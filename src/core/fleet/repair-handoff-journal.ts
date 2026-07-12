@@ -79,6 +79,9 @@ export interface RepairHandoffObservationV2 extends RepairHandoffObservationBase
   parentBackend: EngineId | null;
   parentTier: EngineTier | null;
   parentObjectiveHash: string;
+  /** Present only on rows emitted by an activation-aware writer. */
+  writerActivationId?: string;
+  writerActivatedAt?: string;
 }
 
 export type RepairHandoffObservation = RepairHandoffObservationV1 | RepairHandoffObservationV2;
@@ -117,7 +120,16 @@ export interface RepairHandoffSchemaSummary {
   limitExceeded: boolean;
   aliasFamilies: number;
   latestV2At: string | null;
+  currentActivationV2Authorities: number;
+  unboundV2Authorities: number;
+  latestCurrentActivationV2At: string | null;
+  currentActivationAuthorityDigest: string | null;
   authorityDigest: string;
+}
+
+export interface RepairHandoffV2Activation {
+  id: string;
+  activatedAt: string;
 }
 
 export function repairHandoffJournalPath(): string {
@@ -175,6 +187,17 @@ function semanticEventId(fields: Pick<
     'ashlr:repair-handoff:v1', fields.kind, fields.repo, fields.parentItemId,
     fields.parentOutcome, fields.parentAttemptId,
   ])).digest('hex');
+}
+
+const ACTIVATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function validRepairHandoffV2Activation(value: unknown): value is RepairHandoffV2Activation {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  if (typeof row['id'] !== 'string' || !ACTIVATION_ID_RE.test(row['id'])) return false;
+  if (typeof row['activatedAt'] !== 'string') return false;
+  const parsed = Date.parse(row['activatedAt']);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === row['activatedAt'];
 }
 
 function childItemId(kind: RepairHandoffKind, repo: string, parentItemId: string): string {
@@ -319,6 +342,12 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
   )) return false;
   if (row['schemaVersion'] === 2 && row['kind'] === 'no-diff-reslice' && !treatmentMetadataPresent) return false;
   if (row['schemaVersion'] === 2) {
+    const activationPresent = row['writerActivationId'] !== undefined || row['writerActivatedAt'] !== undefined;
+    if (activationPresent && !validRepairHandoffV2Activation({
+      id: row['writerActivationId'],
+      activatedAt: row['writerActivatedAt'],
+    })) return false;
+    if (activationPresent && Date.parse(String(row['writerActivatedAt'])) > Date.parse(String(row['ts']))) return false;
     try {
       if (resolve(String(row['repo'])) !== row['repo']) return false;
       if (new Date(Date.parse(String(row['ts']))).toISOString() !== row['ts']) return false;
@@ -403,6 +432,8 @@ function fullObservationFingerprint(row: RepairHandoffObservation): string {
     row.parentBackend ?? null,
     row.parentTier ?? null,
     row.parentObjectiveHash ?? null,
+    row.schemaVersion === 2 ? row.writerActivationId ?? null : null,
+    row.schemaVersion === 2 ? row.writerActivatedAt ?? null : null,
     row.parentRunId ?? null,
     row.parentTrajectoryId ?? null,
     row.diffFiles ?? null,
@@ -482,7 +513,10 @@ function appendObservation(observation: RepairHandoffObservation): boolean {
 
 export function recordRepairHandoffs(
   events: DispatchProductionEvent | DispatchProductionEvent[],
-  options: { schemaVersion?: 1 | 2 } = {},
+  options: { schemaVersion?: 1; activation?: never } | {
+    schemaVersion: 2;
+    activation: RepairHandoffV2Activation;
+  } = {},
 ): RepairHandoffWriteResult {
   const result: RepairHandoffWriteResult = { attempted: 0, recorded: 0, failed: 0 };
   for (const event of Array.isArray(events) ? events : [events]) {
@@ -490,8 +524,25 @@ export function recordRepairHandoffs(
     const canonicalParent = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
     const objectiveScoped = repairHandoffFromDispatchEvent(canonicalParent);
     if (!objectiveScoped) continue;
+    if (options.schemaVersion === 2 && !validRepairHandoffV2Activation(options.activation)) {
+      result.attempted += 1;
+      result.failed += 1;
+      continue;
+    }
     const observation: RepairHandoffObservation = options.schemaVersion === 2
-      ? objectiveScoped
+      ? (() => {
+          const bound = {
+            ...objectiveScoped,
+            writerActivationId: options.activation!.id,
+            writerActivatedAt: options.activation!.activatedAt,
+          };
+          const eventId = semanticEventId(bound);
+          return {
+            ...bound,
+            eventId,
+            generationId: repairGenerationIdFromHandoffId(eventId)!,
+          };
+        })()
       : (() => {
           const legacy = { ...objectiveScoped, schemaVersion: 1 as const };
           const eventId = semanticEventId(legacy);
@@ -504,6 +555,10 @@ export function recordRepairHandoffs(
     result.attempted += 1;
     const parent = recordDispatchProduction(canonicalParent);
     if (parent.recorded !== 1) {
+      result.failed += 1;
+      continue;
+    }
+    if (!validObservation(observation)) {
       result.failed += 1;
       continue;
     }
@@ -727,12 +782,28 @@ function repairHandoffAliasFamilyKey(row: RepairHandoffObservation): string | nu
   ]);
 }
 
-export function readRepairHandoffSchemaSummary(): RepairHandoffSchemaSummary {
+export function readRepairHandoffSchemaSummary(
+  currentActivation?: RepairHandoffV2Activation,
+): RepairHandoffSchemaSummary {
   const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
   const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
   const combined = combineRepairHandoffReads([v1, v2]);
   const v1Authorities = combined.observations.filter((row) => row.schemaVersion === 1);
   const v2Authorities = combined.observations.filter((row) => row.schemaVersion === 2);
+  const currentActivationV2 = currentActivation
+    ? v2Authorities.filter((row) =>
+        row.writerActivationId === currentActivation.id &&
+        row.writerActivatedAt === currentActivation.activatedAt &&
+        Date.parse(row.ts) >= Date.parse(currentActivation.activatedAt))
+    : [];
+  const currentActivationAuthorityDigest = currentActivation
+    ? createHash('sha256').update(JSON.stringify([
+        'ashlr:repair-handoff:activation-authority:v1',
+        currentActivation.id,
+        currentActivation.activatedAt,
+        currentActivationV2.map(fullObservationFingerprint).sort(),
+      ])).digest('hex')
+    : null;
   const v1FamilyKeys = new Set(v1Authorities
     .map(repairHandoffAliasFamilyKey)
     .filter((key): key is string => key !== null));
@@ -750,6 +821,10 @@ export function readRepairHandoffSchemaSummary(): RepairHandoffSchemaSummary {
     limitExceeded: combined.limitExceeded,
     aliasFamilies,
     latestV2At: v2Authorities[0]?.ts ?? null,
+    currentActivationV2Authorities: currentActivationV2.length,
+    unboundV2Authorities: v2Authorities.filter((row) => !row.writerActivationId).length,
+    latestCurrentActivationV2At: currentActivationV2[0]?.ts ?? null,
+    currentActivationAuthorityDigest,
     authorityDigest: combined.authorityDigest,
   };
 }

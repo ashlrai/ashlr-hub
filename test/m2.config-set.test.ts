@@ -15,10 +15,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync, rmSync, readFileSync,
 } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -86,6 +87,20 @@ function useTmpHome(tmpHome: string): void {
 function readStoredConfig(tmpHome: string): AshlrConfig {
   const raw = readFileSync(join(tmpHome, '.ashlr', 'config.json'), 'utf8');
   return JSON.parse(raw) as AshlrConfig;
+}
+
+function runConfigSet(tmpHome: string, args: string[]): void {
+  const result = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', resolve('src/cli/index.ts'), 'config', 'set', ...args],
+    {
+      cwd: resolve('.'),
+      env: { ...process.env, HOME: tmpHome },
+      encoding: 'utf8',
+      timeout: 15_000,
+    },
+  );
+  expect(result.status, result.stderr || result.stdout).toBe(0);
 }
 
 /** Replication of the CLI guard logic — mirrors src/cli/index.ts cmdConfig/set. */
@@ -398,6 +413,82 @@ describe('config set — round-trip persistence', () => {
     const cfg2 = loadConfig();
     expect(cfg2.staleDays).toBe(7);
     expect(cfg2.editor).toBe('vscode');
+  });
+});
+
+describe('config set — repair handoff v2 activation metadata', () => {
+  it('mints a fresh activation identity on each disabled-to-enabled transition', () => {
+    runConfigSet(tmpHome, ['foundry.repairHandoffV2Write', 'true']);
+    const first = readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation;
+    expect(first).toEqual({
+      id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      activatedAt: expect.any(String),
+    });
+    expect(new Date(first!.activatedAt).toISOString()).toBe(first!.activatedAt);
+
+    runConfigSet(tmpHome, ['foundry.repairHandoffV2Write', 'true']);
+    expect(readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation).toEqual(first);
+
+    runConfigSet(tmpHome, [
+      'foundry',
+      '--json',
+      JSON.stringify({
+        repairHandoffV2Write: true,
+        repairHandoffV2Activation: {
+          id: '00000000-0000-4000-8000-000000000000',
+          activatedAt: '2000-01-01T00:00:00.000Z',
+        },
+      }),
+    ]);
+    expect(readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation).toEqual(first);
+
+    runConfigSet(tmpHome, ['foundry.repairHandoffV2Write', 'false']);
+    const disabled = readStoredConfig(tmpHome);
+    expect(disabled.foundry?.repairHandoffV2Write).toBe(false);
+    expect(disabled.foundry?.repairHandoffV2Activation).toEqual(first);
+
+    runConfigSet(tmpHome, ['foundry.repairHandoffV2Write', 'true']);
+    const reenabled = readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation;
+    expect(reenabled?.id).not.toBe(first?.id);
+    expect(new Date(reenabled!.activatedAt).toISOString()).toBe(reenabled!.activatedAt);
+  });
+
+  it('overrides caller-supplied metadata when a parent JSON update enables the writer', () => {
+    runConfigSet(tmpHome, [
+      'foundry',
+      '--json',
+      JSON.stringify({
+        repairHandoffV2Write: true,
+        repairHandoffV2Activation: {
+          id: '00000000-0000-4000-8000-000000000000',
+          activatedAt: '2000-01-01T00:00:00.000Z',
+        },
+      }),
+    ]);
+
+    const activation = readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation;
+    expect(activation?.id).not.toBe('00000000-0000-4000-8000-000000000000');
+    expect(activation?.activatedAt).not.toBe('2000-01-01T00:00:00.000Z');
+  });
+
+  it('repairs an enabled writer whose activation metadata is missing with a fresh identity', () => {
+    saveConfig({
+      ...loadConfig(),
+      foundry: { repairHandoffV2Write: true },
+    });
+    runConfigSet(tmpHome, ['editor', 'vscode']);
+    expect(readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation).toBeUndefined();
+    runConfigSet(tmpHome, [
+      'foundry.repairHandoffV2Activation',
+      '--json',
+      JSON.stringify({
+        id: '00000000-0000-4000-8000-000000000000',
+        activatedAt: '2000-01-01T00:00:00.000Z',
+      }),
+    ]);
+    const activation = readStoredConfig(tmpHome).foundry?.repairHandoffV2Activation;
+    expect(activation?.id).not.toBe('00000000-0000-4000-8000-000000000000');
+    expect(activation?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   });
 });
 

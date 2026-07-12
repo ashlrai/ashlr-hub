@@ -46,6 +46,8 @@ import {
 import {
   readRepairHandoffs,
   readRepairHandoffSchemaSummary,
+  validRepairHandoffV2Activation,
+  type RepairHandoffV2Activation,
   type RepairHandoffSchemaSummary,
 } from './repair-handoff-journal.js';
 import {
@@ -795,8 +797,13 @@ export interface FleetDiagnosticResliceDrainStatus {
 
 export interface FleetRepairHandoffRolloutStatus {
   summaryAvailable: boolean;
+  writerConfigured: boolean;
   writerEnabled: boolean;
-  phase: 'reader-only' | 'awaiting-evidence' | 'v2-healthy' | 'mixed-healthy' | 'degraded';
+  writerEffective: boolean;
+  writerBlockedReason: 'missing-activation' | 'activation-in-future' | 'shared-queue-filesystem' | 'source-degraded' | null;
+  activationId: string | null;
+  activatedAt: string | null;
+  phase: 'reader-only' | 'awaiting-evidence' | 'v2-healthy' | 'mixed-healthy' | 'blocked' | 'degraded';
   sourceState: 'missing' | 'healthy' | 'degraded';
   v1Authorities: number | null;
   v2Authorities: number | null;
@@ -804,6 +811,9 @@ export interface FleetRepairHandoffRolloutStatus {
   v2PhysicalRows: number | null;
   aliasFamilies: number | null;
   latestV2At: string | null;
+  currentActivationV2Authorities: number | null;
+  unboundV2Authorities: number | null;
+  latestCurrentActivationV2At: string | null;
   authorityDigest: string | null;
   projectionObserved: boolean;
   projectionTickAt: string | null;
@@ -811,7 +821,14 @@ export interface FleetRepairHandoffRolloutStatus {
   conflictingIds: number | null;
   limitExceeded: boolean | null;
   eligibleOrdinaryItems: number | null;
-  action: 'enable-canary' | 'wait-ordinary-parent' | 'observe-writer' | 'observe-projection' | 'retain-writer' | 'inspect-source' | 'rollback-writer';
+  action: 'enable-canary' | 'wait-ordinary-parent' | 'observe-writer' | 'observe-projection' | 'retain-writer' | 'inspect-source' | 'repair-writer-config' | 'rollback-writer';
+}
+
+interface RepairHandoffWriterRuntime {
+  activationAware?: boolean;
+  effective?: boolean;
+  blockedReason?: FleetRepairHandoffRolloutStatus['writerBlockedReason'];
+  activation?: RepairHandoffV2Activation;
 }
 
 export function buildRepairHandoffRolloutStatus(
@@ -819,16 +836,25 @@ export function buildRepairHandoffRolloutStatus(
   writerEnabled: boolean,
   eligibleOrdinaryItems: number | null,
   projectionTickAt: string | null = null,
+  runtime: RepairHandoffWriterRuntime = {},
 ): FleetRepairHandoffRolloutStatus {
+  const writerEffective = runtime.effective ?? writerEnabled;
+  const activationV2Authorities = runtime.activationAware
+    ? summary.currentActivationV2Authorities
+    : summary.v2Authorities;
   const phase: FleetRepairHandoffRolloutStatus['phase'] = summary.sourceState === 'degraded' || summary.limitExceeded
     ? 'degraded'
     : !writerEnabled
       ? 'reader-only'
-      : summary.v2Authorities === 0
+      : !writerEffective
+        ? 'blocked'
+      : activationV2Authorities === 0
         ? 'awaiting-evidence'
         : summary.v1Authorities > 0 ? 'mixed-healthy' : 'v2-healthy';
   const action: FleetRepairHandoffRolloutStatus['action'] = phase === 'degraded'
     ? writerEnabled ? 'rollback-writer' : 'inspect-source'
+    : phase === 'blocked'
+      ? 'repair-writer-config'
     : phase === 'reader-only'
       ? eligibleOrdinaryItems === null
         ? 'inspect-source'
@@ -844,7 +870,12 @@ export function buildRepairHandoffRolloutStatus(
           : 'wait-ordinary-parent';
   return {
     summaryAvailable: true,
+    writerConfigured: writerEnabled,
     writerEnabled,
+    writerEffective,
+    writerBlockedReason: runtime.blockedReason ?? null,
+    activationId: runtime.activation?.id ?? null,
+    activatedAt: runtime.activation?.activatedAt ?? null,
     phase,
     sourceState: summary.sourceState,
     v1Authorities: summary.v1Authorities,
@@ -853,6 +884,9 @@ export function buildRepairHandoffRolloutStatus(
     v2PhysicalRows: summary.v2PhysicalRows,
     aliasFamilies: summary.aliasFamilies,
     latestV2At: summary.latestV2At,
+    currentActivationV2Authorities: summary.currentActivationV2Authorities,
+    unboundV2Authorities: summary.unboundV2Authorities,
+    latestCurrentActivationV2At: summary.latestCurrentActivationV2At,
     authorityDigest: summary.authorityDigest,
     projectionObserved: projectionTickAt !== null,
     projectionTickAt,
@@ -867,9 +901,18 @@ export function buildRepairHandoffRolloutStatus(
 export function repairHandoffProjectionTick(
   recentTicks: readonly DaemonTick[],
   authorityDigest: string,
+  notBefore: string | null = null,
+  activationProof?: {
+    id: string;
+    activatedAt: string;
+    authorities: number;
+    authorityDigest: string;
+  },
 ): string | null {
+  const notBeforeMs = notBefore === null ? null : Date.parse(notBefore);
   for (let index = recentTicks.length - 1; index >= 0; index--) {
     const tick = recentTicks[index]!;
+    if (notBeforeMs !== null && (!Number.isFinite(Date.parse(tick.ts)) || Date.parse(tick.ts) < notBeforeMs)) continue;
     const maintenance = tick.producerMaintenance;
     if (
       maintenance?.proposalRepair === true &&
@@ -880,6 +923,13 @@ export function repairHandoffProjectionTick(
       (maintenance.dispatchRepairLifecycleUnavailable ?? 0) === 0 &&
       (maintenance.repairHandoffCompactionUnavailable ?? 0) === 0 &&
       maintenance.proposalRepairInboxAvailable === true
+      && (!activationProof || (
+        maintenance.repairHandoffActivationId === activationProof.id &&
+        maintenance.repairHandoffActivatedAt === activationProof.activatedAt &&
+        maintenance.repairHandoffActivationAuthorities === activationProof.authorities &&
+        maintenance.repairHandoffActivationAuthorityDigest === activationProof.authorityDigest &&
+        activationProof.authorities > 0
+      ))
     ) return tick.ts;
   }
   return null;
@@ -1396,9 +1446,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let scannerEvidence: FleetQueueScannerEvidenceStatus | undefined;
   let resolutionObserver: FleetResolutionObserverStatus | undefined;
   let enrolledExistingRepos: string[] = [];
+  const repairHandoffWriterConfigured = cfg.foundry?.repairHandoffV2Write === true;
+  const repairHandoffActivationRaw = (cfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
+  const repairHandoffActivation = validRepairHandoffV2Activation(repairHandoffActivationRaw)
+    ? repairHandoffActivationRaw
+    : undefined;
   let repairHandoffSummary: RepairHandoffSchemaSummary | undefined;
   try {
-    repairHandoffSummary = readRepairHandoffSchemaSummary();
+    repairHandoffSummary = readRepairHandoffSchemaSummary(repairHandoffActivation);
   } catch {
     repairHandoffSummary = undefined;
   }
@@ -1721,21 +1776,53 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let repairHandoffRollout: FleetRepairHandoffRolloutStatus;
   if (repairHandoffSummary !== undefined) {
     const summary = repairHandoffSummary;
-    const writerEnabled = cfg.foundry?.repairHandoffV2Write === true;
-    const projectionTickAt = summary.v2Authorities > 0
-      ? repairHandoffProjectionTick(recentTicks, summary.authorityDigest)
+    const sharedQueueIncompatible = cfg.fleet?.sharedQueue?.mode === 'filesystem';
+    const writerBlockedReason: FleetRepairHandoffRolloutStatus['writerBlockedReason'] = !repairHandoffWriterConfigured
+      ? null
+      : !repairHandoffActivation
+        ? 'missing-activation'
+        : Date.parse(repairHandoffActivation.activatedAt) > Date.parse(generatedAt)
+          ? 'activation-in-future'
+        : sharedQueueIncompatible
+          ? 'shared-queue-filesystem'
+          : summary.sourceState === 'degraded' || summary.limitExceeded
+            ? 'source-degraded'
+            : null;
+    const writerEffective = repairHandoffWriterConfigured && writerBlockedReason === null;
+    const projectionTickAt = writerEffective && summary.currentActivationV2Authorities > 0
+      ? repairHandoffProjectionTick(
+          recentTicks,
+          summary.authorityDigest,
+          summary.latestCurrentActivationV2At ?? repairHandoffActivation!.activatedAt,
+          {
+            id: repairHandoffActivation!.id,
+            activatedAt: repairHandoffActivation!.activatedAt,
+            authorities: summary.currentActivationV2Authorities,
+            authorityDigest: summary.currentActivationAuthorityDigest!,
+          },
+        )
       : null;
     repairHandoffRollout = buildRepairHandoffRolloutStatus(
       summary,
-      writerEnabled,
+      repairHandoffWriterConfigured,
       eligibleOrdinaryItems,
       projectionTickAt,
+      {
+        activationAware: true,
+        effective: writerEffective,
+        blockedReason: writerBlockedReason,
+        ...(repairHandoffActivation ? { activation: repairHandoffActivation } : {}),
+      },
     );
   } else {
-    const writerEnabled = cfg.foundry?.repairHandoffV2Write === true;
     repairHandoffRollout = {
       summaryAvailable: false,
-      writerEnabled,
+      writerConfigured: repairHandoffWriterConfigured,
+      writerEnabled: repairHandoffWriterConfigured,
+      writerEffective: false,
+      writerBlockedReason: 'source-degraded',
+      activationId: repairHandoffActivation?.id ?? null,
+      activatedAt: repairHandoffActivation?.activatedAt ?? null,
       phase: 'degraded',
       sourceState: 'degraded',
       v1Authorities: null,
@@ -1747,11 +1834,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitExceeded: null,
       aliasFamilies: null,
       latestV2At: null,
+      currentActivationV2Authorities: null,
+      unboundV2Authorities: null,
+      latestCurrentActivationV2At: null,
       authorityDigest: null,
       projectionObserved: false,
       projectionTickAt: null,
       eligibleOrdinaryItems,
-      action: writerEnabled ? 'rollback-writer' : 'inspect-source',
+      action: repairHandoffWriterConfigured ? 'rollback-writer' : 'inspect-source',
     };
   }
 

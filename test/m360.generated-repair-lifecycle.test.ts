@@ -83,7 +83,14 @@ function diagnosticRepairItem(
     basis: 'run-proposal-outcome',
   };
   expect(repairHandoffFromDispatchEvent(parent)).not.toBeNull();
-  recordRepairHandoffs(parent, { schemaVersion });
+  if (schemaVersion === 2) {
+    recordRepairHandoffs(parent, {
+      schemaVersion: 2,
+      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+    });
+  } else {
+    recordRepairHandoffs(parent, { schemaVersion: 1 });
+  }
   const handoff = readRepairHandoffs().observations.find((observation) =>
     observation.schemaVersion === schemaVersion && observation.parentItemId === parent.itemId)!;
   return {

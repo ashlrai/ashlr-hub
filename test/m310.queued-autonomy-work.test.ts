@@ -129,7 +129,10 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
     basis: 'run-proposal-outcome',
     ...overrides,
   };
-  recordRepairHandoffs(value, { schemaVersion: 2 });
+  recordRepairHandoffs(value, {
+    schemaVersion: 2,
+    activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+  });
   const handoff = repairHandoffFromDispatchEvent(value);
   return handoff
     ? { ...value, repairHandoffId: handoff.eventId, repairGenerationId: handoff.generationId }
@@ -1540,7 +1543,10 @@ describe('queued autonomy work scanner', () => {
       ts: '2026-07-10T15:30:00.000Z',
       runId: 'run-source-v2-recurrence',
     };
-    recordRepairHandoffs(recurrence, { schemaVersion: 2 });
+    recordRepairHandoffs(recurrence, {
+      schemaVersion: 2,
+      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+    });
     const appliedProposal: Proposal = { ...pendingProposal, status: 'applied' };
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: [recurrence],
@@ -1750,7 +1756,10 @@ describe('queued autonomy work scanner', () => {
         reason: 'proposal-capture-error: src/other.ts:5 expected other state',
       }),
     ];
-    expect(recordRepairHandoffs(events[1]!, { schemaVersion: 2 })).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffs(events[1]!, {
+      schemaVersion: 2,
+      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+    })).toMatchObject({ recorded: 1, failed: 0 });
 
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: events,

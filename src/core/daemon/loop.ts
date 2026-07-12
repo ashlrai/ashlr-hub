@@ -133,7 +133,12 @@ import {
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
 import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dispatch-manifest.js';
-import { recordRepairHandoffs, repairHandoffFromDispatchEvent } from '../fleet/repair-handoff-journal.js';
+import {
+  readRepairHandoffSchemaSummary,
+  recordRepairHandoffs,
+  repairHandoffFromDispatchEvent,
+  validRepairHandoffV2Activation,
+} from '../fleet/repair-handoff-journal.js';
 import { workItemObjectiveHash } from '../fleet/work-item-objective.js';
 import {
   readAgentActions,
@@ -2065,6 +2070,18 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.handoffAuthorityDigest !== undefined
             ? { repairHandoffAuthorityDigest: proposalRepairMaintenanceResult.handoffAuthorityDigest }
             : {}),
+          ...(proposalRepairMaintenanceResult.handoffActivationId !== undefined
+            ? { repairHandoffActivationId: proposalRepairMaintenanceResult.handoffActivationId }
+            : {}),
+          ...(proposalRepairMaintenanceResult.handoffActivatedAt !== undefined
+            ? { repairHandoffActivatedAt: proposalRepairMaintenanceResult.handoffActivatedAt }
+            : {}),
+          ...(proposalRepairMaintenanceResult.handoffActivationAuthorities !== undefined
+            ? { repairHandoffActivationAuthorities: proposalRepairMaintenanceResult.handoffActivationAuthorities }
+            : {}),
+          ...(proposalRepairMaintenanceResult.handoffActivationAuthorityDigest !== undefined
+            ? { repairHandoffActivationAuthorityDigest: proposalRepairMaintenanceResult.handoffActivationAuthorityDigest }
+            : {}),
           ...(proposalRepairMaintenanceResult.handoffCompacted !== undefined
             ? { repairHandoffCompacted: proposalRepairMaintenanceResult.handoffCompacted }
             : {}),
@@ -2116,6 +2133,16 @@ export async function tick(
         new Date(now),
         { terminalLifecycleEnabled: liveCfg.fleet?.sharedQueue?.mode !== 'filesystem' },
       );
+      const activationRaw = (liveCfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
+      if (validRepairHandoffV2Activation(activationRaw)) {
+        const activationSummary = readRepairHandoffSchemaSummary(activationRaw);
+        proposalRepairMaintenanceResult.handoffActivationId = activationRaw.id;
+        proposalRepairMaintenanceResult.handoffActivatedAt = activationRaw.activatedAt;
+        proposalRepairMaintenanceResult.handoffActivationAuthorities = activationSummary.currentActivationV2Authorities;
+        if (activationSummary.currentActivationAuthorityDigest) {
+          proposalRepairMaintenanceResult.handoffActivationAuthorityDigest = activationSummary.currentActivationAuthorityDigest;
+        }
+      }
       return proposalRepairMaintenanceResult;
     } catch (err) {
       proposalRepairMaintenanceResult = { scanned: 0, eligible: 0, queued: 0, failed: 1 };
@@ -4359,11 +4386,20 @@ export async function tick(
       if (parentWrite.recorded !== 1 && repairable) handoffFailedItemIds.add(event.itemId);
       if (repairable) handoffFailedItemIds.add(event.itemId);
     } else if (repairable) {
-      const handoff = recordRepairHandoffs(event, {
-        schemaVersion: liveCfg.foundry?.repairHandoffV2Write === true
-          ? 2
-          : 1,
-      });
+      const v2Requested = liveCfg.foundry?.repairHandoffV2Write === true;
+      const activationRaw = (liveCfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
+      const activation = validRepairHandoffV2Activation(activationRaw) ? activationRaw : undefined;
+      let handoff: { attempted: number; recorded: number; failed: number };
+      if (v2Requested) {
+        if (!activation) {
+          recordDispatchProduction(event);
+          handoff = { attempted: 1, recorded: 0, failed: 1 };
+        } else {
+          handoff = recordRepairHandoffs(event, { schemaVersion: 2, activation });
+        }
+      } else {
+        handoff = recordRepairHandoffs(event, { schemaVersion: 1 });
+      }
       if (handoff.failed > 0) handoffFailedItemIds.add(event.itemId);
     } else {
       recordDispatchProduction(event);

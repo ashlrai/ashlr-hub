@@ -93,6 +93,10 @@ export interface ProposalRepairWorkResult {
   handoffConflictingIds?: number;
   handoffSourceState?: 'missing' | 'healthy' | 'degraded';
   handoffAuthorityDigest?: string;
+  handoffActivationId?: string;
+  handoffActivatedAt?: string;
+  handoffActivationAuthorities?: number;
+  handoffActivationAuthorityDigest?: string;
   handoffCompacted?: number;
   handoffCompactionUnavailable?: number;
   proposalInboxAvailable?: boolean;

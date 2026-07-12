@@ -1894,7 +1894,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Current Overnight Cycle - V2 Activation Authority And Effective Writer Truth
 - [x] Rehydrate the completed bounded canary, production scheduler, rollout journals, and config state.
 - [x] Audit canary eligibility, activation provenance, runtime writer compatibility, and dispatch-yield follow-up in parallel.
-- [ ] Bind rollout promotion to a durable activation identity and post-activation writer/projection evidence so historical V2 rows cannot certify a new activation.
-- [ ] Distinguish configured and effective writer state, including shared-filesystem queue incompatibility, with a fail-closed operator action.
-- [ ] Add migration, replay, rollback, incompatible-mode, status, and projection regressions plus independent review.
-- [ ] Pass focused and exhaustive verification, commit, push, observe CI, and deploy a new bounded canary only with complete activation provenance.
+- [x] Bind rollout promotion to a durable activation identity and post-activation writer/projection evidence so historical V2 rows cannot certify a new activation.
+- [x] Distinguish configured and effective writer state, including shared-filesystem queue incompatibility, with a fail-closed operator action.
+- [x] Add migration, replay, rollback, incompatible-mode, status, and projection regressions plus independent review.
+- [x] Pass focused and exhaustive local verification; commit, push, CI, deployment, and a provenance-complete canary remain release steps.
+- [ ] Observe the complete CI matrix, deploy at a clean daemon lease boundary, and run one bounded provenance-complete canary.

@@ -18,6 +18,7 @@ import {
   repairHandoffV2JournalPath,
   type RepairHandoffObservation,
   type RepairHandoffObservationV1,
+  type RepairHandoffV2Activation,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import { queueProposalRepairWorkForPendingProposals } from '../src/core/fleet/proposal-repair-work.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
@@ -73,8 +74,17 @@ function event(repo: string, overrides: Partial<DispatchProductionEvent> = {}): 
 function recordRepairHandoffs(
   input: DispatchProductionEvent | DispatchProductionEvent[],
 ) {
-  return recordRepairHandoffsRaw(input, { schemaVersion: 2 });
+  return recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_A });
 }
+
+const ACTIVATION_A: RepairHandoffV2Activation = {
+  id: '11111111-1111-4111-8111-111111111111',
+  activatedAt: '2020-01-01T00:00:00.000Z',
+};
+const ACTIVATION_B: RepairHandoffV2Activation = {
+  id: '22222222-2222-4222-8222-222222222222',
+  activatedAt: '2021-01-01T00:00:00.000Z',
+};
 
 function legacyObservation(observation: RepairHandoffObservation): RepairHandoffObservationV1 {
   const {
@@ -214,7 +224,7 @@ describe('M362 durable repair handoff journal', () => {
       latestV2At: null,
     });
 
-    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2 })).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_A })).toMatchObject({ recorded: 1, failed: 0 });
     const v2Before = readFileSync(repairHandoffV2JournalPath(), 'utf8');
     const legacyBefore = readFileSync(repairHandoffJournalPath(), 'utf8');
     // A legacy reader/compactor only knows this path; rewriting it cannot touch
@@ -235,6 +245,87 @@ describe('M362 durable repair handoff journal', () => {
       invalidRows: 0,
       conflictingIds: 0,
       limitExceeded: false,
+    });
+  });
+
+  it('binds v2 authority to one activation and does not let historical rows certify a reactivation', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir);
+
+    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
+      v2Authorities: 1,
+      currentActivationV2Authorities: 1,
+      unboundV2Authorities: 0,
+      latestCurrentActivationV2At: input.ts,
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      v2Authorities: 1,
+      currentActivationV2Authorities: 0,
+      latestCurrentActivationV2At: null,
+    });
+
+    const reactivatedInput = event(repo.dir, {
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(reactivatedInput, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    const rows = readRepairHandoffs().observations.filter((row) => row.schemaVersion === 2);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      writerActivationId: ACTIVATION_B.id,
+      writerActivatedAt: ACTIVATION_B.activatedAt,
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      v2Authorities: 1,
+      v2PhysicalRows: 2,
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: reactivatedInput.ts,
+    });
+  });
+
+  it('keeps legacy unbound v2 rows readable but excludes them from activation authority', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir);
+    expect(recordDispatchProduction(input)).toMatchObject({ recorded: 1, failed: 0 });
+    const historical = repairHandoffFromDispatchEvent(input)!;
+    mkdirSync(dirname(repairHandoffV2JournalPath()), { recursive: true, mode: 0o700 });
+    writeFileSync(repairHandoffV2JournalPath(), `\n${JSON.stringify(historical)}\n`, { mode: 0o600 });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
+      v2Authorities: 1,
+      currentActivationV2Authorities: 0,
+      unboundV2Authorities: 1,
+    });
+  });
+
+  it('fails closed before appending a v2 row whose activation is malformed or after the event', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir);
+    expect(recordRepairHandoffsRaw(input, {
+      schemaVersion: 2,
+      activation: { ...ACTIVATION_A, id: 'not-an-activation' },
+    })).toMatchObject({ attempted: 1, recorded: 0, failed: 1 });
+    expect(recordRepairHandoffsRaw(input, {
+      schemaVersion: 2,
+      activation: { ...ACTIVATION_A, activatedAt: '2026-07-10T12:00:01.000Z' },
+    })).toMatchObject({ attempted: 1, recorded: 0, failed: 1 });
+    expect(existsSync(repairHandoffV2JournalPath())).toBe(false);
+  });
+
+  it('quarantines activation metadata mutation for the same immutable attempt', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir);
+    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [],
     });
   });
 
@@ -766,7 +857,7 @@ describe('M362 durable repair handoff journal', () => {
     const script = [
       `import { recordRepairHandoffs } from './src/core/fleet/repair-handoff-journal.ts';`,
       `const event = JSON.parse(process.env.ASHLR_TEST_EVENT);`,
-      `const result = recordRepairHandoffs(event, { schemaVersion: 2 });`,
+      `const result = recordRepairHandoffs(event, { schemaVersion: 2, activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2026-07-10T11:00:00.000Z' } });`,
       `process.exit(result.recorded === 1 ? 0 : 1);`,
     ].join(' ');
     const inputs = Array.from({ length: 12 }, (_, index) => event(repo.dir, {
@@ -788,7 +879,13 @@ describe('M362 durable repair handoff journal', () => {
       child.once('error', reject);
       child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`journal child exited ${code}`)));
     })));
-    recordRepairHandoffs(inputs[0]!);
+    recordRepairHandoffsRaw(inputs[0]!, {
+      schemaVersion: 2,
+      activation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        activatedAt: '2026-07-10T11:00:00.000Z',
+      },
+    });
 
     const read = readRepairHandoffs();
     expect(read.sourceState).toBe('healthy');

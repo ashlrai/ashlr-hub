@@ -575,6 +575,9 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(rolloutBlock).toContain("repairHandoffRollout.action === 'enable-canary'");
     expect(rolloutBlock).toContain("'Authorities v1/v2'");
     expect(rolloutBlock).toContain("'Rows v1/v2'");
+    expect(rolloutBlock).toContain('repairHandoffRollout.writerEffective ?? repairHandoffRollout.writerEnabled');
+    expect(rolloutBlock).toContain("'Writer blocked'");
+    expect(rolloutBlock).toContain("'Canary written'");
     expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");
   });
 

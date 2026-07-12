@@ -39,6 +39,7 @@
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
  */
 
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
@@ -788,6 +789,33 @@ function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
   setByPath(cfg, key, value);
 }
 
+function persistConfigSet(
+  cfg: AshlrConfig,
+  repairHandoffV2WasEnabled: boolean,
+  previousActivation: { id: string; activatedAt: string } | undefined,
+  key: string,
+): void {
+  if (!repairHandoffV2WasEnabled && cfg.foundry?.repairHandoffV2Write === true) {
+    cfg.foundry.repairHandoffV2Activation = {
+      id: randomUUID(),
+      activatedAt: new Date().toISOString(),
+    };
+  } else if (repairHandoffV2WasEnabled && cfg.foundry?.repairHandoffV2Write === true) {
+    if (previousActivation) cfg.foundry.repairHandoffV2Activation = previousActivation;
+    else if (
+      key === 'foundry' ||
+      key === 'foundry.repairHandoffV2Write' ||
+      key === 'foundry.repairHandoffV2Activation'
+    ) {
+      cfg.foundry.repairHandoffV2Activation = {
+        id: randomUUID(),
+        activatedAt: new Date().toISOString(),
+      };
+    }
+  }
+  saveConfig(cfg);
+}
+
 // ─── Command: index ───────────────────────────────────────────────────────────
 
 function cmdIndex(args: string[]): void {
@@ -1463,6 +1491,10 @@ async function cmdConfig(args: string[]): Promise<void> {
 
     if (!key) die('Usage: ashlr config set <key> <value>', 2);
     assertSafeConfigKey(key);
+    const repairHandoffV2WasEnabled = cfg.foundry?.repairHandoffV2Write === true;
+    const previousRepairHandoffV2Activation = cfg.foundry?.repairHandoffV2Activation
+      ? { ...cfg.foundry.repairHandoffV2Activation }
+      : undefined;
 
     const topKey = key.split('.')[0];
     // Keys that must never be overwritten with a coerced scalar string.
@@ -1492,8 +1524,9 @@ async function cmdConfig(args: string[]): Promise<void> {
       }
       // Walk to the parent object and set the leaf key
       setByPath(cfg, key, parsed);
-      saveConfig(cfg);
-      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
+      persistConfigSet(cfg, repairHandoffV2WasEnabled, previousRepairHandoffV2Activation, key);
+      const persisted = getConfigValue(cfg, key);
+      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(persisted);
       console.log(`${green('set')} ${key} = ${shown}`);
       return;
     }
@@ -1507,14 +1540,15 @@ async function cmdConfig(args: string[]): Promise<void> {
         die(`Invalid JSON for "${key}": ${jsonValue}`, 2);
       }
       setByPath(cfg, key, parsed);
-      saveConfig(cfg);
-      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
+      persistConfigSet(cfg, repairHandoffV2WasEnabled, previousRepairHandoffV2Activation, key);
+      const persisted = getConfigValue(cfg, key);
+      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(persisted);
       console.log(`${green('set')} ${key} = ${shown}`);
       return;
     }
     if (rawValue === undefined) die(`Usage: ashlr config set <key> <value>`, 2);
     setConfigValue(cfg, key, rawValue);
-    saveConfig(cfg);
+    persistConfigSet(cfg, repairHandoffV2WasEnabled, previousRepairHandoffV2Activation, key);
     const shown = isSensitiveKey(key) ? '<redacted>' : rawValue;
     console.log(`${green('set')} ${key} = ${shown}`);
     return;

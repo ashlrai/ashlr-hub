@@ -527,7 +527,10 @@ function makeDiagnosticResliceItem(
     basis: 'run-proposal-outcome',
   };
   const handoff = repairHandoffFromDispatchEvent(parentEvent)!;
-  recordRepairHandoffs(parentEvent, { schemaVersion: 2 });
+  recordRepairHandoffs(parentEvent, {
+    schemaVersion: 2,
+    activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+  });
   return {
     id: handoff.childItemId,
     repo: repoDir,

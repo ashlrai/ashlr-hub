@@ -508,6 +508,13 @@ export interface AshlrConfig {
      * every deployed reader learns the isolated v2 sidecar format first.
      */
     repairHandoffV2Write?: boolean;
+    /** CLI-issued identity for the current v2 writer activation epoch. */
+    repairHandoffV2Activation?: {
+      /** Fresh UUID minted whenever config set transitions the writer from disabled to enabled. */
+      id: string;
+      /** Canonical ISO timestamp recorded with the activation identity. */
+      activatedAt: string;
+    };
     /** Per-backend preferred model id (keyed by EngineId). */
     models?: Partial<Record<EngineId, string>>;
     /**
@@ -4190,6 +4197,10 @@ export interface DaemonTick {
     repairHandoffConflictingIds?: number;
     repairHandoffSourceState?: 'missing' | 'healthy' | 'degraded';
     repairHandoffAuthorityDigest?: string;
+    repairHandoffActivationId?: string;
+    repairHandoffActivatedAt?: string;
+    repairHandoffActivationAuthorities?: number;
+    repairHandoffActivationAuthorityDigest?: string;
     repairHandoffCompacted?: number;
     repairHandoffCompactionUnavailable?: number;
     proposalRepairInboxAvailable?: boolean;

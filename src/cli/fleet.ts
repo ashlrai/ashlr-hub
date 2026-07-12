@@ -112,10 +112,15 @@ export function formatFleetStatus(s: FleetStatus): string {
   if (s.repairHandoffRollout) {
     const rollout = s.repairHandoffRollout;
     lines.push(
-      `Repair handoff: phase=${rollout.phase}, writer=${rollout.writerEnabled ? 'on' : 'off'}, ` +
+      `Repair handoff: phase=${rollout.phase}, writer=${(rollout.writerConfigured ?? rollout.writerEnabled) ? 'configured' : 'off'}` +
+        `/${(rollout.writerEffective ?? rollout.writerEnabled) ? 'effective' : 'inactive'}, ` +
         `authorities v1/v2=${rollout.v1Authorities ?? 'unknown'}/${rollout.v2Authorities ?? 'unknown'}, ` +
+        `current activation=${rollout.currentActivationV2Authorities ?? 'unknown'}, ` +
         `aliases=${rollout.aliasFamilies ?? 'unknown'}, ordinary eligible=${rollout.eligibleOrdinaryItems ?? 'unknown'}, ` +
-        `action=${rollout.action}`,
+        `action=${rollout.action}` +
+        (rollout.writerBlockedReason ? `, blocked=${rollout.writerBlockedReason}` : '') +
+        (rollout.activatedAt ? `, activated=${rollout.activatedAt}` : '') +
+        (rollout.latestCurrentActivationV2At ? `, canary=${rollout.latestCurrentActivationV2At}` : ''),
     );
     lines.push('');
   }

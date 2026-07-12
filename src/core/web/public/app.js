@@ -3867,7 +3867,8 @@ function renderControl() {
         : repairHandoffRollout.phase === 'awaiting-evidence'
           ? '#fbbf24'
           : '#94a3b8';
-    const actionAccent = repairHandoffRollout.action === 'rollback-writer' || repairHandoffRollout.action === 'inspect-source'
+    const actionAccent = repairHandoffRollout.action === 'rollback-writer' ||
+      repairHandoffRollout.action === 'inspect-source' || repairHandoffRollout.action === 'repair-writer-config'
       ? '#f87171'
       : repairHandoffRollout.action === 'wait-ordinary-parent'
         ? '#fbbf24'
@@ -3886,6 +3887,22 @@ function renderControl() {
       `${repairHandoffRollout.v1Authorities ?? 'unknown'}/${repairHandoffRollout.v2Authorities ?? 'unknown'}`,
       rolloutAccent
     ));
+    heroMetrics.appendChild(controlMetric(
+      'Writer effective',
+      (repairHandoffRollout.writerEffective ?? repairHandoffRollout.writerEnabled) === true ? 'yes' : 'no',
+      (repairHandoffRollout.writerEffective ?? repairHandoffRollout.writerEnabled) === true ? '#4ade80' : actionAccent
+    ));
+    heroMetrics.appendChild(controlMetric(
+      'Current activation',
+      repairHandoffRollout.currentActivationV2Authorities ?? 'unknown',
+      (repairHandoffRollout.currentActivationV2Authorities ?? 0) > 0 ? '#4ade80' : actionAccent
+    ));
+    if (repairHandoffRollout.writerBlockedReason) {
+      heroMetrics.appendChild(controlMetric('Writer blocked', repairHandoffRollout.writerBlockedReason, actionAccent));
+    }
+    if (repairHandoffRollout.latestCurrentActivationV2At) {
+      heroMetrics.appendChild(controlMetric('Canary written', fmtDate(repairHandoffRollout.latestCurrentActivationV2At), rolloutAccent));
+    }
     heroMetrics.appendChild(controlMetric(
       'Rows v1/v2',
       `${repairHandoffRollout.v1PhysicalRows ?? 'unknown'}/${repairHandoffRollout.v2PhysicalRows ?? 'unknown'}`,

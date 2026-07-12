@@ -199,7 +199,10 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
     spentUsd: 0,
     basis: 'run-proposal-outcome',
   };
-  recordRepairHandoffs(parent, { schemaVersion: 2 });
+  recordRepairHandoffs(parent, {
+    schemaVersion: 2,
+    activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+  });
   const handoff = readRepairHandoffs().observations.find((row) =>
     row.schemaVersion === 2 && row.parentItemId === parent.itemId)!;
   return {
@@ -678,6 +681,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       limitExceeded: false,
       aliasFamilies: 0,
       latestV2At: null,
+      currentActivationV2Authorities: 0,
+      unboundV2Authorities: 0,
+      latestCurrentActivationV2At: null,
       authorityDigest: 'a'.repeat(64),
     };
     expect(buildRepairHandoffRolloutStatus(healthy, false, 0)).toMatchObject({
@@ -745,20 +751,93 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }, false, 0)).toMatchObject({
       phase: 'degraded', action: 'inspect-source', limitExceeded: true,
     });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      v2Authorities: 4,
+      v2PhysicalRows: 4,
+      currentActivationV2Authorities: 0,
+      unboundV2Authorities: 4,
+      latestV2At: '2026-07-11T15:00:00.000Z',
+    }, true, 2, null, {
+      activationAware: true,
+      effective: true,
+      activation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        activatedAt: '2026-07-12T15:00:00.000Z',
+      },
+    })).toMatchObject({
+      phase: 'awaiting-evidence',
+      action: 'observe-writer',
+      v2Authorities: 4,
+      currentActivationV2Authorities: 0,
+      unboundV2Authorities: 4,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, true, 2, null, {
+      activationAware: true,
+      effective: false,
+      blockedReason: 'shared-queue-filesystem',
+    })).toMatchObject({
+      phase: 'blocked',
+      action: 'repair-writer-config',
+      writerConfigured: true,
+      writerEffective: false,
+      writerBlockedReason: 'shared-queue-filesystem',
+    });
   });
 
   it('does not report absent ordinary work when writer-on queue evidence is missing', async () => {
     const status = await buildFleetStatus(withFoundry({ repairHandoffV2Write: true }));
     expect(status.repairHandoffRollout).toMatchObject({
       writerEnabled: true,
-      phase: 'awaiting-evidence',
+      writerEffective: false,
+      writerBlockedReason: 'missing-activation',
+      phase: 'blocked',
       eligibleOrdinaryItems: null,
-      action: 'inspect-source',
+      action: 'repair-writer-config',
+    });
+  });
+
+  it('reports a configured v2 writer as ineffective in filesystem shared-queue mode', async () => {
+    const sharedPath = join(tmpHome, 'shared-fleet');
+    mkdirSync(sharedPath, { recursive: true });
+    const cfg = withFoundry({
+      repairHandoffV2Write: true,
+      repairHandoffV2Activation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        activatedAt: '2026-07-12T15:00:00.000Z',
+      },
+    });
+    cfg.fleet = { sharedQueue: { mode: 'filesystem', path: sharedPath } };
+    const status = await buildFleetStatus(cfg);
+    expect(status.repairHandoffRollout).toMatchObject({
+      writerConfigured: true,
+      writerEnabled: true,
+      writerEffective: false,
+      writerBlockedReason: 'shared-queue-filesystem',
+      phase: 'blocked',
+      action: 'repair-writer-config',
+    });
+  });
+
+  it('blocks a configured v2 writer whose activation timestamp is in the future', async () => {
+    const status = await buildFleetStatus(withFoundry({
+      repairHandoffV2Write: true,
+      repairHandoffV2Activation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        activatedAt: '2999-01-01T00:00:00.000Z',
+      },
+    }));
+    expect(status.repairHandoffRollout).toMatchObject({
+      writerConfigured: true,
+      writerEffective: false,
+      writerBlockedReason: 'activation-in-future',
+      phase: 'blocked',
+      action: 'repair-writer-config',
     });
   });
 
   it('requires an exact persisted authority digest for projection evidence', () => {
-    const tick = (ts: string, digest: string): DaemonTick => ({
+    const tick = (ts: string, digest: string, activationId?: string): DaemonTick => ({
       ts,
       itemsConsidered: 0,
       proposalsCreated: 0,
@@ -771,6 +850,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         proposalRepair: true,
         repairHandoffSourceState: 'healthy',
         repairHandoffAuthorityDigest: digest,
+        ...(activationId ? {
+          repairHandoffActivationId: activationId,
+          repairHandoffActivatedAt: '2026-07-11T15:00:00.000Z',
+          repairHandoffActivationAuthorities: 1,
+          repairHandoffActivationAuthorityDigest: 'c'.repeat(64),
+        } : {}),
         repairHandoffInvalidRows: 0,
         repairHandoffConflictingIds: 0,
         dispatchRepairLifecycleUnavailable: 0,
@@ -784,6 +869,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(repairHandoffProjectionTick([
       tick('2026-07-10T13:00:00.000Z', 'b'.repeat(64)),
     ], 'b'.repeat(64))).toBe('2026-07-10T13:00:00.000Z');
+    const proof = {
+      id: '22222222-2222-4222-8222-222222222222',
+      activatedAt: '2026-07-11T15:00:00.000Z',
+      authorities: 1,
+      authorityDigest: 'c'.repeat(64),
+    };
+    expect(repairHandoffProjectionTick([
+      tick('2026-07-11T16:00:00.000Z', 'b'.repeat(64), '11111111-1111-4111-8111-111111111111'),
+    ], 'b'.repeat(64), proof.activatedAt, proof)).toBeNull();
+    expect(repairHandoffProjectionTick([
+      tick('2026-07-11T16:00:00.000Z', 'b'.repeat(64), proof.id),
+    ], 'b'.repeat(64), proof.activatedAt, proof)).toBe('2026-07-11T16:00:00.000Z');
   });
 
   it('does not refresh, persist, or audit backlog while building a status snapshot', async () => {
@@ -5438,22 +5535,24 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       repairHandoffRollout: currentRollout,
     });
     expect(current).toContain(
-      'Repair handoff: phase=mixed-healthy, writer=on, authorities v1/v2=7/3, ' +
-        'aliases=2, ordinary eligible=4, action=observe-projection',
+      'Repair handoff: phase=mixed-healthy, writer=configured/effective, authorities v1/v2=7/3, ' +
+        'current activation=unknown, aliases=2, ordinary eligible=4, action=observe-projection',
     );
 
     const failClosed = formatFleetStatus({
       ...base,
       repairHandoffRollout: {
         ...currentRollout,
+        writerConfigured: false,
         writerEnabled: false,
+        writerEffective: false,
         phase: 'reader-only',
         eligibleOrdinaryItems: 0,
         action: 'wait-ordinary-parent',
       },
     });
     expect(failClosed).toContain(
-      'writer=off, authorities v1/v2=7/3, aliases=2, ordinary eligible=0, ' +
+      'writer=off/inactive, authorities v1/v2=7/3, current activation=unknown, aliases=2, ordinary eligible=0, ' +
         'action=wait-ordinary-parent',
     );
 
