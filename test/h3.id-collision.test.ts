@@ -4,7 +4,7 @@
  * Drives the REAL id-minting paths under same-millisecond bursts, via
  * `collectIds` / `mintProposalIds` / `mintSwarmIds`. Proves ids minted in a
  * tight loop are UNIQUE:
- *   - PROPOSAL ids: the inbox `generateId` `_seq` counter (inbox/store.ts:60-72)
+ *   - PROPOSAL ids: the inbox `makeProposalId` `_seq` counter
  *     ALREADY guarantees same-ms uniqueness — this suite ASSERTS the existing
  *     counter; it does NOT change it.
  *   - SWARM ids: the pre-fix `makeId` (runner.ts) had ONLY ~24-bit random and no
@@ -136,7 +136,7 @@ afterEach(() => {
 });
 
 describe('H3 IDS-COLLISION-SAFE — same-millisecond id bursts stay unique', () => {
-  it('minting N proposal ids in a tight loop yields N UNIQUE ids (asserts the EXISTING inbox _seq counter)', () => {
+  it('minting N proposal ids in a tight loop yields N UNIQUE ids (asserts the inbox _seq counter)', () => {
     const ids = mintProposalIds(N, repo.dir);
 
     // Minted exactly N, and every one is distinct — the existing `_seq` counter

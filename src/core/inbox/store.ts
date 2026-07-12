@@ -15,23 +15,28 @@
  */
 
 import {
+  chmodSync,
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   opendirSync,
   readdirSync,
-  readFileSync,
   readSync,
   renameSync,
-  writeFileSync,
+  unlinkSync,
+  writeSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { AshlrConfig, Proposal, ProposalStatus } from '../types.js';
 import { audit } from '../sandbox/audit.js';
 import { emitFleetEvent } from '../integrations/pulse-sync.js';
@@ -43,6 +48,7 @@ import { linkOutcome } from '../fleet/judge-trace.js';
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
@@ -50,10 +56,14 @@ import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // inbox/store.ts (one direction only).
 import { listGoals, updateMilestoneStatus as _updateMilestoneStatus } from '../goals/store.js';
 import {
+  acquireProposalStoreMutationLock,
   acquireProposalMutationLock,
+  ownsProposalStoreMutationLock,
   ownsProposalMutationLock,
+  releaseProposalStoreMutationLock,
   releaseProposalMutationLock,
   type ProposalMutationLock,
+  type ProposalStoreMutationLock,
 } from './proposal-mutation-lock.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { sanitizeRemoteHandoffReconciliation } from './remote-handoff-attestation.js';
@@ -78,8 +88,12 @@ export function inboxDir(): string {
  * matching runFilePath's guard in core/run/orchestrator.ts. Generated ids
  * are always [a-z0-9-], so this never rejects a legitimate proposal.
  */
+function validProposalId(id: string): boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(id) && id !== '.' && id !== '..';
+}
+
 function proposalPath(id: string): string {
-  if (!/^[\w.-]+$/.test(id)) {
+  if (!validProposalId(id)) {
     throw new Error(`Invalid proposal id: ${JSON.stringify(id)}`);
   }
   return join(inboxDir(), `${id}.json`);
@@ -92,17 +106,15 @@ function proposalPath(id: string): string {
 /**
  * Generate a stable, readable slug id for a proposal.
  *
- * Format: `prop-<timestamp-ms>-<4-hex-random>`.
+ * Format: `prop-<timestamp-ms>-<sequence>-<24-hex-random>`.
  * - Timestamp prefix gives chronological sorting for free.
- * - 4-hex suffix avoids collisions from sub-millisecond bursts.
+ * - A 96-bit random suffix prevents practical cross-process collisions.
  * - All lowercase alphanumeric + hyphens → safe as a filename stem.
  */
 let _seq = 0;
-function generateId(): string {
+export function makeProposalId(): string {
   const ts = Date.now().toString(36); // base-36 ms timestamp, ~8 chars
-  const rand = Math.floor(Math.random() * 0xffff)
-    .toString(16)
-    .padStart(4, '0');
+  const rand = randomBytes(12).toString('hex');
   // Monotonic, zero-padded process counter as the final segment. createdAt has
   // only millisecond resolution, so proposals created in the same ms would
   // otherwise have no defined recency order. The counter gives listProposals a
@@ -267,17 +279,167 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
   return changed ? (next as T) : proposal;
 }
 
-/** Persist a proposal atomically (tmp-write + rename, POSIX-atomic). */
-function persistProposal(proposal: Proposal): void {
-  const safeProposal = sanitizeProposalForStore(proposal);
-  const dir = inboxDir();
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+function ownedByCurrentUser(stat: Stats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+}
+
+function safeProposalFile(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && Number(stat.nlink) === 1 && ownedByCurrentUser(stat);
+}
+
+function completeWrite(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset, null);
+    if (written <= 0) throw new Error('Short proposal write');
+    offset += written;
   }
-  const dest = proposalPath(safeProposal.id);
-  const tmp = dest + '.tmp';
-  writeFileSync(tmp, JSON.stringify(safeProposal, null, 2) + '\n', 'utf8');
-  renameSync(tmp, dest);
+}
+
+/** Durably install one proposal under the global store-writer fence. */
+function persistProposal(
+  expectedId: string,
+  proposal: Proposal,
+  createOnly = false,
+  ownerLock?: ProposalStoreMutationLock,
+): void {
+  const ownsStoreLock = ownsProposalStoreMutationLock(ownerLock);
+  const storeLock = ownsStoreLock ? ownerLock! : acquireProposalStoreMutationLock();
+  if (!storeLock) throw new Error('Proposal store mutation lock unavailable');
+  let fd: number | undefined;
+  let backupFd: number | undefined;
+  let tmp: string | undefined;
+  let backup: string | undefined;
+  let dir: string | undefined;
+  let dest: string | undefined;
+  let destinationInstalled = false;
+  let committed = false;
+  let directoryCreated = false;
+  try {
+    const safeProposal = sanitizeProposalForStore(proposal);
+    if (safeProposal.id !== expectedId) throw new Error('Proposal persistence identity mismatch');
+    dir = inboxDir();
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      directoryCreated = true;
+    }
+    const directoryBefore = lstatSync(dir);
+    if (!safeProposalDirectory(directoryBefore) || !ownedByCurrentUser(directoryBefore)) {
+      throw new Error('Unsafe proposal directory');
+    }
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
+
+    dest = proposalPath(safeProposal.id);
+    if (createOnly && existsSync(dest)) throw new Error('Proposal id collision');
+    if (!createOnly) {
+      if (!existsSync(dest) || !safeProposalFile(lstatSync(dest))) {
+        throw new Error('Unsafe or missing existing proposal');
+      }
+      backup = join(dir, `.${safeProposal.id}.${process.pid}.${randomBytes(12).toString('hex')}.rollback`);
+      const prior = readProposalFileBounded(
+        dest,
+        HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+        HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+      );
+      if (!prior.ok) throw new Error('Existing proposal could not be captured for rollback');
+      const priorBytes = Buffer.from(prior.text, 'utf8');
+      const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+      backupFd = openSync(backup, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
+      const openedBackup = fstatSync(backupFd);
+      if (!safeProposalFile(openedBackup)) throw new Error('Unsafe proposal rollback file');
+      completeWrite(backupFd, priorBytes);
+      if (process.platform !== 'win32') fchmodSync(backupFd, 0o600);
+      fsyncSync(backupFd);
+      const writtenBackup = fstatSync(backupFd);
+      if (!safeProposalFile(writtenBackup) || !sameProposalSource(openedBackup, writtenBackup) ||
+        writtenBackup.size !== priorBytes.length) {
+        throw new Error('Proposal rollback file changed during write');
+      }
+      closeSync(backupFd);
+      backupFd = undefined;
+    }
+
+    const bytes = Buffer.from(JSON.stringify(safeProposal, null, 2) + '\n', 'utf8');
+    if (bytes.length > HARD_PROPOSAL_READ_MAX_FILE_BYTES) {
+      throw new Error('Proposal exceeds the readable store limit');
+    }
+    tmp = join(dir, `.${safeProposal.id}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
+    const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+    fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
+    const opened = fstatSync(fd);
+    if (!safeProposalFile(opened)) throw new Error('Unsafe proposal temporary file');
+    completeWrite(fd, bytes);
+    if (process.platform !== 'win32') fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    const written = fstatSync(fd);
+    if (!safeProposalFile(written) || !sameProposalSource(opened, written) || written.size !== bytes.length) {
+      throw new Error('Proposal temporary file changed during write');
+    }
+    closeSync(fd);
+    fd = undefined;
+
+    const directoryBeforeRename = lstatSync(dir);
+    if (!safeProposalDirectory(directoryBeforeRename) || !sameProposalSource(directoryBefore, directoryBeforeRename)) {
+      throw new Error('Proposal directory changed during write');
+    }
+    if (createOnly && existsSync(dest)) throw new Error('Proposal id collision');
+    if (createOnly) {
+      linkSync(tmp, dest);
+      destinationInstalled = true;
+      unlinkSync(tmp);
+      tmp = undefined;
+    } else {
+      renameSync(tmp, dest);
+      destinationInstalled = true;
+      tmp = undefined;
+    }
+    const installed = lstatSync(dest);
+    const directoryAfter = lstatSync(dir);
+    if (!safeProposalFile(installed) || !sameProposalSource(written, installed) ||
+      !safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) {
+      throw new Error('Proposal installation identity check failed');
+    }
+    const installedRead = readProposalFileBounded(dest, bytes.length, bytes.length);
+    if (!installedRead.ok || installedRead.text !== bytes.toString('utf8')) {
+      throw new Error('Installed proposal bytes do not match the durable temporary file');
+    }
+    fsyncDirectory(dir);
+    if (directoryCreated) fsyncDirectory(dirname(dir));
+    const directoryAfterSync = lstatSync(dir);
+    if (!safeProposalDirectory(directoryAfterSync) || !sameProposalSource(directoryBefore, directoryAfterSync)) {
+      throw new Error('Proposal directory changed during durability sync');
+    }
+    committed = true;
+  } catch (error) {
+    if (destinationInstalled && !committed && dir && dest) {
+      try {
+        if (backup && existsSync(backup)) {
+          renameSync(backup, dest);
+          backup = undefined;
+        }
+        else if (createOnly && existsSync(dest)) unlinkSync(dest);
+        fsyncDirectory(dir);
+      } catch {
+        // The caller still receives failure; subsequent bounded reads remain
+        // the authority for any uncertain installation state.
+      }
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve persistence error */ }
+    }
+    if (backupFd !== undefined) {
+      try { closeSync(backupFd); } catch { /* preserve persistence error */ }
+    }
+    if (tmp !== undefined) {
+      try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+    }
+    if (backup !== undefined && (committed || !destinationInstalled)) {
+      try { unlinkSync(backup); } catch { /* harmless hidden rollback debris */ }
+    }
+    if (!ownsStoreLock) releaseProposalStoreMutationLock(storeLock);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +557,12 @@ function readProposalFileBounded(
 ): ProposalFileRead {
   let fd: number | undefined;
   try {
+    const namedBefore = lstatSync(filePath);
+    if (!safeProposalFile(namedBefore)) return { ok: false, reason: 'io-error' };
     const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
     fd = openSync(filePath, constants.O_RDONLY | noFollow);
     const before = fstatSync(fd);
-    if (!before.isFile() || before.isSymbolicLink() || Number(before.nlink) !== 1) {
+    if (!safeProposalFile(before) || !sameProposalSource(namedBefore, before)) {
       return { ok: false, reason: 'io-error' };
     }
     const size = Number(before.size);
@@ -576,8 +740,8 @@ function linkMilestoneOutcome(proposalId: string, outcome: 'applied' | 'rejected
  *  - `owner`     — cfg.user?.id ?? cfg.user?.name (M109; undefined when cfg absent)
  *
  * NEVER applies or mutates any repo.
- * Never throws — on persistence failure the in-memory proposal is still
- * returned (best-effort).
+ * Never throws. Persistence failure returns an explicit rejected result that
+ * cannot be mistaken for a filed proposal.
  */
 export function createProposal(
   p: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
@@ -604,44 +768,7 @@ export function createProposal(
     }
   }
 
-  // M259: diffHash dedup — if an identical diff is already pending, skip filing.
-  // This prevents the 10x duplicate flood (same fix re-proposed every tick).
-  // Only skips when the incoming proposal has a diffHash AND a pending proposal
-  // with the same diffHash already exists. Safe: never rejects distinct diffs.
-  // No-op when diffHash is absent (no dedup check).
-  if (initialStatus === 'pending' && input.diffHash) {
-    try {
-      const existingPending = listProposals({ status: 'pending' });
-      const duplicate = existingPending.find(
-        (ep) => ep.diffHash === input.diffHash,
-      );
-      if (duplicate) {
-        // Return a synthetic rejected record (never persisted) so the caller
-        // gets a valid Proposal shape without cluttering the inbox.
-        // The real proposal (duplicate.id) is still live — we just skip the new one.
-        audit({
-          action: 'inbox:proposal-rejected',
-          repo: (input.repo as string | null) ?? null,
-          sandboxId: (input.sandboxId as string | undefined) ?? null,
-          summary: `proposal skipped (diffHash dedup): [${input.kind}] ${input.title} — duplicate of ${duplicate.id}`,
-          result: 'ok',
-        });
-        return {
-          ...input,
-          ...(owner !== undefined ? { owner } : {}),
-          id: duplicate.id, // caller receives the existing proposal's id
-          status: 'rejected' as const,
-          createdAt: new Date().toISOString(),
-          decisionReason: `diffHash dedup: duplicate of ${duplicate.id}`,
-          decidedAt: new Date().toISOString(),
-        };
-      }
-    } catch {
-      // Dedup is best-effort — never disrupts proposal creation.
-    }
-  }
-
-  const proposalId = generateId();
+  const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
   const baseProposal: Proposal = {
     ...input,
@@ -671,25 +798,78 @@ export function createProposal(
     }),
   };
 
-  try {
-    persistProposal(proposal);
-  } catch {
-    // Persistence failure: caller still gets the in-memory proposal.
+  let persisted = false;
+  const storeLock = acquireProposalStoreMutationLock();
+  if (storeLock) {
+    try {
+      // Dedup and installation share one namespace transaction so two
+      // processes cannot both observe absence and file the same diff.
+      if (initialStatus === 'pending' && input.diffHash) {
+        const pendingSnapshot = listProposalsDetailed({
+          status: 'pending',
+          requireComplete: true,
+          maxFiles: HARD_PROPOSAL_READ_MAX_FILES,
+          maxBytes: HARD_PROPOSAL_READ_MAX_BYTES,
+          maxFileBytes: HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+        });
+        if (!pendingSnapshot.complete || pendingSnapshot.sourceState === 'degraded') {
+          throw new Error('Proposal dedup source is incomplete');
+        }
+        const duplicate = pendingSnapshot.proposals.find(
+          (existing) => existing.diffHash === input.diffHash,
+        );
+        if (duplicate) {
+          audit({
+            action: 'inbox:proposal-rejected',
+            repo: (input.repo as string | null) ?? null,
+            sandboxId: (input.sandboxId as string | undefined) ?? null,
+            summary: `proposal skipped (diffHash dedup): [${input.kind}] ${input.title} — duplicate of ${duplicate.id}`,
+            result: 'ok',
+          });
+          return {
+            ...input,
+            ...(owner !== undefined ? { owner } : {}),
+            id: duplicate.id,
+            status: 'rejected' as const,
+            createdAt,
+            decisionReason: `diffHash dedup: duplicate of ${duplicate.id}`,
+            decidedAt: createdAt,
+          };
+        }
+      }
+      persistProposal(proposal.id, proposal, true, storeLock);
+      persisted = true;
+    } catch {
+      persisted = false;
+    } finally {
+      releaseProposalStoreMutationLock(storeLock);
+    }
   }
 
+  const returnedProposal: Proposal = persisted
+    ? proposal
+    : {
+        ...proposal,
+        status: 'rejected',
+        decisionReason: 'proposal persistence failed',
+        decidedAt: new Date().toISOString(),
+      };
+
   audit({
-    action: initialStatus === 'rejected' ? 'inbox:proposal-rejected' : 'inbox:proposal-created',
+    action: !persisted || initialStatus === 'rejected' ? 'inbox:proposal-rejected' : 'inbox:proposal-created',
     repo: proposal.repo ?? null,
     sandboxId: proposal.sandboxId ?? null,
     summary:
-      initialStatus === 'rejected'
+      !persisted
+        ? `proposal persistence failed: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
+        : initialStatus === 'rejected'
         ? `proposal auto-rejected (diff-safety): [${proposal.kind}] ${proposal.title} (id=${proposal.id}) — ${diffSafetyRejectionReason}`
         : `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
-    result: 'ok',
+    result: persisted ? 'ok' : 'refused',
   });
 
   // M158: emit decisions-ledger entry for auto-rejected proposals.
-  if (initialStatus === 'rejected' && diffSafetyRejectionReason !== undefined) {
+  if (persisted && initialStatus === 'rejected' && diffSafetyRejectionReason !== undefined) {
     try {
       const ts = new Date().toISOString();
       recordDecision({
@@ -714,14 +894,16 @@ export function createProposal(
 
   // Pulse Map: a proposal now exists. Outcome = its origin so the cloud can
   // distinguish backlog / swarm / manual / agent provenance. Best-effort.
-  emitProposalSpan(
-    initialStatus === 'rejected' ? 'decline' : 'proposal',
-    proposal,
-    initialStatus === 'rejected' ? 'rejected' : proposal.origin,
-    cfg,
-  );
+  if (persisted) {
+    emitProposalSpan(
+      initialStatus === 'rejected' ? 'decline' : 'proposal',
+      proposal,
+      initialStatus === 'rejected' ? 'rejected' : proposal.origin,
+      cfg,
+    );
+  }
 
-  return proposal;
+  return returnedProposal;
 }
 
 /**
@@ -746,6 +928,8 @@ export function listProposals(filter?: { status?: ProposalStatus }): Proposal[] 
   try {
     const dir = inboxDir();
     if (!existsSync(dir)) return [];
+    const directoryBefore = lstatSync(dir);
+    if (!safeProposalDirectory(directoryBefore) || !ownedByCurrentUser(directoryBefore)) return [];
 
     let files: string[];
     try {
@@ -757,9 +941,14 @@ export function listProposals(filter?: { status?: ProposalStatus }): Proposal[] 
     const proposals: Proposal[] = [];
     for (const file of files) {
       try {
-        const raw = readFileSync(join(dir, file), 'utf8');
-        const parsed: unknown = JSON.parse(raw);
-        if (isValidProposal(parsed)) {
+        const loaded = readProposalFileBounded(
+          join(dir, file),
+          HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+          HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+        );
+        if (!loaded.ok) continue;
+        const parsed: unknown = JSON.parse(loaded.text);
+        if (isValidProposal(parsed) && validProposalId(parsed.id) && file === `${parsed.id}.json`) {
           proposals.push(sanitizeProposalForStore(parsed));
         }
       } catch {
@@ -783,6 +972,9 @@ export function listProposals(filter?: { status?: ProposalStatus }): Proposal[] 
       if (a.id > b.id) return -1;
       return 0;
     });
+
+    const directoryAfter = lstatSync(dir);
+    if (!safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) return [];
 
     return filtered;
   } catch {
@@ -897,7 +1089,7 @@ export function listProposalsDetailed(
 
       try {
         const parsed: unknown = JSON.parse(loaded.text);
-        if (!isValidProposal(parsed)) {
+        if (!isValidProposal(parsed) || !validProposalId(parsed.id) || file !== `${parsed.id}.json`) {
           result.invalidFiles++;
           result.complete = false;
           pushProposalStopReason(result.stopReasons, 'invalid-file');
@@ -958,11 +1150,21 @@ export function listProposalsDetailed(
  */
 export function loadProposal(id: string): Proposal | null {
   try {
+    const dir = inboxDir();
+    const directoryBefore = lstatSync(dir);
+    if (!safeProposalDirectory(directoryBefore) || !ownedByCurrentUser(directoryBefore)) return null;
     const p = proposalPath(id);
     if (!existsSync(p)) return null;
-    const raw = readFileSync(p, 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (isValidProposal(parsed)) return sanitizeProposalForStore(parsed);
+    const loaded = readProposalFileBounded(
+      p,
+      HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+      HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+    );
+    if (!loaded.ok) return null;
+    const directoryAfter = lstatSync(dir);
+    if (!safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) return null;
+    const parsed: unknown = JSON.parse(loaded.text);
+    if (isValidProposal(parsed) && parsed.id === id) return sanitizeProposalForStore(parsed);
     return null;
   } catch {
     return null;
@@ -1028,7 +1230,7 @@ export function setStatus(
     });
 
     try {
-      persistProposal(updated);
+      persistProposal(id, updated);
       persisted = true;
     } catch {
       return false;
@@ -1130,7 +1332,7 @@ export function updateProposalField(
     if (existing === null) return false;
     const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
     try {
-      persistProposal(updated);
+      persistProposal(id, updated);
       if (patch.verifyResult !== undefined && proposalCompletesGoalMilestone(updated)) {
         linkMilestoneOutcome(id, 'applied');
       }

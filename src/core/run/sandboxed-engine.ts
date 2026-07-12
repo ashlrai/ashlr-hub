@@ -1108,6 +1108,7 @@ export async function captureSandboxedProposal(
       persisted.workItemGenerationId === opts.workItemGenerationId &&
       persisted.diffHash === diffHash &&
       persisted.provenanceSig === provenanceSig &&
+      persisted.diff === scrubbed &&
       (persisted.isPartial === true) === (opts.isPartial === true) &&
       typeof persisted.diff === 'string' &&
       persisted.diff.trim().length > 0;
@@ -1712,7 +1713,8 @@ export async function runEngineSandboxed(
           }
           if (_m275ShouldFile) {
           const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', effDiff);
-          const proposal = selectInboxStore(cfg).create({
+          const inbox = selectInboxStore(cfg);
+          const proposal = inbox.create({
             repo: sb.sourceRepo,
             origin: 'agent',
             kind: 'patch',
@@ -1748,6 +1750,23 @@ export async function runEngineSandboxed(
           if (isDiffDedupResult(proposal)) {
             proposalOutcomeResult = duplicateDiffOutcome(proposal, effDiff);
           } else {
+            const persisted = proposal.status === 'pending' ? inbox.load(proposal.id) : null;
+            const durablePending =
+              proposal.status === 'pending' &&
+              persisted?.status === 'pending' &&
+              persisted.id === proposal.id &&
+              persisted.repo === sb.sourceRepo &&
+              persisted.runId === id &&
+              persisted.diffHash === diffHash &&
+              persisted.provenanceSig === provenanceSig &&
+              persisted.diff === scrubbed;
+            if (!durablePending) {
+              proposalOutcomeResult = proposalOutcome(
+                'proposal-capture-error',
+                'proposal was not durably persisted with matching capture metadata',
+                effDiff,
+              );
+            } else {
             proposalId = proposal.id;
             proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
             // M246: record telemetry fields on the decision entry (additive, never-throws).
@@ -1815,6 +1834,7 @@ export async function runEngineSandboxed(
                 cacheWrite(cfg, _entry, opts.sourceRepo);
               }
             } catch { /* shadow write is best-effort */ }
+            }
           }
           } // end if (_m275ShouldFile)
           }

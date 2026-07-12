@@ -14,7 +14,8 @@
  * pulse calls are mocked out so the suite is hermetic.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterAll, describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Goal, Milestone, Proposal, SwarmRun } from '../src/core/types.js';
 
@@ -32,33 +33,12 @@ vi.mock('../src/core/goals/store.js', () => ({
   goalsDir: () => '/tmp/fake-goals',
 }));
 
-// Filesystem + homedir — inbox/store.ts uses existsSync, mkdirSync, readFileSync,
-// writeFileSync, renameSync, readdirSync to manage ~/.ashlr/inbox files. In this
-// test we intercept at the setStatus layer: we pre-stub loadProposal (via a
-// readFileSync mock) to return a known proposal, then let the rest of setStatus
-// run — but we stub the write path so nothing touches disk.
-const mockExistsSync = vi.fn(() => true);
-const mockReadFileSync = vi.fn();
-const mockWriteFileSync = vi.fn();
-const mockRenameSync = vi.fn();
-const mockMkdirSync = vi.fn();
-const mockReaddirSync = vi.fn(() => [] as string[]);
-const mockAppendFileSync = vi.fn();
-
-vi.mock('node:fs', async (importOriginal) => ({
-  ...await importOriginal<typeof import('node:fs')>(),
-  existsSync: (...args: unknown[]) => mockExistsSync(...args),
-  readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
-  writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
-  renameSync: (...args: unknown[]) => mockRenameSync(...args),
-  mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
-  readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
-  appendFileSync: (...args: unknown[]) => mockAppendFileSync(...args),
-  unlinkSync: vi.fn(),
+const { fakeHome } = vi.hoisted(() => ({
+  fakeHome: `/tmp/ashlr-m228-${process.pid}`,
 }));
 
 vi.mock('node:os', () => ({
-  homedir: () => '/tmp/fake-home',
+  homedir: () => fakeHome,
 }));
 
 // Audit, fleet telemetry, decisions ledger — no-ops for this test.
@@ -69,11 +49,7 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({ linkOutcome: vi.fn() }));
 vi.mock('../src/core/run/diff-safety.js', () => ({
   isDestructiveDiff: vi.fn(() => ({ destructive: false })),
 }));
-vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
-  acquireProposalMutationLock: () => ({ key: 'test-lock', token: Symbol('test-lock') }),
-  ownsProposalMutationLock: () => false,
-  releaseProposalMutationLock: vi.fn(),
-}));
+afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 
 // ---------------------------------------------------------------------------
 // Lazy imports AFTER mocks are registered.
@@ -178,8 +154,10 @@ function makeSwarmRun(overrides: Partial<SwarmRun> = {}): SwarmRun {
 // ---------------------------------------------------------------------------
 
 function stubExistingProposal(proposal: Proposal): void {
-  mockExistsSync.mockReturnValue(true);
-  mockReadFileSync.mockReturnValue(JSON.stringify(proposal));
+  fs.rmSync(fakeHome, { recursive: true, force: true });
+  const dir = path.join(fakeHome, '.ashlr', 'inbox');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, `${proposal.id}.json`), `${JSON.stringify(proposal)}\n`, { mode: 0o600 });
 }
 
 // ---------------------------------------------------------------------------
@@ -231,13 +209,11 @@ describe('M228 Contract 1 — advanceGoal sets proposalId + proposed status', ()
     expect(typeof mockUpdateMilestoneStatusFromGoals).toBe('function');
 
     // The real guard: advance.ts source text contains the required call.
-    // Read it using Node's child process to avoid the fs mock.
-    const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
     const advancePath = require('node:path').join(
       __dirname,
       '../src/core/goals/advance.ts',
     );
-    const src = execFileSync('cat', [advancePath], { encoding: 'utf8' });
+    const src = fs.readFileSync(advancePath, 'utf8');
 
     expect(src).toMatch(/'proposed'/);
     expect(src).toMatch(/proposalId/);
@@ -253,12 +229,6 @@ describe('M228 Contract 2 — verified proposal applied → linked milestone bec
   beforeEach(() => {
     mockListGoals.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
-    mockExistsSync.mockReset();
-    mockReadFileSync.mockReset();
-    mockWriteFileSync.mockReset();
-    mockRenameSync.mockReset();
-    mockReaddirSync.mockReset();
-    mockReaddirSync.mockReturnValue([]);
     mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
   });
 
@@ -371,12 +341,6 @@ describe('M228 Contract 3 — proposal rejected → linked milestone resets to p
   beforeEach(() => {
     mockListGoals.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
-    mockExistsSync.mockReset();
-    mockReadFileSync.mockReset();
-    mockWriteFileSync.mockReset();
-    mockRenameSync.mockReset();
-    mockReaddirSync.mockReset();
-    mockReaddirSync.mockReturnValue([]);
     mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
   });
 

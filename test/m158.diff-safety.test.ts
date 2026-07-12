@@ -15,7 +15,8 @@
  * All vi.mock() calls at module top level so vitest hoists them correctly.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterAll, describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 
 // ============================================================================
 // ── Module mocks (mirrors m124/m133 conventions) ───────────────────────────
@@ -27,32 +28,12 @@ vi.mock('../src/core/sandbox/audit.js', () => ({
   audit: (record: { action: string; summary: string }) => { auditCalls.push(record); },
 }));
 
-// Stub FS — proposals write to a tmp in-memory map
-const storedProposals = new Map<string, string>();
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    existsSync: (p: string) => {
-      if (String(p).includes('.ashlr/inbox')) return true;
-      return actual.existsSync(p);
-    },
-    mkdirSync: (..._args: unknown[]) => undefined,
-    writeFileSync: (p: string, data: string) => { storedProposals.set(String(p), String(data)); },
-    renameSync: (tmp: string, dest: string) => {
-      const d = storedProposals.get(String(tmp));
-      if (d !== undefined) {
-        storedProposals.set(String(dest), d);
-        storedProposals.delete(String(tmp));
-      }
-    },
-    readFileSync: (p: string, enc?: string) => {
-      const d = storedProposals.get(String(p));
-      if (d !== undefined) return d;
-      return actual.readFileSync(p, enc as BufferEncoding);
-    },
-  };
-});
+const { fakeHome } = vi.hoisted(() => ({
+  fakeHome: `/tmp/ashlr-m158-${process.pid}`,
+}));
+
+vi.mock('node:os', () => ({ homedir: () => fakeHome }));
+afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 
 // Capture decisions-ledger calls
 const ledgerEntries: Array<{ action: string; proposalId: string; reason?: string }> = [];
@@ -385,7 +366,7 @@ describe('M158 — isDestructiveDiff: never-throws on bad input', () => {
 
 describe('M158 — createProposal: auto-rejects destructive diff at intake', () => {
   beforeEach(() => {
-    storedProposals.clear();
+    fs.rmSync(fakeHome, { recursive: true, force: true });
     auditCalls.length = 0;
     ledgerEntries.length = 0;
   });

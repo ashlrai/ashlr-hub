@@ -48,7 +48,7 @@ import type {
   RunUsage,
   SwarmRun,
 } from '../../src/core/types.js';
-import { createProposal } from '../../src/core/inbox/store.js';
+import { createProposal, makeProposalId } from '../../src/core/inbox/store.js';
 
 // ===========================================================================
 // spawnConcurrent — fan out n units and settle them all
@@ -265,23 +265,12 @@ export function collectIds(n: number, mint: () => string): string[] {
 }
 
 /**
- * Mint `n` proposal ids through the REAL inbox store (each `createProposal`
- * persists a record under the isolated HOME and returns its `_seq`-counter id),
- * returning the produced ids. Exercises the EXISTING inbox `generateId` counter
- * (store.ts) — H3 ASSERTS it, never changes it. `repo` attributes the proposals.
+ * Mint `n` proposal ids through the REAL inbox id minter, returning the produced
+ * ids without coupling this same-millisecond property test to durable fsync.
+ * Durable proposal persistence is covered independently by h3.atomic-writes.
  */
-export function mintProposalIds(n: number, repo: string): string[] {
-  return collectIds(n, () => {
-    const p: Proposal = createProposal({
-      repo,
-      origin: 'swarm',
-      kind: 'patch',
-      title: 'h3 id-collision probe',
-      summary: 'H3 IDS-COLLISION-SAFE: mint many ids in the same millisecond',
-      diff: 'diff --git a/x.ts b/x.ts\n',
-    });
-    return p.id;
-  });
+export function mintProposalIds(n: number, _repo: string): string[] {
+  return collectIds(n, makeProposalId);
 }
 
 /**
