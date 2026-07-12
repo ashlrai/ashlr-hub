@@ -60,6 +60,7 @@ function ensurePrivateDir(path: string, assureWindows = false): Stats {
   if (!privateDir(after) || !sameNode(before, after)) throw new Error('reconciliation key directory changed');
   if (assureWindows && !assurePrivateStoragePath(
     path, 'directory', existed ? 'inspect-existing' : 'secure-created',
+    { anchorPath: storageHome() },
   ).ok) {
     if (!existed) {
       try {
@@ -97,7 +98,9 @@ function loadDedicatedKey(create: boolean): Buffer | null {
         const opened = fstatSync(fd);
         uncommitted = opened;
         if (!privateFile(opened)) return null;
-        if (!assurePrivateStoragePath(path, 'file', 'secure-created').ok) return null;
+        if (!assurePrivateStoragePath(path, 'file', 'secure-created', {
+          anchorPath: storageHome(),
+        }).ok) return null;
         const assured = lstatSync(path);
         if (!privateFile(assured) || !sameNode(opened, assured) || assured.size !== 0) return null;
         if (writeSync(fd, bytes) !== bytes.length) return null;
@@ -116,7 +119,9 @@ function loadDedicatedKey(create: boolean): Buffer | null {
     if (!existsSync(path)) return null;
     const named = lstatSync(path);
     if (!privateFile(named) || named.size !== 32) return null;
-    if (!assurePrivateStoragePath(path, 'file', 'inspect-existing').ok) return null;
+    if (!assurePrivateStoragePath(path, 'file', 'inspect-existing', {
+      anchorPath: storageHome(),
+    }).ok) return null;
     const assured = lstatSync(path);
     if (!privateFile(assured) || !sameNode(named, assured) || assured.size !== named.size) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);

@@ -18,12 +18,15 @@ try {
   $raw = [Console]::In.ReadToEnd()
   $request = $raw | ConvertFrom-Json
   $keys = @($request.PSObject.Properties.Name | Sort-Object)
-  if (($keys -join ',') -ne 'kind,mode,nonce,operation,path,schemaVersion') { Finish $false 'invalid-input-shape' }
+  if (($keys -join ',') -ne 'anchorPath,kind,mode,nonce,operation,path,schemaVersion') { Finish $false 'invalid-input-shape' }
   if ($request.schemaVersion -ne 1 -or $request.operation -ne 'assure-private-path') { Finish $false 'invalid-input' }
   if ($request.kind -ne 'file' -and $request.kind -ne 'directory') { Finish $false 'invalid-kind' }
   if ($request.mode -ne 'secure-created' -and $request.mode -ne 'inspect-existing') { Finish $false 'invalid-mode' }
   $stage = 'load-item'
   $item = Get-Item -LiteralPath $request.path -Force
+  $anchor = Get-Item -LiteralPath $request.anchorPath -Force
+  if (-not $anchor.PSIsContainer -or
+    ($anchor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'invalid-anchor' }
   if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-point' }
   if ($request.kind -eq 'file' -and $item.PSIsContainer) { Finish $false 'wrong-kind' }
   if ($request.kind -eq 'directory' -and -not $item.PSIsContainer) { Finish $false 'wrong-kind' }
@@ -33,10 +36,10 @@ try {
   $trustedSids = @($current.Value, $system.Value, $administrators.Value)
   $cursor = if ($request.kind -eq 'file') { $item.Directory } else { $item.Parent }
   $stage = 'inspect-ancestors'
+  $reachedAnchor = $false
   while ($null -ne $cursor) {
     $stage = 'ancestor-parent'
     $ancestorParent = $cursor.Parent
-    if ($null -eq $ancestorParent) { break }
     $stage = 'ancestor-attributes'
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
     $stage = 'ancestor-get-acl'
@@ -58,9 +61,14 @@ try {
         Finish $false 'untrusted-ancestor-delete'
       }
     }
+    if ($cursor.FullName -eq $anchor.FullName) {
+      $reachedAnchor = $true
+      break
+    }
     $stage = 'ancestor-next'
     $cursor = $ancestorParent
   }
+  if (-not $reachedAnchor) { Finish $false 'anchor-not-reached' }
   $principalValues = @($current.Value, $system.Value) | Select-Object -Unique
   if ($request.mode -eq 'secure-created') {
     $stage = 'build-acl'
@@ -142,8 +150,9 @@ const FAILURE_REASONS = new Set([
   'adapter-error-ancestor-parent', 'adapter-error-ancestor-rules',
   'adapter-error-apply-acl', 'adapter-error-build-acl', 'adapter-error-inspect-ancestors',
   'adapter-error-load-item', 'adapter-error-read-input', 'adapter-error-readback-acl',
-  'adapter-error-verify-acl', 'dacl-not-protected', 'deny-ace', 'inherited-ace', 'invalid-input',
-  'invalid-input-shape', 'invalid-kind', 'invalid-mode', 'missing-or-duplicate-principal',
+  'adapter-error-verify-acl', 'anchor-not-reached', 'dacl-not-protected', 'deny-ace',
+  'inherited-ace', 'invalid-anchor', 'invalid-input', 'invalid-input-shape', 'invalid-kind',
+  'invalid-mode', 'missing-or-duplicate-principal',
   'reparse-ancestor', 'reparse-point', 'unexpected-ace-count', 'untrusted-ancestor-delete',
   'untrusted-ancestor-owner', 'wrong-flags', 'wrong-kind', 'wrong-owner', 'wrong-rights',
 ]);
@@ -186,6 +195,7 @@ export function assurePrivateStoragePath(
   options: {
     platform?: NodeJS.Platform;
     systemRoot?: string;
+    anchorPath?: string;
     timeoutMs?: number;
     runner?: PrivateStorageRunner;
   } = {},
@@ -194,6 +204,12 @@ export function assurePrivateStoragePath(
   if (platform !== 'win32') return { ok: true, reason: 'posix-checked-by-caller' };
   const privatePath = localWindowsPath(path, 4_096);
   if (!privatePath) return { ok: false, reason: 'invalid-path' };
+  const anchorPath = localWindowsPath(options.anchorPath, 4_096);
+  if (!anchorPath) return { ok: false, reason: 'invalid-anchor' };
+  const relative = win32.relative(anchorPath, privatePath);
+  if (relative === '..' || relative.startsWith(`..${win32.sep}`) || win32.isAbsolute(relative)) {
+    return { ok: false, reason: 'invalid-anchor' };
+  }
   const executable = powershellPath(options.systemRoot ?? process.env.SystemRoot);
   if (!executable) return { ok: false, reason: 'powershell-unavailable' };
   const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
@@ -205,6 +221,7 @@ export function assurePrivateStoragePath(
     operation: OPERATION,
     nonce,
     path: privatePath,
+    anchorPath,
     kind,
     mode,
   });

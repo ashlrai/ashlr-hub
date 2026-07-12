@@ -38,7 +38,8 @@ describe('M379 Windows private-storage assurance', () => {
     const calls: PrivateStorageInvocation[] = [];
     const path = 'C:\\tmp\\path with spaces\\$env:USER;Remove-Item *\\[x]';
     expect(assurePrivateStoragePath(path, 'file', 'secure-created', {
-      platform: 'win32', systemRoot: 'C:\\Windows', runner: successfulRunner(calls),
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+      runner: successfulRunner(calls),
     })).toEqual({ ok: true, reason: 'exact-private-dacl' });
 
     expect(calls).toHaveLength(1);
@@ -51,14 +52,17 @@ describe('M379 Windows private-storage assurance', () => {
     expect(calls[0]!.args.at(-1)).toMatch(/^[A-Za-z0-9+/=]+$/);
     expect(calls[0]!.args.join(' ')).not.toContain(path);
     expect(JSON.parse(calls[0]!.input)).toMatchObject({
-      schemaVersion: 1, operation: 'assure-private-path', path, kind: 'file', mode: 'secure-created',
+      schemaVersion: 1, operation: 'assure-private-path', anchorPath: 'C:\\tmp',
+      path, kind: 'file', mode: 'secure-created',
     });
     expect(calls[0]!.timeoutMs).toBe(5_000);
     expect(calls[0]!.maxBuffer).toBe(4 * 1024);
   });
 
   it('fails closed on process errors, status failures, malformed output, and nonce substitution', () => {
-    const base = { platform: 'win32' as const, systemRoot: 'C:\\Windows' };
+    const base = {
+      platform: 'win32' as const, systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+    };
     const runners: PrivateStorageRunner[] = [
       () => ({ status: null, error: new Error('timeout') }),
       () => ({ status: 1, stdout: '' }),
@@ -90,7 +94,7 @@ describe('M379 Windows private-storage assurance', () => {
     const runner = vi.fn<PrivateStorageRunner>();
     for (const invalid of ['relative', '\\root-relative', '\\\\server\\share\\key', '\\\\.\\pipe\\key']) {
       expect(assurePrivateStoragePath(invalid, 'file', 'inspect-existing', {
-        platform: 'win32', systemRoot: 'C:\\Windows', runner,
+        platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp', runner,
       })).toEqual({ ok: false, reason: 'invalid-path' });
     }
     expect(assurePrivateStoragePath('/tmp/private', 'file', 'inspect-existing', {
@@ -109,29 +113,36 @@ describe('M379 Windows private-storage assurance', () => {
     // empty objects, then the adapter must secure them before secret bytes exist.
     const mkdir = spawnSync(process.execPath, ['-e', `require('fs').mkdirSync(${JSON.stringify(dir)})`]);
     expect(mkdir.status).toBe(0);
-    const directoryAssurance = assurePrivateStoragePath(dir, 'directory', 'secure-created');
+    const directoryAssurance = assurePrivateStoragePath(dir, 'directory', 'secure-created', {
+      anchorPath: home,
+    });
     expect(directoryAssurance, directoryAssurance.reason).toMatchObject({ ok: true });
     const fd = openSync(file, 'wx', 0o600);
     closeSync(fd);
-    expect(assurePrivateStoragePath(file, 'file', 'secure-created')).toMatchObject({ ok: true });
+    expect(assurePrivateStoragePath(file, 'file', 'secure-created', { anchorPath: home }))
+      .toMatchObject({ ok: true });
     writeFileSync(file, Buffer.alloc(32, 7));
-    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing')).toMatchObject({ ok: true });
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: home }))
+      .toMatchObject({ ok: true });
 
     const ancestorMutation = spawnSync('icacls.exe', [home, '/grant', '*S-1-1-0:(WDAC)'], {
       windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8',
     });
     expect(ancestorMutation.status, ancestorMutation.stderr).toBe(0);
-    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing').ok).toBe(false);
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: home }).ok)
+      .toBe(false);
     const restoreAncestor = spawnSync('icacls.exe', [home, '/remove:g', '*S-1-1-0'], {
       windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8',
     });
     expect(restoreAncestor.status, restoreAncestor.stderr).toBe(0);
-    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing')).toMatchObject({ ok: true });
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: home }))
+      .toMatchObject({ ok: true });
 
     const mutation = spawnSync('icacls.exe', [file, '/grant', '*S-1-1-0:R'], {
       windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8',
     });
     expect(mutation.status, mutation.stderr).toBe(0);
-    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing').ok).toBe(false);
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: home }).ok)
+      .toBe(false);
   }, 45_000);
 });

@@ -106,6 +106,8 @@ describe('M380 Windows reconciliation key lifecycle', () => {
       .toMatch(/^[a-f0-9]{64}$/);
     expect(lstatSync(legacy).size).toBe(32);
     expect(existsSync(replacement)).toBe(false);
-    expect(mocks.assure).toHaveBeenCalledWith(legacy, 'file', 'inspect-existing');
+    expect(mocks.assure).toHaveBeenCalledWith(legacy, 'file', 'inspect-existing', {
+      anchorPath: join(home, '.ashlr'),
+    });
   });
 });
