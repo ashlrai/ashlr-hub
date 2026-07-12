@@ -57,7 +57,7 @@ describe('M374 durable fleet monitoring cursor', () => {
     const candidates = [candidate('proposal-c', 'c'), candidate('proposal-a', 'a'), candidate('proposal-b', 'b')];
     const first = selectOutcomeCandidateSuccessors(candidates, null, 1).selected[0]!;
     const checkpoint = buildMonitoringCursor(repos, {
-      outcome: { candidateAfter: first, sweepComplete: false },
+      outcome: { candidateAfter: first, sweepComplete: false, hadIncomplete: false, candidateSetDigest: null },
       regressionRepoAfter: repos[1]!,
     })!;
 
@@ -163,7 +163,7 @@ describe('M374 durable fleet monitoring cursor', () => {
       wrapped: true,
     });
     const completed = buildMonitoringCursor(repos, {
-      outcome: { candidateAfter: candidates[2]!, sweepComplete: true },
+      outcome: { candidateAfter: candidates[2]!, sweepComplete: true, hadIncomplete: false, candidateSetDigest: null },
       regressionRepoAfter: canonicalRepos[1]!,
     })!;
     expect(saveMonitoringCursor(completed)).toBe(true);
@@ -186,7 +186,10 @@ describe('M374 durable fleet monitoring cursor', () => {
     const advanced = { ...original, regressionRepoAfter: [...repos].sort()[0]! };
     expect(saveMonitoringCursor(advanced, { enrolledRepos: repos, expectedCursor: original })).toBe(true);
 
-    const stale = { ...original, outcome: { candidateAfter: candidate('stale', 'a'), sweepComplete: false } };
+    const stale = {
+      ...original,
+      outcome: { candidateAfter: candidate('stale', 'a'), sweepComplete: false, hadIncomplete: false, candidateSetDigest: null },
+    };
     expect(saveMonitoringCursor(stale, { enrolledRepos: repos, expectedCursor: original })).toBe(false);
     expect(loadMonitoringCursor(repos).cursor).toEqual(advanced);
   });

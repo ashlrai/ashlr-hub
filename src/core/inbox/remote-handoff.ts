@@ -6,10 +6,12 @@
  */
 
 import { existsSync } from 'node:fs';
-import { listProposals, setStatus, updateProposalField } from './store.js';
+import { listProposals, loadProposal, setStatus, updateProposalField } from './store.js';
 import { viewPr } from '../integrations/github.js';
 import type { Proposal, ProposalRemoteHandoff } from '../types.js';
 import type { PrView } from '../integrations/github.js';
+import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
+import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 
 export interface RemoteHandoffReconcileResult {
   checked: number;
@@ -67,6 +69,18 @@ function hasStrongIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boolean 
   );
 }
 
+function sameQueryIdentity(left: ProposalRemoteHandoff, right: ProposalRemoteHandoff): boolean {
+  return left.provider === right.provider && left.branch === right.branch &&
+    left.base === right.base && left.prUrl === right.prUrl && left.createdAt === right.createdAt;
+}
+
+function awaitingHostMerge(proposal: Proposal | null): proposal is Proposal & {
+  remoteHandoff: ProposalRemoteHandoff;
+} {
+  return proposal?.status === 'awaiting-host-merge' &&
+    proposal.remoteHandoff?.state === 'awaiting-host-merge';
+}
+
 function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
   const result = initialResult();
   const handoff = proposal.remoteHandoff;
@@ -89,52 +103,114 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
     result.unknown++;
     return result;
   }
-  const terminal = Boolean(pr.mergedAt || isMergedState(pr.state) || pr.closed === true || isClosedState(pr.state));
+  const mergedAt = sanitizeGithubMergedAt(pr.mergedAt);
+  const mergeCommitOid = typeof pr.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(pr.mergeCommitOid)
+    ? pr.mergeCommitOid.toLowerCase()
+    : undefined;
+  const terminal = Boolean(mergedAt || isMergedState(pr.state) || pr.closed === true || isClosedState(pr.state));
   if (terminal && !hasStrongIdentity(handoff, pr)) {
     result.unknown++;
     return result;
   }
 
-  if (pr.mergedAt || isMergedState(pr.state)) {
-    result.merged++;
-    const detail = `remote PR merged${pr.mergedAt ? ` at ${pr.mergedAt}` : ''}${pr.url ? `: ${pr.url}` : ''}`;
-    updateProposalField(proposal.id, {
-      remoteHandoff: mergeHandoff(handoff, {
+  if (mergedAt || isMergedState(pr.state)) {
+    const detail = `remote PR merged${mergedAt ? ` at ${mergedAt}` : ''}${pr.url ? `: ${pr.url}` : ''}`;
+    const mutationLock = acquireProposalMutationLock(proposal.id);
+    if (!mutationLock) {
+      result.unknown++;
+      return result;
+    }
+    try {
+      const current = loadProposal(proposal.id);
+      if (!awaitingHostMerge(current) || current.remoteHandoff.provider !== 'github' ||
+        !sameQueryIdentity(handoff, current.remoteHandoff) ||
+        (current.remoteHandoff.mergedAt !== undefined && mergedAt !== undefined &&
+          current.remoteHandoff.mergedAt !== mergedAt) ||
+        (current.remoteHandoff.mergeCommitOid !== undefined && mergeCommitOid !== undefined &&
+          current.remoteHandoff.mergeCommitOid !== mergeCommitOid) ||
+        hasConflictingIdentity(current.remoteHandoff, pr) || !hasStrongIdentity(current.remoteHandoff, pr)) {
+        result.unknown++;
+        return result;
+      }
+      const currentHandoff = current.remoteHandoff;
+      const remoteHandoff = mergeHandoff(currentHandoff, {
         state: 'merged',
         ...(pr.url ? { prUrl: pr.url } : {}),
-        ...(typeof pr.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(pr.mergeCommitOid)
-          ? { mergeCommitOid: pr.mergeCommitOid.toLowerCase() }
-          : {}),
+        ...(mergedAt ? { mergedAt } : {}),
+        ...(mergeCommitOid ? { mergeCommitOid } : {}),
         detail,
-      }),
-    });
-    setStatus(proposal.id, 'applied', detail);
+      });
+      if (!setStatus(proposal.id, 'applied', detail, undefined, mutationLock, { remoteHandoff })) {
+        result.unknown++;
+        return result;
+      }
+      result.merged++;
+    } finally {
+      releaseProposalMutationLock(mutationLock);
+    }
     return result;
   }
 
   if (pr.closed === true || isClosedState(pr.state)) {
-    result.closed++;
     const detail = `remote PR closed without merge${pr.url ? `: ${pr.url}` : ''}`;
-    updateProposalField(proposal.id, {
-      remoteHandoff: mergeHandoff(handoff, {
+    const mutationLock = acquireProposalMutationLock(proposal.id);
+    if (!mutationLock) {
+      result.unknown++;
+      return result;
+    }
+    try {
+      const current = loadProposal(proposal.id);
+      if (!awaitingHostMerge(current) || current.remoteHandoff.provider !== 'github' ||
+        !sameQueryIdentity(handoff, current.remoteHandoff) || current.remoteHandoff.mergedAt !== undefined ||
+        current.remoteHandoff.mergeCommitOid !== undefined ||
+        hasConflictingIdentity(current.remoteHandoff, pr) || !hasStrongIdentity(current.remoteHandoff, pr)) {
+        result.unknown++;
+        return result;
+      }
+      const currentHandoff = current.remoteHandoff;
+      const remoteHandoff = mergeHandoff(currentHandoff, {
         state: 'closed',
         ...(pr.url ? { prUrl: pr.url } : {}),
         detail,
-      }),
-    });
-    setStatus(proposal.id, 'rejected', detail);
+      });
+      if (!setStatus(proposal.id, 'rejected', detail, undefined, mutationLock, { remoteHandoff })) {
+        result.unknown++;
+        return result;
+      }
+      result.closed++;
+    } finally {
+      releaseProposalMutationLock(mutationLock);
+    }
     return result;
   }
 
-  result.open++;
-  if (handoff.state !== 'awaiting-host-merge' || (pr.url && pr.url !== handoff.prUrl)) {
-    updateProposalField(proposal.id, {
-      remoteHandoff: mergeHandoff(handoff, {
+  const mutationLock = acquireProposalMutationLock(proposal.id);
+  if (!mutationLock) {
+    result.unknown++;
+    return result;
+  }
+  try {
+    const current = loadProposal(proposal.id);
+    if (!awaitingHostMerge(current) || current.remoteHandoff.provider !== 'github' ||
+      !sameQueryIdentity(handoff, current.remoteHandoff) ||
+      hasConflictingIdentity(current.remoteHandoff, pr)) {
+      result.unknown++;
+      return result;
+    }
+    const currentHandoff = current.remoteHandoff;
+    if (pr.url && pr.url !== currentHandoff.prUrl && !updateProposalField(proposal.id, {
+      remoteHandoff: mergeHandoff(currentHandoff, {
         state: 'awaiting-host-merge',
-        ...(pr.url ? { prUrl: pr.url } : {}),
-        detail: `remote PR still open${pr.url ? `: ${pr.url}` : ''}`,
+        prUrl: pr.url,
+        detail: `remote PR still open: ${pr.url}`,
       }),
-    });
+    }, mutationLock)) {
+      result.unknown++;
+      return result;
+    }
+    result.open++;
+  } finally {
+    releaseProposalMutationLock(mutationLock);
   }
   return result;
 }

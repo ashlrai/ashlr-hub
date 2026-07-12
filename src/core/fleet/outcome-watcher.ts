@@ -21,6 +21,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -28,7 +29,9 @@ import { join, dirname, resolve } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
 import { readJudgeTraces } from './judge-trace.js';
 import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
+import { sanitizeGithubMergedAt } from '../inbox/remote-handoff-time.js';
 import { recordPostMergeObservation, type PostMergeOutcome } from './post-merge-observations.js';
+import { inspectPostMergeWindow } from './post-merge-window.js';
 import {
   buildMonitoringCursor,
   loadMonitoringCursor,
@@ -58,16 +61,33 @@ const DEFAULT_FOLLOWUP_WINDOW_DAYS = 7;
 const MAX_OUTCOME_PROPOSALS = 200;
 const MAX_OUTCOME_CANDIDATES_PER_PASS = 25;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
-const FOLLOWUP_SUBJECT_RE = /\b(fix|hotfix|revert)\b/i;
 
 function defaultStateFile(): string {
   return join(homedir(), '.ashlr', 'outcome-watcher.json');
 }
 
-function recordCompletedScan(stateFile: string, now: number): void {
+function cursorThrottleToken(cursor: MonitoringCursorV1): string {
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:outcome-watcher-throttle:v1',
+    cursor.enrollmentDigest,
+    cursor.outcome,
+  ])).digest('hex');
+}
+
+function candidateSetDigest(candidates: readonly MonitoringOutcomeCandidateCursor[]): string {
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:outcome-candidate-set:v1',
+    candidates.map(outcomeCandidateKey).sort((left, right) => left.localeCompare(right)),
+  ])).digest('hex');
+}
+
+function recordCompletedScan(stateFile: string, now: number, cursor?: MonitoringCursorV1): void {
   try {
     mkdirSync(dirname(stateFile), { recursive: true });
-    writeFileSync(stateFile, JSON.stringify({ lastScanAt: now }) + '\n', 'utf8');
+    writeFileSync(stateFile, JSON.stringify({
+      lastScanAt: now,
+      ...(cursor ? { cursorToken: cursorThrottleToken(cursor) } : {}),
+    }) + '\n', 'utf8');
   } catch {
     // The durable monitoring cursor supersedes this compatibility throttle.
   }
@@ -80,11 +100,6 @@ function git(repo: string, args: string[]): string {
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     encoding: 'utf8',
   });
-}
-
-function filesOf(repo: string, sha: string): Set<string> {
-  const out = git(repo, ['show', '--name-only', '--format=', sha]);
-  return new Set(out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0));
 }
 
 function recordRealizedOutcome(
@@ -142,6 +157,7 @@ export async function scanRealWorldOutcomes(
   try {
     const now = opts?.nowMs ?? Date.now();
     const stateFile = opts?.stateFile ?? defaultStateFile();
+    const productionCursorMode = opts?.enrolledRepos !== undefined;
 
     // Throttle (best-effort state file; a corrupt file simply re-runs).
     if (opts?.force !== true) {
@@ -149,7 +165,17 @@ export async function scanRealWorldOutcomes(
         if (existsSync(stateFile)) {
           const raw = JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>;
           const last = typeof raw['lastScanAt'] === 'number' ? raw['lastScanAt'] : 0;
-          if (now - last < THROTTLE_MS) {
+          const cursorToken = typeof raw['cursorToken'] === 'string' ? raw['cursorToken'] : null;
+          const cursorRead = productionCursorMode
+            ? loadMonitoringCursor(opts?.enrolledRepos ?? [])
+            : null;
+          const productionThrottleValid = !productionCursorMode || (
+            cursorRead?.sourceState !== 'degraded' &&
+            cursorRead?.cursor?.outcome.sweepComplete === true &&
+            cursorRead.cursor.outcome.hadIncomplete === false &&
+            cursorToken === cursorThrottleToken(cursorRead.cursor)
+          );
+          if (now - last < THROTTLE_MS && productionThrottleValid) {
             scan.throttled = true;
             return scan;
           }
@@ -176,6 +202,7 @@ export async function scanRealWorldOutcomes(
       (traceQuality.sourceState !== 'degraded' && traceQuality.complete === true);
     if (!traceSourceHealthy) {
       scan.skipped++;
+      scan.sourceComplete = false;
     }
     // M338 (review fix): only 'reverted' is TERMINAL. A 'followed-up' link
     // must not block a later real revert — the proposal stays scannable for
@@ -206,19 +233,20 @@ export async function scanRealWorldOutcomes(
       cursor?: MonitoringOutcomeCandidateCursor;
     };
     const candidates = new Map<string, Candidate>();
-    const productionCursorMode = opts?.enrolledRepos !== undefined;
     const detailed = typeof listProposalsDetailed === 'function'
       ? listProposalsDetailed({ status: 'applied', requireComplete: true })
       : null;
-    if (detailed && (!detailed.complete || detailed.sourceState === 'degraded' ||
-      (productionCursorMode && detailed.sourceState !== 'healthy'))) {
+    const proposalSourceIncomplete = Boolean(detailed &&
+      (!detailed.complete || detailed.sourceState === 'degraded' ||
+        (productionCursorMode && detailed.sourceState !== 'healthy')));
+    if (proposalSourceIncomplete) {
       scan.sourceComplete = false;
       scan.skipped++;
     }
     const appliedProposals = detailed?.proposals ?? (typeof listProposals === 'function'
       ? listProposals({ status: 'applied' })
       : []);
-    if (productionCursorMode && !scan.sourceComplete) return scan;
+    if (productionCursorMode && proposalSourceIncomplete) return scan;
     const strictProposals = new Map(appliedProposals.map((proposal) => [proposal.id, proposal]));
     for (const trace of traces) {
       const proposal = strictProposals.get(trace.proposalId);
@@ -251,7 +279,37 @@ export async function scanRealWorldOutcomes(
       });
     }
     if (candidates.size === 0) {
-      if (scan.skipped === 0 && scan.sourceComplete) recordCompletedScan(stateFile, now);
+      if (!productionCursorMode) {
+        if (scan.skipped === 0 && scan.sourceComplete) recordCompletedScan(stateFile, now);
+        return scan;
+      }
+      const enrollment = opts?.enrolledRepos ?? [];
+      const cursorRead = loadMonitoringCursor(enrollment);
+      if (cursorRead.sourceState === 'degraded') {
+        scan.skipped++;
+        scan.sourceComplete = false;
+        return scan;
+      }
+      const current = cursorRead.cursor ?? buildMonitoringCursor(enrollment);
+      if (!current) return scan;
+      const completed: MonitoringCursorV1 = {
+        ...current,
+        outcome: {
+          candidateAfter: current.outcome.candidateAfter,
+          sweepComplete: true,
+          hadIncomplete: current.outcome.hadIncomplete || !scan.sourceComplete || scan.skipped > 0,
+          candidateSetDigest: candidateSetDigest([]),
+        },
+      };
+      if (!saveMonitoringCursor(completed, {
+        enrolledRepos: enrollment,
+        expectedCursor: cursorRead.storedCursor,
+      })) {
+        scan.skipped++;
+        scan.sourceComplete = false;
+        return scan;
+      }
+      if (!completed.outcome.hadIncomplete) recordCompletedScan(stateFile, now, completed);
       return scan;
     }
     const enrolled = opts?.enrolledRepos === undefined
@@ -261,6 +319,7 @@ export async function scanRealWorldOutcomes(
     let monitoringCursorExpected: MonitoringCursorV1 | null = null;
     let selectedCandidates = [...candidates.values()];
     let finalCandidateKey: string | null = null;
+    const sweepSourceIncomplete = !scan.sourceComplete;
     if (productionCursorMode) {
       const enrollment = opts.enrolledRepos ?? [];
       const cursorRead = loadMonitoringCursor(enrollment);
@@ -275,10 +334,29 @@ export async function scanRealWorldOutcomes(
       const cursorCandidates = [...candidates.values()]
         .map((candidate) => candidate.cursor)
         .filter((candidate): candidate is MonitoringOutcomeCandidateCursor => candidate !== undefined);
-      const after = monitoringCursor.outcome.sweepComplete ? null : monitoringCursor.outcome.candidateAfter;
-      const afterKey = after ? outcomeCandidateKey(after) : null;
       const ordered = [...cursorCandidates]
         .sort((left, right) => outcomeCandidateKey(left).localeCompare(outcomeCandidateKey(right)));
+      const currentCandidateSetDigest = candidateSetDigest(ordered);
+      if (monitoringCursor.outcome.sweepComplete ||
+        (monitoringCursor.outcome.candidateAfter !== null &&
+          monitoringCursor.outcome.candidateSetDigest !== currentCandidateSetDigest)) {
+        monitoringCursor = {
+          ...monitoringCursor,
+          outcome: {
+            candidateAfter: null,
+            sweepComplete: false,
+            hadIncomplete: false,
+            candidateSetDigest: currentCandidateSetDigest,
+          },
+        };
+      } else if (monitoringCursor.outcome.candidateSetDigest === null) {
+        monitoringCursor = {
+          ...monitoringCursor,
+          outcome: { ...monitoringCursor.outcome, candidateSetDigest: currentCandidateSetDigest },
+        };
+      }
+      const after = monitoringCursor.outcome.candidateAfter;
+      const afterKey = after ? outcomeCandidateKey(after) : null;
       const selectedForSweep = ordered
         .filter((candidate) => afterKey === null || outcomeCandidateKey(candidate).localeCompare(afterKey) > 0)
         .slice(0, MAX_OUTCOME_CANDIDATES_PER_PASS);
@@ -294,7 +372,12 @@ export async function scanRealWorldOutcomes(
       if (selectedCandidates.length === 0 && afterKey !== null) {
         monitoringCursor = {
           ...monitoringCursor,
-          outcome: { candidateAfter: monitoringCursor.outcome.candidateAfter, sweepComplete: true },
+          outcome: {
+            candidateAfter: monitoringCursor.outcome.candidateAfter,
+            sweepComplete: true,
+            hadIncomplete: monitoringCursor.outcome.hadIncomplete || sweepSourceIncomplete,
+            candidateSetDigest: currentCandidateSetDigest,
+          },
         };
         if (!saveMonitoringCursor(monitoringCursor, {
           enrolledRepos: enrollment,
@@ -310,6 +393,7 @@ export async function scanRealWorldOutcomes(
 
     for (const candidate of selectedCandidates) {
       let cursorPersistFailed = false;
+      const skippedBeforeCandidate = scan.skipped;
       scan.scanned++;
       try {
         const proposal = candidate.proposal ?? loadProposal(candidate.proposalId);
@@ -324,33 +408,47 @@ export async function scanRealWorldOutcomes(
         // the original subject (Revert "ashlr: auto-merge proposal <id>"), so
         // the newest match can be the revert itself — the true merge commit
         // always predates it.
-        const expectedSubject = `ashlr: auto-merge proposal ${candidate.proposalId}`;
-        const mergeMatches = git(repo, ['log', '--format=%H%x09%s'])
-          .split('\n')
-          .map((line) => line.split('\t', 2))
-          .filter((parts) => parts[1] === expectedSubject)
-          .map((parts) => parts[0] ?? '')
-          .filter(Boolean);
-        const mergeSha = proposal.remoteHandoff?.mergeCommitOid ?? mergeMatches.at(-1) ?? '';
+        let mergeSha = proposal.remoteHandoff?.mergeCommitOid ?? '';
+        if (!mergeSha) {
+          const expectedSubject = `ashlr: auto-merge proposal ${candidate.proposalId}`;
+          const mergeMatches = git(repo, ['log', '--format=%H%x09%s'])
+            .split('\n')
+            .map((line) => line.split('\t', 2))
+            .filter((parts) => parts[1] === expectedSubject)
+            .map((parts) => parts[0] ?? '')
+            .filter(Boolean);
+          mergeSha = mergeMatches.at(-1) ?? '';
+        }
         if (!mergeSha) {
           scan.skipped++;
           continue;
         }
-        const observedHead = git(repo, ['rev-parse', 'HEAD']).trim();
-        if (!/^[0-9a-f]{40}$/i.test(mergeSha) || !/^[0-9a-f]{40}$/i.test(observedHead)) {
+        if (!/^[0-9a-f]{40}$/.test(mergeSha)) {
           scan.skipped++;
           continue;
         }
-        git(repo, ['cat-file', '-e', `${mergeSha}^{commit}`]);
-        git(repo, ['merge-base', '--is-ancestor', mergeSha, observedHead]);
-
-        // (a) Revert: any commit referencing the merge sha.
-        const revertSha = git(repo, [
-          'log', '-F', `--grep=This reverts commit ${mergeSha}`,
-          '--format=%H', '-n', '1',
-        ]).trim();
-        if (revertSha) {
-          if (!recordRealizedOutcome(candidate.proposalId, proposal, mergeSha, observedHead, 'reverted', 'git-revert-reference', now)) {
+        const mergedAt = sanitizeGithubMergedAt(proposal.remoteHandoff?.mergedAt);
+        const inspection = inspectPostMergeWindow({
+          repo: resolve(repo),
+          mergeCommit: mergeSha,
+          observedAtMs: now,
+          followUpWindowMs: windowDays * 24 * 60 * 60 * 1_000,
+          ...(mergedAt ? { windowStartedAtMs: Date.parse(mergedAt) } : {}),
+        });
+        if (inspection.state === 'inconclusive') {
+          scan.skipped++;
+          continue;
+        }
+        if (inspection.adverse?.outcome === 'reverted') {
+          if (!recordRealizedOutcome(
+            candidate.proposalId,
+            proposal,
+            inspection.mergeCommit,
+            inspection.observedHead,
+            'reverted',
+            'git-revert-reference',
+            now,
+          )) {
             scan.skipped++;
             continue;
           }
@@ -358,62 +456,38 @@ export async function scanRealWorldOutcomes(
           continue;
         }
 
-        // M338: already followed-up — only the reverted UPGRADE above is
-        // interesting for this proposal; never re-link the same outcome.
+        // An existing heuristic observation remains scannable for a later
+        // deterministic revert, but never emits the same heuristic twice.
         if (followedUpPids.has(candidate.proposalId)) continue;
-
-        // (b) Follow-up fix: a near-term commit after the merge touching the
-        //     same files with a fix-flavored subject.
-        const mergeTimeRaw = git(repo, ['show', '-s', '--format=%ct', mergeSha]).trim();
-        const mergeTimeMs = Number(mergeTimeRaw) * 1000;
-        if (!Number.isFinite(mergeTimeMs)) {
-          continue;
-        }
-        const windowEnd = mergeTimeMs + windowDays * 24 * 60 * 60 * 1000;
-        const mergedFiles = filesOf(repo, mergeSha);
-        if (mergedFiles.size === 0) continue;
-
-        // Read the complete time-bounded window in one output- and timeout-
-        // bounded process. This avoids a fixed commit-count blind spot while
-        // retaining a hard resource ceiling for unusually large histories.
-        const history = git(repo, [
-          'log', `${mergeSha}..HEAD`, `--until=${Math.floor(windowEnd / 1000)}`,
-          '--no-renames', '--format=%H%x09%ct%x09%s', '--name-only',
-        ]);
-        const commits: Array<{ sha: string; subject: string; touched: Set<string> }> = [];
-        let current: { sha: string; subject: string; touched: Set<string> } | null = null;
-        for (const rawLine of history.split('\n')) {
-          const line = rawLine.trim();
-          const header = /^([a-f0-9]{40})\t(\d+)\t(.*)$/i.exec(line);
-          if (header) {
-            current = { sha: header[1]!, subject: header[3]!, touched: new Set<string>() };
-            commits.push(current);
-          } else if (line && current) {
-            current.touched.add(line);
+        if (inspection.adverse?.outcome === 'followed-up') {
+          if (!recordRealizedOutcome(
+            candidate.proposalId,
+            proposal,
+            inspection.mergeCommit,
+            inspection.observedHead,
+            'followed-up',
+            'overlapping-fix',
+            now,
+          )) {
+            scan.skipped++;
+            continue;
           }
-        }
-
-        for (const commit of commits.reverse()) {
-          if (!FOLLOWUP_SUBJECT_RE.test(commit.subject)) continue;
-          const touched = commit.touched;
-          const overlaps = [...touched].some((f) => mergedFiles.has(f));
-          if (overlaps) {
-            if (!recordRealizedOutcome(candidate.proposalId, proposal, mergeSha, observedHead, 'followed-up', 'overlapping-fix', now)) {
-              scan.skipped++;
-              break;
-            }
-            scan.followUps++;
-            break;
-          }
+          scan.followUps++;
         }
       } catch {
         scan.skipped++;
       } finally {
         if (productionCursorMode && monitoringCursor && candidate.cursor) {
           const sweepComplete = finalCandidateKey === outcomeCandidateKey(candidate.cursor);
+          const candidateIncomplete = scan.skipped > skippedBeforeCandidate;
           monitoringCursor = {
             ...monitoringCursor,
-            outcome: { candidateAfter: candidate.cursor, sweepComplete },
+            outcome: {
+              candidateAfter: candidate.cursor,
+              sweepComplete,
+              hadIncomplete: monitoringCursor.outcome.hadIncomplete || sweepSourceIncomplete || candidateIncomplete,
+              candidateSetDigest: monitoringCursor.outcome.candidateSetDigest,
+            },
           };
           if (!saveMonitoringCursor(monitoringCursor, {
             enrolledRepos: opts?.enrolledRepos ?? [],
@@ -431,7 +505,11 @@ export async function scanRealWorldOutcomes(
     }
     if (scan.skipped > 0) scan.sourceComplete = false;
     const sweepComplete = !productionCursorMode || monitoringCursor?.outcome.sweepComplete === true;
-    if (scan.sourceComplete && sweepComplete) recordCompletedScan(stateFile, now);
+    const sweepHadIncomplete = productionCursorMode && monitoringCursor?.outcome.hadIncomplete === true;
+    if (scan.sourceComplete && sweepComplete && !sweepHadIncomplete) {
+      if (productionCursorMode && monitoringCursor) recordCompletedScan(stateFile, now, monitoringCursor);
+      else if (!productionCursorMode) recordCompletedScan(stateFile, now);
+    }
     return scan;
   } catch {
     return scan;

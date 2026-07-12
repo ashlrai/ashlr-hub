@@ -70,6 +70,7 @@ const { detectRegression, bisectAndRevert } = await import(
   '../src/core/fleet/regression-sentinel.js'
 );
 const { verifyProvenance } = await import('../src/core/foundry/provenance.js');
+const { buildRequiredVerificationManifest } = await import('../src/core/run/verification-manifest.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -119,6 +120,20 @@ afterEach(() => {
 // ===========================================================================
 
 describe('detectRegression', () => {
+  it('canonicalizes required verification metadata without advisory commands', () => {
+    const manifest = buildRequiredVerificationManifest('/repo-a', [
+      { id: 'lint', kind: 'lint', cmd: ['npm', 'run', 'lint'], required: false, profiles: ['merge'] },
+      { id: 'tests', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge', 'quick', 'merge'] },
+    ]);
+    const equivalent = buildRequiredVerificationManifest('/repo-b', [
+      { id: 'tests', kind: 'test', cmd: ['npm', 'test'], cwd: '/repo-b', profiles: ['quick', 'merge'] },
+    ]);
+
+    expect(manifest).toEqual(equivalent);
+    expect(manifest).toMatchObject({ commandCount: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(buildRequiredVerificationManifest('/repo-a', [])).toBeNull();
+  });
+
   it('flag OFF → no-op (not regressed), never runs the suite', async () => {
     const runSuite = vi.fn(() => RED);
     const r = await detectRegression(OFF_CFG, REPO, { runSuite, git: fakeGit(() => 'HEADSHA') });
@@ -157,6 +172,59 @@ describe('detectRegression', () => {
     expect(markers.length).toBe(1);
     const sha = JSON.parse(fs.readFileSync(path.join(dir, markers[0]!), 'utf8')).sha;
     expect(sha).toBe('HEAD_A');
+  });
+
+  it('returns a same-run green observation for an unchanged commit and required manifest', async () => {
+    const head = 'a'.repeat(40);
+    const result = await detectRegression(onCfg(), REPO, {
+      runSuite: () => PROVEN_GREEN,
+      git: fakeGit((args) => args[0] === 'status' ? '' : head),
+    });
+
+    expect(result).toMatchObject({
+      regressed: false,
+      greenObservation: {
+        authority: 'observation-only',
+        head,
+        manifestDigest: PROOF_MANIFEST,
+        requiredCommandCount: 1,
+        workspaceClean: true,
+        isolation: 'clean-workspace',
+      },
+    });
+    expect(Date.parse(result.greenObservation!.verifiedAt)).not.toBeNaN();
+  });
+
+  it('treats a HEAD move during verification as inconclusive and emits no green observation', async () => {
+    const heads = ['a'.repeat(40), 'b'.repeat(40)];
+    const git = fakeGit(() => heads.shift() ?? 'b'.repeat(40));
+
+    const result = await detectRegression(onCfg(), REPO, {
+      runSuite: () => PROVEN_GREEN,
+      git,
+    });
+
+    expect(result).toEqual({ regressed: false });
+    expect(() => fs.readdirSync(path.join(tmpHome, '.ashlr', 'foundry'))).toThrow();
+  });
+
+  it('does not label a green suite authoritative without a required-command manifest', async () => {
+    const result = await detectRegression(onCfg(), REPO, {
+      runSuite: () => GREEN,
+      git: fakeGit(() => 'a'.repeat(40)),
+    });
+
+    expect(result).toEqual({ regressed: false });
+  });
+
+  it('does not emit a green observation from a dirty repository workspace', async () => {
+    const head = 'a'.repeat(40);
+    const result = await detectRegression(onCfg(), REPO, {
+      runSuite: () => PROVEN_GREEN,
+      git: fakeGit((args) => args[0] === 'status' ? ' M src/local.ts' : head),
+    });
+
+    expect(result).toEqual({ regressed: false });
   });
 
   it('a streak does NOT carry across a HEAD change (new HEAD restarts the count)', async () => {

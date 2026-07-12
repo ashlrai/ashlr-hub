@@ -55,6 +55,7 @@ import {
   releaseProposalMutationLock,
   type ProposalMutationLock,
 } from './proposal-mutation-lock.js';
+import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -228,17 +229,20 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
     const scrubbedMergeCommitOid = typeof handoff.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(handoff.mergeCommitOid)
       ? handoff.mergeCommitOid.toLowerCase()
       : undefined;
+    const sanitizedMergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
     if (
       scrubbedDetail !== handoff.detail ||
       scrubbedPrUrl !== handoff.prUrl ||
-      scrubbedMergeCommitOid !== handoff.mergeCommitOid
+      scrubbedMergeCommitOid !== handoff.mergeCommitOid ||
+      sanitizedMergedAt !== handoff.mergedAt
     ) {
-      const { mergeCommitOid: _mergeCommitOid, ...safeHandoff } = handoff;
+      const { mergeCommitOid: _mergeCommitOid, mergedAt: _mergedAt, ...safeHandoff } = handoff;
       next.remoteHandoff = {
         ...safeHandoff,
         ...(scrubbedDetail !== undefined ? { detail: scrubbedDetail } : {}),
         ...(scrubbedPrUrl !== undefined ? { prUrl: scrubbedPrUrl } : {}),
         ...(scrubbedMergeCommitOid !== undefined ? { mergeCommitOid: scrubbedMergeCommitOid } : {}),
+        ...(sanitizedMergedAt !== undefined ? { mergedAt: sanitizedMergedAt } : {}),
       };
       changed = true;
     }
@@ -976,13 +980,15 @@ export function setStatus(
   result?: string,
   reason?: string,
   ownerLock?: ProposalMutationLock,
-): void {
+  transitionPatch: Partial<Pick<Proposal, 'remoteHandoff'>> = {},
+): boolean {
   const ownsLock = ownsProposalMutationLock(id, ownerLock);
   const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
-  if (!mutationLock) return;
+  if (!mutationLock) return false;
+  let persisted = false;
   try {
     const existing = loadProposal(id);
-    if (existing === null) return;
+    if (existing === null) return false;
 
     // Partial captures are immutable review evidence. They may be rejected or
     // repaired, but no status transition may grant apply/merge authority.
@@ -997,12 +1003,13 @@ export function setStatus(
         summary: `partial proposal authority transition refused: ${status} (id=${id})`,
         result: 'refused',
       });
-      return;
+      return false;
     }
 
     const decidedStatuses: ProposalStatus[] = ['approved', 'rejected'];
     const updated: Proposal = sanitizeProposalForStore({
       ...existing,
+      ...transitionPatch,
       status,
       ...(result !== undefined ? { result } : {}),
       // M119: persist decisionReason when provided (additive, backward-compatible).
@@ -1014,8 +1021,9 @@ export function setStatus(
 
     try {
       persistProposal(updated);
+      persisted = true;
     } catch {
-      // Persistence failure — swallow; audit still fires.
+      return false;
     }
 
     audit({
@@ -1086,8 +1094,9 @@ export function setStatus(
       status,
       updated.owner ? { user: { id: updated.owner } } : undefined,
     );
+    return true;
   } catch {
-    // Never throws.
+    return persisted;
   } finally {
     if (!ownsLock) releaseProposalMutationLock(mutationLock);
   }

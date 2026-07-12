@@ -116,6 +116,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface post-merge source quality and denominator incompleteness without changing operational readiness.
 - [x] Close adversarial test gaps, run focused and exhaustive verification, commit, push, and reload production.
 
+## Current Overnight Cycle - Production Stability Proofs
+- [x] Rehydrate the released observation baseline and audit the missing production proof path.
+- [x] Persist authoritative GitHub merge timestamps without fabricating or erasing host time.
+- [x] Expose current-checkout green verification as explicitly observation-only, bound to one unchanged clean HEAD and one canonical required-command manifest.
+- [x] Extract a bounded, HEAD-stable complete-window inspector for reverts and overlapping fixes.
+- [ ] Wire observation-only stability witness production from strict historical merge evidence.
+- [x] Define the first fail-closed Windows DACL assurance slice for provenance and new private stores.
+- [ ] Run exhaustive verification, complete adversarial review, update durable notes, commit, push, and reload production.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

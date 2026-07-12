@@ -30,7 +30,7 @@ const EXACT_STATE_KEYS = new Set([
   'outcome',
   'regressionRepoAfter',
 ]);
-const EXACT_OUTCOME_KEYS = new Set(['candidateAfter', 'sweepComplete']);
+const EXACT_OUTCOME_KEYS = new Set(['candidateAfter', 'sweepComplete', 'hadIncomplete', 'candidateSetDigest']);
 const EXACT_CANDIDATE_KEYS = new Set(['proposalId', 'mergeCommitOid']);
 
 export interface MonitoringOutcomeCandidateCursor {
@@ -48,6 +48,10 @@ export interface MonitoringCursorV1 {
     candidateAfter: MonitoringOutcomeCandidateCursor | null;
     /** True only after the current candidate set was traversed to its end. */
     sweepComplete: boolean;
+    /** True when any candidate/source in the current sweep was inconclusive. */
+    hadIncomplete: boolean;
+    /** Stable digest of the candidate identities traversed by this sweep. */
+    candidateSetDigest: string | null;
   };
   /** Last fully handled canonical repository path for regression monitoring. */
   regressionRepoAfter: string | null;
@@ -214,7 +218,12 @@ export function buildMonitoringCursor(
   return sanitizeMonitoringCursor({
     schemaVersion: 1,
     enrollmentDigest,
-    outcome: progress.outcome ?? { candidateAfter: null, sweepComplete: false },
+    outcome: progress.outcome ?? {
+      candidateAfter: null,
+      sweepComplete: false,
+      hadIncomplete: false,
+      candidateSetDigest: null,
+    },
     regressionRepoAfter: progress.regressionRepoAfter ?? null,
   });
 }
@@ -232,8 +241,13 @@ export function sanitizeMonitoringCursor(value: unknown): MonitoringCursorV1 | n
   if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return null;
   const outcomeRow = outcome as Record<string, unknown>;
   const outcomeKeys = Object.keys(outcomeRow);
-  if (outcomeKeys.length !== EXACT_OUTCOME_KEYS.size || outcomeKeys.some((key) => !EXACT_OUTCOME_KEYS.has(key))) return null;
+  if (![2, 3, EXACT_OUTCOME_KEYS.size].includes(outcomeKeys.length) ||
+    outcomeKeys.some((key) => !EXACT_OUTCOME_KEYS.has(key)) ||
+    !Object.hasOwn(outcomeRow, 'candidateAfter') || !Object.hasOwn(outcomeRow, 'sweepComplete')) return null;
   if (typeof outcomeRow['sweepComplete'] !== 'boolean') return null;
+  if (outcomeRow['hadIncomplete'] !== undefined && typeof outcomeRow['hadIncomplete'] !== 'boolean') return null;
+  if (outcomeRow['candidateSetDigest'] !== undefined && outcomeRow['candidateSetDigest'] !== null &&
+    (typeof outcomeRow['candidateSetDigest'] !== 'string' || !SHA256_RE.test(outcomeRow['candidateSetDigest']))) return null;
   const candidateAfter = outcomeRow['candidateAfter'] === null ? null : sanitizeCandidate(outcomeRow['candidateAfter']);
   if (outcomeRow['candidateAfter'] !== null && !candidateAfter) return null;
   const regressionRepoAfter = row['regressionRepoAfter'] === null ? null : canonicalRepo(row['regressionRepoAfter']);
@@ -241,7 +255,14 @@ export function sanitizeMonitoringCursor(value: unknown): MonitoringCursorV1 | n
   return {
     schemaVersion: 1,
     enrollmentDigest: row['enrollmentDigest'],
-    outcome: { candidateAfter, sweepComplete: outcomeRow['sweepComplete'] },
+    outcome: {
+      candidateAfter,
+      sweepComplete: outcomeRow['sweepComplete'],
+      hadIncomplete: outcomeRow['hadIncomplete'] === true,
+      candidateSetDigest: typeof outcomeRow['candidateSetDigest'] === 'string'
+        ? outcomeRow['candidateSetDigest']
+        : null,
+    },
     regressionRepoAfter,
   };
 }

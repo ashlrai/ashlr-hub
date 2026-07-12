@@ -3682,6 +3682,8 @@ export interface ProposalRemoteHandoff {
   base?: string;
   /** Host-reported merge commit identity; persistence must require exactly 40 hex characters. */
   mergeCommitOid?: string;
+  /** Authoritative host-reported merge time; never synthesized from local reconciliation time. */
+  mergedAt?: string;
   createdAt: string;
   updatedAt?: string;
   detail?: string;

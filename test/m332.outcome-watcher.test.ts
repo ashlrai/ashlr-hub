@@ -27,6 +27,7 @@ import type { AshlrConfig, SkillCard } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 let traces: Record<string, unknown>[] = [];
+let traceSourceState: 'healthy' | 'degraded' = 'healthy';
 const linked: Array<[string, string]> = [];
 let proposalRepo = '';
 let appliedProposals: Record<string, unknown>[] = [];
@@ -36,7 +37,15 @@ let skillCards: SkillCard[] = [];
 const recordedSkillCards: SkillCard[] = [];
 
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
-  readJudgeTraces: vi.fn(() => traces),
+  readJudgeTraces: vi.fn(() => {
+    Object.defineProperty(traces, 'sourceQuality', {
+      configurable: true,
+      value: traceSourceState === 'healthy'
+        ? { sourceState: 'healthy', complete: true }
+        : { sourceState: 'degraded', complete: false },
+    });
+    return traces;
+  }),
   linkOutcome: vi.fn((id: string, outcome: string) => {
     linked.push([id, outcome]);
   }),
@@ -106,7 +115,7 @@ import { outcomeToIntent } from '../src/core/fleet/judge-calibration.js';
 import { buildProducerScores } from '../src/core/run/learned-router.js';
 import { readJudgeTraces } from '../src/core/fleet/judge-trace.js';
 import { recordPostMergeObservation } from '../src/core/fleet/post-merge-observations.js';
-import { loadMonitoringCursor } from '../src/core/fleet/monitoring-cursor.js';
+import { loadMonitoringCursor, saveMonitoringCursor } from '../src/core/fleet/monitoring-cursor.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { sanitizeSkillCard } from '../src/core/fleet/skill-records.js';
 
@@ -189,6 +198,7 @@ let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
   traces = [];
+  traceSourceState = 'healthy';
   ledger = [];
   linked.length = 0;
   proposalRepo = '';
@@ -233,7 +243,7 @@ describe('M332 scanRealWorldOutcomes', () => {
       attestation: 'f'.repeat(64),
     }];
 
-    const nowMs = Date.parse('2026-07-10T14:00:00.000Z');
+    const nowMs = Date.now();
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile, nowMs });
     expect(scan.reverts).toBe(1);
     expect(recordedObservations).toEqual([expect.objectContaining({
@@ -565,7 +575,90 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(second.throttled).toBe(false);
   }, 30_000);
 
-  it('completes a partial sweep when its unvisited tail disappears', async () => {
+  it('restarts paging when a new candidate sorts before the persisted cursor', async () => {
+    const monitoredRepo = repoWithMerge('p-generation-base');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-generation-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+    const enrolledRepos = [monitoredRepo];
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    appliedProposals.push({
+      id: 'p-generation-00-early',
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    });
+    const restarted = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const cursor = loadMonitoringCursor(enrolledRepos).cursor?.outcome;
+
+    expect(first.scanned).toBe(25);
+    expect(restarted).toMatchObject({ scanned: 25, throttled: false });
+    expect(cursor).toMatchObject({ sweepComplete: false, hadIncomplete: false });
+  }, 30_000);
+
+  it('does not forget an incomplete early page when a later page reaches the sweep end', async () => {
+    const monitoredRepo = repoWithMerge('p-incomplete-base');
+    const missingRepo = join(monitoredRepo, 'missing-repo');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-incomplete-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: index === 0 ? missingRepo : monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+    const enrolledRepos = [monitoredRepo, missingRepo];
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const second = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const cursorAfterSecond = loadMonitoringCursor(enrolledRepos).cursor?.outcome;
+    const third = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+
+    expect(first).toMatchObject({ scanned: 25, sourceComplete: false, throttled: false });
+    expect(second).toMatchObject({ scanned: 5, sourceComplete: true, throttled: false });
+    expect(cursorAfterSecond).toMatchObject({
+      sweepComplete: true,
+      hadIncomplete: true,
+    });
+    expect(third).toMatchObject({ scanned: 25, throttled: false });
+  }, 30_000);
+
+  it('does not forget a degraded trace source that recovers before the final page', async () => {
+    const monitoredRepo = repoWithMerge('p-trace-degraded-base');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-trace-degraded-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+    const enrolledRepos = [monitoredRepo];
+    traceSourceState = 'degraded';
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    traceSourceState = 'healthy';
+    const second = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const cursorAfterSecond = loadMonitoringCursor(enrolledRepos).cursor?.outcome;
+    const third = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+
+    expect(first).toMatchObject({ scanned: 25, sourceComplete: false, throttled: false });
+    expect(second).toMatchObject({ scanned: 5, sourceComplete: true, throttled: false });
+    expect(cursorAfterSecond).toMatchObject({
+      sweepComplete: true,
+      hadIncomplete: true,
+    });
+    expect(third).toMatchObject({ scanned: 25, throttled: false });
+  }, 30_000);
+
+  it('restarts and completes when the candidate tail disappears', async () => {
     const monitoredRepo = repoWithMerge('p-tail-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
@@ -582,9 +675,61 @@ describe('M332 scanRealWorldOutcomes', () => {
     const throttled = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [monitoredRepo] });
 
     expect(first.scanned).toBe(25);
-    expect(completed).toMatchObject({ scanned: 0, sourceComplete: true, throttled: false });
+    expect(completed).toMatchObject({ scanned: 24, sourceComplete: true, throttled: false });
     expect(loadMonitoringCursor([monitoredRepo]).cursor?.outcome.sweepComplete).toBe(true);
     expect(throttled.throttled).toBe(true);
+  }, 30_000);
+
+  it('preserves incompleteness when every remaining candidate disappears', async () => {
+    const monitoredRepo = repoWithMerge('p-empty-tail-base');
+    const missingRepo = join(monitoredRepo, 'missing-repo');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-empty-tail-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: index === 0 ? missingRepo : monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+    const enrolledRepos = [monitoredRepo, missingRepo];
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    appliedProposals = [];
+    const completed = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const retry = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+
+    expect(first).toMatchObject({ scanned: 25, sourceComplete: false, throttled: false });
+    expect(completed).toMatchObject({ scanned: 0, throttled: false });
+    expect(loadMonitoringCursor(enrolledRepos).cursor?.outcome).toMatchObject({
+      sweepComplete: true,
+      hadIncomplete: true,
+    });
+    expect(retry.throttled).toBe(false);
+  }, 30_000);
+
+  it('invalidates a completed throttle when another process resets the cursor generation', async () => {
+    const monitoredRepo = repoWithMerge('p-throttle-token-base');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = [{
+      id: 'p-throttle-token',
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }];
+    const enrolledRepos = [monitoredRepo];
+
+    await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+    const completed = loadMonitoringCursor(enrolledRepos).cursor!;
+    expect(completed.outcome.sweepComplete).toBe(true);
+    expect(saveMonitoringCursor({
+      ...completed,
+      outcome: { candidateAfter: null, sweepComplete: false, hadIncomplete: true, candidateSetDigest: null },
+    }, { enrolledRepos, expectedCursor: completed })).toBe(true);
+
+    const retry = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
+
+    expect(retry.throttled).toBe(false);
   }, 30_000);
 
   it('hard-caps the complete trace-backed candidate population', async () => {

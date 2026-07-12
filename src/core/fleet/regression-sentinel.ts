@@ -45,6 +45,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from '../run/verify-commands.js';
+import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { createProposal } from '../inbox/store.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 
@@ -167,16 +168,9 @@ async function defaultRunSuite(
   try {
     const commands = detectVerifyCommands(repoDir, 'merge');
     const requiredCommands = commands.filter((command) => command.required !== false);
-    if (requiredCommands.length === 0) return { red: false, conclusive: false };
-    const manifestDigest = createHash('sha256').update(JSON.stringify(requiredCommands.map((command) => ({
-      id: command.id ?? null,
-      kind: command.kind,
-      cmd: command.cmd,
-      cwd: command.cwd ?? '.',
-      timeoutMs: command.timeoutMs ?? null,
-      profiles: command.profiles ?? null,
-    })))).digest('hex');
-    const proof = { manifestDigest, requiredCommandCount: requiredCommands.length };
+    const manifest = buildRequiredVerificationManifest(repoDir, commands);
+    if (!manifest) return { red: false, conclusive: false };
+    const proof = { manifestDigest: manifest.digest, requiredCommandCount: manifest.commandCount };
     for (const vc of requiredOnly ? requiredCommands : commands) {
       const result = await runVerifyCommandAsync(vc, repoDir, {} as AshlrConfig, { timeoutMs });
       if (!result.ok) {
@@ -283,6 +277,20 @@ export interface RegressionResult {
   regressed: boolean;
   /** Human-readable signal describing what tripped (suite line / signal file). */
   signal?: string;
+  /** Non-authoritative same-run observation from the current clean checkout. */
+  greenObservation?: RegressionGreenObservation;
+}
+
+export interface RegressionGreenObservation {
+  authority: 'observation-only';
+  head: string;
+  verifiedAt: string;
+  manifestDigest: string;
+  requiredCommandCount: number;
+  /** The repository had no tracked or untracked workspace changes after verification. */
+  workspaceClean: true;
+  /** This is not a stability proof; production must require detached-worktree isolation later. */
+  isolation: 'clean-workspace';
 }
 
 /**
@@ -323,12 +331,16 @@ export async function detectRegression(
       }
     }
 
-    // (3) Built-in signal: run the suite on HEAD.
+    const git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
+    const headBefore = git(['rev-parse', 'HEAD']) ?? '';
+    if (!headBefore) return { regressed: false };
+
+    // (3) Built-in signal: bind one suite run to an immutable HEAD.
     const runSuite = opts?.runSuite ?? defaultRunSuite;
     const run = await runSuite(repoDir, sc.timeoutMs);
-
-    const git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
-    const head = git(['rev-parse', 'HEAD']) ?? '';
+    const headAfter = git(['rev-parse', 'HEAD']) ?? '';
+    if (!headAfter || headAfter !== headBefore) return { regressed: false };
+    const head = headAfter;
 
     // Missing verification, timeout, tool failure, or infrastructure failure
     // is not evidence that HEAD is green and must not erase a RED streak.
@@ -338,7 +350,21 @@ export async function detectRegression(
       // Green — reset streak, advance the known-green marker.
       writeStreak(repoDir, { head, count: 0 });
       if (head) writeGreenMarker(repoDir, head);
-      return { regressed: false };
+      const workspaceClean = git(['status', '--porcelain', '--untracked-files=normal']) === '';
+      const greenObservation = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(head) &&
+        typeof run.manifestDigest === 'string' && /^[a-f0-9]{64}$/i.test(run.manifestDigest) &&
+        Number.isSafeInteger(run.requiredCommandCount) && Number(run.requiredCommandCount) > 0 && workspaceClean
+        ? {
+          authority: 'observation-only' as const,
+          head,
+          verifiedAt: new Date().toISOString(),
+          manifestDigest: run.manifestDigest,
+          requiredCommandCount: Number(run.requiredCommandCount),
+          workspaceClean: true as const,
+          isolation: 'clean-workspace' as const,
+        }
+        : undefined;
+      return { regressed: false, ...(greenObservation ? { greenObservation } : {}) };
     }
 
     // RED — accumulate the streak (sustained-anomaly gate).
