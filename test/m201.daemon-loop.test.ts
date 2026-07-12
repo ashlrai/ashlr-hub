@@ -1223,6 +1223,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'only installed mid backend' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
@@ -1741,6 +1742,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       failed: 0,
       dispatchRepairRetired: 1,
       dispatchRepairExhausted: 0,
+      dispatchRepairQuarantined: 2,
       dispatchRepairPruned: 1,
       dispatchRepairPruneFailed: 0,
       blockedItemKeys: [workItemCoverageKey(terminal)],
@@ -1764,6 +1766,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.producerMaintenance).toMatchObject({
       dispatchRepairRetired: 1,
       dispatchRepairExhausted: 0,
+      dispatchRepairQuarantined: 2,
       dispatchRepairPruned: 1,
       dispatchRepairPruneFailed: 0,
     });
@@ -3250,6 +3253,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-33345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     })).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -3285,6 +3289,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-43345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -3327,7 +3332,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
-      disposition: 'exhausted',
+      disposition: 'quarantined',
       authoritativeEmptyRuns: 2,
     });
     expect(readDispatchProductionEvents().find((event) =>
@@ -3434,6 +3439,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-53345678-1234-4123-8123-123456789abc',
       backend: 'builtin',
+      tier: 'local',
     });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),

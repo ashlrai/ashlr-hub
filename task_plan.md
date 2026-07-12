@@ -1869,3 +1869,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add parent, manifest, infrastructure, restore, identity, privacy, precedence, and downgrade coverage.
 - [x] Pass focused and exhaustive verification plus independent adversarial review; update durable release notes.
 - [x] Commit, push, observe the complete GitHub matrix, reload production, and canary the deterministic attribution path.
+
+## Current Overnight Cycle - Evidence-Only Objective Saturation Quarantine
+- [x] Rehydrate the deployed repair-corpus baseline, live lifecycle evidence, git state, and durable notes.
+- [x] Audit terminal lifecycle semantics, handoff authority, alias migration, queue retention, and daemon telemetry in parallel.
+- [x] Quarantine only after one objective has three unique authoritative empty attempts across at least two non-builtin backends on one durable tier.
+- [x] Bind legacy tier hydration to each source generation before alias merge and fail closed on incomplete or contradictory evidence.
+- [x] Retain quarantined work for inspection while blocking dispatch and requeue; keep legacy two-empty repairs exhausted.
+- [x] Add V1/V2, cross-tier, replay, malformed persistence, queue, and daemon regressions and pass focused verification.
+- [x] Pass exhaustive verification and independent final review.
+- [ ] Commit, push, observe CI, reload production, and canary the lifecycle path.

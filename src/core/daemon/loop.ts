@@ -2036,6 +2036,9 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.dispatchRepairExhausted !== undefined
             ? { dispatchRepairExhausted: proposalRepairMaintenanceResult.dispatchRepairExhausted }
             : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairQuarantined !== undefined
+            ? { dispatchRepairQuarantined: proposalRepairMaintenanceResult.dispatchRepairQuarantined }
+            : {}),
           ...(proposalRepairMaintenanceResult.dispatchRepairPruned !== undefined
             ? { dispatchRepairPruned: proposalRepairMaintenanceResult.dispatchRepairPruned }
             : {}),
@@ -4447,12 +4450,14 @@ export async function tick(
           production.outcome === 'empty-diff' &&
           !production.reason?.startsWith('best-of-') &&
           trace.backend &&
+          trace.tier &&
           generatedRepairExecutionBackendAllowed(outcome.value.item, trace.backend, routingCfg)
         ) {
           const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
             kind: 'empty-diff',
             attemptId,
             backend: trace.backend,
+            tier: trace.tier,
             ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
               ? { treatmentCandidate: {
                 ...productionEvent,

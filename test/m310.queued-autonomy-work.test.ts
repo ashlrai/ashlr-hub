@@ -30,6 +30,7 @@ import { decisionsDir } from '../src/core/fleet/decisions-ledger.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import {
   recordRepairHandoffs,
@@ -1230,12 +1231,14 @@ describe('queued autonomy work scanner', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
     const active = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     recordGeneratedRepairLifecycle(repair, {
       kind: 'empty-diff',
       attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
       backend: 'kimi',
+      tier: 'mid',
     });
     const terminal = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const remaining = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
@@ -1251,6 +1254,60 @@ describe('queued autonomy work scanner', () => {
     });
     expect(remaining.map((candidate) => candidate.id)).toEqual(['ordinary-invent']);
     expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual(['ordinary-invent']);
+  });
+
+  it('retains objective-saturated repairs for inspection while blocking requeue and dispatch', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:objective-saturated-reslice',
+      source: 'goal',
+      backend: 'local-coder',
+      tier: 'mid',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-02345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-02345678-1234-4123-8123-123456789abc',
+      reason: 'engine completed without file changes',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir)).find((candidate) =>
+      candidate.tags.includes('dispatch-no-diff-reslice'),
+    )!;
+    const ordinary = item(repo.dir, 'ordinary-preserved-next-to-quarantine');
+    const currentQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [ordinary, ...currentQueue]);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(), repos: [repo.dir], items: [ordinary, repair],
+    });
+
+    recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    expect(recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      backend: 'kimi',
+      tier: 'mid',
+    })).toMatchObject({ disposition: 'quarantined' });
+
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const remaining = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const remainingBacklog = JSON.parse(readFileSync(join(fx.ashlrDir, 'backlog.json'), 'utf8')) as { items: WorkItem[] };
+
+    expect(result).toMatchObject({
+      dispatchRepairQuarantined: 1,
+      dispatchRepairPruned: 0,
+      dispatchNoDiffQueued: 0,
+      blockedItemKeys: expect.arrayContaining([workItemCoverageKey(repair)]),
+    });
+    expect(remaining.map((candidate) => candidate.id)).toEqual([ordinary.id, repair.id]);
+    expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual([ordinary.id, repair.id]);
   });
 
   it('reports prune failure without claiming a row was durably removed', async () => {

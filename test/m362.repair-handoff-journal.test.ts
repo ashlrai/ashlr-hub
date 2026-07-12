@@ -24,6 +24,7 @@ import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
   generatedRepairCooldownKey,
   generatedRepairCooldownKeys,
+  generatedRepairLifecyclePath,
   generatedRepairGenerationId,
   generatedRepairGenerationIds,
   readGeneratedRepairLifecycle,
@@ -872,6 +873,7 @@ describe('M362 durable repair handoff journal', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
 
     const recurrence = event(repo.dir, {
@@ -894,6 +896,7 @@ describe('M362 durable repair handoff journal', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
       backend: 'codex',
+      tier: 'frontier',
     });
     expect(exhausted).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
   });
@@ -912,6 +915,7 @@ describe('M362 durable repair handoff journal', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
     recordOutcome(generatedRepairCooldownKey(legacyItem), 'empty');
 
@@ -946,7 +950,51 @@ describe('M362 durable repair handoff journal', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
       backend: 'codex',
+      tier: 'frontier',
     })).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
+  });
+
+  it('never relabels tierless child evidence across v1 and v2 aliases', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const firstEvent = event(repo.dir, { backend: 'codex', tier: 'frontier' });
+    const v1 = legacyObservation(repairHandoffFromDispatchEvent(firstEvent)!);
+    recordDispatchProduction(firstEvent);
+    mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(v1)}\n`, { mode: 0o600 });
+    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
+    const legacyItem = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordGeneratedRepairLifecycle(legacyItem, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      backend: 'codex',
+      tier: 'frontier',
+    });
+    const lifecycle = JSON.parse(readFileSync(generatedRepairLifecyclePath(), 'utf8')) as {
+      records: Array<{ emptyAttemptTiers?: string[] }>;
+    };
+    delete lifecycle.records[0]!.emptyAttemptTiers;
+    writeFileSync(generatedRepairLifecyclePath(), `${JSON.stringify(lifecycle)}\n`, 'utf8');
+
+    const recurrence = event(repo.dir, {
+      ts: '2026-07-10T14:00:00.000Z',
+      backend: 'local-coder',
+      tier: 'mid',
+      runId: 'attempt-42345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-42345678-1234-4123-8123-123456789abc',
+    });
+    recordRepairHandoffs(recurrence);
+    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T15:00:00.000Z'));
+    const current = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    const second = recordGeneratedRepairLifecycle(current, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+
+    expect(second).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
+    expect(second).not.toMatchObject({ disposition: 'quarantined' });
   });
 
   it('preserves terminal objective control when the writer rolls back from v2 to v1', async () => {
@@ -963,11 +1011,13 @@ describe('M362 durable repair handoff journal', () => {
       kind: 'empty-diff',
       attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
       backend: 'local-coder',
+      tier: 'mid',
     });
     expect(recordGeneratedRepairLifecycle(legacyItem, {
       kind: 'empty-diff',
       attemptId: 'attempt-42345678-1234-4123-8123-123456789abc',
       backend: 'codex',
+      tier: 'frontier',
     })).toMatchObject({ disposition: 'exhausted' });
 
     const v2Event = event(repo.dir, {

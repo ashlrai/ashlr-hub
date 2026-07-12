@@ -82,6 +82,7 @@ export interface ProposalRepairWorkResult {
   dispatchNoDiffFailed?: number;
   dispatchRepairRetired?: number;
   dispatchRepairExhausted?: number;
+  dispatchRepairQuarantined?: number;
   dispatchRepairPruned?: number;
   dispatchRepairPruneFailed?: number;
   dispatchRepairLifecycleUnavailable?: number;
@@ -739,6 +740,7 @@ export function queueProposalRepairWorkForPendingProposals(
     dispatchNoDiffFailed: 0,
     dispatchRepairRetired: 0,
     dispatchRepairExhausted: 0,
+    dispatchRepairQuarantined: 0,
     dispatchRepairPruned: 0,
     dispatchRepairPruneFailed: 0,
     dispatchRepairLifecycleUnavailable: 0,
@@ -754,12 +756,12 @@ export function queueProposalRepairWorkForPendingProposals(
   }
 
   const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
-  const terminalByKey = new Map<string, 'retired' | 'exhausted'>();
+  const terminalByKey = new Map<string, 'retired' | 'exhausted' | 'quarantined'>();
   const blockedItemKeys = new Set<string>();
   const lifecycleUnavailableKeys = new Set<string>();
   const observeLifecycle = (
     item: WorkItem,
-  ): 'not-generated' | 'active' | 'terminal' | 'unavailable' => {
+  ): 'not-generated' | 'active' | 'terminal' | 'quarantined' | 'unavailable' => {
     if (!terminalLifecycleEnabled) return 'not-generated';
     if (!isTrustedGeneratedRepairItem(item)) return 'not-generated';
     let key: string;
@@ -793,7 +795,7 @@ export function queueProposalRepairWorkForPendingProposals(
     }
     terminalByKey.set(key, lifecycle.disposition);
     blockedItemKeys.add(key);
-    return 'terminal';
+    return lifecycle.disposition === 'quarantined' ? 'quarantined' : 'terminal';
   };
   const prune = terminalLifecycleEnabled
       ? pruneQueuedSelfHealItems((item) => {
@@ -826,7 +828,7 @@ export function queueProposalRepairWorkForPendingProposals(
       const item = proposalRepairWorkItem(current, now, currentProof);
       if (!item) continue;
       const lifecycle = observeLifecycle(item);
-      if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
+      if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
       result.eligible++;
       result.proposalEligible!++;
       if (queueSelfHealItem(item)) {
@@ -849,7 +851,7 @@ export function queueProposalRepairWorkForPendingProposals(
     if (seenCaptureIds.has(item.id)) continue;
     seenCaptureIds.add(item.id);
     const lifecycle = observeLifecycle(item);
-    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
+    if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchCaptureEligible!++;
     const queued = queueSelfHealItemDetailed(item);
@@ -872,7 +874,7 @@ export function queueProposalRepairWorkForPendingProposals(
     if (seenNoDiffIds.has(item.id)) continue;
     seenNoDiffIds.add(item.id);
     const lifecycle = observeLifecycle(item);
-    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
+    if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchNoDiffEligible!++;
     const queued = queueSelfHealItemDetailed(item);
@@ -889,6 +891,7 @@ export function queueProposalRepairWorkForPendingProposals(
 
   result.dispatchRepairRetired = [...terminalByKey.values()].filter((value) => value === 'retired').length;
   result.dispatchRepairExhausted = [...terminalByKey.values()].filter((value) => value === 'exhausted').length;
+  result.dispatchRepairQuarantined = [...terminalByKey.values()].filter((value) => value === 'quarantined').length;
   result.dispatchRepairLifecycleUnavailable = lifecycleUnavailableKeys.size;
   result.blockedItemKeys = [...blockedItemKeys];
   if (

@@ -16,6 +16,7 @@ import type { WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { routeBackend } from '../src/core/fleet/router.js';
 import {
+  readRepairHandoffs,
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
 } from '../src/core/fleet/repair-handoff-journal.js';
@@ -60,6 +61,7 @@ function repairItem(overrides: Partial<WorkItem> = {}): WorkItem {
 function diagnosticRepairItem(
   parentBackend: 'local-coder' | 'codex' = 'local-coder',
   parentTier: 'mid' | 'frontier' = 'mid',
+  schemaVersion: 1 | 2 = 2,
 ): WorkItem {
   const nonce = fx.home.replace(/[^a-zA-Z0-9]/g, '').slice(-16);
   const parent: DispatchProductionEvent = {
@@ -80,8 +82,10 @@ function diagnosticRepairItem(
     spentUsd: 0,
     basis: 'run-proposal-outcome',
   };
-  const handoff = repairHandoffFromDispatchEvent(parent)!;
-  recordRepairHandoffs(parent, { schemaVersion: 2 });
+  expect(repairHandoffFromDispatchEvent(parent)).not.toBeNull();
+  recordRepairHandoffs(parent, { schemaVersion });
+  const handoff = readRepairHandoffs().observations.find((observation) =>
+    observation.schemaVersion === schemaVersion && observation.parentItemId === parent.itemId)!;
   return {
     id: handoff.childItemId,
     repo: parent.repo,
@@ -111,6 +115,7 @@ function diagnosticRepairItem(
 
 const ATTEMPT_ONE = 'attempt-12345678-1234-4123-8123-123456789abc';
 const ATTEMPT_TWO = 'attempt-22345678-1234-4123-8123-123456789abc';
+const ATTEMPT_THREE = 'attempt-32345678-1234-4123-8123-123456789abc';
 
 describe('generated repair lifecycle store', () => {
   it('propagates deterministic treatment through lifecycle and dispatch lineage metadata', () => {
@@ -147,6 +152,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_TWO,
       backend: 'local-coder',
+      tier: 'mid',
     });
     expect(routeBackend(item, cfg)).toMatchObject({
       backend: 'kimi',
@@ -177,6 +183,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_TWO,
       backend: 'codex',
+      tier: 'frontier',
     });
 
     expect(routeBackend(item, cfg)).toMatchObject({
@@ -267,9 +274,9 @@ describe('generated repair lifecycle store', () => {
 
   it('exhausts after two distinct empty-diff attempts and deduplicates replay', () => {
     const item = repairItem();
-    const first = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder' });
-    const replay = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder' });
-    const second = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'kimi' });
+    const first = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid' });
+    const replay = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid' });
+    const second = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'kimi', tier: 'mid' });
 
     expect(first).toMatchObject({ disposition: 'active', authoritativeEmptyRuns: 1, recorded: true });
     expect(replay).toMatchObject({ disposition: 'active', authoritativeEmptyRuns: 1, recorded: false });
@@ -290,18 +297,87 @@ describe('generated repair lifecycle store', () => {
       .toEqual(second.treatmentOutcomeWitness);
   });
 
+  it('quarantines one objective only with three unique same-tier attempts across two backends', () => {
+    const item = diagnosticRepairItem('local-coder', 'mid');
+    const first = recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
+    });
+    const second = recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_THREE, backend: 'kimi', tier: 'mid',
+    });
+
+    expect(first).toMatchObject({ disposition: 'active', authoritativeEmptyRuns: 1 });
+    expect(second).toMatchObject({
+      disposition: 'quarantined',
+      authoritativeEmptyRuns: 2,
+      authoritativeEmptyBackends: ['local-coder', 'kimi'],
+      authoritativeEmptyTiers: ['mid', 'mid'],
+      treatmentOutcomeWitness: { outcome: 'not-converted', disposition: 'quarantined' },
+    });
+    expect(readGeneratedRepairTerminalOutcome(second.treatmentOutcomeWitness!.generationId))
+      .toEqual(second.treatmentOutcomeWitness);
+  });
+
+  it('quarantines complete objective-bound V1 handoffs on the default writer path', () => {
+    const item = diagnosticRepairItem('local-coder', 'mid', 1);
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
+    });
+    expect(recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_THREE, backend: 'kimi', tier: 'mid',
+    })).toMatchObject({ disposition: 'quarantined' });
+  });
+
+  it('does not claim objective saturation from cross-tier child evidence', () => {
+    const item = diagnosticRepairItem('local-coder', 'mid');
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
+    });
+    const second = recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_THREE, backend: 'codex', tier: 'frontier',
+    });
+
+    expect(second).toMatchObject({ disposition: 'exhausted', recorded: true });
+    expect(second).not.toMatchObject({ disposition: 'quarantined' });
+  });
+
+  it.each([
+    { field: 'emptyAttemptTiers', value: ['mid', 'frontier'] },
+    { field: 'emptyAttemptBackends', value: ['local-coder', 'builtin'] },
+  ])('rejects persisted quarantine with impossible $field evidence', ({ field, value }) => {
+    const item = diagnosticRepairItem('local-coder', 'mid');
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
+    });
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_THREE, backend: 'kimi', tier: 'mid',
+    });
+    const path = generatedRepairLifecyclePath();
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { records: Array<Record<string, unknown>> };
+    parsed.records[0]![field] = value;
+    writeFileSync(path, `${JSON.stringify(parsed)}\n`, 'utf8');
+
+    expect(readGeneratedRepairLifecycle(item)).toEqual({
+      available: false,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+  });
+
   it('rejects a replay that changes the authoritative backend for one attempt', () => {
     const item = repairItem();
     recordGeneratedRepairLifecycle(item, {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     });
 
     expect(recordGeneratedRepairLifecycle(item, {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'kimi',
+      tier: 'mid',
     })).toMatchObject({ available: false, recorded: false, authoritativeEmptyRuns: 1 });
     expect(readGeneratedRepairLifecycle(item)).toMatchObject({
       available: true,
@@ -315,12 +391,14 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_TWO,
       backend: 'local-coder',
+      tier: 'mid',
     });
     const path = generatedRepairLifecyclePath();
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
-      records: Array<{ emptyAttemptBackends?: string[] }>;
+      records: Array<{ emptyAttemptBackends?: string[]; emptyAttemptTiers?: string[] }>;
     };
     delete parsed.records[0]!.emptyAttemptBackends;
+    delete parsed.records[0]!.emptyAttemptTiers;
     writeFileSync(path, `${JSON.stringify(parsed)}\n`, 'utf8');
 
     expect(readGeneratedRepairLifecycle(item)).toMatchObject({
@@ -334,6 +412,33 @@ describe('generated repair lifecycle store', () => {
       available: false,
       requireAlternative: false,
       excludedBackend: null,
+    });
+  });
+
+  it('hydrates pre-tier active evidence only from the durable objective handoff tier', () => {
+    const item = diagnosticRepairItem();
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
+    });
+    const path = generatedRepairLifecyclePath();
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      records: Array<{ emptyAttemptTiers?: string[] }>;
+    };
+    delete parsed.records[0]!.emptyAttemptTiers;
+    writeFileSync(path, `${JSON.stringify(parsed)}\n`, 'utf8');
+
+    expect(readGeneratedRepairLifecycle(item)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+      lastAuthoritativeEmptyBackend: 'local-coder',
+      authoritativeEmptyTiers: ['mid'],
+    });
+    expect(generatedRepairRetryPolicy(item)).toMatchObject({
+      applies: true,
+      available: true,
+      requireAlternative: true,
+      excludedBackend: 'local-coder',
     });
   });
 
@@ -360,7 +465,7 @@ describe('generated repair lifecycle store', () => {
       attemptId: ATTEMPT_ONE,
       proposalId: 'prop-generated-repair',
     });
-    const late = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'kimi' });
+    const late = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'kimi', tier: 'mid' });
 
     expect(late).toMatchObject({ disposition: 'retired', recorded: false });
     expect(readGeneratedRepairLifecycle(item).disposition).toBe('retired');
@@ -409,7 +514,7 @@ describe('generated repair lifecycle store', () => {
     repairItem({ id: 'repo:manual-repair' }),
     repairItem({ ts: 'invalid' }),
   ])('fails open for untrusted or invalid repair generation %#', (item) => {
-    const transition = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder' });
+    const transition = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid' });
     expect(transition.available).toBe(false);
     expect(transition.recorded).toBe(false);
     expect(readGeneratedRepairLifecycle(item).disposition).toBe('active');
@@ -417,7 +522,7 @@ describe('generated repair lifecycle store', () => {
 
   it('rejects unsafe attempt and proposal identities', () => {
     const item = repairItem();
-    const badAttempt = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: 'work:spoofed', backend: 'local-coder' });
+    const badAttempt = recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: 'work:spoofed', backend: 'local-coder', tier: 'mid' });
     const badProposal = recordGeneratedRepairLifecycle(item, {
       kind: 'proposal-created',
       attemptId: ATTEMPT_ONE,
@@ -438,6 +543,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     });
 
     expect(transition).toMatchObject({ available: false, recorded: false });
@@ -458,6 +564,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     }).recorded).toBe(false);
   });
 
@@ -472,6 +579,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     }).recorded).toBe(false);
 
     rmSync(lockPath);
@@ -480,6 +588,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     })).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
   });
 
@@ -498,6 +607,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     })).toMatchObject({ available: true, recorded: true, authoritativeEmptyRuns: 1 });
     expect(readGeneratedRepairLifecycle(item).available).toBe(true);
   });
@@ -514,6 +624,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     })).toEqual({
       available: false,
       disposition: 'active',
@@ -528,6 +639,7 @@ describe('generated repair lifecycle store', () => {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
       backend: 'local-coder',
+      tier: 'mid',
     })).toMatchObject({ available: true, recorded: true, authoritativeEmptyRuns: 1 });
     expect(readGeneratedRepairLifecycle(item)).toMatchObject({ available: true, authoritativeEmptyRuns: 1 });
   });
@@ -572,7 +684,7 @@ describe('generated repair lifecycle store', () => {
 
   it('reports unavailable when the exact lifecycle directory is not writable', () => {
     const item = repairItem();
-    recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder' });
+    recordGeneratedRepairLifecycle(item, { kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid' });
     const dir = dirname(generatedRepairLifecyclePath());
     chmodSync(dir, 0o500);
 

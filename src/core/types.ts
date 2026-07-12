@@ -4181,6 +4181,7 @@ export interface DaemonTick {
     dispatchNoDiffResliceFailed?: number;
     dispatchRepairRetired?: number;
     dispatchRepairExhausted?: number;
+    dispatchRepairQuarantined?: number;
     dispatchRepairPruned?: number;
     dispatchRepairPruneFailed?: number;
     dispatchRepairLifecycleUnavailable?: number;
