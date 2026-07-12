@@ -45,7 +45,8 @@ const mockMkdirSync = vi.fn();
 const mockReaddirSync = vi.fn(() => [] as string[]);
 const mockAppendFileSync = vi.fn();
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),

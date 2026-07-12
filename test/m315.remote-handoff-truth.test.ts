@@ -705,6 +705,7 @@ describe('M315 remote PR handoff truth', () => {
 
   it('reconciles a host-merged PR to applied only with positive merge evidence', async () => {
     const { proposal } = await createRemoteHandoffProposal();
+    if (process.platform !== 'win32') fs.chmodSync(path.join(tmpHome, '.ashlr'), 0o755);
     const handoff = loadProposal(proposal.id)?.remoteHandoff;
     viewPrMock.mockReturnValueOnce({
       state: 'MERGED',
@@ -737,7 +738,10 @@ describe('M315 remote PR handoff truth', () => {
     ));
     expect(reconciliationKey.isFile()).toBe(true);
     expect(reconciliationKey.size).toBe(32);
-    if (process.platform !== 'win32') expect(reconciliationKey.mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(reconciliationKey.mode & 0o777).toBe(0o600);
+      expect(fs.lstatSync(path.join(tmpHome, '.ashlr')).mode & 0o777).toBe(0o700);
+    }
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'merged' && d.verdict === 'applied')).toBe(true);
   });

@@ -48,7 +48,9 @@ function reconciliationKeyPath(): string {
 function ensurePrivateDir(path: string): Stats {
   if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
   const before = lstatSync(path);
-  if (!privateDir(before)) throw new Error('unsafe reconciliation key directory');
+  if (!before.isDirectory() || before.isSymbolicLink() || !privateOwner(before)) {
+    throw new Error('unsafe reconciliation key directory');
+  }
   chmodSync(path, 0o700);
   const after = lstatSync(path);
   if (!privateDir(after) || !sameNode(before, after)) throw new Error('reconciliation key directory changed');
