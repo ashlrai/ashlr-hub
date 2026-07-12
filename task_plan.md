@@ -1878,4 +1878,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Retain quarantined work for inspection while blocking dispatch and requeue; keep legacy two-empty repairs exhausted.
 - [x] Add V1/V2, cross-tier, replay, malformed persistence, queue, and daemon regressions and pass focused verification.
 - [x] Pass exhaustive verification and independent final review.
-- [ ] Commit, push, observe CI, reload production, and canary the lifecycle path.
+- [x] Commit, push, observe CI, reload production, and canary the lifecycle path.
