@@ -134,6 +134,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add adversarial population, timing, replay, privacy, partial-write, and compatibility coverage for the observation-only v1 slice.
 - [x] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and preserve fail-closed canary truth when no receipt-qualified merge exists.
 
+## Current Overnight Cycle - Windows Reconciliation Key Assurance
+- [x] Rehydrate the released stable-witness baseline, production truth, CI state, git state, Entire state, and durable notes.
+- [x] Audit denominator-v2, detached-worktree proof, and Windows private-storage blockers in parallel.
+- [x] Add a fixed-program JSON-stdin Windows ACL adapter with exact SID/ACE readback and bounded fail-closed execution.
+- [x] Store the reconciliation key under a dedicated protected directory and assure an exclusive empty file before writing secret bytes.
+- [x] Add injected and native Windows adversarial tests, and pin the assurance suite into the portability matrix.
+- [ ] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and canary fail-closed behavior.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

@@ -733,9 +733,10 @@ describe('M315 remote PR handoff truth', () => {
       detail: expect.stringContaining('remote PR merged'),
     });
     expect(verifyRemoteHandoffReconciliation(proposal.id, tmpRepo, loaded!.remoteHandoff!)).toBe(true);
-    const reconciliationKey = fs.lstatSync(path.join(
-      tmpHome, '.ashlr', 'foundry', 'remote-handoff-reconciliation.key',
-    ));
+    const reconciliationKeyPath = process.platform === 'win32'
+      ? path.join(tmpHome, '.ashlr', 'foundry', 'reconciliation', 'key')
+      : path.join(tmpHome, '.ashlr', 'foundry', 'remote-handoff-reconciliation.key');
+    const reconciliationKey = fs.lstatSync(reconciliationKeyPath);
     expect(reconciliationKey.isFile()).toBe(true);
     expect(reconciliationKey.size).toBe(32);
     if (process.platform !== 'win32') {

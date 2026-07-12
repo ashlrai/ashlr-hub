@@ -36,6 +36,7 @@ jobs:
               test/m220.anticlog-verdict-feedback.test.ts
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m332.outcome-watcher.test.ts test/m372.test-ci-watchdog.test.ts
+              test/m379.private-storage.test.ts
     runs-on: ${{ matrix.os }}
 
     steps:

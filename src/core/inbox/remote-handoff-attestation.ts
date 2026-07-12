@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync,
-  fsyncSync, lstatSync, mkdirSync, openSync, readSync, writeSync, type Stats,
+  fsyncSync, lstatSync, mkdirSync, openSync, readSync, rmdirSync, unlinkSync, writeSync, type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -10,6 +10,7 @@ import { viewPr } from '../integrations/github.js';
 import type { PrView } from '../integrations/github.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
@@ -42,11 +43,14 @@ function storageHome(): string {
 }
 
 function reconciliationKeyPath(): string {
-  return join(storageHome(), 'foundry', 'remote-handoff-reconciliation.key');
+  const legacy = join(storageHome(), 'foundry', 'remote-handoff-reconciliation.key');
+  if (process.platform !== 'win32' || existsSync(legacy)) return legacy;
+  return join(storageHome(), 'foundry', 'reconciliation', 'key');
 }
 
-function ensurePrivateDir(path: string): Stats {
-  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+function ensurePrivateDir(path: string, assureWindows = false): Stats {
+  const existed = existsSync(path);
+  if (!existed) mkdirSync(path, { mode: 0o700 });
   const before = lstatSync(path);
   if (!before.isDirectory() || before.isSymbolicLink() || !privateOwner(before)) {
     throw new Error('unsafe reconciliation key directory');
@@ -54,15 +58,36 @@ function ensurePrivateDir(path: string): Stats {
   chmodSync(path, 0o700);
   const after = lstatSync(path);
   if (!privateDir(after) || !sameNode(before, after)) throw new Error('reconciliation key directory changed');
-  return after;
+  if (assureWindows && !assurePrivateStoragePath(
+    path, 'directory', existed ? 'inspect-existing' : 'secure-created',
+  ).ok) {
+    if (!existed) {
+      try {
+        const failed = lstatSync(path);
+        if (sameNode(after, failed)) {
+          rmdirSync(path);
+          fsyncDirectory(dirname(path));
+        }
+      } catch { /* retain fail-closed state if cleanup cannot be proven */ }
+    }
+    throw new Error('reconciliation key directory ACL unavailable');
+  }
+  const assured = lstatSync(path);
+  if (!privateDir(assured) || !sameNode(after, assured)) throw new Error('reconciliation key directory changed');
+  return assured;
 }
 
 function loadDedicatedKey(create: boolean): Buffer | null {
   const path = reconciliationKeyPath();
   let fd: number | undefined;
+  let uncommitted: Stats | undefined;
   try {
     const root = ensurePrivateDir(storageHome());
-    ensurePrivateDir(dirname(path));
+    const foundry = ensurePrivateDir(join(storageHome(), 'foundry'));
+    if (!privateDir(foundry)) return null;
+    if (process.platform === 'win32' && dirname(path) !== join(storageHome(), 'foundry')) {
+      ensurePrivateDir(dirname(path), true);
+    }
     const rebound = lstatSync(storageHome());
     if (!privateDir(rebound) || !sameNode(root, rebound)) return null;
     if (!existsSync(path) && create) {
@@ -70,7 +95,11 @@ function loadDedicatedKey(create: boolean): Buffer | null {
       try {
         fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
         const opened = fstatSync(fd);
+        uncommitted = opened;
         if (!privateFile(opened)) return null;
+        if (!assurePrivateStoragePath(path, 'file', 'secure-created').ok) return null;
+        const assured = lstatSync(path);
+        if (!privateFile(assured) || !sameNode(opened, assured) || assured.size !== 0) return null;
         if (writeSync(fd, bytes) !== bytes.length) return null;
         fchmodSync(fd, 0o600);
         fsyncSync(fd);
@@ -79,6 +108,7 @@ function loadDedicatedKey(create: boolean): Buffer | null {
         const installed = lstatSync(path);
         if (!privateFile(installed) || !sameNode(opened, installed) || installed.size !== 32) return null;
         fsyncDirectory(dirname(path));
+        uncommitted = undefined;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
       }
@@ -86,6 +116,9 @@ function loadDedicatedKey(create: boolean): Buffer | null {
     if (!existsSync(path)) return null;
     const named = lstatSync(path);
     if (!privateFile(named) || named.size !== 32) return null;
+    if (!assurePrivateStoragePath(path, 'file', 'inspect-existing').ok) return null;
+    const assured = lstatSync(path);
+    if (!privateFile(assured) || !sameNode(named, assured) || assured.size !== named.size) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const opened = fstatSync(fd);
     if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== 32) return null;
@@ -97,7 +130,18 @@ function loadDedicatedKey(create: boolean): Buffer | null {
       !sameNode(after, reboundFile) || after.size !== 32) return null;
     return bytes;
   } catch { return null; }
-  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } } }
+  finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    if (uncommitted) {
+      try {
+        const named = lstatSync(path);
+        if (sameNode(uncommitted, named)) {
+          unlinkSync(path);
+          fsyncDirectory(dirname(path));
+        }
+      } catch { /* retain fail-closed state if cleanup cannot be proven */ }
+    }
+  }
 }
 
 function payload(
