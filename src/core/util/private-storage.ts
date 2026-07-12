@@ -34,17 +34,16 @@ try {
   $cursor = if ($request.kind -eq 'file') { $item.Directory } else { $item.Parent }
   $stage = 'inspect-ancestors'
   while ($null -ne $cursor) {
+    $stage = 'ancestor-parent'
+    $ancestorParent = $cursor.Parent
+    if ($null -eq $ancestorParent) { break }
     $stage = 'ancestor-attributes'
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
     $stage = 'ancestor-get-acl'
     $ancestorAcl = Get-Acl -LiteralPath $cursor.FullName
-    $stage = 'ancestor-parent'
-    $ancestorParent = $cursor.Parent
-    if ($null -ne $ancestorParent) {
-      $stage = 'ancestor-owner'
-      $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-      if ($trustedSids -notcontains $ancestorOwner) { Finish $false 'untrusted-ancestor-owner' }
-    }
+    $stage = 'ancestor-owner'
+    $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($trustedSids -notcontains $ancestorOwner) { Finish $false 'untrusted-ancestor-owner' }
     $stage = 'ancestor-rules'
     $ancestorRules = @($ancestorAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($ancestorRule in $ancestorRules) {
