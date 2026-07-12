@@ -158,7 +158,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Implement a bracketed enrollment/default-branch producer with source, repository, and Git-metadata identity binding.
 - [x] Keep exact cutoff authority false and candidate accounting unwired with `policyEligible:false` and `denominatorComplete:false`.
 - [x] Add adversarial tamper, race, replay, bounds, privacy, and compatibility coverage.
-- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, observe CI, reload production, and canary unchanged authority.
+- [x] Run focused/exhaustive verification and independent review; update notes, commit, push, observe CI, reload production, and canary unchanged authority.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
