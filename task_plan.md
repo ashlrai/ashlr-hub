@@ -132,7 +132,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Bind every attempted population member to an explicit stable, adverse, or inconclusive classification with replay-safe identity and metadata-only persistence.
 - [x] Preserve fail-closed source quality, cursor fairness, command-manifest integrity, and policy non-authority across restarts and concurrent scans for the observation-only v1 slice.
 - [x] Add adversarial population, timing, replay, privacy, partial-write, and compatibility coverage for the observation-only v1 slice.
-- [ ] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and canary witness generation.
+- [x] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and preserve fail-closed canary truth when no receipt-qualified merge exists.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
