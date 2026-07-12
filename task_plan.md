@@ -121,7 +121,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Persist authoritative GitHub merge timestamps without fabricating or erasing host time.
 - [x] Expose current-checkout green verification as explicitly observation-only, bound to one unchanged clean HEAD and one canonical required-command manifest.
 - [x] Extract a bounded, HEAD-stable complete-window inspector for reverts and overlapping fixes.
-- [ ] Wire observation-only stability witness production from strict historical merge evidence.
+- [x] Wire observation-only stability witness production from strict historical merge evidence.
 - [x] Define the first fail-closed Windows DACL assurance slice for provenance and new private stores.
 - [x] Run exhaustive verification, complete adversarial review, update durable notes, commit, push, and reload production.
 
