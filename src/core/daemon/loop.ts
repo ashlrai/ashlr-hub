@@ -2895,6 +2895,13 @@ export async function tick(
     return out;
   };
 
+  const normalOrdinaryEligibleItems = selectionItems.filter((item) =>
+    !isTrustedGeneratedRepairItem(item) && !isSelectionBlocked(item));
+  const normalGeneratedEligibleItems = selectionItems.filter((item) =>
+    isTrustedGeneratedRepairItem(item) && !isSelectionBlocked(item));
+  const normalRepairFairness = !automaticDrain && explicitDrainMode === undefined && selectCount > 1 &&
+    normalOrdinaryEligibleItems.length > 0 && normalGeneratedEligibleItems.length > 0;
+
   let selected: WorkItem[];
   let automaticDrainOrdinaryTurnDue = state.automaticDrainOrdinaryTurnDue === true;
   const singleSlotOrdinaryTurn = automaticDrain && selectCount === 1 &&
@@ -2921,6 +2928,16 @@ export async function tick(
       ? Math.min(selectCount, drainLimit)
       : selectCount;
     selected = selectRoundRobinCandidates(selectionItems, automaticRepairCount);
+  }
+  // Generated proposal repairs are not ordinary work merely because they are
+  // outside the diagnostic-reslice drain. In a normal multi-slot tick, keep
+  // one slot available for a real portfolio item so a deep repair backlog
+  // cannot indefinitely prevent fresh goals/issues/todos from running.
+  if (normalRepairFairness) {
+    if (!selected.some((item) => !isTrustedGeneratedRepairItem(item))) {
+      const ordinary = selectRoundRobinCandidates(normalOrdinaryEligibleItems, 1)[0];
+      if (ordinary) selected = [...selected.slice(0, Math.max(0, selectCount - 1)), ordinary];
+    }
   }
   const selectionTelemetryItems = selectionItems;
   const selectionTelemetryRawSelectCount = rawSelectCount;
@@ -2966,10 +2983,21 @@ export async function tick(
           }]
           : []),
       ]
-    : [{
-      candidates: selectRoundRobinCandidates(selectionItems, selectionItems.length),
-      limit: selectCount,
-    }];
+    : normalRepairFairness
+      ? [
+          {
+            candidates: selectRoundRobinCandidates(normalOrdinaryEligibleItems, normalOrdinaryEligibleItems.length),
+            limit: 1,
+          },
+          {
+            candidates: selectRoundRobinCandidates(selectionItems, selectionItems.length),
+            limit: selectCount,
+          },
+        ]
+      : [{
+          candidates: selectRoundRobinCandidates(selectionItems, selectionItems.length),
+          limit: selectCount,
+        }];
   // One atomic claim preserves total capacity and per-lane quotas under
   // cross-machine contention. Lock/storage failure remains fail-closed.
   const workedSet = coordinator.claimItemsByLane(claimLanes, selectCount, machineId);

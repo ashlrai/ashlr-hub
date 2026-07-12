@@ -1028,6 +1028,41 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedIds).not.toContain(secondReslice.id);
   });
 
+  it('A1-generated-repair-fairness: reserves one normal-selection slot for real portfolio work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 1;
+    const repair = (suffix: string, score: number): WorkItem => ({
+      ...generic,
+      id: `${basename(repo.dir)}:proposal-repair:${suffix}`,
+      source: 'self',
+      title: `Repair proposal prop-${suffix}: test failure in src/app.ts:12`,
+      detail:
+        `Proposal repair: test failure in src/app.ts:12 expected ready state.\n` +
+        `Proposal: prop-${suffix}\n` +
+        `Original work item: repo:goal:stalled\n` +
+        `Produce a fresh complete fix and verify it.`,
+      score,
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+    });
+    const firstRepair = repair('abcdef123456', 100);
+    const secondRepair = repair('fedcba654321', 90);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [firstRepair, secondRepair, generic],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 2, parallel: 2 }), { dryRun: false });
+    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(2);
+    expect(dispatchedIds).toContain(generic.id);
+    expect(dispatchedIds.filter((id) => id === firstRepair.id || id === secondRepair.id)).toHaveLength(1);
+  });
+
   it('A1-drain-auto-single-slot-fairness: persisted automatic repair selection yields the next slot to ordinary work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
