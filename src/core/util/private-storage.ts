@@ -43,7 +43,7 @@ try {
     $stage = 'ancestor-attributes'
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
     $stage = 'ancestor-get-acl'
-    $ancestorAcl = Get-Acl -LiteralPath $cursor.FullName
+    $ancestorAcl = $cursor.GetAccessControl()
     $stage = 'ancestor-owner'
     $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($trustedSids -notcontains $ancestorOwner) { Finish $false 'untrusted-ancestor-owner' }
@@ -92,10 +92,11 @@ try {
       [void]$security.AddAccessRule($rule)
     }
     $stage = 'apply-acl'
-    Set-Acl -LiteralPath $request.path -AclObject $security
+    $item.SetAccessControl($security)
   }
   $stage = 'readback-acl'
-  $acl = Get-Acl -LiteralPath $request.path
+  $item.Refresh()
+  $acl = $item.GetAccessControl()
   if (-not $acl.AreAccessRulesProtected) { Finish $false 'dacl-not-protected' }
   if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { Finish $false 'wrong-owner' }
   $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
