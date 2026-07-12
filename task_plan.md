@@ -149,7 +149,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep `policyEligible:false`; refuse incomplete, degraded, stale, conflicting, or over-limit sources rather than certifying a partial denominator.
 - [x] Add adversarial cutoff snapshots, historical replay identity, source bounds, privacy, and v1 compatibility coverage.
 - [ ] Add authenticated strict snapshot readers, then signed witness/root persistence with crash recovery and status projection before setting `denominatorComplete:true`.
-- [ ] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and verify observation-only truth.
+- [x] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and verify observation-only truth.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
