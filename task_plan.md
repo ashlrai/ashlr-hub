@@ -1883,10 +1883,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Current Overnight Cycle - V2 Handoff Canary And Dispatchable Queue Truth
 - [x] Rehydrate the deployed quarantine baseline, live rollout status, lifecycle migration, git state, and durable notes.
 - [x] Complete parallel audits of V2 activation, lifecycle-blocked queue selection, dispatch yield, and adversarial migration risks.
-- [ ] Run a reversible V2 writer canary only while source health and ordinary-parent eligibility remain positive; writer is enabled and awaiting a natural handoff.
+- [x] Run a reversible V2 writer canary only while source health and ordinary-parent eligibility remain positive; the bounded natural canary was inconclusive and rolled back cleanly.
 - [x] Make Fleet queue eligibility exclude and separately report generated repairs whose lifecycle authority is unavailable or terminal.
 - [x] Prune quarantined executable queue projections while retaining their durable lifecycle evidence.
 - [x] Add focused status, dispatch, compatibility, retention-boundary, read-only, and fail-closed regression coverage plus independent review.
 - [x] Pass exhaustive verification on the frozen tree; commit, push, CI, and production reload remain release steps.
 - [x] Observe the complete CI matrix and reload Mission Control with the corrected queue truth.
-- [ ] Reload the daemon after its fresh post-activation repair lease clears, then complete the V2 authority canary without interrupting work.
+- [x] Reload the daemon after the post-activation lease cleared without interruption and retain reader-only authority after the inconclusive canary.
+
+## Current Overnight Cycle - V2 Activation Authority And Effective Writer Truth
+- [x] Rehydrate the completed bounded canary, production scheduler, rollout journals, and config state.
+- [x] Audit canary eligibility, activation provenance, runtime writer compatibility, and dispatch-yield follow-up in parallel.
+- [ ] Bind rollout promotion to a durable activation identity and post-activation writer/projection evidence so historical V2 rows cannot certify a new activation.
+- [ ] Distinguish configured and effective writer state, including shared-filesystem queue incompatibility, with a fail-closed operator action.
+- [ ] Add migration, replay, rollback, incompatible-mode, status, and projection regressions plus independent review.
+- [ ] Pass focused and exhaustive verification, commit, push, observe CI, and deploy a new bounded canary only with complete activation provenance.
