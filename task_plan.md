@@ -1908,4 +1908,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve total capacity through a full-candidate fallback lane without changing explicit drains, automatic diagnostic drains, or single-slot policy.
 - [x] Add an adversarial high-score repair-backlog regression and pass focused scheduler and queue verification.
 - [x] Pass typecheck, lint, build, dependency audit, diff checks, exhaustive verification, and independent review.
-- [ ] Commit, push, observe CI, deploy at a clean lease boundary, and inspect the first production canary opportunity.
+- [x] Commit, push, observe CI, deploy at a clean lease boundary, and inspect the first production canary opportunity.
