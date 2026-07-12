@@ -177,7 +177,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover maximum valid captures, replay, tamper, wrong keys, unstable providers, permissions, and crash recovery with focused tests.
 - [ ] Add authenticated rotation/retention and an external monotonic anchor before treating the bounded ledger as rollback-resistant historical authority.
 - [ ] Project checkpoint freshness into a separate observation-only FleetStatus surface after role-based forensic exclusion is implemented.
-- [ ] Commit, push, observe CI, reload production, and record unchanged cutoff/population/merge authority.
+- [x] Commit, push, observe CI, reload production, and record unchanged cutoff/population/merge authority.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
