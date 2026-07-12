@@ -34,12 +34,18 @@ try {
   $cursor = if ($request.kind -eq 'file') { $item.Directory } else { $item.Parent }
   $stage = 'inspect-ancestors'
   while ($null -ne $cursor) {
+    $stage = 'ancestor-attributes'
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
+    $stage = 'ancestor-get-acl'
     $ancestorAcl = Get-Acl -LiteralPath $cursor.FullName
-    if ($null -ne $cursor.Parent) {
+    $stage = 'ancestor-parent'
+    $ancestorParent = $cursor.Parent
+    if ($null -ne $ancestorParent) {
+      $stage = 'ancestor-owner'
       $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
       if ($trustedSids -notcontains $ancestorOwner) { Finish $false 'untrusted-ancestor-owner' }
     }
+    $stage = 'ancestor-rules'
     $ancestorRules = @($ancestorAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($ancestorRule in $ancestorRules) {
       $inheritOnly = (([int]$ancestorRule.PropagationFlags -band 2) -ne 0)
@@ -53,7 +59,8 @@ try {
         Finish $false 'untrusted-ancestor-delete'
       }
     }
-    $cursor = $cursor.Parent
+    $stage = 'ancestor-next'
+    $cursor = $ancestorParent
   }
   $principalValues = @($current.Value, $system.Value) | Select-Object -Unique
   if ($request.mode -eq 'secure-created') {
@@ -131,6 +138,9 @@ export type PrivateStorageRunner = (invocation: PrivateStorageInvocation) => {
 };
 
 const FAILURE_REASONS = new Set([
+  'adapter-error-ancestor-attributes', 'adapter-error-ancestor-get-acl',
+  'adapter-error-ancestor-next', 'adapter-error-ancestor-owner',
+  'adapter-error-ancestor-parent', 'adapter-error-ancestor-rules',
   'adapter-error-apply-acl', 'adapter-error-build-acl', 'adapter-error-inspect-ancestors',
   'adapter-error-load-item', 'adapter-error-read-input', 'adapter-error-readback-acl',
   'adapter-error-verify-acl', 'dacl-not-protected', 'deny-ace', 'inherited-ace', 'invalid-input',
