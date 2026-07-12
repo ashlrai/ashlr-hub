@@ -166,7 +166,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a store-wide cross-process persistence fence outside the replaceable inbox directory while retaining proposal-scoped authority locks.
 - [x] Bind committed filenames, requested IDs, embedded IDs, and persistence destinations; move compatibility loads onto bounded no-follow reads.
 - [x] Harden durable installation with collision refusal, high-entropy IDs, private random exclusive temps, complete writes, identity checks, and file/directory sync.
-- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, observe CI, reload production, and canary unchanged authority.
+- [x] Run focused/exhaustive verification and independent review; update notes, commit, push, observe CI, reload production, and canary unchanged authority.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
