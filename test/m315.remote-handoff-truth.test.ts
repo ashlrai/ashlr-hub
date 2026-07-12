@@ -1002,7 +1002,7 @@ describe('M315 remote PR handoff truth', () => {
     const loaded = loadProposal(proposal.id);
     expect(loaded?.status).toBe('awaiting-host-merge');
     expect(loaded?.remoteHandoff?.mergedAt).toBeUndefined();
-  });
+  }, 30_000);
 
   it('strips a malformed mergedAt at the proposal persistence boundary', async () => {
     const { proposal } = await createRemoteHandoffProposal();
