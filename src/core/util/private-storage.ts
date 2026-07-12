@@ -39,12 +39,14 @@ try {
     }
     $ancestorRules = @($ancestorAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($ancestorRule in $ancestorRules) {
+      $inheritOnly = (([int]$ancestorRule.PropagationFlags -band 2) -ne 0)
       $canReplaceChild = (([int]$ancestorRule.FileSystemRights -band 64) -ne 0) -or
         (([int]$ancestorRule.FileSystemRights -band 65536) -ne 0) -or
         (([int]$ancestorRule.FileSystemRights -band 262144) -ne 0) -or
         (([int]$ancestorRule.FileSystemRights -band 524288) -ne 0)
       if ($ancestorRule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-        $canReplaceChild -and $trustedSids -notcontains $ancestorRule.IdentityReference.Value) {
+        -not $inheritOnly -and $canReplaceChild -and
+        $trustedSids -notcontains $ancestorRule.IdentityReference.Value) {
         Finish $false 'untrusted-ancestor-delete'
       }
     }
@@ -121,6 +123,13 @@ export type PrivateStorageRunner = (invocation: PrivateStorageInvocation) => {
   error?: Error;
 };
 
+const FAILURE_REASONS = new Set([
+  'adapter-error', 'dacl-not-protected', 'deny-ace', 'inherited-ace', 'invalid-input',
+  'invalid-input-shape', 'invalid-kind', 'invalid-mode', 'missing-or-duplicate-principal',
+  'reparse-ancestor', 'reparse-point', 'unexpected-ace-count', 'untrusted-ancestor-delete',
+  'untrusted-ancestor-owner', 'wrong-flags', 'wrong-kind', 'wrong-owner', 'wrong-rights',
+]);
+
 const defaultRunner: PrivateStorageRunner = (invocation) => spawnSync(
   invocation.executable,
   invocation.args,
@@ -192,13 +201,21 @@ export function assurePrivateStoragePath(
       timeoutMs,
       maxBuffer: MAX_OUTPUT_BYTES,
     });
-    if (result.error || result.status !== 0) return { ok: false, reason: 'adapter-failed' };
+    if (result.error) return { ok: false, reason: 'adapter-failed' };
     const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout ?? '';
     if (!stdout || Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) return { ok: false, reason: 'invalid-output' };
     const parsed = JSON.parse(stdout) as Record<string, unknown>;
     if (Object.keys(parsed).sort().join(',') !== 'nonce,ok,operation,reason' ||
-      parsed['nonce'] !== nonce || parsed['operation'] !== OPERATION || parsed['ok'] !== true ||
-      parsed['reason'] !== 'exact-private-dacl') return { ok: false, reason: 'invalid-output' };
+      parsed['nonce'] !== nonce || parsed['operation'] !== OPERATION ||
+      typeof parsed['reason'] !== 'string') return { ok: false, reason: 'invalid-output' };
+    if (result.status !== 0) {
+      return parsed['ok'] === false && FAILURE_REASONS.has(parsed['reason'])
+        ? { ok: false, reason: parsed['reason'] }
+        : { ok: false, reason: 'adapter-failed' };
+    }
+    if (parsed['ok'] !== true || parsed['reason'] !== 'exact-private-dacl') {
+      return { ok: false, reason: 'invalid-output' };
+    }
     return { ok: true, reason: 'exact-private-dacl' };
   } catch {
     return { ok: false, reason: 'adapter-failed' };

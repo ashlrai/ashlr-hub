@@ -75,6 +75,15 @@ describe('M379 Windows private-storage assurance', () => {
         ...base, runner,
       }).ok).toBe(false);
     }
+    const authenticatedFailure: PrivateStorageRunner = (invocation) => {
+      const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
+      return { status: 1, stdout: JSON.stringify({
+        nonce: request.nonce, operation: request.operation, ok: false, reason: 'untrusted-ancestor-owner',
+      }) };
+    };
+    expect(assurePrivateStoragePath('C:\\tmp\\private', 'directory', 'inspect-existing', {
+      ...base, runner: authenticatedFailure,
+    })).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
   });
 
   it('rejects invalid paths and bypasses PowerShell on POSIX', () => {
@@ -100,7 +109,8 @@ describe('M379 Windows private-storage assurance', () => {
     // empty objects, then the adapter must secure them before secret bytes exist.
     const mkdir = spawnSync(process.execPath, ['-e', `require('fs').mkdirSync(${JSON.stringify(dir)})`]);
     expect(mkdir.status).toBe(0);
-    expect(assurePrivateStoragePath(dir, 'directory', 'secure-created')).toMatchObject({ ok: true });
+    const directoryAssurance = assurePrivateStoragePath(dir, 'directory', 'secure-created');
+    expect(directoryAssurance, directoryAssurance.reason).toMatchObject({ ok: true });
     const fd = openSync(file, 'wx', 0o600);
     closeSync(fd);
     expect(assurePrivateStoragePath(file, 'file', 'secure-created')).toMatchObject({ ok: true });
