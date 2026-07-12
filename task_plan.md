@@ -123,7 +123,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Extract a bounded, HEAD-stable complete-window inspector for reverts and overlapping fixes.
 - [ ] Wire observation-only stability witness production from strict historical merge evidence.
 - [x] Define the first fail-closed Windows DACL assurance slice for provenance and new private stores.
-- [ ] Run exhaustive verification, complete adversarial review, update durable notes, commit, push, and reload production.
+- [x] Run exhaustive verification, complete adversarial review, update durable notes, commit, push, and reload production.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
