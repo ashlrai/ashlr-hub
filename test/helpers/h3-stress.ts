@@ -43,7 +43,6 @@
  */
 
 import type {
-  Proposal,
   RunState,
   RunUsage,
   SwarmRun,
