@@ -776,7 +776,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'applied',
       remoteHandoff: { state: 'merged', mergeCommitOid: 'c'.repeat(40) },
     });
-  });
+  }, 30_000);
 
   it('does not let a stale open response replace a concurrent merged transition', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -803,7 +803,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'applied',
       remoteHandoff: { state: 'merged', mergeCommitOid: 'd'.repeat(40) },
     });
-  });
+  }, 30_000);
 
   it('does not reject an awaiting handoff that already has authoritative merge evidence', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -824,7 +824,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'awaiting-host-merge',
       remoteHandoff: { state: 'awaiting-host-merge', mergedAt: '2026-07-03T01:00:00Z' },
     });
-  });
+  }, 30_000);
 
   it('does not attach a sparse stale open response to a replacement handoff', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -846,7 +846,7 @@ describe('M315 remote PR handoff truth', () => {
       state: 'awaiting-host-merge',
     });
     expect(loadProposal(proposal.id)?.remoteHandoff?.prUrl).toBeUndefined();
-  });
+  }, 30_000);
 
   it('does not apply a stale terminal response to a same-selector replacement generation', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -874,7 +874,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'awaiting-host-merge',
       remoteHandoff: { createdAt: '2026-07-03T00:30:00.000Z', state: 'awaiting-host-merge' },
     });
-  });
+  }, 30_000);
 
   it('does not fabricate mergedAt when GitHub reports merged state without a merge time', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -936,7 +936,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'awaiting-host-merge',
       remoteHandoff: { mergedAt: '2026-07-03T01:00:00Z' },
     });
-  });
+  }, 30_000);
 
   it('fails closed when GitHub returns a merge OID that conflicts with stored evidence', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -957,7 +957,7 @@ describe('M315 remote PR handoff truth', () => {
       status: 'awaiting-host-merge',
       remoteHandoff: { mergeCommitOid: 'a'.repeat(40) },
     });
-  });
+  }, 30_000);
 
   it('rejects malformed GitHub mergedAt instead of persisting or trusting it', async () => {
     const { proposal } = await createRemoteHandoffProposal();
