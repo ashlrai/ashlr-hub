@@ -193,6 +193,7 @@ import {
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
 import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
 import {
+  isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
 } from '../fleet/self-heal-trust.js';
@@ -1179,6 +1180,21 @@ function dispatchProductionEventFromOutcome(
     source: value.item.source,
   });
   const repairLineage = generatedRepairDispatchLineage(value.item, trace.backend);
+  const repairRetryPolicy = generatedRepairRetryPolicy(value.item);
+  const repairParentTierBound = isTrustedDiagnosticResliceItem(value.item) || (
+    isTrustedCaptureRepairItem(value.item) &&
+    (value.item.repairParentSource === 'issue' || value.item.repairParentSource === 'goal')
+  );
+  const repairRequiredTier = repairRetryPolicy.requiredTier ?? (
+    repairParentTierBound ? value.item.repairParentTier ?? null : null
+  );
+  const repairLineageInvalid = isTrustedGeneratedRepairItem(value.item) && (
+    !repairRetryPolicy.available ||
+    trace.backend === null ||
+    trace.backend === 'builtin' ||
+    !generatedRepairBackendAllowed(value.item, trace.backend) ||
+    (repairRequiredTier !== null && trace.tier !== repairRequiredTier)
+  );
   return {
     schemaVersion: 1,
     ts,
@@ -1206,7 +1222,7 @@ function dispatchProductionEventFromOutcome(
     ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
     learningLabel,
     ...(objectiveHash ? { objectiveHash } : {}),
-    ...(repairLineage ?? {}),
+    ...(repairLineageInvalid ? { repairLineageInvalid: true as const } : (repairLineage ?? {})),
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
@@ -1262,6 +1278,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
     ...(event.repairTreatmentUnitId ? { repairTreatmentUnitId: event.repairTreatmentUnitId } : {}),
     ...(event.repairTreatment ? { repairTreatment: event.repairTreatment } : {}),
+    ...(event.repairLineageInvalid ? { repairLineageInvalid: true as const } : {}),
     ...(event.repairAttemptOrdinal ? { repairAttemptOrdinal: event.repairAttemptOrdinal } : {}),
     ...(event.repairPreviousBackend ? { repairPreviousBackend: event.repairPreviousBackend } : {}),
     backend: event.backend,
@@ -3660,14 +3677,14 @@ export async function tick(
         backendTier = engineTierOf(backend, routingCfg);
         selectedModel = null;
       }
-      if (isTrustedDiagnosticResliceItem(item)) {
-        const requiredTier = item.repairParentTier;
+      if (isTrustedGeneratedRepairItem(item)) {
         const retryPolicy = generatedRepairRetryPolicy(item);
-        const invalidRetryBackend = !generatedRepairBackendAllowed(item, backend);
-        if (!requiredTier || backendTier !== requiredTier || invalidRetryBackend) {
+        const requiredTier = retryPolicy.requiredTier ?? item.repairParentTier ?? null;
+        const invalidRetryBackend = !generatedRepairExecutionBackendAllowed(item, backend, routingCfg);
+        if (invalidRetryBackend) {
           const reason = !retryPolicy.available
             ? 'repair-lifecycle-unavailable: retry authority unavailable'
-            : invalidRetryBackend && retryPolicy.requireAlternative
+            : retryPolicy.requireAlternative && backend === retryPolicy.excludedBackend
               ? `repair-alternative-unavailable: refusing repeat dispatch to ${backend}; no open installed same-tier alternative is available`
               : requiredTier
                 ? `repair-tier-unavailable: required ${requiredTier}, resolved ${backendTier ?? 'unknown'} via ${backend}`
@@ -3680,14 +3697,14 @@ export async function tick(
               backend,
               tier: backendTier,
               model: selectedModel,
-              assignedBy: invalidRetryBackend ? 'repair-retry-guard' : 'repair-tier-guard',
+              assignedBy: retryPolicy.requireAlternative ? 'repair-retry-guard' : 'repair-tier-guard',
               reason,
               dispatched: false,
               runId: attemptId,
               trajectoryId: `run:${attemptId}`,
               skipReason: !retryPolicy.available
                 ? 'repair-lifecycle-unavailable'
-                : invalidRetryBackend
+                : retryPolicy.requireAlternative && backend === retryPolicy.excludedBackend
                   ? 'repair-alternative-unavailable'
                   : requiredTier ? 'repair-tier-unavailable' : 'repair-provenance-missing',
             }),

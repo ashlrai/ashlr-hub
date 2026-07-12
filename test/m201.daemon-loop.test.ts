@@ -1311,6 +1311,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       action: 'proceed',
       decision: { backend: 'builtin', tier: 'local', reason: 'late learned pause' },
     });
+    mockGeneratedRepairCandidateAllowed.mockImplementation(
+      (_item: WorkItem, backend: EngineId) => backend !== 'builtin',
+    );
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -3589,8 +3592,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       disposition: 'active',
-      authoritativeEmptyRuns: 1,
-      lastAuthoritativeEmptyBackend: 'builtin',
+      authoritativeEmptyRuns: 0,
     });
     expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
       repairLineageInvalid: true,

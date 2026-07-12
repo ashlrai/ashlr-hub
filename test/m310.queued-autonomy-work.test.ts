@@ -1214,6 +1214,8 @@ describe('queued autonomy work scanner', () => {
       itemId: 'repo:goal:terminal-reslice',
       outcome: 'empty-diff',
       proposalCreated: false,
+      backend: 'builtin',
+      tier: 'mid',
       runId: 'run-source-empty',
       reason: 'engine completed without file changes',
     });

@@ -59,7 +59,11 @@ import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
-import { isTrustedCaptureRepairItem, isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
+import {
+  isTrustedCaptureRepairItem,
+  isTrustedDiagnosticResliceItem,
+  isTrustedGeneratedRepairItem,
+} from './self-heal-trust.js';
 import {
   generatedRepairBackendAllowed,
   generatedRepairGenerationId,
@@ -109,13 +113,20 @@ export function generatedRepairExecutionBackendAllowed(
 ): boolean {
   const parentTierBoundCapture = isTrustedCaptureRepairItem(item) &&
     (item.repairParentSource === 'issue' || item.repairParentSource === 'goal');
-  if (!isTrustedDiagnosticResliceItem(item) && !parentTierBoundCapture) return true;
+  if (!isTrustedGeneratedRepairItem(item)) return true;
+  const retryPolicy = generatedRepairRetryPolicy(item);
+  if (!retryPolicy.available) return false;
+  const requiredTier = retryPolicy.requiredTier ?? (
+    isTrustedDiagnosticResliceItem(item) || parentTierBoundCapture
+      ? item.repairParentTier ?? null
+      : null
+  );
   if (!generatedRepairBackendAllowed(item, backend) || backend === 'builtin') return false;
   const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
-  return allowed.has(backend) &&
-    engineInstalled(backend, cfg) &&
-    item.repairParentTier != null &&
-    engineTierOf(backend, cfg) === item.repairParentTier;
+  if (!allowed.has(backend) || !engineInstalled(backend, cfg)) return false;
+  return requiredTier === null
+    ? !retryPolicy.requireAlternative
+    : engineTierOf(backend, cfg) === requiredTier;
 }
 
 /**
@@ -321,24 +332,36 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   }
 
   if (isParentTierBoundCapture && item.repairParentTier) {
+    const retryPolicy = generatedRepairRetryPolicy(item);
+    if (!retryPolicy.available) {
+      return {
+        ...decide('builtin', 'capture-repair-lifecycle-unavailable: retry authority unavailable', cfg),
+        model: null,
+      };
+    }
+    const requiredTier = retryPolicy.requiredTier ?? item.repairParentTier;
     const sameTier = REPAIR_PREFERENCE.filter(
       (backend) => generatedRepairCandidateAllowed(item, backend, cfg),
     );
-    const preferred = item.repairParentBackend && sameTier.includes(item.repairParentBackend)
+    const preferred = !retryPolicy.requireAlternative && item.repairParentBackend && sameTier.includes(item.repairParentBackend)
       ? item.repairParentBackend
       : pickFrom(sameTier, item);
     if (preferred) {
       return {
         ...decide(
           preferred,
-          `capture-repair-tier-preserved: generated ${item.repairParentSource} repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
+          retryPolicy.requireAlternative
+            ? `capture-repair-alternative-selected: moved ${retryPolicy.excludedBackend ?? 'unknown'}→${preferred} within ${requiredTier}`
+            : `capture-repair-tier-preserved: generated ${item.repairParentSource} repair remains ${requiredTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
           cfg,
         ),
         model: null,
       };
     }
     return {
-      ...decide('builtin', `capture-repair-tier-unavailable: no installed ${item.repairParentTier} backend`, cfg),
+      ...decide('builtin', retryPolicy.requireAlternative
+        ? `capture-repair-alternative-unavailable: no installed ${requiredTier} backend differs from ${retryPolicy.excludedBackend ?? 'unknown'}`
+        : `capture-repair-tier-unavailable: no installed ${requiredTier} backend`, cfg),
       model: null,
     };
   }
@@ -358,6 +381,7 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
         model: null,
       };
     }
+    const requiredTier = retryPolicy.requiredTier ?? item.repairParentTier;
     const sameTier = REPAIR_PREFERENCE.filter(
       (backend) => generatedRepairCandidateAllowed(item, backend, cfg),
     );
@@ -369,8 +393,8 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
         ...decide(
           preferred,
           retryPolicy.requireAlternative
-            ? `repair-alternative-selected: generated no-diff retry moved ${retryPolicy.excludedBackend ?? 'unknown'}→${preferred} within ${item.repairParentTier}`
-            : `repair-tier-preserved: generated no-diff repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
+            ? `repair-alternative-selected: generated no-diff retry moved ${retryPolicy.excludedBackend ?? 'unknown'}→${preferred} within ${requiredTier}`
+            : `repair-tier-preserved: generated no-diff repair remains ${requiredTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
           cfg,
         ),
         model: null,
@@ -380,12 +404,42 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
       ...decide(
         'builtin',
         retryPolicy.requireAlternative
-          ? `repair-alternative-unavailable: no installed ${item.repairParentTier} backend differs from ${retryPolicy.excludedBackend ?? 'unknown'}`
-          : `repair-tier-unavailable: no installed ${item.repairParentTier} backend for generated no-diff repair`,
+          ? `repair-alternative-unavailable: no installed ${requiredTier} backend differs from ${retryPolicy.excludedBackend ?? 'unknown'}`
+          : `repair-tier-unavailable: no installed ${requiredTier} backend for generated no-diff repair`,
         cfg,
       ),
       model: null,
     };
+  }
+
+  if (isTrustedGeneratedRepairItem(item)) {
+    const retryPolicy = generatedRepairRetryPolicy(item);
+    if (!retryPolicy.available) {
+      return {
+        ...decide('builtin', 'repair-lifecycle-unavailable: retry authority unavailable', cfg),
+        model: null,
+      };
+    }
+    if (retryPolicy.requireAlternative) {
+      const preferred = pickFrom(
+        REPAIR_PREFERENCE.filter((backend) => generatedRepairCandidateAllowed(item, backend, cfg)),
+        item,
+      );
+      if (preferred) {
+        return {
+          ...decide(
+            preferred,
+            `repair-alternative-selected: generated retry moved ${retryPolicy.excludedBackend ?? 'unknown'}→${preferred} within ${retryPolicy.requiredTier}`,
+            cfg,
+          ),
+          model: null,
+        };
+      }
+      return {
+        ...decide('builtin', `repair-alternative-unavailable: no installed ${retryPolicy.requiredTier} backend differs from ${retryPolicy.excludedBackend ?? 'unknown'}`, cfg),
+        model: null,
+      };
+    }
   }
 
   // ── 1. Frontier for hard/escalation items (+ substantive under quality policy) ─

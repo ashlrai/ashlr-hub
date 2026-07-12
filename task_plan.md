@@ -1918,3 +1918,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve fail-closed source, digest, activation, count, corruption, compaction, and inbox gates and add regression coverage.
 - [x] Pass focused status/scheduler/queue/journal tests, typecheck, lint, build, audit, diff checks, exhaustive verification, and independent review.
 - [x] Commit, push, observe CI, deploy at a clean boundary, and verify live `retain-writer` truth.
+
+## Current Overnight Cycle - Trusted Repair Retry Authority
+- [x] Rehydrate the retained-writer production baseline, live proposal-yield bottleneck, git state, and durable notes.
+- [x] Audit lifecycle authority, routing bypasses, and normal-lane route feasibility on disjoint parallel lanes.
+- [x] Generalize durable retry policy metadata from diagnostics to every trusted proposal and capture repair class.
+- [x] Require one alternate backend on the original durable tier after the first authoritative empty attempt.
+- [x] Reject distinct same-backend and cross-tier second-attempt evidence at the lifecycle writer while preserving exact replay.
+- [x] Bind normal routing and the final daemon executor guard to the same durable tier and alternate-backend authority.
+- [x] Reject invalid split-alias exhaustion and parent-tier-mismatched first evidence before it can become learning authority.
+- [x] Add proposal, capture, diagnostic, alias, generation, rollback, router, and executor-drift regressions and pass focused verification.
+- [x] Pass exhaustive verification and independent final review.
+- [ ] Commit, push, observe CI, reload production, and canary the authority-only release.

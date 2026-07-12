@@ -153,6 +153,7 @@ export interface GeneratedRepairRetryPolicy {
   available: boolean;
   requireAlternative: boolean;
   excludedBackend: EngineId | null;
+  requiredTier: EngineTier | null;
 }
 
 export interface GeneratedRepairDispatchLineage {
@@ -725,6 +726,7 @@ function mergedLifecycleRecord(
       const hash = record.emptyAttemptHashes[index]!;
       const backend = record.emptyAttemptBackends![index]!;
       const tier = record.emptyAttemptTiers?.[index];
+      if (backend === 'builtin') return { ok: false };
       const existing = attempts.get(hash);
       if (existing !== undefined && (existing.backend !== backend || existing.tier !== tier)) return { ok: false };
       if (attempts.size < 2 || attempts.has(hash)) attempts.set(hash, { backend, ...(tier ? { tier } : {}) });
@@ -736,6 +738,13 @@ function mergedLifecycleRecord(
   const emptyAttemptTiers = mergedTiers.every((tier): tier is EngineTier => tier !== undefined)
     ? mergedTiers
     : undefined;
+  if (
+    emptyAttemptHashes.length >= 2 && (
+      emptyAttemptTiers === undefined ||
+      new Set(emptyAttemptTiers).size !== 1 ||
+      new Set(emptyAttemptBackends).size !== emptyAttemptBackends.length
+    )
+  ) return { ok: false };
   const explicitDisposition = [...terminal][0];
   const disposition: GeneratedRepairDisposition = explicitDisposition ?? (
     emptyAttemptHashes.length >= 2 ? 'exhausted' : 'active'
@@ -926,28 +935,54 @@ export function readGeneratedRepairQueueSnapshot(): GeneratedRepairQueueReaderSn
   };
 }
 
-/** Derive backend retry constraints only from durable diagnostic lifecycle evidence. */
+/** Derive backend retry constraints from durable evidence for every trusted repair. */
 export function generatedRepairRetryPolicy(item: WorkItem): GeneratedRepairRetryPolicy {
-  if (!isTrustedDiagnosticResliceItem(item)) {
-    return { applies: false, available: true, requireAlternative: false, excludedBackend: null };
+  if (!isTrustedGeneratedRepairItem(item)) {
+    return {
+      applies: false,
+      available: true,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
   }
   if (generatedRepairGenerationId(item) === null) {
-    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+    return {
+      applies: true,
+      available: false,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
   }
   const lifecycle = readGeneratedRepairLifecycle(item);
   if (!lifecycle.available) {
-    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+    return {
+      applies: true,
+      available: false,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
   }
   if (lifecycle.disposition !== 'active') {
-    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+    return {
+      applies: true,
+      available: false,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
   }
   const requireAlternative = lifecycle.authoritativeEmptyRuns >= 1;
   const excludedBackend = lifecycle.lastAuthoritativeEmptyBackend ?? null;
+  const requiredTier = lifecycle.authoritativeEmptyTiers?.[0] ?? null;
   return {
     applies: true,
-    available: !requireAlternative || excludedBackend !== null,
+    available: !requireAlternative || (excludedBackend !== null && requiredTier !== null),
     requireAlternative,
     excludedBackend: requireAlternative ? excludedBackend : null,
+    requiredTier: requireAlternative ? requiredTier : null,
   };
 }
 
@@ -1020,6 +1055,7 @@ export function recordGeneratedRepairLifecycle(
   }
   if (evidence.kind === 'empty-diff' && (
     !ENGINE_IDS.has(evidence.backend) ||
+    evidence.backend === 'builtin' ||
     (evidence.tier !== 'local' && evidence.tier !== 'mid' && evidence.tier !== 'frontier')
   )) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
@@ -1121,6 +1157,23 @@ function recordGeneratedRepairLifecycleUnlocked(
         return { ...resultFromRecord(false, existing), recorded: false };
       }
       return { ...resultFromRecord(true, existing), recorded: false };
+    }
+    const parentTierBound = isTrustedDiagnosticResliceItem(item) || (
+      isTrustedCaptureRepairItem(item) &&
+      (item.repairParentSource === 'issue' || item.repairParentSource === 'goal')
+    );
+    if (
+      emptyAttemptHashes.length === 0 &&
+      parentTierBound &&
+      item.repairParentTier !== evidence.tier
+    ) {
+      return { ...resultFromRecord(false, existing), recorded: false };
+    }
+    if (emptyAttemptHashes.length === 1 && (
+      emptyAttemptBackends[0] === evidence.backend ||
+      emptyAttemptTiers[0] !== evidence.tier
+    )) {
+      return { ...resultFromRecord(false, existing), recorded: false };
     }
     emptyAttemptHashes.push(hash);
     emptyAttemptBackends.push(evidence.backend);

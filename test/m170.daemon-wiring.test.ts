@@ -165,6 +165,8 @@ afterEach(() => {
 const mockRouteBackend = vi.fn();
 vi.mock('../src/core/fleet/router.js', () => ({
   routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
+  generatedRepairCandidateAllowed: () => true,
+  generatedRepairExecutionBackendAllowed: () => true,
 }));
 
 // And withinLimit — always allow.
@@ -377,7 +379,7 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     });
   });
 
-  it('binds builtin fallback options to the exact generated repair generation', async () => {
+  it('binds editing-backend options to the exact generated repair generation', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair: WorkItem = {
@@ -401,12 +403,12 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
       repos: [repo.dir],
       items: [repair],
     });
-    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'cloud', reason: 'mock fallback' });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock editing route' });
 
-    await tick(makeCfg({}), { dryRun: false });
+    await tick(makeCfg({ foundry: { allowedBackends: ['local-coder'] } }), { dryRun: false });
 
-    const swarmOpts = mockRunSwarm.mock.calls[0]?.[2] as { workItemGenerationId?: string } | undefined;
-    expect(swarmOpts?.workItemGenerationId).toBe(generatedRepairGenerationId(repair));
+    const runOpts = mockRunGoal.mock.calls[0]?.[2] as { workItemGenerationId?: string } | undefined;
+    expect(runOpts?.workItemGenerationId).toBe(generatedRepairGenerationId(repair));
   });
 });
 
