@@ -1929,4 +1929,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Reject invalid split-alias exhaustion and parent-tier-mismatched first evidence before it can become learning authority.
 - [x] Add proposal, capture, diagnostic, alias, generation, rollback, router, and executor-drift regressions and pass focused verification.
 - [x] Pass exhaustive verification and independent final review.
-- [ ] Commit, push, observe CI, reload production, and canary the authority-only release.
+- [x] Commit, push, observe CI, reload production, and canary the trusted-retry release.
