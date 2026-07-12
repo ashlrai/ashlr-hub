@@ -1917,4 +1917,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove retained dispatch-blocked lifecycle inventory from otherwise exact authority-journal projection certification.
 - [x] Preserve fail-closed source, digest, activation, count, corruption, compaction, and inbox gates and add regression coverage.
 - [x] Pass focused status/scheduler/queue/journal tests, typecheck, lint, build, audit, diff checks, exhaustive verification, and independent review.
-- [ ] Commit, push, observe CI, deploy at a clean boundary, and verify live `retain-writer` truth.
+- [x] Commit, push, observe CI, deploy at a clean boundary, and verify live `retain-writer` truth.
