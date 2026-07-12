@@ -3330,12 +3330,18 @@ function renderCutoffCheckpointCard(status) {
     ['Released', available ? status.releasedCheckpoints ?? 0 : degraded ? `${status.releasedCheckpoints ?? 0} (partial)` : unavailableValue],
     ['Unreleased', available ? status.unreleasedRows ?? 0 : degraded ? `${status.unreleasedRows ?? 0} (partial)` : unavailableValue],
     ['Read', available ? 'complete' : degraded ? 'incomplete' : unavailableValue],
+    ['Capture', status.captureScheduler?.state ?? 'unknown'],
+    ['Last attempt', status.captureScheduler?.lastAttemptAt ? fmtRelative(status.captureScheduler.lastAttemptAt) : 'never'],
+    ['Next attempt', status.captureScheduler?.nextEligibleAt ? fmtRelative(status.captureScheduler.nextEligibleAt) : 'due'],
     ['Cutoff authority', 'disabled'],
     ['Historical authority', 'disabled'],
     ['Rollback protection', 'disabled'],
   ]));
   if (Array.isArray(status.stopReasons) && status.stopReasons.length > 0) {
     body.appendChild(el('p', { cls: 'hint' }, `Source: ${status.stopReasons.join(', ')}`));
+  }
+  if (status.captureScheduler?.lastReason) {
+    body.appendChild(el('p', { cls: 'hint' }, `Capture: ${status.captureScheduler.lastReason}`));
   }
   card.appendChild(body);
   return card;

@@ -73,6 +73,8 @@ export interface CutoffObservationCheckpointV1 {
   sequence: number;
   previousEntryDigest: string | null;
   recordedAt: string;
+  recoveryPolicy?: 'root-required';
+  captureAttemptId?: string;
   snapshot: EnrollmentCutoffSnapshotV2;
   entryDigest: string;
 }
@@ -264,12 +266,15 @@ function writeAll(fd: number, bytes: Buffer): void {
 }
 
 function entryPayload(entry: Omit<CutoffObservationCheckpointV1, 'entryDigest'>): unknown[] {
-  return [
+  const payload: unknown[] = [
     'entry', entry.schemaVersion, entry.recordType, entry.authority,
     entry.cutoffAuthority, entry.denominatorComplete, entry.policyEligible,
     entry.rollbackProtected, entry.historicalAuthority,
     entry.sequence, entry.previousEntryDigest, entry.recordedAt, entry.snapshot,
   ];
+  if (entry.recoveryPolicy === 'root-required') payload.push(entry.recoveryPolicy);
+  if (entry.captureAttemptId) payload.push(entry.captureAttemptId);
+  return payload;
 }
 
 function rootPayload(root: Omit<CutoffObservationRootV1, 'rootDigest'>): unknown[] {
@@ -287,6 +292,8 @@ function buildEntry(
   previousEntryDigest: string | null,
   recordedAt: string,
   key: KeyProvider,
+  recoveryPolicy?: 'root-required',
+  captureAttemptId?: string,
 ): CutoffObservationCheckpointV1 | null {
   if (!Number.isSafeInteger(sequence) || sequence < 1 || !canonicalTimestamp(recordedAt) ||
     !verifyEnrollmentCutoffSnapshotV2(snapshot, key)) return null;
@@ -303,6 +310,8 @@ function buildEntry(
     previousEntryDigest,
     recordedAt,
     snapshot,
+    ...(recoveryPolicy ? { recoveryPolicy } : {}),
+    ...(captureAttemptId ? { captureAttemptId } : {}),
   };
   const entryDigest = createCutoffCheckpointDigestV1(entryPayload(base), key);
   return entryDigest ? { ...base, entryDigest } : null;
@@ -316,11 +325,15 @@ function verifyEntry(
 ): value is CutoffObservationCheckpointV1 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entry = value as CutoffObservationCheckpointV1;
-  if (Object.keys(entry).length !== ENTRY_KEYS.size || Object.keys(entry).some((name) => !ENTRY_KEYS.has(name)) ||
+  const keys = new Set(ENTRY_KEYS);
+  if (entry.recoveryPolicy === 'root-required') keys.add('recoveryPolicy');
+  if (typeof entry.captureAttemptId === 'string') keys.add('captureAttemptId');
+  if (Object.keys(entry).length !== keys.size || Object.keys(entry).some((name) => !keys.has(name)) ||
     entry.schemaVersion !== 1 || entry.recordType !== 'cutoff-observation-checkpoint' ||
     entry.authority !== 'observation-only' || entry.cutoffAuthority !== false ||
     entry.denominatorComplete !== false || entry.policyEligible !== false ||
     entry.rollbackProtected !== false || entry.historicalAuthority !== false ||
+    (entry.captureAttemptId !== undefined && !/^[a-f0-9-]{36}$/.test(entry.captureAttemptId)) ||
     entry.sequence !== expectedSequence || entry.previousEntryDigest !== previousEntryDigest ||
     !canonicalTimestamp(entry.recordedAt) || !SHA256_RE.test(entry.entryDigest) ||
     !verifyEnrollmentCutoffSnapshotV2(entry.snapshot, key)) return false;
@@ -593,7 +606,13 @@ export function readCutoffObservationCheckpoints(
 
 export function recordCutoffObservationCheckpoint(
   snapshot: EnrollmentCutoffSnapshotV2,
-  options: { now?: () => string; lockWaitMs?: number; keyProvider?: KeyProvider } = {},
+  options: {
+    now?: () => string;
+    lockWaitMs?: number;
+    keyProvider?: KeyProvider;
+    recoveryPolicy?: 'root-required';
+    captureAttemptId?: string;
+  } = {},
 ): CutoffObservationCheckpointWriteResult {
   const result: CutoffObservationCheckpointWriteResult = {
     attempted: 1, recorded: 0, replayed: 0, recoveredRows: 0, invalid: 0, failed: 0,
@@ -658,13 +677,29 @@ export function recordCutoffObservationCheckpoint(
         throw new Error('checkpoint root does not bind ledger');
       }
       if (root === null || root.sequence < parsed.entries.length) {
-        const recoveredRoot = buildRoot(last, parsed.lineEnds[parsed.lineEnds.length - 1]!,
-          options.now?.() ?? new Date().toISOString(), key);
-        if (!recoveredRoot || !writeRoot(rootPath, recoveredRoot, directories)) throw new Error('checkpoint recovery failed');
-        result.recoveredRows += root === null ? parsed.entries.length : parsed.entries.length - root.sequence;
-        root = recoveredRoot;
+        const releasedRows = root?.sequence ?? 0;
+        const unreleased = parsed.entries.slice(releasedRows);
+        if (unreleased.some((entry) => entry.recoveryPolicy === 'root-required')) {
+          const recoveryBytes = root?.ledgerBytes ?? 0;
+          ftruncateSync(fd, recoveryBytes);
+          fsyncSync(fd);
+          const truncated = fstatSync(fd);
+          const named = lstatSync(ledgerPath);
+          if (!privateFile(truncated) || !sameNode(opened, truncated) || truncated.size !== recoveryBytes ||
+            !privateFile(named) || !sameNode(truncated, named)) throw new Error('checkpoint root-required recovery failed');
+          parsed = parseLedger(openedBytes.subarray(0, recoveryBytes), key);
+          ledgerSize = recoveryBytes;
+          result.recoveredRows += unreleased.length;
+        } else {
+          const recoveredRoot = buildRoot(last, parsed.lineEnds[parsed.lineEnds.length - 1]!,
+            options.now?.() ?? new Date().toISOString(), key);
+          if (!recoveredRoot || !writeRoot(rootPath, recoveredRoot, directories)) throw new Error('checkpoint recovery failed');
+          result.recoveredRows += root === null ? parsed.entries.length : parsed.entries.length - root.sequence;
+          root = recoveredRoot;
+        }
       }
-      if (parsed.entries.some((candidate) => candidate.snapshot.snapshotDigest === snapshot.snapshotDigest)) {
+      if (parsed.entries.some((candidate) => candidate.snapshot.snapshotDigest === snapshot.snapshotDigest &&
+        (!options.captureAttemptId || candidate.captureAttemptId === options.captureAttemptId))) {
         result.replayed = 1;
         return result;
       }
@@ -672,7 +707,10 @@ export function recordCutoffObservationCheckpoint(
     if (parsed.entries.length >= MAX_ROWS) throw new Error('checkpoint row limit');
     const recordedAt = options.now?.() ?? new Date().toISOString();
     const previous = parsed.entries[parsed.entries.length - 1]?.entryDigest ?? null;
-    const entry = buildEntry(snapshot, parsed.entries.length + 1, previous, recordedAt, key);
+    const entry = buildEntry(
+      snapshot, parsed.entries.length + 1, previous, recordedAt, key,
+      options.recoveryPolicy, options.captureAttemptId,
+    );
     if (!entry) { result.invalid = 1; return result; }
     const row = Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8');
     if (row.length > MAX_ROW_BYTES || ledgerSize + row.length > MAX_LEDGER_BYTES) throw new Error('checkpoint limit');

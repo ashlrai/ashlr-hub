@@ -257,6 +257,47 @@ describe('M383 authenticated cutoff observation checkpoints', () => {
     });
   });
 
+  it('never releases a root-required scheduler row whose root publication was interrupted', () => {
+    const cancelled = snapshot('2026-07-12T09:29:30.000Z');
+    const replacement = snapshot('2026-07-12T09:29:31.000Z', 'trunk');
+    expect(recordCutoffObservationCheckpoint(cancelled, {
+      keyProvider: () => key,
+      recoveryPolicy: 'root-required',
+    })).toMatchObject({ recorded: 1 });
+    rmSync(cutoffObservationCheckpointRootPath());
+
+    expect(record(replacement, '2026-07-12T09:29:32.000Z')).toMatchObject({
+      recorded: 1, replayed: 0, recoveredRows: 1, failed: 0,
+    });
+    const result = read();
+    expect(result).toMatchObject({ sourceState: 'healthy', releasedRows: 1, unreleasedRows: 0 });
+    expect(result.checkpoints.map((entry) => entry.snapshot.snapshotDigest)).toEqual([
+      replacement.snapshotDigest,
+    ]);
+  });
+
+  it('binds replay to the exact scheduler capture attempt', () => {
+    const value = snapshot('2026-07-12T09:25:30.000Z');
+    const firstAttempt = '11111111-1111-4111-8111-111111111111';
+    const secondAttempt = '22222222-2222-4222-8222-222222222222';
+    expect(recordCutoffObservationCheckpoint(value, {
+      keyProvider: () => key,
+      recoveryPolicy: 'root-required',
+      captureAttemptId: firstAttempt,
+    })).toMatchObject({ recorded: 1, replayed: 0 });
+    expect(recordCutoffObservationCheckpoint(value, {
+      keyProvider: () => key,
+      recoveryPolicy: 'root-required',
+      captureAttemptId: secondAttempt,
+    })).toMatchObject({ recorded: 1, replayed: 0 });
+    expect(recordCutoffObservationCheckpoint(value, {
+      keyProvider: () => key,
+      recoveryPolicy: 'root-required',
+      captureAttemptId: secondAttempt,
+    })).toMatchObject({ recorded: 0, replayed: 1 });
+    expect(read().checkpoints.map((entry) => entry.captureAttemptId)).toEqual([firstAttempt, secondAttempt]);
+  });
+
   it('discards an unauthenticated partial genesis append before the first root exists', () => {
     mkdirSync(join(home, '.ashlr'), { mode: 0o700 });
     mkdirSync(join(home, '.ashlr', 'fleet'), { mode: 0o700 });

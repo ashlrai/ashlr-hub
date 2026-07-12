@@ -188,6 +188,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep production capture scheduling separate until its detached child-process budget and restart-safe cadence are independently proven.
 - [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary truthful visibility.
 
+## Current Overnight Cycle - Detached Cutoff Observation Capture
+- [x] Rehydrate the released visibility baseline, production health, git state, Entire state, and durable notes.
+- [x] Deploy disjoint audits for daemon integration, detached-process safety, restart-safe cadence, and deterministic verification seams.
+- [x] Add a Unix-only detached capture child with no inherited stdio, a 30-second parent deadline, single-flight execution, and bounded shutdown cancellation.
+- [x] Persist private metadata-only cadence state with a 24-hour success interval and one-hour failure retry floor.
+- [x] Schedule capture only after durable resident daemon ticks; exclude dry-run, once, persistence-failed, killed, and unsupported execution.
+- [x] Surface capture health without granting cutoff, denominator, historical, rollback, routing, readiness, or merge authority.
+- [x] Add cadence, restart, overlap, timeout, cancellation, malformed-state, privacy, platform, failure, replay, and authority-isolation coverage.
+- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary the first production checkpoint.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

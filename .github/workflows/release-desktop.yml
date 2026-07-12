@@ -155,6 +155,10 @@ jobs:
       - name: Build SEA sidecar (dist-bin/ashlr-<triple>)
         run: node scripts/build-sea.mjs
 
+      - name: Smoke hidden cutoff worker entrypoints
+        run: >-
+          node -e "const {spawnSync}=require('node:child_process');const p=require('node:path');const bin=p.resolve('dist-bin',process.platform==='win32'?'ashlr.exe':'ashlr');for(const flag of ['--_cutoff-checkpoint-supervisor','--_cutoff-checkpoint-worker']){const r=spawnSync(bin,[flag,'invalid','invalid'],{encoding:'utf8'});if(r.status!==1||r.stdout!==''||r.stderr!=='')throw new Error(flag+' hidden entrypoint failed closed incorrectly')}"
+
       # ── Stage sidecar into src-tauri/binaries/ ──────────────────────────────
       - name: Prepare sidecar for Tauri
         run: node desktop/scripts/prepare-sidecar.mjs

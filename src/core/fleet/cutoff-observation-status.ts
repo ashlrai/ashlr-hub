@@ -2,6 +2,11 @@ import {
   readCutoffObservationCheckpointsSnapshot,
   type CutoffObservationCheckpointReadResult,
 } from './cutoff-observation-checkpoints.js';
+import {
+  decideCutoffCaptureSchedule,
+  readCutoffCaptureSchedulerState,
+  type CutoffCaptureSchedulerReadResult,
+} from '../daemon/cutoff-checkpoint-scheduler.js';
 
 export const CUTOFF_CHECKPOINT_STALE_MS = 30 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 5_000;
@@ -26,6 +31,16 @@ export interface FleetCutoffCheckpointStatus {
   policyEligible: false;
   rollbackProtected: false;
   historicalAuthority: false;
+  captureScheduler: {
+    sourceState: 'missing' | 'healthy' | 'degraded' | 'unsupported';
+    state: 'due' | 'active' | 'backoff' | 'degraded' | 'unsupported';
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastFailureAt: string | null;
+    nextEligibleAt: string | null;
+    lastOutcome: string | null;
+    lastReason: string | null;
+  };
 }
 
 const AUTHORITY_BOUNDARY = {
@@ -44,7 +59,24 @@ export function projectCutoffCheckpointStatus(
   read: CutoffObservationCheckpointReadResult,
   generatedAt: string,
   platform = process.platform,
+  schedulerRead: CutoffCaptureSchedulerReadResult = platform === 'win32'
+    ? { sourceState: 'unsupported', state: null, stopReasons: ['platform-unsupported'] }
+    : { sourceState: 'missing', state: null, stopReasons: [] },
 ): FleetCutoffCheckpointStatus {
+  const schedulerDecision = decideCutoffCaptureSchedule(schedulerRead, Date.parse(generatedAt), platform);
+  const captureScheduler = {
+    sourceState: schedulerRead.sourceState,
+    state: schedulerDecision.reason === 'platform-unsupported' ? 'unsupported' as const
+      : schedulerDecision.reason === 'state-degraded' || schedulerDecision.reason === 'invalid-time' ? 'degraded' as const
+        : schedulerDecision.reason === 'active' ? 'active' as const
+          : schedulerDecision.due ? 'due' as const : 'backoff' as const,
+    lastAttemptAt: schedulerRead.state?.lastAttemptAt ?? null,
+    lastSuccessAt: schedulerRead.state?.lastSuccessAt ?? null,
+    lastFailureAt: schedulerRead.state?.lastFailureAt ?? null,
+    nextEligibleAt: schedulerRead.state?.nextEligibleAt ?? null,
+    lastOutcome: schedulerRead.state?.lastOutcome ?? null,
+    lastReason: schedulerRead.state?.lastReason ?? null,
+  };
   if (platform === 'win32') {
     return {
       ...AUTHORITY_BOUNDARY,
@@ -58,6 +90,7 @@ export function projectCutoffCheckpointStatus(
       unreleasedRows: 0,
       complete: false,
       stopReasons: ['platform-unsupported'],
+      captureScheduler,
     };
   }
 
@@ -99,6 +132,7 @@ export function projectCutoffCheckpointStatus(
       ...(invalidObservationTime && read.releasedRows > 0 ? ['invalid-observation-time'] : []),
       ...(impossibleHealthyZero ? ['healthy-zero-invalid'] : []),
     ],
+    captureScheduler,
   };
 }
 
@@ -110,7 +144,12 @@ export function readFleetCutoffCheckpointStatus(
     return projectCutoffCheckpointStatus({} as CutoffObservationCheckpointReadResult, generatedAt, platform);
   }
   try {
-    return projectCutoffCheckpointStatus(readCutoffObservationCheckpointsSnapshot(), generatedAt, platform);
+    return projectCutoffCheckpointStatus(
+      readCutoffObservationCheckpointsSnapshot(),
+      generatedAt,
+      platform,
+      readCutoffCaptureSchedulerState(platform),
+    );
   } catch {
     return {
       ...AUTHORITY_BOUNDARY,
@@ -124,6 +163,10 @@ export function readFleetCutoffCheckpointStatus(
       unreleasedRows: 0,
       complete: false,
       stopReasons: ['io-error'],
+      captureScheduler: {
+        sourceState: 'degraded', state: 'degraded', lastAttemptAt: null, lastSuccessAt: null,
+        lastFailureAt: null, nextEligibleAt: null, lastOutcome: null, lastReason: 'io-error',
+      },
     };
   }
 }

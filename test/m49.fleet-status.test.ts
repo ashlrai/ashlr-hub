@@ -462,12 +462,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational' });
     expect(s.cutoffCheckpoints).toMatchObject({
       state: 'missing', freshness: 'unknown', releasedCheckpoints: 0,
+      captureScheduler: { sourceState: 'missing', state: 'due' },
       authority: 'observation-only', evidenceRole: 'forensics', eligibility: 'observational',
       cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
       rollbackProtected: false, historicalAuthority: false,
     });
     expect(Object.keys(s.cutoffCheckpoints!).sort()).toEqual([
-      'ageMs', 'authority', 'complete', 'cutoffAuthority', 'denominatorComplete',
+      'ageMs', 'authority', 'captureScheduler', 'complete', 'cutoffAuthority', 'denominatorComplete',
       'eligibility', 'evidenceRole', 'freshness', 'historicalAuthority', 'latestCapturedAt',
       'physicalRows', 'policyEligible', 'releasedCheckpoints', 'rollbackProtected', 'staleAfterMs',
       'state', 'stopReasons', 'unreleasedRows', 'version',
@@ -559,10 +560,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     mkdirSync(fleetDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(fleetDir, 'cutoff-observation-checkpoints.jsonl'), 'broken\n', { mode: 0o600 });
     writeFileSync(join(fleetDir, 'cutoff-observation-checkpoints.root.json'), 'broken\n', { mode: 0o600 });
+    writeFileSync(join(fleetDir, 'cutoff-observation-scheduler.json'), 'broken\n', { mode: 0o600 });
 
     const degraded = await buildFleetStatus(cfg);
     expect(degraded.cutoffCheckpoints).toMatchObject({
       state: 'degraded', freshness: 'unknown', complete: false,
+      captureScheduler: { sourceState: 'degraded', state: 'degraded' },
       cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
     });
     const authorityProjection = (status: typeof missing) => JSON.parse(JSON.stringify({

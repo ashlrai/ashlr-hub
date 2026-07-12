@@ -65,6 +65,7 @@ describe('M30 CI workflow', () => {
       'test/m332.outcome-watcher.test.ts',
       'test/m372.test-ci-watchdog.test.ts',
       'test/m379.private-storage.test.ts',
+      'test/m385.cutoff-checkpoint-windows.test.ts',
     ];
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     expect(new Set(declaredFiles).size).toBe(declaredFiles.length);

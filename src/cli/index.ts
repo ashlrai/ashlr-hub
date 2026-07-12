@@ -1553,6 +1553,17 @@ async function cmdHelp(rest: string[] = []): Promise<void> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
+  if (argv[0] === '--_cutoff-checkpoint-supervisor') {
+    const { runCutoffCheckpointSupervisor } = await import('../core/daemon/cutoff-checkpoint-child.js');
+    process.exitCode = await runCutoffCheckpointSupervisor(argv[1], argv[2]);
+    return;
+  }
+  if (argv[0] === '--_cutoff-checkpoint-worker') {
+    const { runCutoffCheckpointWorker } = await import('../core/daemon/cutoff-checkpoint-worker.js');
+    process.exitCode = runCutoffCheckpointWorker(argv[1], argv[2]);
+    return;
+  }
+
   // ── Internal background-worker entry point ──────────────────────────────
   // When `cmdSwarm --background` spawns a detached worker it re-invokes the
   // CLI as: `ashlr --_worker swarm --resume <id> [...]`

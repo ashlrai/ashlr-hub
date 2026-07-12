@@ -728,6 +728,12 @@ export function formatFleetStatus(s: FleetStatus): string {
         ? `partial (${cutoff.releasedCheckpoints} released, ${cutoff.unreleasedRows} unreleased)`
         : cutoff.state === 'unsupported' ? 'unsupported' : 'unavailable';
     lines.push(`  records:    ${records}`);
+    const capture = cutoff.captureScheduler;
+    lines.push(
+      `  capture:    ${capture.state}` +
+      `${capture.lastOutcome ? `, last ${capture.lastOutcome}${capture.lastReason ? ` (${capture.lastReason})` : ''}` : ''}` +
+      `${capture.nextEligibleAt ? `, next ${capture.nextEligibleAt}` : ''}`,
+    );
     lines.push(
       `  authority:  cutoff=false, denominator=false, policy=false, ` +
         `rollback=false, historical=false`,

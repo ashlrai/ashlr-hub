@@ -206,6 +206,11 @@ import {
   scheduleResolutionObserverChild,
   type ScheduledResolutionObserverChild,
 } from './resolution-observer-scheduler.js';
+import {
+  CUTOFF_CAPTURE_DEADLINE_MS,
+  scheduleCutoffCheckpointCapture,
+  type ScheduledCutoffCapture,
+} from './cutoff-checkpoint-scheduler.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -302,6 +307,17 @@ export function scheduleResolutionObserverAfterTick(
     expectedBacklogGeneratedAt: tickResult.backlogSnapshotAt,
     expectedBacklogSnapshotId: tickResult.backlogSnapshotId,
   });
+}
+
+/** Schedule cutoff observation only after a durable resident daemon tick. */
+export function scheduleCutoffCheckpointAfterTick(
+  tickResult: DaemonTick,
+  opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
+  schedule: typeof scheduleCutoffCheckpointCapture = scheduleCutoffCheckpointCapture,
+): ScheduledCutoffCapture | null {
+  if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
+    !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId || killSwitchOn()) return null;
+  return schedule();
 }
 
 interface ResolvedContextRollupConfig {
@@ -4873,6 +4889,26 @@ export async function runDaemon(
   heartbeatDaemonLock(daemonLock);
   const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock);
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
+  let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
+  const shutdown = new AbortController();
+  let forcedShutdownTimer: ReturnType<typeof setTimeout> | null = null;
+  const requestShutdown = (signal: 'SIGINT' | 'SIGTERM'): void => {
+    shutdown.abort();
+    scheduledResolutionObserver?.cancel();
+    scheduledCutoffCapture?.cancel();
+    if (forcedShutdownTimer === null) {
+      forcedShutdownTimer = setTimeout(() => {
+        process.removeListener('SIGINT', requestSigint);
+        process.removeListener('SIGTERM', requestSigterm);
+        process.kill(process.pid, signal);
+      }, CUTOFF_CAPTURE_DEADLINE_MS);
+      forcedShutdownTimer.unref?.();
+    }
+  };
+  const requestSigint = (): void => requestShutdown('SIGINT');
+  const requestSigterm = (): void => requestShutdown('SIGTERM');
+  process.once('SIGINT', requestSigint);
+  process.once('SIGTERM', requestSigterm);
 
   audit({
     action: 'daemon:start',
@@ -4964,9 +5000,10 @@ export async function runDaemon(
       // work is flowing and only sleeps on idle/no-op ticks.
       let cyclesLeft = opts.maxCycles ?? Infinity;
       while (true) {
+        if (shutdown.signal.aborted) break;
         if (!heartbeatDaemonLock(daemonLock)) break;
         if (cyclesLeft-- <= 0) break;
-        if (killSwitchOn()) break;
+        if (killSwitchOn() || shutdown.signal.aborted) break;
 
         const liveCfg = reloadLiveConfigForDaemon(cfg);
 
@@ -4991,7 +5028,7 @@ export async function runDaemon(
         // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
         if (opts.dryRun) break;
 
-        if (killSwitchOn()) break;
+        if (killSwitchOn() || shutdown.signal.aborted) break;
         const afterTickLoaded = loadDaemonStateStrict();
         if (!afterTickLoaded.ok) {
           audit({
@@ -5007,6 +5044,7 @@ export async function runDaemon(
         // backoff, and batch interval changes can take effect without restart.
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
+        scheduledCutoffCapture = scheduleCutoffCheckpointAfterTick(tickResult, opts);
         recordContextRollupAfterTick(tickResult, opts, afterTickCfg);
         const afterLoopCfg = resolveCfg(afterTickCfg);
         const afterTick = afterTickLoaded.state;
@@ -5018,7 +5056,7 @@ export async function runDaemon(
             summary: 'daily budget exhausted; daemon sleeping until the next UTC budget day',
             result: 'ok',
           });
-          if (!(await sleepUntilNextUtcBudgetDay(daemonLock))) break;
+          if (!(await sleepUntilNextUtcBudgetDay(daemonLock, shutdown.signal))) break;
           continue;
         }
 
@@ -5029,20 +5067,23 @@ export async function runDaemon(
 
         if (afterLoopCfg.mode === 'continuous') {
           if (noWorkDispatched) {
-            await sleep(afterLoopCfg.idleBackoffMs ?? 5_000);
+            if (!(await sleep(afterLoopCfg.idleBackoffMs ?? 5_000, shutdown.signal))) break;
           }
         } else {
-          await sleep(afterLoopCfg.intervalMs);
+          if (!(await sleep(afterLoopCfg.intervalMs, shutdown.signal))) break;
         }
 
         if (!heartbeatDaemonLock(daemonLock)) break;
-        if (killSwitchOn()) break;
+        if (killSwitchOn() || shutdown.signal.aborted) break;
       }
     }
   } catch {
     // Unexpected error — swallow; still clean up running state below.
   }
-  await cancelResolutionObserverBeforeShutdown(scheduledResolutionObserver);
+  await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
+  if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
+  process.removeListener('SIGINT', requestSigint);
+  process.removeListener('SIGTERM', requestSigterm);
   stopLockHeartbeat();
 
   // -------------------------------------------------------------------------
@@ -5101,6 +5142,18 @@ export async function cancelResolutionObserverBeforeShutdown(
   await scheduled.completion;
 }
 
+export async function cancelDaemonPostTickChildren(
+  observer: ScheduledResolutionObserverChild | null,
+  cutoff: ScheduledCutoffCapture | null,
+): Promise<void> {
+  observer?.cancel();
+  cutoff?.cancel();
+  await Promise.allSettled([
+    ...(observer ? [observer.completion] : []),
+    ...(cutoff ? [cutoff.completion] : []),
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // stopDaemon — halt the operator
 // ---------------------------------------------------------------------------
@@ -5141,9 +5194,21 @@ export function stopDaemon(): void {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Promise-based sleep (bounded; never less than 0ms). */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+/** Promise-based sleep that wakes promptly for an orderly daemon shutdown. */
+function sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolveSleep) => {
+    if (signal?.aborted) { resolveSleep(false); return; }
+    let settled = false;
+    const finish = (completed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      resolveSleep(completed);
+    };
+    const timer = setTimeout(() => finish(true), Math.max(0, ms));
+    const onAbort = (): void => { clearTimeout(timer); finish(false); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function currentUtcBudgetDay(now = new Date()): string {
@@ -5162,14 +5227,14 @@ function budgetExhaustedForCurrentUtcDay(state: DaemonState, dcfg: DaemonConfig)
   return state.todayDate === currentUtcBudgetDay() && state.todaySpentUsd >= dcfg.dailyBudgetUsd;
 }
 
-async function sleepUntilNextUtcBudgetDay(lock: DaemonLock): Promise<boolean> {
+async function sleepUntilNextUtcBudgetDay(lock: DaemonLock, signal?: AbortSignal): Promise<boolean> {
   const maxChunkMs = 60_000;
   const wakeAtMs = nextUtcBudgetDayStartMs();
   while (true) {
     if (killSwitchOn()) return false;
     const remainingMs = msUntilUtcTimestamp(wakeAtMs);
     if (remainingMs <= 0) return true;
-    await sleep(Math.min(maxChunkMs, remainingMs + 1));
+    if (!(await sleep(Math.min(maxChunkMs, remainingMs + 1), signal))) return false;
     if (!heartbeatDaemonLock(lock)) return false;
   }
 }

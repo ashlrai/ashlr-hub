@@ -820,6 +820,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     expect(src).toContain("el('span', { cls: 'card-title' }, 'Cutoff Checkpoints')");
     expect(src).toContain("el('span', { cls: 'card-subtitle' }, 'Observation only')");
+    expect(src).toContain("['Capture', status.captureScheduler?.state ?? 'unknown']");
     expect(src).toContain('d.fleet?.cutoffCheckpoints ?? fleet.cutoffCheckpoints ?? null');
     expect(src.indexOf('renderCutoffCheckpointCard('))
       .toBeGreaterThan(src.indexOf('renderAutonomousShipReadinessCard('));

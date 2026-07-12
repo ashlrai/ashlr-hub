@@ -248,6 +248,17 @@ vi.mock('../src/core/config.js', () => ({
   loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
 }));
 
+const mockScheduleCutoffCheckpointCapture = vi.fn(() => ({
+  disposition: 'not-due' as const,
+  reason: 'cadence-active',
+  completion: Promise.resolve({ outcome: 'failed' as const, code: null, signal: null }),
+  cancel: () => {},
+}));
+vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
+  CUTOFF_CAPTURE_DEADLINE_MS: 30_000,
+  scheduleCutoffCheckpointCapture: (...args: unknown[]) => mockScheduleCutoffCheckpointCapture(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — AFTER all mocks.
 // ---------------------------------------------------------------------------
@@ -339,6 +350,7 @@ beforeEach(() => {
   mockReconcileRemoteHandoffs.mockReset();
   mockBuildResourceStrategyReport.mockReset();
   mockLoadQueuedAutonomyItems.mockReset();
+  mockScheduleCutoffCheckpointCapture.mockClear();
 
   fx = makeFixture();
   prevAshlrHome = process.env.ASHLR_HOME;
@@ -4800,6 +4812,62 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(state.running).toBe(false);
     // Kill fired after first swarm call → loop stopped; swarm called at most once.
     expect(swarmCalls).toBeLessThanOrEqual(1);
+  });
+
+  it('E3b: SIGTERM wakes resident shutdown and removes its signal listeners', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    const before = process.listenerCount('SIGTERM');
+    mockRunSwarm.mockImplementation(async () => {
+      process.emit('SIGTERM');
+      return { id: 'signal-stop', status: 'done', goal: '', result: '', usage: { totalTokens: 1, estCostUsd: 0, steps: 1 } };
+    });
+
+    const state = await runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      once: false, dryRun: false, maxCycles: 10,
+    });
+
+    expect(state.running).toBe(false);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(process.listenerCount('SIGTERM')).toBe(before);
+  });
+
+  it('E3c: SIGTERM restores default termination after a stalled tick exhausts its grace period', async () => {
+    vi.useFakeTimers();
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    let release!: () => void;
+    mockRunSwarm.mockImplementation(() => new Promise((resolveRun) => {
+      release = () => resolveRun({
+        id: 'forced-signal-stop', status: 'done', goal: '', result: '',
+        usage: { totalTokens: 1, estCostUsd: 0, steps: 1 },
+      });
+    }));
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      const running = runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+        once: false, dryRun: false, maxCycles: 10,
+      });
+      await vi.waitFor(() => expect(mockRunSwarm).toHaveBeenCalledTimes(1));
+      process.emit('SIGTERM');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      release();
+      await running;
+    } finally {
+      kill.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('E4: runDaemon re-entrancy guard — refuses when ASHLR_IN_DAEMON is already set', async () => {
