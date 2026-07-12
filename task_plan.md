@@ -1879,3 +1879,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add V1/V2, cross-tier, replay, malformed persistence, queue, and daemon regressions and pass focused verification.
 - [x] Pass exhaustive verification and independent final review.
 - [x] Commit, push, observe CI, reload production, and canary the lifecycle path.
+
+## Current Overnight Cycle - V2 Handoff Canary And Dispatchable Queue Truth
+- [x] Rehydrate the deployed quarantine baseline, live rollout status, lifecycle migration, git state, and durable notes.
+- [x] Complete parallel audits of V2 activation, lifecycle-blocked queue selection, dispatch yield, and adversarial migration risks.
+- [ ] Run a reversible V2 writer canary only while source health and ordinary-parent eligibility remain positive; writer is enabled and awaiting a natural handoff.
+- [x] Make Fleet queue eligibility exclude and separately report generated repairs whose lifecycle authority is unavailable or terminal.
+- [x] Prune quarantined executable queue projections while retaining their durable lifecycle evidence.
+- [x] Add focused status, dispatch, compatibility, retention-boundary, read-only, and fail-closed regression coverage plus independent review.
+- [x] Pass exhaustive verification on the frozen tree; commit, push, CI, and production reload remain release steps.
+- [ ] Observe the complete CI matrix, reload production after the live repair lease clears, and canary both rollout and queue truth.

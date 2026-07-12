@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,6 +39,15 @@ import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import {
+  generatedRepairCooldownKey,
+  generatedRepairDispatchState,
+  recordGeneratedRepairLifecycle,
+} from '../src/core/fleet/generated-repair-lifecycle.js';
+import {
+  readRepairHandoffs,
+  recordRepairHandoffs,
+} from '../src/core/fleet/repair-handoff-journal.js';
 import {
   readSkillUseEvents,
   recordSkillCard,
@@ -171,8 +180,30 @@ function makeBacklogItem(
 }
 
 function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', score = 9): WorkItem {
+  const parent: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: '2026-07-03T00:00:00.000Z',
+    machineId: 'm49',
+    itemId: `repo:goal:diagnostic-retry:${hash}`,
+    source: 'goal',
+    repo,
+    title: 'Repair a stalled objective',
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'router',
+    routeReason: 'test parent route',
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+    objectiveHash: hash.padEnd(64, 'a').slice(0, 64),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+  };
+  recordRepairHandoffs(parent, { schemaVersion: 2 });
+  const handoff = readRepairHandoffs().observations.find((row) =>
+    row.schemaVersion === 2 && row.parentItemId === parent.itemId)!;
   return {
-    id: `repo:proposal-repair-nodiff:${hash}`,
+    id: handoff.childItemId,
     repo,
     source: 'self',
     title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
@@ -185,6 +216,59 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
     effort: 1,
     score,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff'],
+    ts: parent.ts,
+    repairHandoffId: handoff.eventId,
+    repairGenerationId: handoff.generationId,
+    repairTreatmentUnitId: handoff.repairTreatmentUnitId,
+    repairTreatment: handoff.repairTreatment,
+    repairParentItemId: parent.itemId,
+    repairParentSource: parent.source,
+    repairParentBackend: parent.backend,
+    repairParentTier: parent.tier,
+    repairParentObjectiveHash: parent.objectiveHash,
+  };
+}
+
+function makeTrustedProposalRepairItem(repo: string, id = 'repo:proposal-repair:abcdef123456'): WorkItem {
+  return {
+    id,
+    repo,
+    source: 'self',
+    title: 'Proposal repair: complete the stalled scheduler fix',
+    detail:
+      'Proposal repair: produce a corrected proposal.\n' +
+      'Proposal: prop-stalled\n' +
+      'Original work item: repo:goal:stalled\n' +
+      'Produce a fresh complete fix and verify it.',
+    value: 4,
+    effort: 1,
+    score: 4,
+    tags: ['self-heal', 'proposal-repair', 'verify'],
+    ts: '2026-07-03T00:00:00.000Z',
+  };
+}
+
+function makeTrustedCaptureRepairItem(
+  repo: string,
+  id = 'repo:proposal-repair-capture:abcdef123456',
+  score = 9,
+): WorkItem {
+  return {
+    id,
+    repo,
+    source: 'self',
+    title: 'Dispatch capture repair: complete the failed proposal capture',
+    detail:
+      'Dispatch capture repair: complete the failed proposal capture.\n' +
+      'Original work item: repo:self:gate\n' +
+      'Dispatch outcome: gate-blocked\n' +
+      'Diff metadata: files=1 lines=12\n' +
+      'Failure: proposal capture was incomplete.\n' +
+      'Produce a fresh complete fix and verify it.',
+    value: 5,
+    effort: 1,
+    score,
+    tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
     ts: '2026-07-03T00:00:00.000Z',
   };
 }
@@ -1253,6 +1337,164 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         id: 'cooldown-gated-backlog',
       },
     });
+  });
+
+  it('projects ordinary and active generated work as dispatchable', async () => {
+    const repo = join(tmpHome, 'repo');
+    const ordinary = makeBacklogItem(repo, 'repo:goal:ordinary', 'Ordinary work', 5);
+    const active = makeTrustedProposalRepairItem(repo);
+    writeBacklogSnapshot(tmpHome, repo, [ordinary, active]);
+
+    expect(generatedRepairDispatchState(ordinary)).toEqual({
+      applies: false,
+      state: 'not-applicable',
+      dispatchable: true,
+    });
+    expect(generatedRepairDispatchState(active)).toEqual({
+      applies: true,
+      state: 'active',
+      dispatchable: true,
+      disposition: 'active',
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.queue).toMatchObject({
+      backlogItems: 2,
+      eligibleBacklogItems: 2,
+      cooldownItems: 0,
+      pendingItems: 0,
+    });
+    expect(status.queue.repairControlBlockedItems).toBeUndefined();
+    expect(status.queue.next?.map((item) => item.id)).toEqual(expect.arrayContaining([ordinary.id, active.id]));
+  });
+
+  it('does not create lifecycle storage or a failure marker while building status', async () => {
+    const repo = join(tmpHome, 'repo');
+    const fleetDir = join(tmpHome, '.ashlr', 'fleet');
+    const lifecyclePath = join(fleetDir, 'generated-repair-lifecycle.json');
+    writeBacklogSnapshot(tmpHome, repo, [makeTrustedProposalRepairItem(repo)]);
+    expect(existsSync(fleetDir)).toBe(false);
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.queue.eligibleBacklogItems).toBe(1);
+    expect(existsSync(fleetDir)).toBe(false);
+    expect(existsSync(lifecyclePath)).toBe(false);
+    expect(existsSync(`${lifecyclePath}.failed`)).toBe(false);
+  });
+
+  it('does not chmod an existing lifecycle directory while building status', async () => {
+    const repo = join(tmpHome, 'repo');
+    const fleetDir = join(tmpHome, '.ashlr', 'fleet');
+    writeBacklogSnapshot(tmpHome, repo, [makeTrustedProposalRepairItem(repo)]);
+    mkdirSync(fleetDir, { recursive: true, mode: 0o750 });
+    if (process.platform !== 'win32') chmodSync(fleetDir, 0o750);
+    const beforeMode = statSync(fleetDir).mode & 0o777;
+
+    await buildFleetStatus(baseConfig());
+
+    expect(statSync(fleetDir).mode & 0o777).toBe(beforeMode);
+    expect(existsSync(join(fleetDir, 'generated-repair-lifecycle.json.failed'))).toBe(false);
+  });
+
+  it('keeps lifecycle-unavailable generated repairs visible but ineligible', async () => {
+    const repo = join(tmpHome, 'repo');
+    const ordinary = makeBacklogItem(repo, 'repo:goal:ordinary', 'Ordinary work', 5);
+    const unavailable = {
+      ...makeTrustedProposalRepairItem(repo, 'repo:proposal-repair:bbbbbbbbbbbb'),
+      repairHandoffId: 'a'.repeat(64),
+      repairGenerationId: 'b'.repeat(64),
+    };
+    writeBacklogSnapshot(tmpHome, repo, [unavailable, ordinary]);
+
+    expect(generatedRepairDispatchState(unavailable)).toEqual({
+      applies: true,
+      state: 'lifecycle-unavailable',
+      dispatchable: false,
+    });
+
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
+    expect(status.queue).toMatchObject({
+      backlogItems: 2,
+      eligibleBacklogItems: 1,
+      cooldownItems: 0,
+      pendingItems: 0,
+      repairControlBlockedItems: 1,
+      repairLifecycleUnavailableItems: 1,
+    });
+    expect(status.queue.next?.map((item) => item.id)).toEqual([ordinary.id]);
+  });
+
+  it('fails closed for an untrusted repair-shaped queue row', async () => {
+    const repo = join(tmpHome, 'repo');
+    const malformed = makeTrustedProposalRepairItem(repo, 'repo:manual-repair');
+    writeBacklogSnapshot(tmpHome, repo, [malformed]);
+    writeRunningDaemon(tmpHome);
+
+    expect(generatedRepairDispatchState(malformed)).toEqual({
+      applies: true,
+      state: 'lifecycle-unavailable',
+      dispatchable: false,
+    });
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 0,
+      repairControlBlockedItems: 1,
+      repairLifecycleUnavailableItems: 1,
+    });
+    expect(status.nextActions).toContainEqual(expect.objectContaining({
+      id: 'inspect-repair-lifecycle-control',
+    }));
+    expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('repair-lifecycle-control-blocked');
+  });
+
+  it('keeps quarantined generated repairs visible but terminal and ineligible', async () => {
+    const repo = join(tmpHome, 'repo');
+    const quarantined = makeTrustedDiagnosticResliceItem(repo, 'cccccccccccc');
+    recordGeneratedRepairLifecycle(quarantined, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    expect(recordGeneratedRepairLifecycle(quarantined, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      backend: 'kimi',
+      tier: 'mid',
+    })).toMatchObject({ disposition: 'quarantined' });
+    writeBacklogSnapshot(tmpHome, repo, [quarantined]);
+    writeRunningDaemon(tmpHome);
+
+    expect(generatedRepairDispatchState(quarantined)).toEqual({
+      applies: true,
+      state: 'terminal',
+      dispatchable: false,
+      disposition: 'quarantined',
+    });
+
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 0,
+      cooldownItems: 0,
+      pendingItems: 0,
+      repairControlBlockedItems: 1,
+      repairTerminalItems: 1,
+      repairQuarantinedItems: 1,
+    });
+    expect(status.queue.next).toBeUndefined();
+    expect(status.nextActions).toContainEqual(expect.objectContaining({
+      id: 'inspect-repair-lifecycle-control',
+    }));
+    expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('repair-lifecycle-control-blocked');
   });
 
   it('does not suggest building backlog when visible items already have pending proposals', async () => {
@@ -3147,14 +3389,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         generatedAt: now,
         repos: [repo],
         items: [
-          makeBacklogItem(
-            repo,
-            'repo:proposal-repair-capture:abcdef123456',
-            'Repair dispatch capture failure for repo item repo:self:gate',
-            9,
-            'self',
-            ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
-          ),
+          makeTrustedCaptureRepairItem(repo),
         ],
       }),
       'utf8',
@@ -3240,7 +3475,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(repairAction?.detail)
       .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
     expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(repairAction?.detail).toContain('First: Repair dispatch capture failure for repo item repo:self:gate.');
+    expect(repairAction?.detail).toContain('First: Dispatch capture repair: complete the failed proposal capture.');
     expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
     expect(yieldAction?.detail)
       .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
@@ -3270,13 +3505,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeRunningDaemon(tmpHome, [], now);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeBacklogSnapshot(tmpHome, repo, [
-      makeBacklogItem(
+      makeTrustedCaptureRepairItem(
         repo,
         'repo:proposal-repair-capture:fedcba987654',
-        'Repair dispatch capture failure for repo item repo:self:active',
         9,
-        'self',
-        ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
       ),
     ], now);
     const baseEvent: DispatchProductionEvent = {
@@ -3355,13 +3587,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
-    const repair = makeBacklogItem(
+    const repair = makeTrustedCaptureRepairItem(
       repo,
-      'repo:proposal-repair-capture:cooling123456',
-      'Repair dispatch capture failure for repo item repo:self:cooling',
+      'repo:proposal-repair-capture:c0011a123456',
       9,
-      'self',
-      ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
     );
     const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
     mkdirSync(ashlrDir, { recursive: true });
@@ -3369,7 +3598,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeRunningDaemon(tmpHome, [], now);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
-    recordOutcome(repair.id, 'empty', now);
+    recordOutcome(generatedRepairCooldownKey(repair), 'empty', now);
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -3450,7 +3679,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { ...localFailure, itemId: 'local-empty-b' },
       { ...localFailure, itemId: 'local-empty-c' },
     ]);
-    recordOutcome(repair.id, 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    recordOutcome(generatedRepairCooldownKey(repair), 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
 
     const s = await buildFleetStatus(baseConfig());
 
@@ -3481,7 +3710,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeRunningDaemon(tmpHome, [], now);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
-    recordOutcome(repair.id, 'dispatch-blocked', new Date(Date.now() - 6 * 60 * 1000).toISOString());
+    recordOutcome(generatedRepairCooldownKey(repair), 'dispatch-blocked', new Date(Date.now() - 6 * 60 * 1000).toISOString());
 
     const s = await buildFleetStatus(baseConfig());
 
@@ -3502,7 +3731,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
     seedHealthyRepairRecoveryEvents(repo, now);
-    recordOutcome(repair.id, 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    recordOutcome(generatedRepairCooldownKey(repair), 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
 
     const s = await buildFleetStatus(baseConfig());
 
@@ -3528,16 +3757,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       JSON.stringify({
         generatedAt: now,
         repos: [repo],
-        items: [
-          makeBacklogItem(
-            repo,
-            'repo:proposal-repair-nodiff:abcdef123456',
-            'Reslice no-diff dispatch for repo item repo:goal:no-alt',
-            9,
-            'self',
-            ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
-          ),
-        ],
+        items: [makeTrustedDiagnosticResliceItem(repo, '666666666666', 9)],
       }),
       'utf8',
     );
@@ -3605,7 +3825,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
     expect(drainAction?.detail).toContain('queued repair coverage: 1 no-diff reslice queued');
-    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:no-alt.');
+    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:stalled.');
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
         id: 'drain-diagnostic-reslices',
@@ -3660,21 +3880,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
-    const reslice = makeBacklogItem(
-      repo,
-      'repo:proposal-repair-nodiff:cooling123456',
-      'Reslice no-diff dispatch for repo item repo:goal:cooling',
-      9,
-      'self',
-      ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
-    );
+    const reslice = makeTrustedDiagnosticResliceItem(repo, '777777777777', 9);
     const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
     mkdirSync(ashlrDir, { recursive: true });
     mkdirSync(repo, { recursive: true });
     writeRunningDaemon(tmpHome, [], now);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeBacklogSnapshot(tmpHome, repo, [reslice, fresh], now);
-    recordOutcome(reslice.id, 'empty', now);
+    recordOutcome(generatedRepairCooldownKey(reslice), 'empty', now);
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -3731,16 +3944,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       JSON.stringify({
         generatedAt: now,
         repos: [repo],
-        items: [
-          makeBacklogItem(
-            repo,
-            'repo:proposal-repair-nodiff:abcdef123456',
-            'Reslice no-diff dispatch for repo item repo:goal:no-alt',
-            9,
-            'self',
-            ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
-          ),
-        ],
+        items: [makeTrustedDiagnosticResliceItem(repo, '888888888888', 9)],
       }),
       'utf8',
     );

@@ -471,6 +471,71 @@ describe('generated repair lifecycle store', () => {
     expect(readGeneratedRepairLifecycle(item).disposition).toBe('retired');
   });
 
+  it('preserves terminal tombstones when active-record retention reaches its count cap', () => {
+    const terminalItem = repairItem({ id: 'repo:proposal-repair:111111111111' });
+    expect(recordGeneratedRepairLifecycle(terminalItem, {
+      kind: 'proposal-created',
+      attemptId: ATTEMPT_ONE,
+      proposalId: 'prop-terminal-cap',
+    })).toMatchObject({ disposition: 'retired', recorded: true });
+    const path = generatedRepairLifecyclePath();
+    const terminal = (JSON.parse(readFileSync(path, 'utf8')) as {
+      records: Array<Record<string, unknown>>;
+    }).records[0]!;
+    const updatedAt = '2026-07-10T12:00:00.000Z';
+    const active = Array.from({ length: 99_999 }, (_, index) => ({
+      generationId: index.toString(16).padStart(64, '0'),
+      disposition: 'active',
+      emptyAttemptHashes: [],
+      updatedAt,
+    }));
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, records: [terminal, ...active] }), 'utf8');
+
+    const appended = recordGeneratedRepairLifecycle(
+      repairItem({ id: 'repo:proposal-repair:222222222222' }),
+      { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid' },
+    );
+    const persisted = (JSON.parse(readFileSync(path, 'utf8')) as {
+      records: Array<Record<string, unknown>>;
+    }).records;
+
+    expect(appended).toMatchObject({ disposition: 'active', recorded: true });
+    expect(persisted).toHaveLength(100_000);
+    expect(persisted).toContainEqual(expect.objectContaining({
+      generationId: terminal['generationId'],
+      disposition: 'retired',
+    }));
+    expect(readGeneratedRepairLifecycle(terminalItem)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
+  }, 30_000);
+
+  it('fails closed instead of dropping a new active transition at the terminal count cap', () => {
+    const updatedAt = '2026-07-10T12:00:00.000Z';
+    const terminal = Array.from({ length: 100_000 }, (_, index) => ({
+      generationId: index.toString(16).padStart(64, '0'),
+      disposition: 'retired',
+      emptyAttemptHashes: [],
+      updatedAt,
+    }));
+    const path = generatedRepairLifecyclePath();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, records: terminal }), 'utf8');
+
+    const appended = recordGeneratedRepairLifecycle(
+      repairItem({ id: 'repo:proposal-repair:333333333333' }),
+      { kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid' },
+    );
+    const persisted = (JSON.parse(readFileSync(path, 'utf8')) as {
+      records: Array<Record<string, unknown>>;
+    }).records;
+
+    expect(appended).toMatchObject({ available: false, recorded: false });
+    expect(persisted).toHaveLength(100_000);
+    expect(persisted.every((record) => record['disposition'] === 'retired')).toBe(true);
+  }, 30_000);
+
   it('does not suppress a newer immutable generation with the same deterministic item id', () => {
     const firstGeneration = repairItem();
     recordGeneratedRepairLifecycle(firstGeneration, {

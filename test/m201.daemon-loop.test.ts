@@ -302,6 +302,7 @@ import { SharedStore } from '../src/core/fleet/shared-store.js';
 import {
   generatedRepairCooldownKey,
   generatedRepairGenerationId,
+  generatedRepairLifecyclePath,
   readGeneratedRepairLifecycle,
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
@@ -1644,10 +1645,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const repairItems = makeItems(repo.dir, 1).map((item) => ({
       ...item,
-      id: `${repo.dir}:proposal-repair:abc123`,
+      id: `${basename(repo.dir)}:proposal-repair:abc123def456`,
       source: 'self' as const,
       title: 'Repair proposal prop-partial: test failure in src/app.ts:12',
-      detail: 'Proposal repair: test failure in src/app.ts:12 expected ready state.',
+      detail:
+        'Proposal repair: test failure in src/app.ts:12 expected ready state.\n' +
+        'Proposal: prop-partial\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Produce a fresh complete fix and verify it.',
       tags: ['self-heal', 'proposal-repair', 'verify'],
     }));
     mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
@@ -1705,9 +1710,15 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const [repair] = makeItems(repo.dir, 1).map((item) => ({
       ...item,
-      id: `${repo.dir}:proposal-repair:revoked123456`,
+      id: `${basename(repo.dir)}:proposal-repair:abc123def457`,
       source: 'self' as const,
-      tags: ['self-heal', 'proposal-repair', 'rejected-capture-recovery'],
+      title: 'Repair proposal prop-revoked: persistence mismatch',
+      detail:
+        'Proposal repair: recover a rejected persistence mismatch.\n' +
+        'Proposal: prop-revoked\n' +
+        'Original work item: repo:goal:revoked\n' +
+        'Produce a fresh complete fix and verify it.',
+      tags: ['self-heal', 'proposal-repair', 'rejected-capture-recovery', 'verify'],
     }));
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -1771,6 +1782,69 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       dispatchRepairPruneFailed: 0,
     });
     expect(JSON.stringify(result.producerMaintenance)).not.toContain(terminal.id);
+  });
+
+  it('A1a2b1a: lifecycle-unavailable repair is filtered even without a maintenance blocked key', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdee123456', 10, 'mid');
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-63345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    const path = generatedRepairLifecyclePath();
+    const ledger = JSON.parse(fs.readFileSync(path, 'utf8')) as {
+      records: Array<{ emptyAttemptTiers?: string[] }>;
+    };
+    delete ledger.records[0]!.emptyAttemptTiers;
+    fs.writeFileSync(path, `${JSON.stringify(ledger)}\n`, 'utf8');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair, ordinary],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(mockQueueProposalRepairWorkForPendingProposals).toHaveReturnedWith(
+      expect.not.objectContaining({ blockedItemKeys: expect.anything() }),
+    );
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+    expect(result.dispatches?.map((dispatch) => dispatch.itemId)).toEqual([ordinary.id]);
+  });
+
+  it('A1a2b1aa: high-score untrusted repair-shaped work fails closed before selection', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const malformed: WorkItem = {
+      ...makeItems(repo.dir, 1)[0]!,
+      id: 'repo:manual-repair',
+      source: 'self',
+      score: 100,
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+    };
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [malformed, ordinary],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+    expect(result.dispatches?.map((dispatch) => dispatch.itemId)).toEqual([ordinary.id]);
   });
 
   it('A1a2b1b: later producer refresh cannot reintroduce a blocked repair', async () => {

@@ -1256,7 +1256,7 @@ describe('queued autonomy work scanner', () => {
     expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual(['ordinary-invent']);
   });
 
-  it('retains objective-saturated repairs for inspection while blocking requeue and dispatch', async () => {
+  it('prunes objective-saturated queue projections while retaining lifecycle evidence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const now = new Date('2026-07-10T16:00:00.000Z');
@@ -1302,12 +1302,16 @@ describe('queued autonomy work scanner', () => {
 
     expect(result).toMatchObject({
       dispatchRepairQuarantined: 1,
-      dispatchRepairPruned: 0,
+      dispatchRepairPruned: 2,
       dispatchNoDiffQueued: 0,
       blockedItemKeys: expect.arrayContaining([workItemCoverageKey(repair)]),
     });
-    expect(remaining.map((candidate) => candidate.id)).toEqual([ordinary.id, repair.id]);
-    expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual([ordinary.id, repair.id]);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'quarantined',
+    });
+    expect(remaining.map((candidate) => candidate.id)).toEqual([ordinary.id]);
+    expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual([ordinary.id]);
   });
 
   it('reports prune failure without claiming a row was durably removed', async () => {

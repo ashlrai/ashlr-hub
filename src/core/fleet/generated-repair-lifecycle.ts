@@ -95,6 +95,17 @@ export interface GeneratedRepairLifecycleResult {
   authoritativeEmptyTiers?: EngineTier[];
 }
 
+export type GeneratedRepairDispatchState =
+  | { applies: false; state: 'not-applicable'; dispatchable: true }
+  | { applies: true; state: 'active'; dispatchable: true; disposition: 'active' }
+  | {
+      applies: true;
+      state: 'terminal';
+      dispatchable: false;
+      disposition: Exclude<GeneratedRepairDisposition, 'active'>;
+    }
+  | { applies: true; state: 'lifecycle-unavailable'; dispatchable: false };
+
 export type GeneratedRepairLifecycleEvidence =
   | { kind: 'proposal-created'; attemptId: string; proposalId: string; ts?: string; treatmentCandidate?: DispatchProductionEvent }
   | { kind: 'empty-diff'; attemptId: string; backend: EngineId; tier: EngineTier; ts?: string; treatmentCandidate?: DispatchProductionEvent }
@@ -157,22 +168,63 @@ export function generatedRepairLifecyclePath(): string {
   return join(homedir(), '.ashlr', 'fleet', 'generated-repair-lifecycle.json');
 }
 
-function handoffAuthoritySnapshot(): {
+interface HandoffAuthoritySnapshot {
   byEventId: Map<string, RepairHandoffObservation>;
   observations: RepairHandoffObservation[];
+  aliasGenerationsByEventId: Map<string, string[]>;
+  observationsByGenerationId: Map<string, RepairHandoffObservation[]>;
+  widenedCaptureChildren: Set<string>;
   sourceState: 'missing' | 'healthy' | 'degraded';
-} {
+}
+
+function handoffAuthoritySnapshot(): HandoffAuthoritySnapshot {
   const read = readRepairHandoffs();
   const observations = read.sourceState === 'degraded' ? [] : read.observations;
   const byEventId = new Map(observations.map((entry) => [entry.eventId, entry]));
-  return { byEventId, observations, sourceState: read.sourceState };
+  const aliasFamilies = new Map<string, RepairHandoffObservation[]>();
+  const observationsByGenerationId = new Map<string, RepairHandoffObservation[]>();
+  const widenedCaptureChildren = new Set<string>();
+  for (const observation of observations) {
+    const generationRows = observationsByGenerationId.get(observation.generationId) ?? [];
+    generationRows.push(observation);
+    observationsByGenerationId.set(observation.generationId, generationRows);
+    if (
+      observation.kind === 'capture-repair' &&
+      (observation.parentSource === 'issue' || observation.parentSource === 'goal')
+    ) {
+      widenedCaptureChildren.add(JSON.stringify([observation.repo, observation.childItemId]));
+    }
+    if (!observation.parentObjectiveHash) continue;
+    const family = JSON.stringify([
+      observation.kind,
+      observation.repo,
+      observation.parentItemId,
+      observation.parentObjectiveHash,
+      observation.childItemId,
+    ]);
+    const rows = aliasFamilies.get(family) ?? [];
+    rows.push(observation);
+    aliasFamilies.set(family, rows);
+  }
+  const aliasGenerationsByEventId = new Map<string, string[]>();
+  for (const rows of aliasFamilies.values()) {
+    const generations = [...new Set(rows.map((row) => row.generationId))];
+    for (const row of rows) aliasGenerationsByEventId.set(row.eventId, generations);
+  }
+  return {
+    byEventId,
+    observations,
+    aliasGenerationsByEventId,
+    observationsByGenerationId,
+    widenedCaptureChildren,
+    sourceState: read.sourceState,
+  };
 }
 
-function handoffAuthorityByEventId(): Map<string, RepairHandoffObservation> {
-  return handoffAuthoritySnapshot().byEventId;
-}
-
-export function generatedRepairGenerationId(item: WorkItem): string | null {
+function generatedRepairGenerationIdFromAuthority(
+  item: WorkItem,
+  authority: HandoffAuthoritySnapshot,
+): string | null {
   if (!isTrustedGeneratedRepairItem(item)) return null;
   if (item.repairHandoffId !== undefined || item.repairGenerationId !== undefined) {
     if (
@@ -180,7 +232,7 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
       typeof item.repairGenerationId !== 'string' ||
       repairGenerationIdFromHandoffId(item.repairHandoffId) !== item.repairGenerationId
     ) return null;
-    const handoff = handoffAuthorityByEventId().get(item.repairHandoffId);
+    const handoff = authority.byEventId.get(item.repairHandoffId);
     if (!handoff || handoff.generationId !== item.repairGenerationId || handoff.childItemId !== item.id) return null;
     try { if (resolve(handoff.repo) !== resolve(item.repo)) return null; } catch { return null; }
     if (isTrustedDiagnosticResliceItem(item)) {
@@ -245,13 +297,10 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
     return null;
   }
   if (isTrustedCaptureRepairItem(item)) {
-    const authority = handoffAuthoritySnapshot();
     if (authority.sourceState === 'degraded') return null;
-    const authoritativeWidenedChild = authority.observations.some((handoff) =>
-      handoff.kind === 'capture-repair' &&
-      handoff.childItemId === item.id &&
-      resolve(handoff.repo) === repo &&
-      (handoff.parentSource === 'issue' || handoff.parentSource === 'goal'));
+    const authoritativeWidenedChild = authority.widenedCaptureChildren.has(
+      JSON.stringify([repo, item.id]),
+    );
     if (authoritativeWidenedChild) return null;
   }
   const ts = Date.parse(item.ts);
@@ -265,6 +314,10 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
   ])).digest('hex');
 }
 
+export function generatedRepairGenerationId(item: WorkItem): string | null {
+  return generatedRepairGenerationIdFromAuthority(item, handoffAuthoritySnapshot());
+}
+
 export function generatedRepairCooldownKey(item: WorkItem): string {
   if (item.repairHandoffId === undefined && item.repairGenerationId === undefined) return item.id;
   const generationId = generatedRepairGenerationId(item);
@@ -273,27 +326,27 @@ export function generatedRepairCooldownKey(item: WorkItem): string {
 
 /** Current generation plus exact hashful aliases in either rollout direction. */
 export function generatedRepairGenerationIds(item: WorkItem): string[] {
-  const current = generatedRepairGenerationId(item);
+  return generatedRepairGenerationIdsFromAuthority(item, handoffAuthoritySnapshot());
+}
+
+function generatedRepairGenerationIdsFromAuthority(
+  item: WorkItem,
+  snapshot: HandoffAuthoritySnapshot,
+): string[] {
+  const current = generatedRepairGenerationIdFromAuthority(item, snapshot);
   if (!current || typeof item.repairHandoffId !== 'string') return current ? [current] : [];
-  const snapshot = handoffAuthoritySnapshot();
   const target = snapshot.byEventId.get(item.repairHandoffId);
   if (!target || !target.parentObjectiveHash) return [current];
-  const aliases = snapshot.observations
-    .filter((candidate) =>
-      candidate.eventId !== target.eventId &&
-      candidate.kind === target.kind &&
-      candidate.repo === target.repo &&
-      candidate.parentItemId === target.parentItemId &&
-      candidate.parentObjectiveHash === target.parentObjectiveHash &&
-      candidate.childItemId === target.childItemId)
-    .map((candidate) => candidate.generationId);
-  return [...new Set([current, ...aliases])];
+  return [...new Set([current, ...(snapshot.aliasGenerationsByEventId.get(target.eventId) ?? [])])];
 }
 
 export function generatedRepairCooldownKeys(item: WorkItem): string[] {
   const generations = generatedRepairGenerationIds(item);
   if (generations.length === 0) return [item.id];
-  return generations.map((generationId) => `${item.id}::generation:${generationId}`);
+  const generationKeys = generations.map((generationId) => `${item.id}::generation:${generationId}`);
+  return item.repairHandoffId === undefined && item.repairGenerationId === undefined
+    ? [item.id, ...generationKeys]
+    : generationKeys;
 }
 
 function isLifecycleAttemptIdentity(value: unknown): value is string {
@@ -418,10 +471,11 @@ function loadLedger(): { ok: true; ledger: GeneratedRepairLifecycleLedger } | { 
     if (value['schemaVersion'] !== 1 || !Array.isArray(value['records'])) return { ok: false };
     if (!value['records'].every(validRecord)) return { ok: false };
     const records = value['records'] as GeneratedRepairLifecycleRecord[];
+    if (records.length > MAX_RECORDS) return { ok: false };
     if (new Set(records.map((record) => record.generationId)).size !== records.length) return { ok: false };
     const ledger: GeneratedRepairLifecycleLedger = {
       schemaVersion: 1,
-      records: records.slice(-MAX_RECORDS),
+      records,
     };
     lifecycleLedgerCache = { fingerprint, ledger };
     return { ok: true, ledger: cloneLedger(ledger) };
@@ -542,6 +596,26 @@ function lifecycleStorageAvailable(): boolean {
   }
 }
 
+/** Validate lifecycle sources without creating directories, chmodding, or writing markers. */
+function lifecycleStorageReadable(): boolean {
+  try {
+    const failure = lifecycleFailurePath();
+    if (existsSync(failure)) return false;
+    if (lifecycleWriteInProgress()) return false;
+    const path = generatedRepairLifecyclePath();
+    const dir = dirname(path);
+    if (existsSync(dir)) {
+      const stat = lstatSync(dir);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUser(stat.uid)) return false;
+    }
+    if (!existsSync(path)) return true;
+    const stat = lstatSync(path);
+    return safeStoreFile(stat) && stat.size <= MAX_LEDGER_BYTES;
+  } catch {
+    return false;
+  }
+}
+
 function saveLedger(ledger: GeneratedRepairLifecycleLedger): boolean {
   try {
     const path = generatedRepairLifecyclePath();
@@ -557,23 +631,40 @@ function saveLedger(ledger: GeneratedRepairLifecycleLedger): boolean {
 }
 
 function serializeLedger(records: GeneratedRepairLifecycleRecord[]): Buffer {
-  const bounded = records.slice(-MAX_RECORDS);
-  const encode = (count: number): Buffer => Buffer.from(JSON.stringify({
+  const terminal = records.filter((record) => record.disposition !== 'active');
+  if (terminal.length > MAX_RECORDS) throw new Error('generated repair terminal lifecycle capacity exceeded');
+  const active = records.filter((record) => record.disposition === 'active');
+  const activeCapacity = MAX_RECORDS - terminal.length;
+  const encode = (activeCount: number): Buffer => {
+    const retainedActive = new Set((activeCount === 0 ? [] : active.slice(-activeCount))
+      .map((record) => record.generationId));
+    const retained = records.filter((record) =>
+      record.disposition !== 'active' || retainedActive.has(record.generationId));
+    return Buffer.from(JSON.stringify({
     schemaVersion: 1,
-    records: bounded.slice(-count),
-  }, null, 2) + '\n', 'utf8');
+      records: retained,
+    }, null, 2) + '\n', 'utf8');
+  };
   let low = 0;
-  let high = bounded.length;
+  let high = Math.min(active.length, activeCapacity);
   let best = encode(0);
+  let bestActiveCount = 0;
+  if (best.length > MAX_LEDGER_BYTES) {
+    throw new Error('generated repair terminal lifecycle bytes exceeded');
+  }
   while (low <= high) {
     const count = Math.floor((low + high) / 2);
     const candidate = encode(count);
     if (candidate.length <= MAX_LEDGER_BYTES) {
       best = candidate;
+      bestActiveCount = count;
       low = count + 1;
     } else {
       high = count - 1;
     }
+  }
+  if (records.at(-1)?.disposition === 'active' && bestActiveCount === 0) {
+    throw new Error('generated repair active lifecycle capacity exceeded');
   }
   return best;
 }
@@ -674,6 +765,7 @@ function mergedLifecycleRecord(
 function hydrateLegacyAttemptTiers(
   item: WorkItem,
   record: GeneratedRepairLifecycleRecord | undefined,
+  authority = handoffAuthoritySnapshot(),
 ): GeneratedRepairLifecycleRecord | undefined {
   if (
     !record ||
@@ -685,11 +777,9 @@ function hydrateLegacyAttemptTiers(
     typeof item.repairHandoffId !== 'string' ||
     item.repairParentTier == null
   ) return record;
-  const authority = handoffAuthoritySnapshot();
   if (authority.sourceState === 'degraded') return record;
   const target = authority.byEventId.get(item.repairHandoffId);
-  const sourceParents = authority.observations.filter((observation) =>
-    observation.generationId === record.generationId);
+  const sourceParents = authority.observationsByGenerationId.get(record.generationId) ?? [];
   if (sourceParents.length !== 1) return record;
   const parent = sourceParents[0]!;
   if (
@@ -719,16 +809,32 @@ function upsertNewest(
 
 /** Read one immutable generation; callers block dispatch when availability is false. */
 export function readGeneratedRepairLifecycle(item: WorkItem): GeneratedRepairLifecycleResult {
-  const id = generatedRepairGenerationId(item);
-  if (!id) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
+  const authority = handoffAuthoritySnapshot();
   if (!lifecycleStorageAvailable() || lifecycleWriteInProgress()) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
   }
   const loaded = loadLedger();
-  if (!loaded.ok) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
-  const generationIds = generatedRepairGenerationIds(item);
-  const records = loaded.ledger.records.map((record) =>
-    generationIds.includes(record.generationId) ? hydrateLegacyAttemptTiers(item, record)! : record);
+  return readGeneratedRepairLifecycleFromSources(item, authority, loaded);
+}
+
+function readGeneratedRepairLifecycleFromSources(
+  item: WorkItem,
+  authority: HandoffAuthoritySnapshot,
+  loaded: ReturnType<typeof loadLedger>,
+  recordsByGeneration?: ReadonlyMap<string, GeneratedRepairLifecycleRecord>,
+  resolvedGenerationIds?: readonly string[],
+): GeneratedRepairLifecycleResult {
+  const id = generatedRepairGenerationIdFromAuthority(item, authority);
+  if (!id || !loaded.ok) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
+  const generationIds = resolvedGenerationIds ?? generatedRepairGenerationIdsFromAuthority(item, authority);
+  const selectedIds = new Set(generationIds);
+  const selectedRecords = recordsByGeneration
+    ? generationIds.flatMap((generationId) => {
+      const record = recordsByGeneration.get(generationId);
+      return record ? [record] : [];
+    })
+    : loaded.ledger.records.filter((record) => selectedIds.has(record.generationId));
+  const records = selectedRecords.map((record) => hydrateLegacyAttemptTiers(item, record, authority)!);
   const merged = mergedLifecycleRecord(id, generationIds, records);
   if (!merged.ok) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
   const record = merged.record;
@@ -737,8 +843,87 @@ export function readGeneratedRepairLifecycle(item: WorkItem): GeneratedRepairLif
     record.emptyAttemptHashes,
     record.emptyAttemptBackends ?? [],
     record.emptyAttemptTiers ?? [],
+    authority,
   )) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
   return resultFromRecord(true, record);
+}
+
+function dispatchStateForLifecycle(
+  item: WorkItem,
+  lifecycle: GeneratedRepairLifecycleResult,
+): GeneratedRepairDispatchState {
+  if (!isTrustedGeneratedRepairItem(item)) {
+    if (item.tags.includes('proposal-repair')) {
+      return { applies: true, state: 'lifecycle-unavailable', dispatchable: false };
+    }
+    return { applies: false, state: 'not-applicable', dispatchable: true };
+  }
+  if (!lifecycle.available) {
+    return { applies: true, state: 'lifecycle-unavailable', dispatchable: false };
+  }
+  if (lifecycle.disposition === 'active') {
+    return { applies: true, state: 'active', dispatchable: true, disposition: 'active' };
+  }
+  return {
+    applies: true,
+    state: 'terminal',
+    dispatchable: false,
+    disposition: lifecycle.disposition,
+  };
+}
+
+/** Project durable generated-repair lifecycle authority into dispatch eligibility. */
+export function generatedRepairDispatchState(item: WorkItem): GeneratedRepairDispatchState {
+  return dispatchStateForLifecycle(item, readGeneratedRepairLifecycle(item));
+}
+
+export interface GeneratedRepairQueueReaderSnapshot {
+  dispatchState(item: WorkItem): GeneratedRepairDispatchState;
+  cooldownKeys(item: WorkItem): string[];
+}
+
+/** Read-only, point-in-time generated-repair authority for one queue projection. */
+export function readGeneratedRepairQueueSnapshot(): GeneratedRepairQueueReaderSnapshot {
+  const authority = handoffAuthoritySnapshot();
+  const loaded = lifecycleStorageReadable()
+    ? loadLedger()
+    : { ok: false as const };
+  const recordsByGeneration = new Map(
+    loaded.ok ? loaded.ledger.records.map((record) => [record.generationId, record] as const) : [],
+  );
+  const generationIdsByItem = new Map<WorkItem, string[]>();
+  const lifecycleByItem = new Map<WorkItem, GeneratedRepairLifecycleResult>();
+  const generationIdsFor = (item: WorkItem): string[] => {
+    const cached = generationIdsByItem.get(item);
+    if (cached) return cached;
+    const generationIds = generatedRepairGenerationIdsFromAuthority(item, authority);
+    generationIdsByItem.set(item, generationIds);
+    return generationIds;
+  };
+  return {
+    dispatchState(item) {
+      let lifecycle = lifecycleByItem.get(item);
+      if (!lifecycle) {
+        lifecycle = readGeneratedRepairLifecycleFromSources(
+          item,
+          authority,
+          loaded,
+          recordsByGeneration,
+          generationIdsFor(item),
+        );
+        lifecycleByItem.set(item, lifecycle);
+      }
+      return dispatchStateForLifecycle(item, lifecycle);
+    },
+    cooldownKeys(item) {
+      const generations = generationIdsFor(item);
+      if (generations.length === 0) return [item.id];
+      const generationKeys = generations.map((generationId) => `${item.id}::generation:${generationId}`);
+      return item.repairHandoffId === undefined && item.repairGenerationId === undefined
+        ? [item.id, ...generationKeys]
+        : generationKeys;
+    },
+  };
 }
 
 /** Derive backend retry constraints only from durable diagnostic lifecycle evidence. */
@@ -855,6 +1040,7 @@ function hasObjectiveSaturationProof(
   childAttemptHashes: readonly string[],
   childBackends: readonly EngineId[],
   childTiers: readonly EngineTier[],
+  authority = handoffAuthoritySnapshot(),
 ): boolean {
   if (
     !isTrustedDiagnosticResliceItem(item) ||
@@ -863,7 +1049,6 @@ function hasObjectiveSaturationProof(
     childBackends.length !== 2 ||
     childTiers.length !== 2
   ) return false;
-  const authority = handoffAuthoritySnapshot();
   if (authority.sourceState === 'degraded') return false;
   const parent = authority.byEventId.get(item.repairHandoffId);
   if (

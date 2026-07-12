@@ -40,7 +40,9 @@ import {
   summarizeAttemptCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
-import { generatedRepairCooldownKeys } from './generated-repair-lifecycle.js';
+import {
+  readGeneratedRepairQueueSnapshot,
+} from './generated-repair-lifecycle.js';
 import {
   readRepairHandoffs,
   readRepairHandoffSchemaSummary,
@@ -933,6 +935,9 @@ export interface FleetStatus {
     cooldownItems?: number;
     pendingItems?: number;
     repairControlBlockedItems?: number;
+    repairLifecycleUnavailableItems?: number;
+    repairTerminalItems?: number;
+    repairQuarantinedItems?: number;
     nextEligibleAt?: string | null;
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
@@ -1121,6 +1126,9 @@ interface FleetQueueEligibility {
   cooldownItems: number;
   pendingItems: number;
   repairControlBlockedItems: number;
+  repairLifecycleUnavailableItems: number;
+  repairTerminalItems: number;
+  repairQuarantinedItems: number;
   nextEligibleAt: string | null;
 }
 
@@ -1143,6 +1151,7 @@ function buildQueueEligibility(
   const nowMs = Date.now();
   const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
   const workedEvents = selectWorkQueueCoordinator(cfg).readWorkedEvents();
+  const repairQueue = readGeneratedRepairQueueSnapshot();
 
   const blockingPendingProposals = blockingPendingProposalsForBacklog(pendingProposals, cfg);
   const pendingItemKeys = pendingProposalItemKeysForBacklog(items, blockingPendingProposals);
@@ -1150,17 +1159,31 @@ function buildQueueEligibility(
   let cooldownItems = 0;
   let pendingItems = 0;
   let repairControlBlockedItems = 0;
+  let repairLifecycleUnavailableItems = 0;
+  let repairTerminalItems = 0;
+  let repairQuarantinedItems = 0;
   let nextEligibleMs: number | null = null;
   for (const item of items) {
     if (!repairControlAvailable && item.tags.includes('proposal-repair')) {
       repairControlBlockedItems++;
       continue;
     }
+    const repairDispatch = repairQueue.dispatchState(item);
+    if (repairDispatch.applies && !repairDispatch.dispatchable) {
+      repairControlBlockedItems++;
+      if (repairDispatch.state === 'lifecycle-unavailable') {
+        repairLifecycleUnavailableItems++;
+      } else {
+        repairTerminalItems++;
+        if (repairDispatch.disposition === 'quarantined') repairQuarantinedItems++;
+      }
+      continue;
+    }
     if (pendingItemKeys.has(workItemCoverageKey(item))) {
       pendingItems++;
       continue;
     }
-    const lastEvent = latestWorkedEventForKeys(workedEvents, generatedRepairCooldownKeys(item));
+    const lastEvent = latestWorkedEventForKeys(workedEvents, repairQueue.cooldownKeys(item));
     const lastMs = lastEvent ? Date.parse(lastEvent.ts) : Number.NaN;
     const last = lastEvent && Number.isFinite(lastMs)
       ? { event: lastEvent, tsMs: lastMs, suppressible: isSuppressibleWorkedOutcome(lastEvent.outcome) }
@@ -1182,6 +1205,9 @@ function buildQueueEligibility(
     cooldownItems,
     pendingItems,
     repairControlBlockedItems,
+    repairLifecycleUnavailableItems,
+    repairTerminalItems,
+    repairQuarantinedItems,
     nextEligibleAt: isoFromMs(nextEligibleMs),
   };
 }
@@ -1360,6 +1386,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let cooldownItems = 0;
   let pendingItems = 0;
   let repairControlBlockedItems = 0;
+  let repairLifecycleUnavailableItems = 0;
+  let repairTerminalItems = 0;
+  let repairQuarantinedItems = 0;
   let eligibleOrdinaryItems: number | null = null;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
@@ -1554,6 +1583,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     cooldownItems = eligibility.cooldownItems;
     pendingItems = eligibility.pendingItems;
     repairControlBlockedItems = eligibility.repairControlBlockedItems;
+    repairLifecycleUnavailableItems = eligibility.repairLifecycleUnavailableItems;
+    repairTerminalItems = eligibility.repairTerminalItems;
+    repairQuarantinedItems = eligibility.repairQuarantinedItems;
     eligibleOrdinaryItems = queueSourceStatus === 'healthy'
       ? eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length
       : null;
@@ -1733,6 +1765,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       cooldownItems,
       pendingItems,
       ...(repairControlBlockedItems > 0 ? { repairControlBlockedItems } : {}),
+      ...(repairLifecycleUnavailableItems > 0 ? { repairLifecycleUnavailableItems } : {}),
+      ...(repairTerminalItems > 0 ? { repairTerminalItems } : {}),
+      ...(repairQuarantinedItems > 0 ? { repairQuarantinedItems } : {}),
       nextEligibleAt,
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
@@ -3487,8 +3522,22 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   } else if (status.queue.backlogItems > 0 && !controlBlocked) {
     const cooling = status.queue.cooldownItems ?? 0;
     const pending = status.queue.pendingItems ?? 0;
+    const repairBlocked = status.queue.repairControlBlockedItems ?? 0;
     const nextEligible = status.queue.nextEligibleAt;
-    if (cooling > 0 && eligibleBacklogItems === 0) {
+    if (repairBlocked > 0) {
+      const unavailable = status.queue.repairLifecycleUnavailableItems ?? 0;
+      const terminal = status.queue.repairTerminalItems ?? 0;
+      add({
+        id: 'inspect-repair-lifecycle-control',
+        priority: 'medium',
+        label: 'Inspect repair lifecycle control',
+        detail: `${repairBlocked} generated repair item(s) are lifecycle/control blocked ` +
+          `(${unavailable} unavailable, ${terminal} terminal).`,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        ],
+      });
+    } else if (cooling > 0 && eligibleBacklogItems === 0) {
       add({
         id: 'cooldown-gated-backlog',
         priority: 'medium',
@@ -3502,17 +3551,19 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         ],
       });
     }
-    add({
-      id: 'wait-for-backlog-eligibility',
-      priority: 'low',
-      label: 'Wait for backlog eligibility',
-      detail: nextEligible
-        ? `${status.queue.backlogItems} backlog item(s) are present, but ${cooling} are cooling and ${pending} already have pending proposals; next eligible at ${nextEligible}.`
-        : `${status.queue.backlogItems} backlog item(s) are present, but none are currently eligible (${cooling} cooling, ${pending} pending).`,
-      commands: [
-        nextActionCommand('Watch fleet', ['ashlr', 'fleet', 'watch'], 'read-only'),
-      ],
-    });
+    if (repairBlocked === 0) {
+      add({
+        id: 'wait-for-backlog-eligibility',
+        priority: 'low',
+        label: 'Wait for backlog eligibility',
+        detail: nextEligible
+          ? `${status.queue.backlogItems} backlog item(s) are present, but ${cooling} are cooling and ${pending} already have pending proposals; next eligible at ${nextEligible}.`
+          : `${status.queue.backlogItems} backlog item(s) are present, but none are currently eligible (${cooling} cooling, ${pending} pending).`,
+        commands: [
+          nextActionCommand('Watch fleet', ['ashlr', 'fleet', 'watch'], 'read-only'),
+        ],
+      });
+    }
   }
 
   const missingVerify = status.queue.repos?.executionProfiles?.reposMissingVerifyCommands ?? 0;
@@ -4366,6 +4417,20 @@ function chooseReadinessBlocker(
   }
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (status.queue.backlogItems > 0 && eligibleBacklogItems === 0 && status.proposals.pending === 0) {
+    const repairBlocked = status.queue.repairControlBlockedItems ?? 0;
+    if (repairBlocked > 0) {
+      const unavailable = status.queue.repairLifecycleUnavailableItems ?? 0;
+      const terminal = status.queue.repairTerminalItems ?? 0;
+      const quarantined = status.queue.repairQuarantinedItems ?? 0;
+      return readinessBlocker(
+        'repair-lifecycle-control-blocked',
+        'Repair lifecycle control blocked',
+        `${repairBlocked} generated repair item(s) are withheld ` +
+          `(${unavailable} lifecycle unavailable, ${terminal} terminal, ${quarantined} quarantined).`,
+        'medium',
+        'queue',
+      );
+    }
     const cooling = status.queue.cooldownItems ?? 0;
     const pending = status.queue.pendingItems ?? 0;
     const nextEligible = status.queue.nextEligibleAt ? ` Next eligible at ${status.queue.nextEligibleAt}.` : '';

@@ -807,7 +807,8 @@ export function queueProposalRepairWorkForPendingProposals(
           })
         ) return true;
         if (isTrustedDiagnosticResliceItem(item) && generatedRepairGenerationId(item) === null) return true;
-        return observeLifecycle(item) === 'terminal';
+        const lifecycle = observeLifecycle(item);
+        return lifecycle === 'terminal' || lifecycle === 'quarantined';
       })
     : { scanned: 0, removed: 0, failed: false };
   result.dispatchRepairPruned = prune.removed;

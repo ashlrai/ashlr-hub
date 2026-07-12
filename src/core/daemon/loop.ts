@@ -193,6 +193,7 @@ import {
 } from '../fleet/self-heal-trust.js';
 import {
   generatedRepairBackendAllowed,
+  generatedRepairDispatchState,
   generatedRepairDispatchLineage,
   generatedRepairGenerationId,
   generatedRepairGenerationIds,
@@ -1981,6 +1982,7 @@ export async function tick(
     if (!generatedRepairDispatchEnabled) return false;
     if (!repairHandoffControlAvailable) return false;
     try {
+      if (!generatedRepairDispatchState(item).dispatchable) return false;
       return !blockedRepairKeys.has(workItemCoverageKey(item));
     } catch {
       return false;
