@@ -1,0 +1,193 @@
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync,
+  fsyncSync, lstatSync, mkdirSync, openSync, readSync, writeSync, type Stats,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import type { ProposalRemoteHandoff, RemoteHandoffReconciliation } from '../types.js';
+import { viewPr } from '../integrations/github.js';
+import type { PrView } from '../integrations/github.js';
+import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
+import { fsyncDirectory } from '../util/durability.js';
+
+const SHA_RE = /^[a-f0-9]{40}$/;
+const DIGEST_RE = /^[a-f0-9]{64}$/;
+const MAX_FUTURE_SKEW_MS = 60_000;
+
+function privateOwner(stat: Stats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+}
+
+function privateDir(stat: Stats): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() && privateOwner(stat) &&
+    (process.platform === 'win32' || (stat.mode & 0o077) === 0);
+}
+
+function privateFile(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && privateOwner(stat) &&
+    (process.platform === 'win32' || (stat.mode & 0o077) === 0);
+}
+
+function sameNode(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function storageHome(): string {
+  const configured = process.env.ASHLR_HOME?.trim();
+  if (configured && isAbsolute(configured) && ![...configured].some((char) => char.charCodeAt(0) < 32)) {
+    try { return resolve(configured); } catch { /* use private default */ }
+  }
+  return resolve(join(homedir(), '.ashlr'));
+}
+
+function reconciliationKeyPath(): string {
+  return join(storageHome(), 'foundry', 'remote-handoff-reconciliation.key');
+}
+
+function ensurePrivateDir(path: string): Stats {
+  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+  const before = lstatSync(path);
+  if (!privateDir(before)) throw new Error('unsafe reconciliation key directory');
+  chmodSync(path, 0o700);
+  const after = lstatSync(path);
+  if (!privateDir(after) || !sameNode(before, after)) throw new Error('reconciliation key directory changed');
+  return after;
+}
+
+function loadDedicatedKey(create: boolean): Buffer | null {
+  const path = reconciliationKeyPath();
+  let fd: number | undefined;
+  try {
+    const root = ensurePrivateDir(storageHome());
+    ensurePrivateDir(dirname(path));
+    const rebound = lstatSync(storageHome());
+    if (!privateDir(rebound) || !sameNode(root, rebound)) return null;
+    if (!existsSync(path) && create) {
+      const bytes = randomBytes(32);
+      try {
+        fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+        const opened = fstatSync(fd);
+        if (!privateFile(opened)) return null;
+        if (writeSync(fd, bytes) !== bytes.length) return null;
+        fchmodSync(fd, 0o600);
+        fsyncSync(fd);
+        closeSync(fd);
+        fd = undefined;
+        const installed = lstatSync(path);
+        if (!privateFile(installed) || !sameNode(opened, installed) || installed.size !== 32) return null;
+        fsyncDirectory(dirname(path));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      }
+    }
+    if (!existsSync(path)) return null;
+    const named = lstatSync(path);
+    if (!privateFile(named) || named.size !== 32) return null;
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== 32) return null;
+    const bytes = Buffer.alloc(32);
+    if (readSync(fd, bytes, 0, 32, 0) !== 32) return null;
+    const after = fstatSync(fd);
+    const reboundFile = lstatSync(path);
+    if (!privateFile(after) || !privateFile(reboundFile) || !sameNode(opened, after) ||
+      !sameNode(after, reboundFile) || after.size !== 32) return null;
+    return bytes;
+  } catch { return null; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } } }
+}
+
+function payload(
+  proposalId: string,
+  repo: string,
+  handoff: ProposalRemoteHandoff,
+  observedAt: string,
+): unknown[] | null {
+  const mergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
+  const observed = sanitizeGithubMergedAt(observedAt);
+  if (!proposalId || !repo || handoff.provider !== 'github' || handoff.state !== 'merged' ||
+    !handoff.prUrl || !handoff.base || !mergedAt || !observed || !SHA_RE.test(handoff.mergeCommitOid ?? '')) return null;
+  if (Date.parse(observed) < Date.parse(mergedAt) || Date.parse(observed) > Date.now() + MAX_FUTURE_SKEW_MS) return null;
+  try {
+    return [
+      'ashlr:remote-handoff-reconciliation:v1', proposalId, resolve(repo), handoff.prUrl,
+      handoff.base, handoff.mergeCommitOid, mergedAt, observed,
+    ];
+  } catch { return null; }
+}
+
+function signature(values: unknown[], createKey = false): string | null {
+  try {
+    const key = loadDedicatedKey(createKey);
+    if (!key) return null;
+    return createHmac('sha256', key).update(JSON.stringify(values), 'utf8').digest('hex');
+  } catch { return null; }
+}
+
+function strongIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
+  if (handoff.prUrl && pr.url && handoff.prUrl === pr.url) return true;
+  return Boolean(handoff.branch && handoff.base && pr.headRefName && pr.baseRefName &&
+    handoff.branch === pr.headRefName && handoff.base === pr.baseRefName);
+}
+
+export interface ReconciledHostRead {
+  pr: PrView;
+  reconciliation?: RemoteHandoffReconciliation;
+}
+
+/** The only signing boundary: first perform a real host read, then bind it. */
+export function viewPrWithReconciliation(
+  repo: string,
+  selector: string,
+  proposalId: string,
+  handoff: ProposalRemoteHandoff,
+): ReconciledHostRead | null {
+  const pr = viewPr(repo, selector);
+  if (!pr) return null;
+  const mergedAt = sanitizeGithubMergedAt(pr.mergedAt);
+  const mergeCommitOid = typeof pr.mergeCommitOid === 'string' && SHA_RE.test(pr.mergeCommitOid.toLowerCase())
+    ? pr.mergeCommitOid.toLowerCase()
+    : undefined;
+  if (!mergedAt || !mergeCommitOid || !strongIdentity(handoff, pr)) return { pr };
+  const observedAt = new Date().toISOString();
+  const mergedHandoff: ProposalRemoteHandoff = {
+    ...handoff,
+    state: 'merged',
+    ...(pr.url ? { prUrl: pr.url } : {}),
+    ...(pr.baseRefName ? { base: pr.baseRefName } : {}),
+    mergeCommitOid,
+    mergedAt,
+  };
+  const values = payload(proposalId, repo, mergedHandoff, observedAt);
+  const attestation = values ? signature(values, true) : null;
+  return attestation
+    ? { pr, reconciliation: { schemaVersion: 1, observedAt, attestation } }
+    : { pr };
+}
+
+export function verifyRemoteHandoffReconciliation(
+  proposalId: string,
+  repo: string,
+  handoff: ProposalRemoteHandoff,
+): boolean {
+  const receipt = handoff.reconciliation;
+  if (!receipt || receipt.schemaVersion !== 1 || !DIGEST_RE.test(receipt.attestation)) return false;
+  if (sanitizeGithubMergedAt(receipt.observedAt) !== receipt.observedAt) return false;
+  const values = payload(proposalId, repo, handoff, receipt.observedAt);
+  const expected = values ? signature(values) : null;
+  if (!expected) return false;
+  const left = Buffer.from(receipt.attestation, 'hex');
+  const right = Buffer.from(expected, 'hex');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+export function sanitizeRemoteHandoffReconciliation(
+  proposalId: string | undefined,
+  repo: string | null | undefined,
+  handoff: ProposalRemoteHandoff,
+): RemoteHandoffReconciliation | undefined {
+  return proposalId && repo && verifyRemoteHandoffReconciliation(proposalId, repo, handoff)
+    ? handoff.reconciliation
+    : undefined;
+}

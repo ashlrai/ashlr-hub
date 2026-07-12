@@ -113,9 +113,11 @@ import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.j
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
 import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
+import { observePostMergeStability } from '../fleet/post-merge-stability-observer.js';
 import {
   buildMonitoringCursor,
   loadMonitoringCursor,
+  monitoringRepoDigest,
   saveMonitoringCursor,
   selectRegressionRepoSuccessors,
 } from '../fleet/monitoring-cursor.js';
@@ -2141,6 +2143,7 @@ export async function tick(
       let attemptedCursor: ReturnType<typeof buildMonitoringCursor> = null;
       let attemptedExpectedCursor: ReturnType<typeof buildMonitoringCursor> = null;
       let attemptedRepo: string | undefined;
+      let attemptedStabilityCandidatesAfter: NonNullable<ReturnType<typeof buildMonitoringCursor>>['stabilityCandidatesAfter'];
       let enrollmentRepos: string[] = [];
       try {
         enrollmentRepos = [...new Set(listEnrolled().map((repo) => resolve(repo)))].sort();
@@ -2157,7 +2160,24 @@ export async function tick(
         attemptedCursor = cursor;
         attemptedExpectedCursor = cursorRead.storedCursor;
         attemptedRepo = monitoredRepo;
+        attemptedStabilityCandidatesAfter = cursor.stabilityCandidatesAfter;
         const r = await detectRegression(liveCfg, monitoredRepo);
+        if (r.greenObservation) {
+          const repoDigest = monitoringRepoDigest(monitoredRepo);
+          const priorCandidate = cursor.stabilityCandidatesAfter?.find((entry) => entry.repoDigest === repoDigest)?.candidateAfter;
+          const observation = observePostMergeStability({
+            repo: monitoredRepo,
+            enrolledRepos: enrollmentRepos,
+            greenObservation: r.greenObservation,
+            ...(priorCandidate ? { candidateAfter: priorCandidate } : {}),
+          });
+          if (repoDigest && observation.candidateAfter) {
+            attemptedStabilityCandidatesAfter = [
+              ...(cursor.stabilityCandidatesAfter ?? []).filter((entry) => entry.repoDigest !== repoDigest),
+              { repoDigest, candidateAfter: observation.candidateAfter },
+            ].sort((left, right) => left.repoDigest.localeCompare(right.repoDigest));
+          }
+        }
         if (r.regressed) {
           const bisect = await bisectAndRevert(liveCfg, monitoredRepo);
           const culpritProposalId = bisect.revertProposal?.culpritProposalId;
@@ -2220,6 +2240,9 @@ export async function tick(
         const advancedCursor = {
           ...cursor,
           regressionRepoAfter: monitoredRepo,
+          ...(attemptedStabilityCandidatesAfter !== undefined
+            ? { stabilityCandidatesAfter: attemptedStabilityCandidatesAfter }
+            : {}),
         };
         if (!saveMonitoringCursor(advancedCursor, {
           enrolledRepos: enrollmentRepos,
@@ -2230,7 +2253,13 @@ export async function tick(
       } catch (err) {
         if (attemptedCursor && attemptedRepo) {
           saveMonitoringCursor(
-            { ...attemptedCursor, regressionRepoAfter: attemptedRepo },
+            {
+              ...attemptedCursor,
+              regressionRepoAfter: attemptedRepo,
+              ...(attemptedStabilityCandidatesAfter !== undefined
+                ? { stabilityCandidatesAfter: attemptedStabilityCandidatesAfter }
+                : {}),
+            },
             { enrolledRepos: enrollmentRepos, expectedCursor: attemptedExpectedCursor },
           );
         }

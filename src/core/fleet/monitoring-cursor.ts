@@ -29,14 +29,21 @@ const EXACT_STATE_KEYS = new Set([
   'enrollmentDigest',
   'outcome',
   'regressionRepoAfter',
+  'stabilityCandidatesAfter',
 ]);
 const EXACT_OUTCOME_KEYS = new Set(['candidateAfter', 'sweepComplete', 'hadIncomplete', 'candidateSetDigest']);
 const EXACT_CANDIDATE_KEYS = new Set(['proposalId', 'mergeCommitOid']);
+const EXACT_STABILITY_CURSOR_KEYS = new Set(['repoDigest', 'candidateAfter']);
 
 export interface MonitoringOutcomeCandidateCursor {
   /** Proposal identity and immutable merge OID form the stable composite key. */
   proposalId: string;
   mergeCommitOid: string;
+}
+
+export interface MonitoringStabilityCandidateCursor {
+  repoDigest: string;
+  candidateAfter: MonitoringOutcomeCandidateCursor;
 }
 
 export interface MonitoringCursorV1 {
@@ -55,6 +62,8 @@ export interface MonitoringCursorV1 {
   };
   /** Last fully handled canonical repository path for regression monitoring. */
   regressionRepoAfter: string | null;
+  /** Per-repository bounded stable-window rotation, pseudonymized at rest. */
+  stabilityCandidatesAfter?: MonitoringStabilityCandidateCursor[];
 }
 
 export interface MonitoringCursorReadResult {
@@ -113,6 +122,13 @@ export function canonicalEnrollmentDigest(repos: readonly string[]): string {
 }
 
 export const monitoringEnrollmentDigest = canonicalEnrollmentDigest;
+
+export function monitoringRepoDigest(repo: string): string {
+  const canonical = canonicalRepo(repo);
+  return canonical ? createHash('sha256').update(JSON.stringify([
+    'ashlr:fleet-monitoring-repo:v1', canonical,
+  ])).digest('hex') : '';
+}
 
 function safeProposalId(value: unknown): value is string {
   return typeof value === 'string' && value.length >= 1 && value.length <= 240 && noControlCharacters(value);
@@ -211,7 +227,7 @@ export function selectRegressionRepoSuccessors(
 
 export function buildMonitoringCursor(
   repos: readonly string[],
-  progress: Partial<Pick<MonitoringCursorV1, 'outcome' | 'regressionRepoAfter'>> = {},
+  progress: Partial<Pick<MonitoringCursorV1, 'outcome' | 'regressionRepoAfter' | 'stabilityCandidatesAfter'>> = {},
 ): MonitoringCursorV1 | null {
   const enrollmentDigest = canonicalEnrollmentDigest(repos);
   if (!enrollmentDigest) return null;
@@ -225,6 +241,9 @@ export function buildMonitoringCursor(
       candidateSetDigest: null,
     },
     regressionRepoAfter: progress.regressionRepoAfter ?? null,
+    ...(progress.stabilityCandidatesAfter !== undefined
+      ? { stabilityCandidatesAfter: progress.stabilityCandidatesAfter }
+      : {}),
   });
 }
 
@@ -233,7 +252,8 @@ export function sanitizeMonitoringCursor(value: unknown): MonitoringCursorV1 | n
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const keys = Object.keys(row);
-  if (keys.length !== EXACT_STATE_KEYS.size || keys.some((key) => !EXACT_STATE_KEYS.has(key))) return null;
+  if ((keys.length !== EXACT_STATE_KEYS.size && keys.length !== EXACT_STATE_KEYS.size - 1) ||
+    keys.some((key) => !EXACT_STATE_KEYS.has(key))) return null;
   if (row['schemaVersion'] !== 1 || typeof row['enrollmentDigest'] !== 'string' || !SHA256_RE.test(row['enrollmentDigest'])) {
     return null;
   }
@@ -252,6 +272,24 @@ export function sanitizeMonitoringCursor(value: unknown): MonitoringCursorV1 | n
   if (outcomeRow['candidateAfter'] !== null && !candidateAfter) return null;
   const regressionRepoAfter = row['regressionRepoAfter'] === null ? null : canonicalRepo(row['regressionRepoAfter']);
   if (row['regressionRepoAfter'] !== null && (!regressionRepoAfter || regressionRepoAfter !== row['regressionRepoAfter'])) return null;
+  let stabilityCandidatesAfter: MonitoringStabilityCandidateCursor[] | undefined;
+  if (row['stabilityCandidatesAfter'] !== undefined) {
+    if (!Array.isArray(row['stabilityCandidatesAfter']) || row['stabilityCandidatesAfter'].length > 128) return null;
+    stabilityCandidatesAfter = [];
+    for (const value of row['stabilityCandidatesAfter']) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const entry = value as Record<string, unknown>;
+      if (Object.keys(entry).length !== EXACT_STABILITY_CURSOR_KEYS.size ||
+        Object.keys(entry).some((key) => !EXACT_STABILITY_CURSOR_KEYS.has(key)) ||
+        typeof entry['repoDigest'] !== 'string' || !SHA256_RE.test(entry['repoDigest'])) return null;
+      const candidate = sanitizeCandidate(entry['candidateAfter']);
+      if (!candidate) return null;
+      stabilityCandidatesAfter.push({ repoDigest: entry['repoDigest'], candidateAfter: candidate });
+    }
+    stabilityCandidatesAfter.sort((left, right) => left.repoDigest.localeCompare(right.repoDigest));
+    if (new Set(stabilityCandidatesAfter.map((entry) => entry.repoDigest)).size !== stabilityCandidatesAfter.length ||
+      JSON.stringify(stabilityCandidatesAfter) !== JSON.stringify(row['stabilityCandidatesAfter'])) return null;
+  }
   return {
     schemaVersion: 1,
     enrollmentDigest: row['enrollmentDigest'],
@@ -264,6 +302,7 @@ export function sanitizeMonitoringCursor(value: unknown): MonitoringCursorV1 | n
         : null,
     },
     regressionRepoAfter,
+    ...(stabilityCandidatesAfter !== undefined ? { stabilityCandidatesAfter } : {}),
   };
 }
 

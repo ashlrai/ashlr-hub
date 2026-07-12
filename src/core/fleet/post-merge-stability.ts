@@ -248,6 +248,12 @@ function repoDigest(key: Buffer, repo: string): string | null {
   try { return hmac(key, 'ashlr:post-merge-stability-repo:v1', [resolve(repo)]); } catch { return null; }
 }
 
+/** Pseudonymous repository identity shared by stability producers and readers. */
+export function postMergeStabilityRepoDigest(repo: string): string | null {
+  const key = existingSigningKey();
+  return key ? repoDigest(key, repo) : null;
+}
+
 type WitnessIdentity = Pick<PostMergeStabilityWitness,
   'cohortId' | 'repoDigest' | 'proposalId' | 'mergeCommit'>;
 

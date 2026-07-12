@@ -125,6 +125,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Define the first fail-closed Windows DACL assurance slice for provenance and new private stores.
 - [x] Run exhaustive verification, complete adversarial review, update durable notes, commit, push, and reload production.
 
+## Current Overnight Cycle - Stable-Window Witness Production
+- [x] Rehydrate the released stability-observation baseline, CI proof, production health, git state, Entire state, and durable notes.
+- [x] Audit detached-worktree verification, strict applied-merge population capture, signed cohort persistence, and Windows private-storage assurance in parallel.
+- [x] Wire a bounded observation-only stability producer from strict complete-window merge evidence without granting routing or merge authority.
+- [ ] Bind every attempted population member to an explicit stable, adverse, or inconclusive classification with replay-safe identity and metadata-only persistence.
+- [x] Preserve fail-closed source quality, cursor fairness, command-manifest integrity, and policy non-authority across restarts and concurrent scans for the observation-only v1 slice.
+- [x] Add adversarial population, timing, replay, privacy, partial-write, and compatibility coverage for the observation-only v1 slice.
+- [ ] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and canary witness generation.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

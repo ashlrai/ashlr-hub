@@ -255,7 +255,7 @@ function failureResult(reason: PostMergeWindowInconclusiveReason, observedHead?:
  */
 export function inspectPostMergeWindow(
   input: PostMergeWindowInput,
-  options: { runGit?: PostMergeGitRunner } = {},
+  options: { runGit?: PostMergeGitRunner; deadlineMs?: number } = {},
 ): PostMergeWindowResult {
   if (
     !input || typeof input.repo !== 'string' || input.repo.length === 0 || input.repo.length > 4_096 ||
@@ -270,7 +270,11 @@ export function inspectPostMergeWindow(
   ) return failureResult('invalid-input');
 
   const runGit = options.runGit ?? defaultGitRunner;
-  const deadline = performance.now() + TOTAL_DEADLINE_MS;
+  const requestedDeadline = options.deadlineMs;
+  const deadlineMs = typeof requestedDeadline === 'number' && Number.isFinite(requestedDeadline)
+    ? Math.max(1, Math.min(TOTAL_DEADLINE_MS, Math.floor(requestedDeadline)))
+    : TOTAL_DEADLINE_MS;
+  const deadline = performance.now() + deadlineMs;
   let invocations = 0;
   let observedHead: string | undefined;
 
@@ -281,7 +285,7 @@ export function inspectPostMergeWindow(
     const result = runGit({
       repo: input.repo,
       args,
-      timeoutMs: Math.max(1, Math.min(TOTAL_DEADLINE_MS, remaining)),
+      timeoutMs: Math.max(1, Math.min(deadlineMs, remaining)),
       maxOutputBytes,
     });
     if (performance.now() > deadline) throw new InspectionFailure('timeout');

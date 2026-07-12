@@ -19,6 +19,7 @@ import {
   canonicalEnrollmentDigest,
   loadMonitoringCursor,
   monitoringCursorPath,
+  monitoringRepoDigest,
   outcomeCandidateKey,
   readMonitoringCursor,
   saveMonitoringCursor,
@@ -95,6 +96,25 @@ describe('M374 durable fleet monitoring cursor', () => {
     })).toBe(true);
     expect(loadMonitoringCursor(changedRepos).cursor).toEqual(replacement);
     expect(writeMonitoringCursor(checkpoint, { enrolledRepos: [repos[0]!] })).toBe(false);
+  });
+
+  it('persists independent pseudonymized stability rotation per repository', () => {
+    const stabilityCandidatesAfter = [...repos].sort().map((repo, index) => ({
+      repoDigest: monitoringRepoDigest(repo),
+      candidateAfter: candidate(`stable-${index}`, index === 0 ? 'a' : 'b'),
+    })).sort((left, right) => left.repoDigest.localeCompare(right.repoDigest));
+    const checkpoint = buildMonitoringCursor(repos, { stabilityCandidatesAfter })!;
+    expect(saveMonitoringCursor(checkpoint, { enrolledRepos: repos })).toBe(true);
+    expect(loadMonitoringCursor(repos).cursor?.stabilityCandidatesAfter).toEqual(stabilityCandidatesAfter);
+    expect(JSON.stringify(checkpoint)).not.toContain(repos[0]);
+    expect(sanitizeMonitoringCursor({
+      ...checkpoint,
+      stabilityCandidatesAfter: [...stabilityCandidatesAfter].reverse(),
+    })).toBeNull();
+    expect(sanitizeMonitoringCursor({
+      ...checkpoint,
+      stabilityCandidatesAfter: [stabilityCandidatesAfter[0], stabilityCandidatesAfter[0]],
+    })).toBeNull();
   });
 
   it('rejects malformed, extra-field, and future persisted state', () => {

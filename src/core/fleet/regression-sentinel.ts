@@ -290,7 +290,7 @@ export interface RegressionGreenObservation {
   /** The repository had no tracked or untracked workspace changes after verification. */
   workspaceClean: true;
   /** This is not a stability proof; production must require detached-worktree isolation later. */
-  isolation: 'clean-workspace';
+  isolation: 'clean-workspace' | 'detached-worktree';
 }
 
 /**

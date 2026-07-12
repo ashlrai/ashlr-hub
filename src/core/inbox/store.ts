@@ -56,6 +56,7 @@ import {
   type ProposalMutationLock,
 } from './proposal-mutation-lock.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
+import { sanitizeRemoteHandoffReconciliation } from './remote-handoff-attestation.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -230,19 +231,26 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
       ? handoff.mergeCommitOid.toLowerCase()
       : undefined;
     const sanitizedMergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
+    const sanitizedReconciliation = sanitizeRemoteHandoffReconciliation(next.id, next.repo, handoff);
     if (
       scrubbedDetail !== handoff.detail ||
       scrubbedPrUrl !== handoff.prUrl ||
       scrubbedMergeCommitOid !== handoff.mergeCommitOid ||
-      sanitizedMergedAt !== handoff.mergedAt
+      sanitizedMergedAt !== handoff.mergedAt || sanitizedReconciliation !== handoff.reconciliation
     ) {
-      const { mergeCommitOid: _mergeCommitOid, mergedAt: _mergedAt, ...safeHandoff } = handoff;
+      const {
+        mergeCommitOid: _mergeCommitOid,
+        mergedAt: _mergedAt,
+        reconciliation: _reconciliation,
+        ...safeHandoff
+      } = handoff;
       next.remoteHandoff = {
         ...safeHandoff,
         ...(scrubbedDetail !== undefined ? { detail: scrubbedDetail } : {}),
         ...(scrubbedPrUrl !== undefined ? { prUrl: scrubbedPrUrl } : {}),
         ...(scrubbedMergeCommitOid !== undefined ? { mergeCommitOid: scrubbedMergeCommitOid } : {}),
         ...(sanitizedMergedAt !== undefined ? { mergedAt: sanitizedMergedAt } : {}),
+        ...(sanitizedReconciliation !== undefined ? { reconciliation: sanitizedReconciliation } : {}),
       };
       changed = true;
     }

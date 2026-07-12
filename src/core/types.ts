@@ -3674,6 +3674,14 @@ export interface ProposalVerifyResult {
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
 }
 
+export interface RemoteHandoffReconciliation {
+  schemaVersion: 1;
+  /** Local observation time, bound with the exact host merge tuple. */
+  observedAt: string;
+  /** HMAC produced only after a successful remote-host reconciliation read. */
+  attestation: string;
+}
+
 export interface ProposalRemoteHandoff {
   provider: 'github';
   state: 'awaiting-host-merge' | 'merged' | 'closed' | 'unknown';
@@ -3684,6 +3692,7 @@ export interface ProposalRemoteHandoff {
   mergeCommitOid?: string;
   /** Authoritative host-reported merge time; never synthesized from local reconciliation time. */
   mergedAt?: string;
+  reconciliation?: RemoteHandoffReconciliation;
   createdAt: string;
   updatedAt?: string;
   detail?: string;

@@ -7,11 +7,11 @@
 
 import { existsSync } from 'node:fs';
 import { listProposals, loadProposal, setStatus, updateProposalField } from './store.js';
-import { viewPr } from '../integrations/github.js';
 import type { Proposal, ProposalRemoteHandoff } from '../types.js';
 import type { PrView } from '../integrations/github.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
+import { viewPrWithReconciliation } from './remote-handoff-attestation.js';
 
 export interface RemoteHandoffReconcileResult {
   checked: number;
@@ -94,11 +94,12 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
     return result;
   }
 
-  const pr = viewPr(repo, selector);
-  if (!pr) {
+  const hostRead = viewPrWithReconciliation(repo, selector, proposal.id, handoff);
+  if (!hostRead) {
     result.unknown++;
     return result;
   }
+  const { pr, reconciliation } = hostRead;
   if (hasConflictingIdentity(handoff, pr)) {
     result.unknown++;
     return result;
@@ -140,6 +141,13 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
         ...(mergeCommitOid ? { mergeCommitOid } : {}),
         detail,
       });
+      if (current.repo && mergedAt && mergeCommitOid) {
+        if (!reconciliation) {
+          result.unknown++;
+          return result;
+        }
+        remoteHandoff.reconciliation = reconciliation;
+      }
       if (!setStatus(proposal.id, 'applied', detail, undefined, mutationLock, { remoteHandoff })) {
         result.unknown++;
         return result;

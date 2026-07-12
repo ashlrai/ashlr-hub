@@ -96,6 +96,11 @@ vi.mock('../src/core/fleet/regression-sentinel.js', () => ({
   bisectAndRevert: (...args: unknown[]) => mockBisectAndRevert(...args),
 }));
 
+const mockObservePostMergeStability = vi.fn();
+vi.mock('../src/core/fleet/post-merge-stability-observer.js', () => ({
+  observePostMergeStability: (...args: unknown[]) => mockObservePostMergeStability(...args),
+}));
+
 const mockLoadProposal = vi.fn();
 vi.mock('../src/core/inbox/store.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/core/inbox/store.js')>(),
@@ -172,6 +177,7 @@ beforeEach(() => {
   mockRunCounterfactualReplay.mockReset();
   mockDetectRegression.mockReset();
   mockBisectAndRevert.mockReset();
+  mockObservePostMergeStability.mockReset();
   mockLoadProposal.mockReset();
   mockRecordPostMergeObservation.mockReset();
 
@@ -218,6 +224,7 @@ beforeEach(() => {
 
   // bisectAndRevert: success.
   mockBisectAndRevert.mockResolvedValue({ reverted: false });
+  mockObservePostMergeStability.mockReturnValue({ sourceComplete: true, stable: 0 });
   mockLoadProposal.mockReturnValue(null);
 
   // buildBacklog: one item per enrolled repo (sufficient to reach dispatcher).
@@ -607,6 +614,55 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
 
     expect(mockDetectRegression).toHaveBeenCalledTimes(1);
     expect(mockBisectAndRevert).not.toHaveBeenCalled();
+  });
+
+  it('runs stability observation only after a same-run green sentinel result', async () => {
+    const repo = enrollBuiltinRepo();
+    const greenObservation = {
+      authority: 'observation-only', head: 'a'.repeat(40),
+      verifiedAt: new Date().toISOString(), manifestDigest: 'b'.repeat(64),
+      requiredCommandCount: 1, workspaceClean: true, isolation: 'clean-workspace',
+    };
+    mockDetectRegression.mockResolvedValue({ regressed: false, greenObservation });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    expect(mockObservePostMergeStability).toHaveBeenCalledWith({
+      repo: resolve(repo.dir),
+      enrolledRepos: [resolve(repo.dir)],
+      greenObservation,
+    });
+  });
+
+  it('does not run stability observation for red or inconclusive sentinel results', async () => {
+    enrollBuiltinRepo();
+    mockDetectRegression.mockResolvedValue({ regressed: false });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    expect(mockObservePostMergeStability).not.toHaveBeenCalled();
+  });
+
+  it('persists and resumes per-repository stability rotation', async () => {
+    const repo = enrollBuiltinRepo();
+    const greenObservation = {
+      authority: 'observation-only', head: 'a'.repeat(40),
+      verifiedAt: new Date().toISOString(), manifestDigest: 'b'.repeat(64),
+      requiredCommandCount: 1, workspaceClean: true, isolation: 'clean-workspace',
+    };
+    const candidateAfter = { proposalId: 'proposal-stability', mergeCommitOid: 'c'.repeat(40) };
+    mockDetectRegression.mockResolvedValue({ regressed: false, greenObservation });
+    mockObservePostMergeStability
+      .mockReturnValueOnce({ sourceComplete: false, stable: 0, candidateAfter })
+      .mockReturnValue({ sourceComplete: false, stable: 0, candidateAfter });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    const { loadMonitoringCursor, monitoringRepoDigest } = await import('../src/core/fleet/monitoring-cursor.js');
+    expect(loadMonitoringCursor([resolve(repo.dir)]).cursor?.stabilityCandidatesAfter).toEqual([{
+      repoDigest: monitoringRepoDigest(resolve(repo.dir)),
+      candidateAfter,
+    }]);
   });
 
   it('calls bisectAndRevert when detectRegression returns regressed=true', async () => {

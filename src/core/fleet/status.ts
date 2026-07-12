@@ -113,7 +113,11 @@ import {
   type ResolutionObserverStatus,
 } from './resolution-observer.js';
 import { readPostMergeObservations } from './post-merge-observations.js';
-import { readPostMergeStability, type PostMergeStabilityCohortSummary } from './post-merge-stability.js';
+import {
+  postMergeStabilityRepoDigest,
+  readPostMergeStability,
+  type PostMergeStabilityCohortSummary,
+} from './post-merge-stability.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -1862,6 +1866,21 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
       !adverse.complete || !stability.complete;
     const missing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
+    const adverseMembers = new Set(adverse.observations.flatMap((row) => {
+      const digest = postMergeStabilityRepoDigest(row.repo);
+      return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
+    }));
+    const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
+      row.repoDigest, row.proposalId, row.mergeCommit,
+    ])));
+    const effectiveSummary: PostMergeStabilityCohortSummary = {
+      completeCohorts: new Set(effectiveStability.map((row) => row.cohortId)).size,
+      releasedWitnesses: effectiveStability.length,
+      distinctRepoDigests: new Set(effectiveStability.map((row) => row.repoDigest)).size,
+      ...(effectiveStability.length > 0
+        ? { latestCompletedAt: effectiveStability.map((row) => row.stableAt).sort().at(-1) }
+        : {}),
+    };
     status.postMergeSource = {
       sourceState: degraded ? 'degraded' : missing ? 'missing' : 'healthy',
       sourcePresent: adverse.sourcePresent || stability.sourcePresent,
@@ -1878,7 +1897,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       // Stable batches do not yet bind the complete eligible denominator.
       denominatorComplete: false,
       adverseObservations: adverse.observations.length,
-      stability: stability.cohortSummary,
+      // Signed adverse evidence monotonically supersedes an overlapping
+      // positive witness in the public observational summary.
+      stability: effectiveSummary,
     };
   } catch {
     status.postMergeSource = {

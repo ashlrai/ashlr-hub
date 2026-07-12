@@ -42,6 +42,7 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
+import { verifyRemoteHandoffReconciliation } from '../src/core/inbox/remote-handoff-attestation.js';
 import { createProposal, listProposals, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from '../src/core/inbox/proposal-mutation-lock.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
@@ -50,6 +51,7 @@ import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 const origHome = process.env.HOME;
+const origAshlrHome = process.env.ASHLR_HOME;
 const origAllowAny = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 let tmpHome: string;
 let tmpRepo: string;
@@ -147,6 +149,7 @@ beforeEach(() => {
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-'));
   bareRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-bare-'));
   process.env.HOME = tmpHome;
+  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
   setKill(false);
   initRepo(tmpRepo);
@@ -190,6 +193,8 @@ afterEach(() => {
   fs.rmSync(tmpRepo, { recursive: true, force: true });
   fs.rmSync(bareRepo, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
   if (origAllowAny === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAny;
 });
@@ -719,8 +724,20 @@ describe('M315 remote PR handoff truth', () => {
       state: 'merged',
       mergedAt: '2026-07-03T01:00:00Z',
       mergeCommitOid: 'a'.repeat(40),
+      reconciliation: {
+        schemaVersion: 1,
+        observedAt: expect.any(String),
+        attestation: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
       detail: expect.stringContaining('remote PR merged'),
     });
+    expect(verifyRemoteHandoffReconciliation(proposal.id, tmpRepo, loaded!.remoteHandoff!)).toBe(true);
+    const reconciliationKey = fs.lstatSync(path.join(
+      tmpHome, '.ashlr', 'foundry', 'remote-handoff-reconciliation.key',
+    ));
+    expect(reconciliationKey.isFile()).toBe(true);
+    expect(reconciliationKey.size).toBe(32);
+    if (process.platform !== 'win32') expect(reconciliationKey.mode & 0o777).toBe(0o600);
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'merged' && d.verdict === 'applied')).toBe(true);
   });

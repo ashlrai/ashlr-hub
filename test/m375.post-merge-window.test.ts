@@ -355,7 +355,7 @@ describe('M375 complete post-merge window inspector', () => {
       return realRunner(invocation);
     };
 
-    expect(inspectPostMergeWindow(input(fixture), { runGit })).toMatchObject({ state: 'complete' });
+    expect(inspectPostMergeWindow(input(fixture), { runGit, deadlineMs: 5_000 })).toMatchObject({ state: 'complete' });
     const history = calls.find((call) => call.args[0] === 'log');
     expect(history?.args).toContain(`${fixture.merge}..${capturedHead}`);
     expect(history?.args).not.toContain(`${fixture.merge}..HEAD`);
@@ -369,7 +369,7 @@ describe('M375 complete post-merge window inspector', () => {
       2 * 1024 * 1024,
       64 * 1024,
     ]);
-    expect(calls.every((call) => call.timeoutMs > 0 && call.timeoutMs <= 15_000)).toBe(true);
+    expect(calls.every((call) => call.timeoutMs > 0 && call.timeoutMs <= 5_000)).toBe(true);
   });
 
   it('fails closed when HEAD moves during inspection', () => {
