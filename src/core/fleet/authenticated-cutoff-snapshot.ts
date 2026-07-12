@@ -162,3 +162,27 @@ export function verifyAuthenticatedCutoffEnvelopeV2(
     return false;
   }
 }
+
+/** Domain-separated MAC for durable cutoff-observation checkpoint metadata. */
+export function createCutoffCheckpointDigestV1(
+  payload: unknown[],
+  keyProvider: KeyProvider = existingKey,
+): string | null {
+  try {
+    if (!Array.isArray(payload)) return null;
+    const key = keyProvider();
+    if (!key || key.length !== 32) return null;
+    return hmac(key, ['ashlr:cutoff-observation-checkpoint:v1', payload]);
+  } catch {
+    return null;
+  }
+}
+
+export function verifyCutoffCheckpointDigestV1(
+  payload: unknown[],
+  digest: string,
+  keyProvider: KeyProvider = existingKey,
+): boolean {
+  const expected = createCutoffCheckpointDigestV1(payload, keyProvider);
+  return expected !== null && equalDigest(expected, digest);
+}
