@@ -44,6 +44,10 @@ import {
   readGeneratedRepairQueueSnapshot,
 } from './generated-repair-lifecycle.js';
 import {
+  inspectGeneratedRepairRouteFeasibility,
+  type GeneratedRepairRouteReason,
+} from './router.js';
+import {
   readRepairHandoffs,
   readRepairHandoffSchemaSummary,
   validRepairHandoffV2Activation,
@@ -749,6 +753,16 @@ export interface FleetQueueGeneratedWorkStatus {
   invent: number;
 }
 
+export interface FleetGeneratedRepairRouteStatus {
+  scope: 'eligible-claim-candidates';
+  authority: 'observation-only';
+  trustedItems: number;
+  feasibleItems: number;
+  unavailableItems: number;
+  requiresAlternativeItems: number;
+  byReason: Array<{ reason: GeneratedRepairRouteReason; count: number }>;
+}
+
 export interface FleetQueueScannerEvidenceStatus {
   state: 'healthy' | 'degraded' | 'unknown';
   observations: number;
@@ -995,6 +1009,7 @@ export interface FleetStatus {
     shared?: FleetSharedQueueStatus;
     activeWork?: FleetActiveWorkStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
+    generatedRepairRoutes?: FleetGeneratedRepairRouteStatus;
     scannerEvidence?: FleetQueueScannerEvidenceStatus;
     resolutionObserver?: FleetResolutionObserverStatus;
     diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
@@ -1180,6 +1195,7 @@ interface FleetQueueEligibility {
   repairLifecycleUnavailableItems: number;
   repairTerminalItems: number;
   repairQuarantinedItems: number;
+  generatedRepairRoutes?: FleetGeneratedRepairRouteStatus;
   nextEligibleAt: string | null;
 }
 
@@ -1213,6 +1229,10 @@ function buildQueueEligibility(
   let repairLifecycleUnavailableItems = 0;
   let repairTerminalItems = 0;
   let repairQuarantinedItems = 0;
+  let trustedRouteItems = 0;
+  let feasibleRouteItems = 0;
+  let requiresAlternativeItems = 0;
+  const routeReasons = new Map<GeneratedRepairRouteReason, number>();
   let nextEligibleMs: number | null = null;
   for (const item of items) {
     if (!repairControlAvailable && item.tags.includes('proposal-repair')) {
@@ -1248,6 +1268,14 @@ function buildQueueEligibility(
       }
       continue;
     }
+    if (isTrustedGeneratedRepairItem(item)) {
+      trustedRouteItems++;
+      const policy = repairQueue.retryPolicy(item);
+      const route = inspectGeneratedRepairRouteFeasibility(item, cfg, policy);
+      if (route.feasible) feasibleRouteItems++;
+      if (route.requiresAlternative) requiresAlternativeItems++;
+      routeReasons.set(route.reason, (routeReasons.get(route.reason) ?? 0) + 1);
+    }
     eligibleItems.push(item);
   }
 
@@ -1259,6 +1287,19 @@ function buildQueueEligibility(
     repairLifecycleUnavailableItems,
     repairTerminalItems,
     repairQuarantinedItems,
+    ...(trustedRouteItems > 0 ? {
+      generatedRepairRoutes: {
+        scope: 'eligible-claim-candidates' as const,
+        authority: 'observation-only' as const,
+        trustedItems: trustedRouteItems,
+        feasibleItems: feasibleRouteItems,
+        unavailableItems: trustedRouteItems - feasibleRouteItems,
+        requiresAlternativeItems,
+        byReason: [...routeReasons.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason)),
+      },
+    } : {}),
     nextEligibleAt: isoFromMs(nextEligibleMs),
   };
 }
@@ -1440,6 +1481,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let repairLifecycleUnavailableItems = 0;
   let repairTerminalItems = 0;
   let repairQuarantinedItems = 0;
+  let generatedRepairRoutes: FleetGeneratedRepairRouteStatus | undefined;
   let eligibleOrdinaryItems: number | null = null;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
@@ -1642,6 +1684,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     repairLifecycleUnavailableItems = eligibility.repairLifecycleUnavailableItems;
     repairTerminalItems = eligibility.repairTerminalItems;
     repairQuarantinedItems = eligibility.repairQuarantinedItems;
+    generatedRepairRoutes = eligibility.generatedRepairRoutes;
     eligibleOrdinaryItems = queueSourceStatus === 'healthy'
       ? eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length
       : null;
@@ -1865,6 +1908,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
       ...(activeWork !== undefined ? { activeWork } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
+      ...(generatedRepairRoutes !== undefined ? { generatedRepairRoutes } : {}),
       ...(scannerEvidence !== undefined ? { scannerEvidence } : {}),
       ...(resolutionObserver !== undefined ? { resolutionObserver } : {}),
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),

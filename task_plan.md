@@ -1930,3 +1930,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add proposal, capture, diagnostic, alias, generation, rollback, router, and executor-drift regressions and pass focused verification.
 - [x] Pass exhaustive verification and independent final review.
 - [x] Commit, push, observe CI, reload production, and canary the trusted-retry release.
+
+## Current Overnight Cycle - Repair Route Feasibility Observability
+- [x] Rehydrate the deployed trusted-retry baseline, production health, git state, Entire state, and durable notes.
+- [x] Audit lifecycle snapshots, pre-claim daemon flow, FleetStatus aggregation, and Mission Control compatibility.
+- [x] Derive retry policy from the existing point-in-time read-only lifecycle snapshot without rereading mutable authority.
+- [x] Add bounded observation-only route feasibility counts and reasons for eligible trusted repair candidates.
+- [x] Preserve queue eligibility, `queue.next`, daemon claim authority, and no-directory/no-chmod status invariants.
+- [x] Add focused lifecycle, route, and FleetStatus coverage.
+- [x] Pass static, adjacent, exhaustive, and independent verification.
+- [ ] Commit, push, observe CI, reload production, and canary live feasibility truth.

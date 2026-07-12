@@ -1469,6 +1469,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(status.queue.repairControlBlockedItems).toBeUndefined();
     expect(status.queue.next?.map((item) => item.id)).toEqual(expect.arrayContaining([ordinary.id, active.id]));
+    expect(status.queue.generatedRepairRoutes).toEqual({
+      scope: 'eligible-claim-candidates',
+      authority: 'observation-only',
+      trustedItems: 1,
+      feasibleItems: 0,
+      unavailableItems: 1,
+      requiresAlternativeItems: 0,
+      byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
+    });
   });
 
   it('does not create lifecycle storage or a failure marker while building status', async () => {
@@ -1481,9 +1490,40 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const status = await buildFleetStatus(baseConfig());
 
     expect(status.queue.eligibleBacklogItems).toBe(1);
+    expect(status.queue.generatedRepairRoutes).toMatchObject({
+      authority: 'observation-only',
+      trustedItems: 1,
+      unavailableItems: 1,
+    });
     expect(existsSync(fleetDir)).toBe(false);
     expect(existsSync(lifecyclePath)).toBe(false);
     expect(existsSync(`${lifecyclePath}.failed`)).toBe(false);
+  });
+
+  it('aggregates an active retry with no configured editing alternative without changing eligibility', async () => {
+    const repo = join(tmpHome, 'repo');
+    const retry = makeTrustedProposalRepairItem(repo, 'repo:proposal-repair:dddddddddddd');
+    recordGeneratedRepairLifecycle(retry, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    writeBacklogSnapshot(tmpHome, repo, [retry]);
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.queue.eligibleBacklogItems).toBe(1);
+    expect(status.queue.next?.map((item) => item.id)).toEqual([retry.id]);
+    expect(status.queue.generatedRepairRoutes).toEqual({
+      scope: 'eligible-claim-candidates',
+      authority: 'observation-only',
+      trustedItems: 1,
+      feasibleItems: 0,
+      unavailableItems: 1,
+      requiresAlternativeItems: 1,
+      byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
+    });
   });
 
   it('does not chmod an existing lifecycle directory while building status', async () => {
@@ -1528,6 +1568,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       repairLifecycleUnavailableItems: 1,
     });
     expect(status.queue.next?.map((item) => item.id)).toEqual([ordinary.id]);
+    expect(status.queue.generatedRepairRoutes).toBeUndefined();
   });
 
   it('fails closed for an untrusted repair-shaped queue row', async () => {
@@ -1594,6 +1635,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       repairQuarantinedItems: 1,
     });
     expect(status.queue.next).toBeUndefined();
+    expect(status.queue.generatedRepairRoutes).toBeUndefined();
     expect(status.nextActions).toContainEqual(expect.objectContaining({
       id: 'inspect-repair-lifecycle-control',
     }));

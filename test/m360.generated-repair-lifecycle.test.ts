@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   generatedRepairLifecyclePath,
   generatedRepairDispatchLineage,
   generatedRepairRetryPolicy,
+  readGeneratedRepairQueueSnapshot,
   acknowledgeGeneratedRepairTreatmentOutcome,
   readGeneratedRepairLifecycle,
   readPendingGeneratedRepairTreatmentOutcomes,
@@ -12,9 +13,10 @@ import {
   readGeneratedRepairTerminalOutcome,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
+import { recordUse } from '../src/core/fleet/quota.js';
 import type { WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
-import { routeBackend } from '../src/core/fleet/router.js';
+import { inspectGeneratedRepairRouteFeasibility, routeBackend } from '../src/core/fleet/router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -214,6 +216,107 @@ describe('generated repair lifecycle store', () => {
         kind: 'empty-diff', attemptId: ATTEMPT_TWO, backend: 'local-coder', tier: 'mid',
       })).toMatchObject({ available: false, disposition: 'active', recorded: false });
     }
+  });
+
+  it('inspects retry route feasibility from one read-only lifecycle snapshot', () => {
+    const item = repairItem();
+    const cfg = {
+      version: 1,
+      roots: ['/tmp'],
+      editor: 'cursor',
+      staleDays: 30,
+      categories: {},
+      tidyRules: [],
+      keepers: [],
+      models: { lmstudio: '', ollama: '', providerChain: [] },
+      telemetry: {},
+      tools: {},
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as import('../src/core/types.js').AshlrConfig;
+    const fleetDir = dirname(generatedRepairLifecyclePath());
+    expect(existsSync(fleetDir)).toBe(false);
+
+    const initial = readGeneratedRepairQueueSnapshot();
+    const initialPolicy = initial.retryPolicy(item);
+    expect(initialPolicy).toMatchObject({ available: true, requireAlternative: false });
+    expect(inspectGeneratedRepairRouteFeasibility(item, cfg, initialPolicy)).toMatchObject({
+      feasible: true,
+      reason: 'feasible',
+    });
+    expect(existsSync(fleetDir)).toBe(false);
+
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid',
+    });
+    expect(initial.retryPolicy(item)).toMatchObject({ requireAlternative: false });
+    const retry = readGeneratedRepairQueueSnapshot().retryPolicy(item);
+    expect(retry).toMatchObject({
+      available: true,
+      requireAlternative: true,
+      excludedBackend: 'local-coder',
+      requiredTier: 'mid',
+    });
+    expect(inspectGeneratedRepairRouteFeasibility(item, cfg, retry)).toMatchObject({
+      feasible: true,
+      backend: 'kimi',
+      reason: 'feasible',
+    });
+    expect(inspectGeneratedRepairRouteFeasibility(item, {
+      ...cfg,
+      foundry: { allowedBackends: ['local-coder'] },
+    }, retry)).toMatchObject({
+      feasible: false,
+      reason: 'same-tier-alternative-unavailable',
+    });
+
+    const repairOnlyCfg = { ...cfg, foundry: { allowedBackends: ['aw'] } } as import('../src/core/types.js').AshlrConfig;
+    const fresh = repairItem({ id: 'repo:proposal-repair:777777777777' });
+    const freshPolicy = readGeneratedRepairQueueSnapshot().retryPolicy(fresh);
+    expect(inspectGeneratedRepairRouteFeasibility(fresh, repairOnlyCfg, freshPolicy)).toMatchObject({
+      feasible: false,
+      reason: 'editing-backend-unavailable',
+    });
+    expect(routeBackend(fresh, repairOnlyCfg)).toMatchObject({ backend: 'builtin' });
+
+    recordUse('local-coder');
+    const cappedCfg = {
+      ...cfg,
+      foundry: {
+        allowedBackends: ['local-coder'],
+        limits: { 'local-coder': { window: '1h', max: 1 } },
+      },
+    } as import('../src/core/types.js').AshlrConfig;
+    expect(inspectGeneratedRepairRouteFeasibility(fresh, cappedCfg, freshPolicy)).toMatchObject({
+      feasible: false,
+      reason: 'route-capacity-unavailable',
+    });
+
+    const frontierItem = repairItem({
+      id: 'repo:proposal-repair:888888888888',
+      effort: 5,
+      score: 10,
+    });
+    const frontierCfg = {
+      ...cfg,
+      foundry: { allowedBackends: ['claude', 'codex'] },
+    } as import('../src/core/types.js').AshlrConfig;
+    const selected = routeBackend(frontierItem, frontierCfg).backend;
+    expect(['claude', 'codex']).toContain(selected);
+    recordUse(selected);
+    const selectedCappedCfg = {
+      ...frontierCfg,
+      foundry: {
+        allowedBackends: ['claude', 'codex'],
+        limits: { [selected]: { window: '1h', max: 1 } },
+      },
+    } as import('../src/core/types.js').AshlrConfig;
+    const frontierPolicy = readGeneratedRepairQueueSnapshot().retryPolicy(frontierItem);
+    expect(routeBackend(frontierItem, selectedCappedCfg).backend).toBe(selected);
+    expect(inspectGeneratedRepairRouteFeasibility(
+      frontierItem,
+      selectedCappedCfg,
+      frontierPolicy,
+    )).toMatchObject({ feasible: false, reason: 'route-capacity-unavailable' });
   });
 
   it('rejects first parent-bound evidence that conflicts with durable routing tier', () => {

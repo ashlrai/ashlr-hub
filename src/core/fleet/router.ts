@@ -68,6 +68,7 @@ import {
   generatedRepairBackendAllowed,
   generatedRepairGenerationId,
   generatedRepairRetryPolicy,
+  type GeneratedRepairRetryPolicy,
 } from './generated-repair-lifecycle.js';
 import { withinLimit } from './quota.js';
 import { isSubscriptionEngine, subscriptionAllows } from './subscription-usage.js';
@@ -155,6 +156,98 @@ const REPAIR_PREFERENCE: readonly EngineId[] = [
   'claude', 'codex', 'nim', 'kimi', 'grok', 'local-coder', 'hermes',
   'opencode', 'ashlrcode', 'aw',
 ];
+
+export type GeneratedRepairRouteReason =
+  | 'feasible'
+  | 'provenance-unavailable'
+  | 'lifecycle-unavailable'
+  | 'editing-backend-unavailable'
+  | 'same-tier-backend-unavailable'
+  | 'same-tier-alternative-unavailable'
+  | 'route-capacity-unavailable';
+
+export interface GeneratedRepairRouteFeasibility {
+  feasible: boolean;
+  requiredTier: EngineTier | null;
+  requiresAlternative: boolean;
+  backend: EngineId | null;
+  reason: GeneratedRepairRouteReason;
+}
+
+/** Read-only route inspection using caller-supplied point-in-time lifecycle authority. */
+export function inspectGeneratedRepairRouteFeasibility(
+  item: WorkItem,
+  cfg: AshlrConfig,
+  policy: GeneratedRepairRetryPolicy,
+): GeneratedRepairRouteFeasibility {
+  const parentTierBoundCapture = isTrustedCaptureRepairItem(item) &&
+    (item.repairParentSource === 'issue' || item.repairParentSource === 'goal');
+  const requiredTier = policy.requiredTier ?? (
+    isTrustedDiagnosticResliceItem(item) || parentTierBoundCapture
+      ? item.repairParentTier ?? null
+      : null
+  );
+  const unavailable = (reason: Exclude<GeneratedRepairRouteReason, 'feasible'>): GeneratedRepairRouteFeasibility => ({
+    feasible: false,
+    requiredTier,
+    requiresAlternative: policy.requireAlternative,
+    backend: null,
+    reason,
+  });
+  if (!policy.applies || !policy.available) return unavailable('lifecycle-unavailable');
+  if ((isTrustedDiagnosticResliceItem(item) || parentTierBoundCapture) && requiredTier === null) {
+    return unavailable('provenance-unavailable');
+  }
+  const exactTierRepairRoute = policy.requireAlternative || requiredTier !== null;
+  let routeCandidates: EngineId[];
+  if (exactTierRepairRoute) {
+    const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
+    const installed = REPAIR_PREFERENCE.filter((backend) =>
+      allowed.has(backend) && engineInstalled(backend, cfg));
+    if (installed.length === 0) return unavailable('editing-backend-unavailable');
+    routeCandidates = requiredTier === null
+      ? installed
+      : installed.filter((backend) => engineTierOf(backend, cfg) === requiredTier);
+    if (routeCandidates.length === 0) return unavailable('same-tier-backend-unavailable');
+    if (policy.requireAlternative) {
+      routeCandidates = routeCandidates.filter((backend) => backend !== policy.excludedBackend);
+      if (routeCandidates.length === 0) return unavailable('same-tier-alternative-unavailable');
+    }
+  } else {
+    const frontiers = availableFrontier(cfg);
+    const mids = availableMid(cfg);
+    const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
+    const frontierCandidate = isFrontierItem(item) ||
+      isGeneratedNoDiffProposalRepair(item) ||
+      isGeneratedCaptureProposalRepair(item) ||
+      (qualityPolicy && isSubstantiveItem(item));
+    routeCandidates = frontierCandidate && frontiers.length > 0
+      ? frontiers
+      : mids.length > 0 ? mids : frontiers;
+    if (routeCandidates.length === 0) return unavailable('editing-backend-unavailable');
+  }
+  const capacityCandidates = exactTierRepairRoute
+    ? routeCandidates
+    : [pickFrom(routeCandidates, item)!];
+  const candidates = capacityCandidates.filter((backend) => {
+    if (!withinLimit(backend, cfg)) return false;
+    if (!isSubscriptionEngine(backend)) return true;
+    const configuredMax = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
+    const maxPercent = typeof configuredMax === 'number'
+      ? Math.min(100, Math.max(1, configuredMax))
+      : 90;
+    return subscriptionAllows(backend, { maxPercent }).allowed;
+  });
+  const backend = candidates[0] ?? null;
+  if (backend === null) return unavailable('route-capacity-unavailable');
+  return {
+    feasible: true,
+    requiredTier,
+    requiresAlternative: policy.requireAlternative,
+    backend,
+    reason: 'feasible',
+  };
+}
 
 /**
  * M115: Effort threshold above which frontier is preferred over local-mid.

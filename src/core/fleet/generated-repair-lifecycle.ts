@@ -888,7 +888,42 @@ export function generatedRepairDispatchState(item: WorkItem): GeneratedRepairDis
 
 export interface GeneratedRepairQueueReaderSnapshot {
   dispatchState(item: WorkItem): GeneratedRepairDispatchState;
+  retryPolicy(item: WorkItem): GeneratedRepairRetryPolicy;
   cooldownKeys(item: WorkItem): string[];
+}
+
+function retryPolicyFromLifecycle(
+  item: WorkItem,
+  lifecycle: GeneratedRepairLifecycleResult,
+): GeneratedRepairRetryPolicy {
+  if (!isTrustedGeneratedRepairItem(item)) {
+    return {
+      applies: false,
+      available: true,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
+  }
+  if (!lifecycle.available || lifecycle.disposition !== 'active') {
+    return {
+      applies: true,
+      available: false,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
+  }
+  const requireAlternative = lifecycle.authoritativeEmptyRuns >= 1;
+  const excludedBackend = lifecycle.lastAuthoritativeEmptyBackend ?? null;
+  const requiredTier = lifecycle.authoritativeEmptyTiers?.[0] ?? null;
+  return {
+    applies: true,
+    available: !requireAlternative || (excludedBackend !== null && requiredTier !== null),
+    requireAlternative,
+    excludedBackend: requireAlternative ? excludedBackend : null,
+    requiredTier: requireAlternative ? requiredTier : null,
+  };
 }
 
 /** Read-only, point-in-time generated-repair authority for one queue projection. */
@@ -909,20 +944,26 @@ export function readGeneratedRepairQueueSnapshot(): GeneratedRepairQueueReaderSn
     generationIdsByItem.set(item, generationIds);
     return generationIds;
   };
+  const lifecycleFor = (item: WorkItem): GeneratedRepairLifecycleResult => {
+    let lifecycle = lifecycleByItem.get(item);
+    if (!lifecycle) {
+      lifecycle = readGeneratedRepairLifecycleFromSources(
+        item,
+        authority,
+        loaded,
+        recordsByGeneration,
+        generationIdsFor(item),
+      );
+      lifecycleByItem.set(item, lifecycle);
+    }
+    return lifecycle;
+  };
   return {
     dispatchState(item) {
-      let lifecycle = lifecycleByItem.get(item);
-      if (!lifecycle) {
-        lifecycle = readGeneratedRepairLifecycleFromSources(
-          item,
-          authority,
-          loaded,
-          recordsByGeneration,
-          generationIdsFor(item),
-        );
-        lifecycleByItem.set(item, lifecycle);
-      }
-      return dispatchStateForLifecycle(item, lifecycle);
+      return dispatchStateForLifecycle(item, lifecycleFor(item));
+    },
+    retryPolicy(item) {
+      return retryPolicyFromLifecycle(item, lifecycleFor(item));
     },
     cooldownKeys(item) {
       const generations = generationIdsFor(item);
@@ -938,13 +979,11 @@ export function readGeneratedRepairQueueSnapshot(): GeneratedRepairQueueReaderSn
 /** Derive backend retry constraints from durable evidence for every trusted repair. */
 export function generatedRepairRetryPolicy(item: WorkItem): GeneratedRepairRetryPolicy {
   if (!isTrustedGeneratedRepairItem(item)) {
-    return {
-      applies: false,
+    return retryPolicyFromLifecycle(item, {
       available: true,
-      requireAlternative: false,
-      excludedBackend: null,
-      requiredTier: null,
-    };
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
   }
   if (generatedRepairGenerationId(item) === null) {
     return {
@@ -955,35 +994,7 @@ export function generatedRepairRetryPolicy(item: WorkItem): GeneratedRepairRetry
       requiredTier: null,
     };
   }
-  const lifecycle = readGeneratedRepairLifecycle(item);
-  if (!lifecycle.available) {
-    return {
-      applies: true,
-      available: false,
-      requireAlternative: false,
-      excludedBackend: null,
-      requiredTier: null,
-    };
-  }
-  if (lifecycle.disposition !== 'active') {
-    return {
-      applies: true,
-      available: false,
-      requireAlternative: false,
-      excludedBackend: null,
-      requiredTier: null,
-    };
-  }
-  const requireAlternative = lifecycle.authoritativeEmptyRuns >= 1;
-  const excludedBackend = lifecycle.lastAuthoritativeEmptyBackend ?? null;
-  const requiredTier = lifecycle.authoritativeEmptyTiers?.[0] ?? null;
-  return {
-    applies: true,
-    available: !requireAlternative || (excludedBackend !== null && requiredTier !== null),
-    requireAlternative,
-    excludedBackend: requireAlternative ? excludedBackend : null,
-    requiredTier: requireAlternative ? requiredTier : null,
-  };
+  return retryPolicyFromLifecycle(item, readGeneratedRepairLifecycle(item));
 }
 
 export function generatedRepairBackendAllowed(item: WorkItem, backend: EngineId): boolean {
