@@ -177,6 +177,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Known failed verification is a permanent no-merge condition, but it should not freeze the fleet forever. Auto-merge maintenance now drains those proposals to `rejected` after the existing stuck threshold, and direction reports ignore terminal failures.
 
 ## Errors Encountered
+- Windows portability 3/3 exposed a timing-only failure in the new 30-candidate paging fixture; production behavior passed, but the test retained Vitest's 5-second default. Raised only that integration test to the existing 30-second git-fixture budget.
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
 - Full serial Vitest can hang after many tests with one worker alive; mitigated with `scripts/test-ci.mjs` watchdog for CI/publish gates.
 - Full CI initially exposed two stale auto-merge test expectations: default tier frontier proposals no longer get a pass-level judge, and evidence-mode explainer fixtures now need a diff-bound verification hash. Updated tests and reran affected suites plus full CI.

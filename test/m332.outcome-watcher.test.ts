@@ -563,7 +563,7 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(first.throttled).toBe(false);
     expect(second.scanned).toBe(5);
     expect(second.throttled).toBe(false);
-  });
+  }, 30_000);
 
   it('completes a partial sweep when its unvisited tail disappears', async () => {
     const monitoredRepo = repoWithMerge('p-tail-base');
