@@ -196,7 +196,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Schedule capture only after durable resident daemon ticks; exclude dry-run, once, persistence-failed, killed, and unsupported execution.
 - [x] Surface capture health without granting cutoff, denominator, historical, rollback, routing, readiness, or merge authority.
 - [x] Add cadence, restart, overlap, timeout, cancellation, malformed-state, privacy, platform, failure, replay, and authority-isolation coverage.
-- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary the first production checkpoint.
+- [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary the first production checkpoint.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
