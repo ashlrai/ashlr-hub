@@ -142,6 +142,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add injected and native Windows adversarial tests, and pin the assurance suite into the portability matrix.
 - [x] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and canary fail-closed behavior.
 
+## Current Overnight Cycle - Denominator-Complete Population Accounting
+- [x] Rehydrate the released Windows-key baseline, CI proof, production health, git state, Entire state, and durable notes.
+- [x] Audit strict applied-merge population capture, replay-safe v2 classification persistence, and detached-worktree proof sequencing in parallel.
+- [x] Implement the smallest bounded metadata-only v2 candidate population/classification slice with adverse precedence and explicit inconclusive members.
+- [x] Keep `policyEligible:false`; refuse incomplete, degraded, stale, conflicting, or over-limit sources rather than certifying a partial denominator.
+- [x] Add adversarial cutoff snapshots, historical replay identity, source bounds, privacy, and v1 compatibility coverage.
+- [ ] Add authenticated strict snapshot readers, then signed witness/root persistence with crash recovery and status projection before setting `denominatorComplete:true`.
+- [ ] Run focused and exhaustive verification plus independent review; update notes, commit, push, observe CI, reload production, and verify observation-only truth.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.
