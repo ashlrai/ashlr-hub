@@ -67,6 +67,12 @@ import {
 } from './proposal-mutation-lock.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { sanitizeRemoteHandoffReconciliation } from './remote-handoff-attestation.js';
+import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
+import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from './persistence-mismatch.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -1217,13 +1223,32 @@ export function setStatus(
     }
 
     const decidedStatuses: ProposalStatus[] = ['approved', 'rejected'];
+    const machineRecoveryDecision =
+      status === 'rejected' &&
+      (reason === PROPOSAL_PERSISTENCE_MISMATCH_REASON ||
+        (reason === undefined && result === PROPOSAL_PERSISTENCE_MISMATCH_RESULT) ||
+        reason?.startsWith('auto-drained: permanent readiness blocker persisted') === true);
+    const revokeRejectedCaptureRecovery =
+      status === 'rejected' &&
+      !machineRecoveryDecision &&
+      typeof existing.repo === 'string' && existing.repo.length > 0;
     const updated: Proposal = sanitizeProposalForStore({
       ...existing,
       ...transitionPatch,
       status,
       ...(result !== undefined ? { result } : {}),
+      ...(revokeRejectedCaptureRecovery && result === undefined &&
+        existing.result === PROPOSAL_PERSISTENCE_MISMATCH_RESULT
+        ? { result: undefined }
+        : {}),
       // M119: persist decisionReason when provided (additive, backward-compatible).
       ...(reason !== undefined ? { decisionReason: reason } : {}),
+      ...(revokeRejectedCaptureRecovery && reason === undefined &&
+        (existing.decisionReason === PROPOSAL_PERSISTENCE_MISMATCH_REASON ||
+          existing.decisionReason?.startsWith('auto-drained: permanent readiness blocker persisted'))
+        ? { decisionReason: undefined }
+        : {}),
+      ...(revokeRejectedCaptureRecovery ? { stuckPassCount: undefined } : {}),
       ...(decidedStatuses.includes(status)
         ? { decidedAt: new Date().toISOString() }
         : {}),
@@ -1234,6 +1259,15 @@ export function setStatus(
       persisted = true;
     } catch {
       return false;
+    }
+
+    // The proposal decision is authoritative and must commit before its queue
+    // projection is cleaned up. Dispatch independently revalidates any stale
+    // rejected-capture row, so lock contention or a crash here cannot revive it.
+    if (revokeRejectedCaptureRecovery) {
+      const recoveryId = proposalRepairId(existing.repo!, id);
+      pruneQueuedSelfHealItems((item) =>
+        item.id === recoveryId && item.tags.includes('rejected-capture-recovery'));
     }
 
     audit({

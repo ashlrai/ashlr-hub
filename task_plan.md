@@ -206,6 +206,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add no-proposal, partial-capture, retry, fairness, and learning regressions.
 - [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary improved production truth.
 
+## Current Overnight Cycle - Repair Corpus Completeness
+- [x] Rehydrate the dispatch-yield recovery release and inspect the first production repair attempts.
+- [x] Audit rejected artifact materialization, physical queue source quality, and post-release proposal yield in parallel.
+- [x] Make real machine-persisted capture mismatches eligible under exact lineage, timing, and non-human predicates.
+- [x] Bound derived goal display titles and refuse invalid outgoing backlog snapshots without dropping authoritative goal data.
+- [x] Run exhaustive verification and independent review; commit, push, reload production, and prove all eligible mismatch repairs materialize with a complete queue source.
+- [ ] Next lane: design and implement evidence-only objective-saturation quarantine after three unique empty attempts across two same-tier editing backends.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

@@ -103,6 +103,8 @@ import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import {
+  beginRejectedCaptureRecoveryDispatch,
+  isRejectedCaptureRecoveryAuthorized,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
   type ProposalRepairWorkResult,
@@ -3174,6 +3176,19 @@ export async function tick(
   });
 
   const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  const authorityUnavailableOutcome = (item: WorkItem, attemptId: string): ItemOutcome => ({
+    item,
+    spentUsd: 0,
+    dispatched: false,
+    dispatch: dispatchTrace(item, {
+      assignedBy: 'preflight',
+      reason: 'rejected capture recovery authority was revoked or unavailable',
+      dispatched: false,
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+      skipReason: 'repair-authority-unavailable',
+    }),
+  });
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     return ({
@@ -3209,6 +3224,21 @@ export async function tick(
             runId: attemptId,
             trajectoryId: `run:${attemptId}`,
             skipReason: 'budget-cap',
+          }),
+        };
+      }
+      if (!isRejectedCaptureRecoveryAuthorized(item)) {
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            assignedBy: 'preflight',
+            reason: 'rejected capture recovery authority was revoked or unavailable',
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: 'repair-authority-unavailable',
           }),
         };
       }
@@ -3662,41 +3692,28 @@ export async function tick(
 
     try {
       const sink = nullSink();
-      dispatched = true;
-      backendDispatch[backend] = (backendDispatch[backend] ?? 0) + 1;
 
       if (backend === 'builtin') {
-        recordDispatchStartAgentAction(item, {
-          ts: new Date().toISOString(),
-          machineId,
-          runId: attemptId,
-          backend,
-          tier: backendTier,
-          model: selectedModel,
-          assignedBy,
-          reason: assignmentReason,
-          mode: 'swarm',
+        const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+          recordDispatchStartAgentAction(item, {
+            ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+            tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'swarm',
+          });
+          return runSwarm(
+            { goal }, routingCfg,
+            {
+              sandbox: true, requireSandbox: true, propose: true, project: item.repo,
+              budget: itemBudget, parallel: 1, dryRun: false, noCapture: true,
+              runId: attemptId, workItemId: item.id, workItemGenerationId,
+              workSource: item.source, delegationScope,
+            },
+            sink,
+          );
         });
-        const swarmRun = await runSwarm(
-          { goal },
-          routingCfg,
-          {
-            sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
-            requireSandbox: true,      // M24: sandbox MANDATORY — abort if it can't be created
-            propose: true,             // M24: swarm records its diff as a PENDING inbox proposal
-            project: item.repo,
-            budget: itemBudget,
-            parallel: 1,
-            dryRun: false,
-            noCapture: true,
-            runId: attemptId,
-            workItemId: item.id,
-            workItemGenerationId,
-            workSource: item.source,
-            delegationScope,
-          },
-          sink,
-        );
+        if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
+        dispatched = true;
+        backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
+        const swarmRun = await launch.value;
 
         const swarmExecuted = swarmRun.status === 'done';
         if (swarmExecuted && swarmRun.proposalOutcome?.kind !== 'kill-switch') {
@@ -3825,32 +3842,22 @@ export async function tick(
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
-          recordDispatchStartAgentAction(item, {
-            ts: new Date().toISOString(),
-            machineId,
-            runId: attemptId,
-            backend,
-            tier: backendTier,
-            model: selectedModel,
-            assignedBy,
-            reason: assignmentReason,
-            mode: 'best-of-n',
+          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+            recordDispatchStartAgentAction(item, {
+              ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+              tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
+            });
+            return runBestOfN(item, routingCfg, {
+              n: bestOfN, engine: backend, model: selectedModel,
+              ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
+              workItemId: item.id, workItemGenerationId, workSource: item.source,
+              delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
+            });
           });
-          const bonResult = await runBestOfN(item, routingCfg, {
-            n: bestOfN,
-            engine: backend,
-            model: selectedModel,
-            ...(_bonCandidates && _bonCandidates.length > 0
-              ? { candidates: _bonCandidates as never }
-              : {}),
-            workItemId: item.id,
-            workItemGenerationId,
-            workSource: item.source,
-            delegationScope,
-            attemptId,
-            shadowSkillCards,
-            shadowSkillSelectedAt,
-          });
+          if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
+          dispatched = true;
+          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
+          const bonResult = await launch.value;
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!bonResult.winner) {
             // All candidates were empty/failing — still count what the fan-out
@@ -3889,32 +3896,22 @@ export async function tick(
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
         } else {
-          recordDispatchStartAgentAction(item, {
-            ts: new Date().toISOString(),
-            machineId,
-            runId: attemptId,
-            backend,
-            tier: backendTier,
-            model: selectedModel,
-            assignedBy,
-            reason: assignmentReason,
-            mode: 'single',
+          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+            recordDispatchStartAgentAction(item, {
+              ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+              tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
+            });
+            return runGoal(goal, routingCfg, {
+              engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
+              budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
+              ...(selectedModel ? { model: selectedModel } : {}),
+              workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
+            });
           });
-          runState = await runGoal(goal, routingCfg, {
-            engine: backend,
-            sandboxEngine: true,
-            requireSandbox: true,
-            cwd: item.repo,
-            budget: itemBudget,
-            tools: true,
-            noMemory: false,
-            runId: attemptId,
-            ...(selectedModel ? { model: selectedModel } : {}),
-            workItemId: item.id,
-            workItemGenerationId,
-            workSource: item.source,
-            delegationScope,
-          });
+          if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
+          dispatched = true;
+          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
+          runState = await launch.value;
           const runActionCounts = runState.runEventSummary?.actionCounts;
           const runExecuted = runState.status === 'done' || [
             runActionCounts?.spawnAttempts,

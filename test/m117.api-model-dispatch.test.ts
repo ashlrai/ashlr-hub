@@ -41,6 +41,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { InboxStore } from '../src/core/seams/inbox.js';
 import type { Proposal } from '../src/core/types.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from '../src/core/inbox/persistence-mismatch.js';
 
 function durableInboxStore(
   proposalId: string,
@@ -466,6 +470,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
   it('fails closed when an optimistic pending proposal is not durably loadable', async () => {
     const capturedProposalArgs: unknown[] = [];
     const setStatus = vi.fn();
+    let returnMismatchedPending = false;
+    let lastCreated: Record<string, unknown> | null = null;
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
       sandboxDiff: () => ({
@@ -480,15 +486,18 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       selectInboxStore: () => ({
         create: (input: Record<string, unknown>) => {
           capturedProposalArgs.push(input);
-          return {
+          lastCreated = {
             ...input,
             id: 'optimistic-only-prop',
             status: 'pending',
             createdAt: new Date().toISOString(),
             isPartial: input['isPartial'] === true,
           };
+          return lastCreated;
         },
-        load: () => null,
+        load: () => returnMismatchedPending && lastCreated
+          ? { ...lastCreated, repo: '/mismatched-repo' }
+          : null,
         setStatus,
       }),
     }));
@@ -539,6 +548,30 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       kind: 'proposal-capture-error',
     });
     expect(result.state.proposalId).toBeUndefined();
+
+    returnMismatchedPending = true;
+    setStatus.mockClear();
+    const mismatchResult = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: {
+        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+      },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-test',
+      },
+      runId: 'run-m117-durable-mismatch',
+    });
+    expect(mismatchResult.proposalOutcome?.kind).toBe('proposal-capture-error');
+    expect(setStatus).toHaveBeenCalledWith(
+      'optimistic-only-prop',
+      'rejected',
+      PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+      PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+    );
 
     vi.resetModules();
   });

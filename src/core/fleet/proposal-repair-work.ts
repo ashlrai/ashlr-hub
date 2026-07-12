@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { Proposal, RepairTreatment, WorkItem } from '../types.js';
-import { listProposals } from '../inbox/store.js';
+import type { DecisionEntry, Proposal, RepairTreatment, WorkItem } from '../types.js';
+import { listProposals, loadProposal } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
 import {
@@ -28,6 +28,16 @@ import {
   repairHandoffFromDispatchEvent,
 } from './repair-handoff-journal.js';
 import { repairTreatmentForUnitId, repairTreatmentUnitId } from './generated-repair-identity.js';
+import { readDecisionsDetailed } from './decisions-ledger.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from '../inbox/persistence-mismatch.js';
+import {
+  acquireProposalMutationLock,
+  releaseProposalMutationLock,
+} from '../inbox/proposal-mutation-lock.js';
+import { proposalRepairId } from './proposal-repair-identity.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
@@ -36,6 +46,23 @@ const DISPATCH_CAPTURE_MAX_QUEUED = 5;
 const DISPATCH_NO_DIFF_MAX_QUEUED = 5;
 const REJECTED_CAPTURE_MAX_SCANNED = 32;
 const MAX_PARENT_CONTEXT = 1_600;
+const PERSISTENCE_MISMATCH_DECISION_WINDOW_MS = 60_000;
+const DECISION_TIMESTAMP_SLOP_MS = 1_000;
+
+interface CaptureDecisionProof {
+  decisions: DecisionEntry[];
+  complete: boolean;
+}
+
+function readCaptureDecisionProof(now: Date): CaptureDecisionProof {
+  const decisionRead = readDecisionsDetailed({
+    sinceMs: now.getTime() - REJECTED_CAPTURE_REPAIR_MAX_AGE_MS - PERSISTENCE_MISMATCH_DECISION_WINDOW_MS,
+  });
+  return {
+    decisions: decisionRead.decisions,
+    complete: decisionRead.complete && decisionRead.sourceState !== 'degraded',
+  };
+}
 
 export interface ProposalRepairWorkResult {
   scanned: number;
@@ -102,14 +129,6 @@ function boundedRepairReason(value: unknown, max: number): string {
     .replace(/\s+/g, ' ')
     .trim();
   return stripped.length > max ? `${stripped.slice(0, Math.max(0, max - 3))}...` : stripped;
-}
-
-function repairId(repo: string, proposalId: string): string {
-  const hash = createHash('sha1')
-    .update(`${resolve(repo)}\0${proposalId}\0proposal-repair`)
-    .digest('hex')
-    .slice(0, 12);
-  return `${basename(repo)}:proposal-repair:${hash}`;
 }
 
 function captureRepairId(repo: string, itemId: string): string {
@@ -248,7 +267,43 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
   return { dispatchable, quarantined, resolved, missing };
 }
 
-function isRecentRejectedCaptureArtifact(proposal: Proposal, now: Date): boolean {
+function hasMachinePersistenceMismatchDecision(
+  proposal: Proposal,
+  proof: CaptureDecisionProof | undefined,
+): boolean {
+  if (proposal.result !== PROPOSAL_PERSISTENCE_MISMATCH_RESULT) return false;
+  const createdAtMs = Date.parse(proposal.createdAt);
+  const decidedAtMs = Date.parse(proposal.decidedAt ?? '');
+  if (
+    !Number.isFinite(createdAtMs) ||
+    !Number.isFinite(decidedAtMs) ||
+    decidedAtMs < createdAtMs ||
+    decidedAtMs - createdAtMs > PERSISTENCE_MISMATCH_DECISION_WINDOW_MS
+  ) return false;
+  // New writers persist an exact proposal-local machine marker atomically with
+  // the rejected capture. The ledger remains causal evidence, while legacy
+  // markerless artifacts still require its complete single-decision proof.
+  if (proposal.decisionReason === PROPOSAL_PERSISTENCE_MISMATCH_REASON) return true;
+  if (!proof?.complete || proposal.decisionReason !== undefined) return false;
+  const decisions = proof.decisions.filter((entry) =>
+    entry.proposalId === proposal.id && entry.action === 'rejected');
+  if (decisions.length !== 1) return false;
+  const decision = decisions[0]!;
+  const decisionAtMs = Date.parse(decision.ts);
+  if (
+    !Number.isFinite(decisionAtMs) ||
+    Math.abs(decisionAtMs - decidedAtMs) > DECISION_TIMESTAMP_SLOP_MS ||
+    decision.runId !== proposal.runId ||
+    decision.trajectoryId !== proposal.trajectoryId
+  ) return false;
+  return decision.reason === undefined;
+}
+
+function isRecentRejectedCaptureArtifact(
+  proposal: Proposal,
+  now: Date,
+  decisionProof?: CaptureDecisionProof,
+): boolean {
   if (proposal.status !== 'rejected' || proposal.isPartial !== true) return false;
   if (proposal.verifyResult?.source !== 'capture-gate') return false;
   if (proposal.origin !== 'agent' && proposal.origin !== 'swarm') return false;
@@ -259,10 +314,7 @@ function isRecentRejectedCaptureArtifact(proposal: Proposal, now: Date): boolean
     typeof stuckPassCount === 'number' &&
     Number.isSafeInteger(stuckPassCount) &&
     stuckPassCount >= 1;
-  const captureMismatch =
-    proposal.result === 'proposal persistence verification failed' &&
-    proposal.decidedAt === undefined &&
-    proposal.decisionReason === undefined;
+  const captureMismatch = hasMachinePersistenceMismatchDecision(proposal, decisionProof);
   if (!autoDrained && !captureMismatch) return false;
   if (typeof proposal.diff !== 'string' || proposal.diff.trim().length === 0) return false;
   if (typeof proposal.runId !== 'string' || !proposal.runId) return false;
@@ -272,8 +324,12 @@ function isRecentRejectedCaptureArtifact(proposal: Proposal, now: Date): boolean
   return Number.isFinite(createdAtMs) && ageMs >= 0 && ageMs <= REJECTED_CAPTURE_REPAIR_MAX_AGE_MS;
 }
 
-function proposalNeedsRepair(proposal: Proposal, now: Date): boolean {
-  if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now)) return false;
+function proposalNeedsRepair(
+  proposal: Proposal,
+  now: Date,
+  decisionProof?: CaptureDecisionProof,
+): boolean {
+  if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now, decisionProof)) return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.repo) return false;
   return proposal.isPartial === true || proposal.verifyResult?.passed === false;
@@ -332,8 +388,12 @@ function isDiagnosticNoDiffEvent(event: DispatchProductionEvent): boolean {
   return true;
 }
 
-export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): WorkItem | null {
-  if (!proposalNeedsRepair(proposal, now) || !proposal.repo) return null;
+export function proposalRepairWorkItem(
+  proposal: Proposal,
+  now = new Date(),
+  decisionProof?: CaptureDecisionProof,
+): WorkItem | null {
+  if (!proposalNeedsRepair(proposal, now, decisionProof) || !proposal.repo) return null;
   const repo = canonicalEnrolledExistingRepo(proposal.repo);
   if (!repo) return null;
 
@@ -344,7 +404,7 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
   const repairKind = proposal.isPartial === true ? 'partial' : 'verify';
 
   return {
-    id: repairId(repo, proposal.id),
+    id: proposalRepairId(repo, proposal.id),
     repo,
     source: 'self',
     title: `Repair proposal ${proposal.id}: ${title}`,
@@ -367,6 +427,57 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
     ],
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
   };
+}
+
+/**
+ * Revalidate a rejected-capture queue projection against its authoritative
+ * proposal and decision ledger immediately before dispatch. Queue cleanup is
+ * best-effort, so a stale row must never grant execution authority by itself.
+ */
+export function isRejectedCaptureRecoveryAuthorized(
+  item: WorkItem,
+  now = new Date(),
+): boolean {
+  const result = beginRejectedCaptureRecoveryDispatch(item, () => true, now);
+  return result.authorized && result.value;
+}
+
+/** Begin producer execution while the parent proposal authority is fenced. */
+export function beginRejectedCaptureRecoveryDispatch<T>(
+  item: WorkItem,
+  begin: () => T,
+  now = new Date(),
+): { authorized: true; value: T } | { authorized: false } {
+  if (!item.tags.includes('rejected-capture-recovery')) {
+    return { authorized: true, value: begin() };
+  }
+  let candidate: Proposal | undefined;
+  try {
+    candidate = listProposals({ status: 'rejected' }).find((proposal) =>
+      typeof proposal.repo === 'string' && proposalRepairId(proposal.repo, proposal.id) === item.id);
+  } catch {
+    return { authorized: false };
+  }
+  if (!candidate) return { authorized: false };
+
+  const mutationLock = acquireProposalMutationLock(candidate.id);
+  if (!mutationLock) return { authorized: false };
+  let began = false;
+  try {
+    const current = loadProposal(candidate.id);
+    if (!current) return { authorized: false };
+    const currentItem = proposalRepairWorkItem(current, now, readCaptureDecisionProof(now));
+    if (currentItem?.id !== item.id || currentItem.repo !== resolve(item.repo)) {
+      return { authorized: false };
+    }
+    began = true;
+    return { authorized: true, value: begin() };
+  } catch (error) {
+    if (began) throw error;
+    return { authorized: false };
+  } finally {
+    releaseProposalMutationLock(mutationLock);
+  }
 }
 
 export function captureGateRepairWorkItem(
@@ -558,10 +669,12 @@ export function queueProposalRepairWorkForPendingProposals(
 ): ProposalRepairWorkResult {
   const handoffs = proposals === undefined && !opts?.dispatchEvents ? readRepairHandoffs() : undefined;
   let pending: Proposal[];
+  let captureDecisionProof: CaptureDecisionProof;
   try {
+    captureDecisionProof = readCaptureDecisionProof(now);
     const available = proposals ?? listProposals();
     const rejectedCapture = available
-      .filter((proposal) => isRecentRejectedCaptureArtifact(proposal, now))
+      .filter((proposal) => isRecentRejectedCaptureArtifact(proposal, now, captureDecisionProof))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
       .slice(0, REJECTED_CAPTURE_MAX_SCANNED);
     pending = [
@@ -699,18 +812,32 @@ export function queueProposalRepairWorkForPendingProposals(
   result.dispatchRepairPruneFailed = prune.failed ? 1 : 0;
 
   if (terminalLifecycleEnabled) for (const proposal of pending) {
-    const item = proposalRepairWorkItem(proposal, now);
-    if (!item) continue;
-    const lifecycle = observeLifecycle(item);
-    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
-    result.eligible++;
-    result.proposalEligible!++;
-    if (queueSelfHealItem(item)) {
-      result.queued++;
-      result.proposalQueued!++;
-    } else {
+    const requiresLiveFence = proposals === undefined && proposal.status === 'rejected';
+    const mutationLock = requiresLiveFence ? acquireProposalMutationLock(proposal.id) : null;
+    if (requiresLiveFence && !mutationLock) {
       result.failed++;
       result.proposalFailed!++;
+      continue;
+    }
+    try {
+      const current = requiresLiveFence ? loadProposal(proposal.id) : proposal;
+      const currentProof = requiresLiveFence ? readCaptureDecisionProof(now) : captureDecisionProof;
+      if (!current) continue;
+      const item = proposalRepairWorkItem(current, now, currentProof);
+      if (!item) continue;
+      const lifecycle = observeLifecycle(item);
+      if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
+      result.eligible++;
+      result.proposalEligible!++;
+      if (queueSelfHealItem(item)) {
+        result.queued++;
+        result.proposalQueued!++;
+      } else {
+        result.failed++;
+        result.proposalFailed!++;
+      }
+    } finally {
+      if (mutationLock) releaseProposalMutationLock(mutationLock);
     }
   }
   const seenCaptureIds = new Set<string>();

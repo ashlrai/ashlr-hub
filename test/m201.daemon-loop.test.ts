@@ -133,11 +133,16 @@ const mockRunSelfHealCycleForRepos = vi.fn();
 vi.mock('../src/core/fleet/self-heal.js', () => ({
   runSelfHealCycle: (...args: unknown[]) => mockRunSelfHealCycle(...args),
   runSelfHealCycleForRepos: (...args: unknown[]) => mockRunSelfHealCycleForRepos(...args),
+  pruneQueuedSelfHealItems: () => ({ scanned: 0, removed: 0, failed: false }),
 }));
 
 const mockQueueProposalRepairWorkForPendingProposals = vi.fn();
 const mockResolveDiagnosticResliceParents = vi.fn();
+const mockIsRejectedCaptureRecoveryAuthorized = vi.fn();
+const mockBeginRejectedCaptureRecoveryDispatch = vi.fn();
 vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
+  beginRejectedCaptureRecoveryDispatch: (...args: unknown[]) => mockBeginRejectedCaptureRecoveryDispatch(...args),
+  isRejectedCaptureRecoveryAuthorized: (...args: unknown[]) => mockIsRejectedCaptureRecoveryAuthorized(...args),
   queueProposalRepairWorkForPendingProposals: (...args: unknown[]) => mockQueueProposalRepairWorkForPendingProposals(...args),
   resolveDiagnosticResliceParents: (...args: unknown[]) => mockResolveDiagnosticResliceParents(...args),
 }));
@@ -335,6 +340,13 @@ beforeEach(() => {
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
   mockQueueProposalRepairWorkForPendingProposals.mockReset();
+  mockIsRejectedCaptureRecoveryAuthorized.mockReset();
+  mockIsRejectedCaptureRecoveryAuthorized.mockReturnValue(true);
+  mockBeginRejectedCaptureRecoveryDispatch.mockReset();
+  mockBeginRejectedCaptureRecoveryDispatch.mockImplementation((_item: WorkItem, begin: () => unknown) => ({
+    authorized: true,
+    value: begin(),
+  }));
   mockRunViaAshlrcode.mockReset();
   mockRunInventCycle.mockReset();
   mockRunCounterfactualReplay.mockReset();
@@ -1685,6 +1697,36 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       dispatchNoDiffResliceFailed: 0,
     });
     expect(result.dispatches?.[0]?.itemId).toBe(repairItems[0]!.id);
+  });
+
+  it('A1a2c: a selected rejected-capture recovery is reauthorized before dispatch', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [repair] = makeItems(repo.dir, 1).map((item) => ({
+      ...item,
+      id: `${repo.dir}:proposal-repair:revoked123456`,
+      source: 'self' as const,
+      tags: ['self-heal', 'proposal-repair', 'rejected-capture-recovery'],
+    }));
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair!],
+    });
+    mockBeginRejectedCaptureRecoveryDispatch.mockReturnValue({ authorized: false });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(mockIsRejectedCaptureRecoveryAuthorized).toHaveBeenCalledWith(repair);
+    expect(mockBeginRejectedCaptureRecoveryDispatch).toHaveBeenCalledWith(repair, expect.any(Function));
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      dispatched: false,
+      skipReason: 'repair-authority-unavailable',
+    });
   });
 
   it('A1a2b1: terminal repair maintenance refreshes and filters the same tick before dispatch', async () => {

@@ -79,6 +79,10 @@ import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { selectInboxStore } from '../seams/inbox.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from '../inbox/persistence-mismatch.js';
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
@@ -1119,7 +1123,12 @@ export async function captureSandboxedProposal(
         persisted.id === proposal.id &&
         persisted.runId === id
       ) {
-        inbox.setStatus(proposal.id, 'rejected', 'proposal persistence verification failed');
+        inbox.setStatus(
+          proposal.id,
+          'rejected',
+          PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+          PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+        );
       }
       const outcome = proposalOutcome(
         'proposal-capture-error',

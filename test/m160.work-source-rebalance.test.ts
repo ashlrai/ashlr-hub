@@ -68,8 +68,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 // ── Mock github integration ───────────────────────────────────────────────────
 // ============================================================================
 
+let _listIssuesImpl: ReturnType<typeof vi.fn>;
+
 vi.mock('../src/core/integrations/github.js', () => ({
-  listIssues: vi.fn(() => []),
+  listIssues: (...args: unknown[]) => _listIssuesImpl(...args),
   githubStatus: vi.fn(() => ({ isRepo: false, ci: 'unknown' })),
 }));
 
@@ -172,6 +174,7 @@ beforeEach(() => {
   });
 
   // Default goals stub: no active goals
+  _listIssuesImpl = vi.fn(() => []);
   _listGoalsImpl = vi.fn(() => []);
   _loadProposalImpl = vi.fn(() => null);
 });
@@ -384,6 +387,21 @@ describe('M160 — high-value scanners: unaffected by M160 flags', () => {
     expect(a).toEqual(b);
   });
 
+  it('bounds a maximum-length GitHub issue title to the persisted WorkItem contract', async () => {
+    _listIssuesImpl = vi.fn(() => [{
+      number: 42,
+      title: 'x'.repeat(256),
+      url: 'https://github.com/ashlrai/example/issues/42',
+      labels: ['bug'],
+    }]);
+
+    const items = await scanIssues(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title.length).toBeLessThanOrEqual(240);
+    expect(items[0]!.detail.length).toBeLessThanOrEqual(4_000);
+  });
+
   it('scanSecurity runs regardless of M160 flags (returns [] when binshield absent)', async () => {
     // execFile stubs "which binshield" to fail → scanSecurity returns []
     _execFileImpl = vi.fn((...args: unknown[]) => {
@@ -590,6 +608,56 @@ describe('M160 — scanGoals: goal-derived work items', () => {
     const items = await scanGoals(tmpDir);
     expect(items[0]!.title).toContain('Ship the new auth flow');
     expect(items[0]!.title).toContain('Add JWT middleware');
+  });
+
+  it('bounds derived goal titles without truncating authoritative goal content', async () => {
+    const objective = `Ship the complete objective ${'objective '.repeat(28)}objective-tail`;
+    const milestoneTitle = `Implement the focused milestone ${'milestone '.repeat(20)}milestone-tail`;
+    const milestoneDetail = `Preserve this complete milestone detail ${'detail '.repeat(24)}detail-tail`;
+    const goal = makeActiveGoal('goal-long-display', objective, milestoneTitle);
+    goal.milestones[0]!.detail = milestoneDetail;
+    const originalGoal = structuredClone(goal);
+    _listGoalsImpl = vi.fn(() => [goal]);
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title.length).toBeLessThanOrEqual(240);
+    expect(items[0]!.title).toContain('...');
+    expect(items[0]!.detail).toContain(objective);
+    expect(items[0]!.detail).toContain(milestoneDetail);
+    expect(goal).toEqual(originalGoal);
+  });
+
+  it('bounds oversized derived goal detail without mutating the authoritative goal', async () => {
+    const objective = `Large objective ${'objective '.repeat(460)}objective-tail`;
+    const milestoneDetail = `Large detail ${'detail '.repeat(700)}detail-tail`;
+    const goal = makeActiveGoal('goal-large-detail', objective, 'Implement the bounded scanner contract');
+    goal.milestones[0]!.detail = milestoneDetail;
+    const originalGoal = structuredClone(goal);
+    _listGoalsImpl = vi.fn(() => [goal]);
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title.length).toBeLessThanOrEqual(240);
+    expect(items[0]!.detail.length).toBeLessThanOrEqual(4_000);
+    expect(items[0]!.detail).toMatch(/\.\.\.$/);
+    expect(goal).toEqual(originalGoal);
+  });
+
+  it('bounds scanner IDs for an enrolled repository with a long basename', async () => {
+    const longRepo = path.join(tmpDir, 'r'.repeat(200));
+    fs.mkdirSync(longRepo);
+    _listGoalsImpl = vi.fn(() => [
+      makeActiveGoal('goal-long-repo', 'Ship bounded scanner identities', 'Implement one focused change', longRepo),
+    ]);
+
+    const items = await scanGoals(longRepo);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.id.length).toBeLessThanOrEqual(180);
+    expect(items[0]!.repo).toBe(longRepo);
   });
 
   it('detail includes goal objective and milestone detail', async () => {

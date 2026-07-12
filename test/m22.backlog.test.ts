@@ -64,7 +64,9 @@ import {
   loadBacklog,
   backlogPath,
   scoreItem,
+  enqueueBacklogItemsDetailed,
 } from '../src/core/portfolio/backlog.js';
+import { isStrictWorkItem } from '../src/core/portfolio/queued-autonomy.js';
 
 import {
   enroll,
@@ -547,6 +549,25 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(Array.isArray(bl['repos'])).toBe(true);
     expect(Array.isArray(bl['items'])).toBe(true);
     expect(Array.isArray(bl['observations'])).toBe(true);
+  });
+
+  it('refuses an invalid outgoing row before temp creation and preserves prior bytes', async () => {
+    const built = await buildBacklog();
+    const priorBytes = fs.readFileSync(backlogPath());
+    const base = built.items[0]!;
+    expect(base).toBeDefined();
+    const validFresh = { ...base, id: 'm22-valid-fresh-row', title: 'Valid fresh backlog row' };
+    const beforeValidation = structuredClone(validFresh);
+    const invalidFresh = { ...validFresh, id: 'm22-invalid-fresh-row', title: 'x'.repeat(241) };
+
+    expect(isStrictWorkItem(validFresh)).toBe(true);
+    expect(validFresh).toEqual(beforeValidation);
+    expect(isStrictWorkItem(invalidFresh)).toBe(false);
+
+    expect(enqueueBacklogItemsDetailed([validFresh, invalidFresh])).toEqual({ ok: false, enqueued: 0 });
+    expect(fs.readFileSync(backlogPath())).toEqual(priorBytes);
+    expect(loadBacklog()?.items.some((item) => item.id === validFresh.id)).toBe(false);
+    expect(fs.readdirSync(path.dirname(backlogPath())).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('persists bounded metadata-only scanner observations', async () => {

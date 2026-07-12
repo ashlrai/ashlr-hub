@@ -104,7 +104,7 @@ export function buildProposalMarkdown(p: Proposal): string {
 
 type ListProposalsFn  = (filter?: { status?: ProposalStatus }) => Proposal[];
 type LoadProposalFn   = (id: string) => Proposal | null;
-type SetStatusFn      = (id: string, status: ProposalStatus, result?: string) => void;
+type SetStatusFn      = (id: string, status: ProposalStatus, result?: string) => boolean | void;
 type PendingCountFn   = () => number;
 type ApplyProposalFn  = (id: string, opts: { confirmed: boolean }) => Promise<import('../core/types.js').ApplyResult>;
 type AutoMergeResult  = { ok: boolean; merged: boolean; handoff?: boolean; reason: string; prUrl?: string };
@@ -692,7 +692,12 @@ async function cmdInboxReject(id: string, jsonMode: boolean): Promise<number> {
     return 1;
   }
 
-  _setStatus(p.id, 'rejected');
+  if (_setStatus(p.id, 'rejected') === false) {
+    const msg = `Proposal ${p.id.slice(0, 12)} could not be rejected because recovery revocation is unavailable.`;
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
 
   if (jsonMode) {
     console.log(JSON.stringify({ ok: true, id: p.id, status: 'rejected' }));

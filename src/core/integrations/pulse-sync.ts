@@ -241,7 +241,13 @@ function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
         const status = cmd.kind === 'approve_proposal' ? 'approved' : 'rejected';
         // setStatus only flips the lifecycle status — it does NOT apply the
         // diff. An explicit apply pass is still required (proposal-only floor).
-        setStatus(proposalId, status, 'resolved via pulse fleet command');
+        if (setStatus(proposalId, status, 'resolved via pulse fleet command') === false) {
+          return {
+            ...base,
+            outcome: 'failed',
+            detail: `proposal ${proposalId} could not transition to ${status}`,
+          };
+        }
         return { ...base, outcome: 'done', detail: `proposal ${proposalId} → ${status}` };
       }
 

@@ -16,6 +16,7 @@
  */
 
 import { audit } from '../sandbox/audit.js';
+import { createHash } from 'node:crypto';
 import { scoreItem } from '../portfolio/backlog.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import type { WorkItem, ProjectTemplate, TemplateFile } from '../types.js';
@@ -30,6 +31,23 @@ const SCANNER_CAP = 100;
 
 /** Scanner timeout in milliseconds. */
 const SCANNER_TIMEOUT_MS = 15_000;
+const WORK_ITEM_ID_MAX = 180;
+const WORK_ITEM_TITLE_MAX = 240;
+const WORK_ITEM_DETAIL_MAX = 4_000;
+const WORK_ITEM_TAG_MAX = 80;
+const WORK_ITEM_TAGS_MAX = 50;
+
+function boundedText(value: string, max: number, fallback: string): string {
+  const text = value.trim() || fallback;
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+function boundedIdentity(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const suffix = createHash('sha256').update(value).digest('hex').slice(0, 12);
+  return `${value.slice(0, max - suffix.length - 1)}-${suffix}`;
+}
 
 /**
  * Wrap a PluginScanner for safety:
@@ -83,22 +101,23 @@ export function wrapScanner(
       // Scrub secrets from title + detail
       const rawTitle = typeof item.title === 'string' ? item.title : '';
       const rawDetail = typeof item.detail === 'string' ? item.detail : '';
-      const title = scrubSecrets(rawTitle);
-      const detail = scrubSecrets(rawDetail);
+      const title = boundedText(scrubSecrets(rawTitle), WORK_ITEM_TITLE_MAX, `Plugin scanner item ${i}`);
+      const detail = boundedText(scrubSecrets(rawDetail), WORK_ITEM_DETAIL_MAX, 'Plugin scanner work item.');
 
       // Namespace id: plugin:<name>:<s.id>:<orig-or-index>
       const origId = typeof item.id === 'string' && item.id.length > 0 ? item.id : String(i);
-      const id = `plugin:${pluginName}:${s.id}:${origId}`;
+      const id = boundedIdentity(`plugin:${pluginName}:${s.id}:${origId}`, WORK_ITEM_ID_MAX);
 
       // Force tags to include ['plugin', pluginName, s.id]
       const baseTags: string[] = Array.isArray(item.tags)
         ? (item.tags as unknown[]).filter((t): t is string => typeof t === 'string')
         : [];
-      const requiredTags = ['plugin', pluginName, s.id];
-      const tags = [
+      const requiredTags = ['plugin', pluginName, s.id]
+        .map((tag) => boundedText(tag, WORK_ITEM_TAG_MAX, 'plugin'));
+      const tags = [...new Set([
         ...requiredTags,
-        ...baseTags.filter((t) => !requiredTags.includes(t)),
-      ];
+        ...baseTags.map((tag) => boundedText(tag, WORK_ITEM_TAG_MAX, 'plugin-tag')),
+      ])].slice(0, WORK_ITEM_TAGS_MAX);
 
       const wrapped: WorkItem = {
         id,
@@ -110,7 +129,9 @@ export function wrapScanner(
         effort,
         score,
         tags,
-        ts: typeof item.ts === 'string' ? item.ts : new Date().toISOString(),
+        ts: typeof item.ts === 'string' && item.ts.length <= 40 && Number.isFinite(Date.parse(item.ts))
+          ? item.ts
+          : new Date().toISOString(),
       };
 
       result.push(wrapped);

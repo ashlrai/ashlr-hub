@@ -809,7 +809,10 @@ export async function handleApi(
       }
 
       if (action === 'reject') {
-        setStatus(id, 'rejected');
+        if (!setStatus(id, 'rejected')) {
+          sendJson(res, 503, { error: 'proposal rejection unavailable; queued recovery could not be revoked' });
+          return true;
+        }
         sendJson(res, 200, { ok: true, id, status: 'rejected' });
         return true;
       }

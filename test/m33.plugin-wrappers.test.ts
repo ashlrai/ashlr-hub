@@ -19,6 +19,7 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { wrapScanner, validateTemplate, wrapCommand } from '../src/core/plugins/wrappers.js';
 import type { PluginScanner, PluginCommandSpec, PluginHost } from '../src/core/plugins/types.js';
 import type { ProjectTemplate, TemplateFile, WorkItem } from '../src/core/types.js';
+import { isStrictWorkItem } from '../src/core/portfolio/queued-autonomy.js';
 
 let fx: H1Fixture;
 
@@ -98,6 +99,34 @@ describe('wrapScanner', () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]!.id).toBe('plugin:my-plugin:my-scan:orig-1');
+  });
+
+  it('normalizes hostile plugin metadata to the strict persisted WorkItem contract', async () => {
+    const scanner: PluginScanner = {
+      id: `scanner-${'s'.repeat(200)}`,
+      async scan(repo) {
+        return [{
+          id: `item-${'i'.repeat(300)}`,
+          repo,
+          source: 'todo',
+          title: 't'.repeat(500),
+          detail: 'd'.repeat(5_000),
+          value: 3,
+          effort: 2,
+          tags: Array.from({ length: 75 }, (_, index) => `tag-${index}-${'x'.repeat(100)}`),
+          ts: 'not-a-timestamp',
+        }] as WorkItem[];
+      },
+    };
+
+    const items = await wrapScanner(`plugin-${'p'.repeat(200)}`, scanner)('/repo');
+
+    expect(items).toHaveLength(1);
+    expect(isStrictWorkItem(items[0])).toBe(true);
+    expect(items[0]!.id.length).toBeLessThanOrEqual(180);
+    expect(items[0]!.title.length).toBeLessThanOrEqual(240);
+    expect(items[0]!.detail.length).toBeLessThanOrEqual(4_000);
+    expect(items[0]!.tags.length).toBeLessThanOrEqual(50);
   });
 
   it('forces source to "plugin"', async () => {

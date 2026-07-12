@@ -248,6 +248,21 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
     expect(out[0]!.outcome).toBe('done');
   });
 
+  it('reject_proposal reports failed when recovery revocation blocks the status transition', async () => {
+    queueCommands([cmd({ id: 'r-blocked', kind: 'reject_proposal', target: 'prop-blocked' })]);
+    vi.mocked(inbox.setStatus).mockReturnValueOnce(false);
+
+    const out = await pollAndApplyCommands(cfg);
+
+    expect(out[0]).toMatchObject({ outcome: 'failed' });
+    expect(exporter.patchFleetCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      'r-blocked',
+      expect.objectContaining({ status: 'failed' }),
+      expect.anything(),
+    );
+  });
+
   it('enroll_repo → enroll (sandbox/policy) + PATCH done', async () => {
     queueCommands([cmd({ id: 'e1', kind: 'enroll_repo', payload: { path: '/repo/new' } })]);
 

@@ -93,8 +93,9 @@ function isWorkItemLike(value: unknown): value is WorkItem {
   );
 }
 
-function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
-  if (!isWorkItemLike(value)) return null;
+/** Pure, non-mutating validation for the persisted WorkItem contract. */
+export function isStrictWorkItem(value: unknown): value is WorkItem {
+  if (!isWorkItemLike(value)) return false;
   if (!(value.id.length > 0 && value.id.length <= 180 &&
     isAbsolute(value.repo) && value.repo.length <= 4096 &&
     WORK_SOURCES.has(value.source) &&
@@ -104,14 +105,14 @@ function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
     Number.isInteger(value.effort) && value.effort >= 1 && value.effort <= 5 &&
     Number.isFinite(value.score) && value.score >= 0 && value.score <= 25 &&
     value.tags.length <= 50 && value.tags.every((tag) => tag.length > 0 && tag.length <= 80) &&
-    value.ts.length <= 40 && Number.isFinite(Date.parse(value.ts)))) return null;
+    value.ts.length <= 40 && Number.isFinite(Date.parse(value.ts)))) return false;
 
   const hasHandoff = value.repairHandoffId !== undefined || value.repairGenerationId !== undefined;
-  if (value.source === 'invent' && (hasHandoff || value.repairParentItemId !== undefined)) return null;
+  if (value.source === 'invent' && (hasHandoff || value.repairParentItemId !== undefined)) return false;
   if (hasHandoff && !(
     typeof value.repairHandoffId === 'string' && value.repairHandoffId.length > 0 && value.repairHandoffId.length <= 180 &&
     typeof value.repairGenerationId === 'string' && value.repairGenerationId.length > 0 && value.repairGenerationId.length <= 180
-  )) return null;
+  )) return false;
   const treatmentMetadataPresent = value.repairTreatmentUnitId !== undefined || value.repairTreatment !== undefined;
   if (treatmentMetadataPresent && (
     typeof value.repairTreatmentUnitId !== 'string' || !/^[a-f0-9]{64}$/.test(value.repairTreatmentUnitId) ||
@@ -127,7 +128,13 @@ function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
       parentObjectiveHash: value.repairParentObjectiveHash,
     }) !== value.repairTreatmentUnitId ||
     repairTreatmentForUnitId(value.repairTreatmentUnitId) !== value.repairTreatment
-  )) return null;
+  )) return false;
+
+  return true;
+}
+
+function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
+  if (!isStrictWorkItem(value)) return null;
 
   return {
     id: value.id,

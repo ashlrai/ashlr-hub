@@ -151,8 +151,11 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       const { setStatus, loadProposal } = await import('../inbox/store.js');
       const proposal = loadProposal(proposalId);
       if (!proposal) return;
-      setStatus(proposalId, 'rejected', 'mason:telegram');
-      await sendReply(`Rejected "${proposal.title}"`, cfg);
+      if (setStatus(proposalId, 'rejected', 'mason:telegram') !== false) {
+        await sendReply(`Rejected "${proposal.title}"`, cfg);
+      } else {
+        await sendReply(`Could not reject "${proposal.title}" because recovery revocation is unavailable`, cfg);
+      }
     } catch {
       // Best-effort.
     }

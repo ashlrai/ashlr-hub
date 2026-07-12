@@ -26,6 +26,7 @@ import {
 } from '../fleet/proposal-matching.js';
 import { withSelfHealQueueLock } from '../fleet/self-heal.js';
 import { sanitizeSourceBaseDigest } from '../fleet/source-base-digest.js';
+import { isStrictWorkItem } from './queued-autonomy.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -244,26 +245,33 @@ export function enqueueBacklogItems(items: WorkItem[]): number {
 
 export function enqueueBacklogItemsDetailed(items: WorkItem[]): { ok: boolean; enqueued: number } {
   if (items.length === 0) return { ok: true, enqueued: 0 };
-  const persisted = withSelfHealQueueLock(() => {
-    const existing = loadBacklog();
-    const existingItems = existing?.items ?? [];
-    const existingIds = new Set(existingItems.map((item) => item.id));
-    const fresh = items.filter((item) => !existingIds.has(item.id));
-    if (fresh.length === 0) return 0;
-    persistBacklogUnlocked({
-      generatedAt: new Date().toISOString(),
-      repos: [...new Set([...existingItems, ...fresh].map((item) => item.repo))],
-      items: [...existingItems, ...fresh],
-      ...(existing?.observations ? { observations: existing.observations } : {}),
-      ...(existing?.observationSourceState ? { observationSourceState: existing.observationSourceState } : {}),
-      ...(existing?.observationsTruncated ? { observationsTruncated: true } : {}),
+  try {
+    const persisted = withSelfHealQueueLock(() => {
+      const existing = loadBacklog();
+      const existingItems = existing?.items ?? [];
+      const existingIds = new Set(existingItems.map((item) => item.id));
+      const fresh = items.filter((item) => !existingIds.has(item.id));
+      if (fresh.length === 0) return 0;
+      persistBacklogUnlocked({
+        generatedAt: new Date().toISOString(),
+        repos: [...new Set([...existingItems, ...fresh].map((item) => item.repo))],
+        items: [...existingItems, ...fresh],
+        ...(existing?.observations ? { observations: existing.observations } : {}),
+        ...(existing?.observationSourceState ? { observationSourceState: existing.observationSourceState } : {}),
+        ...(existing?.observationsTruncated ? { observationsTruncated: true } : {}),
+      });
+      return fresh.length;
     });
-    return fresh.length;
-  });
-  return persisted.ok ? { ok: true, enqueued: persisted.value } : { ok: false, enqueued: 0 };
+    return persisted.ok ? { ok: true, enqueued: persisted.value } : { ok: false, enqueued: 0 };
+  } catch {
+    return { ok: false, enqueued: 0 };
+  }
 }
 
 function persistBacklogUnlocked(backlog: Backlog): void {
+  if (!backlog.items.every(isStrictWorkItem)) {
+    throw new Error('refusing to persist backlog with invalid WorkItem rows');
+  }
   const p = backlogPath();
   const dir = join(homedir(), '.ashlr');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });

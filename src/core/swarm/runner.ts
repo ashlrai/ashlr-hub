@@ -66,6 +66,10 @@ import { scrubSecrets as scrubSensitiveText } from '../util/scrub.js';
 import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { runEventSummary } from '../learning/causal.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from '../inbox/persistence-mismatch.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -142,6 +146,7 @@ type SetProposalStatusFn = (
   id: string,
   status: import('../types.js').ProposalStatus,
   result?: string,
+  reason?: string,
 ) => void;
 
 let _createSandbox:  CreateSandboxFn  | null = null;
@@ -1136,7 +1141,12 @@ function captureSandboxAndCleanup(
               persisted.id === created.id &&
               persisted.runId === run.id
             ) {
-              _setProposalStatus?.(created.id, 'rejected', 'proposal persistence verification failed');
+              _setProposalStatus?.(
+                created.id,
+                'rejected',
+                PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+                PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+              );
             }
             outcome = {
               kind: 'proposal-capture-error',

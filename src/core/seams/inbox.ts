@@ -42,7 +42,7 @@ export interface InboxStore {
   /** Load one proposal by id, or null when absent/malformed. */
   load(id: string): Proposal | null;
   /** Persist a new status for an existing proposal (pure persistence). */
-  setStatus(id: string, status: ProposalStatus, result?: string): void;
+  setStatus(id: string, status: ProposalStatus, result?: string, reason?: string): void;
   /** Count proposals with status === 'pending'. */
   pendingCount(): number;
 }
@@ -58,8 +58,8 @@ export class LocalInboxStore implements InboxStore {
   load(id: string): Proposal | null {
     return loadProposal(id);
   }
-  setStatus(id: string, status: ProposalStatus, result?: string): void {
-    setStatus(id, status, result);
+  setStatus(id: string, status: ProposalStatus, result?: string, reason?: string): void {
+    setStatus(id, status, result, reason);
   }
   pendingCount(): number {
     return pendingCount();
@@ -77,7 +77,7 @@ export class CloudInboxStore implements InboxStore {
   load(_id: string): Proposal | null {
     throw cloudGatedError(INBOX_SEAM.name, 'load');
   }
-  setStatus(_id: string, _status: ProposalStatus, _result?: string): void {
+  setStatus(_id: string, _status: ProposalStatus, _result?: string, _reason?: string): void {
     throw cloudGatedError(INBOX_SEAM.name, 'setStatus');
   }
   pendingCount(): number {

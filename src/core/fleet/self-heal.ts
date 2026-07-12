@@ -37,6 +37,7 @@ import {
   isActionableSelfHealItem,
 } from './self-heal-trust.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+export { pruneQueuedSelfHealItems } from './self-heal-queue-prune.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -527,64 +528,6 @@ export function queueSelfHealItemDetailed(item: WorkItem): QueueSelfHealItemResu
   } finally {
     releaseLocalStoreLock(lock);
   }
-}
-
-export interface PruneQueuedSelfHealItemsResult {
-  scanned: number;
-  removed: number;
-  failed: boolean;
-}
-
-/** Remove selected generated rows from both mutable queue projections. */
-export function pruneQueuedSelfHealItems(
-  shouldRemove: (item: WorkItem) => boolean,
-): PruneQueuedSelfHealItemsResult {
-  const lock = acquireLocalStoreLock(queueLockPath());
-  if (!lock) return { scanned: 0, removed: 0, failed: true };
-  let scanned = 0;
-  let removed = 0;
-  let failed = false;
-  try {
-    const qPath = selfHealQueuePath();
-    const read = readWorkItemsArrayStrict(qPath);
-    if (!read.ok) throw new Error('self-heal queue is malformed');
-    const existing = read.items;
-    scanned += existing.length;
-    const filtered = existing.filter((item) => !shouldRemove(item));
-    const queueRemoved = existing.length - filtered.length;
-    if (queueRemoved > 0) writeJsonAtomic(qPath, filtered);
-    removed += queueRemoved;
-  } catch {
-    failed = true;
-  }
-  try {
-    const path = backlogPath();
-    if (existsSync(path)) {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-      if (Array.isArray(parsed)) {
-        scanned += parsed.length;
-        const filtered = parsed.filter((item) => !shouldRemove(item as WorkItem));
-        const backlogRemoved = parsed.length - filtered.length;
-        if (backlogRemoved > 0) writeJsonAtomic(path, filtered);
-        removed += backlogRemoved;
-      } else if (
-        parsed &&
-        typeof parsed === 'object' &&
-        Array.isArray((parsed as { items?: unknown }).items)
-      ) {
-        const envelope = parsed as { items: unknown[] };
-        scanned += envelope.items.length;
-        const filtered = envelope.items.filter((item) => !shouldRemove(item as WorkItem));
-        const backlogRemoved = envelope.items.length - filtered.length;
-        if (backlogRemoved > 0) writeJsonAtomic(path, { ...parsed, items: filtered });
-        removed += backlogRemoved;
-      }
-    }
-  } catch {
-    failed = true;
-  }
-  releaseLocalStoreLock(lock);
-  return { scanned, removed, failed };
 }
 
 function persistHealItem(item: WorkItem): void {

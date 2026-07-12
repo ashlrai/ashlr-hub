@@ -69,6 +69,8 @@ const MAX_QUEUED_AUTONOMY_ITEMS = 25;
 const MAX_BINSHIELD_DEP_BUMP_SCANS = 10;
 export const MAX_SCANNER_OBSERVATIONS = 500;
 const BINSHIELD_DEP_BUMP_FAIL_ON: BinshieldRiskLevel = 'high';
+const MAX_WORK_ITEM_TITLE_LENGTH = 240;
+const MAX_WORK_ITEM_DETAIL_LENGTH = 4_000;
 
 // ---------------------------------------------------------------------------
 // Shared ignore predicate — non-actionable / generated / vendored files
@@ -163,7 +165,9 @@ function makeId(repo: string, source: WorkSource, discriminator: string): string
     .update(repo + ':' + discriminator)
     .digest('hex')
     .slice(0, 10);
-  return `${basename(repo)}:${source}:${hash}`;
+  const suffix = `:${source}:${hash}`;
+  const repoName = basename(repo) || 'repo';
+  return `${repoName.slice(0, Math.max(1, 180 - suffix.length))}${suffix}`;
 }
 
 function nowIso(): string {
@@ -188,6 +192,27 @@ function score(value: number, effort: number): number {
   return Math.round((v / e) * 100) / 100;
 }
 
+function boundedGoalDisplayTitle(objective: string, milestoneTitle: string): string {
+  const prefix = 'Advance goal "';
+  const separator = '" — ';
+  const fullTitle = `${prefix}${objective}${separator}${milestoneTitle}`;
+  if (fullTitle.length <= MAX_WORK_ITEM_TITLE_LENGTH) return fullTitle;
+
+  const available = MAX_WORK_ITEM_TITLE_LENGTH - prefix.length - separator.length;
+  let objectiveBudget = Math.min(objective.length, Math.floor(available / 2));
+  const milestoneBudget = Math.min(milestoneTitle.length, available - objectiveBudget);
+  objectiveBudget = Math.min(objective.length, available - milestoneBudget);
+  const truncate = (value: string, max: number): string =>
+    value.length <= max ? value : `${value.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+
+  return `${prefix}${truncate(objective, objectiveBudget)}${separator}${truncate(milestoneTitle, milestoneBudget)}`;
+}
+
+function boundedWorkItemText(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
 function makeItem(
   repo: string,
   source: WorkSource,
@@ -204,8 +229,8 @@ function makeItem(
     id: makeId(repo, source, discriminator),
     repo,
     source,
-    title,
-    detail,
+    title: boundedWorkItemText(title, MAX_WORK_ITEM_TITLE_LENGTH),
+    detail: boundedWorkItemText(detail, MAX_WORK_ITEM_DETAIL_LENGTH),
     value: v,
     effort: e,
     score: score(v, e),
@@ -1871,7 +1896,7 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
           repo,
           'goal',
           `goal:${goal.id}:${next.id}`,
-          `Advance goal "${goal.objective}" — ${next.title}`,
+          boundedGoalDisplayTitle(goal.objective, next.title),
           detail,
           4, // high baseline value: user-declared priority
           2,
