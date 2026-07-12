@@ -174,7 +174,7 @@ function readEnrollmentSource(): EnrollmentSourceRead {
   }
 }
 
-function strictDefaultBranch(repo: string, timeoutMs: number): string | null {
+export function strictDefaultBranch(repo: string, timeoutMs: number): string | null {
   try {
     const output = execFileSync('git', [
       '-C', repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD',
@@ -183,7 +183,20 @@ function strictDefaultBranch(repo: string, timeoutMs: number): string | null {
     const branch = output.slice('origin/'.length);
     return validGitBranch(branch) ? branch : null;
   } catch {
-    return null;
+    try {
+      const remotes = execFileSync('git', ['-C', repo, 'remote'], {
+        encoding: 'utf8', stdio: 'pipe', timeout: timeoutMs,
+      }).split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+      if (remotes.includes('origin')) return null;
+    } catch { return null; }
+    // A repository with no origin is local-only; its checked-out symbolic
+    // branch is the strongest available integration target.
+    try {
+      const branch = execFileSync('git', ['-C', repo, 'symbolic-ref', '--short', 'HEAD'], {
+        encoding: 'utf8', stdio: 'pipe', timeout: timeoutMs,
+      }).trim();
+      return validGitBranch(branch) ? branch : null;
+    } catch { return null; }
   }
 }
 

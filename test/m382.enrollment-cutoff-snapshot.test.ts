@@ -1,6 +1,7 @@
 import { linkSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createAuthenticatedCutoffEnvelopeV2,
@@ -8,6 +9,7 @@ import {
 } from '../src/core/fleet/authenticated-cutoff-snapshot.js';
 import {
   captureEnrollmentCutoffSnapshotV2,
+  strictDefaultBranch,
   verifyEnrollmentCutoffSnapshotV2,
 } from '../src/core/fleet/enrollment-cutoff-snapshot.js';
 
@@ -100,6 +102,14 @@ describe('M382 authenticated cutoff snapshot envelope', () => {
 });
 
 describe('M382 live enrollment cutoff producer', () => {
+  it('uses the symbolic branch only for a local-only repository', () => {
+    const repo = join(home, 'local-only');
+    execFileSync('git', ['init', '-q', '-b', 'trunk', repo]);
+    expect(strictDefaultBranch(repo, 5_000)).toBe('trunk');
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'https://example.invalid/repo.git']);
+    expect(strictDefaultBranch(repo, 5_000)).toBeNull();
+  });
+
   it('captures sorted enrollment and branch authority across a stable cutoff', () => {
     const repoA = resolve(home, 'a');
     const repoB = resolve(home, 'b');
