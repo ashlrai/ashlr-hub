@@ -15,13 +15,21 @@
  */
 
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  opendirSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   writeFileSync,
 } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, Proposal, ProposalStatus } from '../types.js';
@@ -279,6 +287,140 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
     typeof p['status'] === 'string' &&
     typeof p['createdAt'] === 'string'
   );
+}
+
+const DEFAULT_PROPOSAL_READ_MAX_FILES = 512;
+const DEFAULT_PROPOSAL_READ_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const HARD_PROPOSAL_READ_MAX_FILES = 4_096;
+const HARD_PROPOSAL_READ_MAX_BYTES = 256 * 1024 * 1024;
+const HARD_PROPOSAL_READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_PROPOSAL_DIRECTORY_ENTRIES = 8_192;
+
+export interface ListProposalsDetailedOptions {
+  status?: ProposalStatus;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxFileBytes?: number;
+  /** Return no proposals unless the selected source was read and validated completely. */
+  requireComplete?: boolean;
+}
+
+export type ProposalReadStopReason =
+  | 'file-limit'
+  | 'byte-limit'
+  | 'per-file-byte-limit'
+  | 'invalid-file'
+  | 'io-error';
+
+export interface ProposalSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: ProposalReadStopReason[];
+  filesDiscovered: number;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+}
+
+export interface ProposalsReadResult extends ProposalSourceQuality {
+  proposals: Proposal[];
+}
+
+function boundedProposalReadOption(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value)))
+    : fallback;
+}
+
+function emptyProposalRead(
+  sourceState: ProposalSourceQuality['sourceState'],
+  overrides: Partial<ProposalsReadResult> = {},
+): ProposalsReadResult {
+  return {
+    proposals: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushProposalStopReason(
+  reasons: ProposalReadStopReason[],
+  reason: ProposalReadStopReason,
+): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function sameProposalSource(
+  left: Stats,
+  right: Stats,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function safeProposalDirectory(stat: Stats): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink();
+}
+
+type ProposalFileRead =
+  | { ok: true; text: string; bytesRead: number }
+  | { ok: false; reason: Exclude<ProposalReadStopReason, 'file-limit'> };
+
+function readProposalFileBounded(
+  filePath: string,
+  remainingBytes: number,
+  maxFileBytes: number,
+): ProposalFileRead {
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+    fd = openSync(filePath, constants.O_RDONLY | noFollow);
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.isSymbolicLink() || Number(before.nlink) !== 1) {
+      return { ok: false, reason: 'io-error' };
+    }
+    const size = Number(before.size);
+    if (!Number.isSafeInteger(size) || size < 0) return { ok: false, reason: 'io-error' };
+    if (size > maxFileBytes) return { ok: false, reason: 'per-file-byte-limit' };
+    if (size > remainingBytes) return { ok: false, reason: 'byte-limit' };
+
+    const buffer = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const count = readSync(fd, buffer, offset, size - offset, null);
+      if (count === 0) return { ok: false, reason: 'io-error' };
+      offset += count;
+    }
+
+    const after = fstatSync(fd);
+    if (
+      !after.isFile() ||
+      Number(after.nlink) !== 1 ||
+      !sameProposalSource(before, after) ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    ) {
+      return { ok: false, reason: 'io-error' };
+    }
+    return { ok: true, text: buffer.toString('utf8'), bytesRead: offset };
+  } catch {
+    return { ok: false, reason: 'io-error' };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort read */ }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +775,167 @@ export function listProposals(filter?: { status?: ProposalStatus }): Proposal[] 
     return filtered;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Bounded proposal enumeration with explicit source-quality diagnostics.
+ *
+ * Unlike the compatibility `listProposals` reader, this path rejects links and
+ * non-regular files, detects inbox replacement, and reports every skipped file.
+ * Never throws.
+ */
+export function listProposalsDetailed(
+  opts: ListProposalsDetailedOptions = {},
+): ProposalsReadResult {
+  try {
+    const maxFiles = boundedProposalReadOption(
+      opts.maxFiles,
+      DEFAULT_PROPOSAL_READ_MAX_FILES,
+      HARD_PROPOSAL_READ_MAX_FILES,
+    );
+    const maxBytes = boundedProposalReadOption(
+      opts.maxBytes,
+      DEFAULT_PROPOSAL_READ_MAX_BYTES,
+      HARD_PROPOSAL_READ_MAX_BYTES,
+    );
+    const maxFileBytes = boundedProposalReadOption(
+      opts.maxFileBytes,
+      DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES,
+      HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+    );
+    const dir = inboxDir();
+    if (!existsSync(dir)) return emptyProposalRead('missing');
+
+    let directoryBefore: Stats;
+    try {
+      directoryBefore = lstatSync(dir);
+      if (!safeProposalDirectory(directoryBefore)) {
+        return emptyProposalRead('degraded', {
+          complete: false,
+          stopReasons: ['io-error'],
+          unreadableFiles: 1,
+        });
+      }
+    } catch {
+      return emptyProposalRead('degraded', {
+        complete: false,
+        stopReasons: ['io-error'],
+        unreadableFiles: 1,
+      });
+    }
+
+    const result = emptyProposalRead('healthy', { sourcePresent: true });
+    const files: string[] = [];
+    try {
+      const handle = opendirSync(dir);
+      let entriesSeen = 0;
+      try {
+        let entry = handle.readSync();
+        while (entry !== null) {
+          entriesSeen++;
+          if (entriesSeen > MAX_PROPOSAL_DIRECTORY_ENTRIES) {
+            pushProposalStopReason(result.stopReasons, 'file-limit');
+            result.complete = false;
+            break;
+          }
+          if (entry.name.endsWith('.json') && !entry.name.endsWith('.tmp')) {
+            files.push(entry.name);
+          }
+          entry = handle.readSync();
+        }
+      } finally {
+        handle.closeSync();
+      }
+    } catch {
+      return emptyProposalRead('degraded', {
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['io-error'],
+        unreadableFiles: 1,
+      });
+    }
+
+    files.sort((left, right) => left.localeCompare(right));
+    result.filesDiscovered = files.length;
+
+    for (const file of files) {
+      if (result.filesRead >= maxFiles) {
+        pushProposalStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
+        break;
+      }
+      const remainingBytes = maxBytes - result.bytesRead;
+      if (remainingBytes <= 0) {
+        pushProposalStopReason(result.stopReasons, 'byte-limit');
+        result.complete = false;
+        break;
+      }
+
+      result.filesRead++;
+      const loaded = readProposalFileBounded(join(dir, file), remainingBytes, maxFileBytes);
+      if (!loaded.ok) {
+        pushProposalStopReason(result.stopReasons, loaded.reason);
+        result.complete = false;
+        if (loaded.reason === 'io-error') result.unreadableFiles++;
+        if (loaded.reason === 'byte-limit') break;
+        continue;
+      }
+      result.bytesRead += loaded.bytesRead;
+
+      try {
+        const parsed: unknown = JSON.parse(loaded.text);
+        if (!isValidProposal(parsed)) {
+          result.invalidFiles++;
+          result.complete = false;
+          pushProposalStopReason(result.stopReasons, 'invalid-file');
+          continue;
+        }
+        const proposal = sanitizeProposalForStore(parsed);
+        if (opts.status === undefined || proposal.status === opts.status) {
+          result.proposals.push(proposal);
+        }
+      } catch {
+        result.invalidFiles++;
+        result.complete = false;
+        pushProposalStopReason(result.stopReasons, 'invalid-file');
+      }
+    }
+
+    try {
+      const directoryAfter = lstatSync(dir);
+      if (!safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) {
+        pushProposalStopReason(result.stopReasons, 'io-error');
+        result.complete = false;
+        result.unreadableFiles++;
+      }
+    } catch {
+      pushProposalStopReason(result.stopReasons, 'io-error');
+      result.complete = false;
+      result.unreadableFiles++;
+    }
+
+    result.proposals.sort((a, b) => {
+      if (a.createdAt < b.createdAt) return 1;
+      if (a.createdAt > b.createdAt) return -1;
+      if (a.id < b.id) return 1;
+      if (a.id > b.id) return -1;
+      return 0;
+    });
+    if (result.invalidFiles > 0 || result.unreadableFiles > 0 || !result.complete) {
+      result.sourceState = 'degraded';
+      result.complete = false;
+    }
+    if (opts.requireComplete === true && result.sourceState === 'degraded') {
+      result.proposals = [];
+    }
+    return result;
+  } catch {
+    return emptyProposalRead('degraded', {
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
   }
 }
 

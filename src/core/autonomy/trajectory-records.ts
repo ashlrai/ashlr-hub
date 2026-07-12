@@ -787,26 +787,10 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       });
     }
 
-    for (const trace of outcome.judgeTraces) {
-      const realized = trace.outcome === 'reverted' || trace.outcome === 'followed-up'
-        ? trace.outcome
-        : undefined;
-      if (!realized) continue;
-      record.realizedOutcome = betterRealizedOutcome(record.realizedOutcome, realized);
-      noteTimeline(record, {
-        ts: trace.outcomeAt ?? trace.ts,
-        kind: 'post-merge',
-        outcome: realized,
-        proposalId: proposal.id,
-        runId: proposal.runId,
-        trajectoryId: proposal.trajectoryId,
-        learningSource: 'outcome-record',
-        labelBasis: 'post-merge-regression',
-      });
-    }
-
     for (const observation of outcome.postMergeObservations ?? []) {
-      record.realizedOutcome = betterRealizedOutcome(record.realizedOutcome, observation.outcome);
+      if (observation.confidence === 'deterministic') {
+        record.realizedOutcome = betterRealizedOutcome(record.realizedOutcome, observation.outcome);
+      }
       noteTimeline(record, {
         ts: observation.observedAt,
         kind: 'post-merge',

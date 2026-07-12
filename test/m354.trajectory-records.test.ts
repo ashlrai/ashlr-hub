@@ -328,19 +328,12 @@ describe('Trajectory records', () => {
 
     expect(record).toMatchObject({
       terminalOutcome: 'merged',
-      realizedOutcome: 'reverted',
+      realizedOutcome: 'regressed',
       proposalId: 'prop-1',
       runId: 'run-1',
       trajectoryId: 'traj-1',
     });
     expect(record?.timeline).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        ts: realizedAt,
-        kind: 'post-merge',
-        outcome: 'reverted',
-        learningSource: 'outcome-record',
-        labelBasis: 'post-merge-regression',
-      }),
       expect.objectContaining({
         ts: realizedAt,
         kind: 'post-merge',
@@ -354,11 +347,11 @@ describe('Trajectory records', () => {
       }),
     ]));
     const summary = summarizeTrajectoryLearning([record!], 24);
-    expect(summary.realizedOutcomes).toMatchObject({ reverted: 1 });
+    expect(summary.realizedOutcomes).toMatchObject({ regressed: 1 });
     expect(summary.terminalOutcomes).toMatchObject({ merged: 1 });
     expect(summary.recent[0]).toMatchObject({
       terminalOutcome: 'merged',
-      realizedOutcome: 'reverted',
+      realizedOutcome: 'regressed',
     });
   });
 

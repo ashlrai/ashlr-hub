@@ -107,6 +107,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused/full verification and three independent adversarial reviews; close every reported P1.
 - [x] Commit, push, watch all Ubuntu/Windows CI jobs, reload production, and record the live result.
 
+## Current Overnight Cycle - Fair Post-Merge Observation
+- [x] Rehydrate the deterministic-attribution release and audit remaining positive-outcome authority gaps.
+- [x] Make post-merge scans observation-only and remove legacy heuristic routing authority.
+- [x] Add strict bounded proposal enumeration and fail closed on incomplete production provenance.
+- [x] Add durable CAS-protected cursors for outcome candidates and enrolled-repository regression rotation.
+- [x] Add signed stable-window witness batches with global cohort replay detection and explicit non-authority.
+- [x] Surface post-merge source quality and denominator incompleteness without changing operational readiness.
+- [ ] Close adversarial test gaps, run focused and exhaustive verification, commit, push, and reload production.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

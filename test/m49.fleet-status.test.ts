@@ -451,6 +451,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourcePresent: false,
       complete: true,
     });
+    expect(s.postMergeCohort).toMatchObject({
+      policyEligible: false,
+      denominatorComplete: false,
+      adverseObservations: 0,
+      stability: { completeCohorts: 0, releasedWitnesses: 0 },
+    });
+    expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'post-merge',
+    )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational' });
     expect(s.autonomyEffectiveness).toMatchObject({
       phase: 'control-blocked',
       canAutoMergeNow: false,
@@ -4531,12 +4540,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         eligible: 1,
         'cold-start': 3,
         withheld: 0,
-        observational: 0,
+        observational: 1,
         'not-applicable': 2,
       },
     });
     expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.map((source) => source.id)).toEqual([
       'decisions', 'judge-traces', 'agent-actions', 'dispatch-production', 'dispatch-manifests', 'best-of-n',
+      'post-merge',
     ]);
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',

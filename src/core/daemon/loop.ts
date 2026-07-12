@@ -113,6 +113,12 @@ import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.j
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
 import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
+import {
+  buildMonitoringCursor,
+  loadMonitoringCursor,
+  saveMonitoringCursor,
+  selectRegressionRepoSuccessors,
+} from '../fleet/monitoring-cursor.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
@@ -2117,16 +2123,13 @@ export async function tick(
       try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
     }
 
-    // M332: outcome watcher — link real-world reverts / follow-up fixes back
-    // onto judge traces so calibration + learned routing see post-merge truth.
-    // READ-ONLY on repos; ledger writes go through linkOutcome IN THIS SERIAL
-    // maintenance phase only (its in-place JSONL rewrite must never run inside
-    // the concurrent dispatch closure). Internal 6h throttle; opt out with
-    // cfg.foundry.outcomeWatcher === false.
+    // Outcome findings remain signed observation-only evidence. They are not
+    // allowed to rewrite judge labels or skill lifecycle state while cohort
+    // enumeration is incomplete.
     if ((liveCfg.foundry as Record<string, unknown>)?.['outcomeWatcher'] !== false) {
       try {
         const { scanRealWorldOutcomes } = await import('../fleet/outcome-watcher.js');
-        await scanRealWorldOutcomes(liveCfg);
+        await scanRealWorldOutcomes(liveCfg, { enrolledRepos: listEnrolled() });
       } catch (err) {
         console.warn('[ashlr] daemon:tick outcomeWatcher failed:', (err as Error)?.message ?? err);
       }
@@ -2135,10 +2138,28 @@ export async function tick(
     // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
     const regressionSentinel = (liveCfg.foundry as Record<string, unknown>)?.regressionSentinel;
     if (regressionSentinel === true || (typeof regressionSentinel === 'object' && regressionSentinel !== null)) {
+      let attemptedCursor: ReturnType<typeof buildMonitoringCursor> = null;
+      let attemptedExpectedCursor: ReturnType<typeof buildMonitoringCursor> = null;
+      let attemptedRepo: string | undefined;
+      let enrollmentRepos: string[] = [];
       try {
-        const r = await detectRegression(liveCfg);
+        enrollmentRepos = [...new Set(listEnrolled().map((repo) => resolve(repo)))].sort();
+        const availableRepos = enrollmentRepos.filter((repo) => existsSync(repo));
+        const cursorRead = loadMonitoringCursor(enrollmentRepos);
+        if (cursorRead.sourceState === 'degraded') {
+          throw new Error('monitoring cursor is degraded');
+        }
+        const cursor = cursorRead.cursor ?? buildMonitoringCursor(enrollmentRepos);
+        const monitoredRepo = cursor
+          ? selectRegressionRepoSuccessors(availableRepos, cursor.regressionRepoAfter, 1).selected[0]
+          : undefined;
+        if (!cursor || !monitoredRepo) return;
+        attemptedCursor = cursor;
+        attemptedExpectedCursor = cursorRead.storedCursor;
+        attemptedRepo = monitoredRepo;
+        const r = await detectRegression(liveCfg, monitoredRepo);
         if (r.regressed) {
-          const bisect = await bisectAndRevert(liveCfg);
+          const bisect = await bisectAndRevert(liveCfg, monitoredRepo);
           const culpritProposalId = bisect.revertProposal?.culpritProposalId;
           const gitOid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
           if (
@@ -2194,9 +2215,27 @@ export async function tick(
               : 'Regression detected; no fleet merge culprit was isolated',
           }, liveCfg);
           // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
-          void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: process.cwd() }, liveCfg)).catch(() => {});
+          void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: monitoredRepo }, liveCfg)).catch(() => {});
         }
-      } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
+        const advancedCursor = {
+          ...cursor,
+          regressionRepoAfter: monitoredRepo,
+        };
+        if (!saveMonitoringCursor(advancedCursor, {
+          enrolledRepos: enrollmentRepos,
+          expectedCursor: cursorRead.storedCursor,
+        })) {
+          throw new Error('failed to persist monitoring cursor advancement');
+        }
+      } catch (err) {
+        if (attemptedCursor && attemptedRepo) {
+          saveMonitoringCursor(
+            { ...attemptedCursor, regressionRepoAfter: attemptedRepo },
+            { enrolledRepos: enrollmentRepos, expectedCursor: attemptedExpectedCursor },
+          );
+        }
+        console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err);
+      }
     }
   };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {

@@ -112,6 +112,8 @@ import {
   readResolutionObserverStatus,
   type ResolutionObserverStatus,
 } from './resolution-observer.js';
+import { readPostMergeObservations } from './post-merge-observations.js';
+import { readPostMergeStability, type PostMergeStabilityCohortSummary } from './post-merge-stability.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -542,7 +544,7 @@ export interface FleetReadinessSourceHealth {
   id:
     | 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom'
     | 'decisions' | 'judge-traces' | 'agent-actions' | 'dispatch-production'
-    | 'dispatch-manifests' | 'best-of-n';
+    | 'dispatch-manifests' | 'best-of-n' | 'post-merge';
   label: string;
   status: FleetReadinessSourceStatus;
   badge: 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
@@ -982,6 +984,14 @@ export interface FleetStatus {
   dispatchManifestSource?: DispatchManifestSourceQuality;
   /** Bounded candidate-economics evidence used only when complete. */
   bestOfNSource?: BestOfNSourceQuality;
+  /** Observation-only post-merge evidence. Never grants routing or merge authority. */
+  postMergeSource?: FleetReadinessEvidenceQuality;
+  postMergeCohort?: {
+    policyEligible: false;
+    denominatorComplete: false;
+    adverseObservations: number;
+    stability: PostMergeStabilityCohortSummary;
+  };
   /** Effective applicability for optional evidence producers. */
   evidencePolicy?: {
     concurrentDispatchEnabled: boolean;
@@ -1845,6 +1855,37 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         invalidRows: 0, unreadableFiles: 1,
       };
     }
+  }
+  try {
+    const adverse = readPostMergeObservations({ requireComplete: true });
+    const stability = readPostMergeStability({ requireComplete: true });
+    const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
+      !adverse.complete || !stability.complete;
+    const missing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
+    status.postMergeSource = {
+      sourceState: degraded ? 'degraded' : missing ? 'missing' : 'healthy',
+      sourcePresent: adverse.sourcePresent || stability.sourcePresent,
+      complete: !degraded,
+      stopReasons: [...new Set([...adverse.stopReasons, ...stability.stopReasons])],
+      filesRead: adverse.filesRead + stability.filesRead,
+      bytesRead: adverse.bytesRead + stability.bytesRead,
+      rowsScanned: adverse.physicalRows + stability.physicalRows,
+      invalidRows: adverse.invalidRows + stability.invalidRows,
+      unreadableFiles: 0,
+    };
+    status.postMergeCohort = {
+      policyEligible: false,
+      // Stable batches do not yet bind the complete eligible denominator.
+      denominatorComplete: false,
+      adverseObservations: adverse.observations.length,
+      stability: stability.cohortSummary,
+    };
+  } catch {
+    status.postMergeSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
   }
   let workspaceRead: AgentWorkspaceReadResult | undefined;
   try {
@@ -3872,6 +3913,10 @@ function learningEvidenceReadinessSources(
       quality: status.bestOfNSource, generatedAt,
       applicable: status.evidencePolicy?.bestOfNEnabled !== false,
     }),
+    evidenceReadinessSource({
+      id: 'post-merge', label: 'Post-Merge Cohort', role: 'forensics',
+      quality: status.postMergeSource, generatedAt,
+    }),
   ];
 }
 
@@ -4381,7 +4426,8 @@ function buildAutonomousShipReadiness(
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const evidenceSources = learningEvidenceReadinessSources(status, inputs.generatedAt);
   const evidenceSummary = readinessEvidenceSummary(evidenceSources);
-  const evidenceState = evidenceSummary.withheld > 0 || evidenceSources.some((source) => source.status === 'degraded')
+  const authoritySources = evidenceSources.filter((source) => source.id !== 'post-merge');
+  const evidenceState = evidenceSummary.withheld > 0 || authoritySources.some((source) => source.status === 'degraded')
     ? 'degraded'
     : evidenceSummary['cold-start'] > 0
       ? 'cold-start'

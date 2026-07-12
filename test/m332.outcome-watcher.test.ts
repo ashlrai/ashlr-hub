@@ -30,6 +30,7 @@ let traces: Record<string, unknown>[] = [];
 const linked: Array<[string, string]> = [];
 let proposalRepo = '';
 let appliedProposals: Record<string, unknown>[] = [];
+let proposalSourceState: 'healthy' | 'missing' | 'degraded' = 'healthy';
 const recordedObservations: Record<string, unknown>[] = [];
 let skillCards: SkillCard[] = [];
 const recordedSkillCards: SkillCard[] = [];
@@ -49,6 +50,18 @@ vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn((id: string) => appliedProposals.find((proposal) => proposal['id'] === id)
     ?? (proposalRepo ? { repo: proposalRepo } : null)),
   listProposals: vi.fn(() => appliedProposals),
+  listProposalsDetailed: vi.fn(() => ({
+    proposals: proposalSourceState === 'healthy' ? appliedProposals : [],
+    sourceState: proposalSourceState,
+    sourcePresent: proposalSourceState !== 'missing',
+    complete: proposalSourceState !== 'degraded',
+    stopReasons: proposalSourceState === 'degraded' ? ['invalid-file'] : [],
+    filesDiscovered: appliedProposals.length,
+    filesRead: appliedProposals.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  })),
 }));
 
 vi.mock('../src/core/fleet/post-merge-observations.js', () => ({
@@ -93,6 +106,7 @@ import { outcomeToIntent } from '../src/core/fleet/judge-calibration.js';
 import { buildProducerScores } from '../src/core/run/learned-router.js';
 import { readJudgeTraces } from '../src/core/fleet/judge-trace.js';
 import { recordPostMergeObservation } from '../src/core/fleet/post-merge-observations.js';
+import { loadMonitoringCursor } from '../src/core/fleet/monitoring-cursor.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { sanitizeSkillCard } from '../src/core/fleet/skill-records.js';
 
@@ -171,6 +185,7 @@ function verifiedCard(pid: string, overrides: Partial<SkillCard> = {}): SkillCar
 
 const cfg = { version: 1, foundry: {} } as unknown as AshlrConfig;
 let stateFile = '';
+let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
   traces = [];
@@ -178,15 +193,20 @@ beforeEach(() => {
   linked.length = 0;
   proposalRepo = '';
   appliedProposals = [];
+  proposalSourceState = 'healthy';
   recordedObservations.length = 0;
   skillCards = [];
   recordedSkillCards.length = 0;
   const stateDir = mkdtempSync(join(tmpdir(), 'ashlr-m332-state-'));
   dirs.push(stateDir);
   stateFile = join(stateDir, 'watch.json');
+  previousAshlrHome = process.env.ASHLR_HOME;
+  process.env.ASHLR_HOME = join(stateDir, '.ashlr');
 });
 
 afterEach(() => {
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   for (const d of dirs) {
     try {
       rmSync(d, { recursive: true, force: true });
@@ -216,22 +236,15 @@ describe('M332 scanRealWorldOutcomes', () => {
     const nowMs = Date.parse('2026-07-10T14:00:00.000Z');
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile, nowMs });
     expect(scan.reverts).toBe(1);
-    expect(linked).toContainEqual(['p-rev', 'reverted']);
-    expect(recordedSkillCards).toEqual([
-      expect.objectContaining({
-        skillId: 'skill.proposal.p-rev',
-        revision: 2,
-        ts: '2026-07-10T14:00:00.000Z',
-        status: 'revoked',
-        verification: { passed: true, diffHash: 'd'.repeat(64), evidenceCount: 2 },
-        contentHash: 'c'.repeat(64),
-        attestation: 'a'.repeat(64),
-      }),
-    ]);
-    expect(recordedSkillCards[0]?.contentHash).not.toBe('e'.repeat(64));
-    expect(recordedSkillCards[0]?.attestation).not.toBe('f'.repeat(64));
-    expect(sanitizeSkillCard).toHaveBeenCalledOnce();
-    expect(attestSkillCard).toHaveBeenCalledOnce();
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-rev',
+      outcome: 'reverted',
+      basis: 'git-revert-reference',
+    })]);
+    expect(linked).toEqual([]);
+    expect(recordedSkillCards).toEqual([]);
+    expect(sanitizeSkillCard).not.toHaveBeenCalled();
+    expect(attestSkillCard).not.toHaveBeenCalled();
   }, 30_000);
 
   it('detects a near-term fix commit touching the same file', async () => {
@@ -244,14 +257,13 @@ describe('M332 scanRealWorldOutcomes', () => {
 
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.followUps).toBe(1);
-    expect(linked).toContainEqual(['p-fix', 'followed-up']);
-    expect(recordedSkillCards).toEqual([
-      expect.objectContaining({
-        skillId: 'skill.proposal.p-fix',
-        revision: 2,
-        status: 'deprecated',
-      }),
-    ]);
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-fix',
+      outcome: 'followed-up',
+      basis: 'overlapping-fix',
+    })]);
+    expect(linked).toEqual([]);
+    expect(recordedSkillCards).toEqual([]);
   }, 30_000);
 
   it('does not mutate trace or skill state when signed observation persistence fails', async () => {
@@ -271,6 +283,23 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(scan.skipped).toBe(1);
     expect(linked).toEqual([]);
     expect(recordedSkillCards).toEqual([]);
+  }, 30_000);
+
+  it('does not throttle retry after an incomplete observation pass', async () => {
+    proposalRepo = repoWithMerge('p-retry');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [mergedTrace('p-retry')];
+    vi.mocked(recordPostMergeObservation).mockReturnValueOnce({
+      attempted: 1, recorded: 0, upgraded: 0, replayed: 0, obsolete: 0,
+      conflicted: 0, invalid: 0, failed: 1,
+    });
+
+    const incomplete = await scanRealWorldOutcomes(cfg, { stateFile });
+    const retry = await scanRealWorldOutcomes(cfg, { stateFile });
+
+    expect(incomplete).toMatchObject({ reverts: 0, skipped: 1, sourceComplete: false, throttled: false });
+    expect(retry).toMatchObject({ reverts: 1, skipped: 0, sourceComplete: true, throttled: false });
   }, 30_000);
 
   it('refuses a stored merge SHA that is not an ancestor of the observed head', async () => {
@@ -339,7 +368,7 @@ describe('M332 scanRealWorldOutcomes', () => {
     ]);
   }, 30_000);
 
-  it('appends only one lifecycle revision across repeated forced scans', async () => {
+  it('never mutates policy ledgers across repeated forced scans', async () => {
     proposalRepo = repoWithMerge('p-repeat');
     const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
     g(proposalRepo, ['revert', '--no-edit', mergeSha]);
@@ -349,8 +378,9 @@ describe('M332 scanRealWorldOutcomes', () => {
     await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     await scanRealWorldOutcomes(cfg, { force: true, stateFile });
 
-    expect(recordedSkillCards).toHaveLength(1);
-    expect(recordedSkillCards[0]).toMatchObject({ revision: 2, status: 'revoked' });
+    expect(recordedObservations).toHaveLength(2);
+    expect(linked).toEqual([]);
+    expect(recordedSkillCards).toEqual([]);
   }, 30_000);
 
   it('does not create a card when the detected proposal has no verified skill', async () => {
@@ -400,7 +430,7 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(recordedSkillCards).toEqual([]);
   }, 30_000);
 
-  it('upgrades a deprecated skill when a later authoritative revert lands', async () => {
+  it('records a later revert without mutating a deprecated skill', async () => {
     proposalRepo = repoWithMerge('p-lifecycle-upgrade');
     const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
     g(proposalRepo, ['revert', '--no-edit', mergeSha]);
@@ -413,9 +443,11 @@ describe('M332 scanRealWorldOutcomes', () => {
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
 
     expect(scan.reverts).toBe(1);
-    expect(recordedSkillCards).toEqual([
-      expect.objectContaining({ revision: 3, status: 'revoked' }),
-    ]);
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-lifecycle-upgrade',
+      outcome: 'reverted',
+    })]);
+    expect(recordedSkillCards).toEqual([]);
   }, 30_000);
 
   it('unrelated later commits produce NO link (no false positives)', async () => {
@@ -456,6 +488,116 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(linked.length).toBe(0);
   });
 
+  it('production enrollment scope excludes an existing but unenrolled proposal repo', async () => {
+    proposalRepo = repoWithMerge('p-unenrolled');
+    traces = [mergedTrace('p-unenrolled')];
+    appliedProposals = [{
+      id: 'p-unenrolled', status: 'applied', createdAt: new Date().toISOString(),
+      repo: proposalRepo, remoteHandoff: { mergeCommitOid: g(proposalRepo, ['rev-parse', 'HEAD']).trim() },
+    }];
+
+    const scan = await scanRealWorldOutcomes(cfg, {
+      force: true,
+      stateFile,
+      enrolledRepos: [join(proposalRepo, 'different-repo')],
+    });
+
+    expect(scan.scanned).toBe(1);
+    expect(scan.skipped).toBe(1);
+    expect(recordedObservations).toEqual([]);
+  }, 30_000);
+
+  it('production observation aborts when strict proposal provenance is incomplete', async () => {
+    proposalRepo = repoWithMerge('p-degraded-source');
+    appliedProposals = [{
+      id: 'p-degraded-source', status: 'applied', createdAt: new Date().toISOString(),
+      repo: proposalRepo,
+      remoteHandoff: { mergeCommitOid: g(proposalRepo, ['rev-parse', 'HEAD']).trim() },
+    }];
+    traces = [mergedTrace('p-degraded-source')];
+    proposalSourceState = 'degraded';
+
+    const scan = await scanRealWorldOutcomes(cfg, {
+      force: true, stateFile, enrolledRepos: [proposalRepo],
+    });
+
+    expect(scan).toMatchObject({ scanned: 0, skipped: 1, sourceComplete: false, throttled: false });
+    expect(recordedObservations).toEqual([]);
+  }, 30_000);
+
+  it('production observation does not throttle when strict proposal provenance is missing', async () => {
+    traces = [mergedTrace('p-missing-source')];
+    proposalSourceState = 'missing';
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [proposalRepo] });
+    const retry = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [proposalRepo] });
+
+    expect(first).toMatchObject({ scanned: 0, skipped: 1, sourceComplete: false, throttled: false });
+    expect(retry.throttled).toBe(false);
+  });
+
+  it('persists outcome paging so the next production scan advances beyond the first page', async () => {
+    const monitoredRepo = repoWithMerge('p-page-base');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-page-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+
+    const first = await scanRealWorldOutcomes(cfg, {
+      stateFile, enrolledRepos: [monitoredRepo],
+    });
+    expect(loadMonitoringCursor([monitoredRepo]).cursor?.outcome).toMatchObject({
+      candidateAfter: { proposalId: 'p-page-24', mergeCommitOid },
+      sweepComplete: false,
+    });
+    const second = await scanRealWorldOutcomes(cfg, {
+      stateFile, enrolledRepos: [monitoredRepo],
+    });
+
+    expect(first.scanned).toBe(25);
+    expect(first.sourceComplete).toBe(true);
+    expect(first.throttled).toBe(false);
+    expect(second.scanned).toBe(5);
+    expect(second.throttled).toBe(false);
+  });
+
+  it('completes a partial sweep when its unvisited tail disappears', async () => {
+    const monitoredRepo = repoWithMerge('p-tail-base');
+    const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
+    appliedProposals = Array.from({ length: 30 }, (_, index) => ({
+      id: `p-tail-${String(index).padStart(2, '0')}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: monitoredRepo,
+      remoteHandoff: { mergeCommitOid },
+    }));
+
+    const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [monitoredRepo] });
+    appliedProposals = appliedProposals.slice(0, 24);
+    const completed = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [monitoredRepo] });
+    const throttled = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos: [monitoredRepo] });
+
+    expect(first.scanned).toBe(25);
+    expect(completed).toMatchObject({ scanned: 0, sourceComplete: true, throttled: false });
+    expect(loadMonitoringCursor([monitoredRepo]).cursor?.outcome.sweepComplete).toBe(true);
+    expect(throttled.throttled).toBe(true);
+  }, 30_000);
+
+  it('hard-caps the complete trace-backed candidate population', async () => {
+    traces = Array.from({ length: 250 }, (_, index) => mergedTrace(`p-cap-${index}`));
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.scanned).toBe(200);
+    expect(scan.skipped).toBe(200);
+    expect(scan).toMatchObject({ sourceComplete: false, candidateLimitReached: true });
+    expect(recordedObservations).toEqual([]);
+  });
+
   it('M337: already-linked proposals are skipped — no duplicate patch records', async () => {
     proposalRepo = repoWithMerge('p-dup');
     const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
@@ -478,7 +620,11 @@ describe('M332 scanRealWorldOutcomes', () => {
     traces = [mergedTrace('p-upg'), { ...mergedTrace('p-upg'), outcome: 'followed-up' }];
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.reverts).toBe(1);
-    expect(linked).toContainEqual(['p-upg', 'reverted']);
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-upg',
+      outcome: 'reverted',
+    })]);
+    expect(linked).toEqual([]);
   }, 30_000);
 
   it('M339: same-day in-place rewrite — a SINGLE followed-up record (no surviving merged) still upgrades to reverted', async () => {
@@ -490,7 +636,11 @@ describe('M332 scanRealWorldOutcomes', () => {
     traces = [{ ...mergedTrace('p-day'), outcome: 'followed-up' }];
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.reverts).toBe(1);
-    expect(linked).toContainEqual(['p-day', 'reverted']);
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-day',
+      outcome: 'reverted',
+    })]);
+    expect(linked).toEqual([]);
   }, 30_000);
 
   it('M339: single followed-up record with NO revert — scanned once, nothing linked', async () => {
@@ -527,7 +677,32 @@ describe('M332 scanRealWorldOutcomes', () => {
     traces = [mergedTrace('p-busy')];
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.followUps).toBe(1);
-    expect(linked).toContainEqual(['p-busy', 'followed-up']);
+    expect(recordedObservations).toEqual([expect.objectContaining({
+      proposalId: 'p-busy',
+      outcome: 'followed-up',
+    })]);
+    expect(linked).toEqual([]);
+  }, 60_000);
+
+  it('finds a qualifying fix after more than 50 in-window commits without truncating history', async () => {
+    proposalRepo = repoWithMerge('p-late-fix');
+    for (let i = 0; i < 55; i++) {
+      g(proposalRepo, ['commit', '--quiet', '--allow-empty', '-m', `chore: pre-fix filler ${i}`]);
+    }
+    writeFileSync(join(proposalRepo, 'file.ts'), 'late fixed change\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'fix: repair after a busy window']);
+    traces = [mergedTrace('p-late-fix')];
+
+    const scan = await scanRealWorldOutcomes(cfg, { stateFile });
+
+    expect(scan).toMatchObject({
+      followUps: 1,
+      sourceComplete: true,
+      candidateLimitReached: false,
+      throttled: false,
+    });
+    expect(recordedObservations).toEqual([expect.objectContaining({ proposalId: 'p-late-fix' })]);
   }, 60_000);
 });
 
@@ -543,7 +718,7 @@ describe('M332 outcome consumers', () => {
     expect(outcomeToIntent('rejected')).toBe('reject');
   });
 
-  it('buildProducerScores pass 3: a reverted outcome drags the ship-rate down', () => {
+  it('legacy post-merge trace outcomes do not influence learned routing', () => {
     const NOW = Date.now();
     const ts = (h: number) => new Date(NOW - h * 3_600_000).toISOString();
     // 6 shipped proposals for sonnet-5 → ship-rate 1.0 without outcomes.
@@ -572,7 +747,6 @@ describe('M332 outcome consumers', () => {
       })) as never,
     );
     const after = buildProducerScores('issue', NOW).get('claude:sonnet-5')!;
-    expect(after.score).toBeLessThan(before.score);
-    expect(after.score).toBeLessThan(0.75);
+    expect(after).toEqual(before);
   });
 });

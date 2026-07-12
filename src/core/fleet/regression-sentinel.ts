@@ -80,13 +80,23 @@ function resolveCfg(cfg?: Pick<AshlrConfig, 'foundry'>): SentinelConfig {
   const raw = (cfg?.foundry as Record<string, unknown> | undefined)?.['regressionSentinel'];
   const enabled = raw === true || (typeof raw === 'object' && raw !== null);
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
-  const num = (v: unknown, d: number): number =>
-    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d;
+  const boundedInt = (v: unknown, d: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0
+      ? Math.min(Math.max(1, Math.floor(v)), max)
+      : d;
+  const safetyThreshold = (v: unknown): number =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0
+      ? Math.max(1, Math.ceil(v))
+      : DEFAULT_MIN_CONSECUTIVE;
+  const boundedMs = (v: unknown): number =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0
+      ? Math.min(Math.max(1, Math.floor(v)), DEFAULT_TIMEOUT_MS)
+      : DEFAULT_TIMEOUT_MS;
   return {
     enabled,
-    minConsecutive: num(obj['minConsecutive'], DEFAULT_MIN_CONSECUTIVE),
-    maxCandidates: num(obj['maxCandidates'], DEFAULT_MAX_CANDIDATES),
-    timeoutMs: Math.min(num(obj['timeoutMs'], DEFAULT_TIMEOUT_MS), DEFAULT_TIMEOUT_MS),
+    minConsecutive: safetyThreshold(obj['minConsecutive']),
+    maxCandidates: boundedInt(obj['maxCandidates'], DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_CANDIDATES),
+    timeoutMs: boundedMs(obj['timeoutMs']),
   };
 }
 

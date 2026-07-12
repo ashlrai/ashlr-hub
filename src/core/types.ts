@@ -582,10 +582,10 @@ export interface AshlrConfig {
      */
     bestOfNMinItemScore?: number;
     /**
-     * M332: outcome watcher — maintenance pass linking real-world reverts and
-     * near-term follow-up fixes back onto judge traces. READ-ONLY on repos,
-     * append-only ledgers, internally throttled to one scan per 6h.
-     * DEFAULT ON (telemetry enrichment, no behavior change); false disables.
+     * M332: outcome watcher — observation-only maintenance pass recording
+     * real-world reverts and near-term follow-up fixes in signed metadata
+     * ledgers. It never rewrites judge labels or skill lifecycle state.
+     * Internally throttled after complete scans. DEFAULT ON; false disables.
      */
     outcomeWatcher?: boolean;
     verifyToGreen?: {

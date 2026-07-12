@@ -737,13 +737,31 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
   });
 
   it('passes cfg to detectRegression', async () => {
-    enrollBuiltinRepo();
+    const repo = enrollBuiltinRepo();
     const cfg = makeFlagCfg('regressionSentinel');
 
     await tick(cfg, { dryRun: false });
 
-    const [passedCfg] = mockDetectRegression.mock.calls[0] as [unknown];
+    const [passedCfg, passedRepo] = mockDetectRegression.mock.calls[0] as [unknown, string];
     expect(passedCfg).toBe(cfg);
+    expect(passedRepo).toBe(resolve(repo.dir));
+  });
+
+  it('rotates regression monitoring across enrolled repositories across ticks', async () => {
+    const firstRepo = fx.makeRepo();
+    const secondRepo = fx.makeRepo();
+    firstRepo.enroll();
+    secondRepo.enroll();
+    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
+    const cfg = makeFlagCfg('regressionSentinel');
+
+    await tick(cfg, { dryRun: false });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+    await tick(cfg, { dryRun: false });
+
+    const monitored = mockDetectRegression.mock.calls.map((call) => call[1] as string);
+    expect(monitored).toHaveLength(2);
+    expect(new Set(monitored)).toEqual(new Set([resolve(firstRepo.dir), resolve(secondRepo.dir)]));
   });
 
   it('flag absent → neither detectRegression nor bisectAndRevert called', async () => {
@@ -775,6 +793,25 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
 
     expect(result.reason).toBe('ok');
     expect(mockBisectAndRevert).not.toHaveBeenCalled();
+  });
+
+  it('rotates after a throwing regression check so one repo cannot pin monitoring', async () => {
+    const firstRepo = fx.makeRepo();
+    const secondRepo = fx.makeRepo();
+    firstRepo.enroll();
+    secondRepo.enroll();
+    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
+    mockDetectRegression
+      .mockRejectedValueOnce(new Error('repo unavailable'))
+      .mockResolvedValueOnce({ regressed: false, details: [] });
+    const cfg = makeFlagCfg('regressionSentinel');
+
+    await tick(cfg, { dryRun: false });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+    await tick(cfg, { dryRun: false });
+
+    const monitored = mockDetectRegression.mock.calls.map((call) => call[1] as string);
+    expect(new Set(monitored)).toEqual(new Set([resolve(firstRepo.dir), resolve(secondRepo.dir)]));
   });
 
   it('bisectAndRevert throws → tick still returns reason ok', async () => {

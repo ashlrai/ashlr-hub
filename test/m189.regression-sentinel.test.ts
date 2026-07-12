@@ -174,6 +174,31 @@ describe('detectRegression', () => {
     expect(r.regressed).toBe(true);
   });
 
+  it('normalizes fractional and oversized sentinel limits to bounded integers', async () => {
+    const runSuite = vi.fn(async () => RED);
+    const git = vi.fn((args: string[]) => {
+      if (args[0] === 'rev-parse') return 'a'.repeat(40);
+      return '';
+    });
+
+    const first = await detectRegression(onCfg({ minConsecutive: 1.9 }), REPO, { runSuite, git });
+    const second = await detectRegression(onCfg({ minConsecutive: 1.9 }), REPO, { runSuite, git });
+    expect(first.regressed).toBe(false);
+    expect(second.regressed).toBe(true);
+
+    const candidateGit = vi.fn((args: string[]) => {
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'b'.repeat(40);
+      if (args[0] === 'status') return '';
+      if (args[0] === 'log') {
+        expect(args).toContain('-n');
+        expect(args[args.indexOf('-n') + 1]).toBe('20');
+        return '';
+      }
+      return '';
+    });
+    await bisectAndRevert(onCfg({ maxCandidates: 1_000.75 }), REPO, { git: candidateGit });
+  });
+
   it('pluggable explicit fail-signal fires immediately (sustained by the external monitor)', async () => {
     const r = await detectRegression(onCfg(), REPO, {
       runSuite: () => GREEN,

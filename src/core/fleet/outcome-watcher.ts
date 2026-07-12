@@ -1,6 +1,6 @@
 /**
  * outcome-watcher.ts — M332 (completes M141): detect the REAL-WORLD outcome
- * of auto-merged proposals and link it back onto their judge traces.
+ * of auto-merged proposals and record it as signed observational evidence.
  *
  * 'reverted' has been in the JudgeOutcome union since M141, but nothing ever
  * DETECTED a revert — judge calibration and learned routing only ever saw the
@@ -13,22 +13,30 @@
  *
  * The merge commit is found via the auto-merge commit-message convention
  * ("ashlr: auto-merge proposal <id>", merge.ts M47). READ-ONLY on repos;
- * ledger writes go through append-only linkOutcomeResult after a complete
- * source read. Internal throttle (default 6h) keeps the git cost negligible.
+ * findings are persisted only to the signed observation-only ledger. They do
+ * not rewrite judge labels or verified-skill lifecycle state: cohort coverage
+ * is not yet complete enough to grant this heuristic scanner policy authority.
+ * Internal throttle (default 6h) keeps the git cost negligible.
  * Never throws.
  */
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 
-import type { AshlrConfig, SkillCard } from '../types.js';
-import { readJudgeTraces, linkOutcomeResult } from './judge-trace.js';
-import { listProposals, loadProposal } from '../inbox/store.js';
+import type { AshlrConfig, Proposal } from '../types.js';
+import { readJudgeTraces } from './judge-trace.js';
+import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
 import { recordPostMergeObservation, type PostMergeOutcome } from './post-merge-observations.js';
-import { attestSkillCard, verifyAttestedSkillCard } from './skill-attestation.js';
-import { readSkillCards, recordSkillCard, sanitizeSkillCard } from './skill-records.js';
+import {
+  buildMonitoringCursor,
+  loadMonitoringCursor,
+  outcomeCandidateKey,
+  saveMonitoringCursor,
+  type MonitoringCursorV1,
+  type MonitoringOutcomeCandidateCursor,
+} from './monitoring-cursor.js';
 
 export interface OutcomeScan {
   /** Merged traces examined this pass. */
@@ -39,23 +47,37 @@ export interface OutcomeScan {
   skipped: number;
   /** True when the throttle short-circuited the pass entirely. */
   throttled: boolean;
+  /** False when proposal/trace enumeration or candidate bounds were incomplete. */
+  sourceComplete: boolean;
+  candidateLimitReached: boolean;
 }
 
 const THROTTLE_MS = 6 * 60 * 60 * 1000; // 6h
 const DEFAULT_LOOKBACK_DAYS = 30;
 const DEFAULT_FOLLOWUP_WINDOW_DAYS = 7;
-const MAX_CANDIDATE_COMMITS = 50;
 const MAX_OUTCOME_PROPOSALS = 200;
+const MAX_OUTCOME_CANDIDATES_PER_PASS = 25;
+const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const FOLLOWUP_SUBJECT_RE = /\b(fix|hotfix|revert)\b/i;
 
 function defaultStateFile(): string {
   return join(homedir(), '.ashlr', 'outcome-watcher.json');
 }
 
+function recordCompletedScan(stateFile: string, now: number): void {
+  try {
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, JSON.stringify({ lastScanAt: now }) + '\n', 'utf8');
+  } catch {
+    // The durable monitoring cursor supersedes this compatibility throttle.
+  }
+}
+
 function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
     stdio: 'pipe',
     timeout: 15_000,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     encoding: 'utf8',
   });
 }
@@ -67,14 +89,14 @@ function filesOf(repo: string, sha: string): Set<string> {
 
 function recordRealizedOutcome(
   proposalId: string,
+  proposal: Proposal,
   mergeCommit: string,
   observedHead: string,
   outcome: PostMergeOutcome,
   basis: 'git-revert-reference' | 'overlapping-fix',
   now: number,
 ): boolean {
-  const proposal = loadProposal(proposalId);
-  if (!proposal?.repo) return false;
+  if (!proposal.repo) return false;
   const result = recordPostMergeObservation({
     observedAt: new Date(now).toISOString(),
     outcome,
@@ -95,70 +117,6 @@ function recordRealizedOutcome(
 }
 
 /**
- * Build a sanitized, newly attested lifecycle revision. Existing attestation
- * fields are never carried across changed revision/status content.
- */
-export function buildSkillLifecycleRevision(
-  current: SkillCard,
-  status: 'deprecated' | 'revoked',
-  nowMs: number,
-): SkillCard | null {
-  try {
-    const revision = sanitizeSkillCard({
-      ...current,
-      revision: current.revision + 1,
-      ts: new Date(nowMs).toISOString(),
-      status,
-      contentHash: undefined,
-      attestation: undefined,
-    });
-    return attestSkillCard(revision);
-  } catch {
-    return null;
-  }
-}
-
-function invalidateVerifiedSkills(
-  proposalId: string,
-  status: 'deprecated' | 'revoked',
-  nowMs: number,
-): void {
-  try {
-    const cards = readSkillCards({ limit: 1_000, maxFiles: 31 });
-    const histories = new Map<string, typeof cards>();
-    for (const card of cards) {
-      if (!verifyAttestedSkillCard(card)) continue;
-      const history = histories.get(card.skillId) ?? [];
-      history.push(card);
-      histories.set(card.skillId, history);
-    }
-
-    const invalidations: SkillCard[] = [];
-    for (const history of histories.values()) {
-      // Revocation is terminal even if a malformed later revision attempts to
-      // revive the skill. Conflicting latest revisions also fail closed.
-      if (history.some((card) => card.status === 'revoked')) continue;
-      const latestRevision = Math.max(...history.map((card) => card.revision));
-      if (!Number.isSafeInteger(latestRevision) || latestRevision >= Number.MAX_SAFE_INTEGER) continue;
-      const latest = history.filter((card) => card.revision === latestRevision);
-      if (latest.length === 0) continue;
-      const current = latest[0]!;
-      const fingerprint = JSON.stringify(current);
-      if (latest.some((card) => JSON.stringify(card) !== fingerprint)) continue;
-      if (current.proposalId !== proposalId) continue;
-      const canInvalidate = current.status === 'verified'
-        || (status === 'revoked' && current.status === 'deprecated');
-      if (!canInvalidate) continue;
-      const invalidation = buildSkillLifecycleRevision(current, status, nowMs);
-      if (invalidation) invalidations.push(invalidation);
-    }
-    if (invalidations.length > 0) recordSkillCard(invalidations);
-  } catch {
-    // Skill lifecycle history is best-effort and must never disrupt scanning.
-  }
-}
-
-/**
  * Scan merged judge traces for real-world reverts / follow-up fixes and link
  * the outcome. Idempotent per trace (already-linked reverted/followed-up
  * traces are excluded by the outcome==='merged' filter). Never throws.
@@ -173,9 +131,14 @@ export async function scanRealWorldOutcomes(
     /** Injectable clock + state path for deterministic tests. */
     nowMs?: number;
     stateFile?: string;
+    /** Explicit production enrollment snapshot. Omitted only for legacy/manual callers. */
+    enrolledRepos?: string[];
   },
 ): Promise<OutcomeScan> {
-  const scan: OutcomeScan = { scanned: 0, reverts: 0, followUps: 0, skipped: 0, throttled: false };
+  const scan: OutcomeScan = {
+    scanned: 0, reverts: 0, followUps: 0, skipped: 0, throttled: false,
+    sourceComplete: true, candidateLimitReached: false,
+  };
   try {
     const now = opts?.nowMs ?? Date.now();
     const stateFile = opts?.stateFile ?? defaultStateFile();
@@ -195,13 +158,6 @@ export async function scanRealWorldOutcomes(
         /* re-run */
       }
     }
-    try {
-      mkdirSync(dirname(stateFile), { recursive: true });
-      writeFileSync(stateFile, JSON.stringify({ lastScanAt: now }) + '\n', 'utf8');
-    } catch {
-      /* throttle is best-effort */
-    }
-
     const lookbackDays = Math.max(1, opts?.lookbackDays ?? DEFAULT_LOOKBACK_DAYS);
     const windowDays = Math.max(1, opts?.followUpWindowDays ?? DEFAULT_FOLLOWUP_WINDOW_DAYS);
     const sinceMs = now - lookbackDays * 24 * 60 * 60 * 1000;
@@ -244,25 +200,121 @@ export async function scanRealWorldOutcomes(
       seenPid.add(t.proposalId);
       return true;
     });
-    const candidates = new Map<string, { proposalId: string; traceBacked: boolean }>();
-    for (const trace of traces) candidates.set(trace.proposalId, { proposalId: trace.proposalId, traceBacked: true });
-    const appliedProposals = typeof listProposals === 'function'
+    type Candidate = {
+      proposalId: string;
+      proposal?: Proposal;
+      cursor?: MonitoringOutcomeCandidateCursor;
+    };
+    const candidates = new Map<string, Candidate>();
+    const productionCursorMode = opts?.enrolledRepos !== undefined;
+    const detailed = typeof listProposalsDetailed === 'function'
+      ? listProposalsDetailed({ status: 'applied', requireComplete: true })
+      : null;
+    if (detailed && (!detailed.complete || detailed.sourceState === 'degraded' ||
+      (productionCursorMode && detailed.sourceState !== 'healthy'))) {
+      scan.sourceComplete = false;
+      scan.skipped++;
+    }
+    const appliedProposals = detailed?.proposals ?? (typeof listProposals === 'function'
       ? listProposals({ status: 'applied' })
-      : [];
+      : []);
+    if (productionCursorMode && !scan.sourceComplete) return scan;
+    const strictProposals = new Map(appliedProposals.map((proposal) => [proposal.id, proposal]));
+    for (const trace of traces) {
+      const proposal = strictProposals.get(trace.proposalId);
+      if (productionCursorMode && !proposal) continue;
+      if (!productionCursorMode && candidates.size >= MAX_OUTCOME_PROPOSALS) {
+        scan.candidateLimitReached = true;
+        scan.sourceComplete = false;
+        break;
+      }
+      candidates.set(trace.proposalId, { proposalId: trace.proposalId, ...(proposal ? { proposal } : {}) });
+    }
     for (const proposal of appliedProposals) {
       const candidateAt = proposal.remoteHandoff?.updatedAt ?? proposal.createdAt;
       if (Date.parse(candidateAt) < sinceMs) continue;
-      if (!candidates.has(proposal.id)) candidates.set(proposal.id, { proposalId: proposal.id, traceBacked: false });
-      if (candidates.size >= MAX_OUTCOME_PROPOSALS) break;
+      const mergeCommitOid = proposal.remoteHandoff?.mergeCommitOid;
+      if (productionCursorMode && (typeof mergeCommitOid !== 'string' || !/^[a-f0-9]{40}$/i.test(mergeCommitOid))) {
+        scan.skipped++;
+        scan.sourceComplete = false;
+        continue;
+      }
+      if (!productionCursorMode && candidates.size >= MAX_OUTCOME_PROPOSALS && !candidates.has(proposal.id)) {
+        scan.candidateLimitReached = true;
+        scan.sourceComplete = false;
+        break;
+      }
+      candidates.set(proposal.id, {
+        proposalId: proposal.id,
+        proposal,
+        ...(mergeCommitOid ? { cursor: { proposalId: proposal.id, mergeCommitOid } } : {}),
+      });
     }
-    if (candidates.size === 0) return scan;
+    if (candidates.size === 0) {
+      if (scan.skipped === 0 && scan.sourceComplete) recordCompletedScan(stateFile, now);
+      return scan;
+    }
+    const enrolled = opts?.enrolledRepos === undefined
+      ? null
+      : new Set(opts.enrolledRepos.map((repo) => resolve(repo)));
+    let monitoringCursor: MonitoringCursorV1 | null = null;
+    let monitoringCursorExpected: MonitoringCursorV1 | null = null;
+    let selectedCandidates = [...candidates.values()];
+    let finalCandidateKey: string | null = null;
+    if (productionCursorMode) {
+      const enrollment = opts.enrolledRepos ?? [];
+      const cursorRead = loadMonitoringCursor(enrollment);
+      if (cursorRead.sourceState === 'degraded') {
+        scan.sourceComplete = false;
+        scan.skipped++;
+        return scan;
+      }
+      monitoringCursor = cursorRead.cursor ?? buildMonitoringCursor(enrollment);
+      monitoringCursorExpected = cursorRead.storedCursor;
+      if (!monitoringCursor) return scan;
+      const cursorCandidates = [...candidates.values()]
+        .map((candidate) => candidate.cursor)
+        .filter((candidate): candidate is MonitoringOutcomeCandidateCursor => candidate !== undefined);
+      const after = monitoringCursor.outcome.sweepComplete ? null : monitoringCursor.outcome.candidateAfter;
+      const afterKey = after ? outcomeCandidateKey(after) : null;
+      const ordered = [...cursorCandidates]
+        .sort((left, right) => outcomeCandidateKey(left).localeCompare(outcomeCandidateKey(right)));
+      const selectedForSweep = ordered
+        .filter((candidate) => afterKey === null || outcomeCandidateKey(candidate).localeCompare(afterKey) > 0)
+        .slice(0, MAX_OUTCOME_CANDIDATES_PER_PASS);
+      const candidateByKey = new Map([...candidates.values()]
+        .filter((candidate): candidate is Candidate & { cursor: MonitoringOutcomeCandidateCursor } => candidate.cursor !== undefined)
+        .map((candidate) => [outcomeCandidateKey(candidate.cursor), candidate]));
+      selectedCandidates = [];
+      for (const selectedCursor of selectedForSweep) {
+        const candidate = candidateByKey.get(outcomeCandidateKey(selectedCursor));
+        if (candidate) selectedCandidates.push(candidate);
+      }
+      finalCandidateKey = ordered.length > 0 ? outcomeCandidateKey(ordered[ordered.length - 1]!) : null;
+      if (selectedCandidates.length === 0 && afterKey !== null) {
+        monitoringCursor = {
+          ...monitoringCursor,
+          outcome: { candidateAfter: monitoringCursor.outcome.candidateAfter, sweepComplete: true },
+        };
+        if (!saveMonitoringCursor(monitoringCursor, {
+          enrolledRepos: enrollment,
+          expectedCursor: monitoringCursorExpected,
+        })) {
+          scan.skipped++;
+          scan.sourceComplete = false;
+          return scan;
+        }
+        monitoringCursorExpected = monitoringCursor;
+      }
+    }
 
-    for (const candidate of candidates.values()) {
+    for (const candidate of selectedCandidates) {
+      let cursorPersistFailed = false;
       scan.scanned++;
       try {
-        const proposal = loadProposal(candidate.proposalId);
+        const proposal = candidate.proposal ?? loadProposal(candidate.proposalId);
         const repo = proposal?.repo;
-        if (!repo || !existsSync(repo)) {
+        if (!repo || !existsSync(repo) || (enrolled !== null && !enrolled.has(resolve(repo)))) {
           scan.skipped++;
           continue;
         }
@@ -298,18 +350,10 @@ export async function scanRealWorldOutcomes(
           '--format=%H', '-n', '1',
         ]).trim();
         if (revertSha) {
-          if (!recordRealizedOutcome(candidate.proposalId, mergeSha, observedHead, 'reverted', 'git-revert-reference', now)) {
+          if (!recordRealizedOutcome(candidate.proposalId, proposal, mergeSha, observedHead, 'reverted', 'git-revert-reference', now)) {
             scan.skipped++;
             continue;
           }
-          const linked = candidate.traceBacked
-            ? linkOutcomeResult(candidate.proposalId, 'reverted')
-            : { status: 'not-applicable' as const };
-          if (candidate.traceBacked && linked.status !== 'linked' && linked.status !== 'already-linked') {
-            scan.skipped++;
-            continue;
-          }
-          invalidateVerifiedSkills(candidate.proposalId, 'revoked', now);
           scan.reverts++;
           continue;
         }
@@ -329,49 +373,65 @@ export async function scanRealWorldOutcomes(
         const mergedFiles = filesOf(repo, mergeSha);
         if (mergedFiles.size === 0) continue;
 
-        // M337 (review fix): git log is newest-first, but the commits INSIDE
-        // the follow-up window are the OLDEST ones since the merge — slicing
-        // the newest 50 silently dropped exactly the window commits in any
-        // active repo. Examine oldest-first and stop once past the window.
-        const candidates = git(repo, [
-          'log', `${mergeSha}..HEAD`, '--format=%H%x09%ct%x09%s',
-        ])
-          .split('\n')
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0)
-          .reverse()
-          .slice(0, MAX_CANDIDATE_COMMITS);
+        // Read the complete time-bounded window in one output- and timeout-
+        // bounded process. This avoids a fixed commit-count blind spot while
+        // retaining a hard resource ceiling for unusually large histories.
+        const history = git(repo, [
+          'log', `${mergeSha}..HEAD`, `--until=${Math.floor(windowEnd / 1000)}`,
+          '--no-renames', '--format=%H%x09%ct%x09%s', '--name-only',
+        ]);
+        const commits: Array<{ sha: string; subject: string; touched: Set<string> }> = [];
+        let current: { sha: string; subject: string; touched: Set<string> } | null = null;
+        for (const rawLine of history.split('\n')) {
+          const line = rawLine.trim();
+          const header = /^([a-f0-9]{40})\t(\d+)\t(.*)$/i.exec(line);
+          if (header) {
+            current = { sha: header[1]!, subject: header[3]!, touched: new Set<string>() };
+            commits.push(current);
+          } else if (line && current) {
+            current.touched.add(line);
+          }
+        }
 
-        for (const line of candidates) {
-          const [sha, ctRaw, ...subjectParts] = line.split('\t');
-          const subject = subjectParts.join('\t');
-          const ctMs = Number(ctRaw) * 1000;
-          if (!sha || !Number.isFinite(ctMs)) continue;
-          if (ctMs > windowEnd) break; // oldest-first: past the window ⇒ done
-          if (!FOLLOWUP_SUBJECT_RE.test(subject ?? '')) continue;
-          const touched = filesOf(repo, sha);
+        for (const commit of commits.reverse()) {
+          if (!FOLLOWUP_SUBJECT_RE.test(commit.subject)) continue;
+          const touched = commit.touched;
           const overlaps = [...touched].some((f) => mergedFiles.has(f));
           if (overlaps) {
-            if (!recordRealizedOutcome(candidate.proposalId, mergeSha, observedHead, 'followed-up', 'overlapping-fix', now)) {
+            if (!recordRealizedOutcome(candidate.proposalId, proposal, mergeSha, observedHead, 'followed-up', 'overlapping-fix', now)) {
               scan.skipped++;
               break;
             }
-            const linked = candidate.traceBacked
-              ? linkOutcomeResult(candidate.proposalId, 'followed-up')
-              : { status: 'not-applicable' as const };
-            if (candidate.traceBacked && linked.status !== 'linked' && linked.status !== 'already-linked') {
-              scan.skipped++;
-              break;
-            }
-            invalidateVerifiedSkills(candidate.proposalId, 'deprecated', now);
             scan.followUps++;
             break;
           }
         }
       } catch {
         scan.skipped++;
+      } finally {
+        if (productionCursorMode && monitoringCursor && candidate.cursor) {
+          const sweepComplete = finalCandidateKey === outcomeCandidateKey(candidate.cursor);
+          monitoringCursor = {
+            ...monitoringCursor,
+            outcome: { candidateAfter: candidate.cursor, sweepComplete },
+          };
+          if (!saveMonitoringCursor(monitoringCursor, {
+            enrolledRepos: opts?.enrolledRepos ?? [],
+            expectedCursor: monitoringCursorExpected,
+          })) {
+            scan.skipped++;
+            scan.sourceComplete = false;
+            cursorPersistFailed = true;
+          } else {
+            monitoringCursorExpected = monitoringCursor;
+          }
+        }
       }
+      if (cursorPersistFailed) break;
     }
+    if (scan.skipped > 0) scan.sourceComplete = false;
+    const sweepComplete = !productionCursorMode || monitoringCursor?.outcome.sweepComplete === true;
+    if (scan.sourceComplete && sweepComplete) recordCompletedScan(stateFile, now);
     return scan;
   } catch {
     return scan;
