@@ -15,6 +15,11 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 const SHA_RE = /^[a-f0-9]{40}$/;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const MAX_FUTURE_SKEW_MS = 60_000;
+let reconciliationKeyDiagnostic: string | null = null;
+
+export function getRemoteHandoffKeyDiagnostic(): string | null {
+  return reconciliationKeyDiagnostic;
+}
 
 function privateOwner(stat: Stats): boolean {
   return typeof process.getuid !== 'function' || stat.uid === process.getuid();
@@ -58,10 +63,12 @@ function ensurePrivateDir(path: string, assureWindows = false): Stats {
   chmodSync(path, 0o700);
   const after = lstatSync(path);
   if (!privateDir(after) || !sameNode(before, after)) throw new Error('reconciliation key directory changed');
-  if (assureWindows && !assurePrivateStoragePath(
+  const directoryAssurance = assureWindows ? assurePrivateStoragePath(
     path, 'directory', existed ? 'inspect-existing' : 'secure-created',
     { anchorPath: storageHome() },
-  ).ok) {
+  ) : null;
+  if (directoryAssurance && !directoryAssurance.ok) {
+    reconciliationKeyDiagnostic = directoryAssurance.reason;
     if (!existed) {
       try {
         const failed = lstatSync(path);
@@ -79,6 +86,7 @@ function ensurePrivateDir(path: string, assureWindows = false): Stats {
 }
 
 function loadDedicatedKey(create: boolean): Buffer | null {
+  reconciliationKeyDiagnostic = null;
   const path = reconciliationKeyPath();
   let fd: number | undefined;
   let uncommitted: Stats | undefined;
@@ -98,9 +106,13 @@ function loadDedicatedKey(create: boolean): Buffer | null {
         const opened = fstatSync(fd);
         uncommitted = opened;
         if (!privateFile(opened)) return null;
-        if (!assurePrivateStoragePath(path, 'file', 'secure-created', {
+        const createdAssurance = assurePrivateStoragePath(path, 'file', 'secure-created', {
           anchorPath: storageHome(),
-        }).ok) return null;
+        });
+        if (!createdAssurance.ok) {
+          reconciliationKeyDiagnostic = createdAssurance.reason;
+          return null;
+        }
         const assured = lstatSync(path);
         if (!privateFile(assured) || !sameNode(opened, assured) || assured.size !== 0) return null;
         if (writeSync(fd, bytes) !== bytes.length) return null;
@@ -119,9 +131,13 @@ function loadDedicatedKey(create: boolean): Buffer | null {
     if (!existsSync(path)) return null;
     const named = lstatSync(path);
     if (!privateFile(named) || named.size !== 32) return null;
-    if (!assurePrivateStoragePath(path, 'file', 'inspect-existing', {
+    const existingAssurance = assurePrivateStoragePath(path, 'file', 'inspect-existing', {
       anchorPath: storageHome(),
-    }).ok) return null;
+    });
+    if (!existingAssurance.ok) {
+      reconciliationKeyDiagnostic = existingAssurance.reason;
+      return null;
+    }
     const assured = lstatSync(path);
     if (!privateFile(assured) || !sameNode(named, assured) || assured.size !== named.size) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);

@@ -42,7 +42,10 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
-import { verifyRemoteHandoffReconciliation } from '../src/core/inbox/remote-handoff-attestation.js';
+import {
+  getRemoteHandoffKeyDiagnostic,
+  verifyRemoteHandoffReconciliation,
+} from '../src/core/inbox/remote-handoff-attestation.js';
 import { createProposal, listProposals, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from '../src/core/inbox/proposal-mutation-lock.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
@@ -718,7 +721,8 @@ describe('M315 remote PR handoff truth', () => {
 
     const r = reconcileRemoteHandoffs();
 
-    expect(r).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
+    expect(r, getRemoteHandoffKeyDiagnostic() ?? undefined)
+      .toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
     const loaded = loadProposal(proposal.id);
     expect(loaded?.status).toBe('applied');
     expect(loaded?.remoteHandoff).toMatchObject({
