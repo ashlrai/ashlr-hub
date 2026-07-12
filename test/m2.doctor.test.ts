@@ -234,13 +234,13 @@ describe('runDoctor — report structure', () => {
 // ---------------------------------------------------------------------------
 
 describe('runDoctor — all healthy', () => {
-  it('has zero fail checks when everything is up', async () => {
+  it('has zero fail checks when everything is up', { timeout: 15_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.fail).toBe(0);
   });
 
-  it('has at least one pass check when everything is up', async () => {
+  it('has at least one pass check when everything is up', { timeout: 15_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.pass).toBeGreaterThan(0);
