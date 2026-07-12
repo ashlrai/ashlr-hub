@@ -9,6 +9,7 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$stage = 'read-input'
 function Finish([bool]$ok, [string]$reason) {
   [Console]::Out.Write((@{nonce=$request.nonce;operation='assure-private-path';ok=$ok;reason=$reason} | ConvertTo-Json -Compress))
   exit $(if ($ok) { 0 } else { 1 })
@@ -21,6 +22,7 @@ try {
   if ($request.schemaVersion -ne 1 -or $request.operation -ne 'assure-private-path') { Finish $false 'invalid-input' }
   if ($request.kind -ne 'file' -and $request.kind -ne 'directory') { Finish $false 'invalid-kind' }
   if ($request.mode -ne 'secure-created' -and $request.mode -ne 'inspect-existing') { Finish $false 'invalid-mode' }
+  $stage = 'load-item'
   $item = Get-Item -LiteralPath $request.path -Force
   if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-point' }
   if ($request.kind -eq 'file' -and $item.PSIsContainer) { Finish $false 'wrong-kind' }
@@ -30,6 +32,7 @@ try {
   $administrators = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
   $trustedSids = @($current.Value, $system.Value, $administrators.Value)
   $cursor = if ($request.kind -eq 'file') { $item.Directory } else { $item.Parent }
+  $stage = 'inspect-ancestors'
   while ($null -ne $cursor) {
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
     $ancestorAcl = Get-Acl -LiteralPath $cursor.FullName
@@ -54,6 +57,7 @@ try {
   }
   $principalValues = @($current.Value, $system.Value) | Select-Object -Unique
   if ($request.mode -eq 'secure-created') {
+    $stage = 'build-acl'
     if ($request.kind -eq 'file') {
       $security = [System.Security.AccessControl.FileSecurity]::new()
       $flags = [System.Security.AccessControl.InheritanceFlags]::None
@@ -73,8 +77,10 @@ try {
         [System.Security.AccessControl.AccessControlType]::Allow)
       [void]$security.AddAccessRule($rule)
     }
+    $stage = 'apply-acl'
     Set-Acl -LiteralPath $request.path -AclObject $security
   }
+  $stage = 'readback-acl'
   $acl = Get-Acl -LiteralPath $request.path
   if (-not $acl.AreAccessRulesProtected) { Finish $false 'dacl-not-protected' }
   if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { Finish $false 'wrong-owner' }
@@ -82,6 +88,7 @@ try {
   if ($rules.Count -ne $principalValues.Count) { Finish $false 'unexpected-ace-count' }
   $expectedFlags = if ($request.kind -eq 'file') { 0 } else { 3 }
   foreach ($sid in $principalValues) {
+    $stage = 'verify-acl'
     $matches = @($rules | Where-Object { $_.IdentityReference.Value -eq $sid })
     if ($matches.Count -ne 1) { Finish $false 'missing-or-duplicate-principal' }
     $rule = $matches[0]
@@ -95,7 +102,7 @@ try {
   if ($null -eq $request) {
     $request = @{nonce='invalid'}
   }
-  Finish $false 'adapter-error'
+  Finish $false ('adapter-error-' + $stage)
 }
 `;
 
@@ -124,7 +131,9 @@ export type PrivateStorageRunner = (invocation: PrivateStorageInvocation) => {
 };
 
 const FAILURE_REASONS = new Set([
-  'adapter-error', 'dacl-not-protected', 'deny-ace', 'inherited-ace', 'invalid-input',
+  'adapter-error-apply-acl', 'adapter-error-build-acl', 'adapter-error-inspect-ancestors',
+  'adapter-error-load-item', 'adapter-error-read-input', 'adapter-error-readback-acl',
+  'adapter-error-verify-acl', 'dacl-not-protected', 'deny-ace', 'inherited-ace', 'invalid-input',
   'invalid-input-shape', 'invalid-kind', 'invalid-mode', 'missing-or-duplicate-principal',
   'reparse-ancestor', 'reparse-point', 'unexpected-ace-count', 'untrusted-ancestor-delete',
   'untrusted-ancestor-owner', 'wrong-flags', 'wrong-kind', 'wrong-owner', 'wrong-rights',
