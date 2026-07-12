@@ -36,9 +36,9 @@ try {
   while ($null -ne $cursor) {
     if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Finish $false 'reparse-ancestor' }
     $ancestorAcl = Get-Acl -LiteralPath $cursor.FullName
-    $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($null -ne $cursor.Parent -and $trustedSids -notcontains $ancestorOwner) {
-      Finish $false 'untrusted-ancestor-owner'
+    if ($null -ne $cursor.Parent) {
+      $ancestorOwner = $ancestorAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+      if ($trustedSids -notcontains $ancestorOwner) { Finish $false 'untrusted-ancestor-owner' }
     }
     $ancestorRules = @($ancestorAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($ancestorRule in $ancestorRules) {
