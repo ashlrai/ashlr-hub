@@ -1888,4 +1888,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prune quarantined executable queue projections while retaining their durable lifecycle evidence.
 - [x] Add focused status, dispatch, compatibility, retention-boundary, read-only, and fail-closed regression coverage plus independent review.
 - [x] Pass exhaustive verification on the frozen tree; commit, push, CI, and production reload remain release steps.
-- [ ] Observe the complete CI matrix, reload production after the live repair lease clears, and canary both rollout and queue truth.
+- [x] Observe the complete CI matrix and reload Mission Control with the corrected queue truth.
+- [ ] Reload the daemon after its fresh post-activation repair lease clears, then complete the V2 authority canary without interrupting work.
