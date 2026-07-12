@@ -186,7 +186,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make forensic evidence exclusion role-based and prevent missing/degraded sources from rendering as healthy zero rows.
 - [x] Prove checkpoint state cannot change readiness, mission, effectiveness, direction, actions, routing, or merge authority.
 - [x] Keep production capture scheduling separate until its detached child-process budget and restart-safe cadence are independently proven.
-- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary truthful visibility.
+- [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary truthful visibility.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
