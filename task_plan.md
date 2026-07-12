@@ -1898,4 +1898,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Distinguish configured and effective writer state, including shared-filesystem queue incompatibility, with a fail-closed operator action.
 - [x] Add migration, replay, rollback, incompatible-mode, status, and projection regressions plus independent review.
 - [x] Pass focused and exhaustive local verification; commit, push, CI, deployment, and a provenance-complete canary remain release steps.
-- [ ] Observe the complete CI matrix, deploy at a clean daemon lease boundary, and run one bounded provenance-complete canary.
+- [x] Observe the complete CI matrix and deploy at a clean daemon lease boundary.
+- [ ] Complete the armed provenance-bound canary, retaining or rolling back only from activation-scoped writer and projection evidence.
