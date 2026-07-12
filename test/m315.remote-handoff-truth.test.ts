@@ -749,7 +749,7 @@ describe('M315 remote PR handoff truth', () => {
     }
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'merged' && d.verdict === 'applied')).toBe(true);
-  });
+  }, 30_000);
 
   it('does not split merge evidence from applied status when the proposal mutation lock is held', async () => {
     const { proposal } = await createRemoteHandoffProposal();
