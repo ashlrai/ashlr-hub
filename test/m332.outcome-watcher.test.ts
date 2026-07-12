@@ -36,6 +36,19 @@ const recordedObservations: Record<string, unknown>[] = [];
 let skillCards: SkillCard[] = [];
 const recordedSkillCards: SkillCard[] = [];
 
+const { inspectWindowMock } = vi.hoisted(() => ({ inspectWindowMock: vi.fn() }));
+
+vi.mock('../src/core/fleet/post-merge-window.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/post-merge-window.js')>();
+  return {
+    ...actual,
+    inspectPostMergeWindow: (input: Parameters<typeof actual.inspectPostMergeWindow>[0]) => {
+      const implementation = inspectWindowMock.getMockImplementation();
+      return implementation ? inspectWindowMock(input) : actual.inspectPostMergeWindow(input);
+    },
+  };
+});
+
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: vi.fn(() => {
     Object.defineProperty(traces, 'sourceQuality', {
@@ -192,12 +205,32 @@ function verifiedCard(pid: string, overrides: Partial<SkillCard> = {}): SkillCar
   };
 }
 
+function useFastWindowInspection(): void {
+  inspectWindowMock.mockImplementation((input: {
+    mergeCommit: string;
+    observedAtMs: number;
+    followUpWindowMs: number;
+    windowStartedAtMs?: number;
+  }) => ({
+    state: 'complete',
+    mergeCommit: input.mergeCommit,
+    observedHead: input.mergeCommit,
+    mergeTimeMs: input.observedAtMs - 1,
+    windowStartedAtMs: input.windowStartedAtMs ?? input.observedAtMs - 1,
+    followUpWindowEndMs: input.observedAtMs + input.followUpWindowMs,
+    windowElapsed: false,
+    commitsInspected: 0,
+    adverse: null,
+  }));
+}
+
 const cfg = { version: 1, foundry: {} } as unknown as AshlrConfig;
 let stateFile = '';
 let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
   traces = [];
+  inspectWindowMock.mockReset();
   traceSourceState = 'healthy';
   ledger = [];
   linked.length = 0;
@@ -547,6 +580,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   });
 
   it('persists outcome paging so the next production scan advances beyond the first page', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-page-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
@@ -576,6 +610,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('restarts paging when a new candidate sorts before the persisted cursor', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-generation-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
@@ -604,6 +639,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('does not forget an incomplete early page when a later page reaches the sweep end', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-incomplete-base');
     const missingRepo = join(monitoredRepo, 'missing-repo');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
@@ -631,6 +667,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('does not forget a degraded trace source that recovers before the final page', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-trace-degraded-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
@@ -659,6 +696,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('restarts and completes when the candidate tail disappears', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-tail-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
@@ -681,6 +719,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('preserves incompleteness when every remaining candidate disappears', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-empty-tail-base');
     const missingRepo = join(monitoredRepo, 'missing-repo');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
@@ -708,6 +747,7 @@ describe('M332 scanRealWorldOutcomes', () => {
   }, 30_000);
 
   it('invalidates a completed throttle when another process resets the cursor generation', async () => {
+    useFastWindowInspection();
     const monitoredRepo = repoWithMerge('p-throttle-token-base');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = [{
