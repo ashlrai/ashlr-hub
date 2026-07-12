@@ -114,7 +114,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add durable CAS-protected cursors for outcome candidates and enrolled-repository regression rotation.
 - [x] Add signed stable-window witness batches with global cohort replay detection and explicit non-authority.
 - [x] Surface post-merge source quality and denominator incompleteness without changing operational readiness.
-- [ ] Close adversarial test gaps, run focused and exhaustive verification, commit, push, and reload production.
+- [x] Close adversarial test gaps, run focused and exhaustive verification, commit, push, and reload production.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
