@@ -881,6 +881,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(repairHandoffProjectionTick([
       tick('2026-07-11T16:00:00.000Z', 'b'.repeat(64), proof.id),
     ], 'b'.repeat(64), proof.activatedAt, proof)).toBe('2026-07-11T16:00:00.000Z');
+
+    const retainedUnavailable = tick('2026-07-11T17:00:00.000Z', 'b'.repeat(64), proof.id);
+    retainedUnavailable.producerMaintenance!.dispatchRepairLifecycleUnavailable = 2;
+    expect(repairHandoffProjectionTick([
+      retainedUnavailable,
+    ], 'b'.repeat(64), proof.activatedAt, proof)).toBe('2026-07-11T17:00:00.000Z');
   });
 
   it('does not refresh, persist, or audit backlog while building a status snapshot', async () => {

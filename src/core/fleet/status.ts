@@ -914,13 +914,14 @@ export function repairHandoffProjectionTick(
     const tick = recentTicks[index]!;
     if (notBeforeMs !== null && (!Number.isFinite(Date.parse(tick.ts)) || Date.parse(tick.ts) < notBeforeMs)) continue;
     const maintenance = tick.producerMaintenance;
+    // Lifecycle-unavailable repairs are retained, dispatch-blocked inventory;
+    // they do not weaken an exact healthy authority-journal projection.
     if (
       maintenance?.proposalRepair === true &&
       maintenance.repairHandoffSourceState === 'healthy' &&
       maintenance.repairHandoffAuthorityDigest === authorityDigest &&
       (maintenance.repairHandoffInvalidRows ?? 0) === 0 &&
       (maintenance.repairHandoffConflictingIds ?? 0) === 0 &&
-      (maintenance.dispatchRepairLifecycleUnavailable ?? 0) === 0 &&
       (maintenance.repairHandoffCompactionUnavailable ?? 0) === 0 &&
       maintenance.proposalRepairInboxAvailable === true
       && (!activationProof || (

@@ -1909,3 +1909,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add an adversarial high-score repair-backlog regression and pass focused scheduler and queue verification.
 - [x] Pass typecheck, lint, build, dependency audit, diff checks, exhaustive verification, and independent review.
 - [x] Commit, push, observe CI, deploy at a clean lease boundary, and inspect the first production canary opportunity.
+
+## Current Overnight Cycle - Activation Projection Truth
+- [x] Rehydrate the exact-source canary, current V2 journal, maintenance receipts, fleet status, git state, and durable notes.
+- [x] Audit rollout evidence, generalized repair retry enforcement, and the live proposal-production bottleneck in parallel.
+- [x] Prove the current activation has an exact later maintenance receipt for its authority count and both authority digests.
+- [x] Remove retained dispatch-blocked lifecycle inventory from otherwise exact authority-journal projection certification.
+- [x] Preserve fail-closed source, digest, activation, count, corruption, compaction, and inbox gates and add regression coverage.
+- [x] Pass focused status/scheduler/queue/journal tests, typecheck, lint, build, audit, diff checks, exhaustive verification, and independent review.
+- [ ] Commit, push, observe CI, deploy at a clean boundary, and verify live `retain-writer` truth.
