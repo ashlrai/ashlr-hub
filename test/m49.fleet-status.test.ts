@@ -460,6 +460,24 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'post-merge',
     )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational' });
+    expect(s.cutoffCheckpoints).toMatchObject({
+      state: 'missing', freshness: 'unknown', releasedCheckpoints: 0,
+      authority: 'observation-only', evidenceRole: 'forensics', eligibility: 'observational',
+      cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
+      rollbackProtected: false, historicalAuthority: false,
+    });
+    expect(Object.keys(s.cutoffCheckpoints!).sort()).toEqual([
+      'ageMs', 'authority', 'complete', 'cutoffAuthority', 'denominatorComplete',
+      'eligibility', 'evidenceRole', 'freshness', 'historicalAuthority', 'latestCapturedAt',
+      'physicalRows', 'policyEligible', 'releasedCheckpoints', 'rollbackProtected', 'staleAfterMs',
+      'state', 'stopReasons', 'unreleasedRows', 'version',
+    ].sort());
+    const cutoffPayload = JSON.stringify(s.cutoffCheckpoints);
+    for (const forbidden of ['checkpoints', 'snapshot', 'entryDigest', 'rootDigest', 'repositoryIdentities']) {
+      expect(cutoffPayload).not.toContain(`"${forbidden}"`);
+    }
+    expect(formatFleetStatus(s)).toContain('Cutoff checkpoints (observation only):');
+    expect(formatFleetStatus(s)).toContain('cutoff=false, denominator=false, policy=false');
     expect(s.autonomyEffectiveness).toMatchObject({
       phase: 'control-blocked',
       canAutoMergeNow: false,
@@ -532,6 +550,33 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('keeps degraded cutoff observations structurally outside readiness and mission authority', async () => {
+    const cfg = baseConfig();
+    const missing = await buildFleetStatus(cfg);
+    const fleetDir = join(process.env.ASHLR_HOME!, 'fleet');
+    mkdirSync(fleetDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fleetDir, 'cutoff-observation-checkpoints.jsonl'), 'broken\n', { mode: 0o600 });
+    writeFileSync(join(fleetDir, 'cutoff-observation-checkpoints.root.json'), 'broken\n', { mode: 0o600 });
+
+    const degraded = await buildFleetStatus(cfg);
+    expect(degraded.cutoffCheckpoints).toMatchObject({
+      state: 'degraded', freshness: 'unknown', complete: false,
+      cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
+    });
+    const authorityProjection = (status: typeof missing) => JSON.parse(JSON.stringify({
+      autoMergeReadiness: status.autoMergeReadiness,
+      evidencePolicy: status.evidencePolicy,
+      autonomyDirection: status.autonomyDirection,
+      autonomyEffectiveness: status.autonomyEffectiveness,
+      autonomousShipReadiness: status.autonomousShipReadiness,
+      missionBrief: status.missionBrief,
+      nextActions: status.nextActions,
+    }, (key, value) => [
+      'generatedAt', 'observedAt', 'ageMs', 'freshestAt', 'stalestAt', 'maxAgeMs',
+    ].includes(key) ? undefined : value));
+    expect(authorityProjection(degraded)).toEqual(authorityProjection(missing));
   });
 
   it('classifies repair handoff rollout phases and next actions deterministically', () => {
@@ -2112,14 +2157,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.dispatchManifestSource).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
     expect(status.dispatchManifests).toBeUndefined();
     expect(formatFleetStatus(status)).toContain('manifest source: degraded (partial);');
-    expect(status.autonomousShipReadiness?.evidenceMatrix).toMatchObject({ state: 'degraded' });
+    expect(status.autonomousShipReadiness?.evidenceMatrix).not.toMatchObject({ state: 'degraded' });
     expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'dispatch-manifests',
     )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational', status: 'degraded' });
-    expect(status.nextActions?.find((action) => action.id === 'inspect-learning-evidence')?.commands?.[0]).toMatchObject({
-      argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'dispatch-manifests', '--json'],
-      safety: 'read-only',
-    });
+    expect(status.nextActions?.find((action) => action.id === 'inspect-learning-evidence'))
+      .toBeUndefined();
   });
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {

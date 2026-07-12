@@ -714,6 +714,27 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Authenticated observation checkpoints are deliberately outside readiness.
+  const cutoff = s.cutoffCheckpoints;
+  lines.push('Cutoff checkpoints (observation only):');
+  if (!cutoff) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  state:      ${cutoff.state} (${cutoff.freshness})`);
+    lines.push(`  observed:   ${cutoff.latestCapturedAt ?? 'never'}`);
+    const records = cutoff.state === 'available'
+      ? `${cutoff.releasedCheckpoints} released, ${cutoff.unreleasedRows} unreleased, complete read`
+      : cutoff.state === 'degraded'
+        ? `partial (${cutoff.releasedCheckpoints} released, ${cutoff.unreleasedRows} unreleased)`
+        : cutoff.state === 'unsupported' ? 'unsupported' : 'unavailable';
+    lines.push(`  records:    ${records}`);
+    lines.push(
+      `  authority:  cutoff=false, denominator=false, policy=false, ` +
+        `rollback=false, historical=false`,
+    );
+  }
+  lines.push('');
+
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');

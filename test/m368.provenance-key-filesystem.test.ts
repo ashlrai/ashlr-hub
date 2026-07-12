@@ -30,6 +30,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   loadExistingProvenanceKey,
+  loadExistingProvenanceKeyReadOnly,
   loadOrCreateKey,
 } from '../src/core/foundry/provenance.js';
 
@@ -125,6 +126,17 @@ describe('provenance key filesystem boundary', () => {
     expect(loadExistingProvenanceKey()).toHaveLength(32);
     expect(fs.lstatSync(keyPath).nlink).toBe(1);
     expect(fs.existsSync(installerTemp)).toBe(false);
+  });
+
+  it('strict read-only loading refuses recovery-required state without mutation', () => {
+    const keyPath = makeStorage();
+    writeOpaqueKey(keyPath);
+    const installerTemp = `${keyPath}.123.${'b'.repeat(24)}.tmp`;
+    fs.linkSync(keyPath, installerTemp);
+
+    expect(() => loadExistingProvenanceKeyReadOnly()).toThrow(/exactly one link/i);
+    expect(fs.lstatSync(keyPath).nlink).toBe(2);
+    expect(fs.existsSync(installerTemp)).toBe(true);
   });
 
   it.each([0, 31, 33])('rejects an existing %i-byte key without replacing it', (length) => {

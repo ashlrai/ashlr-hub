@@ -794,6 +794,37 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
   });
 
+  it('renders cutoff checkpoints outside readiness and labels evidence source quality honestly', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const summaryStart = src.indexOf('function evidenceSourceSummary(source)');
+    const summaryEnd = src.indexOf('\nfunction renderCutoffCheckpointCard', summaryStart);
+    expect(summaryStart).toBeGreaterThanOrEqual(0);
+    expect(summaryEnd).toBeGreaterThan(summaryStart);
+    const evidenceSourceSummary = new Function(
+      `${src.slice(summaryStart, summaryEnd)}\nreturn evidenceSourceSummary;`,
+    )() as (source: Record<string, unknown>) => string;
+
+    expect(evidenceSourceSummary({
+      evidenceRole: 'forensics',
+      evidenceQuality: { sourceState: 'missing', sourcePresent: false, complete: true, rowsScanned: 0 },
+    })).toBe('forensics · missing');
+    expect(evidenceSourceSummary({
+      evidenceRole: 'forensics',
+      evidenceQuality: { sourceState: 'degraded', sourcePresent: true, complete: false, rowsScanned: 0 },
+    })).toBe('forensics · degraded');
+    expect(evidenceSourceSummary({
+      evidenceRole: 'learning',
+      evidenceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true, rowsScanned: 0 },
+    })).toBe('learning · 0 rows');
+
+    expect(src).toContain("el('span', { cls: 'card-title' }, 'Cutoff Checkpoints')");
+    expect(src).toContain("el('span', { cls: 'card-subtitle' }, 'Observation only')");
+    expect(src).toContain('d.fleet?.cutoffCheckpoints ?? fleet.cutoffCheckpoints ?? null');
+    expect(src.indexOf('renderCutoffCheckpointCard('))
+      .toBeGreaterThan(src.indexOf('renderAutonomousShipReadinessCard('));
+  });
+
   it('app.js renders Fleet Dashboard lease board from shared queue machine health', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

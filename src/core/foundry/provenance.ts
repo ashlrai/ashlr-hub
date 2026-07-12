@@ -237,7 +237,7 @@ function recoverInstallerLink(
 }
 
 /** Read the existing protected key without creating signing authority. */
-function loadExistingKey(): Buffer | null {
+function loadExistingKey(recoverInterruptedInstall = true): Buffer | null {
   const keyPath = provenanceKeyPath();
   let directories: OpenStorageDirectory[] = [];
   let fd: number | undefined;
@@ -247,7 +247,7 @@ function loadExistingKey(): Buffer | null {
     if (before.isSymbolicLink()) {
       throw storageError(keyPath, 'must not be a symbolic link');
     }
-    before = recoverInstallerLink(keyPath, before, directories);
+    if (recoverInterruptedInstall) before = recoverInstallerLink(keyPath, before, directories);
     validateKeyFile(keyPath, before);
 
     fd = openSync(keyPath, fsConstants.O_RDONLY | noFollowFlag());
@@ -590,6 +590,15 @@ function computeSkillCardAttestation(params: SkillCardAttestationParams): string
 /** Return the durable generated key only when its exact format is intact. */
 export function loadExistingProvenanceKey(): Buffer | null {
   const key = loadExistingKey();
+  return key?.length === 32 ? key : null;
+}
+
+/**
+ * Strictly read the durable key without repairing interrupted installation.
+ * Observation/status callers use this path so a read can never unlink or fsync.
+ */
+export function loadExistingProvenanceKeyReadOnly(): Buffer | null {
+  const key = loadExistingKey(false);
   return key?.length === 32 ? key : null;
 }
 

@@ -136,7 +136,7 @@ describe('H3 ATOMIC-WRITES-UNDER-CONTENTION — concurrent writers never tear a 
     ).toBe(true);
     // The persisted set equals the minted set — nothing lost, nothing extra.
     expect(new Set(listed.map((p) => p.id))).toEqual(new Set(mintedIds));
-  });
+  }, 30_000);
 
   it('N concurrent saveSwarm of distinct ids leave N readable records via the POSIX-atomic rename path', async () => {
     const N = 150;

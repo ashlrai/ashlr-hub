@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -19,12 +20,15 @@ import {
   cutoffObservationCheckpointLedgerPath,
   cutoffObservationCheckpointRootPath,
   readCutoffObservationCheckpoints,
+  readCutoffObservationCheckpointsSnapshot,
   recordCutoffObservationCheckpoint,
 } from '../src/core/fleet/cutoff-observation-checkpoints.js';
 import {
   captureEnrollmentCutoffSnapshotV2,
   type EnrollmentCutoffSnapshotV2,
 } from '../src/core/fleet/enrollment-cutoff-snapshot.js';
+import { readFleetCutoffCheckpointStatus } from '../src/core/fleet/cutoff-observation-status.js';
+import { loadOrCreateKey, provenanceKeyPath } from '../src/core/foundry/provenance.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 
 const key = Buffer.alloc(32, 23);
@@ -37,7 +41,7 @@ function enrollmentFingerprint(repos: string[]): string {
   return createHash('sha256').update(JSON.stringify(['enrollment-source:v1', repos])).digest('hex');
 }
 
-function snapshot(capturedAt: string, branch = 'main'): EnrollmentCutoffSnapshotV2 {
+function snapshot(capturedAt: string, branch = 'main', identityKey = key): EnrollmentCutoffSnapshotV2 {
   const source = {
     sourceState: 'healthy' as const,
     complete: true,
@@ -47,7 +51,7 @@ function snapshot(capturedAt: string, branch = 'main'): EnrollmentCutoffSnapshot
   const result = captureEnrollmentCutoffSnapshotV2({
     now: () => capturedAt,
     monotonicNow: () => 0,
-    identityKey: () => key,
+    identityKey: () => identityKey,
     readSource: () => ({ ...source, repos: [...source.repos] }),
     resolveDefaultBranch: () => branch,
     inspectRepository: () => ({
@@ -278,6 +282,48 @@ describe('M383 authenticated cutoff observation checkpoints', () => {
       () => (++readCalls === 1 ? key : Buffer.alloc(32, 9)),
     )).toMatchObject({ sourceState: 'healthy', releasedRows: 1 });
     expect(readCalls).toBe(1);
+
+    let snapshotReadCalls = 0;
+    expect(readCutoffObservationCheckpointsSnapshot(
+      () => (++snapshotReadCalls === 1 ? key : Buffer.alloc(32, 9)),
+    )).toMatchObject({ sourceState: 'healthy', releasedRows: 1 });
+    expect(snapshotReadCalls).toBe(1);
+  });
+
+  it('provides a non-mutating authenticated snapshot read for status', () => {
+    expect(record(snapshot('2026-07-12T09:30:30.000Z'))).toMatchObject({ recorded: 1 });
+    const fleetPath = join(home, '.ashlr', 'fleet');
+    const lock = join(fleetPath, '.cutoff-observation-checkpoints.lock');
+    chmodSync(fleetPath, 0o500);
+    try {
+      expect(readCutoffObservationCheckpointsSnapshot(() => key)).toMatchObject({
+        sourceState: 'healthy', complete: true, releasedRows: 1,
+      });
+      expect(statSync(fleetPath).mode & 0o777).toBe(0o500);
+      expect(existsSync(lock)).toBe(false);
+    } finally {
+      chmodSync(fleetPath, 0o700);
+    }
+  });
+
+  it('keeps the complete status call path read-only when key recovery is required', () => {
+    const persistentKey = loadOrCreateKey();
+    const value = snapshot('2026-07-12T09:30:45.000Z', 'main', persistentKey);
+    expect(recordCutoffObservationCheckpoint(value, {
+      keyProvider: () => persistentKey,
+    })).toMatchObject({ recorded: 1 });
+    expect(readFleetCutoffCheckpointStatus('2026-07-12T09:31:00.000Z')).toMatchObject({
+      state: 'available', releasedCheckpoints: 1,
+    });
+
+    const keyPath = provenanceKeyPath();
+    const installerTemp = `${keyPath}.123.${'c'.repeat(24)}.tmp`;
+    linkSync(keyPath, installerTemp);
+    expect(readFleetCutoffCheckpointStatus('2026-07-12T09:31:00.000Z')).toMatchObject({
+      state: 'degraded', releasedCheckpoints: 0,
+    });
+    expect(statSync(keyPath).nlink).toBe(2);
+    expect(existsSync(installerTemp)).toBe(true);
   });
 
   it('persists the maximum capture-valid 64-repository snapshot', () => {

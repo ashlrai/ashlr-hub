@@ -176,8 +176,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep checkpoint evidence observation-only and statically unwired from population, routing, readiness, merge, daemon, and policy authority.
 - [x] Cover maximum valid captures, replay, tamper, wrong keys, unstable providers, permissions, and crash recovery with focused tests.
 - [ ] Add authenticated rotation/retention and an external monotonic anchor before treating the bounded ledger as rollback-resistant historical authority.
-- [ ] Project checkpoint freshness into a separate observation-only FleetStatus surface after role-based forensic exclusion is implemented.
+- [x] Project checkpoint freshness into a separate observation-only FleetStatus surface after role-based forensic exclusion is implemented.
 - [x] Commit, push, observe CI, reload production, and record unchanged cutoff/population/merge authority.
+
+## Current Overnight Cycle - Cutoff Observation Fleet Visibility
+- [x] Rehydrate the released checkpoint baseline, CI proof, production health, git state, Entire state, and durable notes.
+- [x] Deploy disjoint audits for production capture cadence, observation-only Fleet OS projection, and authenticated rotation/anchoring.
+- [x] Add a separate cutoff-checkpoint status with signed-source freshness and literal non-authority fields.
+- [x] Make forensic evidence exclusion role-based and prevent missing/degraded sources from rendering as healthy zero rows.
+- [x] Prove checkpoint state cannot change readiness, mission, effectiveness, direction, actions, routing, or merge authority.
+- [x] Keep production capture scheduling separate until its detached child-process budget and restart-safe cadence are independently proven.
+- [ ] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary truthful visibility.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.

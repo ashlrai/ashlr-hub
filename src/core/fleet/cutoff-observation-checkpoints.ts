@@ -26,7 +26,10 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { loadExistingProvenanceKey } from '../foundry/provenance.js';
+import {
+  loadExistingProvenanceKey,
+  loadExistingProvenanceKeyReadOnly,
+} from '../foundry/provenance.js';
 import { fsyncDirectory } from '../util/durability.js';
 import {
   createCutoffCheckpointDigestV1,
@@ -141,6 +144,10 @@ interface ParsedLedger {
 
 function keyProvider(): Buffer | null {
   try { return loadExistingProvenanceKey(); } catch { return null; }
+}
+
+function readOnlyKeyProvider(): Buffer | null {
+  try { return loadExistingProvenanceKeyReadOnly(); } catch { return null; }
 }
 
 function pinKey(provider: KeyProvider): KeyProvider | null {
@@ -462,8 +469,8 @@ function emptyRead(
   };
 }
 
-export function readCutoffObservationCheckpoints(
-  key: KeyProvider = keyProvider,
+function readCutoffObservationCheckpointsOnce(
+  key: KeyProvider,
 ): CutoffObservationCheckpointReadResult {
   let directories: DirectoryState;
   try {
@@ -477,14 +484,13 @@ export function readCutoffObservationCheckpoints(
     }
     directories = { rootPath, root, fleetPath, fleet };
   } catch { return emptyRead('degraded', { stopReasons: ['io-error'] }); }
-  const lock = acquireLocalStoreLock(lockPath(), 2_000);
-  if (!lock) return emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
   try {
     const pinnedKey = pinKey(key);
     if (!pinnedKey) return emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
     verifyDirectories(directories);
     const ledgerBytes = readPrivateFile(cutoffObservationCheckpointLedgerPath(), MAX_LEDGER_BYTES);
     const root = readRoot(cutoffObservationCheckpointRootPath(), pinnedKey);
+    verifyDirectories(directories);
     if (ledgerBytes === null && root === null) return emptyRead('missing', { sourcePresent: false });
     if (root === 'invalid-root') {
       return emptyRead('degraded', { sourcePresent: true, stopReasons: ['invalid-root'] });
@@ -534,6 +540,52 @@ export function readCutoffObservationCheckpoints(
     };
   } catch {
     return emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
+  }
+}
+
+/** Authenticated, non-mutating snapshot read for status and diagnostics. */
+export function readCutoffObservationCheckpointsSnapshot(
+  key: KeyProvider = readOnlyKeyProvider,
+  attempts = 3,
+): CutoffObservationCheckpointReadResult {
+  let keyLoaded = false;
+  let stableKey: Buffer | null = null;
+  const transactionKey = (): Buffer | null => {
+    if (!keyLoaded) {
+      keyLoaded = true;
+      try {
+        const loaded = key();
+        stableKey = Buffer.isBuffer(loaded) && loaded.length === 32 ? Buffer.from(loaded) : null;
+      } catch { stableKey = null; }
+    }
+    return stableKey;
+  };
+  const boundedAttempts = Number.isSafeInteger(attempts) ? Math.max(1, Math.min(5, attempts)) : 3;
+  let result = emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
+  for (let attempt = 0; attempt < boundedAttempts; attempt += 1) {
+    result = readCutoffObservationCheckpointsOnce(transactionKey);
+    if (result.sourceState !== 'degraded') return result;
+  }
+  return result;
+}
+
+export function readCutoffObservationCheckpoints(
+  key: KeyProvider = keyProvider,
+): CutoffObservationCheckpointReadResult {
+  try {
+    const rootPath = storageRoot();
+    const fleetPath = join(rootPath, 'fleet');
+    if (!existsSync(rootPath) || !existsSync(fleetPath)) return emptyRead('missing', { sourcePresent: false });
+    const root = lstatSync(rootPath);
+    const fleet = lstatSync(fleetPath);
+    if (!privateDirectory(root) || !privateDirectory(fleet)) {
+      return emptyRead('degraded', { stopReasons: ['io-error'] });
+    }
+  } catch { return emptyRead('degraded', { stopReasons: ['io-error'] }); }
+  const lock = acquireLocalStoreLock(lockPath(), 2_000);
+  if (!lock) return emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
+  try {
+    return readCutoffObservationCheckpointsOnce(key);
   } finally {
     releaseLocalStoreLock(lock);
   }

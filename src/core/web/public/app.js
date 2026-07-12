@@ -3277,7 +3277,7 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
   }
 
   if (evidenceSources.length > 0) {
-    body.appendChild(el('div', { cls: 'card-section-label' }, 'Learning evidence'));
+    body.appendChild(el('div', { cls: 'card-section-label' }, 'Evidence sources'));
     const list = el('div', { cls: cls.includes('fleet-card') ? 'fleet-backends' : 'ctrl-backend-list' });
     for (const source of evidenceSources) {
       list.appendChild(el('div', {
@@ -3286,7 +3286,7 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
       },
         el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-name' : 'ctrl-backend-name' }, source.label ?? source.id),
         el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-dispatches' : 'ctrl-backend-dispatches' },
-          `${source.evidenceRole ?? 'evidence'} · ${source.evidenceQuality?.rowsScanned ?? 0} rows`),
+          evidenceSourceSummary(source)),
         el('span', {
           cls: 'fleet-quota',
           style: `color:${sourceStatusAccent(source.status)}`,
@@ -3296,6 +3296,47 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
     body.appendChild(list);
   }
 
+  card.appendChild(body);
+  return card;
+}
+
+function evidenceSourceSummary(source) {
+  const role = source?.evidenceRole ?? 'evidence';
+  const quality = source?.evidenceQuality ?? null;
+  if (!quality || quality.sourceState === 'missing' || quality.sourcePresent === false) {
+    return `${role} · missing`;
+  }
+  if (quality.sourceState === 'degraded' || quality.complete === false) {
+    return `${role} · degraded`;
+  }
+  return `${role} · ${quality.rowsScanned ?? 0} rows`;
+}
+
+function renderCutoffCheckpointCard(status) {
+  if (!status) return null;
+  const available = status.state === 'available';
+  const degraded = status.state === 'degraded';
+  const unavailableValue = status.state === 'unsupported' ? 'unsupported' : 'unavailable';
+  const card = el('div', { cls: 'ctrl-card card' });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Cutoff Checkpoints'),
+    el('span', { cls: 'card-subtitle' }, 'Observation only')
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['State', status.state ?? 'unknown'],
+    ['Freshness', status.freshness ?? 'unknown'],
+    ['Latest capture', status.latestCapturedAt ? fmtRelative(status.latestCapturedAt) : 'never'],
+    ['Released', available ? status.releasedCheckpoints ?? 0 : degraded ? `${status.releasedCheckpoints ?? 0} (partial)` : unavailableValue],
+    ['Unreleased', available ? status.unreleasedRows ?? 0 : degraded ? `${status.unreleasedRows ?? 0} (partial)` : unavailableValue],
+    ['Read', available ? 'complete' : degraded ? 'incomplete' : unavailableValue],
+    ['Cutoff authority', 'disabled'],
+    ['Historical authority', 'disabled'],
+    ['Rollback protection', 'disabled'],
+  ]));
+  if (Array.isArray(status.stopReasons) && status.stopReasons.length > 0) {
+    body.appendChild(el('p', { cls: 'hint' }, `Source: ${status.stopReasons.join(', ')}`));
+  }
   card.appendChild(body);
   return card;
 }
@@ -3957,6 +3998,11 @@ function renderControl() {
 
   const missionReadinessCard = renderAutonomousShipReadinessCard(shipReadiness);
   if (missionReadinessCard) section.appendChild(missionReadinessCard);
+
+  const cutoffCheckpointCard = renderCutoffCheckpointCard(
+    d.fleet?.cutoffCheckpoints ?? fleet.cutoffCheckpoints ?? null
+  );
+  if (cutoffCheckpointCard) section.appendChild(cutoffCheckpointCard);
 
   const missionEffectivenessCard = renderAutonomyEffectivenessCard(effectiveness);
   if (missionEffectivenessCard) section.appendChild(missionEffectivenessCard);

@@ -118,6 +118,10 @@ import {
   readPostMergeStability,
   type PostMergeStabilityCohortSummary,
 } from './post-merge-stability.js';
+import {
+  readFleetCutoffCheckpointStatus,
+  type FleetCutoffCheckpointStatus,
+} from './cutoff-observation-status.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -996,6 +1000,8 @@ export interface FleetStatus {
     adverseObservations: number;
     stability: PostMergeStabilityCohortSummary;
   };
+  /** Authenticated checkpoint availability. Excluded from readiness and policy inputs. */
+  cutoffCheckpoints?: FleetCutoffCheckpointStatus;
   /** Effective applicability for optional evidence producers. */
   evidencePolicy?: {
     concurrentDispatchEnabled: boolean;
@@ -2005,6 +2011,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     queueSourceDetail,
   });
   status.missionBrief = buildMissionBrief(status);
+
+  // Construct this forensic projection only after every operational and
+  // authority-bearing status has been derived.
+  status.cutoffCheckpoints = readFleetCutoffCheckpointStatus(generatedAt);
 
   return status;
 }
@@ -3209,7 +3219,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (phantomAuditAction) add(phantomAuditAction);
 
   const unhealthyEvidence = learningEvidenceReadinessSources(status, status.generatedAt)
-    .filter((source) => source.eligibility === 'withheld' || source.status === 'degraded');
+    .filter((source) => source.eligibility !== 'observational' &&
+      (source.eligibility === 'withheld' || source.status === 'degraded'));
   if (unhealthyEvidence.length > 0) {
     const labels = unhealthyEvidence.slice(0, 3).map((source) => source.label).join(', ');
     const firstSource = unhealthyEvidence[0]!.id;
@@ -4447,7 +4458,7 @@ function buildAutonomousShipReadiness(
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const evidenceSources = learningEvidenceReadinessSources(status, inputs.generatedAt);
   const evidenceSummary = readinessEvidenceSummary(evidenceSources);
-  const authoritySources = evidenceSources.filter((source) => source.id !== 'post-merge');
+  const authoritySources = evidenceSources.filter((source) => source.eligibility !== 'observational');
   const evidenceState = evidenceSummary.withheld > 0 || authoritySources.some((source) => source.status === 'degraded')
     ? 'degraded'
     : evidenceSummary['cold-start'] > 0
