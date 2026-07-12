@@ -2,6 +2,7 @@ import type { WorkItem } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const SELF_HEAL_ITEM_MAX_AGE_MS = 14 * DAY_MS;
+export const REJECTED_CAPTURE_REPAIR_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 const NOISE_PATTERNS: RegExp[] = [
   /^\s*>\s*[\w@./-]+.*\s(?:check|test|build|lint|typecheck)\s*$/im,

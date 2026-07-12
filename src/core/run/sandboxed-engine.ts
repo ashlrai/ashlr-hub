@@ -77,7 +77,7 @@ import { audit as auditConfinement } from '../sandbox/audit.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
-import { scrubSecrets } from '../knowledge/index.js';
+import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
@@ -1024,7 +1024,7 @@ export async function captureSandboxedProposal(
       };
     }
 
-    const scrubbed = scrubSecrets(diff.patch);
+    const scrubbed = canonicalizeProposalDiff(diff.patch);
     const diffHash = hashDiff(scrubbed);
     const provenanceSig = signProvenance(engineModel, tier, diffHash);
     const label = opts.sourceLabel ?? 'Sandboxed';
@@ -1611,7 +1611,7 @@ export async function runEngineSandboxed(
           // M331: bindings are `let` — a verify-to-green repair mutates the
           // worktree, so the diff is re-captured and RE-SIGNED after repair.
           let effDiff = diff;
-          let scrubbed = scrubSecrets(effDiff.patch);
+          let scrubbed = canonicalizeProposalDiff(effDiff.patch);
           let diffHash = hashDiff(scrubbed);
           let provenanceSig = signProvenance(engineModel, tier, diffHash);
           // M275: completeness + self-verify gate. Runs typecheck/test in the
@@ -1684,7 +1684,7 @@ export async function runEngineSandboxed(
                 const repaired = wt.sandboxDiff(sb);
                 if (repaired.files > 0 && repaired.patch.trim().length > 0) {
                   effDiff = repaired;
-                  scrubbed = scrubSecrets(effDiff.patch);
+                  scrubbed = canonicalizeProposalDiff(effDiff.patch);
                   diffHash = hashDiff(scrubbed);
                   provenanceSig = signProvenance(engineModel, tier, diffHash);
                   _gateResult = {

@@ -2150,13 +2150,21 @@ export async function runScannerWithObservations(
     }
     if (descriptor.id === 'queued-autonomy' && descriptor.canAssertAbsent) {
       const source = loadQueuedAutonomyItemsDetailed();
-      if (source.sourceState !== 'complete') {
-        return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-unavailable')] };
-      }
       const repoKey = resolve(repo);
       const items = source.items
         .filter((item) => resolve(item.repo) === repoKey)
         .slice(0, descriptor.maxItems);
+      if (source.sourceState !== 'complete') {
+        return {
+          items,
+          observations: items.length > 0
+            ? [
+                ...presentObservations(descriptor, repo, items),
+                unavailableObservation(descriptor, repo, 'source-unavailable'),
+              ]
+            : [unavailableObservation(descriptor, repo, 'source-unavailable')],
+        };
+      }
       if (items.length > 0) return { items, observations: presentObservations(descriptor, repo, items) };
       return {
         items,

@@ -84,3 +84,17 @@ export function scrubSecrets(text: string): string {
     return text;
   }
 }
+
+/** Stable bytes for proposal persistence, hashing, and provenance signing. */
+export function canonicalizeProposalDiff(text: string): string {
+  let current = text;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = scrubSecrets(current)
+      .replace(/\bsk_(?:live|test)_[A-Za-z0-9_]{16,}\b/g, '[REDACTED]')
+      .replace(/\b(?:AKIA|ASIA|AROA)[0-9A-Z]{16}\b/g, '[REDACTED]')
+      .replace(/\b[0-9a-fA-F]{32,}\b/g, '[REDACTED]');
+    if (next === current) return current;
+    current = next;
+  }
+  throw new Error('proposal diff canonicalization did not converge');
+}

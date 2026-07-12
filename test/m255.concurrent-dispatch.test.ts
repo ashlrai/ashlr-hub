@@ -86,7 +86,7 @@ function makeTrustedCaptureRepair(): WorkItem {
     source: 'self',
     title: 'Repair dispatch capture failure for repo item repo:self-heal:123',
     detail:
-      'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+      'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
       'Original work item: repo:self-heal:123\n' +
       'Dispatch outcome: gate-blocked\n' +
       'Diff metadata: files=1, lines=3\n' +

@@ -160,7 +160,7 @@ describe('routeBackend', () => {
       score: 1,
       title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
       detail:
-        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
         'Original work item: repo:self-heal:stalled\n' +
         'Dispatch outcome: gate-blocked\n' +
         'Diff metadata: files=1, lines=12\n' +
@@ -184,6 +184,34 @@ describe('routeBackend', () => {
     }
   });
 
+  it('fails closed when widened capture tier metadata lacks durable handoff authority', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const item = makeItem({
+      id: 'repo:proposal-repair-capture:fedcba654321',
+      source: 'self',
+      effort: 5,
+      score: 5,
+      title: 'Repair dispatch capture failure for repo item repo:issue:42',
+      detail:
+        'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
+        'Original work item: repo:issue:42\n' +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=12\n' +
+        'Failure: completeness gate blocked proposal capture\n' +
+        'Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
+      repairParentItemId: 'repo:issue:42',
+      repairParentSource: 'issue',
+      repairParentBackend: 'local-coder',
+      repairParentTier: 'mid',
+      repairParentObjectiveHash: 'a'.repeat(64),
+    });
+
+    const decision = routeBackend(item, cfg);
+    expect(decision.backend).toBe('builtin');
+    expect(decision.reason).toContain('capture-repair-provenance-unavailable');
+  });
+
   it('does not promote tag-only capture repair lookalikes to frontier as generated repairs', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
     const d = routeBackend(makeItem({
@@ -193,7 +221,7 @@ describe('routeBackend', () => {
       score: 1,
       title: 'Manual capture repair',
       detail:
-        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
         'Original work item: repo:self-heal:stalled\n' +
         'Dispatch outcome: gate-blocked\n' +
         'Diff metadata: files=1, lines=12\n' +
@@ -214,7 +242,7 @@ describe('routeBackend', () => {
       score: 1,
       title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
       detail:
-        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
         'Original work item: repo:self-heal:stalled\n' +
         'Dispatch outcome: gate-blocked\n' +
         'Diff metadata: files=1, lines=12\n' +

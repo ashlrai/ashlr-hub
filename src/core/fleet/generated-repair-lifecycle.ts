@@ -19,14 +19,16 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
-import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from './self-heal-trust.js';
+import {
+  isTrustedCaptureRepairItem,
+  isTrustedDiagnosticResliceItem,
+  isTrustedGeneratedRepairItem,
+} from './self-heal-trust.js';
 import type { EngineId, RepairTreatment, WorkItem } from '../types.js';
 import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
 import {
   readRepairHandoffs,
   repairGenerationIdFromHandoffId,
-  repairHandoffJournalPath,
-  repairHandoffV2JournalPath,
   type RepairHandoffObservation,
 } from './repair-handoff-journal.js';
 import {
@@ -150,32 +152,15 @@ export function generatedRepairLifecyclePath(): string {
   return join(homedir(), '.ashlr', 'fleet', 'generated-repair-lifecycle.json');
 }
 
-let handoffAuthorityCache: {
-  fingerprint: string;
-  byEventId: Map<string, RepairHandoffObservation>;
-  observations: RepairHandoffObservation[];
-} | undefined;
-
 function handoffAuthoritySnapshot(): {
   byEventId: Map<string, RepairHandoffObservation>;
   observations: RepairHandoffObservation[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
 } {
-  const fingerprint = [repairHandoffJournalPath(), repairHandoffV2JournalPath()]
-    .map((path) => {
-      try {
-        const stat = lstatSync(path);
-        return `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-      } catch {
-        return `${path}:missing`;
-      }
-    })
-    .join('|');
-  if (handoffAuthorityCache?.fingerprint === fingerprint) return handoffAuthorityCache;
   const read = readRepairHandoffs();
   const observations = read.sourceState === 'degraded' ? [] : read.observations;
   const byEventId = new Map(observations.map((entry) => [entry.eventId, entry]));
-  handoffAuthorityCache = { fingerprint, byEventId, observations };
-  return handoffAuthorityCache;
+  return { byEventId, observations, sourceState: read.sourceState };
 }
 
 function handoffAuthorityByEventId(): Map<string, RepairHandoffObservation> {
@@ -223,16 +208,46 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
         (handoff.repairTreatment !== undefined && handoff.repairTreatment !== expectedTreatment)
       ) return null;
     }
+    const widenedCapture = isTrustedCaptureRepairItem(item) && (
+      handoff.parentSource === 'issue' ||
+      handoff.parentSource === 'goal' ||
+      item.repairParentSource === 'issue' ||
+      item.repairParentSource === 'goal'
+    );
+    if (
+      widenedCapture &&
+      (
+        handoff.kind !== 'capture-repair' ||
+        handoff.parentSource !== item.repairParentSource ||
+        handoff.parentBackend !== item.repairParentBackend ||
+        handoff.parentTier !== item.repairParentTier ||
+        handoff.parentObjectiveHash !== item.repairParentObjectiveHash
+      )
+    ) return null;
     return item.repairGenerationId;
   }
   // Diagnostic reslices derive authority from a durable parent handoff. Older
   // hashless/fallback generations remain readable but can never dispatch.
   if (isTrustedDiagnosticResliceItem(item)) return null;
+  if (
+    isTrustedCaptureRepairItem(item) &&
+    (item.repairParentSource === 'issue' || item.repairParentSource === 'goal')
+  ) return null;
   let repo: string;
   try {
     repo = resolve(item.repo);
   } catch {
     return null;
+  }
+  if (isTrustedCaptureRepairItem(item)) {
+    const authority = handoffAuthoritySnapshot();
+    if (authority.sourceState === 'degraded') return null;
+    const authoritativeWidenedChild = authority.observations.some((handoff) =>
+      handoff.kind === 'capture-repair' &&
+      handoff.childItemId === item.id &&
+      resolve(handoff.repo) === repo &&
+      (handoff.parentSource === 'issue' || handoff.parentSource === 'goal'));
+    if (authoritativeWidenedChild) return null;
   }
   const ts = Date.parse(item.ts);
   if (!Number.isFinite(ts)) return null;

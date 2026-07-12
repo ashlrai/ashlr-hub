@@ -138,6 +138,22 @@ describe('M362 durable repair handoff journal', () => {
     }))).toMatchObject({ recorded: 1, failed: 0 });
   });
 
+  it.each(['issue', 'goal'] as const)('persists %s capture failures as durable repair handoffs', (source) => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, {
+      source,
+      outcome: 'proposal-capture-error',
+      diffFiles: 2,
+    });
+
+    expect(recordRepairHandoffs(input)).toMatchObject({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readRepairHandoffs().observations[0]).toMatchObject({
+      kind: 'capture-repair',
+      parentSource: source,
+      parentObjectiveHash: input.objectiveHash,
+    });
+  });
+
   it('persists fixed routing provenance while excluding free-form execution text', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);

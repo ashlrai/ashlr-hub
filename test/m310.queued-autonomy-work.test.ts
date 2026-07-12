@@ -19,6 +19,7 @@ import {
 } from '../src/core/portfolio/queued-autonomy.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
+  captureGateRepairWorkItem,
   noDiffResliceWorkItem,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
@@ -29,9 +30,11 @@ import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js'
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import {
   recordRepairHandoffs,
+  readRepairHandoffs,
   repairGenerationIdFromHandoffId,
   repairHandoffFromDispatchEvent,
   repairHandoffJournalPath,
+  repairHandoffV2JournalPath,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairGenerationId,
@@ -118,7 +121,10 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
     ...overrides,
   };
   recordRepairHandoffs(value, { schemaVersion: 2 });
-  return value;
+  const handoff = repairHandoffFromDispatchEvent(value);
+  return handoff
+    ? { ...value, repairHandoffId: handoff.eventId, repairGenerationId: handoff.generationId }
+    : value;
 }
 
 describe('queued autonomy work scanner', () => {
@@ -302,7 +308,35 @@ describe('queued autonomy work scanner', () => {
     expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
       items: [],
       sourceState: 'unavailable',
+      filesUnavailable: 2,
+      itemsLoaded: 0,
     });
+  });
+
+  it('keeps a valid repair queue selectable when the legacy backlog is malformed', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const heal = item(repo.dir, 'repair-survives-malformed-backlog', {
+      source: 'self',
+      title: 'Repair failing autonomous daemon verification: src/daemon.ts(4,1): error TS2304',
+      detail: 'Self-heal: build is RED.\nFirst failure: src/daemon.ts(4,1): error TS2304: Cannot find name daemon.',
+      tags: ['self-heal', 'verify', 'build'],
+    });
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [heal]);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      items: [item(repo.dir, 'oversized-legacy-goal', { source: 'goal', title: 'x'.repeat(241) })],
+    });
+
+    const detailed = loadQueuedAutonomyItemsDetailed();
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(detailed).toMatchObject({
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+      itemsLoaded: 1,
+    });
+    expect(detailed.items.map((candidate) => candidate.id)).toEqual([heal.id]);
+    expect(found.map((candidate) => candidate.id)).toEqual([heal.id]);
   });
 
   it('rehydrates self-heal and invent items for the scanned enrolled repo only', async () => {
@@ -445,6 +479,113 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
     expect(found[0]!.detail).toContain('[REDACTED]');
     expect(found[0]!.ts).toBe(proposal.createdAt);
+  });
+
+  it('recovers a recent rejected capture artifact without reopening or copying it', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-12T12:00:00.000Z');
+    const proposal = partialProposal(repo.dir, {
+      status: 'rejected',
+      createdAt: '2026-07-12T11:00:00.000Z',
+      runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
+      diffHash: undefined,
+      provenanceSig: undefined,
+      decisionReason: 'auto-drained: permanent readiness blocker persisted for 3 pass(es): known verification failure',
+    });
+    (proposal as unknown as Record<string, unknown>)['stuckPassCount'] = 3;
+
+    const first = queueProposalRepairWorkForPendingProposals([proposal], now);
+    const second = queueProposalRepairWorkForPendingProposals([proposal], now);
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(first).toMatchObject({ scanned: 1, eligible: 1, queued: 1, failed: 0 });
+    expect(second).toMatchObject({ scanned: 1, eligible: 1, queued: 1, failed: 0 });
+    expect(proposal.status).toBe('rejected');
+    expect(found).toHaveLength(1);
+    expect(found[0]!.detail).toContain('Produce a fresh complete fix');
+    expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
+  });
+
+  it('recovers an unsigned persistence-mismatch artifact only as fresh repair work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-12T12:00:00.000Z');
+    const proposal = partialProposal(repo.dir, {
+      id: 'prop-capture-mismatch',
+      status: 'rejected',
+      createdAt: '2026-07-12T11:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+      result: 'proposal persistence verification failed',
+      diffHash: undefined,
+      provenanceSig: undefined,
+    });
+
+    expect(queueProposalRepairWorkForPendingProposals([proposal], now)).toMatchObject({
+      scanned: 1,
+      eligible: 1,
+      queued: 1,
+    });
+    const found = await scanQueuedAutonomyWork(repo.dir);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
+  });
+
+  it('expires materialized rejected-capture recovery after the bounded window', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = partialProposal(repo.dir, {
+      status: 'rejected',
+      createdAt: '2026-07-12T11:00:00.000Z',
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
+      result: 'proposal persistence verification failed',
+    });
+    queueProposalRepairWorkForPendingProposals([proposal], new Date('2026-07-12T12:00:00.000Z'));
+    expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
+
+    const expired = queueProposalRepairWorkForPendingProposals([], new Date('2026-07-14T11:00:00.001Z'));
+
+    expect(expired.dispatchRepairPruned).toBe(1);
+    expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
+  });
+
+  it('rejects stale, human, unbound, empty, and non-capture rejected artifacts', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-12T12:00:00.000Z');
+    const bound = {
+      status: 'rejected' as const,
+      createdAt: '2026-07-12T11:00:00.000Z',
+      runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
+    };
+    const proposals = [
+      partialProposal(repo.dir, {
+        ...bound,
+        id: 'human',
+        origin: 'agent',
+        decidedAt: '2026-07-12T11:05:00.000Z',
+        decisionReason: 'human rejected this artifact',
+      }),
+      partialProposal(repo.dir, { ...bound, id: 'unbound', trajectoryId: 'run:other' }),
+      partialProposal(repo.dir, { ...bound, id: 'empty', diff: '' }),
+      partialProposal(repo.dir, {
+        ...bound,
+        id: 'judge-rejected',
+        verifyResult: { passed: false, detail: 'judge rejected', source: 'judge' },
+      }),
+      partialProposal(repo.dir, { ...bound, id: 'stale', createdAt: '2026-07-09T11:00:00.000Z' }),
+    ];
+
+    expect(queueProposalRepairWorkForPendingProposals(proposals, now)).toMatchObject({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+    });
+    expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
   });
 
   it('applies the terminal lifecycle to ordinary pending-proposal repairs', async () => {
@@ -1303,7 +1444,7 @@ describe('queued autonomy work scanner', () => {
     expect(found).toEqual([]);
   });
 
-  it('does not queue capture-gate repair for non-self, disabled, or successful dispatches', async () => {
+  it('queues issue capture repair but excludes ineligible sources, disabled, stale, and successful dispatches', async () => {
     const repo = fx.makeRepo();
     const otherRepo = fx.makeRepo();
     repo.enroll();
@@ -1311,6 +1452,17 @@ describe('queued autonomy work scanner', () => {
     const recent = new Date(now.getTime() - 60_000).toISOString();
     const events: DispatchProductionEvent[] = [
       captureFailure(repo.dir, { ts: recent, itemId: 'todo-gate', source: 'todo' }),
+      captureFailure(repo.dir, {
+        ts: recent,
+        itemId: 'repo:issue:captured-partial',
+        source: 'issue',
+        backend: 'codex',
+        tier: 'frontier',
+        runId: 'attempt-42345678-1234-4123-8123-123456789abc',
+        trajectoryId: 'run:attempt-42345678-1234-4123-8123-123456789abc',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: src/issue.ts:5 expected ready state',
+      }),
       captureFailure(repo.dir, { ts: recent, itemId: 'self-disabled', outcome: 'proposal-disabled' }),
       captureFailure(repo.dir, {
         ts: recent,
@@ -1357,14 +1509,56 @@ describe('queued autonomy work scanner', () => {
         reason: 'proposal-capture-error: src/other.ts:5 expected other state',
       }),
     ];
+    expect(recordRepairHandoffs(events[1]!, { schemaVersion: 2 })).toMatchObject({ recorded: 1, failed: 0 });
 
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: events,
     });
     const found = await scanQueuedAutonomyWork(repo.dir);
+    const issueCandidate = captureGateRepairWorkItem(events[1]!, now);
+    const handoffs = readRepairHandoffs();
 
-    expect(result).toMatchObject({ scanned: events.length, eligible: 0, queued: 0, failed: 0 });
-    expect(found).toEqual([]);
+    expect(issueCandidate).not.toBeNull();
+    expect(handoffs.sourceState).toBe('healthy');
+    expect(handoffs.observations.find((row) => row.eventId === events[1]!.repairHandoffId)).toMatchObject({
+      kind: 'capture-repair',
+      parentSource: 'issue',
+      parentBackend: 'codex',
+      parentTier: 'frontier',
+      parentObjectiveHash: 'a'.repeat(64),
+    });
+    expect(generatedRepairGenerationId(issueCandidate!)).toMatch(/^[a-f0-9]{64}$/);
+    expect(result).toMatchObject({ scanned: events.length, eligible: 1, queued: 1, failed: 0 });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      source: 'self',
+      repairParentItemId: 'repo:issue:captured-partial',
+      repairParentSource: 'issue',
+      repairParentBackend: 'codex',
+      repairParentTier: 'frontier',
+      repairParentObjectiveHash: 'a'.repeat(64),
+    });
+    expect(generatedRepairGenerationId(found[0]!)).toMatch(/^[a-f0-9]{64}$/);
+    expect(generatedRepairGenerationId({ ...found[0]!, repairParentTier: 'mid' })).toBeNull();
+    expect(generatedRepairGenerationId({ ...found[0]!, repairParentSource: 'self' })).toBeNull();
+    const {
+      repairHandoffId: _handoff,
+      repairGenerationId: _generation,
+      repairParentItemId: _parentItem,
+      repairParentSource: _parentSource,
+      repairParentBackend: _parentBackend,
+      repairParentTier: _parentTier,
+      repairParentObjectiveHash: _parentObjective,
+      ...lineageStripped
+    } = found[0]!;
+    expect(generatedRepairGenerationId(lineageStripped)).toBeNull();
+    const unrelatedLegacyShape = {
+      ...lineageStripped,
+      id: 'repo:proposal-repair-capture:001122334455',
+    };
+    expect(generatedRepairGenerationId(unrelatedLegacyShape)).toMatch(/^[a-f0-9]{64}$/);
+    writeFileSync(repairHandoffV2JournalPath(), '{malformed', 'utf8');
+    expect(generatedRepairGenerationId(unrelatedLegacyShape)).toBeNull();
   });
 
   it('does not queue repair work for clean pending proposals', async () => {

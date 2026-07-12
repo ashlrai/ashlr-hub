@@ -6,6 +6,7 @@ import { listProposals } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
 import {
+  REJECTED_CAPTURE_REPAIR_MAX_AGE_MS,
   isActionableSelfHealItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
@@ -33,6 +34,7 @@ const MAX_REASON = 260;
 const DISPATCH_CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DISPATCH_CAPTURE_MAX_QUEUED = 5;
 const DISPATCH_NO_DIFF_MAX_QUEUED = 5;
+const REJECTED_CAPTURE_MAX_SCANNED = 32;
 const MAX_PARENT_CONTEXT = 1_600;
 
 export interface ProposalRepairWorkResult {
@@ -246,8 +248,32 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
   return { dispatchable, quarantined, resolved, missing };
 }
 
-function proposalNeedsRepair(proposal: Proposal): boolean {
-  if (proposal.status !== 'pending') return false;
+function isRecentRejectedCaptureArtifact(proposal: Proposal, now: Date): boolean {
+  if (proposal.status !== 'rejected' || proposal.isPartial !== true) return false;
+  if (proposal.verifyResult?.source !== 'capture-gate') return false;
+  if (proposal.origin !== 'agent' && proposal.origin !== 'swarm') return false;
+  const stuckPassCount = (proposal as unknown as Record<string, unknown>)['stuckPassCount'];
+  const autoDrained =
+    typeof proposal.decisionReason === 'string' &&
+    proposal.decisionReason.startsWith('auto-drained: permanent readiness blocker persisted') &&
+    typeof stuckPassCount === 'number' &&
+    Number.isSafeInteger(stuckPassCount) &&
+    stuckPassCount >= 1;
+  const captureMismatch =
+    proposal.result === 'proposal persistence verification failed' &&
+    proposal.decidedAt === undefined &&
+    proposal.decisionReason === undefined;
+  if (!autoDrained && !captureMismatch) return false;
+  if (typeof proposal.diff !== 'string' || proposal.diff.trim().length === 0) return false;
+  if (typeof proposal.runId !== 'string' || !proposal.runId) return false;
+  if (proposal.trajectoryId !== `run:${proposal.runId}`) return false;
+  const createdAtMs = Date.parse(proposal.createdAt);
+  const ageMs = now.getTime() - createdAtMs;
+  return Number.isFinite(createdAtMs) && ageMs >= 0 && ageMs <= REJECTED_CAPTURE_REPAIR_MAX_AGE_MS;
+}
+
+function proposalNeedsRepair(proposal: Proposal, now: Date): boolean {
+  if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now)) return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.repo) return false;
   return proposal.isPartial === true || proposal.verifyResult?.passed === false;
@@ -268,7 +294,7 @@ function repairReason(proposal: Proposal): string {
 }
 
 function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
-  if (event.source !== 'self') return false;
+  if (event.source !== 'self' && event.source !== 'issue' && event.source !== 'goal') return false;
   if (event.basis !== 'run-proposal-outcome') return false;
   if (event.proposalCreated !== false) return false;
   if (event.proposalId) return false;
@@ -307,7 +333,9 @@ function isDiagnosticNoDiffEvent(event: DispatchProductionEvent): boolean {
 }
 
 export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): WorkItem | null {
-  if (!proposalNeedsRepair(proposal) || !proposal.repo) return null;
+  if (!proposalNeedsRepair(proposal, now) || !proposal.repo) return null;
+  const repo = canonicalEnrolledExistingRepo(proposal.repo);
+  if (!repo) return null;
 
   const title = bounded(proposal.title, MAX_TITLE) || proposal.id;
   const reason = repairReason(proposal);
@@ -316,8 +344,8 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
   const repairKind = proposal.isPartial === true ? 'partial' : 'verify';
 
   return {
-    id: repairId(proposal.repo, proposal.id),
-    repo: proposal.repo,
+    id: repairId(repo, proposal.id),
+    repo,
     source: 'self',
     title: `Repair proposal ${proposal.id}: ${title}`,
     detail:
@@ -329,7 +357,14 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
     value,
     effort,
     score: value / effort,
-    tags: ['self-heal', 'proposal-repair', repairKind, 'verify', 'high-priority'],
+    tags: [
+      'self-heal',
+      'proposal-repair',
+      repairKind,
+      'verify',
+      'high-priority',
+      ...(proposal.status === 'rejected' ? ['rejected-capture-recovery'] : []),
+    ],
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
   };
 }
@@ -366,7 +401,7 @@ export function captureGateRepairWorkItem(
     source: 'self',
     title: `Repair dispatch capture failure for ${bounded(basename(repo), 80) || 'repo'} item ${itemId}`,
     detail:
-      `Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n` +
+      `Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n` +
       `Original work item: ${itemId}\n` +
       (title ? `Original title: ${title}\n` : '') +
       (runId ? `Run: ${runId}\n` : '') +
@@ -381,6 +416,15 @@ export function captureGateRepairWorkItem(
     ts: new Date(eventMs).toISOString(),
     ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
     ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
+    ...(typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
+      ? {
+          repairParentItemId: itemId,
+          repairParentSource: event.source,
+          repairParentBackend: event.backend,
+          repairParentTier: event.tier,
+          repairParentObjectiveHash: event.objectiveHash,
+        }
+      : {}),
   };
   return isActionableSelfHealItem(item, {
     nowMs,
@@ -515,7 +559,15 @@ export function queueProposalRepairWorkForPendingProposals(
   const handoffs = proposals === undefined && !opts?.dispatchEvents ? readRepairHandoffs() : undefined;
   let pending: Proposal[];
   try {
-    pending = proposals ?? listProposals({ status: 'pending' });
+    const available = proposals ?? listProposals();
+    const rejectedCapture = available
+      .filter((proposal) => isRecentRejectedCaptureArtifact(proposal, now))
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, REJECTED_CAPTURE_MAX_SCANNED);
+    pending = [
+      ...available.filter((proposal) => proposal.status === 'pending'),
+      ...rejectedCapture,
+    ];
   } catch {
     return {
       scanned: 0,
@@ -631,7 +683,14 @@ export function queueProposalRepairWorkForPendingProposals(
     return 'terminal';
   };
   const prune = terminalLifecycleEnabled
-    ? pruneQueuedSelfHealItems((item) => {
+      ? pruneQueuedSelfHealItems((item) => {
+        if (
+          item.tags.includes('rejected-capture-recovery') &&
+          !isActionableSelfHealItem(item, {
+            nowMs: now.getTime(),
+            maxAgeMs: REJECTED_CAPTURE_REPAIR_MAX_AGE_MS,
+          })
+        ) return true;
         if (isTrustedDiagnosticResliceItem(item) && generatedRepairGenerationId(item) === null) return true;
         return observeLifecycle(item) === 'terminal';
       })

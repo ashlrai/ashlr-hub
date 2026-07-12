@@ -198,6 +198,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add cadence, restart, overlap, timeout, cancellation, malformed-state, privacy, platform, failure, replay, and authority-isolation coverage.
 - [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary the first production checkpoint.
 
+## Current Overnight Cycle - Actionable Dispatch Yield Recovery
+- [x] Rehydrate the released capture baseline, production health, git state, Entire state, and durable notes.
+- [x] Audit partial-capture causes, issue-route yield, queued repair coverage, and repair scheduling fairness in parallel.
+- [x] Select one metadata-grounded intervention that improves mergeable proposal yield without weakening completeness or verification gates.
+- [x] Implement bounded causal telemetry and/or recovery behavior with authority isolation and privacy preserved.
+- [x] Add no-proposal, partial-capture, retry, fairness, and learning regressions.
+- [x] Run focused/exhaustive verification and independent review; update notes, commit, push, reload, and canary improved production truth.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

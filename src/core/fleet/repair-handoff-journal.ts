@@ -205,7 +205,7 @@ function eligibleKind(event: DispatchProductionEvent): RepairHandoffKind | null 
     if (event.learningLabel && event.learningLabel.learningKind !== 'diagnostic-no-proposal') return null;
     return 'no-diff-reslice';
   }
-  if (event.source !== 'self') return null;
+  if (event.source !== 'self' && event.source !== 'issue' && event.source !== 'goal') return null;
   if (event.outcome === 'proposal-capture-error') return 'capture-repair';
   if (event.outcome !== 'gate-blocked') return null;
   const actions = event.runEventSummary?.actionCounts;

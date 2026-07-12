@@ -60,7 +60,11 @@ import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
 import { isTrustedCaptureRepairItem, isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
-import { generatedRepairBackendAllowed, generatedRepairRetryPolicy } from './generated-repair-lifecycle.js';
+import {
+  generatedRepairBackendAllowed,
+  generatedRepairGenerationId,
+  generatedRepairRetryPolicy,
+} from './generated-repair-lifecycle.js';
 import { withinLimit } from './quota.js';
 import { isSubscriptionEngine, subscriptionAllows } from './subscription-usage.js';
 
@@ -103,7 +107,9 @@ export function generatedRepairExecutionBackendAllowed(
   backend: EngineId,
   cfg: AshlrConfig,
 ): boolean {
-  if (!isTrustedDiagnosticResliceItem(item)) return true;
+  const parentTierBoundCapture = isTrustedCaptureRepairItem(item) &&
+    (item.repairParentSource === 'issue' || item.repairParentSource === 'goal');
+  if (!isTrustedDiagnosticResliceItem(item) && !parentTierBoundCapture) return true;
   if (!generatedRepairBackendAllowed(item, backend) || backend === 'builtin') return false;
   const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
   return allowed.has(backend) &&
@@ -293,6 +299,49 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const mids = availableMid(cfg);
   const ctx = buildRoutingContext(frontiers, mids);
   const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
+  const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
+  const isParentTierBoundCapture = isCaptureRepair &&
+    (item.repairParentSource === 'issue' || item.repairParentSource === 'goal');
+
+  if (
+    isCaptureRepair &&
+    generatedRepairGenerationId(item) === null
+  ) {
+    return {
+      ...decide('builtin', 'capture-repair-provenance-unavailable: durable handoff does not match queue metadata', cfg),
+      model: null,
+    };
+  }
+
+  if (isParentTierBoundCapture && !item.repairParentTier) {
+    return {
+      ...decide('builtin', 'capture-repair-provenance-missing: durable parent tier unavailable', cfg),
+      model: null,
+    };
+  }
+
+  if (isParentTierBoundCapture && item.repairParentTier) {
+    const sameTier = REPAIR_PREFERENCE.filter(
+      (backend) => generatedRepairCandidateAllowed(item, backend, cfg),
+    );
+    const preferred = item.repairParentBackend && sameTier.includes(item.repairParentBackend)
+      ? item.repairParentBackend
+      : pickFrom(sameTier, item);
+    if (preferred) {
+      return {
+        ...decide(
+          preferred,
+          `capture-repair-tier-preserved: generated ${item.repairParentSource} repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
+          cfg,
+        ),
+        model: null,
+      };
+    }
+    return {
+      ...decide('builtin', `capture-repair-tier-unavailable: no installed ${item.repairParentTier} backend`, cfg),
+      model: null,
+    };
+  }
 
   if (isNoDiffRepair && !item.repairParentTier) {
     return {
@@ -346,7 +395,6 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   // frontier AI to handle end-to-end. Under cost/absent policy the extra condition
   // is NOT evaluated (byte-identical parity with pre-M182 for those policies).
   const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
-  const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
   const isFrontierCandidate =
     isFrontierItem(item) ||
     isNoDiffRepair ||

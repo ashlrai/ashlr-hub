@@ -53,6 +53,7 @@ import {
 } from '../src/core/inbox/store.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import { hashDiff, signProvenance, verifyProvenance } from '../src/core/foundry/provenance.js';
+import { canonicalizeProposalDiff } from '../src/core/util/scrub.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,41 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(loaded!.diff).toContain('[REDACTED]');
     expect(loaded!.diffHash).toBeUndefined();
     expect(listProposals().find((item) => item.id === p.id)!.diff).toContain('[REDACTED]');
+  });
+
+  it('preserves trust metadata signed over canonicalized proposal bytes', () => {
+    const rawDiff =
+      'diff --git a/config.ts b/config.ts\n' +
+      '--- a/config.ts\n+++ b/config.ts\n' +
+      '+const password = "github_pat_1234567890abcdefghijklmnop";\n';
+    const canonical = canonicalizeProposalDiff(rawDiff);
+    const diffHash = hashDiff(canonical);
+    const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
+
+    expect(canonicalizeProposalDiff(canonical)).toBe(canonical);
+    const proposal = createProposal(makeInput({
+      diff: canonical,
+      diffHash,
+      provenanceSig,
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    }));
+
+    expect(proposal.diff).toBe(canonical);
+    expect(proposal.diffHash).toBe(diffHash);
+    expect(proposal.provenanceSig).toBe(provenanceSig);
+    expect(verifyProvenance(proposal).ok).toBe(true);
+  });
+
+  it.each([
+    `sk_${'live'}_1234567890abcdefghijklmnop`,
+    'ASIA1234567890ABCDEF',
+    '0123456789abcdef0123456789abcdef',
+  ])('canonical proposal bytes redact legacy secret class %s', (secret) => {
+    const canonical = canonicalizeProposalDiff(`diff --git a/a b/a\n+const value = "${secret}";\n`);
+    expect(canonical).not.toContain(secret);
+    expect(canonical).toContain('[REDACTED]');
+    expect(canonicalizeProposalDiff(canonical)).toBe(canonical);
   });
 
   it('keeps diffHash and provenanceSig when only non-diff text is redacted', () => {

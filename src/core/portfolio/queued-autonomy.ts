@@ -20,7 +20,10 @@ import {
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { EngineId, EngineTier, RepairTreatment, WorkItem, WorkSource } from '../types.js';
-import { isActionableSelfHealItem } from '../fleet/self-heal-trust.js';
+import {
+  REJECTED_CAPTURE_REPAIR_MAX_AGE_MS,
+  isActionableSelfHealItem,
+} from '../fleet/self-heal-trust.js';
 import { generatedRepairGenerationId } from '../fleet/generated-repair-lifecycle.js';
 import { repairTreatmentForUnitId, repairTreatmentUnitId } from '../fleet/generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
@@ -267,9 +270,12 @@ function isQueuedAutonomyItem(item: WorkItem): boolean {
   if (!item.tags.includes('self-heal')) return false;
   const generationId = generatedRepairGenerationId(item);
   if ((item.repairHandoffId !== undefined || item.repairGenerationId !== undefined) && !generationId) return false;
-  return isActionableSelfHealItem(item, generationId
-    ? { maxAgeMs: Number.MAX_SAFE_INTEGER }
-    : undefined);
+  const maxAgeMs = item.tags.includes('rejected-capture-recovery')
+    ? REJECTED_CAPTURE_REPAIR_MAX_AGE_MS
+    : generationId
+      ? Number.MAX_SAFE_INTEGER
+      : undefined;
+  return isActionableSelfHealItem(item, maxAgeMs === undefined ? undefined : { maxAgeMs });
 }
 
 /** Return all queued self-heal/invent items without mutating any state. */
@@ -321,22 +327,10 @@ export function loadQueuedAutonomyItemsDetailed(): QueuedAutonomyReadResult {
   const filesUnavailable = reads.filter((read) => read.state === 'unavailable').length;
   const rowsScanned = reads.reduce((total, read) => total + read.rowsScanned, 0);
   const limitExceeded = reads.some((read) => read.limitExceeded);
-  if (filesUnavailable > 0) {
-    return {
-      items: [],
-      sourceState: 'unavailable',
-      filesPresent,
-      filesMissing,
-      filesUnavailable,
-      rowsScanned,
-      itemsLoaded: 0,
-      limitExceeded,
-    };
-  }
-
   const seen = new Set<string>();
   const items: WorkItem[] = [];
   for (const read of reads) {
+    if (read.state !== 'complete') continue;
     for (const item of read.items) {
       if (!isQueuedAutonomyItem(item)) continue;
       const key = `${resolve(item.repo)}\0${item.id}`;
@@ -347,13 +341,13 @@ export function loadQueuedAutonomyItemsDetailed(): QueuedAutonomyReadResult {
   }
   return {
     items,
-    sourceState: 'complete',
+    sourceState: filesUnavailable > 0 ? 'unavailable' : 'complete',
     filesPresent,
     filesMissing,
-    filesUnavailable: 0,
+    filesUnavailable,
     rowsScanned,
     itemsLoaded: items.length,
-    limitExceeded: false,
+    limitExceeded,
   };
 }
 

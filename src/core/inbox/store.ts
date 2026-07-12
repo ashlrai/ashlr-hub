@@ -47,7 +47,7 @@ import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
-import { scrubSecrets } from '../util/scrub.js';
+import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
@@ -165,7 +165,7 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
   scrubTopLevel('decisionReason');
 
   if (typeof next.diff === 'string') {
-    const scrubbedDiff = scrubProposalText(next.diff);
+    const scrubbedDiff = canonicalizeProposalDiff(next.diff);
     if (scrubbedDiff !== next.diff) {
       next.diff = scrubbedDiff;
       delete next.diffHash;

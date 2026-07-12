@@ -858,7 +858,7 @@ describe('M252 Gateway — resource-aware demote', () => {
       score: 1,
       title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
       detail:
-        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Dispatch capture repair: an autonomous dispatch produced repairable work but no proposal.\n' +
         'Original work item: repo:self-heal:stalled\n' +
         'Dispatch outcome: gate-blocked\n' +
         'Diff metadata: files=1, lines=12\n' +
