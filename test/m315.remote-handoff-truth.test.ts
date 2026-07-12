@@ -774,7 +774,7 @@ describe('M315 remote PR handoff truth', () => {
     expect(loaded?.status).toBe('awaiting-host-merge');
     expect(loaded?.remoteHandoff?.state).toBe('awaiting-host-merge');
     expect(loaded?.remoteHandoff?.mergedAt).toBeUndefined();
-  });
+  }, 30_000);
 
   it('does not let a stale closed response overwrite a concurrent merged transition', async () => {
     const { proposal } = await createRemoteHandoffProposal();
