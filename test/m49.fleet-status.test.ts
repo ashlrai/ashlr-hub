@@ -85,6 +85,10 @@ function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): Ash
   return withFoundry({
     ...foundry,
     allowedBackends: ['local-coder'],
+    resourceOverrides: {
+      ...foundry.resourceOverrides,
+      'local-coder': { availability: 'open', reason: 'm49 routable mid fixture' },
+    },
     engines: {
       ...foundry.engines,
       'local-coder': {
