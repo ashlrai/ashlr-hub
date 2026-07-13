@@ -246,7 +246,19 @@ const GENOME_INJECT_CHAR_CAP = 1500;
  * Only creates entries under ~/.ashlr/runs — never repos/Desktop.
  */
 function ensureRunsDir(): void {
-  fs.mkdirSync(runsDir(), { recursive: true, mode: 0o700 });
+  const root = path.join(os.homedir(), '.ashlr');
+  if (!fs.existsSync(root)) fs.mkdirSync(root, { mode: 0o700 });
+  if (!fs.lstatSync(root).isDirectory()) {
+    throw new Error(`Refusing non-directory Ashlr state root: ${root}`);
+  }
+  fs.chmodSync(root, 0o700);
+
+  const dir = runsDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { mode: 0o700 });
+  if (!fs.lstatSync(dir).isDirectory()) {
+    throw new Error(`Refusing non-directory run store: ${dir}`);
+  }
+  fs.chmodSync(dir, 0o700);
 }
 
 /**
@@ -278,12 +290,58 @@ function parsePersistedRun(raw: string, expectedId: string): RunState | null {
   return rehydrateRunStateFromPersistence(parsed as unknown as PersistedRunState);
 }
 
+function hasExactRunFilename(file: string): boolean {
+  return fs.readdirSync(path.dirname(file)).includes(path.basename(file));
+}
+
+function secureExactRunFile(file: string): boolean {
+  const dir = path.dirname(file);
+  const root = path.dirname(dir);
+  if (
+    !fs.existsSync(root) ||
+    !fs.lstatSync(root).isDirectory() ||
+    !fs.existsSync(dir) ||
+    !fs.lstatSync(dir).isDirectory()
+  ) return false;
+  fs.chmodSync(root, 0o700);
+  fs.chmodSync(dir, 0o700);
+  if (!hasExactRunFilename(file) || !fs.lstatSync(file).isFile()) return false;
+  fs.chmodSync(file, 0o600);
+  return true;
+}
+
+function assertCaseFoldedRunOwnership(file: string, id: string): void {
+  const expected = path.basename(file);
+  const folded = expected.toLowerCase();
+  const collision = fs.readdirSync(path.dirname(file)).find(
+    (entry) => entry !== expected && entry.toLowerCase() === folded,
+  );
+  if (collision) {
+    throw new Error(`Run id collides with existing persisted id: ${collision}`);
+  }
+
+  const claim = path.join(
+    path.dirname(file),
+    `.id-claim-${createHash('sha256').update(id.toLowerCase()).digest('hex')}`,
+  );
+  try {
+    fs.writeFileSync(claim, id, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (!fs.lstatSync(claim).isFile() || fs.readFileSync(claim, 'utf8') !== id) {
+      throw new Error(`Run id collides with an existing case-folded ownership claim`);
+    }
+    fs.chmodSync(claim, 0o600);
+  }
+}
+
 /**
  * Load a persisted RunState by id. Returns null if absent, unreadable, or invalid JSON.
  */
 export function loadRun(id: string): RunState | null {
   try {
     const file = runFilePath(id);
+    if (!secureExactRunFile(file)) return null;
     const raw = fs.readFileSync(file, 'utf8');
     return parsePersistedRun(raw, id);
   } catch {
@@ -302,7 +360,10 @@ export function listRuns(): RunState[] {
     for (const file of files) {
       try {
         const expectedId = file.slice(0, -'.json'.length);
-        const raw = fs.readFileSync(runFilePath(expectedId), 'utf8');
+        const persistedFile = runFilePath(expectedId);
+        if (!fs.lstatSync(persistedFile).isFile()) continue;
+        fs.chmodSync(persistedFile, 0o600);
+        const raw = fs.readFileSync(persistedFile, 'utf8');
         const state = parsePersistedRun(raw, expectedId);
         if (state) runs.push(state);
       } catch {
@@ -700,6 +761,7 @@ function newCancelledRunState(
 export function saveRun(s: RunState): void {
   ensureRunsDir();
   const dest = runFilePath(s.id);
+  assertCaseFoldedRunOwnership(dest, s.id);
   const legacyTmp = `${dest}.tmp`;
   try {
     if (fs.lstatSync(legacyTmp).isDirectory()) {

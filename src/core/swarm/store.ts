@@ -14,11 +14,13 @@
  * untouched and the temporary file is removed.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -73,16 +75,20 @@ export function swarmsDir(): string {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Ensure the swarms directory exists, silently creating it if needed. */
+/** Ensure the swarms directory exists with owner-only access. */
 function ensureDir(dir: string): void {
-  try {
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-  } catch {
-    // Best-effort; if we can't create the dir the subsequent write will fail
-    // gracefully in saveSwarm's try/catch.
+  const root = join(homedir(), '.ashlr');
+  if (!existsSync(root)) mkdirSync(root, { mode: 0o700 });
+  if (!lstatSync(root).isDirectory()) {
+    throw new Error(`Refusing non-directory Ashlr state root: ${root}`);
   }
+  chmodSync(root, 0o700);
+
+  if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
+  if (!lstatSync(dir).isDirectory()) {
+    throw new Error(`Refusing non-directory swarm store: ${dir}`);
+  }
+  chmodSync(dir, 0o700);
 }
 
 /**
@@ -98,6 +104,55 @@ function swarmPath(dir: string, id: string): string {
     throw new Error('Invalid swarm id');
   }
   return join(dir, `${id}.json`);
+}
+
+function hasExactSwarmFilename(dir: string, file: string): boolean {
+  return readdirSync(dir).includes(file);
+}
+
+function secureExistingSwarmDir(dir: string): boolean {
+  const root = join(homedir(), '.ashlr');
+  if (
+    !existsSync(root) ||
+    !lstatSync(root).isDirectory() ||
+    !existsSync(dir) ||
+    !lstatSync(dir).isDirectory()
+  ) return false;
+  chmodSync(root, 0o700);
+  chmodSync(dir, 0o700);
+  return true;
+}
+
+function secureExactSwarmFile(dir: string, file: string): boolean {
+  if (!secureExistingSwarmDir(dir) || !hasExactSwarmFilename(dir, file)) return false;
+  const persistedFile = join(dir, file);
+  if (!lstatSync(persistedFile).isFile()) return false;
+  chmodSync(persistedFile, 0o600);
+  return true;
+}
+
+function assertCaseFoldedSwarmOwnership(dir: string, file: string, id: string): void {
+  const folded = file.toLowerCase();
+  const collision = readdirSync(dir).find(
+    (entry) => entry !== file && entry.toLowerCase() === folded,
+  );
+  if (collision) {
+    throw new Error(`Swarm id collides with existing persisted id: ${collision}`);
+  }
+
+  const claim = join(
+    dir,
+    `.id-claim-${createHash('sha256').update(id.toLowerCase()).digest('hex')}`,
+  );
+  try {
+    writeFileSync(claim, id, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (!lstatSync(claim).isFile() || readFileSync(claim, 'utf8') !== id) {
+      throw new Error('Swarm id collides with an existing case-folded ownership claim');
+    }
+    chmodSync(claim, 0o600);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -249,10 +304,11 @@ export function saveSwarm(s: SwarmRun): void {
     ensureDir(dir);
 
     const target = swarmPath(dir, s.id);
+    assertCaseFoldedSwarmOwnership(dir, `${s.id}.json`, s.id);
     tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     const json = JSON.stringify(prepareForPersistence(s), null, 2) + '\n';
 
-    writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx' });
+    writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(tmp, target);
   } catch {
     // Never propagate persistence failures to the caller.
@@ -282,7 +338,7 @@ export function loadSwarm(id: string): SwarmRun | null {
     const dir = swarmsDir();
     const path = swarmPath(dir, id);
 
-    if (!existsSync(path)) return null;
+    if (!secureExactSwarmFile(dir, `${id}.json`)) return null;
 
     const raw = readFileSync(path, 'utf8');
     const parsed: unknown = JSON.parse(raw);
@@ -313,7 +369,7 @@ export function listSwarms(): SwarmRun[] {
   try {
     const dir = swarmsDir();
 
-    if (!existsSync(dir)) return [];
+    if (!secureExistingSwarmDir(dir)) return [];
 
     let entries: string[];
     try {
@@ -331,7 +387,10 @@ export function listSwarms(): SwarmRun[] {
 
     for (const file of jsonFiles) {
       try {
-        const raw = readFileSync(join(dir, file), 'utf8');
+        const persistedFile = join(dir, file);
+        if (!lstatSync(persistedFile).isFile()) continue;
+        chmodSync(persistedFile, 0o600);
+        const raw = readFileSync(persistedFile, 'utf8');
         const parsed: unknown = JSON.parse(raw);
         const expectedId = file.slice(0, -'.json'.length);
 

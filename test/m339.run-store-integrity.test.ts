@@ -74,6 +74,32 @@ describe('run-store read integrity', () => {
     expect(listRuns()).toEqual([]);
   });
 
+  it('rejects case-folded aliases and prevents case-variant id collisions', () => {
+    const original = makeState('CaseSensitiveId');
+    writeNamed('CaseSensitiveId.json', original);
+
+    expect(loadRun('casesensitiveid')).toBeNull();
+    expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
+    saveRun(original);
+    fs.rmSync(runPath(original.id));
+    expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
+    saveRun(original);
+    expect(loadRun(original.id)?.id).toBe(original.id);
+    expect(listRuns().map((run) => run.id)).toEqual([original.id]);
+  });
+
+  it('migrates historical regular files and directories to private modes on read', () => {
+    if (process.platform === 'win32') return;
+    const state = makeState('historical-mode');
+    writeNamed(`${state.id}.json`, state);
+    fs.chmodSync(runsDir(), 0o755);
+    fs.chmodSync(runPath(state.id), 0o644);
+
+    expect(loadRun(state.id)?.id).toBe(state.id);
+    expect(fs.statSync(runsDir()).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(runPath(state.id)).mode & 0o777).toBe(0o600);
+  });
+
   it('preserves cancellation markers through validated load and list paths', () => {
     const state = makeState('cancelled-roundtrip', {
       status: 'aborted',
@@ -103,6 +129,20 @@ describe('run-store read integrity', () => {
 });
 
 describe('run-store write integrity', () => {
+  it('refuses a linked store directory instead of escaping the state root', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-outside-'));
+    fs.mkdirSync(path.dirname(runsDir()), { recursive: true });
+    fs.symlinkSync(outside, runsDir(), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      expect(() => saveRun(makeState('escape'))).toThrow(/run store/);
+      expect(loadRun('escape')).toBeNull();
+      expect(listRuns()).toEqual([]);
+      expect(fs.existsSync(path.join(outside, 'escape.json'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('does not share the legacy predictable sidecar and installs a private file', () => {
     const state = makeState('unique-temp');
     const legacyTmp = `${runPath(state.id)}.tmp`;
@@ -117,6 +157,7 @@ describe('run-store write integrity', () => {
       fs.readdirSync(runsDir()).filter((name) => name.startsWith(`.${state.id}.json.`)),
     ).toEqual([]);
     if (process.platform !== 'win32') {
+      expect(fs.statSync(runsDir()).mode & 0o777).toBe(0o700);
       expect(fs.statSync(runPath(state.id)).mode & 0o777).toBe(0o600);
     }
   });

@@ -111,9 +111,51 @@ describe('swarm store record integrity', () => {
     for (const [id] of invalidRecords) expect(loadSwarm(id)).toBeNull();
     expect(listSwarms().map((run) => run.id)).toEqual(['valid-shape']);
   });
+
+  it('rejects case-folded aliases and prevents case-variant id collisions', () => {
+    const original = makeRun('CaseSensitiveId');
+    writeRecord(original.id, original);
+
+    expect(loadSwarm('casesensitiveid')).toBeNull();
+    saveSwarm(makeRun('casesensitiveid'));
+    saveSwarm(original);
+    fs.rmSync(path.join(swarmsDir(), `${original.id}.json`));
+    saveSwarm(makeRun('casesensitiveid'));
+    expect(loadSwarm('casesensitiveid')).toBeNull();
+    saveSwarm(original);
+    expect(loadSwarm(original.id)).toEqual(original);
+    expect(listSwarms().map((run) => run.id)).toEqual([original.id]);
+  });
+
+  it('migrates historical regular files and directories to private modes on read', () => {
+    if (process.platform === 'win32') return;
+    const original = makeRun('historical-mode');
+    writeRecord(original.id, original);
+    const persistedFile = path.join(swarmsDir(), `${original.id}.json`);
+    fs.chmodSync(swarmsDir(), 0o755);
+    fs.chmodSync(persistedFile, 0o644);
+
+    expect(loadSwarm(original.id)).toEqual(original);
+    expect(fs.statSync(swarmsDir()).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(persistedFile).mode & 0o777).toBe(0o600);
+  });
 });
 
 describe('swarm store atomic replacement', () => {
+  it('refuses a linked store directory instead of escaping the state root', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-outside-'));
+    fs.mkdirSync(path.dirname(swarmsDir()), { recursive: true });
+    fs.symlinkSync(outside, swarmsDir(), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      saveSwarm(makeRun('escape'));
+      expect(loadSwarm('escape')).toBeNull();
+      expect(listSwarms()).toEqual([]);
+      expect(fs.existsSync(path.join(outside, 'escape.json'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('does not share or overwrite the legacy predictable sidecar', () => {
     const run = makeRun('unique-temp');
     const target = path.join(swarmsDir(), `${run.id}.json`);
@@ -127,6 +169,10 @@ describe('swarm store atomic replacement', () => {
     expect(fs.readFileSync(legacyTmp, 'utf8')).toBe('leave-me-alone');
     expect(renameState.sources).toHaveLength(1);
     expect(renameState.sources[0]).not.toBe(legacyTmp);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(swarmsDir()).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('preserves the last valid record and cleans unique sibling temps on failure', () => {
