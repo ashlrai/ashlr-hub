@@ -103,6 +103,27 @@ function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): Ash
   });
 }
 
+function withRoutableFrontierAndMid(): AshlrConfig {
+  const cfg = withRoutableMid();
+  cfg.foundry!.allowedBackends = ['nim', 'local-coder'];
+  cfg.foundry!.resourceOverrides = {
+    ...cfg.foundry!.resourceOverrides,
+    nim: { availability: 'open', reason: 'm49 routable frontier fixture' },
+  };
+  cfg.foundry!.engines = {
+    ...cfg.foundry!.engines,
+    nim: {
+      id: 'nim',
+      kind: 'cli-agent',
+      tier: 'frontier',
+      bin: 'node',
+      bins: ['node'],
+      argv: ['$GOAL'],
+    },
+  };
+  return cfg;
+}
+
 async function withTemporaryEnv<T>(entries: Record<string, string>, fn: () => Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(entries)) {
@@ -1505,6 +1526,29 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const actionIds = status.nextActions?.map((action) => action.id) ?? [];
     expect(actionIds.indexOf('build-backlog')).toBeGreaterThanOrEqual(0);
     expect(actionIds.indexOf('build-backlog')).toBeLessThan(actionIds.indexOf('restore-repair-routes'));
+  });
+
+  it('projects a fresh trusted ordinary repair through deterministic frontier capacity', async () => {
+    const repo = join(tmpHome, 'repo');
+    const repair = makeTrustedProposalRepairItem(repo);
+    writeBacklogSnapshot(tmpHome, repo, [repair]);
+    writeRunningDaemon(tmpHome);
+
+    const status = await buildFleetStatus(withRoutableFrontierAndMid());
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 1,
+      generatedRepairRoutes: {
+        trustedItems: 1,
+        feasibleItems: 1,
+        unavailableItems: 0,
+        requiresAlternativeItems: 0,
+        byReason: [{ reason: 'feasible', count: 1 }],
+      },
+    });
+    expect(status.queue.repairRouteBlockedItems).toBeUndefined();
+    expect(status.queue.next?.map((item) => item.id)).toEqual([repair.id]);
   });
 
   it('withholds trusted repairs when proposal repair dispatch is disabled', async () => {

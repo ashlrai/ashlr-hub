@@ -63,6 +63,7 @@ import {
   isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from './self-heal-trust.js';
 import {
   generatedRepairBackendAllowed,
@@ -221,6 +222,7 @@ export function inspectGeneratedRepairRouteFeasibility(
     const frontierCandidate = isFrontierItem(item) ||
       isGeneratedNoDiffProposalRepair(item) ||
       isGeneratedCaptureProposalRepair(item) ||
+      isTrustedProposalRepairItem(item) ||
       (qualityPolicy && isSubstantiveItem(item));
     routeCandidates = frontierCandidate && frontiers.length > 0
       ? frontiers
@@ -405,6 +407,7 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const ctx = buildRoutingContext(frontiers, mids);
   const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
   const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
+  const isProposalRepair = isTrustedProposalRepairItem(item);
   const isParentTierBoundCapture = isCaptureRepair &&
     (item.repairParentSource === 'issue' || item.repairParentSource === 'goal');
 
@@ -547,6 +550,7 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     isFrontierItem(item) ||
     isNoDiffRepair ||
     isCaptureRepair ||
+    isProposalRepair ||
     (qualityPolicy && isSubstantiveItem(item));
   if (isFrontierCandidate && frontiers.length > 0) {
     const chosen = pickFrom(frontiers, item)!;
@@ -561,6 +565,9 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     }
     if (isCaptureRepair) {
       baseReason = `frontier: generated capture proposal repair (source=${item.source}) → ${chosen}`;
+    }
+    if (isProposalRepair) {
+      baseReason = `frontier: generated proposal repair (source=${item.source}) → ${chosen}`;
     }
 
     // M128: enrich with model selection

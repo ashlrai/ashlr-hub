@@ -218,6 +218,76 @@ describe('generated repair lifecycle store', () => {
     }
   });
 
+  it('promotes only fresh trusted ordinary repairs while preserving retry tier authority', () => {
+    const cfg = {
+      version: 1,
+      roots: ['/tmp'],
+      editor: 'cursor',
+      staleDays: 30,
+      categories: {},
+      tidyRules: [],
+      keepers: [],
+      models: { lmstudio: '', ollama: '', providerChain: [] },
+      telemetry: {},
+      tools: {},
+      foundry: {
+        allowedBackends: ['nim', 'local-coder'],
+        engines: {
+          nim: { id: 'nim', kind: 'cli-agent', tier: 'frontier', bin: 'node', argv: ['$GOAL'] },
+          'local-coder': { id: 'local-coder', kind: 'cli-agent', tier: 'mid', bin: 'node', argv: ['$GOAL'] },
+        },
+      },
+    } as import('../src/core/types.js').AshlrConfig;
+    const item = repairItem({ id: 'repo:proposal-repair:111111111111' });
+    const freshPolicy = readGeneratedRepairQueueSnapshot().retryPolicy(item);
+
+    expect(routeBackend(item, cfg)).toMatchObject({
+      backend: 'nim',
+      tier: 'frontier',
+      reason: expect.stringMatching(/^frontier: generated proposal repair/),
+    });
+    expect(inspectGeneratedRepairRouteFeasibility(item, cfg, freshPolicy)).toMatchObject({
+      feasible: true,
+      backend: 'nim',
+      requiredTier: null,
+      requiresAlternative: false,
+    });
+
+    const spoofed = repairItem({ id: 'repo:manual-repair' });
+    expect(routeBackend(spoofed, cfg)).toMatchObject({
+      backend: 'local-coder',
+      tier: 'mid',
+      reason: expect.stringMatching(/^local-mid bulk:/),
+    });
+    expect(inspectGeneratedRepairRouteFeasibility(spoofed, cfg, freshPolicy)).toMatchObject({
+      feasible: true,
+      backend: 'local-coder',
+    });
+
+    const midOnlyCfg = {
+      ...cfg,
+      foundry: { ...cfg.foundry, allowedBackends: ['local-coder'] },
+    } as import('../src/core/types.js').AshlrConfig;
+    expect(routeBackend(item, midOnlyCfg)).toMatchObject({ backend: 'local-coder', tier: 'mid' });
+
+    recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff', attemptId: ATTEMPT_ONE, backend: 'local-coder', tier: 'mid',
+    });
+    const retryPolicy = readGeneratedRepairQueueSnapshot().retryPolicy(item);
+    const retryCfg = {
+      ...cfg,
+      foundry: { ...cfg.foundry, allowedBackends: ['nim', 'local-coder', 'kimi'] },
+    } as import('../src/core/types.js').AshlrConfig;
+    expect(retryPolicy).toMatchObject({ requireAlternative: true, requiredTier: 'mid' });
+    expect(routeBackend(item, retryCfg)).toMatchObject({ backend: 'kimi', tier: 'mid' });
+    expect(inspectGeneratedRepairRouteFeasibility(item, retryCfg, retryPolicy)).toMatchObject({
+      feasible: true,
+      backend: 'kimi',
+      requiredTier: 'mid',
+      requiresAlternative: true,
+    });
+  });
+
   it('inspects retry route feasibility from one read-only lifecycle snapshot', () => {
     const item = repairItem();
     const cfg = {
