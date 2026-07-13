@@ -2064,7 +2064,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose cancellation counts in dispatch summaries, trajectories, attempt coverage, CLI, Mission Control, and Fleet Dashboard.
 - [x] Pass focused tests, typecheck, lint, build, dependency audit, and the definitive 492-file suite.
 - [x] Resolve independent adversarial review, including Best-of-N precedence, diagnostic bucket ordering, and cooperating-daemon mutation fencing.
-- [ ] Commit/push, observe CI, and stage exact source.
+- [x] Commit/push, observe CI, and stage exact source.
 - [ ] Activate only at a natural stable boundary with no daemon tick, descendants, or spend guard.
 
 ## Next P1 - Bounded Race-Safe Persistence Reads
