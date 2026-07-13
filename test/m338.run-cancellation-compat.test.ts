@@ -8,6 +8,7 @@ import { listRuns, loadRun, saveRun } from '../src/core/run/orchestrator.js';
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
 const CANCELLED_TASK_ERROR = 'Task cancelled.';
 const CANCELLED_MARKER = '_ashlrCancelled';
+const CANCELLED_MARKER_VERSION = 1;
 
 let previousHome: string | undefined;
 let tmpHome: string;
@@ -44,6 +45,49 @@ function writeRaw(state: unknown): void {
   fs.writeFileSync(runPath(id), JSON.stringify(state, null, 2), 'utf8');
 }
 
+function readRaw(id: string): Record<string, unknown> {
+  return JSON.parse(fs.readFileSync(runPath(id), 'utf8')) as Record<string, unknown>;
+}
+
+type LegacyOutcome = 'success' | 'failure' | 'budget-abort';
+
+function simulateLegacyResume(id: string, outcome: LegacyOutcome): Record<string, unknown> {
+  const raw = readRaw(id);
+  const tasks = raw['tasks'] as Array<Record<string, unknown>>;
+
+  raw['status'] = 'running';
+  raw['updatedAt'] = '2026-07-13T12:01:00.000Z';
+  for (const task of tasks) {
+    if (task['status'] === 'running' ||
+        (task['status'] === 'failed' && task['error'] === ABORT_TASK_ERROR)) {
+      task['status'] = 'pending';
+      delete task['error'];
+    }
+  }
+
+  const task = tasks[0]!;
+  raw['updatedAt'] = '2026-07-13T12:02:00.000Z';
+  if (outcome === 'success') {
+    raw['status'] = 'done';
+    raw['result'] = 'Legacy reader completed the retry.';
+    task['status'] = 'done';
+    task['result'] = 'Legacy task completed.';
+  } else if (outcome === 'failure') {
+    raw['status'] = 'failed';
+    raw['result'] = 'Legacy retry failed.';
+    task['status'] = 'failed';
+    task['error'] = 'Provider returned 500';
+  } else {
+    raw['status'] = 'aborted';
+    raw['result'] = 'Run budget exceeded.';
+    task['status'] = 'failed';
+    task['error'] = ABORT_TASK_ERROR;
+  }
+
+  writeRaw(raw);
+  return raw;
+}
+
 beforeEach(() => {
   previousHome = process.env.HOME;
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m338-'));
@@ -57,7 +101,7 @@ afterEach(() => {
 });
 
 describe('explicit run cancellation persistence compatibility', () => {
-  it('writes a parent-compatible abort while preserving caller and current-reader truth', () => {
+  it('round-trips current cancellation while preserving caller truth and old statuses', () => {
     const state = makeState('m338-mixed-round-trip', {
       result: 'Run cancelled.',
       terminationReason: 'cancelled',
@@ -97,12 +141,19 @@ describe('explicit run cancellation persistence compatibility', () => {
     const raw = JSON.parse(rawText) as Record<string, unknown>;
     const rawTasks = raw['tasks'] as Array<Record<string, unknown>>;
     expect(rawText).not.toContain('"terminationReason": "cancelled"');
-    expect(raw).toMatchObject({ status: 'aborted', [CANCELLED_MARKER]: true });
+    expect(raw).toMatchObject({
+      status: 'aborted',
+      [CANCELLED_MARKER]: {
+        version: CANCELLED_MARKER_VERSION,
+        epoch: state.updatedAt,
+        fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
     expect(raw['terminationReason']).toBeUndefined();
     expect(rawTasks[0]).toMatchObject({
       status: 'failed',
       error: ABORT_TASK_ERROR,
-      [CANCELLED_MARKER]: true,
+      [CANCELLED_MARKER]: raw[CANCELLED_MARKER],
     });
     expect(rawTasks[1]).toMatchObject({ status: 'failed', error: ABORT_TASK_ERROR });
     expect(rawTasks[1]).not.toHaveProperty(CANCELLED_MARKER);
@@ -122,90 +173,101 @@ describe('explicit run cancellation persistence compatibility', () => {
     ]);
   });
 
-  it('rehydrates a raw zero-task cancellation marker through load and list', () => {
-    const raw = {
-      ...makeState('m338-raw-zero-task', {
-        result: 'Run cancelled before execution.',
-      }),
-      [CANCELLED_MARKER]: true,
-    };
-    writeRaw(raw);
+  it('rehydrates a current zero-task cancellation through load and list', () => {
+    const state = makeState('m338-raw-zero-task', {
+      result: 'Run cancelled before execution.',
+      terminationReason: 'cancelled',
+    });
+    saveRun(state);
 
-    expect(loadRun(raw.id)).toMatchObject({
-      id: raw.id,
+    expect(loadRun(state.id)).toMatchObject({
+      id: state.id,
       status: 'aborted',
       terminationReason: 'cancelled',
       tasks: [],
     });
-    expect(listRuns().find((run) => run.id === raw.id)?.terminationReason).toBe('cancelled');
+    expect(listRuns().find((run) => run.id === state.id)?.terminationReason).toBe('cancelled');
   });
 
-  it('requires exact markers and sentinels and keeps the encoding stable after another save', () => {
-    const raw = {
-      ...makeState('m338-adversarial', {
-        terminationReason: 'error-exit',
-        tasks: [
-          {
-            id: 'exact',
-            goal: 'Exact task marker',
-            deps: [],
-            status: 'failed',
-            error: ABORT_TASK_ERROR,
-            [CANCELLED_MARKER]: true,
-          },
-          {
-            id: 'unmarked',
-            goal: 'Ordinary budget abort',
-            deps: [],
-            status: 'failed',
-            error: ABORT_TASK_ERROR,
-          },
-          {
-            id: 'wrong-error',
-            goal: 'Marker cannot erase a genuine failure',
-            deps: [],
-            status: 'failed',
-            error: 'Socket closed',
-            [CANCELLED_MARKER]: true,
-          },
-          {
-            id: 'wrong-status',
-            goal: 'Marker cannot rewrite completed work',
-            deps: [],
-            status: 'done',
-            result: ABORT_TASK_ERROR,
-            [CANCELLED_MARKER]: true,
-          },
-        ],
-      }),
-      [CANCELLED_MARKER]: true,
-    };
-    writeRaw(raw);
+  it.each([
+    ['success', 'done', undefined],
+    ['failure', 'failed', 'Provider returned 500'],
+    ['budget-abort', 'failed', ABORT_TASK_ERROR],
+  ] as const)(
+    'treats a legacy %s resume outcome as authoritative',
+    (outcome, taskStatus, taskError) => {
+      const state = makeState(`m338-legacy-${outcome}`, {
+        result: 'Run cancelled.',
+        terminationReason: 'cancelled',
+        tasks: [{
+          id: 'cancelled-task',
+          goal: 'Interrupted work',
+          deps: [],
+          status: 'failed',
+          error: CANCELLED_TASK_ERROR,
+        }],
+      });
+      saveRun(state);
+      simulateLegacyResume(state.id, outcome);
 
-    const loaded = loadRun(raw.id)!;
-    expect(loaded.terminationReason).toBe('error-exit');
-    expect(loaded.tasks.map((task) => task.error)).toEqual([
-      CANCELLED_TASK_ERROR,
-      ABORT_TASK_ERROR,
-      'Socket closed',
-      undefined,
-    ]);
+      const loaded = loadRun(state.id)!;
+      expect(loaded.terminationReason).toBeUndefined();
+      expect(loaded.tasks[0]).toMatchObject({ status: taskStatus });
+      expect(loaded.tasks[0]!.error).toBe(taskError);
+      expect(loaded).not.toHaveProperty(CANCELLED_MARKER);
+      expect(loaded.tasks[0]).not.toHaveProperty(CANCELLED_MARKER);
 
-    saveRun(loaded);
-    expect(loaded.terminationReason).toBe('error-exit');
-    expect(loaded.tasks[0]!.error).toBe(CANCELLED_TASK_ERROR);
+      saveRun(loaded);
+      const rewritten = readRaw(state.id);
+      const rewrittenTask = (rewritten['tasks'] as Array<Record<string, unknown>>)[0]!;
+      expect(rewritten).not.toHaveProperty(CANCELLED_MARKER);
+      expect(rewrittenTask).not.toHaveProperty(CANCELLED_MARKER);
+      expect(rewrittenTask['error']).toBe(taskError);
+    },
+  );
 
-    const rewritten = JSON.parse(fs.readFileSync(runPath(raw.id), 'utf8')) as Record<string, unknown>;
-    const rewrittenTasks = rewritten['tasks'] as Array<Record<string, unknown>>;
-    expect(rewritten['terminationReason']).toBe('error-exit');
-    expect(rewritten).not.toHaveProperty(CANCELLED_MARKER);
-    expect(rewrittenTasks[0]).toMatchObject({
-      error: ABORT_TASK_ERROR,
-      [CANCELLED_MARKER]: true,
+  it('rejects boolean and copied markers, even when the epoch is unchanged', () => {
+    const source = makeState('m338-marker-source', {
+      terminationReason: 'cancelled',
+      tasks: [{
+        id: 'cancelled-task',
+        goal: 'Interrupted work',
+        deps: [],
+        status: 'failed',
+        error: CANCELLED_TASK_ERROR,
+      }],
     });
-    expect(rewrittenTasks[1]).not.toHaveProperty(CANCELLED_MARKER);
-    expect(rewrittenTasks[2]).toMatchObject({ error: 'Socket closed' });
-    expect(rewrittenTasks[2]).not.toHaveProperty(CANCELLED_MARKER);
-    expect(rewrittenTasks[3]).not.toHaveProperty(CANCELLED_MARKER);
+    saveRun(source);
+    const sourceRaw = readRaw(source.id);
+    const sourceTask = (sourceRaw['tasks'] as Array<Record<string, unknown>>)[0]!;
+
+    const poisoned = makeState('m338-marker-poisoning', {
+      tasks: [{
+        id: 'budget-task',
+        goal: 'A different run hit its budget',
+        deps: [],
+        status: 'failed',
+        error: ABORT_TASK_ERROR,
+      }],
+    }) as RunState & Record<string, unknown>;
+    const poisonedTask = poisoned.tasks[0]! as RunState['tasks'][number] & Record<string, unknown>;
+    poisoned[CANCELLED_MARKER] = sourceRaw[CANCELLED_MARKER];
+    poisonedTask[CANCELLED_MARKER] = sourceTask[CANCELLED_MARKER];
+    writeRaw(poisoned);
+
+    const copiedMarkerLoad = loadRun(poisoned.id)!;
+    expect(copiedMarkerLoad.terminationReason).toBeUndefined();
+    expect(copiedMarkerLoad.tasks[0]!.error).toBe(ABORT_TASK_ERROR);
+    expect(copiedMarkerLoad).not.toHaveProperty(CANCELLED_MARKER);
+    expect(copiedMarkerLoad.tasks[0]).not.toHaveProperty(CANCELLED_MARKER);
+
+    poisoned[CANCELLED_MARKER] = true;
+    poisonedTask[CANCELLED_MARKER] = true;
+    writeRaw(poisoned);
+    const booleanMarkerLoad = loadRun(poisoned.id)!;
+    expect(booleanMarkerLoad.terminationReason).toBeUndefined();
+    expect(booleanMarkerLoad.tasks[0]!.error).toBe(ABORT_TASK_ERROR);
+    expect(booleanMarkerLoad).not.toHaveProperty(CANCELLED_MARKER);
+    expect(booleanMarkerLoad.tasks[0]).not.toHaveProperty(CANCELLED_MARKER);
   });
 });

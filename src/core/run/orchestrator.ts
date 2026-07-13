@@ -61,6 +61,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import type {
   AshlrConfig,
@@ -140,6 +141,13 @@ function runsDir(): string {
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
 const CANCELLED_TASK_ERROR = 'Task cancelled.';
 const CANCELLED_MARKER = '_ashlrCancelled' as const;
+const CANCELLED_MARKER_VERSION = 1 as const;
+
+type CancellationMarker = {
+  version: typeof CANCELLED_MARKER_VERSION;
+  epoch: string;
+  fingerprint: string;
+};
 
 type PersistedRunTask = RunTask & {
   [CANCELLED_MARKER]?: unknown;
@@ -150,21 +158,56 @@ type PersistedRunState = Omit<RunState, 'tasks'> & {
   [CANCELLED_MARKER]?: unknown;
 };
 
+function cancellationFingerprint(state: PersistedRunState): string {
+  const canonical = JSON.stringify(state, (_key, value: unknown) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function cancellationMarkerMatches(
+  marker: unknown,
+  state: PersistedRunState,
+  fingerprint: string,
+): marker is CancellationMarker {
+  if (typeof marker !== 'object' || marker === null || Array.isArray(marker)) return false;
+  const candidate = marker as Record<string, unknown>;
+  return (
+    candidate['version'] === CANCELLED_MARKER_VERSION &&
+    candidate['epoch'] === state.updatedAt &&
+    candidate['fingerprint'] === fingerprint
+  );
+}
+
 function rehydrateRunStateFromPersistence(state: PersistedRunState): RunState {
-  const markedCancelled =
-    state.status === 'aborted' &&
-    state[CANCELLED_MARKER] === true &&
-    (state.terminationReason === undefined || state.terminationReason === 'cancelled');
-  const { [CANCELLED_MARKER]: _runMarker, ...semanticState } = state;
-  return {
+  const { [CANCELLED_MARKER]: runMarker, ...semanticState } = state;
+  const taskRecords = state.tasks.map((task) => {
+    const { [CANCELLED_MARKER]: marker, ...semanticTask } = task;
+    return { marker, semanticTask };
+  });
+  const markerFreeState: PersistedRunState = {
     ...semanticState,
+    tasks: taskRecords.map(({ semanticTask }) => semanticTask),
+  };
+  const fingerprint = cancellationFingerprint(markerFreeState);
+  const markedCancelled =
+    markerFreeState.status === 'aborted' &&
+    cancellationMarkerMatches(runMarker, markerFreeState, fingerprint) &&
+    (markerFreeState.terminationReason === undefined ||
+      markerFreeState.terminationReason === 'cancelled');
+  return {
+    ...markerFreeState,
     ...(markedCancelled ? { terminationReason: 'cancelled' as const } : {}),
-    tasks: state.tasks.map((task) => {
+    tasks: taskRecords.map(({ marker, semanticTask }) => {
       const taskMarkedCancelled =
-        task.status === 'failed' &&
-        task[CANCELLED_MARKER] === true &&
-        task.error === ABORT_TASK_ERROR;
-      const { [CANCELLED_MARKER]: _taskMarker, ...semanticTask } = task;
+        semanticTask.status === 'failed' &&
+        semanticTask.error === ABORT_TASK_ERROR &&
+        cancellationMarkerMatches(marker, markerFreeState, fingerprint);
       return taskMarkedCancelled
         ? { ...semanticTask, error: CANCELLED_TASK_ERROR }
         : semanticTask;
@@ -377,15 +420,16 @@ function normalizeRunStateForPersistence(state: RunState): RunState {
 
 function downgradeRunStateForPersistence(state: RunState): PersistedRunState {
   const { [CANCELLED_MARKER]: _runMarker, ...semanticState } = state as PersistedRunState;
+  const cancelledTaskIndexes = new Set<number>();
   const persisted: PersistedRunState = {
     ...semanticState,
-    tasks: state.tasks.map((task) => {
+    tasks: state.tasks.map((task, index) => {
       const { [CANCELLED_MARKER]: _taskMarker, ...semanticTask } = task as PersistedRunTask;
       if (task.status === 'failed' && task.error === CANCELLED_TASK_ERROR) {
+        cancelledTaskIndexes.add(index);
         return {
           ...semanticTask,
           error: ABORT_TASK_ERROR,
-          [CANCELLED_MARKER]: true,
         };
       }
       return semanticTask;
@@ -394,9 +438,20 @@ function downgradeRunStateForPersistence(state: RunState): PersistedRunState {
 
   if (state.status === 'aborted' && state.terminationReason === 'cancelled') {
     delete persisted.terminationReason;
-    persisted[CANCELLED_MARKER] = true;
   } else {
     if (persisted.terminationReason === 'cancelled') delete persisted.terminationReason;
+  }
+
+  const marker: CancellationMarker = {
+    version: CANCELLED_MARKER_VERSION,
+    epoch: persisted.updatedAt,
+    fingerprint: cancellationFingerprint(persisted),
+  };
+  for (const index of cancelledTaskIndexes) {
+    persisted.tasks[index]![CANCELLED_MARKER] = marker;
+  }
+  if (state.status === 'aborted' && state.terminationReason === 'cancelled') {
+    persisted[CANCELLED_MARKER] = marker;
   }
   return persisted;
 }
