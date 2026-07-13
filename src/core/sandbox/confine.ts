@@ -170,6 +170,21 @@ const HOME_CONFIG_SUBDIRS = [
   '.node_repl_history',
 ];
 
+/** HOME paths needed to resolve vendor executables, but never for session writes. */
+const HOME_READ_ONLY_SUBDIRS = [
+  '.local/bin',
+  '.grok',
+];
+
+/** Mutable Grok runtime state; executable and bundled code remain read-only. */
+const HOME_GROK_WRITE_SUBDIRS = [
+  '.grok/active_sessions.json',
+  '.grok/active_sessions.lock',
+  '.grok/logs',
+  '.grok/sessions',
+  '.grok/upload_queue',
+];
+
 /**
  * Build a macOS SBPL profile string for sandbox-exec.
  *
@@ -200,6 +215,7 @@ export function buildMacosSbplProfile(
   }
   if (home) {
     for (const s of HOME_CONFIG_SUBDIRS) reallowRead.push(`${home}/${s}`);
+    for (const s of HOME_READ_ONLY_SUBDIRS) reallowRead.push(`${home}/${s}`);
   }
   if (profile.readAllowed) {
     for (const p of profile.readAllowed) if (p) reallowRead.push(p);
@@ -226,6 +242,7 @@ export function buildMacosSbplProfile(
   }
   if (home) {
     for (const s of HOME_CONFIG_SUBDIRS) reallowWrite.push(`${home}/${s}`);
+    for (const s of HOME_GROK_WRITE_SUBDIRS) reallowWrite.push(`${home}/${s}`);
   }
 
   const reallowReadClauses = reallowRead.map(sub).join('\n    ');

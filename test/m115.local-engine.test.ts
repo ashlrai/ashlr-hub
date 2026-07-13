@@ -177,6 +177,7 @@ describe('M115 router bias', () => {
     vi.spyOn(enginesModule, 'engineInstalled').mockImplementation(
       (engine: string) => {
         if (engine === 'local-coder') return true;
+        if (engine === 'grok') return true;
         if (engine === 'claude') return true;
         if (engine === 'codex') return false;
         if (engine === 'builtin') return true;
@@ -197,6 +198,16 @@ describe('M115 router bias', () => {
     const item = makeItem({ source: 'todo', effort: 2, score: 3 });
     const d = routeBackend(item, localCoderCfg);
     expect(d.backend).toBe('local-coder');
+    expect(d.tier).toBe('mid');
+    expect(d.reason).toMatch(/local-mid bulk/);
+  });
+
+  it('bulk item routes to Grok when it is the only allowed installed mid backend', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'grok'] as AshlrConfig['foundry']['allowedBackends'],
+    });
+    const d = routeBackend(makeItem({ source: 'todo', effort: 2, score: 3 }), cfg);
+    expect(d.backend).toBe('grok');
     expect(d.tier).toBe('mid');
     expect(d.reason).toMatch(/local-mid bulk/);
   });

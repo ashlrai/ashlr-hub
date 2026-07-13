@@ -142,6 +142,62 @@ describe('M298 Part 2 — grok engine entry', () => {
     expect(buildEngineCommand('grok' as EngineId, GOAL, cfg, { cwd: CWD })).toBeNull();
   });
 
+  it('config-only Grok CLI override compiles an exact headless autonomous argv', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['grok'] as EngineId[],
+      engines: {
+        grok: {
+          id: 'grok',
+          kind: 'cli-agent',
+          tier: 'mid',
+          bin: 'grok',
+          bins: ['grok'],
+          argv: [
+            '--single',
+            '$GOAL',
+            '--cwd',
+            '$CWD',
+            { optModel: ['--model', '$MODEL'] },
+            '--output-format',
+            'json',
+            '--no-leader',
+            '--no-memory',
+            '--no-subagents',
+            '--max-turns',
+            '100',
+          ],
+          autonomousArgv: ['--always-approve'],
+          capabilities: ['agent', 'edit', 'tools'],
+        },
+      },
+    });
+    const command = buildEngineCommand('grok' as EngineId, GOAL, cfg, {
+      cwd: CWD,
+      model: 'grok-code-fast-1',
+      autonomous: true,
+    });
+    expect(command).toEqual({
+      bin: 'grok',
+      cwd: CWD,
+      args: [
+        '--single',
+        GOAL,
+        '--cwd',
+        CWD,
+        '--model',
+        'grok-code-fast-1',
+        '--output-format',
+        'json',
+        '--no-leader',
+        '--no-memory',
+        '--no-subagents',
+        '--max-turns',
+        '100',
+        '--always-approve',
+      ],
+    });
+  });
+
   it('engineTierOf("grok") is mid by default', () => {
     expect(engineTierOf('grok' as EngineId)).toBe('mid');
   });

@@ -428,11 +428,17 @@ describe('runSwarm — parallel task execution', () => {
     mockPlanSwarm.mockResolvedValueOnce(plan);
 
     // Give build tasks a small delay to allow overlap detection
-    const startTimes: Record<string, number> = {};
+    let activeBuilds = 0;
+    let peakBuilds = 0;
     runGoalDelay = 10;
     mockRunGoal.mockImplementation(async (goal: string) => {
-      startTimes[goal] = Date.now();
+      const isBuild = ['Build A', 'Build B', 'Build C'].some((label) => goal.includes(label));
+      if (isBuild) {
+        activeBuilds++;
+        peakBuilds = Math.max(peakBuilds, activeBuilds);
+      }
       await new Promise(r => setTimeout(r, 10));
+      if (isBuild) activeBuilds--;
       return {
         id: `run-${Math.random().toString(36).slice(2)}`,
         goal, status: 'done' as const, result: `done: ${goal}`,
@@ -453,18 +459,9 @@ describe('runSwarm — parallel task execution', () => {
     const elapsed = Date.now() - start;
 
     expect(result.status).toBe('done');
-    // If tasks ran sequentially 3×10ms + overhead = ~30ms+; parallel = ~10ms+
-    // With parallel:3 all 3 build tasks should start within the same window
-    const buildGoals = ['Build A', 'Build B', 'Build C'];
-    const buildStartTimes = buildGoals
-      .map(g => startTimes[g] ?? startTimes[Object.keys(startTimes).find(k => k.includes(g.split(' ')[1]!)) ?? ''])
-      .filter(Boolean) as number[];
-
-    if (buildStartTimes.length >= 2) {
-      const spread = Math.max(...buildStartTimes) - Math.min(...buildStartTimes);
-      // All 3 build tasks should have started within a short window (not sequentially)
-      expect(spread).toBeLessThan(30);
-    }
+    // Assert actual overlap rather than wall-clock proximity, which is sensitive
+    // to scheduler load when the exhaustive suite runs hundreds of test files.
+    expect(peakBuilds).toBeGreaterThanOrEqual(2);
     // Sanity: elapsed should be well under 3 × 10ms = 30ms + overhead
     expect(elapsed).toBeLessThan(200);
   });

@@ -715,6 +715,21 @@ function boundedText(value: string, max = 220): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;
 }
 
+function dispatchConfigForItem(item: WorkItem, cfg: AshlrConfig): AshlrConfig {
+  if (!isTrustedDiagnosticResliceItem(item)) return cfg;
+  if (item.repairTreatment !== 'baseline-reslice' && item.repairTreatment !== 'target-localization') {
+    return cfg;
+  }
+  return {
+    ...cfg,
+    foundry: {
+      ...cfg.foundry,
+      repoMap: false,
+      localization: item.repairTreatment === 'target-localization',
+    },
+  } as AshlrConfig;
+}
+
 interface GeneratedRepairRouteEvaluation {
   attemptId?: string;
   feasibility: GeneratedRepairRouteFeasibility;
@@ -3888,6 +3903,7 @@ export async function tick(
         }
       }
       const goal = buildItemGoal(item);
+      const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
       const delegationScope = scopeFromWorkItem(item, {
@@ -3920,7 +3936,7 @@ export async function tick(
             tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'swarm',
           });
           return runSwarm(
-            { goal }, routingCfg,
+            { goal }, dispatchCfg,
             {
               sandbox: true, requireSandbox: true, propose: true, project: item.repo,
               budget: itemBudget, parallel: 1, dryRun: false, noCapture: true,
@@ -4121,7 +4137,7 @@ export async function tick(
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
             });
-            return runGoal(goal, routingCfg, {
+            return runGoal(goal, dispatchCfg, {
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),

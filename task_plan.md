@@ -1983,3 +1983,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove source-mode environment identity fallback and prove a compiled binary ignores hostile external identity injection.
 - [x] Pass focused integration, typecheck, build, dependency audit, exhaustive verification, independent adversarial re-review, and cross-platform CI.
 - [ ] Restore canonical Desktop workspace access, reconcile local state, deploy exact green source, and verify live build/learning parity.
+
+## Current Overnight Cycle - Mid-Tier Route Recovery
+- [x] Rehydrate the clean release mirror, production fleet state, service boundary, and durable notes.
+- [x] Audit the same-tier alternative deficit, recent material-diff yield, and causal backend-learning requirements in parallel.
+- [x] Prove Grok supports bounded headless single-turn execution through cached CLI authentication under the launchd environment.
+- [x] Canary an argv-only mid-tier Grok override, discover the macOS confinement gap before a fleet child launched, and remove the authorization.
+- [x] Add first-class Grok mid-tier routing, minimal confinement, exact argv, and headless adapter coverage.
+- [x] Make the existing six-unit repair treatment alter real dispatch context while preserving deterministic assignment and terminal attribution.
+- [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent verification.
+- [x] Correct the live evidence policy mismatch by setting `allowSelfMerge:false`.
+- [x] Reload Mission Control and the daemon only at a clear guard/zero-child boundary; preserve HTTP health.
+- [x] Let the post-reload child finish naturally, then reload the reverted backend allowlist without interrupting work.
+- [ ] Commit, push, observe CI, deploy exact green source, then re-enable Grok with per-engine OS confinement and network egress.
+- [ ] Observe the first Grok repair attempt and compare durable proposal conversion against the prior local-coder cohort.
+- [ ] Restore canonical Desktop access and deploy the exact green release build.

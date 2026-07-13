@@ -13,8 +13,8 @@
  *   6. localize: narrows to keyword-matching files.
  *   7. localize: prefers item.files over keyword matches.
  *   8. localize: empty repo-map → falls back to item.files.
- *   9. flag-OFF → sandboxed-engine goal is UNCHANGED (byte-identical parity).
- *  10. flag-ON  → sandboxed-engine goal gains context prefix.
+ *   9. both flags OFF → sandboxed-engine goal is UNCHANGED (byte-identical parity).
+ *  10. repo-map/localization combinations inject only their intended context.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -26,6 +26,8 @@ import { createHash } from 'node:crypto';
 
 import { buildRepoMap, renderRepoMap } from '../src/core/run/repo-map.js';
 import { localize, renderLocalization } from '../src/core/run/localize.js';
+import { buildM154ContextPrefix } from '../src/core/run/sandboxed-engine.js';
+import type { AshlrConfig } from '../src/core/types.js';
 import type { RepoMap } from '../src/core/run/repo-map.js';
 
 // ---------------------------------------------------------------------------
@@ -466,22 +468,26 @@ describe('M154 localize — empty repo-map', () => {
 // ---------------------------------------------------------------------------
 
 describe('M154 flag-gated wiring — sandboxed-engine context', () => {
-  /**
-   * We test the wiring via the private buildM154ContextPrefix helper by
-   * re-implementing its behaviour in terms of the exported functions.
-   * The real gate is:
-   *   cfg.foundry?.repoMap === true  → repoMap built + rendered
-   *   cfg.foundry?.localization === true (requires repoMap also true) → localize
-   *   both absent/false → empty prefix
-   */
+  const config = (foundry: Record<string, unknown>): AshlrConfig => ({
+    version: 1,
+    roots: [],
+    editor: 'cursor',
+    staleDays: 30,
+    categories: {},
+    tidyRules: [],
+    keepers: [],
+    models: { lmstudio: '', ollama: '', providerChain: [] },
+    telemetry: {},
+    tools: {},
+    foundry,
+  } as AshlrConfig);
 
-  it('flag-OFF: buildRepoMap is NOT called and prefix is empty string', () => {
-    // With flags off, buildM154ContextPrefix should return '' — we verify the
-    // observable: repoMap over a real tmp repo with flags OFF returns no prefix.
-    const cfgOff = { version: 1, roots: [], editor: 'cursor', staleDays: 30, categories: {}, tidyRules: [], keepers: [], models: { lmstudio: '', ollama: '', providerChain: [] }, telemetry: {}, tools: {}, foundry: {} };
-    // foundry.repoMap is absent → flag is OFF
-    const isOn = (cfgOff.foundry as Record<string, unknown>)['repoMap'] === true;
-    expect(isOn).toBe(false);
+  it('both flags OFF: returns an empty prefix for byte-identical goal delivery', () => {
+    expect(buildM154ContextPrefix(
+      'implement retry logic',
+      '/path/that/must/not/be/scanned',
+      config({ repoMap: false, localization: false }),
+    )).toBe('');
   });
 
   it('flag-ON: repoMap flag true produces a non-empty prefix for a real repo', () => {
@@ -489,12 +495,15 @@ describe('M154 flag-gated wiring — sandboxed-engine context', () => {
       'src/index.ts': 'export function main() {}\nexport class App {}\n',
     });
 
-    // Build the map directly and render it — this is what the engine sees
-    const map = buildRepoMap(dir);
-    const rendered = renderRepoMap(map);
-    expect(rendered).toContain('<!-- repo-map (M154) -->');
-    expect(rendered).toContain('src/index.ts');
-    expect(rendered).toContain('main');
+    const prefix = buildM154ContextPrefix(
+      'update application entry point',
+      dir,
+      config({ repoMap: true, localization: false }),
+    );
+    expect(prefix).toContain('<!-- repo-map (M154) -->');
+    expect(prefix).not.toContain('<!-- localization (M154) -->');
+    expect(prefix).toContain('src/index.ts');
+    expect(prefix).toContain('main');
   });
 
   it('flag-ON + localization: localize result is appended after repo-map', () => {
@@ -513,18 +522,64 @@ describe('M154 flag-gated wiring — sandboxed-engine context', () => {
     expect(loc.files.some((f) => f.includes('auth'))).toBe(true);
   });
 
-  it('flag-OFF parity: goal string passed to engine is byte-identical when flags absent', () => {
-    // Simulate the guard logic in buildM154ContextPrefix
-    const cfg = { foundry: {} };
-    const repoMapOn = (cfg.foundry as Record<string, unknown>)['repoMap'] === true;
-    const locOn = (cfg.foundry as Record<string, unknown>)['localization'] === true;
-    expect(repoMapOn).toBe(false);
-    expect(locOn).toBe(false);
-    // When both flags off, contextPrefix === '' → goalWithContext === goal
-    const contextPrefix = '';
-    const goal = 'implement retry logic';
-    const goalWithContext = contextPrefix ? contextPrefix + goal : goal;
-    expect(goalWithContext).toBe(goal);
+  it('localization-only: renders at most one candidate and no repository map', () => {
+    const dir = makeRepo({
+      'src/auth/login.ts': 'export function authenticateLogin() {}\n',
+      'src/auth/token.ts': 'export function authenticateToken() {}\n',
+      'src/unrelated.ts': 'export function unrelated() {}\n',
+    });
+
+    const prefix = buildM154ContextPrefix(
+      'fix auth authentication',
+      dir,
+      config({ repoMap: false, localization: true }),
+    );
+
+    expect(prefix).toContain('<!-- localization (M154) -->');
+    expect(prefix).not.toContain('<!-- repo-map (M154) -->');
+    expect(prefix).not.toContain('src/unrelated.ts');
+    const candidates = prefix
+      .split('\n')
+      .filter((line) => line.startsWith('  src/'));
+    expect(candidates).toHaveLength(1);
+  });
+
+  it('localization-only ranks the current objective ahead of repair boilerplate', () => {
+    const dir = makeRepo({
+      'src/payments/settlement.ts': 'export function reconcileSettlement() {}\n',
+      'src/dispatch/reslice.ts': 'export function dispatchDiagnosticReslice() {}\n',
+    });
+    const repairGoal = [
+      'Diagnostic reslice: retry a currently actionable work item after an earlier dispatch produced no file changes.',
+      'Original work item: repo:self:item',
+      'Current objective: reconcile payment settlement records',
+      'Dispatch outcome: empty-diff',
+      'Action: reslice by inspecting the current target.',
+    ].join('\n');
+
+    const prefix = buildM154ContextPrefix(
+      repairGoal,
+      dir,
+      config({ repoMap: false, localization: true }),
+    );
+
+    expect(prefix).toContain('src/payments/settlement.ts');
+    expect(prefix).not.toContain('src/dispatch/reslice.ts');
+  });
+
+  it('both flags ON: preserves full repo-map plus localization treatment', () => {
+    const dir = makeRepo({
+      'src/auth.ts': 'export function authenticate() {}\n',
+    });
+
+    const prefix = buildM154ContextPrefix(
+      'fix auth',
+      dir,
+      config({ repoMap: true, localization: true }),
+    );
+
+    expect(prefix).toContain('<!-- repo-map (M154) -->');
+    expect(prefix).toContain('<!-- localization (M154) -->');
   });
 });
 

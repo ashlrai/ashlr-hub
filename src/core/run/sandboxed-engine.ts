@@ -576,13 +576,13 @@ function sandboxedProducerCausalMetadata(fields: {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a repo-map + localization context prefix for the given goal/repo.
- * Returns '' (empty string) when either flag is OFF — byte-identical to
- * the pre-M154 behaviour for all flag-off callers.
+ * Build a repo-map and/or localization context prefix for the given goal/repo.
+ * Returns '' (empty string) when both flags are OFF — byte-identical to the
+ * pre-M154 behaviour for all flag-off callers.
  *
  * Never throws.
  */
-function buildM154ContextPrefix(
+export function buildM154ContextPrefix(
   goal: string,
   sourceRepo: string,
   cfg: AshlrConfig,
@@ -608,6 +608,19 @@ function buildM154ContextPrefix(
         const rendered2 = renderLocalization(loc);
         if (rendered2) parts.push(rendered2);
       }
+    } else if (localizeOn) {
+      const map = buildRepoMap(sourceRepo);
+      const objective = goal.match(/^Current objective:\s*(.+)$/mi)?.[1]?.trim() || goal;
+      const loc = localize(
+        { title: objective, files: hintedFiles },
+        map,
+        { maxFiles: 1 },
+      );
+      const rendered = renderLocalization({
+        ...loc,
+        files: loc.files.slice(0, 1),
+      });
+      if (rendered) parts.push(rendered);
     }
 
     return parts.length > 0 ? parts.join('\n\n') + '\n\n' : '';

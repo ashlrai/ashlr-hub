@@ -65,7 +65,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { basename, join } from 'node:path';
-import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
+import type {
+  AshlrConfig,
+  DaemonTick,
+  EngineId,
+  EngineTier,
+  RepairTreatment,
+  WorkItem,
+} from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
@@ -560,12 +567,27 @@ function makeDiagnosticResliceItem(
     ts,
     repairHandoffId: handoff.eventId,
     repairGenerationId: handoff.generationId,
+    repairTreatmentUnitId: handoff.repairTreatmentUnitId,
+    repairTreatment: handoff.repairTreatment,
     repairParentItemId: parentItemId,
     repairParentSource: 'goal',
     repairParentBackend: parentTier === 'mid' ? 'local-coder' : 'builtin',
     repairParentTier: parentTier,
     repairParentObjectiveHash: objectiveHash,
   };
+}
+
+function makeDiagnosticResliceForTreatment(
+  repoDir: string,
+  treatment: RepairTreatment,
+  parentTier: EngineTier = 'local',
+): WorkItem {
+  for (let index = 0; index < 256; index++) {
+    const hash = index.toString(16).padStart(12, '0');
+    const item = makeDiagnosticResliceItem(repoDir, hash, 1, parentTier);
+    if (item.repairTreatment === treatment) return item;
+  }
+  throw new Error(`Unable to construct diagnostic reslice treatment ${treatment}`);
 }
 
 function seedHealthyGeneratedRepairYield(repoDir: string): void {
@@ -1005,6 +1027,70 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
     });
     expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(true);
+  });
+
+  it.each([
+    ['baseline-reslice', 'builtin', false],
+    ['target-localization', 'local-coder', true],
+  ] as const)(
+    'A1-reslice-dispatch-config: %s sets only its repo-map/localization treatment fields',
+    async (treatment, backend, localization) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      const parentTier: EngineTier = backend === 'builtin' ? 'local' : 'mid';
+      const reslice = makeDiagnosticResliceForTreatment(repo.dir, treatment, parentTier);
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [reslice],
+      });
+      mockRouteBackend.mockReturnValue({ backend, tier: parentTier, reason: 'treatment dispatch test' });
+      mockEngineTierOf.mockImplementation((engine: unknown) => engine === 'local-coder' ? 'mid' : 'local');
+
+      const config = {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['builtin', 'local-coder'],
+          repoMap: true,
+          localization: !localization,
+          models: { 'local-coder': 'test-local-model' },
+        },
+      } as AshlrConfig;
+      const originalFoundry = structuredClone(config.foundry);
+
+      const result = await tick(config, { dryRun: false });
+      const dispatchCall = backend === 'builtin'
+        ? mockRunSwarm.mock.calls[0]
+        : mockRunGoal.mock.calls[0];
+      const dispatchCfg = dispatchCall?.[1] as AshlrConfig;
+
+      expect(result.reason).toBe('ok');
+      expect(dispatchCfg).toEqual({
+        ...config,
+        foundry: { ...config.foundry, repoMap: false, localization },
+      });
+      expect(dispatchCfg).not.toBe(config);
+      expect(dispatchCfg.foundry?.models).toBe(config.foundry?.models);
+      expect(config.foundry).toEqual(originalFoundry);
+    },
+  );
+
+  it('A1-reslice-dispatch-config: ordinary work keeps the original dispatch config object', async () => {
+    const { items } = enrollWithItems(1);
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['builtin'],
+        repoMap: true,
+        localization: true,
+      },
+    } as AshlrConfig;
+
+    const result = await tick(config, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(items).toHaveLength(1);
+    expect(mockRunSwarm.mock.calls[0]?.[1]).toBe(config);
   });
 
   it('A1-drain-auto-fairness: reserves one ordinary slot when automatic repair drain has capacity', async () => {

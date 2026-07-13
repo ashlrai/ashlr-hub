@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -79,6 +79,14 @@ describe('M52 write-allow — pure profile string assertions', () => {
     expect(writeAllowSection).toContain(`(subpath "${home}/.config")`);
     expect(writeAllowSection).toContain(`(subpath "${home}/.codex")`);
     expect(writeAllowSection).toContain(`(subpath "${home}/.hermes")`);
+    expect(writeAllowSection).toContain(`(subpath "${home}/.grok/logs")`);
+    expect(writeAllowSection).toContain(`(subpath "${home}/.grok/sessions")`);
+    expect(writeAllowSection).toContain(`(subpath "${home}/.grok/upload_queue")`);
+    expect(writeAllowSection).toContain(`(subpath "${home}/.grok/active_sessions.json")`);
+    expect(writeAllowSection).toContain(`(subpath "${home}/.grok/active_sessions.lock")`);
+    expect(writeAllowSection).not.toContain(`(subpath "${home}/.grok")`);
+    expect(writeAllowSection).not.toContain(`(subpath "${home}/.grok/bin")`);
+    expect(writeAllowSection).not.toContain(`(subpath "${home}/.local/bin")`);
   });
 
   it('VENDOR_HOME_ENVS values appear in write-allow when set', () => {
@@ -126,6 +134,8 @@ describe('M52 write-allow — pure profile string assertions', () => {
     expect(readAllowIdx).toBeGreaterThan(-1);
     const readAllowSection = profile.slice(readAllowIdx, profile.indexOf('(deny file-write*'));
     expect(readAllowSection).toContain(`(subpath "${home}/.claude")`);
+    expect(readAllowSection).toContain(`(subpath "${home}/.grok")`);
+    expect(readAllowSection).toContain(`(subpath "${home}/.local/bin")`);
   });
 });
 
@@ -188,6 +198,47 @@ darwinOnly('M52 macOS write-allow proof (sandbox-exec) — DARWIN ONLY', () => {
     } finally {
       try { rmSync(allowedProbe, { force: true }); } catch { /* idempotent */ }
       try { rmSync(deniedProbe, { force: true }); } catch { /* idempotent */ }
+      try { rmSync(fakeHome, { recursive: true, force: true }); } catch { /* idempotent */ }
+      try { rmSync(worktree, { recursive: true, force: true }); } catch { /* idempotent */ }
+    }
+  });
+
+  it('allows Grok session writes but denies replacement of its executable', () => {
+    const fakeHome = mkTmp('ashlr-m52-grok-home-');
+    const worktree = mkTmp('ashlr-m52-grok-wt-');
+    const sessions = join(fakeHome, '.grok', 'sessions');
+    const bin = join(fakeHome, '.grok', 'bin');
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    const sessionProbe = join(sessions, 'probe.json');
+    const activeSessionsProbe = join(fakeHome, '.grok', 'active_sessions.json');
+    const binaryProbe = join(bin, 'grok');
+    writeFileSync(activeSessionsProbe, '{}\n', 'utf8');
+
+    try {
+      const profile = buildMacosSbplProfile(
+        { mode: 'os', networkEgress: false },
+        { worktree, home: fakeHome, env: { TMPDIR: tmpdir(), HOME: fakeHome } },
+      );
+      const sessionResult = spawnSync(
+        'sandbox-exec',
+        ['-p', profile, 'sh', '-c', `echo session > "${sessionProbe}"`],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      const binaryResult = spawnSync(
+        'sandbox-exec',
+        ['-p', profile, 'sh', '-c', `echo replacement > "${binaryProbe}"`],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      const activeSessionsResult = spawnSync(
+        'sandbox-exec',
+        ['-p', profile, 'sh', '-c', `echo active > "${activeSessionsProbe}"`],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      expect(sessionResult.status).toBe(0);
+      expect(activeSessionsResult.status).toBe(0);
+      expect(binaryResult.status).not.toBe(0);
+    } finally {
       try { rmSync(fakeHome, { recursive: true, force: true }); } catch { /* idempotent */ }
       try { rmSync(worktree, { recursive: true, force: true }); } catch { /* idempotent */ }
     }
