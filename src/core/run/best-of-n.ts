@@ -33,6 +33,12 @@ import {
 import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
+import {
+  abandonExecutionAuthority,
+  acquireExecutionAuthority,
+  beginExecutionAuthority,
+  finishExecutionAuthority,
+} from '../util/execution-lease.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -279,6 +285,46 @@ function cleanupCandidateSandboxes(candidates: InternalCandidateResult[], remove
  * @param opts  Optional overrides: { n } overrides the config N.
  */
 export async function runBestOfN(
+  item: WorkItem,
+  cfg: AshlrConfig,
+  opts?: Parameters<typeof runBestOfNInternal>[2],
+): ReturnType<typeof runBestOfNInternal> {
+  if (!opts?.attemptId || opts.signal?.aborted === true) {
+    return runBestOfNInternal(item, cfg, opts);
+  }
+  const n = readN(cfg, opts.n);
+  const refused = (reason: string): Awaited<ReturnType<typeof runBestOfNInternal>> => ({
+    winner: undefined,
+    candidates: [],
+    critique: {
+      n,
+      nonEmpty: 0,
+      judged: 0,
+      topScore: 0,
+      winnerIndex: -1,
+      totalCostUsd: 0,
+      billableCostUsd: 0,
+      noProposalReasons: [{ reason, count: 1 }],
+    },
+  });
+  const acquired = acquireExecutionAuthority('run', opts.attemptId);
+  if (!acquired.ok) return refused(`execution authority ${acquired.reason}`);
+  if (!beginExecutionAuthority(acquired.authority)) {
+    abandonExecutionAuthority(acquired.authority);
+    return refused('execution authority unavailable');
+  }
+  let completed = false;
+  try {
+    const result = await runBestOfNInternal(item, cfg, opts);
+    completed = true;
+    return result;
+  } finally {
+    if (completed) finishExecutionAuthority(acquired.authority);
+    else abandonExecutionAuthority(acquired.authority);
+  }
+}
+
+async function runBestOfNInternal(
   item: WorkItem,
   cfg: AshlrConfig,
   opts?: {

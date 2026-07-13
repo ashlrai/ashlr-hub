@@ -650,21 +650,16 @@ describe('runSwarm — parallel task execution', () => {
       } as RunState;
     });
 
-    const start = Date.now();
     const result = await runSwarm(
       { goal: 'parallel build test' },
       makeConfig(),
       { budget: { maxTokens: 1_000_000, maxSteps: 1000 }, parallel: 3 },
       nullSink,
     );
-    const elapsed = Date.now() - start;
-
     expect(result.status).toBe('done');
     // Assert actual overlap rather than wall-clock proximity, which is sensitive
     // to scheduler load when the exhaustive suite runs hundreds of test files.
     expect(peakBuilds).toBeGreaterThanOrEqual(2);
-    // Sanity: elapsed should be well under 3 × 10ms = 30ms + overhead
-    expect(elapsed).toBeLessThan(200);
   });
 
   it('never exceeds --parallel cap', async () => {

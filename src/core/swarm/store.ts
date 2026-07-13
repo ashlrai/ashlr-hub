@@ -151,6 +151,11 @@ function ensureDir(dir: string): void {
   chmodSync(dir, 0o700);
 }
 
+/** Validate and create the private swarm store before acquiring lifecycle metadata. */
+export function ensureSwarmsDir(): void {
+  ensureDir(swarmsDir());
+}
+
 /**
  * Return the absolute path for a swarm record by id.
  *
@@ -459,6 +464,22 @@ export function loadSwarm(id: string): SwarmRun | null {
     return parsePersistedSwarm(loaded.text, id);
   } catch {
     return null;
+  }
+}
+
+/** Prove that this exact loaded/mutated object still owns the installed generation. */
+export function ownsCurrentSwarmGeneration(swarm: SwarmRun): boolean {
+  const expected = persistenceSnapshot(swarm);
+  if (!expected) return false;
+  try {
+    const loaded = readStableRegularFile(swarmPath(swarmsDir(), swarm.id), {
+      anchorPath: stateRoot(),
+      maxFileBytes: MAX_PERSISTED_SWARM_BYTES,
+      remainingBytes: MAX_PERSISTED_SWARM_BYTES,
+    });
+    return loaded.ok && persistenceDigest(loaded.text) === expected.digest;
+  } catch {
+    return false;
   }
 }
 

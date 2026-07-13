@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,7 +29,13 @@ interface SpawnCall {
   opts: { detached?: boolean; stdio?: unknown; env?: Record<string, string | undefined> };
 }
 const spawnCalls: SpawnCall[] = [];
-const fakeChild = { unref: vi.fn() };
+class FakeChild extends EventEmitter {
+  unref = vi.fn();
+  disconnect = vi.fn();
+  kill = vi.fn();
+}
+let fakeChild: FakeChild;
+let workerLaunch: 'ack' | 'exit';
 
 vi.mock('node:child_process', async (orig) => {
   const actual = (await orig()) as typeof import('node:child_process');
@@ -36,6 +43,15 @@ vi.mock('node:child_process', async (orig) => {
     ...actual,
     spawn: vi.fn((cmd: string, args: string[], opts: SpawnCall['opts']) => {
       spawnCalls.push({ cmd, args, opts });
+      const token = opts.env?.ASHLR_BACKGROUND_HANDOFF_TOKEN;
+      queueMicrotask(() => {
+        if (workerLaunch === 'exit') fakeChild.emit('exit', 1, null);
+        else fakeChild.emit('message', {
+          protocol: 'ashlr-background-handoff-v1',
+          swarmId: args[3],
+          token,
+        });
+      });
       return fakeChild as unknown as ReturnType<typeof actual.spawn>;
     }),
   };
@@ -107,6 +123,8 @@ beforeEach(async () => {
   process.env.HOME = tmpHome;
   delete process.env.ASHLR_IN_SWARM;
   spawnCalls.length = 0;
+  fakeChild = new FakeChild();
+  workerLaunch = 'ack';
   vi.clearAllMocks();
   mockPlanSwarm.mockResolvedValue(plan());
   await ensureImported();
@@ -153,6 +171,23 @@ describe('runSwarm — --background spawns the worker correctly', () => {
     expect(result.status).not.toBe('done');
   });
 
+  it('reports a failed launch when the worker exits before acknowledging handoff', async () => {
+    workerLaunch = 'exit';
+    const result = await runSwarm(
+      { goal: 'worker cannot start' },
+      makeConfig(),
+      { background: true },
+      nullSink,
+    );
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      result: expect.stringMatching(/handoff was not acknowledged/i),
+    });
+    expect(loadSwarm(result.id)).toMatchObject({ status: 'failed' });
+    expect(fakeChild.unref).not.toHaveBeenCalled();
+  });
+
   it('persists causal identity and resume flags for the detached worker', async () => {
     const workItemGenerationId = 'b'.repeat(64);
     const result = await runSwarm(
@@ -192,8 +227,9 @@ describe('runSwarm — --background spawns the worker correctly', () => {
     expect(call.args[0]).toMatch(/ashlr$/);
     expect(call.args.slice(1)).toEqual(['swarm', '--resume', result.id, '--_worker']);
     expect(call.opts.detached).toBe(true);
-    expect(call.opts.stdio).toBe('ignore');
+    expect(call.opts.stdio).toEqual(['ignore', 'ignore', 'ignore', 'ipc']);
     expect(fakeChild.unref).toHaveBeenCalled();
+    expect(fakeChild.disconnect).toHaveBeenCalled();
   });
 
   it('does NOT set ASHLR_IN_SWARM on the worker env (worker IS the runner)', async () => {

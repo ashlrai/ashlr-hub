@@ -16,6 +16,7 @@ import {
   readdirSync,
   unlinkSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -59,15 +60,33 @@ function currentStartIdentity(): { ref: string; verified: boolean } {
 }
 
 function safelyUnlink(path: string, expected: { dev: number; ino: number }): boolean {
+  const guard = `${path}.unlink-${process.pid}-${randomUUID()}.guard`;
+  let guarded = false;
   try {
     const current = lstatSync(path);
     if (
       current.isSymbolicLink() || !current.isFile() || current.nlink !== 1 || !owned(current.uid) ||
       current.dev !== expected.dev || current.ino !== expected.ino
     ) return false;
+    // Pin this exact inode under a unique name before removing the canonical
+    // path. Cooperating contenders see nlink=2 and fail closed, so none can
+    // install a replacement between our final identity check and unlink.
+    linkSync(path, guard);
+    guarded = true;
+    const pinned = lstatSync(guard);
+    const stillCurrent = lstatSync(path);
+    if (
+      pinned.dev !== expected.dev || pinned.ino !== expected.ino || pinned.nlink !== 2 ||
+      stillCurrent.dev !== expected.dev || stillCurrent.ino !== expected.ino ||
+      stillCurrent.nlink !== 2
+    ) return false;
     unlinkSync(path);
-    return true;
+    const remaining = lstatSync(guard);
+    return remaining.dev === expected.dev && remaining.ino === expected.ino && remaining.nlink === 1;
   } catch { return false; }
+  finally {
+    if (guarded) { try { unlinkSync(guard); } catch { /* best effort; canonical path is fail-closed */ } }
+  }
 }
 
 function collapseInstalledCandidate(path: string, expected: { dev: number; ino: number }): boolean {
@@ -109,13 +128,16 @@ function ownerState(
     };
     if (
       !Number.isInteger(owner.pid) || Number(owner.pid) < 1 ||
-      typeof owner.token !== 'string' || owner.token.length > 64 ||
-      typeof owner.startRef !== 'string' || !/^[a-f0-9]{64}$/.test(owner.startRef) ||
-      typeof owner.startRefVerified !== 'boolean'
+      typeof owner.token !== 'string' || owner.token.length > 64
     ) return Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown';
     const pid = Number(owner.pid);
     try { process.kill(pid, 0); }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'alive'; }
+    if (owner.startRef === undefined && owner.startRefVerified === undefined) return 'alive';
+    if (
+      typeof owner.startRef !== 'string' || !/^[a-f0-9]{64}$/.test(owner.startRef) ||
+      typeof owner.startRefVerified !== 'boolean'
+    ) return 'unknown';
     if (!owner.startRefVerified) return 'alive';
     const observed = pid === process.pid ? currentStartIdentity().ref : processStartRef(pid);
     return observed && observed !== owner.startRef ? 'dead' : 'alive';
@@ -123,6 +145,89 @@ function ownerState(
     return Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown';
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+  }
+}
+
+function acquireReclaimElection(path: string): LocalStoreLock | null {
+  const ownerPath = `${path}.reclaim.owner`;
+  const token = randomUUID();
+  const candidate = `${ownerPath}.${process.pid}.${token}.candidate`;
+  let fd: number | undefined;
+  let installed: Stats | undefined;
+  let election: LocalStoreLock | null = null;
+  try {
+    fd = openSync(
+      candidate,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.nlink !== 1 || !owned(opened.uid)) return null;
+    const start = currentStartIdentity();
+    const bytes = Buffer.from(`${JSON.stringify({
+      pid: process.pid,
+      token,
+      startRef: start.ref,
+      startRefVerified: start.verified,
+    })}\n`, 'utf8');
+    if (writeSync(fd, bytes) !== bytes.length) return null;
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    installed = lstatSync(candidate);
+    if (
+      installed.isSymbolicLink() || !installed.isFile() || installed.nlink !== 1 ||
+      !owned(installed.uid) || installed.dev !== opened.dev || installed.ino !== opened.ino
+    ) return null;
+
+    try {
+      linkSync(candidate, ownerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      const current = lstatSync(ownerPath);
+      if (
+        current.isSymbolicLink() || !current.isFile() || !owned(current.uid) ||
+        current.nlink < 1 || current.nlink > 2
+      ) return null;
+      const state = ownerState(ownerPath, {
+        dev: current.dev,
+        ino: current.ino,
+        mtimeMs: current.mtimeMs,
+      });
+      if (
+        state !== 'dead' &&
+        !(state === 'unknown' && Date.now() - current.mtimeMs >= INIT_GRACE_MS)
+      ) return null;
+      // Exact-inode deletion makes stale-reclaimer recovery ABA-safe. If a
+      // contender replaces the owner first, this attempt fails closed.
+      if (!safelyUnlink(ownerPath, current)) return null;
+      linkSync(candidate, ownerPath);
+    }
+    unlinkSync(candidate);
+    installed = lstatSync(ownerPath);
+    if (
+      installed.isSymbolicLink() || !installed.isFile() || installed.nlink !== 1 ||
+      !owned(installed.uid) || installed.dev !== opened.dev || installed.ino !== opened.ino
+    ) return null;
+    election = { path: ownerPath, token, dev: installed.dev, ino: installed.ino };
+    return election;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    if (!election) {
+      try {
+        const current = installed ?? lstatSync(ownerPath);
+        releaseLocalStoreLock({
+          path: ownerPath,
+          token,
+          dev: current.dev,
+          ino: current.ino,
+        });
+      } catch { /* best effort */ }
+      try { unlinkSync(candidate); } catch { /* best effort */ }
+    }
   }
 }
 
@@ -173,15 +278,49 @@ export function acquireLocalStoreLock(path: string, waitMs = 2_000): LocalStoreL
         if (stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) || stat.nlink < 1 || stat.nlink > 2) return null;
         const state = ownerState(path, { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs });
         if (state === 'dead' || (state === 'unknown' && Date.now() - stat.mtimeMs >= INIT_GRACE_MS)) {
-          if (stat.nlink === 2 && !collapseInstalledCandidate(path, stat)) return null;
-          const installed = lstatSync(path);
-          if (!safelyUnlink(path, installed)) return null;
-          continue;
+          const election = acquireReclaimElection(path);
+          if (election) {
+            try {
+              if (stat.nlink === 2 && !collapseInstalledCandidate(path, stat)) return null;
+              const installed = lstatSync(path);
+              if (installed.dev !== stat.dev || installed.ino !== stat.ino) return null;
+              if (!safelyUnlink(path, stat)) return null;
+              continue;
+            } finally {
+              releaseLocalStoreLock(election);
+            }
+          }
         }
       } catch { /* changing path; retry within bounded deadline */ }
       if (performance.now() >= deadline) return null;
       Atomics.wait(SLEEP, 0, 0, 10);
     }
+  }
+}
+
+export function ownsLocalStoreLock(lock: LocalStoreLock | null | undefined): boolean {
+  if (!lock) return false;
+  let fd: number | undefined;
+  try {
+    const stat = lstatSync(lock.path);
+    if (
+      stat.dev !== lock.dev || stat.ino !== lock.ino || stat.isSymbolicLink() ||
+      !stat.isFile() || stat.nlink !== 1 || !owned(stat.uid)
+    ) return false;
+    fd = openSync(lock.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (
+      opened.dev !== lock.dev || opened.ino !== lock.ino || opened.nlink !== 1 ||
+      opened.size < 2 || opened.size > 512
+    ) return false;
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
+    const owner = JSON.parse(bytes.toString('utf8')) as { token?: unknown };
+    return owner.token === lock.token;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
 }
 

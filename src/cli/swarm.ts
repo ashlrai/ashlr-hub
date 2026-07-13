@@ -1398,6 +1398,20 @@ export async function cmdSwarm(args: string[]): Promise<number> {
   // worker (ashlr swarm --resume <id> --_worker with ASHLR_IN_SWARM cleared),
   // and returned immediately. Report the id; the worker drives the swarm. ─────
   if (parsed.background) {
+    if (swarm.status === 'failed') {
+      const detail = swarm.result ?? 'Background swarm launch failed.';
+      if (parsed.json) {
+        process.stdout.write(JSON.stringify({
+          swarmId: swarm.id,
+          background: false,
+          status: swarm.status,
+          result: detail,
+        }) + '\n');
+      } else {
+        process.stderr.write(`${red('error:')} ${detail}\n`);
+      }
+      return 1;
+    }
     if (parsed.json) {
       process.stdout.write(
         JSON.stringify({ swarmId: swarm.id, background: true }) + '\n',
