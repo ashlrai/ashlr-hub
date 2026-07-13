@@ -203,6 +203,8 @@ export interface DispatchProductionOutcomeCounts {
   emptyDiff: number;
   gateBlocked: number;
   engineFailed: number;
+  /** Optional for compatibility with callers that construct legacy count fixtures. */
+  cancelled?: number;
   sandboxFailed: number;
   proposalCaptureError: number;
   proposalDisabled: number;
@@ -288,6 +290,10 @@ export interface DispatchProductionYieldBucket {
   proposalsCreated: number;
   noProposal: number;
   proposalRate: number;
+  /** Optional for compatibility with summaries persisted before diagnostic accounting. */
+  diagnosticAttempts?: number;
+  diagnosticNoProposal?: number;
+  diagnosticProposalRate?: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts?: RunActionCounts;
@@ -304,6 +310,10 @@ export interface DispatchProductionYieldSummary {
   proposalsCreated: number;
   noProposal: number;
   proposalRate: number;
+  /** Optional for compatibility with summaries persisted before diagnostic accounting. */
+  diagnosticAttempts?: number;
+  diagnosticNoProposal?: number;
+  diagnosticProposalRate?: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts?: RunActionCounts;
@@ -1285,6 +1295,7 @@ function emptyOutcomeCounts(): DispatchProductionOutcomeCounts {
     emptyDiff: 0,
     gateBlocked: 0,
     engineFailed: 0,
+    cancelled: 0,
     sandboxFailed: 0,
     proposalCaptureError: 0,
     proposalDisabled: 0,
@@ -1330,7 +1341,7 @@ function hasRunActionCounts(counts: RunActionCounts): boolean {
 
 function incrementOutcome(
   counts: DispatchProductionOutcomeCounts,
-  outcome: DaemonDispatchProductionOutcome,
+  outcome: DaemonDispatchProductionOutcome | 'cancelled',
 ): void {
   switch (outcome) {
     case 'proposal-created':
@@ -1345,6 +1356,9 @@ function incrementOutcome(
     case 'engine-failed':
       counts.engineFailed++;
       break;
+    case 'cancelled':
+      counts.cancelled = (counts.cancelled ?? 0) + 1;
+      break;
     case 'sandbox-failed':
       counts.sandboxFailed++;
       break;
@@ -1358,6 +1372,26 @@ function incrementOutcome(
       counts.unknown++;
       break;
   }
+}
+
+function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boolean {
+  if (String(event.outcome).trim().toLowerCase() === 'cancelled') return true;
+  const classification = classifyProductionAttemptForLearningWithLabel({
+    outcome: event.outcome,
+    proposalCreated: event.proposalCreated,
+    actionCounts: event.runEventSummary?.actionCounts,
+    reason: event.reason ?? event.routeReason,
+    itemId: event.itemId,
+    title: event.title,
+    source: event.source,
+  }, event.learningLabel);
+  return String(classification.kind) === 'cancelled';
+}
+
+function outcomeForAccounting(
+  event: DispatchProductionEvent,
+): DaemonDispatchProductionOutcome | 'cancelled' {
+  return isCancelledDispatchProductionEvent(event) ? 'cancelled' : event.outcome;
 }
 
 function sortedReasons(reasons: Map<string, number>, limit: number): DispatchProductionReasonCount[] {
@@ -1378,7 +1412,7 @@ function addDiagnosticReason(
   reason: string,
   classification: ProductionAttemptLearningClassification,
 ): void {
-  if (classification.policySuppressed || isSuppressedDispatchProductionReason(reason)) return;
+  if (!classification.diagnosticAttempt || isSuppressedDispatchProductionReason(reason)) return;
   reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
 }
 
@@ -1390,6 +1424,9 @@ interface MutableYieldBucket {
   model?: string | null;
   attempts: number;
   proposalsCreated: number;
+  diagnosticAttempts: number;
+  diagnosticProposalsCreated: number;
+  diagnosticNoProposal: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts: RunActionCounts;
@@ -1454,8 +1491,9 @@ function addGeneratedRepairAttempt(
   summary: GeneratedRepairAttemptSummary,
   kind: GeneratedRepairAttemptKind | undefined,
   proposalCreated: boolean,
+  cancelled: boolean,
 ): void {
-  if (!kind) return;
+  if (!kind || cancelled) return;
   summary.attempts++;
   if (proposalCreated) summary.proposalsCreated++;
   else summary.noProposal++;
@@ -1469,6 +1507,7 @@ function addRepairTreatmentAttempt(
   attribution: MutableRepairTreatmentAttribution,
   event: DispatchProductionEvent,
 ): void {
+  if (isCancelledDispatchProductionEvent(event)) return;
   const kind = generatedRepairAttemptKindFromSignals({
     itemId: event.itemId,
     title: event.title,
@@ -1638,6 +1677,9 @@ function touchBucket(
       ...fields,
       attempts: 0,
       proposalsCreated: 0,
+      diagnosticAttempts: 0,
+      diagnosticProposalsCreated: 0,
+      diagnosticNoProposal: 0,
       spentUsd: 0,
       outcomes: emptyOutcomeCounts(),
       actionCounts: {},
@@ -1656,7 +1698,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
   bucket.attempts++;
   if (event.proposalCreated) bucket.proposalsCreated++;
   bucket.spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
-  incrementOutcome(bucket.outcomes, event.outcome);
+  incrementOutcome(bucket.outcomes, outcomeForAccounting(event));
   addRunActionCounts(bucket.actionCounts, event.runEventSummary?.actionCounts);
   const classification = classifyProductionAttemptForLearningWithLabel({
     outcome: event.outcome,
@@ -1667,6 +1709,10 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     title: event.title,
     source: event.source,
   }, event.learningLabel);
+  const cancelled = isCancelledDispatchProductionEvent(event);
+  if (!cancelled && classification.diagnosticAttempt) bucket.diagnosticAttempts++;
+  if (!cancelled && classification.kind === 'proposal-created') bucket.diagnosticProposalsCreated++;
+  if (!cancelled && classification.diagnosticNoProposal) bucket.diagnosticNoProposal++;
   addProductionAttemptShape(bucket.attemptShape, classification.attemptShape);
   addGeneratedRepairAttempt(
     bucket.generatedRepairAttempts,
@@ -1676,6 +1722,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
       source: event.source,
     }),
     event.proposalCreated,
+    cancelled,
   );
   addRepairTreatmentAttempt(bucket.repairTreatments, event);
   const reason = event.reason ?? event.routeReason ?? event.outcome;
@@ -1700,6 +1747,11 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     proposalsCreated,
     noProposal: Math.max(0, attempts - proposalsCreated),
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 0,
+    diagnosticAttempts: bucket.diagnosticAttempts,
+    diagnosticNoProposal: bucket.diagnosticNoProposal,
+    diagnosticProposalRate: bucket.diagnosticAttempts > 0
+      ? bucket.diagnosticProposalsCreated / bucket.diagnosticAttempts
+      : 0,
     spentUsd: bucket.spentUsd,
     outcomes: bucket.outcomes,
     ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
@@ -1717,9 +1769,10 @@ function sortedBuckets(buckets: Map<string, MutableYieldBucket>, limit: number):
     .map(finalizeBucket)
     .sort(
       (a, b) =>
-        b.noProposal - a.noProposal ||
-        a.proposalRate - b.proposalRate ||
-        b.attempts - a.attempts ||
+        Number((b.diagnosticAttempts ?? 0) > 0) - Number((a.diagnosticAttempts ?? 0) > 0) ||
+        (b.diagnosticNoProposal ?? 0) - (a.diagnosticNoProposal ?? 0) ||
+        (a.diagnosticProposalRate ?? 0) - (b.diagnosticProposalRate ?? 0) ||
+        (b.diagnosticAttempts ?? 0) - (a.diagnosticAttempts ?? 0) ||
         a.key.localeCompare(b.key),
     )
     .slice(0, limit);
@@ -1774,7 +1827,7 @@ function summarizeGeneratedRepairBackendTransitions(
     const same = previous.repairHandoffId === event.repairHandoffId &&
       previous.repairPreviousBackend === event.repairPreviousBackend &&
       previous.backend === event.backend &&
-      previous.outcome === event.outcome &&
+      outcomeForAccounting(previous) === outcomeForAccounting(event) &&
       previous.proposalCreated === event.proposalCreated;
     if (same) duplicateEvents++;
     else conflicts.add(key);
@@ -1799,11 +1852,12 @@ function summarizeGeneratedRepairBackendTransitions(
       };
       buckets.set(bucketKey, bucket);
     }
+    incrementOutcome(bucket.outcomes, outcomeForAccounting(event));
+    if (isCancelledDispatchProductionEvent(event)) continue;
     bucket.attempts++;
     if (event.proposalCreated) bucket.proposalsCreated++;
     else bucket.noProposal++;
     bucket.proposalRate = bucket.proposalsCreated / bucket.attempts;
-    incrementOutcome(bucket.outcomes, event.outcome);
   }
 
   const aggregateAttempts = [...buckets.values()]
@@ -1849,6 +1903,9 @@ export function summarizeDispatchProductionYield(
   const generatedRepairAttempts = emptyGeneratedRepairAttemptSummary();
   const repairTreatments = emptyRepairTreatmentAttribution();
   let proposalsCreated = 0;
+  let diagnosticAttempts = 0;
+  let diagnosticProposalsCreated = 0;
+  let diagnosticNoProposal = 0;
   let spentUsd = 0;
   let total = 0;
   const diagnosticTopReasons = new Map<string, number>();
@@ -1878,7 +1935,7 @@ export function summarizeDispatchProductionYield(
     total++;
     if (event.proposalCreated) proposalsCreated++;
     spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
-    incrementOutcome(overall, event.outcome);
+    incrementOutcome(overall, outcomeForAccounting(event));
     addRunActionCounts(actionCounts, event.runEventSummary?.actionCounts);
     const classification = classifyProductionAttemptForLearningWithLabel({
       outcome: event.outcome,
@@ -1889,6 +1946,10 @@ export function summarizeDispatchProductionYield(
       title: event.title,
       source: event.source,
     }, event.learningLabel);
+    const cancelled = isCancelledDispatchProductionEvent(event);
+    if (!cancelled && classification.diagnosticAttempt) diagnosticAttempts++;
+    if (!cancelled && classification.kind === 'proposal-created') diagnosticProposalsCreated++;
+    if (!cancelled && classification.diagnosticNoProposal) diagnosticNoProposal++;
     addProductionAttemptShape(attemptShape, classification.attemptShape);
     addGeneratedRepairAttempt(
       generatedRepairAttempts,
@@ -1898,6 +1959,7 @@ export function summarizeDispatchProductionYield(
         source: event.source,
       }),
       event.proposalCreated,
+      cancelled,
     );
     addRepairTreatmentAttempt(repairTreatments, event);
     const reason = event.reason ?? event.routeReason ?? event.outcome;
@@ -1940,6 +2002,9 @@ export function summarizeDispatchProductionYield(
     proposalsCreated,
     noProposal: Math.max(0, total - proposalsCreated),
     proposalRate: total > 0 ? proposalsCreated / total : 0,
+    diagnosticAttempts,
+    diagnosticNoProposal,
+    diagnosticProposalRate: diagnosticAttempts > 0 ? diagnosticProposalsCreated / diagnosticAttempts : 0,
     spentUsd,
     outcomes: overall,
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),

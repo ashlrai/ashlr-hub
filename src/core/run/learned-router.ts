@@ -43,7 +43,10 @@ import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
 } from '../learning/causal.js';
-import { sanitizeProductionAttemptLearningLabel } from '../learning/attempt-shape.js';
+import {
+  classifyProductionAttemptForLearningWithLabel,
+  sanitizeProductionAttemptLearningLabel,
+} from '../learning/attempt-shape.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -291,7 +294,6 @@ function isCaptureMissingDispatchEvent(event: DispatchProductionEvent): boolean 
 function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {
   const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
   if (!label?.authoritative) return false;
-  if (label.policySuppressed || label.learningKind === 'policy-suppressed') return false;
   if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;
   if (
     event.routeSnapshot?.routerPolicyVersion !== undefined &&
@@ -299,7 +301,19 @@ function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): bo
   ) {
     return false;
   }
-  return event.learningEpoch === learningEpochFromTimestamp(event.ts);
+  if (event.learningEpoch !== learningEpochFromTimestamp(event.ts)) return false;
+  const classification = classifyProductionAttemptForLearningWithLabel({
+    outcome: event.outcome,
+    proposalCreated: event.proposalCreated,
+    actionCounts: event.runEventSummary?.actionCounts,
+    reason: event.reason,
+    itemId: event.itemId,
+    title: event.title,
+    source: event.source,
+  }, label);
+  return !classification.policySuppressed &&
+    classification.kind !== 'policy-suppressed' &&
+    classification.kind !== 'cancelled';
 }
 
 function loadDispatchYieldEvents(

@@ -16,6 +16,7 @@ import {
 } from '../fleet/dispatch-production-ledger.js';
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { GeneratedRepairRouteReason } from '../fleet/router.js';
+import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import type {
@@ -44,6 +45,7 @@ export type TrajectoryTerminalOutcome =
   | 'handoff'
   | 'pending'
   | 'no-proposal'
+  | 'cancelled'
   | 'failed'
   | 'unknown';
 export type TrajectoryRealizedOutcome = 'followed-up' | 'reverted' | 'regressed';
@@ -181,12 +183,16 @@ type PublishedCoverageMetrics = Omit<
   Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>,
   'skillUse'
 > & { skillUse?: TrajectoryCoverageMetric };
+export type TrajectoryTerminalOutcomeCounts = Omit<
+  Record<TrajectoryTerminalOutcome, number>,
+  'cancelled'
+> & { cancelled?: number };
 
 export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
   trajectories: number;
-  terminalOutcomes: Record<TrajectoryTerminalOutcome, number>;
+  terminalOutcomes: TrajectoryTerminalOutcomeCounts;
   realizedOutcomes: Record<TrajectoryRealizedOutcome, number>;
   coverage: PublishedCoverageMetrics;
   routeSpine: {
@@ -395,12 +401,13 @@ function betterTerminalOutcome(
 ): TrajectoryTerminalOutcome {
   const rank: Record<TrajectoryTerminalOutcome, number> = {
     unknown: 0,
-    pending: 1,
-    failed: 2,
-    'no-proposal': 3,
-    handoff: 4,
-    rejected: 5,
-    merged: 6,
+    cancelled: 1,
+    pending: 2,
+    failed: 3,
+    'no-proposal': 4,
+    handoff: 5,
+    rejected: 6,
+    merged: 7,
   };
   return rank[next] >= rank[current] ? next : current;
 }
@@ -474,6 +481,16 @@ function decisionTerminalOutcome(action: OutcomeRecordDecision['action']): Traje
 
 function dispatchTerminalOutcome(event: DispatchProductionEvent): TrajectoryTerminalOutcome {
   if (event.proposalCreated) return 'pending';
+  const classification = classifyProductionAttemptForLearningWithLabel({
+    outcome: event.outcome,
+    proposalCreated: event.proposalCreated,
+    actionCounts: event.runEventSummary?.actionCounts,
+    reason: event.reason ?? event.routeReason,
+    itemId: event.itemId,
+    title: event.title,
+    source: event.source,
+  }, event.learningLabel);
+  if (classification.kind === 'cancelled') return 'cancelled';
   if (event.outcome === 'empty-diff' || event.outcome === 'proposal-disabled') return 'no-proposal';
   if (
     event.outcome === 'engine-failed' ||
@@ -1029,6 +1046,7 @@ export function summarizeTrajectoryLearning(
     handoff: 0,
     pending: 0,
     'no-proposal': 0,
+    cancelled: 0,
     failed: 0,
     unknown: 0,
   };

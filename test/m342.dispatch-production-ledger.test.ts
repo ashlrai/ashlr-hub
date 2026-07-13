@@ -248,7 +248,7 @@ describe('M342 dispatch production ledger', () => {
     const event = readDispatchProductionEvents({ limit: 1 })[0];
     expect(event?.learningLabel).toMatchObject({
       schemaVersion: 1,
-      classifierVersion: 'attempt-shape-v1',
+      classifierVersion: 'attempt-shape-v2',
       authoritative: true,
       learningKind: 'policy-suppressed',
       policySuppressed: true,
@@ -671,6 +671,9 @@ describe('M342 dispatch production ledger', () => {
       proposalsCreated: 1,
       noProposal: 3,
       proposalRate: 1 / 4,
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 2,
+      diagnosticProposalRate: 1 / 3,
       outcomes: {
         proposalCreated: 1,
         emptyDiff: 1,
@@ -700,6 +703,9 @@ describe('M342 dispatch production ledger', () => {
       proposalsCreated: 0,
       noProposal: 2,
       proposalRate: 0,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 2,
+      diagnosticProposalRate: 0,
       outcomes: {
         emptyDiff: 1,
         gateBlocked: 1,
@@ -744,6 +750,9 @@ describe('M342 dispatch production ledger', () => {
     expect(summary?.byBackend.some((bucket) =>
       bucket.backend === 'codex' &&
       bucket.attempts === 2 &&
+      bucket.diagnosticAttempts === 1 &&
+      bucket.diagnosticNoProposal === 0 &&
+      bucket.diagnosticProposalRate === 1 &&
       bucket.outcomes.proposalDisabled === 1 &&
       bucket.actionCounts?.proposalCreated === 1 &&
       bucket.actionCounts?.proposalDisabled === 1
@@ -822,6 +831,126 @@ describe('M342 dispatch production ledger', () => {
         diagnosticReslices: 1,
         proposalRepairs: 0,
       },
+    });
+  });
+
+  it('accounts explicit and historical cancellation separately from genuine engine failure', () => {
+    const explicitCancellation = makeEvent({
+      itemId: 'explicit-cancellation',
+      outcome: 'cancelled' as never,
+      proposalCreated: false,
+      reason: 'run cancelled by owner',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'cancelled',
+        proposalCreated: false,
+      },
+    });
+    const historicalCancellation = makeEvent({
+      itemId: 'historical-cancellation',
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      reason: 'swarm cancelled by owner',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'engine-failed',
+        proposalCreated: false,
+      },
+    });
+    const genuineFailure = makeEvent({
+      itemId: 'genuine-engine-failure',
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      reason: 'provider request failed',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'engine-failed',
+        proposalCreated: false,
+      },
+    });
+
+    const summary = summarizeDispatchProductionYield([
+      explicitCancellation,
+      historicalCancellation,
+      genuineFailure,
+    ]);
+
+    expect(summary?.outcomes).toEqual({
+      proposalCreated: 0,
+      emptyDiff: 0,
+      gateBlocked: 0,
+      engineFailed: 1,
+      cancelled: 2,
+      sandboxFailed: 0,
+      proposalCaptureError: 0,
+      proposalDisabled: 0,
+      unknown: 0,
+    });
+    expect(summary).toMatchObject({
+      attempts: 3,
+      noProposal: 3,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: 0,
+    });
+    expect(summary?.byBackend[0]).toMatchObject({
+      attempts: 3,
+      noProposal: 3,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: 0,
+      diagnosticTopReasons: [{ reason: 'provider request failed', count: 1 }],
+    });
+    expect(summary?.diagnosticTopReasons).toEqual([
+      { reason: 'provider request failed', count: 1 },
+    ]);
+    expect(summary?.byBackend[0]?.outcomes).toEqual(summary?.outcomes);
+    expect(summarizeDispatchProductionYield([genuineFailure])?.outcomes.cancelled).toBe(0);
+  });
+
+  it('excludes current and historical cancellation from generated-repair conversion accounting', () => {
+    const generatedRepair = {
+      itemId: 'ashlr-hub:proposal-repair-nodiff:123456789abc',
+      title: 'Reslice no-diff dispatch for cancellation accounting',
+      proposalCreated: false,
+    } as const;
+    const explicitCancellation = makeEvent({
+      ...generatedRepair,
+      runId: 'generated-repair-cancelled',
+      outcome: 'cancelled' as never,
+      reason: 'run cancelled by owner',
+      runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
+    });
+    const historicalCancellation = makeEvent({
+      ...generatedRepair,
+      runId: 'generated-repair-legacy-cancelled',
+      outcome: 'engine-failed',
+      reason: 'best-of-2 selection cancelled by owner',
+      runEventSummary: { status: 'failed', outcome: 'engine-failed', proposalCreated: false },
+    });
+    const genuineFailure = makeEvent({
+      ...generatedRepair,
+      runId: 'generated-repair-failed',
+      outcome: 'engine-failed',
+      reason: 'provider request failed',
+      runEventSummary: { status: 'failed', outcome: 'engine-failed', proposalCreated: false },
+    });
+
+    const summary = summarizeDispatchProductionYield([
+      explicitCancellation,
+      historicalCancellation,
+      genuineFailure,
+    ]);
+
+    expect(summary?.outcomes).toMatchObject({ cancelled: 2, engineFailed: 1 });
+    expect(summary?.generatedRepairAttempts).toMatchObject({
+      attempts: 1,
+      proposalsCreated: 0,
+      noProposal: 1,
+      proposalRate: 0,
+      captureRepairs: 0,
+      diagnosticReslices: 1,
+      proposalRepairs: 0,
     });
   });
 
@@ -961,6 +1090,49 @@ describe('M342 dispatch production ledger', () => {
     const replayed = summarizeDispatchProductionYield([...events, replay])?.generatedRepairAttempts;
     expect(replayed?.treatmentAttribution?.replayedEvents).toBe(1);
     expect(replayed).not.toHaveProperty('treatmentConversions');
+  });
+
+  it('does not let cancelled repair executions contaminate treatment conversions', () => {
+    const events = treatmentEvents();
+    const raw = events.find((event) =>
+      event.repairTreatmentOutcome === undefined &&
+      event.basis !== 'repair-lifecycle-candidate'
+    )!;
+    const explicitCancellation = {
+      ...raw,
+      runId: 'cancelled-treatment-execution',
+      outcome: 'cancelled' as never,
+      proposalCreated: false,
+      proposalId: undefined,
+      runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
+    };
+    const historicalCancellation = {
+      ...raw,
+      runId: 'legacy-cancelled-treatment-execution',
+      outcome: 'engine-failed' as const,
+      proposalCreated: false,
+      proposalId: undefined,
+      reason: 'run cancelled by owner',
+      runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
+    };
+
+    const generated = summarizeDispatchProductionYield([
+      ...events,
+      explicitCancellation,
+      historicalCancellation,
+    ])?.generatedRepairAttempts;
+
+    expect(generated?.treatmentAttribution).toMatchObject({
+      eligibleEvents: 10,
+      attributedEvents: 10,
+      replayedEvents: 0,
+      gate: 'ready',
+      blockers: [],
+    });
+    expect(generated?.treatmentConversions).toEqual([
+      { repairTreatment: 'baseline-reslice', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
+      { repairTreatment: 'target-localization', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
+    ]);
   });
 
   it('reports sorted per-arm terminal progress for imbalanced treatment samples', () => {
@@ -1221,6 +1393,66 @@ describe('M342 dispatch production ledger', () => {
       'proposal filing disabled for this sandboxed attempt',
     ]);
     expect(codex?.diagnosticTopReasons).toEqual([]);
+    expect(codex).toMatchObject({
+      attempts: 2,
+      noProposal: 2,
+      diagnosticAttempts: 0,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: 0,
+    });
+  });
+
+  it('sorts and truncates buckets by diagnostic yield instead of raw suppressed volume', () => {
+    const events = Array.from({ length: 20 }, (_, index) => makeEvent({
+      itemId: `cancelled-${index}`,
+      backend: 'local-coder',
+      outcome: 'cancelled',
+      reason: 'dispatch cancelled after daemon ownership changed',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'cancelled',
+        proposalCreated: false,
+      },
+    }));
+    events.push(
+      makeEvent({
+        itemId: 'policy-suppressed',
+        backend: 'kimi',
+        outcome: 'proposal-disabled',
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      }),
+      makeEvent({
+        itemId: 'actionable-empty-diff',
+        backend: 'codex',
+        outcome: 'empty-diff',
+        reason: 'engine completed without file changes',
+      }),
+    );
+
+    const summary = summarizeDispatchProductionYield(events, { limitPerDimension: 1 });
+
+    expect(summary?.byBackend).toHaveLength(1);
+    expect(summary?.byBackend[0]).toMatchObject({
+      key: 'codex',
+      attempts: 1,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 1,
+      diagnosticProposalRate: 0,
+    });
+  });
+
+  it('uses the bucket key as a deterministic diagnostic-yield tie breaker', () => {
+    const forward = summarizeDispatchProductionYield([
+      makeEvent({ itemId: 'zeta-failure', backend: 'kimi', outcome: 'empty-diff' }),
+      makeEvent({ itemId: 'alpha-failure', backend: 'codex', outcome: 'empty-diff' }),
+    ]);
+    const reverse = summarizeDispatchProductionYield([
+      makeEvent({ itemId: 'alpha-failure', backend: 'codex', outcome: 'empty-diff' }),
+      makeEvent({ itemId: 'zeta-failure', backend: 'kimi', outcome: 'empty-diff' }),
+    ]);
+
+    expect(forward?.byBackend.map((bucket) => bucket.key)).toEqual(['codex', 'kimi']);
+    expect(reverse?.byBackend.map((bucket) => bucket.key)).toEqual(['codex', 'kimi']);
   });
 
   it('treats capture-missing proposal-disabled telemetry as diagnostic, not policy-suppressed', () => {
@@ -1353,6 +1585,19 @@ describe('M342 dispatch production ledger', () => {
       outcome: 'engine-failed',
       proposalCreated: false,
     });
+    const cancelled = makeEvent({
+      ...retry,
+      runId: 'run-c',
+      outcome: 'cancelled',
+      proposalCreated: false,
+      runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
+    });
+    const historicalCancelledDuplicate = makeEvent({
+      ...cancelled,
+      outcome: 'engine-failed',
+      reason: 'run cancelled by owner',
+      runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
+    });
     const conflict = makeEvent({
       ...retry,
       runId: retry.runId,
@@ -1361,13 +1606,19 @@ describe('M342 dispatch production ledger', () => {
       proposalCreated: false,
     });
 
-    const healthy = summarizeDispatchProductionYield([retry, { ...retry }, distinct]);
+    const healthy = summarizeDispatchProductionYield([
+      retry,
+      { ...retry },
+      distinct,
+      cancelled,
+      historicalCancelledDuplicate,
+    ]);
     expect(healthy?.generatedRepairBackendTransitions).toEqual({
       sourceState: 'healthy',
-      lineageEvents: 3,
-      transitionEvents: 3,
+      lineageEvents: 5,
+      transitionEvents: 5,
       attempts: 2,
-      duplicateEvents: 1,
+      duplicateEvents: 2,
       conflictingAttempts: 0,
       invalidLineageEvents: 0,
       byTransition: [{
@@ -1377,7 +1628,7 @@ describe('M342 dispatch production ledger', () => {
         proposalsCreated: 1,
         noProposal: 1,
         proposalRate: 0.5,
-        outcomes: expect.objectContaining({ proposalCreated: 1, engineFailed: 1 }),
+        outcomes: expect.objectContaining({ proposalCreated: 1, engineFailed: 1, cancelled: 1 }),
       }],
     });
 

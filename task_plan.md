@@ -2053,3 +2053,23 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit, push, pass exhaustive Ubuntu/package plus all Windows CI, and stage a clean no-hardlinks immutable exact-SHA release.
 - [x] Promote Mission Control only and prove three exact-identity, guard-clear, owner-matched HTTP canaries without changing the daemon or `current`.
 - [ ] Activate the exact daemon and atomically advance `current` only at a stable natural boundary with no tick, descendants, or spend guard.
+
+## Current Overnight Cycle - Cancellation Learning Truth
+- [x] Rehydrate the clean release candidate, production process boundary, durable notes, and persistence state.
+- [x] Audit cancellation emission, learned-router denominators, trajectory projection, and persistence scalability in parallel.
+- [x] Emit first-class metadata-only `cancelled` dispatch and agent-action outcomes without changing downgrade-safe public run/swarm status.
+- [x] Classify current and recognizable historical owner/selection/lock-loss cancellations as non-diagnostic control flow.
+- [x] Exclude cancellation from learned routing, proposal-yield diagnostics, generated-repair conversion, treatment attribution, and causal-label weakness.
+- [x] Preserve hard-budget aborts, authoritative engine error exits, and provider failures as real failures.
+- [x] Expose cancellation counts in dispatch summaries, trajectories, attempt coverage, CLI, Mission Control, and Fleet Dashboard.
+- [x] Pass focused tests, typecheck, lint, build, dependency audit, and the definitive 492-file suite.
+- [x] Resolve independent adversarial review, including Best-of-N precedence, diagnostic bucket ordering, and cooperating-daemon mutation fencing.
+- [ ] Commit/push, observe CI, and stage exact source.
+- [ ] Activate only at a natural stable boundary with no daemon tick, descendants, or spend guard.
+
+## Next P1 - Bounded Race-Safe Persistence Reads
+- [ ] Replace full-history `listRuns()`/dashboard/SSE scans with a bounded recent-record reader that counts only valid records.
+- [ ] Read records through opened, `fstat`-verified handles with size and schema bounds to close pathname TOCTOU races.
+- [ ] Reuse the reader for swarm history so malformed early directory entries cannot hide valid recent records.
+- [ ] Add per-ID revision/CAS fencing so concurrent same-ID saves cannot roll completed state backward.
+- [ ] Replace permanent case-fold claims with recoverable ownership plus bounded retention.

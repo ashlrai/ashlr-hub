@@ -4043,6 +4043,7 @@ export interface DaemonDispatchTrace {
 
 export type DaemonDispatchProductionOutcome =
   | 'proposal-created'
+  | 'cancelled'
   | 'empty-diff'
   | 'gate-blocked'
   | 'engine-failed'

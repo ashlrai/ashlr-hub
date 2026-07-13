@@ -2670,9 +2670,32 @@ function dispatchProductionPolicyDisabledCount(bucket) {
 }
 
 function dispatchProductionDiagnosticAttempts(bucket) {
+  const materialized = Number(bucket?.diagnosticAttempts);
+  if (Number.isFinite(materialized) && materialized >= 0) return Math.trunc(materialized);
   const attempts = Number(bucket?.attempts ?? 0);
   const safeAttempts = Number.isFinite(attempts) && attempts > 0 ? Math.trunc(attempts) : 0;
-  return Math.max(0, safeAttempts - dispatchProductionPolicyDisabledCount(bucket));
+  const cancelled = Number(bucket?.outcomes?.cancelled ?? 0);
+  const safeCancelled = Number.isFinite(cancelled) && cancelled > 0 ? Math.trunc(cancelled) : 0;
+  return Math.max(0, safeAttempts - dispatchProductionPolicyDisabledCount(bucket) - safeCancelled);
+}
+
+function dispatchProductionDiagnosticRate(bucket) {
+  const materialized = Number(bucket?.diagnosticProposalRate);
+  if (Number.isFinite(materialized) && materialized >= 0) return materialized;
+  const attempts = dispatchProductionDiagnosticAttempts(bucket);
+  return attempts > 0 ? Number(bucket?.proposalsCreated ?? 0) / attempts : 0;
+}
+
+function dispatchProductionWeakestBackend(backends) {
+  if (!Array.isArray(backends)) return null;
+  return backends
+    .filter((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)
+    .sort((left, right) =>
+      dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right) ||
+      Number(right?.diagnosticNoProposal ?? 0) - Number(left?.diagnosticNoProposal ?? 0) ||
+      dispatchProductionDiagnosticAttempts(right) - dispatchProductionDiagnosticAttempts(left) ||
+      String(left?.key ?? '').localeCompare(String(right?.key ?? ''))
+    )[0] ?? null;
 }
 
 function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = 'ctrl-card card') {
@@ -2692,11 +2715,14 @@ function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = '
   }
 
   const sourceHealthy = dispatchProductionSourceHealthy(sourceQuality);
-  const proposalRate = sourceHealthy ? formatFleetPercent(dispatchProduction.proposalRate) : 'partial';
+  const diagnosticAttempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
+  const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
+    Math.max(0, diagnosticAttempts - Number(dispatchProduction.proposalsCreated ?? 0));
+  const proposalRate = sourceHealthy ? formatFleetPercent(dispatchProductionDiagnosticRate(dispatchProduction)) : 'partial';
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Dispatch Yield'),
     el('span', { cls: 'card-subtitle' }, sourceHealthy
-      ? `${dispatchProduction.proposalsCreated ?? 0}/${dispatchProduction.events ?? 0} proposals`
+      ? `${dispatchProduction.proposalsCreated ?? 0}/${diagnosticAttempts} proposals`
       : dispatchProductionSourceText(sourceQuality))
   ));
 
@@ -2705,11 +2731,12 @@ function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = '
   body.appendChild(infoGrid([
     ['Source', dispatchProductionSourceText(sourceQuality)],
     ['Window', proposalProductionWindowLabel(dispatchProduction)],
-    ['Attempts', dispatchProduction.events ?? 0],
+    ['Attempts', diagnosticAttempts],
     ['Proposals', dispatchProduction.proposalsCreated ?? 0],
     ['Yield', proposalRate],
     ['Repair recovery', repairRecovery?.value ?? '—'],
-    ['No-proposal', dispatchProduction.noProposal ?? 0],
+    ['No-proposal', diagnosticNoProposal],
+    ['Cancelled', dispatchProduction.outcomes?.cancelled ?? 0],
     ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
   ]));
   const shape = formatAttemptShape(dispatchProduction.attemptShape);
@@ -2730,7 +2757,8 @@ function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = '
       list.appendChild(el('div', { cls: 'ctrl-backend-row', title: bucketReasons[0]?.reason ?? '' },
         el('span', { cls: 'ctrl-backend-name' }, dispatchProductionBucketLabel(bucket)),
         el('span', { cls: 'ctrl-backend-dispatches' },
-          `${bucket.proposalsCreated ?? 0}/${bucket.attempts ?? 0} · ${formatFleetPercent(bucket.proposalRate)}`
+          `${bucket.proposalsCreated ?? 0}/${dispatchProductionDiagnosticAttempts(bucket)} · ` +
+          `${formatFleetPercent(dispatchProductionDiagnosticRate(bucket))}`
         )
       ));
     }
@@ -2807,6 +2835,7 @@ function formatCoverageMetric(metric) {
 function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   if (!attemptCoverage) return null;
   const attempts = attemptCoverage.attempts ?? 0;
+  const cancelled = attemptCoverage.production?.cancelled ?? 0;
   const causal = attemptCoverage.causalCoverage ?? {};
   const joins = attemptCoverage.coverage ?? {};
   const weak = attemptCoverage.causalWeak ?? {};
@@ -2838,10 +2867,11 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
     ['Policy', formatCoverageMetric(causal.currentRouterPolicyVersion)],
     ['Epoch', formatCoverageMetric(causal.currentLearningEpoch)],
     ['Labels', formatCoverageMetric(causal.currentAuthoritativeLabel)],
+    ['Cancelled', cancelled],
   ]));
   if (topWeak) {
     body.appendChild(el('p', { cls: 'hint' },
-      `Weak causal signal: ${topWeak.kind} ${topWeak.count ?? 0}/${attempts} (${formatFleetPercent(topWeak.rate)})`
+      `Weak causal signal: ${topWeak.kind} ${topWeak.count ?? 0}/${topWeak.denominator ?? attempts} (${formatFleetPercent(topWeak.rate)})`
     ));
   }
   if (topCause) {
@@ -2943,6 +2973,7 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
     ['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)],
     ['Merged', terminal.merged ?? 0],
     ['No-proposal', terminal['no-proposal'] ?? 0],
+    ['Cancelled', terminal.cancelled ?? 0],
     ['Failed', terminal.failed ?? 0],
     ['Skill-observed trajectories', skillObserved ? formatCoverageMetric(skill.observedTrajectoryCoverage) : skillNone ? 'none' : withheldLabel],
     ['Observation sample', skillEventsPresent && skill.sampleState === 'none' ? 'no joined sample' : skill.sampleState ?? 'unavailable'],
@@ -3940,10 +3971,11 @@ function renderControl() {
   }
   if (dispatchProduction) {
     const sourceHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+    const diagnosticRate = dispatchProductionDiagnosticRate(dispatchProduction);
     heroMetrics.appendChild(controlMetric(
       'Yield 24h',
-      sourceHealthy ? formatFleetPercent(dispatchProduction.proposalRate) : 'degraded',
-      sourceHealthy && dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'
+      sourceHealthy ? formatFleetPercent(diagnosticRate) : 'degraded',
+      sourceHealthy && diagnosticRate > 0 ? '#4ade80' : '#f97316'
     ));
   }
   else if (dispatchProductionSource?.sourceState === 'degraded') {
@@ -4891,8 +4923,8 @@ function fdDispatchYieldText(dispatchProduction, sourceQuality) {
     : 'unavailable';
   if (!dispatchProductionSourceHealthy(sourceQuality)) return dispatchProductionSourceText(sourceQuality);
   const proposals = dispatchProduction.proposalsCreated ?? 0;
-  const attempts = dispatchProduction.events ?? dispatchProduction.attempts ?? 0;
-  return `${proposals}/${attempts} proposals (${formatFleetPercent(dispatchProduction.proposalRate)})`;
+  const attempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
+  return `${proposals}/${attempts} proposals (${formatFleetPercent(dispatchProductionDiagnosticRate(dispatchProduction))})`;
 }
 
 function fdMetricPill(label, value, title) {
@@ -5363,17 +5395,21 @@ function fdRenderProductionPanel(snap) {
 
   if (dispatchProduction) {
     const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
+    const diagnosticAttempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
+    const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
+      Math.max(0, diagnosticAttempts - Number(dispatchProduction.proposalsCreated ?? 0));
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
     body.appendChild(infoGrid([
       ['Source', dispatchProductionSourceText(dispatchProductionSource)],
       ['Window', proposalProductionWindowLabel(dispatchProduction)],
-      ['Attempts', dispatchProduction.events ?? 0],
+      ['Attempts', diagnosticAttempts],
       ['Proposals', dispatchProduction.proposalsCreated ?? 0],
       ['Yield', dispatchProductionSourceHealthy(dispatchProductionSource)
-        ? formatFleetPercent(dispatchProduction.proposalRate)
+        ? formatFleetPercent(dispatchProductionDiagnosticRate(dispatchProduction))
         : 'partial'],
       ['Repair recovery', repairRecovery?.value ?? '—'],
-      ['No-proposal', dispatchProduction.noProposal ?? 0],
+      ['No-proposal', diagnosticNoProposal],
+      ['Cancelled', dispatchProduction.outcomes?.cancelled ?? 0],
       ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
     ]));
     const shape = formatAttemptShape(dispatchProduction.attemptShape);
@@ -5382,14 +5418,13 @@ function fdRenderProductionPanel(snap) {
       body.appendChild(el('p', { cls: 'hint' }, `Repair loop: ${repairRecovery.detail}`));
     }
     const backends = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend : [];
-    const backend = backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0) ?? backends[0] ?? null;
+    const backend = dispatchProductionWeakestBackend(backends);
     if (backend) {
-      const diagnosticAttempts = dispatchProductionDiagnosticAttempts(backend);
-      const attempts = diagnosticAttempts > 0 ? diagnosticAttempts : backend.attempts ?? 0;
+      const attempts = dispatchProductionDiagnosticAttempts(backend);
       const proposals = backend.proposalsCreated ?? 0;
-      const rate = attempts > 0 ? proposals / attempts : 0;
       body.appendChild(el('p', { cls: 'hint' },
-        `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${proposals}/${attempts} (${formatFleetPercent(rate)})`
+        `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${proposals}/${attempts} ` +
+        `(${formatFleetPercent(dispatchProductionDiagnosticRate(backend))})`
       ));
     }
   }
@@ -5444,6 +5479,7 @@ function fdRenderProductionPanel(snap) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Attempt coverage'));
     body.appendChild(infoGrid([
       ['Attempts', attemptCoverage.attempts ?? 0],
+      ['Cancelled', attemptCoverage.production?.cancelled ?? 0],
       ['Trajectory', formatCoverageMetric(causal.trajectoryId)],
       ['Route', formatCoverageMetric(causal.routeSnapshot)],
       ['Run summary', formatCoverageMetric(causal.runEventSummary)],
@@ -5453,7 +5489,7 @@ function fdRenderProductionPanel(snap) {
     ]));
     if (topWeak) {
       body.appendChild(el('p', { cls: 'hint' },
-        `Top causal gap: ${topWeak.kind} ${topWeak.count ?? 0}/${attemptCoverage.attempts ?? 0} (${formatFleetPercent(topWeak.rate)})`
+        `Top causal gap: ${topWeak.kind} ${topWeak.count ?? 0}/${topWeak.denominator ?? attemptCoverage.attempts ?? 0} (${formatFleetPercent(topWeak.rate)})`
       ));
     }
     if (topCause) {

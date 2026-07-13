@@ -19,12 +19,16 @@ export type ProductionAttemptLearningKind =
   | 'proposal-created'
   | 'diagnostic-no-proposal'
   | 'policy-suppressed'
+  | 'cancelled'
   | 'failed'
   | 'blocked'
   | 'unknown';
 
 export const PRODUCTION_ATTEMPT_LEARNING_LABEL_SCHEMA_VERSION = 1;
-export const PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION = 'attempt-shape-v1';
+export const PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION = 'attempt-shape-v2';
+
+// Keep the envelope stable so v1 readers can drop an unknown label without dropping its event row.
+const LEGACY_PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION = 'attempt-shape-v1';
 
 export interface ProductionAttemptLearningClassification {
   attemptShape: ProductionAttemptShape;
@@ -46,6 +50,16 @@ export interface ProductionAttemptLearningLabel {
 }
 
 const PRODUCTION_ATTEMPT_LEARNING_KINDS = new Set<ProductionAttemptLearningKind>([
+  'proposal-created',
+  'diagnostic-no-proposal',
+  'policy-suppressed',
+  'cancelled',
+  'failed',
+  'blocked',
+  'unknown',
+]);
+
+const V1_PRODUCTION_ATTEMPT_LEARNING_KINDS = new Set<ProductionAttemptLearningKind>([
   'proposal-created',
   'diagnostic-no-proposal',
   'policy-suppressed',
@@ -95,9 +109,11 @@ export function productionAttemptShapeFromSignals(
   const verifyRepairAttempts = nonNegativeInteger(counts?.verifyRepairAttempts) ?? 0;
   const generatedRepairAttemptKind = generatedRepairAttemptKindFromSignals(signals);
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
+  const cancelled = !produced && isCancellationSignal(signals);
   const policyDisabled = !captureMissing && (outcome === 'proposal-disabled' || proposalDisabled > 0);
   const gateish = captureMissing || outcome === 'gate-blocked' || outcome === 'proposal-capture-error';
   const backendNoDiff =
+    !cancelled &&
     !policyDisabled &&
     !produced &&
     (outcome === 'empty-diff' || (diffFiles === 0 && !gateish));
@@ -111,7 +127,9 @@ export function productionAttemptShapeFromSignals(
   ) {
     shape.captureOrGateBlocked = 1;
   }
-  shape.repairAttempts = Math.max(verifyRepairAttempts, generatedRepairAttemptKind ? 1 : 0);
+  shape.repairAttempts = cancelled
+    ? 0
+    : Math.max(verifyRepairAttempts, generatedRepairAttemptKind ? 1 : 0);
   return shape;
 }
 
@@ -121,10 +139,11 @@ export function classifyProductionAttemptForLearning(
   const attemptShape = productionAttemptShapeFromSignals(signals);
   const outcome = normalizeOutcome(signals.outcome);
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
-  const policySuppressed = attemptShape.policyDisabled > 0;
+  const cancelled = !produced && isCancellationSignal(signals);
+  const policySuppressed = !cancelled && attemptShape.policyDisabled > 0;
   const failed = isFailedOutcome(outcome);
   const blocked = isBlockedOutcome(outcome);
-  const diagnosticNoProposal = !produced && !policySuppressed && !failed && !blocked && (
+  const diagnosticNoProposal = !cancelled && !produced && !policySuppressed && !failed && !blocked && (
     signals.proposalCreated === false ||
     outcome === 'no-proposal' ||
     outcome === 'empty-diff' ||
@@ -136,20 +155,22 @@ export function classifyProductionAttemptForLearning(
   );
   const kind: ProductionAttemptLearningKind = produced
     ? 'proposal-created'
-    : policySuppressed
-      ? 'policy-suppressed'
-      : diagnosticNoProposal
-        ? 'diagnostic-no-proposal'
-        : failed
-          ? 'failed'
-          : blocked
-            ? 'blocked'
-            : 'unknown';
+    : cancelled
+      ? 'cancelled'
+      : policySuppressed
+        ? 'policy-suppressed'
+        : diagnosticNoProposal
+          ? 'diagnostic-no-proposal'
+          : failed
+            ? 'failed'
+            : blocked
+              ? 'blocked'
+              : 'unknown';
   return {
     attemptShape,
     policySuppressed,
     diagnosticNoProposal,
-    diagnosticAttempt: kind !== 'policy-suppressed' && kind !== 'unknown',
+    diagnosticAttempt: kind !== 'policy-suppressed' && kind !== 'cancelled' && kind !== 'unknown',
     kind,
   };
 }
@@ -186,10 +207,16 @@ export function sanitizeProductionAttemptLearningLabel(
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   if (record['schemaVersion'] !== PRODUCTION_ATTEMPT_LEARNING_LABEL_SCHEMA_VERSION) return undefined;
-  if (record['classifierVersion'] !== PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION) return undefined;
+  const classifierVersion = record['classifierVersion'];
+  const supportedKinds = classifierVersion === PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION
+    ? PRODUCTION_ATTEMPT_LEARNING_KINDS
+    : classifierVersion === LEGACY_PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION
+      ? V1_PRODUCTION_ATTEMPT_LEARNING_KINDS
+      : undefined;
+  if (!supportedKinds) return undefined;
   if (record['authoritative'] !== true) return undefined;
   const learningKind = typeof record['learningKind'] === 'string' &&
-    PRODUCTION_ATTEMPT_LEARNING_KINDS.has(record['learningKind'] as ProductionAttemptLearningKind)
+    supportedKinds.has(record['learningKind'] as ProductionAttemptLearningKind)
     ? record['learningKind'] as ProductionAttemptLearningKind
     : undefined;
   if (!learningKind) return undefined;
@@ -206,6 +233,7 @@ export function sanitizeProductionAttemptLearningLabel(
   }
   const attemptShape = productionAttemptShapeFromUnknown(record['attemptShape']);
   if (!attemptShape) return undefined;
+  if (learningKind === 'cancelled') attemptShape.backendNoDiff = 0;
   return {
     schemaVersion: PRODUCTION_ATTEMPT_LEARNING_LABEL_SCHEMA_VERSION,
     classifierVersion: PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION,
@@ -222,6 +250,8 @@ export function classifyProductionAttemptForLearningWithLabel(
   signals: ProductionAttemptShapeSignals,
   label: unknown,
 ): ProductionAttemptLearningClassification {
+  const current = classifyProductionAttemptForLearning(signals);
+  if (current.kind === 'proposal-created' || current.kind === 'cancelled') return current;
   const stored = sanitizeProductionAttemptLearningLabel(label);
   if (stored) {
     return {
@@ -232,7 +262,7 @@ export function classifyProductionAttemptForLearningWithLabel(
       attemptShape: stored.attemptShape,
     };
   }
-  return classifyProductionAttemptForLearning(signals);
+  return current;
 }
 
 function actionCountsRecord(counts: RunActionCounts | undefined): Record<string, unknown> | undefined {
@@ -256,6 +286,17 @@ function normalizeReason(value: string | null | undefined): string | undefined {
 function isCaptureMissingSignal(signals: ProductionAttemptShapeSignals): boolean {
   const reason = normalizeReason(signals.reason);
   return reason?.includes('capture-missing') === true;
+}
+
+function isCancellationSignal(signals: ProductionAttemptShapeSignals): boolean {
+  const outcome = normalizeOutcome(signals.outcome);
+  if (outcome === 'cancelled' || outcome === 'canceled') return true;
+  const reason = normalizeReason(signals.reason);
+  if (!reason) return false;
+  return /\bselection cancell?ed\b/.test(reason) ||
+    /\bdaemon lock ownership lost\b/.test(reason) ||
+    /\bcancel(?:lation|l?ed)\b.*\bowner\b/.test(reason) ||
+    /\bowner(?:[- ](?:cancell?ed|cancellation))\b/.test(reason);
 }
 
 export function generatedRepairAttemptKindFromSignals(
@@ -302,7 +343,7 @@ function learningFlagsForKind(kind: ProductionAttemptLearningKind): {
   return {
     policySuppressed: kind === 'policy-suppressed',
     diagnosticNoProposal: kind === 'diagnostic-no-proposal',
-    diagnosticAttempt: kind !== 'policy-suppressed' && kind !== 'unknown',
+    diagnosticAttempt: kind !== 'policy-suppressed' && kind !== 'cancelled' && kind !== 'unknown',
   };
 }
 

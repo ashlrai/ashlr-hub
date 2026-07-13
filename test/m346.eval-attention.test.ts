@@ -312,6 +312,61 @@ describe('M346 eval attention', () => {
     });
   });
 
+  it('excludes current and historical cancellations without hiding genuine failures', () => {
+    const events: AgentActionEvent[] = [
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:00.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: 'cancelled dispatch',
+        runEventSummary: { outcome: 'cancelled', proposalCreated: false },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:01.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'failed',
+        action: 'daemon:dispatch',
+        summary: 'legacy cancelled dispatch',
+        reason: 'run cancelled by owner',
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:02.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'failed',
+        action: 'daemon:dispatch',
+        summary: 'provider failure',
+        reason: 'provider request failed',
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      },
+    ];
+
+    const report = buildAttentionEvalReport(events, {
+      generatedAt: '2026-07-09T05:01:00.000Z',
+    });
+
+    expect(report.productionYield).toMatchObject({
+      attempts: 1,
+      proposalCreated: 0,
+      noProposal: 0,
+      failed: 1,
+      blocked: 0,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      proposalRate: 0,
+      noProposalRate: 0,
+      diagnosticProposalRate: 0,
+      diagnosticNoProposalRate: 0,
+    });
+  });
+
   it('excludes selection, start, and no-dispatch actions from production attempts', () => {
     const base: Omit<AgentActionEvent, 'ts' | 'kind' | 'outcome' | 'action' | 'summary'> = {
       schemaVersion: 1,

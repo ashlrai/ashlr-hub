@@ -202,6 +202,7 @@ export function buildAttentionEvalReport(
   let blocked = 0;
   let policySuppressed = 0;
   let diagnosticAttempts = 0;
+  let diagnosticProposalsCreated = 0;
   let diagnosticNoProposal = 0;
   const attemptShape = emptyProductionAttemptShape();
   let spendUsd = 0;
@@ -293,20 +294,26 @@ export function buildAttentionEvalReport(
             : event.outcome === 'no-proposal'
               ? false
               : undefined;
-      const produced = proposalCreatedSignal === true;
-      if (produced) proposalCreated++;
-      else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
-      else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
-      else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: run?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal,
         actionCounts: run?.actionCounts,
         reason: event.reason,
       }, event.learningLabel);
+      const cancelled = classification.kind === 'cancelled';
+      const produced = proposalCreatedSignal === true;
+      if (!cancelled) {
+        if (produced) proposalCreated++;
+        else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
+        else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
+        else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
+      }
       if (classification.policySuppressed) policySuppressed++;
       if (classification.diagnosticNoProposal) diagnosticNoProposal++;
-      if (classification.diagnosticAttempt) diagnosticAttempts++;
+      if (classification.diagnosticAttempt) {
+        diagnosticAttempts++;
+        if (classification.kind === 'proposal-created') diagnosticProposalsCreated++;
+      }
       addProductionAttemptShape(attemptShape, classification.attemptShape);
     }
 
@@ -398,7 +405,9 @@ export function buildAttentionEvalReport(
       diagnosticNoProposal,
       proposalRate: attempts > 0 ? roundRatio(proposalCreated / attempts) : null,
       noProposalRate: attempts > 0 ? roundRatio(noProposal / attempts) : null,
-      diagnosticProposalRate: diagnosticAttempts > 0 ? roundRatio(proposalCreated / diagnosticAttempts) : null,
+      diagnosticProposalRate: diagnosticAttempts > 0
+        ? roundRatio(diagnosticProposalsCreated / diagnosticAttempts)
+        : null,
       diagnosticNoProposalRate: diagnosticAttempts > 0 ? roundRatio(diagnosticNoProposal / diagnosticAttempts) : null,
       attemptShape,
     },

@@ -1262,23 +1262,112 @@ function noProposalProductionReason(production: DaemonDispatchProduction | undef
 }
 
 function noProposalOutcomeFromReason(reason: string): DaemonDispatchProductionOutcome {
-  if (/\bempty-diff\b/i.test(reason)) return 'empty-diff';
+  if (/\bempty[- ]diff\b/i.test(reason)) return 'empty-diff';
   if (/\b(trivial-proposal|trivial|completeness-gate|gate-blocked|gate)\b/i.test(reason)) return 'gate-blocked';
   if (/\b(sandbox-unavailable|sandbox)\b/i.test(reason)) return 'sandbox-failed';
   if (/\b(proposal-capture-error|capture)\b/i.test(reason)) return 'proposal-capture-error';
   if (/\b(proposal-disabled)\b/i.test(reason)) return 'proposal-disabled';
-  if (/\b(engine|api-model-task-failed|command-missing|unsupported|failed)\b/i.test(reason)) return 'engine-failed';
+  if (/\b(engine|api-model-task-failed|command-missing|unsupported|failed|error|aborted|budget)\b/i.test(reason)) return 'engine-failed';
   return 'unknown';
 }
 
-function bestOfNNoWinnerProduction(result: BestOfNRunResult, n: number): DaemonDispatchProduction {
-  const top = result.critique.noProposalReasons?.[0]?.reason;
-  const reason = top
-    ? `best-of-${n}: ${top}`
-    : `best-of-${n}: all candidates failed to produce a proposal`;
+function normalizeBestOfNSignal(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function candidateErrorDuplicatesProposalOutcome(
+  error: string,
+  outcome: RunProposalOutcome | undefined,
+): boolean {
+  if (!outcome) return false;
+  const normalizedError = normalizeBestOfNSignal(error);
+  const reason = outcome.reason?.trim();
+  if (normalizedError === normalizeBestOfNSignal(outcome.kind)) return true;
+  if (!reason) return false;
+  return normalizedError === normalizeBestOfNSignal(reason) ||
+    normalizedError === normalizeBestOfNSignal(`${outcome.kind}: ${reason}`);
+}
+
+function bestOfNAuthoritativeNoWinnerProduction(
+  result: BestOfNRunResult,
+  n: number,
+  runId: string,
+  costUsd: number,
+): DaemonDispatchProduction | undefined {
+  const authorityRank: Record<DaemonDispatchProductionOutcome, number> = {
+    'proposal-created': 700,
+    'proposal-capture-error': 650,
+    'engine-failed': 600,
+    'sandbox-failed': 550,
+    'gate-blocked': 400,
+    'empty-diff': 300,
+    'proposal-disabled': 200,
+    cancelled: 0,
+    unknown: 100,
+  };
+  const authorities: Array<{
+    production: DaemonDispatchProduction;
+    rank: number;
+    tieBreak: string;
+  }> = [];
+  const addAuthority = (production: DaemonDispatchProduction, tieBreak: string): void => {
+    authorities.push({ production, rank: authorityRank[production.outcome], tieBreak });
+  };
+  const structuredErrorAuthorities = new Map<string, DaemonDispatchProduction>();
+
+  for (const candidate of result.candidates) {
+    const candidateProduction = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
+    if (candidateProduction) {
+      addAuthority(candidateProduction, `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}`);
+    }
+    const error = candidate.error?.trim();
+    if (error && candidateProduction && candidateErrorDuplicatesProposalOutcome(error, candidate.proposalOutcome)) {
+      structuredErrorAuthorities.set(normalizeBestOfNSignal(error), candidateProduction);
+    }
+    if (
+      error &&
+      error !== 'cancelled' &&
+      !candidateErrorDuplicatesProposalOutcome(error, candidate.proposalOutcome)
+    ) {
+      addAuthority({ outcome: 'engine-failed', reason: error }, `error:${error}`);
+    }
+  }
+  for (const entry of result.critique.noProposalReasons ?? []) {
+    const reason = entry.reason.trim();
+    if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
+    const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason));
+    const outcome = structuredAuthority?.outcome ?? noProposalOutcomeFromReason(reason);
+    addAuthority({ ...(structuredAuthority ?? { outcome }), reason }, `critique:${outcome}:${reason}`);
+  }
+
+  const selected = authorities.sort((left, right) =>
+    right.rank - left.rank || left.tieBreak.localeCompare(right.tieBreak)
+  )[0]?.production;
+  if (!selected) return undefined;
+  const reason = selected.reason ?? selected.outcome;
+  const failed = selected.outcome === 'engine-failed' || selected.outcome === 'sandbox-failed' ||
+    selected.outcome === 'proposal-capture-error';
   return {
-    outcome: noProposalOutcomeFromReason(reason),
-    reason: boundedText(reason, 220),
+    ...selected,
+    runId,
+    reason: boundedText(`best-of-${n}: ${reason}`, 220),
+    runEventSummary: runEventSummary({
+      runId,
+      status: failed
+        ? /\b(aborted|budget)\b/i.test(reason) ? 'aborted' : 'failed'
+        : 'done',
+      outcome: selected.outcome,
+      proposalCreated: selected.outcome === 'proposal-created',
+      proposalId: selected.proposalId,
+      costUsd,
+    }),
+  };
+}
+
+function bestOfNNoWinnerProduction(n: number): DaemonDispatchProduction {
+  return {
+    outcome: 'unknown',
+    reason: `best-of-${n}: all candidates failed to produce a proposal`,
   };
 }
 
@@ -1291,19 +1380,59 @@ function cancelledDispatchProduction(
   runId: string,
   reason: string,
   costUsd: number,
+  summary?: RunEventSummary,
+  evidenceOutcome?: EvidenceOutcomeSummary,
 ): DaemonDispatchProduction {
+  const evidence = evidenceOutcomeSummary(evidenceOutcome);
   return {
-    outcome: 'engine-failed',
+    outcome: 'cancelled',
     runId,
     reason,
     runEventSummary: runEventSummary({
+      ...(summary ?? {}),
       runId,
       status: 'aborted',
-      outcome: 'engine-failed',
+      outcome: 'cancelled',
       proposalCreated: false,
       costUsd,
     }),
+    ...(evidence ? { evidenceOutcome: evidence } : {}),
   };
+}
+
+function failedProducerDispatchProduction(fields: {
+  runId: string;
+  producer: string;
+  status: 'aborted' | 'failed';
+  result?: string;
+  costUsd: number;
+  summary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+}): DaemonDispatchProduction {
+  const evidence = evidenceOutcomeSummary(fields.evidenceOutcome);
+  const result = fields.result?.trim();
+  const reason = boundedText(
+    result || `${fields.producer} ${fields.status} without a proposal outcome`,
+    220,
+  );
+  return {
+    outcome: 'engine-failed',
+    runId: fields.runId,
+    reason,
+    runEventSummary: runEventSummary({
+      ...(fields.summary ?? {}),
+      runId: fields.runId,
+      status: fields.status,
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      costUsd: fields.costUsd,
+    }),
+    ...(evidence ? { evidenceOutcome: evidence } : {}),
+  };
+}
+
+function resultDescribesCancellation(result: string | undefined): boolean {
+  return typeof result === 'string' && /\bcancel(?:led|ed|lation)?\b/i.test(result);
 }
 
 function dispatchProductionBasis(
@@ -1409,6 +1538,8 @@ function dispatchProductionEventFromOutcome(
 function agentOutcomeFromDispatchEvent(event: DispatchProductionEvent): AgentActionOutcome {
   if (event.proposalCreated) return 'proposal-created';
   switch (event.outcome) {
+    case 'cancelled':
+      return 'skipped';
     case 'empty-diff':
     case 'gate-blocked':
     case 'proposal-disabled':
@@ -2164,13 +2295,30 @@ export async function tick(
       reason: 'state-persistence-failed',
     });
   };
-  const runAutoMergeMaintenancePass = async (): Promise<AutoMergePassResult | null> => {
+  const acquireTickMutationFence = () => {
+    if (!opts.ownerLock) return undefined;
+    const fence = acquireLocalStoreLock(`${opts.ownerLock.path}.mutation.lock`);
+    if (!fence) return null;
+    if (daemonLockOwned(opts.ownerLock)) return fence;
+    releaseLocalStoreLock(fence);
+    stillOwnsTick();
+    return null;
+  };
+  const runAutoMergeMaintenancePass = async (
+    ownershipAlreadyFenced = false,
+  ): Promise<AutoMergePassResult | null> => {
     if (opts.dryRun || stopRequested()) return null;
+    const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
+    if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
     try {
-      return await runAutoMergePass(liveCfg);
+      if (!stillOwnsTick()) return null;
+      const result = await runAutoMergePass(liveCfg);
+      return stillOwnsTick() ? result : null;
     } catch (err) {
       console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err);
       return null;
+    } finally {
+      releaseLocalStoreLock(fence);
     }
   };
   let preDispatchAutoMergePassResult: AutoMergePassResult | null = null;
@@ -4147,11 +4295,13 @@ export async function tick(
             }),
           };
         }
-        const swarmCancelled = swarmRun.status === 'aborted' ||
-          (opts.signal?.aborted === true && swarmRun.proposalOutcome?.kind !== 'filed');
-        const effectiveSwarmOutcome = swarmRun.proposalOutcome ?? (swarmCancelled
-          ? { kind: 'engine-failed-no-diff' as const, reason: 'swarm cancelled by owner' }
-          : undefined);
+        const effectiveSwarmOutcome = swarmRun.proposalOutcome;
+        const swarmCancelled = effectiveSwarmOutcome === undefined &&
+          swarmRun.status === 'aborted' &&
+          opts.signal?.aborted === true &&
+          resultDescribesCancellation(swarmRun.result);
+        const swarmFailed = effectiveSwarmOutcome === undefined &&
+          (swarmRun.status === 'aborted' || swarmRun.status === 'failed');
 
         const swarmExecuted = swarmRun.status === 'done';
         if (swarmExecuted && swarmRun.proposalOutcome?.kind !== 'kill-switch') {
@@ -4173,7 +4323,11 @@ export async function tick(
         const swarmRunSummary = runEventSummary({
           runId: swarmRun.id,
           status: swarmCancelled ? 'aborted' : swarmRun.status,
-          outcome: swarmCancelled ? 'engine-failed' : effectiveSwarmOutcome?.kind ?? swarmRun.status,
+          outcome: swarmCancelled
+            ? 'cancelled'
+            : swarmFailed
+              ? 'engine-failed'
+              : effectiveSwarmOutcome?.kind ?? swarmRun.status,
           proposalCreated: effectiveSwarmOutcome?.kind === 'filed',
           proposalId: effectiveSwarmOutcome?.proposalId,
           diffFiles: effectiveSwarmOutcome?.files,
@@ -4186,12 +4340,28 @@ export async function tick(
           tokensOut: swarmRun.usage?.tokensOut,
           costUsd: swarmRun.usage?.estCostUsd,
         });
-        dispatchProduction = dispatchProductionFromProposalOutcome(
-          effectiveSwarmOutcome,
-          swarmRun.id,
-          swarmRunSummary,
-          { proposalRequired: effectiveSwarmOutcome?.kind !== 'proposal-disabled' },
-        );
+        dispatchProduction = swarmCancelled
+          ? cancelledDispatchProduction(
+              swarmRun.id,
+              'swarm cancelled by owner',
+              swarmRun.usage?.estCostUsd ?? 0,
+              swarmRunSummary,
+            )
+          : swarmFailed
+            ? failedProducerDispatchProduction({
+                runId: swarmRun.id,
+                producer: 'swarm',
+                status: swarmRun.status === 'failed' ? 'failed' : 'aborted',
+                result: swarmRun.result,
+                costUsd: swarmRun.usage?.estCostUsd ?? 0,
+                summary: swarmRunSummary,
+              })
+          : dispatchProductionFromProposalOutcome(
+              effectiveSwarmOutcome,
+              swarmRun.id,
+              swarmRunSummary,
+              { proposalRequired: effectiveSwarmOutcome?.kind !== 'proposal-disabled' },
+            );
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
@@ -4329,10 +4499,17 @@ export async function tick(
             // actually spent (M333: the pre-M333 $0 under-reported real spend).
             swarmSpent = bonBillable;
             tickSpent += swarmSpent;
-            const cancelled = opts.signal?.aborted === true || bestOfNWasCancelled(bonResult);
-            const production = cancelled
+            const authoritativeProduction = bestOfNAuthoritativeNoWinnerProduction(
+              bonResult,
+              bestOfN,
+              attemptId,
+              swarmSpent,
+            );
+            const cancelled = authoritativeProduction === undefined &&
+              (opts.signal?.aborted === true || bestOfNWasCancelled(bonResult));
+            const production = authoritativeProduction ?? (cancelled
               ? cancelledDispatchProduction(attemptId, `best-of-${bestOfN} selection cancelled by owner`, swarmSpent)
-              : bestOfNNoWinnerProduction(bonResult, bestOfN);
+              : bestOfNNoWinnerProduction(bestOfN));
             audit({
               action: 'daemon:no-proposal',
               repo: item.repo,
@@ -4466,31 +4643,54 @@ export async function tick(
             }
           }
         }
-        const directCancelled = runState.status === 'aborted' || runState.terminationReason === 'cancelled';
-        const directOutcome = runState.proposalOutcome ??
-          (directCancelled
-            ? {
-                kind: 'engine-failed-no-diff' as const,
-                reason: runState.terminationReason === 'cancelled'
-                  ? 'run cancelled by owner'
-                  : 'run aborted without a proposal',
-              }
-            : undefined);
+        const directOutcome = runState.proposalOutcome;
+        const directCancelled = directOutcome === undefined && runState.status === 'aborted' && (
+          runState.terminationReason === 'cancelled' || (
+            opts.signal?.aborted === true && resultDescribesCancellation(runState.result)
+          )
+        );
+        const directFailed = directOutcome === undefined &&
+          (runState.status === 'aborted' || runState.status === 'failed');
+        const directCancellationReason = runState.terminationReason === 'cancelled'
+          ? 'run cancelled by owner'
+          : 'run aborted without a proposal';
         const directRunSummary = runEventSummary({
           ...(runState.runEventSummary ?? {}),
           runId: runState.id,
           status: directCancelled ? 'aborted' : runState.status,
-          outcome: directCancelled ? 'engine-failed' : directOutcome?.kind ?? runState.status,
+          outcome: directCancelled
+            ? 'cancelled'
+            : directFailed
+              ? 'engine-failed'
+              : directOutcome?.kind ?? runState.status,
           proposalCreated: directCancelled ? false : directOutcome?.kind === 'filed',
           proposalId: directCancelled ? undefined : directOutcome?.proposalId,
           tokensIn: runState.usage?.tokensIn,
           tokensOut: runState.usage?.tokensOut,
           costUsd: runState.usage?.estCostUsd,
         });
-        dispatchProduction = dispatchProductionFromProposalOutcome(directOutcome, runState.id, directRunSummary, {
-          proposalRequired: true,
-          evidenceOutcome: runState.evidenceOutcome,
-        });
+        dispatchProduction = directCancelled
+          ? cancelledDispatchProduction(
+              runState.id,
+              directCancellationReason,
+              runState.usage?.estCostUsd ?? 0,
+              directRunSummary,
+              runState.evidenceOutcome,
+            )
+          : directFailed
+            ? failedProducerDispatchProduction({
+                runId: runState.id,
+                producer: 'run',
+                status: runState.status === 'failed' ? 'failed' : 'aborted',
+                result: runState.result,
+                costUsd: runState.usage?.estCostUsd ?? 0,
+                summary: directRunSummary,
+                evidenceOutcome: runState.evidenceOutcome,
+              })
+          : dispatchProductionFromProposalOutcome(directOutcome, runState.id, directRunSummary, {
+              proposalRequired: true,
+              evidenceOutcome: runState.evidenceOutcome,
+            });
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
@@ -4831,7 +5031,8 @@ export async function tick(
     stopLeaseRenewer();
   }
 
-  if (!stillOwnsTick()) {
+  const postDispatchOwnershipLost = (): DaemonTick | null => {
+    if (stillOwnsTick()) return null;
     return ownershipLostTick({
       ts: now,
       itemsConsidered: workedSet.length,
@@ -4840,6 +5041,22 @@ export async function tick(
       reason: 'shutdown-requested',
       ...(dispatchesFromOutcomes(outcomes) ? { dispatches: dispatchesFromOutcomes(outcomes) } : {}),
     });
+  };
+  const postSettlementFence = acquireTickMutationFence();
+  if (opts.ownerLock && !postSettlementFence) {
+    return postDispatchOwnershipLost() ?? {
+      ts: now,
+      itemsConsidered: workedSet.length,
+      proposalsCreated: 0,
+      spentUsd: tickSpent,
+      reason: 'state-persistence-failed',
+      ...(dispatchesFromOutcomes(outcomes) ? { dispatches: dispatchesFromOutcomes(outcomes) } : {}),
+    };
+  }
+  try {
+  const ownershipLostAfterSettlement = postDispatchOwnershipLost();
+  if (ownershipLostAfterSettlement) {
+    return ownershipLostAfterSettlement;
   }
 
   // itemsProcessed counts items whose swarm was actually dispatched (not those
@@ -4856,6 +5073,8 @@ export async function tick(
   // learned-router, budget, or resource decision. Cool only the claimed repair
   // generation briefly so ordinary work can progress on the next tick. This is
   // selection evidence, not execution or empty-diff lifecycle authority.
+  const ownershipLostBeforeCooldown = postDispatchOwnershipLost();
+  if (ownershipLostBeforeCooldown) return ownershipLostBeforeCooldown;
   if (automaticDrain && drainSelectedItems.length > 0) {
     const dispatchedItemIds = new Set(
       outcomes.flatMap((outcome) =>
@@ -4905,6 +5124,8 @@ export async function tick(
   });
   const handoffFailedItemIds = new Set<string>();
   const workedOutcomeFailedItemIds = new Set<string>();
+  const ownershipLostBeforeDispatchWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeDispatchWrites) return ownershipLostBeforeDispatchWrites;
   for (const event of productionEvents) {
     const repairable = repairHandoffFromDispatchEvent(event) !== null;
     if (liveCfg.fleet?.sharedQueue?.mode === 'filesystem') {
@@ -4937,6 +5158,8 @@ export async function tick(
   // a patch instead of relying on the old aggregate pending-count heuristic.
   // Non-dispatched items (kill-switch / budget skip) are NOT recorded — they
   // were never run, so they should not trigger a cooldown.
+  const ownershipLostBeforeWorkedWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeWorkedWrites) return ownershipLostBeforeWorkedWrites;
   if (dispatchedCount > 0) {
     try {
       const proposalItemIds = new Set<string>(newPendingProposalsByItemId.keys());
@@ -4981,6 +5204,8 @@ export async function tick(
   // Generated-repair lifecycle is a local, atomic control store. Shared-queue
   // mode stays fail-closed until claim fencing can bind late outcomes safely.
   const repairTreatmentOutcomeWitnesses: DispatchProductionEvent[] = [];
+  const ownershipLostBeforeLifecycleWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeLifecycleWrites) return ownershipLostBeforeLifecycleWrites;
   if (dispatchedCount > 0 && liveCfg.fleet?.sharedQueue?.mode !== 'filesystem') {
     try {
       for (const outcome of outcomes) {
@@ -5089,6 +5314,8 @@ export async function tick(
     }
   }
 
+  const ownershipLostBeforeLifecycleWitnessWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeLifecycleWitnessWrites) return ownershipLostBeforeLifecycleWitnessWrites;
   if (repairTreatmentOutcomeWitnesses.length > 0) {
     for (const witness of repairTreatmentOutcomeWitnesses) {
       const witnessWrite = recordDispatchProduction(witness);
@@ -5105,8 +5332,12 @@ export async function tick(
       }
     }
   }
+  const ownershipLostBeforeTreatmentFlush = postDispatchOwnershipLost();
+  if (ownershipLostBeforeTreatmentFlush) return ownershipLostBeforeTreatmentFlush;
   if (!stopRequested()) flushPendingRepairTreatmentOutcomes();
 
+  const ownershipLostBeforeActionWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeActionWrites) return ownershipLostBeforeActionWrites;
   if (dispatchedCount > 0) {
     try {
       recordAgentAction(productionEvents.map(agentActionFromDispatchEvent));
@@ -5114,6 +5345,8 @@ export async function tick(
       console.warn('[ashlr] daemon:tick dispatch production ledger failed:', (err as Error)?.message ?? err);
     }
   }
+  const ownershipLostBeforeSkipActionWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeSkipActionWrites) return ownershipLostBeforeSkipActionWrites;
   try {
     const completedAt = new Date().toISOString();
     const skipActions = outcomes.flatMap((outcome): AgentActionEvent[] => {
@@ -5128,6 +5361,8 @@ export async function tick(
 
   // M113: release any claimed-but-not-dispatched items so they're free for
   // the next machine or tick (no-op for LocalWorkQueueCoordinator).
+  const ownershipLostBeforeClaimRelease = postDispatchOwnershipLost();
+  if (ownershipLostBeforeClaimRelease) return ownershipLostBeforeClaimRelease;
   try {
     const dispatchedIds = new Set(
       outcomes
@@ -5149,7 +5384,7 @@ export async function tick(
   // strictly proposal-only.
   let merged = 0;
   let autoMergePassResult: AutoMergePassResult | null = null;
-  autoMergePassResult = preDispatchAutoMergePassRan ? preDispatchAutoMergePassResult : await runAutoMergeMaintenancePass();
+  autoMergePassResult = preDispatchAutoMergePassRan ? preDispatchAutoMergePassResult : await runAutoMergeMaintenancePass(true);
   const autoMerge = autoMergeTickSummary(autoMergePassResult);
   merged = autoMergePassResult?.merged ?? 0;
   const producerMaintenance = producerMaintenanceSummary();
@@ -5340,6 +5575,9 @@ export async function tick(
   });
 
   return tickRecord;
+  } finally {
+    releaseLocalStoreLock(postSettlementFence);
+  }
 }
 
 async function runOwnedPulseSync(

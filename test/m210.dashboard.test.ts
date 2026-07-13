@@ -581,6 +581,62 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");
   });
 
+  it('renders cancellations explicitly and excludes them from diagnostic yield', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain("const cancelled = Number(bucket?.outcomes?.cancelled ?? 0)");
+    expect(appSource).toContain(
+      'safeAttempts - dispatchProductionPolicyDisabledCount(bucket) - safeCancelled',
+    );
+    expect(appSource).toContain("['Cancelled', attemptCoverage.production?.cancelled ?? 0]");
+    expect(appSource).toContain('topWeak.denominator ?? attempts');
+    expect(appSource).toContain("['Cancelled', terminal.cancelled ?? 0]");
+    expect(appSource).toContain('dispatchProductionDiagnosticRate(dispatchProduction)');
+  });
+
+  it('preserves explicit zero diagnostic attempts without inventing a weakest backend', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain(
+      'if (Number.isFinite(materialized) && materialized >= 0) return Math.trunc(materialized);',
+    );
+    expect(appSource).toContain(
+      'const backend = dispatchProductionWeakestBackend(backends);',
+    );
+    expect(appSource).not.toContain(
+      'diagnosticAttempts > 0 ? diagnosticAttempts : backend.attempts ?? 0',
+    );
+    expect(appSource).not.toContain('?? backends[0] ?? null');
+  });
+
+  it('selects the weakest backend by diagnostic yield with deterministic ties', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+    const helper = appSource.match(
+      /function dispatchProductionWeakestBackend\(backends\) \{[\s\S]*?\n\}/,
+    )?.[0];
+
+    expect(helper).toBeDefined();
+    expect(helper).toContain(
+      '.filter((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)',
+    );
+    expect(helper).toContain(
+      'dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)',
+    );
+    expect(helper).toContain(
+      "String(left?.key ?? '').localeCompare(String(right?.key ?? ''))",
+    );
+    expect(helper).not.toContain('.find(');
+  });
+
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {
     const { loadDaemonState } = await import('../src/core/daemon/state.js');
     vi.mocked(loadDaemonState).mockImplementation(() => { throw new Error('no state'); });

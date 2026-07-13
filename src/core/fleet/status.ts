@@ -2845,18 +2845,51 @@ function isGeneratedRepairQueueItem(item: FleetQueueNextItem): boolean {
 function diagnosticPolicyDisabled(
   value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
 ): number {
-  return Math.max(
-    value.outcomes.proposalDisabled,
-    value.attemptShape?.policyDisabled ?? 0,
-  );
+  const classified = value.attemptShape?.policyDisabled;
+  if (classified !== undefined && Number.isFinite(classified)) {
+    return Math.max(0, Math.floor(classified));
+  }
+  return Math.max(0, value.outcomes.proposalDisabled);
+}
+
+function diagnosticCancelled(
+  value: Pick<DispatchProductionYieldSummary, 'outcomes'>,
+): number {
+  return value.outcomes.cancelled ?? 0;
 }
 
 function diagnosticAttemptsForDispatchBucket(bucket: DispatchProductionYieldBucket): number {
-  return Math.max(0, bucket.attempts - diagnosticPolicyDisabled(bucket));
+  if (bucket.diagnosticAttempts !== undefined && Number.isFinite(bucket.diagnosticAttempts)) {
+    return Math.max(0, Math.floor(bucket.diagnosticAttempts));
+  }
+  return Math.max(0, bucket.attempts - diagnosticPolicyDisabled(bucket) - diagnosticCancelled(bucket));
 }
 
 function diagnosticAttemptsForDispatchSummary(summary: DispatchProductionYieldSummary): number {
-  return Math.max(0, summary.attempts - diagnosticPolicyDisabled(summary));
+  if (summary.diagnosticAttempts !== undefined && Number.isFinite(summary.diagnosticAttempts)) {
+    return Math.max(0, Math.floor(summary.diagnosticAttempts));
+  }
+  return Math.max(0, summary.attempts - diagnosticPolicyDisabled(summary) - diagnosticCancelled(summary));
+}
+
+function diagnosticNoProposalForDispatchBucket(
+  bucket: DispatchProductionYieldBucket,
+  diagnosticAttempts: number,
+): number {
+  if (bucket.diagnosticNoProposal !== undefined && Number.isFinite(bucket.diagnosticNoProposal)) {
+    return Math.max(0, Math.floor(bucket.diagnosticNoProposal));
+  }
+  return Math.max(0, diagnosticAttempts - bucket.proposalsCreated);
+}
+
+function diagnosticNoProposalForDispatchSummary(
+  summary: DispatchProductionYieldSummary,
+  diagnosticAttempts: number,
+): number {
+  if (summary.diagnosticNoProposal !== undefined && Number.isFinite(summary.diagnosticNoProposal)) {
+    return Math.max(0, Math.floor(summary.diagnosticNoProposal));
+  }
+  return Math.max(0, diagnosticAttempts - summary.proposalsCreated);
 }
 
 function diagnosticTopReason(bucket: DispatchProductionYieldBucket): string | undefined {
@@ -3016,7 +3049,7 @@ function dispatchYieldCandidate(
     ...(bucket.model !== undefined ? { model: bucket.model } : {}),
     diagnosticAttempts,
     proposalsCreated,
-    noProposal: Math.max(0, diagnosticAttempts - proposalsCreated),
+    noProposal: diagnosticNoProposalForDispatchBucket(bucket, diagnosticAttempts),
     proposalRate,
     policyDisabled,
     verdict,
@@ -3080,7 +3113,7 @@ function buildDispatchYieldDiagnostics(
     key: 'fleet',
     diagnosticAttempts,
     proposalsCreated,
-    noProposal: Math.max(0, diagnosticAttempts - proposalsCreated),
+    noProposal: diagnosticNoProposalForDispatchSummary(dispatchProduction, diagnosticAttempts),
     proposalRate,
     policyDisabled,
     verdict: overallVerdict,

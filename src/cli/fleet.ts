@@ -422,9 +422,16 @@ export function formatFleetStatus(s: FleetStatus): string {
       : 'unknown (legacy snapshot)';
     lines.push(`  source:    ${sourceDetail}`);
     lines.push(`  window:    ${formatProductionWindow(dispatchProduction.windowHours)}`);
+    const diagnosticAttempts = dispatchProduction.diagnosticAttempts ??
+      s.dispatchYieldDiagnostics?.diagnosticAttempts ?? dispatchProduction.events;
+    const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
+      Math.max(0, diagnosticAttempts - dispatchProduction.proposalsCreated);
+    const diagnosticProposalRate = dispatchProduction.diagnosticProposalRate ??
+      (diagnosticAttempts > 0 ? dispatchProduction.proposalsCreated / diagnosticAttempts : 0);
     lines.push(
-      `  output:    proposals ${dispatchProduction.proposalsCreated}/${dispatchProduction.events} ` +
-        `(${formatPercent(dispatchProduction.proposalRate)}), no-proposal ${dispatchProduction.noProposal}`,
+      `  output:    proposals ${dispatchProduction.proposalsCreated}/${diagnosticAttempts} ` +
+        `(${formatPercent(diagnosticProposalRate)}), no-proposal ${diagnosticNoProposal}, ` +
+        `cancelled ${dispatchProduction.outcomes.cancelled ?? 0}`,
     );
     const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
@@ -535,7 +542,8 @@ export function formatFleetStatus(s: FleetStatus): string {
       `  learning:  diagnostic ${attemptCoverage.production.proposalCreated}/${attemptCoverage.production.diagnosticAttempts} ` +
         `(${formatNullablePercent(attemptCoverage.production.diagnosticProposalRate)}), ` +
         `no-proposal ${attemptCoverage.production.diagnosticNoProposal}, ` +
-        `policy-suppressed ${attemptCoverage.production.policySuppressed}`,
+        `policy-suppressed ${attemptCoverage.production.policySuppressed}, ` +
+        `cancelled ${attemptCoverage.production.cancelled ?? 0}`,
     );
     const repairYield = formatGeneratedRepairYield(attemptCoverage.production.generatedRepairAttempts);
     if (repairYield) lines.push(`  repairs:   ${repairYield}`);
@@ -566,7 +574,10 @@ export function formatFleetStatus(s: FleetStatus): string {
     }
     if (attemptCoverage.causalWeak.weak && attemptCoverage.causalWeak.reasons.length > 0) {
       const reason = attemptCoverage.causalWeak.reasons[0]!;
-      lines.push(`  causal gap:${reason.kind} ${reason.count}/${attemptCoverage.attempts} (${formatPercent(reason.rate)})`);
+      lines.push(
+        `  causal gap:${reason.kind} ${reason.count}/${reason.denominator ?? attemptCoverage.attempts} ` +
+          `(${formatPercent(reason.rate)})`,
+      );
     }
     const topCause = attemptCoverage.causalGapDiagnostics?.causes?.[0];
     if (topCause) {
@@ -598,7 +609,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
     lines.push(
       `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
-        `no-proposal ${outcomes['no-proposal']}, failed ${outcomes.failed}`,
+        `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`,
     );
     lines.push(
       `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToDecision)}, ` +
@@ -1100,7 +1111,10 @@ function formatDispatchYieldBucket(
   bucket: NonNullable<FleetStatus['dispatchProduction']>['byBackend'][number],
 ): string {
   const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
-  return `${label} ${bucket.proposalsCreated}/${bucket.attempts} ${formatPercent(bucket.proposalRate)}`;
+  const attempts = bucket.diagnosticAttempts ?? bucket.attempts;
+  const rate = bucket.diagnosticProposalRate ??
+    (attempts > 0 ? bucket.proposalsCreated / attempts : 0);
+  return `${label} ${bucket.proposalsCreated}/${attempts} ${formatPercent(rate)}`;
 }
 
 function formatDispatchManifestBackend(

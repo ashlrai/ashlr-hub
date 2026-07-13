@@ -373,13 +373,39 @@ describe('M343 agent action ledger', () => {
     expect(existsSync(join(process.cwd(), 'relative-home', 'agent-actions'))).toBe(false);
   });
 
-  it('preserves started and verification lifecycle outcomes', () => {
+  it('preserves started, old-reader-safe cancellation metadata, and verification outcomes', () => {
     recordAgentAction([
       makeEvent({
         action: 'daemon:tick-start',
         kind: 'tick',
         outcome: 'started',
         summary: 'start: budget $1.00, perTick 4, parallel 3',
+      }),
+      makeEvent({
+        action: 'daemon:dispatch-cancelled',
+        outcome: 'skipped',
+        summary: 'dispatch cancelled by owner',
+        reason: 'run cancelled by owner',
+        runEventSummary: {
+          status: 'aborted',
+          outcome: 'cancelled',
+          proposalCreated: false,
+        },
+        learningLabel: {
+          schemaVersion: 1,
+          classifierVersion: 'attempt-shape-v2',
+          authoritative: true,
+          learningKind: 'cancelled',
+          policySuppressed: false,
+          diagnosticAttempt: false,
+          diagnosticNoProposal: false,
+          attemptShape: {
+            backendNoDiff: 0,
+            captureOrGateBlocked: 0,
+            repairAttempts: 0,
+            policyDisabled: 0,
+          },
+        },
       }),
       makeEvent({
         action: 'auto-merge:verify-before-judge-finish',
@@ -393,13 +419,30 @@ describe('M343 agent action ledger', () => {
 
     const events = readAgentActions();
 
-    expect(events.map((event) => event.outcome)).toEqual(['verified', 'started']);
+    expect(events.map((event) => event.outcome)).toEqual(['verified', 'skipped', 'started']);
     expect(events[0]).toMatchObject({
       actor: 'verifier',
       kind: 'verification',
       action: 'auto-merge:verify-before-judge-finish',
     });
     expect(events[1]).toMatchObject({
+      actor: 'daemon',
+      kind: 'dispatch',
+      action: 'daemon:dispatch-cancelled',
+      outcome: 'skipped',
+      reason: 'run cancelled by owner',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'cancelled',
+        proposalCreated: false,
+      },
+      learningLabel: {
+        learningKind: 'cancelled',
+        diagnosticAttempt: false,
+        diagnosticNoProposal: false,
+      },
+    });
+    expect(events[2]).toMatchObject({
       actor: 'daemon',
       kind: 'tick',
       action: 'daemon:tick-start',

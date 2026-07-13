@@ -487,7 +487,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("'Proposal production'");
     expect(src).toContain("'Dispatch yield'");
     expect(src).toContain("['Suppressed', suppressed]");
-    expect(src).toContain('backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
+    expect(src).toContain('function dispatchProductionWeakestBackend(backends)');
+    expect(src).toContain('.filter((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
+    expect(src).toContain('dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)');
   });
 
   it('app.js renders activity evidence without a misleading healthy zero', () => {

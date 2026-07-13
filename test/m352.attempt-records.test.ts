@@ -306,6 +306,87 @@ describe('AttemptRecord coverage', () => {
     });
   });
 
+  it('counts explicit and historical cancellations without diagnostic or causal-label weakness', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            itemId: 'cancelled-explicit',
+            runId: 'run-cancelled-explicit',
+            trajectoryId: 'traj-cancelled-explicit',
+            proposalId: undefined,
+            outcome: 'cancelled',
+            proposalCreated: false,
+            learningLabel: undefined,
+            runEventSummary: {
+              runId: 'run-cancelled-explicit',
+              outcome: 'cancelled',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
+          causalDispatch({
+            itemId: 'cancelled-selection',
+            runId: 'run-cancelled-selection',
+            trajectoryId: 'traj-cancelled-selection',
+            proposalId: undefined,
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            reason: 'selection cancelled after owner changed',
+            learningLabel: undefined,
+            runEventSummary: {
+              runId: 'run-cancelled-selection',
+              outcome: 'engine-failed',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
+          causalDispatch({
+            itemId: 'cancelled-lock-loss',
+            runId: 'run-cancelled-lock-loss',
+            trajectoryId: 'traj-cancelled-lock-loss',
+            proposalId: undefined,
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            reason: 'daemon lock ownership lost before completion',
+            learningLabel: undefined,
+            runEventSummary: {
+              runId: 'run-cancelled-lock-loss',
+              outcome: 'engine-failed',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records).toHaveLength(3);
+    expect(records.every((record) =>
+      record.learningKind === 'cancelled' &&
+      !record.diagnosticAttempt &&
+      !record.diagnosticNoProposal
+    )).toBe(true);
+    const summary = summarizeAttemptCoverage(records);
+    expect(summary.production).toMatchObject({
+      attempts: 3,
+      proposalCreated: 0,
+      cancelled: 3,
+      diagnosticAttempts: 0,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: null,
+      diagnosticNoProposalRate: null,
+      legacyUnversionedAttempts: 0,
+    });
+    expect(summary.causalWeak).toMatchObject({ weak: false, reasons: [] });
+    expect(summary.causalGapDiagnostics.actionableCauses).toEqual([]);
+  });
+
   it('summarizes causal metadata coverage and weak current-label readiness', () => {
     const records = listAttemptRecords({
       deps: deps({
@@ -957,6 +1038,21 @@ describe('AttemptRecord coverage', () => {
               actionCounts: { diffFiles: 0 },
             },
           }),
+          dispatch({
+            itemId: 'ashlr-hub:proposal-repair-capture:cancelled123',
+            title: 'Repair dispatch capture failure for a cancelled generated repair',
+            outcome: 'cancelled',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId: 'run-repair-cancelled',
+            trajectoryId: 'traj-repair-cancelled',
+            runEventSummary: {
+              runId: 'run-repair-cancelled',
+              outcome: 'cancelled',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
         ],
         listOutcomeRecords: () => [],
         readDecisions: () => [],
@@ -965,7 +1061,7 @@ describe('AttemptRecord coverage', () => {
       }),
     });
 
-    expect(records).toHaveLength(2);
+    expect(records).toHaveLength(3);
     expect(records[0]).toMatchObject({
       learningKind: 'proposal-created',
       diagnosticAttempt: true,
@@ -980,11 +1076,17 @@ describe('AttemptRecord coverage', () => {
         repairAttempts: 1,
       },
     });
+    expect(records[2]).toMatchObject({
+      learningKind: 'cancelled',
+      diagnosticAttempt: false,
+      attemptShape: { repairAttempts: 0 },
+    });
 
     const summary = summarizeAttemptCoverage(records);
     expect(summary.production).toMatchObject({
-      attempts: 2,
+      attempts: 3,
       proposalCreated: 1,
+      cancelled: 1,
       diagnosticAttempts: 2,
       diagnosticNoProposal: 1,
       diagnosticProposalRate: 0.5,

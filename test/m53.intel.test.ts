@@ -72,7 +72,13 @@ import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
 } from '../src/core/learning/causal.js';
-import { productionAttemptLearningLabelFromSignals } from '../src/core/learning/attempt-shape.js';
+import {
+  PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION,
+  classifyProductionAttemptForLearning,
+  classifyProductionAttemptForLearningWithLabel,
+  productionAttemptLearningLabelFromSignals,
+  sanitizeProductionAttemptLearningLabel,
+} from '../src/core/learning/attempt-shape.js';
 
 import {
   recommendRoute,
@@ -222,6 +228,10 @@ function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}
       outcome: event.outcome,
       proposalCreated: event.proposalCreated,
       actionCounts: event.runEventSummary?.actionCounts,
+      reason: event.reason,
+      itemId: event.itemId,
+      title: event.title,
+      source: event.source,
     });
   }
   return event;
@@ -258,6 +268,127 @@ function makeForecast(projectedMonthlyUsd = 0): CostForecast {
     projectedMonthlyUsd,
   };
 }
+
+describe('cancellation learning semantics', () => {
+  it('keeps a created proposal diagnostic even when the reason reports cancellation', () => {
+    const cancelledLabel = productionAttemptLearningLabelFromSignals({
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      reason: 'run cancelled by owner',
+    });
+    expect(cancelledLabel.learningKind).toBe('cancelled');
+
+    const classification = classifyProductionAttemptForLearningWithLabel({
+      outcome: 'engine-failed',
+      proposalCreated: true,
+      actionCounts: { diffFiles: 0 },
+      reason: 'run cancelled by owner',
+    }, cancelledLabel);
+
+    expect(classification).toMatchObject({
+      kind: 'proposal-created',
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: true,
+      attemptShape: { backendNoDiff: 0 },
+    });
+  });
+
+  it('emits v2 labels and migrates valid v1 labels in memory', () => {
+    const emitted = productionAttemptLearningLabelFromSignals({
+      outcome: 'proposal-created',
+      proposalCreated: true,
+    });
+    const migrated = sanitizeProductionAttemptLearningLabel({
+      ...emitted,
+      classifierVersion: 'attempt-shape-v1',
+    });
+
+    expect(PRODUCTION_ATTEMPT_LEARNING_CLASSIFIER_VERSION).toBe('attempt-shape-v2');
+    expect(emitted).toMatchObject({
+      schemaVersion: 1,
+      classifierVersion: 'attempt-shape-v2',
+      learningKind: 'proposal-created',
+    });
+    expect(migrated).toEqual(emitted);
+  });
+
+  it('classifies an explicit cancelled outcome as non-diagnostic control flow', () => {
+    const classification = classifyProductionAttemptForLearning({
+      outcome: 'cancelled',
+      proposalCreated: false,
+      actionCounts: { diffFiles: 0 },
+    });
+
+    expect(classification).toMatchObject({
+      kind: 'cancelled',
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: false,
+      attemptShape: { backendNoDiff: 0 },
+    });
+  });
+
+  it('does not count a cancelled generated repair as a repair attempt', () => {
+    const classification = classifyProductionAttemptForLearning({
+      outcome: 'cancelled',
+      proposalCreated: false,
+      itemId: 'ashlr-hub:proposal-repair-nodiff:123456789abc',
+      title: 'Reslice no-diff dispatch for cancelled repair',
+      source: 'self',
+      actionCounts: { verifyRepairAttempts: 2, diffFiles: 0 },
+    });
+
+    expect(classification).toMatchObject({
+      kind: 'cancelled',
+      diagnosticAttempt: false,
+      attemptShape: { backendNoDiff: 0, repairAttempts: 0 },
+    });
+  });
+
+  it.each([
+    'run cancelled by owner',
+    'best-of-2 selection cancelled by owner',
+    'daemon lock ownership lost',
+  ])('overrides an old authoritative failed label for historical control flow: %s', (reason) => {
+    const oldFailedLabel = productionAttemptLearningLabelFromSignals({
+      outcome: 'engine-failed',
+      proposalCreated: false,
+    });
+    expect(oldFailedLabel.learningKind).toBe('failed');
+
+    const classification = classifyProductionAttemptForLearningWithLabel({
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      actionCounts: { diffFiles: 0 },
+      reason,
+    }, oldFailedLabel);
+
+    expect(classification).toMatchObject({
+      kind: 'cancelled',
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: false,
+      attemptShape: { backendNoDiff: 0 },
+    });
+  });
+
+  it('keeps a real engine failure diagnostic', () => {
+    const classification = classifyProductionAttemptForLearning({
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      actionCounts: { diffFiles: 0 },
+      reason: 'engine exited without diff',
+    });
+
+    expect(classification).toMatchObject({
+      kind: 'failed',
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: true,
+    });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1. SOURCE GREP-GUARD — no auto-apply / no gate bypass
@@ -652,6 +783,83 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
     expect(rec.reason).toContain('recent proposal yield');
     expect(rec.reason).toContain('same-tier reroute');
+    expect(rec.reason).toContain('candidate yield 2/3');
+  });
+
+  it('cancelled rows do not enter learned-router attempt or proposal-yield denominators', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const oldFailedLabel = productionAttemptLearningLabelFromSignals({
+      outcome: 'engine-failed',
+      proposalCreated: false,
+    });
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'cancelled' as never,
+        proposalCreated: false,
+        reason: 'explicit cancellation outcome',
+      }),
+      ...[
+        'run cancelled by owner',
+        'selection cancelled',
+        'daemon lock ownership lost',
+      ].map((reason) => makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'engine-failed',
+        proposalCreated: false,
+        reason,
+        learningLabel: oldFailedLabel,
+      })),
+      ...comparativeCandidateEvents(alternate),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
+  it('counts a created proposal with a cancellation reason in both yield numerator and denominator', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        reason: 'selection cancelled after proposal capture',
+      }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(rec.backend).toBe(alternate);
+    expect(rec.reason).toContain('recent proposal yield');
+    expect(rec.reason).toContain('1/3 < threshold');
     expect(rec.reason).toContain('candidate yield 2/3');
   });
 

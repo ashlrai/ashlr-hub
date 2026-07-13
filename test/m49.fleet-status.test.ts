@@ -3164,14 +3164,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Attempt coverage:');
     expect(formatted).toContain('attempts:  1 in 24h');
-    expect(formatted).toContain('learning:  diagnostic 1/1 (100%), no-proposal 0, policy-suppressed 0');
+    expect(formatted).toContain('learning:  diagnostic 1/1 (100%), no-proposal 0, policy-suppressed 0, cancelled 0');
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
     expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
     expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
     expect(formatted).toContain('Trajectory learning:');
     expect(formatted).toContain('trajectories: 1 in 24h');
-    expect(formatted).toContain('outcomes:     merged 0, pending 1, no-proposal 0, failed 0');
+    expect(formatted).toContain(
+      'outcomes:     merged 0, pending 1, no-proposal 0, cancelled 0, failed 0',
+    );
     expect(formatted).toContain('spine:        dispatch->decision 1 (100%), dispatch->evidence 1 (100%), dispatch->merge 0 (0%)');
     expect(formatted).toContain('coverage:     dispatch 1 (100%), proposal 1 (100%), evidence 1 (100%), decision 1 (100%)');
     expect(formatted).toContain('skill observations:');
@@ -3618,6 +3620,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.dispatchProduction).toMatchObject({
       attempts: 3,
       proposalsCreated: 0,
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 2,
       proposalRate: 0,
     });
     expect(s.dispatchYieldDiagnostics).toMatchObject({
@@ -3633,6 +3637,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'goal',
         diagnosticAttempts: 3,
         proposalsCreated: 0,
+        noProposal: 2,
         verdict: 'actionable',
         action: 'route-same-tier-alternative',
         sameTierOnly: true,
@@ -4543,6 +4548,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       count: 3,
     });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
+      backend: 'local-coder',
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 3,
+    });
+    expect(s.dispatchProduction?.byBackend.find((bucket) => bucket.backend === 'codex')).toMatchObject({
       backend: 'codex',
       attempts: 16,
       outcomes: {
@@ -4638,8 +4648,73 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
-    expect(formatted).toContain('learning:  diagnostic 0/0 (—), no-proposal 0, policy-suppressed 4');
+    expect(formatted).toContain('learning:  diagnostic 0/0 (—), no-proposal 0, policy-suppressed 4, cancelled 0');
     expect(formatted).not.toContain('proposal filing disabled');
+  });
+
+  it('subtracts cancelled outcomes from dispatch-yield diagnostic attempts', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49',
+      itemId: 'diagnostic-a',
+      source: 'goal',
+      repo,
+      title: 'Mixed diagnostic and cancellation sample',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      reason: 'agent returned no diff',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'diagnostic-b' },
+      {
+        ...baseEvent,
+        itemId: 'cancelled-a',
+        outcome: 'cancelled',
+        reason: 'selection cancelled after daemon lock ownership lost',
+      },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({
+      attempts: 3,
+      outcomes: { cancelled: 1 },
+    });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'insufficient-sample',
+      diagnosticAttempts: 2,
+      proposalsCreated: 0,
+      primaryCandidate: {
+        scope: 'backend-source',
+        backend: 'local-coder',
+        source: 'goal',
+        diagnosticAttempts: 2,
+        verdict: 'insufficient-sample',
+      },
+    });
+    expect(s.attemptCoverage?.production).toMatchObject({
+      attempts: 3,
+      cancelled: 1,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 2,
+      diagnosticProposalRate: 0,
+      diagnosticNoProposalRate: 1,
+    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
   });
 
   it('keeps daemon capture-missing rows diagnostic even with raw proposal-disabled counts', async () => {
@@ -4670,7 +4745,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       tier: 'mid',
       assignedBy: 'daemon',
       routeReason: 'local route',
-      outcome: 'proposal-capture-error',
+      outcome: 'proposal-disabled',
       proposalCreated: false,
       spentUsd: 0.001,
       reason: 'capture-missing: required proposal dispatch ended before final capture',
@@ -4695,9 +4770,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.dispatchProduction).toMatchObject({
       attempts: 3,
       proposalsCreated: 0,
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 3,
       outcomes: {
-        proposalCaptureError: 3,
-        proposalDisabled: 0,
+        proposalCaptureError: 0,
+        proposalDisabled: 3,
       },
       actionCounts: {
         proposalDisabled: 3,

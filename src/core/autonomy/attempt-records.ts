@@ -198,6 +198,7 @@ export interface AttemptCoverageStatus {
   production: {
     attempts: number;
     proposalCreated: number;
+    cancelled?: number;
     policySuppressed: number;
     labelAuthoritativeAttempts: number;
     legacyUnversionedAttempts: number;
@@ -469,6 +470,8 @@ function causalGapCauses(record: AttemptRecord): AttemptCausalGapCause[] {
 
   if (record.policySuppressed) {
     causes.push('policy-suppressed');
+  } else if (record.learningKind === 'cancelled') {
+    // Cancellation is intentionally non-diagnostic and needs no causal label.
   } else if (!coverage.labelAuthoritative) {
     if (!coverage.routerPolicyVersion && !coverage.learningEpoch && !coverage.runEventSummary) {
       causes.push('legacy-unlabeled-attempt');
@@ -769,26 +772,30 @@ export function summarizeAttemptCoverage(
   const attemptShape = emptyProductionAttemptShape();
   const generatedRepairAttempts = emptyAttemptGeneratedRepairSummary();
   let proposalCreated = 0;
+  let cancelled = 0;
   let policySuppressed = 0;
   let labelAuthoritativeAttempts = 0;
   let diagnosticAttempts = 0;
   let diagnosticNoProposal = 0;
   for (const record of records) {
     if (record.proposalCreated) proposalCreated++;
+    if (record.learningKind === 'cancelled') cancelled++;
     if (record.policySuppressed) policySuppressed++;
     if (record.labelAuthoritative) labelAuthoritativeAttempts++;
     if (record.diagnosticAttempt) diagnosticAttempts++;
     if (record.diagnosticNoProposal) diagnosticNoProposal++;
     addProductionAttemptShape(attemptShape, record.attemptShape);
-    addAttemptGeneratedRepair(
-      generatedRepairAttempts,
-      generatedRepairAttemptKindFromSignals({
-        itemId: record.itemId,
-        title: record.title,
-        source: record.source,
-      }),
-      record.proposalCreated,
-    );
+    if (record.learningKind !== 'cancelled') {
+      addAttemptGeneratedRepair(
+        generatedRepairAttempts,
+        generatedRepairAttemptKindFromSignals({
+          itemId: record.itemId,
+          title: record.title,
+          source: record.source,
+        }),
+        record.proposalCreated,
+      );
+    }
   }
   const coverage = {
     agentAction: metric(records, (record) => record.coverage.agentAction),
@@ -836,21 +843,23 @@ export function summarizeAttemptCoverage(
   const weakReasons = records.length >= CAUSAL_WEAK_MIN_ATTEMPTS
     ? weakKinds
         .map(({ kind, threshold }) => {
-          const learnableCurrentLabelRecords = kind === 'currentAuthoritativeLabel'
-            ? records.filter((record) => !record.policySuppressed)
-            : null;
-          const metricValue = learnableCurrentLabelRecords
+          const causalLabelRecords = kind === 'labelAuthoritative'
+            ? records.filter((record) => record.learningKind !== 'cancelled')
+            : kind === 'currentAuthoritativeLabel'
+              ? records.filter((record) => !record.policySuppressed && record.learningKind !== 'cancelled')
+              : null;
+          const metricValue = causalLabelRecords
             ? {
-                count: learnableCurrentLabelRecords.filter((record) => record.causalCoverage.currentAuthoritativeLabel).length,
-                rate: learnableCurrentLabelRecords.length > 0
-                  ? learnableCurrentLabelRecords.filter((record) => record.causalCoverage.currentAuthoritativeLabel).length / learnableCurrentLabelRecords.length
+                count: causalLabelRecords.filter((record) => record.causalCoverage[kind]).length,
+                rate: causalLabelRecords.length > 0
+                  ? causalLabelRecords.filter((record) => record.causalCoverage[kind]).length / causalLabelRecords.length
                   : 1,
               }
             : causalCoverage[kind];
           const gap = causalGaps.find((candidate) => candidate.kind === kind);
-          const sampleRefs = learnableCurrentLabelRecords
-            ? learnableCurrentLabelRecords
-                .filter((record) => !record.causalCoverage.currentAuthoritativeLabel)
+          const sampleRefs = causalLabelRecords
+            ? causalLabelRecords
+                .filter((record) => !record.causalCoverage[kind])
                 .slice(0, 5)
                 .map(attemptRef)
             : gap?.sampleRefs ?? [];
@@ -859,11 +868,14 @@ export function summarizeAttemptCoverage(
             count: metricValue.count,
             rate: metricValue.rate,
             threshold,
-            ...(learnableCurrentLabelRecords ? { denominator: learnableCurrentLabelRecords.length } : {}),
+            ...(causalLabelRecords ? { denominator: causalLabelRecords.length } : {}),
             sampleRefs,
           };
         })
-        .filter((reason) => reason.rate < reason.threshold)
+        .filter((reason) =>
+          (reason.denominator === undefined || reason.denominator >= CAUSAL_WEAK_MIN_ATTEMPTS) &&
+          reason.rate < reason.threshold,
+        )
     : [];
   const causalGapDiagnostics = buildCausalGapDiagnostics(records);
   return {
@@ -894,9 +906,12 @@ export function summarizeAttemptCoverage(
     production: {
       attempts: records.length,
       proposalCreated,
+      cancelled,
       policySuppressed,
       labelAuthoritativeAttempts,
-      legacyUnversionedAttempts: Math.max(0, records.length - labelAuthoritativeAttempts),
+      legacyUnversionedAttempts: records.filter((record) =>
+        record.learningKind !== 'cancelled' && !record.labelAuthoritative
+      ).length,
       diagnosticAttempts,
       diagnosticNoProposal,
       diagnosticProposalRate: diagnosticAttempts > 0 ? proposalCreated / diagnosticAttempts : null,

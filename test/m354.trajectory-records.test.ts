@@ -8,6 +8,7 @@ import {
   MIN_SKILL_OBSERVED_TRAJECTORIES,
   summarizeTrajectoryLearning,
   suppressDegradedSkillObservation,
+  type TrajectoryLearningStatus,
   type TrajectoryRecordReadDeps,
 } from '../src/core/autonomy/trajectory-records.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
@@ -464,6 +465,248 @@ describe('Trajectory records', () => {
     expect(record?.trajectoryId).toBeUndefined();
   });
 
+  it('projects cancellation as an explicit terminal outcome', () => {
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          itemId: 'item-cancelled',
+          outcome: 'cancelled',
+          proposalCreated: false,
+          proposalId: undefined,
+          runId: 'run-cancelled',
+          trajectoryId: 'traj-cancelled',
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+      }),
+    });
+
+    expect(record).toMatchObject({
+      terminalOutcome: 'cancelled',
+      coverage: { dispatch: true, proposal: false },
+    });
+    expect(summarizeTrajectoryLearning([record!]).terminalOutcomes).toMatchObject({
+      cancelled: 1,
+      'no-proposal': 0,
+      failed: 0,
+    });
+  });
+
+  it('projects historical owner cancellation without masking genuine engine failure', () => {
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'item-historical-cancelled',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId: 'run-historical-cancelled',
+            trajectoryId: 'traj-historical-cancelled',
+            reason: 'selection cancelled after daemon lock ownership lost',
+            runEventSummary: {
+              runId: 'run-historical-cancelled',
+              status: 'aborted',
+              outcome: 'engine-failed',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
+          dispatch({
+            ts: TS1,
+            itemId: 'item-provider-failed',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId: 'run-provider-failed',
+            trajectoryId: 'traj-provider-failed',
+            reason: 'provider request aborted after upstream transport failure',
+            runEventSummary: {
+              runId: 'run-provider-failed',
+              status: 'aborted',
+              outcome: 'engine-failed',
+              proposalCreated: false,
+              actionCounts: {},
+            },
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+      }),
+    });
+
+    expect(records.find((record) => record.itemId === 'item-historical-cancelled'))
+      .toMatchObject({ terminalOutcome: 'cancelled' });
+    expect(records.find((record) => record.itemId === 'item-provider-failed'))
+      .toMatchObject({ terminalOutcome: 'failed' });
+    expect(summarizeTrajectoryLearning(records).terminalOutcomes).toMatchObject({
+      cancelled: 1,
+      failed: 1,
+    });
+  });
+
+  it('lets every substantive joined terminal fact outrank cancellation', () => {
+    const dispatchCases = [
+      {
+        expected: 'pending',
+        event: { outcome: 'proposal-created', proposalCreated: true, proposalId: 'prop-pending' },
+      },
+      {
+        expected: 'failed',
+        event: {
+          outcome: 'engine-failed',
+          proposalCreated: false,
+          proposalId: undefined,
+          reason: 'provider failed after starting work',
+        },
+      },
+      {
+        expected: 'no-proposal',
+        event: { outcome: 'empty-diff', proposalCreated: false, proposalId: undefined },
+      },
+    ] as const;
+
+    for (const [index, testCase] of dispatchCases.entries()) {
+      const runId = `run-mixed-dispatch-${index}`;
+      const trajectoryId = `traj-mixed-dispatch-${index}`;
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          readDispatchProductionEvents: () => [
+            dispatch({
+              ts: TS0,
+              itemId: `item-mixed-dispatch-${index}`,
+              outcome: 'cancelled',
+              proposalCreated: false,
+              proposalId: undefined,
+              runId,
+              trajectoryId,
+            }),
+            dispatch({
+              ts: TS1,
+              itemId: `item-mixed-dispatch-${index}`,
+              runId,
+              trajectoryId,
+              ...testCase.event,
+            }),
+          ],
+          listOutcomeRecords: () => [],
+          readAgentActions: () => [],
+        }),
+      });
+
+      expect(record?.terminalOutcome).toBe(testCase.expected);
+    }
+
+    for (const [index, action] of (['handoff', 'rejected', 'merged'] as const).entries()) {
+      const proposalId = `prop-mixed-decision-${index}`;
+      const runId = `run-mixed-decision-${index}`;
+      const trajectoryId = `traj-mixed-decision-${index}`;
+      const base = outcomeRecord();
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          readDispatchProductionEvents: () => [dispatch({
+            itemId: `item-mixed-decision-${index}`,
+            outcome: 'cancelled',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId,
+            trajectoryId,
+          })],
+          listOutcomeRecords: () => [{
+            ...base,
+            proposal: {
+              ...base.proposal,
+              id: proposalId,
+              status: action === 'merged' ? 'applied' : action === 'rejected' ? 'rejected' : 'pending',
+              createdAt: TS1,
+              workItemId: `item-mixed-decision-${index}`,
+              runId,
+              trajectoryId,
+            },
+            lastActivityAt: TS2,
+            evidencePacks: [],
+            decisions: [{
+              ...base.decisions[0]!,
+              ts: TS2,
+              proposalId,
+              action,
+              runId,
+              trajectoryId,
+            }],
+          }],
+          readAgentActions: () => [],
+        }),
+      });
+
+      expect(record?.terminalOutcome).toBe(action);
+    }
+  });
+
+  it('does not let a later cancellation mask joined failure or no-diff truth', () => {
+    for (const [index, terminal] of (['engine-failed', 'empty-diff'] as const).entries()) {
+      const runId = `run-late-cancel-${index}`;
+      const trajectoryId = `traj-late-cancel-${index}`;
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          readDispatchProductionEvents: () => [
+            dispatch({
+              ts: TS1,
+              itemId: `item-late-cancel-${index}`,
+              outcome: terminal,
+              proposalCreated: false,
+              proposalId: undefined,
+              runId,
+              trajectoryId,
+              reason: terminal === 'engine-failed' ? 'provider failed during execution' : undefined,
+            }),
+            dispatch({
+              ts: TS2,
+              itemId: `item-late-cancel-${index}`,
+              outcome: 'cancelled',
+              proposalCreated: false,
+              proposalId: undefined,
+              runId,
+              trajectoryId,
+            }),
+          ],
+          listOutcomeRecords: () => [],
+          readAgentActions: () => [],
+        }),
+      });
+
+      expect(record?.terminalOutcome).toBe(terminal === 'engine-failed' ? 'failed' : 'no-proposal');
+    }
+  });
+
+  it('accepts historical terminal counts without cancellation while materializing new summaries', () => {
+    const historicalTerminalOutcomes = {
+      merged: 1,
+      rejected: 0,
+      handoff: 0,
+      pending: 2,
+      'no-proposal': 1,
+      failed: 0,
+      unknown: 0,
+    } satisfies TrajectoryLearningStatus['terminalOutcomes'];
+
+    expect(historicalTerminalOutcomes).not.toHaveProperty('cancelled');
+    expect(summarizeTrajectoryLearning([], 24).terminalOutcomes).toEqual({
+      merged: 0,
+      rejected: 0,
+      handoff: 0,
+      pending: 0,
+      'no-proposal': 0,
+      cancelled: 0,
+      failed: 0,
+      unknown: 0,
+    });
+  });
+
   it('keeps orphaned proposal records pending when no final decision exists', () => {
     const [record] = listTrajectoryRecords({
       windowHours: 1000,
@@ -686,6 +929,7 @@ describe('Trajectory records', () => {
         handoff: 0,
         pending: 0,
         'no-proposal': 0,
+        cancelled: 0,
         failed: 0,
         unknown: 0,
       },
