@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { readBuildIdentity, type BuildIdentity } from '../build-identity.js';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
@@ -1007,6 +1008,8 @@ export interface FleetQueueRepoCoverage {
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
   generatedAt: string;
+  /** Canonical build-produced identity. Optional for legacy serialized snapshots. */
+  buildIdentity?: BuildIdentity;
   daemon: {
     running: boolean;
     startedAt?: string | null;
@@ -1992,6 +1995,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   const status: FleetStatus = {
     generatedAt,
+    buildIdentity: readBuildIdentity(),
     daemon,
     backends,
     queue: {

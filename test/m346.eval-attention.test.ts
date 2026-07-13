@@ -262,6 +262,126 @@ describe('M346 eval attention', () => {
     });
   });
 
+  it('preserves failed attempts as the remainder of mixed diagnostic rates', () => {
+    const events: AgentActionEvent[] = [
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:00.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'proposal-created',
+        action: 'daemon:dispatch',
+        summary: 'proposal filed',
+        runEventSummary: { outcome: 'proposal-created', proposalCreated: true },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:01.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: 'empty diff',
+        runEventSummary: { outcome: 'empty-diff', proposalCreated: false },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:02.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'failed',
+        action: 'daemon:dispatch',
+        summary: 'engine failed',
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      },
+    ];
+
+    const report = buildAttentionEvalReport(events, {
+      generatedAt: '2026-07-09T05:01:00.000Z',
+    });
+
+    expect(report.productionYield).toMatchObject({
+      attempts: 3,
+      proposalCreated: 1,
+      noProposal: 1,
+      failed: 1,
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 1,
+      diagnosticProposalRate: 0.333,
+      diagnosticNoProposalRate: 0.333,
+    });
+  });
+
+  it('excludes selection, start, and no-dispatch actions from production attempts', () => {
+    const base: Omit<AgentActionEvent, 'ts' | 'kind' | 'outcome' | 'action' | 'summary'> = {
+      schemaVersion: 1,
+      actor: 'daemon',
+    };
+    const events: AgentActionEvent[] = [
+      {
+        ...base,
+        ts: '2026-07-09T05:00:00.000Z',
+        kind: 'dispatch',
+        outcome: 'ok',
+        action: 'daemon:drain-select',
+        summary: 'selected one item',
+        counts: { selected: 1 },
+      },
+      {
+        ...base,
+        ts: '2026-07-09T05:00:01.000Z',
+        kind: 'dispatch',
+        outcome: 'ok',
+        action: 'daemon:dispatch-start',
+        summary: 'dispatch started',
+        counts: { dispatched: 1 },
+      },
+      {
+        ...base,
+        ts: '2026-07-09T05:00:02.000Z',
+        kind: 'dispatch',
+        outcome: 'skipped',
+        action: 'daemon:dispatch-skip',
+        summary: 'dispatch skipped',
+        counts: { dispatched: 0, selected: 1 },
+      },
+      {
+        ...base,
+        ts: '2026-07-09T05:00:03.000Z',
+        kind: 'dispatch',
+        outcome: 'failed',
+        action: 'daemon:dispatch',
+        summary: 'terminal dispatch failed',
+        counts: { dispatched: 1 },
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      },
+      {
+        ...base,
+        ts: '2026-07-09T05:00:04.000Z',
+        kind: 'proposal',
+        outcome: 'proposal-created',
+        action: 'agent:proposal',
+        summary: 'proposal created',
+        runEventSummary: { outcome: 'proposal-created', proposalCreated: true },
+      },
+    ];
+
+    const report = buildAttentionEvalReport(events, {
+      generatedAt: '2026-07-09T05:01:00.000Z',
+    });
+
+    expect(report.productionYield).toMatchObject({
+      attempts: 2,
+      proposalCreated: 1,
+      noProposal: 0,
+      failed: 1,
+      blocked: 0,
+      diagnosticAttempts: 2,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0,
+    });
+  });
+
   it('does not persist raw prompt, diff, stdout, stderr, summary, reason, detail, or full paths', () => {
     const report = buildAttentionEvalReport(fixtureEvents(), {
       generatedAt: '2026-07-09T05:01:00.000Z',

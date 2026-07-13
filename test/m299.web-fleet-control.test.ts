@@ -154,13 +154,19 @@ describe('POST /api/fleet/pause|resume', () => {
     );
     expect(paused.statusCode).toBe(200);
     expect(killSwitchOn()).toBe(true);
-    expect((JSON.parse(paused.body) as { ok: boolean; fleet: { killed: boolean } }).fleet.killed).toBe(true);
+    const pausedBody = JSON.parse(paused.body) as {
+      ok: boolean;
+      fleet: { killed: boolean; buildIdentity?: unknown };
+    };
+    expect(pausedBody.fleet.killed).toBe(true);
+    expect(pausedBody.fleet.buildIdentity).toBeDefined();
     expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
 
     const fleetPaused = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetPaused.statusCode).toBe(200);
     const pausedFleet = JSON.parse(fleetPaused.body) as {
       killed: boolean;
+      buildIdentity?: unknown;
       autonomyControlMode?: unknown;
       backends?: Array<{ resource?: { availability?: unknown } }>;
       autonomyDirection?: { mode?: unknown; resources?: unknown };
@@ -171,6 +177,7 @@ describe('POST /api/fleet/pause|resume', () => {
       };
     };
     expect(pausedFleet.killed).toBe(true);
+    expect(pausedFleet.buildIdentity).toEqual(pausedBody.fleet.buildIdentity);
     expect(['disabled', 'advisory', 'executable']).toContain(pausedFleet.autonomyControlMode);
     expect(['open', 'near', 'throttled', 'exhausted', 'unreachable', 'unknown', 'not-sensed'])
       .toContain(pausedFleet.backends?.[0]?.resource?.availability);
@@ -192,9 +199,10 @@ describe('POST /api/fleet/pause|resume', () => {
     const resumedBody = JSON.parse(resumed.body) as {
       ok: boolean;
       service?: { installed: boolean; running: boolean };
-      fleet: { killed: boolean };
+      fleet: { killed: boolean; buildIdentity?: unknown };
     };
     expect(resumedBody.fleet.killed).toBe(false);
+    expect(resumedBody.fleet.buildIdentity).toEqual(pausedBody.fleet.buildIdentity);
     expect(resumedBody.service).toMatchObject({ installed: true, running: true });
     expect(serviceMocks.ensureRunning).toHaveBeenCalledWith({
       budget: 1,
@@ -207,11 +215,13 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(fleetResumed.statusCode).toBe(200);
     const resumedFleet = JSON.parse(fleetResumed.body) as {
       killed: boolean;
+      buildIdentity?: unknown;
       autonomyControlMode?: unknown;
       autonomyDirection?: { mode?: unknown };
       missionBrief?: { directive?: unknown; whyNow?: unknown };
     };
     expect(resumedFleet.killed).toBe(false);
+    expect(resumedFleet.buildIdentity).toEqual(pausedBody.fleet.buildIdentity);
     expect(['disabled', 'advisory', 'executable']).toContain(resumedFleet.autonomyControlMode);
     expect(typeof resumedFleet.autonomyDirection?.mode).toBe('string');
     expect(typeof resumedFleet.missionBrief?.directive).toBe('string');

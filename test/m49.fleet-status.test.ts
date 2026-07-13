@@ -550,6 +550,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     // Shape
     expect(typeof s.generatedAt).toBe('string');
     expect(Date.parse(s.generatedAt)).not.toBeNaN();
+    expect(s.buildIdentity).toEqual({
+      schemaVersion: 1,
+      packageVersion: null,
+      revision: null,
+      dirty: null,
+      provenance: 'unavailable',
+    });
     expect(s.daemon).toBeDefined();
     expect(s.backends).toBeInstanceOf(Array);
     expect(s.queue).toBeDefined();
@@ -5796,6 +5803,31 @@ describe('skill corpus readiness projection', () => {
 });
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  it('renders compact build identity and omits it for legacy snapshots', () => {
+    const base = {
+      generatedAt: '2026-07-11T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+    const current = formatFleetStatus({
+      ...base,
+      buildIdentity: {
+        schemaVersion: 1,
+        packageVersion: '3.1.0',
+        revision: 'abcdef0123456789abcdef0123456789abcdef01',
+        dirty: true,
+        provenance: 'git',
+      },
+    });
+
+    expect(current).toContain('Build: 3.1.0 @ abcdef012345 (dirty)');
+    expect(formatFleetStatus(base)).not.toContain('Build:');
+  });
+
   it('renders repair handoff rollout status and omits it for legacy snapshots', () => {
     const base = {
       generatedAt: '2026-07-11T00:00:00.000Z',

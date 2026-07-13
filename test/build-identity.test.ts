@@ -10,6 +10,7 @@ import {
   javascriptStringLiteral,
   writeBuildIdentity,
 } from '../scripts/build-identity.mjs';
+import { createSeaShim } from '../scripts/build-sea.mjs';
 import { readBuildIdentity } from '../src/core/build-identity.js';
 
 vi.mock('../src/core/fleet/status.js', () => ({
@@ -36,6 +37,7 @@ function initGit(root: string): string {
 
 afterEach(() => {
   delete process.env.ASHLR_BUILD_IDENTITY;
+  Reflect.deleteProperty(globalThis, Symbol.for('ashlr.build-identity.v1'));
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -108,13 +110,13 @@ describe('build identity generation', () => {
     mkdirSync(join(root, 'dist'));
     const manifestPath = join(root, 'dist', 'build-identity.json');
     const generated = writeBuildIdentity({ repoRoot: root, outputPath: manifestPath, env: {} });
-    process.env.ASHLR_BUILD_IDENTITY = JSON.stringify({
+    Reflect.set(globalThis, Symbol.for('ashlr.build-identity.v1'), JSON.stringify({
       schemaVersion: 1,
       packageVersion: '9.9.9',
       revision: 'f'.repeat(40),
       dirty: false,
       provenance: 'git',
-    });
+    }));
 
     expect(readBuildIdentity({ manifestPath })).toEqual(generated);
   });
@@ -127,17 +129,54 @@ describe('build identity generation', () => {
     expect(literal).not.toContain('\u2029');
     expect(Function(`return ${literal}`)()).toBe(value);
   });
-});
 
-describe('GET /api/fleet build identity', () => {
-  it('adds the validated identity without changing fleet status construction', async () => {
-    process.env.ASHLR_BUILD_IDENTITY = JSON.stringify({
+  it('makes the SEA-embedded identity authoritative over external env', () => {
+    const root = fixture();
+    const embedded = JSON.stringify({
       schemaVersion: 1,
       packageVersion: '3.1.0',
-      revision: 'b'.repeat(40),
+      revision: 'a'.repeat(40),
       dirty: false,
       provenance: 'git',
     });
+    const conflicting = JSON.stringify({
+      schemaVersion: 1,
+      packageVersion: '9.9.9',
+      revision: 'f'.repeat(40),
+      dirty: true,
+      provenance: 'git',
+    });
+    const shimPath = join(root, 'identity-shim.mjs');
+    const shim = createSeaShim({ pkgVersion: '3.1.0', buildIdentityJson: embedded })
+      .replace(
+        "await import('../dist/cli/index.js');",
+        "process.stdout.write(Reflect.get(globalThis, Symbol.for('ashlr.build-identity.v1')) ?? '');",
+      );
+    writeFileSync(shimPath, shim, 'utf8');
+
+    const observed = execFileSync(process.execPath, [shimPath], {
+      encoding: 'utf8',
+      env: { ...process.env, ASHLR_BUILD_IDENTITY: conflicting },
+    });
+    expect(observed).toBe(embedded);
+  });
+});
+
+describe('GET /api/fleet build identity', () => {
+  it('returns the canonical FleetStatus object without API-side recomposition', async () => {
+    const canonicalFleet = {
+      killed: false,
+      queue: [],
+      buildIdentity: {
+        schemaVersion: 1 as const,
+        packageVersion: '3.1.0',
+        revision: 'b'.repeat(40),
+        dirty: false,
+        provenance: 'git' as const,
+      },
+    };
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce(canonicalFleet as never);
     const { handleApi } = await import('../src/core/web/api.js');
     const req = { url: '/api/fleet', method: 'GET', headers: {} } as IncomingMessage;
     let body = '';
@@ -148,9 +187,23 @@ describe('GET /api/fleet build identity', () => {
 
     const handled = await handleApi(req, res, {} as never, { token: 'test', allowDispatch: false });
     expect(handled).toBe(true);
-    expect(JSON.parse(body)).toMatchObject({
-      killed: false,
-      buildIdentity: { packageVersion: '3.1.0', revision: 'b'.repeat(40), dirty: false },
-    });
+    expect(JSON.parse(body)).toEqual(canonicalFleet);
+  });
+
+  it('preserves legacy FleetStatus payloads without synthesizing identity', async () => {
+    const legacyFleet = { killed: false, queue: [] };
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce(legacyFleet as never);
+    const { handleApi } = await import('../src/core/web/api.js');
+    const req = { url: '/api/fleet', method: 'GET', headers: {} } as IncomingMessage;
+    let body = '';
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn((chunk?: string) => { body = chunk ?? ''; }),
+    } as unknown as ServerResponse;
+
+    const handled = await handleApi(req, res, {} as never, { token: 'test', allowDispatch: false });
+    expect(handled).toBe(true);
+    expect(JSON.parse(body)).toEqual(legacyFleet);
   });
 });

@@ -586,10 +586,11 @@ describe('M343 agent action ledger', () => {
       eventCount: 3,
       proposalEvents: 1,
       noProposalEvents: 1,
+      diagnosticAttempts: 3,
       diagnosticNoProposalEvents: 1,
       policySuppressedEvents: 0,
-      diagnosticProposalRate: 0.5,
-      diagnosticNoProposalRate: 0.5,
+      diagnosticProposalRate: 1 / 3,
+      diagnosticNoProposalRate: 1 / 3,
     });
     expect(summary.spendUsd).toBeCloseTo(0.6);
     expect(summary.repoEventCount).toBe(3);
@@ -635,6 +636,7 @@ describe('M343 agent action ledger', () => {
     expect(summary).toMatchObject({
       proposalEvents: 1,
       noProposalEvents: 2,
+      diagnosticAttempts: 2,
       diagnosticNoProposalEvents: 1,
       policySuppressedEvents: 1,
       diagnosticProposalRate: 0.5,
@@ -683,6 +685,7 @@ describe('M343 agent action ledger', () => {
     expect(summary).toMatchObject({
       proposalEvents: 1,
       noProposalEvents: 1,
+      diagnosticAttempts: 1,
       diagnosticNoProposalEvents: 0,
       policySuppressedEvents: 1,
       diagnosticProposalRate: 1,
@@ -690,22 +693,23 @@ describe('M343 agent action ledger', () => {
     });
   });
 
-  it('keeps failed proposal attempts out of diagnostic no-proposal workspace counts', () => {
+  it('uses all diagnostic attempts for mixed proposal, no-proposal, and failure rates', () => {
     const summary = summarizeAgentWorkspace([
+      makeEvent({
+        action: 'proposal-created',
+        outcome: 'proposal-created',
+        proposalId: 'prop-created',
+        runEventSummary: {
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          actionCounts: { proposalCreated: 1 },
+        },
+      }),
       makeEvent({
         action: 'engine-failed',
         outcome: 'failed',
         runEventSummary: {
           outcome: 'engine-failed',
-          proposalCreated: false,
-          actionCounts: { diffFiles: 0 },
-        },
-      }),
-      makeEvent({
-        action: 'sandbox-failed',
-        outcome: 'failed',
-        runEventSummary: {
-          outcome: 'sandbox-failed',
           proposalCreated: false,
           actionCounts: { diffFiles: 0 },
         },
@@ -722,12 +726,90 @@ describe('M343 agent action ledger', () => {
     ]);
 
     expect(summary).toMatchObject({
-      proposalEvents: 0,
+      proposalEvents: 1,
       noProposalEvents: 1,
+      diagnosticAttempts: 3,
       diagnosticNoProposalEvents: 1,
       policySuppressedEvents: 0,
+      diagnosticProposalRate: 1 / 3,
+      diagnosticNoProposalRate: 1 / 3,
+    });
+  });
+
+  it('keeps selection, start, and no-dispatch actions out of attempt rates', () => {
+    const summary = summarizeAgentWorkspace([
+      makeEvent({
+        kind: 'dispatch',
+        action: 'daemon:drain-select',
+        outcome: 'no-proposal',
+        counts: { selected: 1 },
+      }),
+      makeEvent({
+        kind: 'dispatch',
+        action: 'daemon:dispatch-start',
+        outcome: 'started',
+        counts: { dispatched: 1 },
+      }),
+      makeEvent({
+        kind: 'dispatch',
+        action: 'daemon:dispatch-skip',
+        outcome: 'no-proposal',
+        counts: { dispatched: 0 },
+      }),
+      makeEvent({
+        kind: 'dispatch',
+        action: 'daemon:dispatch',
+        outcome: 'failed',
+        counts: { dispatched: 1 },
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      }),
+    ]);
+
+    expect(summary).toMatchObject({
+      proposalEvents: 0,
+      noProposalEvents: 0,
+      diagnosticAttempts: 1,
+      diagnosticNoProposalEvents: 0,
       diagnosticProposalRate: 0,
-      diagnosticNoProposalRate: 1,
+      diagnosticNoProposalRate: 0,
+    });
+  });
+
+  it('deduplicates sandbox and daemon terminal telemetry for one causal run', () => {
+    const summary = summarizeAgentWorkspace([
+      makeEvent({
+        runId: 'run-paired-proposal',
+        trajectoryId: undefined,
+        kind: 'maintenance',
+        action: 'sandbox:complete',
+        outcome: 'proposal-created',
+        runEventSummary: { outcome: 'proposal-created', proposalCreated: true },
+      }),
+      makeEvent({
+        runId: 'run-paired-proposal',
+        trajectoryId: 'run:run-paired-proposal',
+        kind: 'dispatch',
+        action: 'daemon:dispatch',
+        outcome: 'proposal-created',
+        runEventSummary: { outcome: 'proposal-created', proposalCreated: true },
+      }),
+      makeEvent({
+        runId: 'run-terminal-failure',
+        trajectoryId: 'run:run-terminal-failure',
+        kind: 'dispatch',
+        action: 'daemon:dispatch',
+        outcome: 'failed',
+        runEventSummary: { outcome: 'engine-failed', proposalCreated: false },
+      }),
+    ]);
+
+    expect(summary).toMatchObject({
+      proposalEvents: 1,
+      noProposalEvents: 0,
+      diagnosticAttempts: 2,
+      diagnosticNoProposalEvents: 0,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0,
     });
   });
 

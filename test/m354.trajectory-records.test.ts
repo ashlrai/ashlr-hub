@@ -978,7 +978,7 @@ describe('Trajectory records', () => {
     expect(JSON.stringify(summary)).not.toContain(REPO);
   });
 
-  it('excludes action-only trajectories from route-spine denominators without changing coverage', () => {
+  it('isolates action-only preclaim trajectories from production learning metrics', () => {
     const records = listTrajectoryRecords({
       windowHours: 1000,
       deps: deps({
@@ -986,9 +986,18 @@ describe('Trajectory records', () => {
           action(),
           action({
             itemId: 'item-action-only',
-            proposalId: 'prop-action-only',
+            proposalId: undefined,
             runId: 'run-action-only',
             trajectoryId: 'traj-action-only',
+            routeSnapshot: {
+              backend: null,
+              tier: 'mid',
+              assignedBy: 'preclaim-route-inspection',
+              reason: 'same-tier-backend-unavailable',
+              routerPolicyVersion: ROUTER_POLICY_VERSION,
+            },
+            learningSource: 'agent-action',
+            labelBasis: 'preclaim-route-feasibility',
           }),
         ],
       }),
@@ -1003,17 +1012,116 @@ describe('Trajectory records', () => {
     ]));
 
     const summary = summarizeTrajectoryLearning(records, 24);
+    expect(summary.trajectories).toBe(1);
+    expect(summary.terminalOutcomes).toMatchObject({ merged: 1, unknown: 0 });
     expect(summary.coverage).toMatchObject({
-      dispatch: { count: 1, rate: 0.5 },
-      evidence: { count: 1, rate: 0.5 },
-      decision: { count: 1, rate: 0.5 },
-      agentAction: { count: 2, rate: 1 },
+      dispatch: { count: 1, rate: 1 },
+      evidence: { count: 1, rate: 1 },
+      decision: { count: 1, rate: 1 },
+      agentAction: { count: 1, rate: 1 },
     });
+    expect(summary.gaps).toEqual([]);
+    expect(summary.recent).toHaveLength(1);
     expect(summary.routeSpine).toEqual({
       dispatchToDecision: { count: 1, rate: 1 },
       dispatchToEvidence: { count: 1, rate: 1 },
       dispatchToMerge: { count: 1, rate: 1 },
     });
+    expect(summary.routeDiagnostics).toMatchObject({
+      trajectories: 1,
+      reasonCounts: { 'same-tier-backend-unavailable': 1 },
+    });
+  });
+
+  it('prioritizes production trajectories within a 500-record action-only overflow window', () => {
+    const dispatches = [
+      dispatch({ proposalId: undefined, runId: 'run-production-a', trajectoryId: 'traj-production-a' }),
+      dispatch({ ts: TS1, itemId: 'item-production-b', proposalId: undefined, runId: 'run-production-b', trajectoryId: 'traj-production-b' }),
+      dispatch({ ts: TS2, itemId: 'item-production-c', proposalId: undefined, runId: 'run-production-c', trajectoryId: 'traj-production-c' }),
+    ];
+    const actions = Array.from({ length: 510 }, (_, index) => action({
+      ts: new Date(Date.parse(TS4) + index).toISOString(),
+      itemId: `item-route-${index}`,
+      proposalId: undefined,
+      runId: `run-route-${index}`,
+      trajectoryId: `traj-route-${index}`,
+      routeSnapshot: {
+        backend: null,
+        tier: 'mid',
+        assignedBy: 'preclaim-route-inspection',
+        reason: index < 300
+          ? 'editing-backend-unavailable'
+          : index < 509
+            ? 'same-tier-backend-unavailable'
+            : 'private-arbitrary-reason',
+        routerPolicyVersion: ROUTER_POLICY_VERSION,
+      },
+      learningSource: 'agent-action',
+      labelBasis: 'preclaim-route-feasibility',
+    }));
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      limit: 500,
+      deps: deps({
+        readDispatchProductionEvents: () => dispatches,
+        listOutcomeRecords: () => [],
+        readAgentActions: () => actions,
+        readSkillUseEvents: () => [
+          skillUse({ eventId: 'skill-production-a', proposalId: undefined, runId: 'run-production-a', trajectoryId: 'traj-production-a' }),
+          skillUse({ eventId: 'skill-production-b', proposalId: undefined, runId: 'run-production-b', trajectoryId: 'traj-production-b' }),
+          skillUse({ eventId: 'skill-production-c', proposalId: undefined, runId: 'run-production-c', trajectoryId: 'traj-production-c' }),
+          skillUse({ eventId: 'skill-route-only', proposalId: undefined, runId: 'run-route-509', trajectoryId: 'traj-route-509' }),
+        ],
+      }),
+    });
+
+    expect(records).toHaveLength(500);
+    expect(records.filter((record) => record.coverage.dispatch)).toHaveLength(3);
+    expect(records.filter((record) => !record.coverage.dispatch)).toHaveLength(497);
+    expect(records.map((record) => record.trajectoryId)).toEqual(expect.arrayContaining([
+      'traj-production-a',
+      'traj-production-b',
+      'traj-production-c',
+      'traj-route-509',
+    ]));
+
+    const summary = summarizeTrajectoryLearning(records, 24);
+    expect(summary.trajectories).toBe(3);
+    expect(summary.terminalOutcomes).toMatchObject({ pending: 3, unknown: 0 });
+    expect(summary.coverage).toMatchObject({
+      dispatch: { count: 3, rate: 1 },
+      proposal: { count: 0, rate: 0 },
+      agentAction: { count: 0, rate: 0 },
+      skillUse: { count: 3, rate: 1 },
+    });
+    expect(summary.gaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'proposal', count: 3 }),
+      expect.objectContaining({ kind: 'evidence', count: 3 }),
+      expect.objectContaining({ kind: 'decision', count: 3 }),
+      expect.objectContaining({ kind: 'agentAction', count: 3 }),
+    ]));
+    expect(summary.gaps).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'dispatch' }),
+    ]));
+    expect(summary.skillObservation).toMatchObject({
+      joined: 3,
+      observedTrajectoryCoverage: { count: 3, rate: 1 },
+      sampleState: 'observed',
+    });
+    expect(summary.routeDiagnostics).toEqual({
+      trajectories: 497,
+      reasonCounts: {
+        feasible: 0,
+        'provenance-unavailable': 0,
+        'lifecycle-unavailable': 0,
+        'editing-backend-unavailable': 287,
+        'same-tier-backend-unavailable': 209,
+        'same-tier-alternative-unavailable': 0,
+        'inspection-unavailable': 1,
+        'route-capacity-unavailable': 0,
+      },
+    });
+    expect(JSON.stringify(summary.routeDiagnostics)).not.toContain('private-arbitrary-reason');
   });
 
   it('suppresses every exact skill metric when the observation source is degraded', () => {

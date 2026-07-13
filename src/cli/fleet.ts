@@ -51,6 +51,16 @@ export function formatFleetStatus(s: FleetStatus): string {
   const pausedTag = s.killed ? '  [PAUSED — kill switch engaged]' : '';
 
   lines.push('Fleet status' + pausedTag);
+  if (s.buildIdentity) {
+    const version = s.buildIdentity.packageVersion ?? 'unknown';
+    const revision = s.buildIdentity.revision?.slice(0, 12) ?? 'unknown';
+    const state = s.buildIdentity.dirty === true
+      ? 'dirty'
+      : s.buildIdentity.dirty === false
+        ? 'clean'
+        : 'unknown';
+    lines.push(`Build: ${version} @ ${revision} (${state})`);
+  }
   lines.push('');
 
   // Daemon

@@ -117,6 +117,7 @@ describe('buildControlSnapshot — full shape (M61)', () => {
   it('fleet section has all FleetStatus keys', async () => {
     const snap = await buildControlSnapshot(baseConfig());
     expect(snap.fleet).toHaveProperty('generatedAt');
+    expect(snap.fleet).toHaveProperty('buildIdentity');
     expect(snap.fleet).toHaveProperty('daemon');
     expect(snap.fleet).toHaveProperty('backends');
     expect(snap.fleet).toHaveProperty('queue');

@@ -283,7 +283,7 @@ export function buildAttentionEvalReport(
       }
     }
 
-    if (isProductionAttempt(event.kind)) {
+    if (isProductionAttempt(event)) {
       const proposalCreatedSignal = run?.proposalCreated === true
         ? true
         : run?.proposalCreated === false
@@ -295,9 +295,9 @@ export function buildAttentionEvalReport(
               : undefined;
       const produced = proposalCreatedSignal === true;
       if (produced) proposalCreated++;
-      else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
       else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
+      else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: run?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal,
@@ -584,8 +584,14 @@ function repoVerdict(
   return topRepoShare >= 0.75 ? 'concentrated' : 'balanced';
 }
 
-function isProductionAttempt(kind: string): boolean {
-  return kind === 'dispatch' || kind === 'proposal';
+function isProductionAttempt(event: AgentActionEvent): boolean {
+  if (event.kind === 'proposal') return true;
+  if (event.kind !== 'dispatch') return false;
+  if (event.outcome === 'started') return false;
+  if (event.counts?.dispatched === 0) return false;
+  return event.action !== 'daemon:drain-select' &&
+    event.action !== 'daemon:dispatch-start' &&
+    event.action !== 'daemon:dispatch-skip';
 }
 
 function roundRatio(value: number): number {

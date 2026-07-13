@@ -15,6 +15,7 @@ import {
   readDispatchProductionEventsDetailed,
 } from '../fleet/dispatch-production-ledger.js';
 import { readSkillUseEvents } from '../fleet/skill-records.js';
+import type { GeneratedRepairRouteReason } from '../fleet/router.js';
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import type {
@@ -153,6 +154,11 @@ export interface TrajectorySkillObservationSummary {
   stageCounts?: Record<SkillUseStage, number>;
 }
 
+export interface TrajectoryRouteDiagnosticSummary {
+  trajectories: number;
+  reasonCounts: Record<GeneratedRepairRouteReason, number>;
+}
+
 /** Remove all exact skill metrics when the observation ledger is degraded. */
 export function suppressDegradedSkillObservation(
   status: TrajectoryLearningStatus,
@@ -188,6 +194,8 @@ export interface TrajectoryLearningStatus {
     dispatchToEvidence: TrajectoryCoverageMetric;
     dispatchToMerge: TrajectoryCoverageMetric;
   };
+  /** Bounded action-only preclaim observations, excluded from learning metrics. */
+  routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
   skillObservation: TrajectorySkillObservationSummary;
   gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
   recent: Array<{
@@ -418,6 +426,42 @@ function metric(count: number, denominator: number): TrajectoryCoverageMetric {
 
 function trajectoryRef(record: TrajectoryRecord): string {
   return `trajectory:${createHash('sha256').update(record.id).digest('hex').slice(0, 12)}`;
+}
+
+function generatedRepairRouteReason(value: unknown): GeneratedRepairRouteReason {
+  switch (value) {
+    case 'feasible':
+    case 'provenance-unavailable':
+    case 'lifecycle-unavailable':
+    case 'editing-backend-unavailable':
+    case 'same-tier-backend-unavailable':
+    case 'same-tier-alternative-unavailable':
+    case 'inspection-unavailable':
+    case 'route-capacity-unavailable':
+      return value;
+    default:
+      return 'inspection-unavailable';
+  }
+}
+
+function emptyRouteReasonCounts(): Record<GeneratedRepairRouteReason, number> {
+  return {
+    feasible: 0,
+    'provenance-unavailable': 0,
+    'lifecycle-unavailable': 0,
+    'editing-backend-unavailable': 0,
+    'same-tier-backend-unavailable': 0,
+    'same-tier-alternative-unavailable': 0,
+    'inspection-unavailable': 0,
+    'route-capacity-unavailable': 0,
+  };
+}
+
+function isActionOnlyPreclaimRoute(record: TrajectoryRecord): boolean {
+  return !record.coverage.dispatch &&
+    record.coverage.agentAction &&
+    record.labelBasis === 'preclaim-route-feasibility' &&
+    record.routeSnapshot?.assignedBy === 'preclaim-route-inspection';
 }
 
 function decisionTerminalOutcome(action: OutcomeRecordDecision['action']): TrajectoryTerminalOutcome | null {
@@ -886,10 +930,17 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   ].sort((a, b) => eventMs(a.ts) - eventMs(b.ts) || a.rank - b.rank);
   for (const event of causalEvents) event.apply();
 
-  const includedRecords = [...records.values()]
+  const eligibleRecords = [...records.values()]
     .filter((record) => eventMs(record.latestAt) >= sinceMs)
-    .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id))
-    .slice(0, limit);
+    .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id));
+  const productionRecords = eligibleRecords.filter((record) => record.coverage.dispatch).slice(0, limit);
+  const productionRecordIds = new Set(productionRecords.map((record) => record.id));
+  const remainingCapacity = Math.max(0, limit - productionRecords.length);
+  const diagnosticRecords = eligibleRecords
+    .filter((record) => !productionRecordIds.has(record.id))
+    .slice(0, remainingCapacity);
+  const includedRecords = [...productionRecords, ...diagnosticRecords]
+    .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id));
   const includedRecordIds = new Set(includedRecords.map((record) => record.id));
   const skillObservation = emptySkillObservationCounts();
   const selectionKeysByRecord = new Map<string, Set<string>>();
@@ -970,7 +1021,8 @@ export function summarizeTrajectoryLearning(
   records: TrajectoryRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): TrajectoryLearningStatus {
-  const denominator = records.length;
+  const productionRecords = records.filter((record) => record.coverage.dispatch);
+  const denominator = productionRecords.length;
   const terminalOutcomes: Record<TrajectoryTerminalOutcome, number> = {
     merged: 0,
     rejected: 0,
@@ -1005,7 +1057,7 @@ export function summarizeTrajectoryLearning(
   let dispatchToEvidence = 0;
   let dispatchToMerge = 0;
 
-  for (const record of records) {
+  for (const record of productionRecords) {
     terminalOutcomes[record.terminalOutcome]++;
     if (record.realizedOutcome) realizedOutcomes[record.realizedOutcome]++;
     for (const key of Object.keys(coverageCounts) as Array<keyof TrajectoryRecordCoverage>) {
@@ -1042,7 +1094,7 @@ export function summarizeTrajectoryLearning(
   const recordDiagnostics = records
     .map((record) => skillObservationDiagnosticsByRecord.get(record))
     .find((diagnostics) => diagnostics !== undefined);
-  const recordObservations = records
+  const recordObservations = productionRecords
     .map((record) => skillObservationByRecord.get(record))
     .filter((observation): observation is SkillObservationCounts => Boolean(observation));
   const skillObservation = recordObservations.length > 0
@@ -1075,6 +1127,11 @@ export function summarizeTrajectoryLearning(
     ? rawObservedTrajectoryCoverage
     : metric(0, denominator);
   const { skillUse: _privateSkillCoverage, ...publishedCoverage } = coverage;
+  const diagnosticRecords = records.filter(isActionOnlyPreclaimRoute);
+  const routeReasonCounts = emptyRouteReasonCounts();
+  for (const record of diagnosticRecords) {
+    routeReasonCounts[generatedRepairRouteReason(record.routeSnapshot?.reason)]++;
+  }
 
   return {
     version: 1,
@@ -1090,6 +1147,12 @@ export function summarizeTrajectoryLearning(
       dispatchToEvidence: metric(dispatchToEvidence, dispatchDenominator),
       dispatchToMerge: metric(dispatchToMerge, dispatchDenominator),
     },
+    ...(diagnosticRecords.length > 0 ? {
+      routeDiagnostics: {
+        trajectories: diagnosticRecords.length,
+        reasonCounts: routeReasonCounts,
+      },
+    } : {}),
     skillObservation: publishSkillMetrics
       ? {
           joined: skillObservation.joined,
@@ -1103,7 +1166,7 @@ export function summarizeTrajectoryLearning(
         }
       : { eventState, sampleState },
     gaps,
-    recent: records.slice(0, 8).map((record) => ({
+    recent: productionRecords.slice(0, 8).map((record) => ({
       ref: trajectoryRef(record),
       latestAt: record.latestAt,
       terminalOutcome: record.terminalOutcome,

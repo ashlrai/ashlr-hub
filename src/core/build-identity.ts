@@ -11,6 +11,7 @@ export interface BuildIdentity {
 
 const REVISION_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const PACKAGE_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$/;
+const EMBEDDED_BUILD_IDENTITY = Symbol.for('ashlr.build-identity.v1');
 
 export const UNAVAILABLE_BUILD_IDENTITY: Readonly<BuildIdentity> = Object.freeze({
   schemaVersion: 1,
@@ -63,7 +64,8 @@ export function readBuildIdentity(options: { raw?: string; manifestPath?: string
   try {
     raw = readFileSync(manifestPath, 'utf8');
   } catch {
-    raw = process.env.ASHLR_BUILD_IDENTITY ?? '';
+    const embedded = Reflect.get(globalThis, EMBEDDED_BUILD_IDENTITY) as unknown;
+    raw = typeof embedded === 'string' ? embedded : '';
   }
   return parseBuildIdentity(raw) ?? { ...UNAVAILABLE_BUILD_IDENTITY };
 }

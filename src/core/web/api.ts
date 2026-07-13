@@ -75,7 +75,6 @@ import { loadDaemonState } from '../daemon/state.js';
 import { ensureRunning as ensureDaemonServiceRunning, install as installDaemonService, serviceStatus } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import { buildFleetStatus } from '../fleet/status.js';
-import { readBuildIdentity } from '../build-identity.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
 // M90: Fleet-Activity panel.
@@ -912,7 +911,7 @@ export async function handleApi(
     // no-auth read class as /api/daemon and /api/pulse.
     if (path === '/api/fleet' && method === 'GET') {
       const fleet = await buildFleetStatus(cfg);
-      sendJson(res, 200, { ...fleet, buildIdentity: readBuildIdentity() });
+      sendJson(res, 200, fleet);
       return true;
     }
 
