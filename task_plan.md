@@ -1972,3 +1972,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose sorted, capped, length-bounded route-block row evidence with explicit omission counts and no raw goals, details, repository paths, or backend metadata.
 - [x] Pass focused integration tests, exhaustive verification, dependency audit, clean-build identity proof, independent adversarial review, and cross-platform CI.
 - [ ] Restore canonical Desktop workspace access, reconcile its identical pre-existing patch with `origin/master`, deploy exact green source, and prove live revision/route invariants.
+
+## Current Overnight Cycle - Learning Denominator And Build Identity Parity
+- [x] Audit workspace proposal-rate math, attention attempt selection, trajectory retention, and build identity surfaces in parallel.
+- [x] Use all diagnostic attempts as the proposal/no-proposal rate denominator while leaving failed attempts as the explicit remainder.
+- [x] Exclude selection, start, skip, and `dispatched:0` actions from attempt numerators and denominators.
+- [x] Deduplicate sandbox and daemon terminal telemetry by normalized causal identity, preferring the canonical daemon dispatch row.
+- [x] Prioritize dispatch-rooted trajectories in the bounded learning window and isolate action-only route diagnostics from production, skill, terminal, coverage, and recent denominators.
+- [x] Make build identity canonical across FleetStatus, CLI JSON/text, fleet/control/snapshot/pause/resume APIs, Node artifacts, and Bun SEA.
+- [x] Remove source-mode environment identity fallback and prove a compiled binary ignores hostile external identity injection.
+- [x] Pass focused integration, typecheck, build, dependency audit, exhaustive verification, independent adversarial re-review, and cross-platform CI.
+- [ ] Restore canonical Desktop workspace access, reconcile local state, deploy exact green source, and verify live build/learning parity.
