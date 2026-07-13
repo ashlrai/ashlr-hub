@@ -1961,3 +1961,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+
+## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
+- [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
+- [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.
+- [x] Mirror frontier classification in read-only route feasibility so daemon claims and FleetStatus remain consistent.
+- [x] Add stable action-only preclaim trajectories for route-infeasible repairs without creating dispatch, spend, cooldown, proposal-yield, lifecycle, or production-attempt authority.
+- [x] Bound recurring preclaim trajectories by stable item/reason/policy identity and expose capped decision-row censorship counts.
+- [x] Embed exact build revision and clean/dirty provenance in Node and SEA artifacts without runtime Git execution.
+- [x] Expose sorted, capped, length-bounded route-block row evidence with explicit omission counts and no raw goals, details, repository paths, or backend metadata.
+- [x] Pass focused integration tests, exhaustive verification, dependency audit, clean-build identity proof, independent adversarial review, and cross-platform CI.
+- [ ] Restore canonical Desktop workspace access, reconcile its identical pre-existing patch with `origin/master`, deploy exact green source, and prove live revision/route invariants.
