@@ -12,6 +12,7 @@ import {
 } from '../src/core/swarm/store.js';
 
 const TASK_CANCELLED_MARKER = '_ashlrCancelled';
+const TASK_CANCELLED_SNAPSHOT_VERSION = 1;
 const originalHome = process.env.HOME;
 let tmpHome: string;
 
@@ -20,7 +21,21 @@ function makeRun(
   updatedAt = '2026-07-13T12:00:00.000Z',
 ): SwarmRun {
   const tasks: SwarmTaskRun[] = [
-    { id: 'cancelled-task', phase: 'build', status: 'cancelled' },
+    {
+      id: 'cancelled-task',
+      phase: 'build',
+      status: 'cancelled',
+      result: 'Stale partial result.',
+      usage: { tokensIn: 120, tokensOut: 45, steps: 2, estCostUsd: 0 },
+      error: 'Interrupted after producing output.',
+      signature: {
+        alg: 'hmac-sha256',
+        hash: 'content-hash',
+        sig: 'content-signature',
+        signer: 'local',
+        ts: '2026-07-13T11:30:00.000Z',
+      },
+    },
     { id: 'failed-task', phase: 'verify', status: 'failed', error: 'Tests failed.' },
   ];
 
@@ -53,6 +68,14 @@ function readRaw(runId: string): Record<string, unknown> {
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
+function writeRaw(runId: string, value: unknown): void {
+  fs.writeFileSync(
+    path.join(swarmsDir(), `${runId}.json`),
+    JSON.stringify(value, null, 2),
+    'utf8',
+  );
+}
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m338-cancel-'));
   process.env.HOME = tmpHome;
@@ -64,7 +87,7 @@ afterEach(() => {
 });
 
 describe('swarm cancellation persistence compatibility', () => {
-  it('writes cancelled tasks as pending with a boolean marker without mutating the caller', () => {
+  it('sanitizes the legacy-visible pending task and privately snapshots current semantics', () => {
     const run = makeRun('raw-json');
     const callerSnapshot = structuredClone(run);
 
@@ -75,32 +98,36 @@ describe('swarm cancellation persistence compatibility', () => {
     expect(tasks[0]).toMatchObject({
       id: 'cancelled-task',
       status: 'pending',
-      [TASK_CANCELLED_MARKER]: true,
+      [TASK_CANCELLED_MARKER]: {
+        version: TASK_CANCELLED_SNAPSHOT_VERSION,
+        task: run.tasks[0],
+      },
     });
+    expect(tasks[0]).not.toHaveProperty('result');
+    expect(tasks[0]).not.toHaveProperty('usage');
+    expect(tasks[0]).not.toHaveProperty('error');
+    expect(tasks[0]).not.toHaveProperty('signature');
     expect(tasks[1]).toMatchObject({ id: 'failed-task', status: 'failed' });
     expect(tasks[1]).not.toHaveProperty(TASK_CANCELLED_MARKER);
     expect(run).toEqual(callerSnapshot);
     expect(run.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
   });
 
-  it('rehydrates cancellation through both load and list and hides the durable marker', () => {
+  it('preserves the complete cancellation through modern load and list round trips', () => {
     const older = makeRun('older', '2026-07-13T12:00:00.000Z');
     const newer = makeRun('newer', '2026-07-13T13:00:00.000Z');
     saveSwarm(older);
     saveSwarm(newer);
 
     const loaded = loadSwarm(older.id)!;
-    expect(loaded.tasks[0]!.status).toBe('cancelled');
+    expect(loaded).toEqual(older);
     expect(loaded.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
-    expect(loaded.tasks[1]!.status).toBe('failed');
 
     const listed = listSwarms();
     expect(listed.map((run) => run.id)).toEqual(['newer', 'older']);
-    for (const run of listed) {
-      expect(run.tasks[0]!.status).toBe('cancelled');
-      expect(run.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
-      expect(run.tasks[1]!.status).toBe('failed');
-    }
+    expect(listed).toEqual([newer, older]);
+    expect(listed[0]!.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
+    expect(listed[1]!.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
   });
 
   it('uses a status recognized by a pre-cancellation reader', () => {
@@ -119,7 +146,9 @@ describe('swarm cancellation persistence compatibility', () => {
 
     expect(legacyStatuses.has(task['status'] as string)).toBe(true);
     expect(task['status']).toBe('pending');
-    expect(task[TASK_CANCELLED_MARKER]).toBe(true);
+    expect(task[TASK_CANCELLED_MARKER]).toMatchObject({
+      version: TASK_CANCELLED_SNAPSHOT_VERSION,
+    });
   });
 
   it('is included by a pre-cancellation reader pending selector', () => {
@@ -131,5 +160,62 @@ describe('swarm cancellation persistence compatibility', () => {
       .filter((candidate) => candidate['status'] === 'pending');
     expect(legacyPendingTasks.map((candidate) => candidate['id']))
       .toContain('cancelled-task');
+  });
+
+  it('accepts legacy success and does not resurrect the cancellation snapshot', () => {
+    const run = makeRun('legacy-success');
+    saveSwarm(run);
+
+    const persisted = readRaw(run.id);
+    const task = (persisted['tasks'] as Array<Record<string, unknown>>)[0]!;
+    task['status'] = 'done';
+    task['result'] = 'Legacy reader completed the retry.';
+    task['usage'] = {
+      tokensIn: 30,
+      tokensOut: 12,
+      steps: 1,
+      estCostUsd: 0,
+    };
+    task['signature'] = {
+      alg: 'hmac-sha256',
+      hash: 'legacy-hash',
+      sig: 'legacy-signature',
+      signer: 'local',
+      ts: '2026-07-13T12:30:00.000Z',
+    };
+    writeRaw(run.id, persisted);
+
+    const expectedTask = {
+      id: 'cancelled-task',
+      phase: 'build',
+      status: 'done',
+      result: 'Legacy reader completed the retry.',
+      usage: {
+        tokensIn: 30,
+        tokensOut: 12,
+        steps: 1,
+        estCostUsd: 0,
+      },
+      signature: {
+        alg: 'hmac-sha256',
+        hash: 'legacy-hash',
+        sig: 'legacy-signature',
+        signer: 'local',
+        ts: '2026-07-13T12:30:00.000Z',
+      },
+    };
+
+    const loaded = loadSwarm(run.id)!;
+    expect(loaded.tasks[0]).toEqual(expectedTask);
+    expect(loaded.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
+    expect(listSwarms().find((candidate) => candidate.id === run.id)?.tasks[0])
+      .toEqual(expectedTask);
+
+    saveSwarm(loaded);
+    const rewrittenTask = (
+      readRaw(run.id)['tasks'] as Array<Record<string, unknown>>
+    )[0]!;
+    expect(rewrittenTask).toEqual(expectedTask);
+    expect(rewrittenTask).not.toHaveProperty(TASK_CANCELLED_MARKER);
   });
 });

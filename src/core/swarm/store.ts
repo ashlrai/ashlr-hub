@@ -35,13 +35,20 @@ import type { SwarmRun, SwarmTaskRun } from '../types.js';
 const MAX_LIST = 200;
 
 // New task statuses must remain safe when a persisted run is read by an older
-// Ashlr version. The boolean marker carries no user content, while `pending`
-// makes readers that predate explicit cancellation safely re-execute the task.
+// Ashlr version. `pending` makes readers that predate explicit cancellation
+// safely re-execute the task. The private snapshot keeps current-reader truth
+// without exposing stale completion fields to the legacy task record.
 const TASK_CANCELLED_MARKER = '_ashlrCancelled' as const;
+const TASK_CANCELLED_SNAPSHOT_VERSION = 1 as const;
+
+type CancelledTaskSnapshot = {
+  version: typeof TASK_CANCELLED_SNAPSHOT_VERSION;
+  task: SwarmTaskRun;
+};
 
 type PersistedSwarmTaskRun = Omit<SwarmTaskRun, 'status'> & {
   status: Exclude<SwarmTaskRun['status'], 'cancelled'>;
-  [TASK_CANCELLED_MARKER]?: true;
+  [TASK_CANCELLED_MARKER]?: true | CancelledTaskSnapshot;
 };
 
 type PersistedSwarmRun = Omit<SwarmRun, 'tasks'> & {
@@ -105,13 +112,59 @@ function prepareForPersistence(swarm: SwarmRun): PersistedSwarmRun {
         return semanticTask as PersistedSwarmTaskRun;
       }
 
+      const {
+        result: _result,
+        usage: _usage,
+        error: _error,
+        signature: _signature,
+        ...legacyTask
+      } = semanticTask;
+
       return {
-        ...semanticTask,
+        ...legacyTask,
         status: 'pending',
-        [TASK_CANCELLED_MARKER]: true,
+        [TASK_CANCELLED_MARKER]: {
+          version: TASK_CANCELLED_SNAPSHOT_VERSION,
+          task: semanticTask,
+        },
       };
     }),
   };
+}
+
+function cancelledTaskFromSnapshot(
+  value: unknown,
+  publicTask: Record<string, unknown>,
+): SwarmTaskRun | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const snapshot = value as Record<string, unknown>;
+  const task = snapshot['task'];
+  if (
+    snapshot['version'] !== TASK_CANCELLED_SNAPSHOT_VERSION ||
+    typeof task !== 'object' ||
+    task === null ||
+    Array.isArray(task)
+  ) {
+    return null;
+  }
+
+  const snapshotTask = task as Record<string, unknown>;
+  if (
+    snapshotTask['status'] !== 'cancelled' ||
+    snapshotTask['id'] !== publicTask['id'] ||
+    snapshotTask['phase'] !== publicTask['phase']
+  ) {
+    return null;
+  }
+
+  const {
+    [TASK_CANCELLED_MARKER]: _nestedMarker,
+    ...semanticTask
+  } = snapshotTask;
+  return semanticTask as unknown as SwarmTaskRun;
 }
 
 /** Restore the current semantic status and hide the persistence-only marker. */
@@ -126,18 +179,26 @@ function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
     }
 
     const record = task as Record<string, unknown>;
-    if (record[TASK_CANCELLED_MARKER] !== true) {
-      return task;
-    }
-
     const {
-      [TASK_CANCELLED_MARKER]: _persistedMarker,
-      ...semanticTask
+      [TASK_CANCELLED_MARKER]: persistedMarker,
+      ...publicTask
     } = record;
 
-    return semanticTask['status'] === 'pending'
-      ? { ...semanticTask, status: 'cancelled' }
-      : semanticTask;
+    // A legacy reader that has started or completed this task is authoritative.
+    // Never let a preserved private snapshot overwrite its newer public state.
+    if (publicTask['status'] !== 'pending') {
+      return publicTask;
+    }
+
+    const snapshotTask = cancelledTaskFromSnapshot(persistedMarker, publicTask);
+    if (snapshotTask !== null) {
+      return snapshotTask;
+    }
+
+    // Read the boolean encoding emitted by the immediately preceding release.
+    return persistedMarker === true
+      ? { ...publicTask, status: 'cancelled' }
+      : publicTask;
   });
 
   return { ...parsed, tasks } as unknown as SwarmRun;
