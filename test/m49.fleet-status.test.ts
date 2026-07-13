@@ -44,6 +44,7 @@ import {
   generatedRepairDispatchState,
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
+import * as fleetRouter from '../src/core/fleet/router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -1522,6 +1523,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       unavailableItems: 1,
       requiresAlternativeItems: 0,
       byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
+      blockedItems: [{ itemId: active.id, reason: 'editing-backend-unavailable' }],
     });
     const actionIds = status.nextActions?.map((action) => action.id) ?? [];
     expect(actionIds.indexOf('build-backlog')).toBeGreaterThanOrEqual(0);
@@ -1548,7 +1550,128 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(status.queue.repairRouteBlockedItems).toBeUndefined();
+    expect(status.queue.generatedRepairRoutes?.blockedItems).toBeUndefined();
     expect(status.queue.next?.map((item) => item.id)).toEqual([repair.id]);
+  });
+
+  it('pairs and sorts bounded row-level evidence for route-infeasible trusted repairs', async () => {
+    const repo = join(tmpHome, 'repo-sensitive-path');
+    const editingBlocked = {
+      ...makeTrustedProposalRepairItem(repo, 'repo:proposal-repair:ffffffffffff'),
+      title: 'Proposal repair: sensitive-title-evidence',
+      detail:
+        'Proposal repair: sensitive-detail-evidence.\n' +
+        'Proposal: sensitive-goal-evidence\n' +
+        'Original work item: repo:goal:sensitive\n' +
+        'Produce a fresh complete fix and verify it.',
+    };
+    const provenanceBlocked = {
+      ...makeTrustedProposalRepairItem(repo, 'repo:proposal-repair:aaaaaaaaaaaa'),
+      title: 'Proposal repair: second-sensitive-title-evidence',
+      detail:
+        'Proposal repair: second-sensitive-detail-evidence.\n' +
+        'Proposal: second-sensitive-goal-evidence\n' +
+        'Original work item: repo:goal:second-sensitive\n' +
+        'Produce a fresh complete fix and verify it.',
+    };
+    writeBacklogSnapshot(tmpHome, repo, [editingBlocked, provenanceBlocked]);
+    writeRunningDaemon(tmpHome);
+    const inspection = vi.spyOn(fleetRouter, 'inspectGeneratedRepairRouteFeasibility')
+      .mockImplementation((item) => ({
+        feasible: false,
+        requiredTier: null,
+        requiresAlternative: false,
+        backend: null,
+        reason: item.id === provenanceBlocked.id
+          ? 'provenance-unavailable'
+          : 'editing-backend-unavailable',
+      }));
+
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      const routes = status.queue.generatedRepairRoutes;
+
+      expect(status.queue.repairRouteBlockedItems).toBe(2);
+      expect(status.queue.repairControlBlockedItems).toBeUndefined();
+      expect(routes?.blockedItems).toEqual([
+        { itemId: provenanceBlocked.id, reason: 'provenance-unavailable' },
+        { itemId: editingBlocked.id, reason: 'editing-backend-unavailable' },
+      ]);
+      expect(routes?.blockedItems).toHaveLength(status.queue.repairRouteBlockedItems!);
+      expect(routes?.blockedItems?.every((row) => row.reason !== 'feasible')).toBe(true);
+      expect(routes?.blockedItems?.map((row) => Object.keys(row).sort())).toEqual([
+        ['itemId', 'reason'],
+        ['itemId', 'reason'],
+      ]);
+      const evidence = JSON.stringify(routes?.blockedItems);
+      for (const raw of [
+        repo,
+        editingBlocked.title,
+        editingBlocked.detail,
+        provenanceBlocked.title,
+        provenanceBlocked.detail,
+        'sensitive-title-evidence',
+        'sensitive-detail-evidence',
+        'sensitive-goal-evidence',
+        'local-coder',
+        'mid',
+        'lifecycle',
+      ]) {
+        expect(evidence).not.toContain(raw);
+      }
+    } finally {
+      inspection.mockRestore();
+    }
+  });
+
+  it('records bounded inspection-unavailable row evidence when route inspection fails', async () => {
+    const repo = join(tmpHome, 'repo');
+    const repair = makeTrustedProposalRepairItem(repo);
+    writeBacklogSnapshot(tmpHome, repo, [repair]);
+    writeRunningDaemon(tmpHome);
+    const inspection = vi.spyOn(fleetRouter, 'inspectGeneratedRepairRouteFeasibility')
+      .mockImplementation(() => { throw new Error('sensitive inspection failure'); });
+
+    try {
+      const status = await buildFleetStatus(withRoutableFrontierAndMid());
+
+      expect(status.queue.repairRouteBlockedItems).toBe(1);
+      expect(status.queue.generatedRepairRoutes?.blockedItems).toEqual([
+        { itemId: repair.id, reason: 'inspection-unavailable' },
+      ]);
+      expect(status.queue.generatedRepairRoutes?.blockedItems).toHaveLength(
+        status.queue.repairRouteBlockedItems!,
+      );
+      expect(JSON.stringify(status.queue.generatedRepairRoutes?.blockedItems))
+        .not.toContain('sensitive inspection failure');
+    } finally {
+      inspection.mockRestore();
+    }
+  });
+
+  it('caps route-block rows, reports omissions, and hashes oversized item ids', async () => {
+    const repo = join(tmpHome, 'repo');
+    const repairs = Array.from({ length: 52 }, (_, index) => {
+      const prefix = index === 0 ? 'r'.repeat(220) : 'zrepo';
+      return makeTrustedProposalRepairItem(
+        repo,
+        `${prefix}:proposal-repair:${index.toString(16).padStart(12, '0')}`,
+      );
+    });
+    writeBacklogSnapshot(tmpHome, repo, repairs);
+    writeRunningDaemon(tmpHome);
+
+    const status = await buildFleetStatus(baseConfig());
+    const routes = status.queue.generatedRepairRoutes;
+
+    expect(status.queue.repairRouteBlockedItems).toBe(52);
+    expect(routes?.blockedItems).toHaveLength(50);
+    expect(routes?.blockedItemsOmitted).toBe(2);
+    expect((routes?.blockedItems?.length ?? 0) + (routes?.blockedItemsOmitted ?? 0)).toBe(
+      status.queue.repairRouteBlockedItems,
+    );
+    expect(routes?.blockedItems?.every((row) => row.itemId.length <= 160)).toBe(true);
+    expect(routes?.blockedItems?.some((row) => /^sha256:[a-f0-9]{64}$/.test(row.itemId))).toBe(true);
   });
 
   it('withholds trusted repairs when proposal repair dispatch is disabled', async () => {
@@ -1636,6 +1759,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       unavailableItems: 1,
       requiresAlternativeItems: 1,
       byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
+      blockedItems: [{ itemId: retry.id, reason: 'editing-backend-unavailable' }],
     });
     expect(status.autonomyEffectiveness).toMatchObject({
       phase: 'route-gated',

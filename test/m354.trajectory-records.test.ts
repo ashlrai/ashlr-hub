@@ -235,6 +235,64 @@ function deps(overrides: Partial<TrajectoryRecordReadDeps> = {}): TrajectoryReco
 }
 
 describe('Trajectory records', () => {
+  it('materializes preclaim route infeasibility as an action-only trajectory', () => {
+    const attemptId = 'attempt-12345678-1234-4123-8123-123456789abc';
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          kind: 'selection',
+          outcome: 'blocked',
+          action: 'daemon:generated-repair-decision',
+          summary: 'generated repair dispatch-route-unavailable',
+          proposalId: undefined,
+          runId: attemptId,
+          trajectoryId: `run:${attemptId}`,
+          backend: undefined,
+          tier: undefined,
+          model: undefined,
+          routeSnapshot: {
+            backend: null,
+            tier: 'mid',
+            assignedBy: 'preclaim-route-inspection',
+            reason: 'same-tier-backend-unavailable',
+            routerPolicyVersion: ROUTER_POLICY_VERSION,
+          },
+          learningSource: 'agent-action',
+          labelBasis: 'preclaim-route-feasibility',
+        })],
+      }),
+    });
+
+    expect(record).toMatchObject({
+      id: `trajectory:run:${attemptId}`,
+      terminalOutcome: 'unknown',
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+      routeSnapshot: {
+        backend: null,
+        tier: 'mid',
+        assignedBy: 'preclaim-route-inspection',
+        reason: 'same-tier-backend-unavailable',
+        routerPolicyVersion: ROUTER_POLICY_VERSION,
+      },
+      learningSource: 'agent-action',
+      labelBasis: 'preclaim-route-feasibility',
+      coverage: {
+        dispatch: false,
+        proposal: false,
+        evidence: false,
+        decision: false,
+        agentAction: true,
+        skillUse: false,
+      },
+    });
+    expect(record?.timeline).toHaveLength(1);
+    expect(record?.timeline[0]).toMatchObject({ kind: 'agent-action' });
+  });
+
   it('joins dispatch, proposal, evidence, decision, and agent action into one ordered trajectory', () => {
     const [record] = listTrajectoryRecords({ windowHours: 1000, deps: deps() });
 

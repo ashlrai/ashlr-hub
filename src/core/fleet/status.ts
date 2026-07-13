@@ -14,6 +14,7 @@
  * only reads what the daemon/quota/inbox/backlog modules already persist.
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
@@ -766,6 +767,22 @@ export interface FleetGeneratedRepairRouteStatus {
   unavailableItems: number;
   requiresAlternativeItems: number;
   byReason: Array<{ reason: GeneratedRepairRouteReason; count: number }>;
+  blockedItems?: Array<{
+    itemId: string;
+    reason: Exclude<GeneratedRepairRouteReason, 'feasible'>;
+  }>;
+  blockedItemsOmitted?: number;
+}
+
+const MAX_GENERATED_REPAIR_ROUTE_BLOCKED_ITEMS = 50;
+const MAX_GENERATED_REPAIR_ROUTE_ITEM_ID = 160;
+
+function boundedRepairRouteItemId(itemId: string): string {
+  if (itemId.length <= MAX_GENERATED_REPAIR_ROUTE_ITEM_ID) return itemId;
+  const digest = createHash('sha256')
+    .update(JSON.stringify(['ashlr:repair-route-item:v1', itemId]))
+    .digest('hex');
+  return `sha256:${digest}`;
 }
 
 export interface FleetQueueScannerEvidenceStatus {
@@ -1247,10 +1264,18 @@ function buildQueueEligibility(
   let feasibleRouteItems = 0;
   let requiresAlternativeItems = 0;
   const routeReasons = new Map<GeneratedRepairRouteReason, number>();
-  const recordInspectionUnavailable = (): void => {
-    trustedRouteItems++;
+  const blockedRouteItems: NonNullable<FleetGeneratedRepairRouteStatus['blockedItems']> = [];
+  const recordRouteBlock = (
+    item: WorkItem,
+    reason: Exclude<GeneratedRepairRouteReason, 'feasible'>,
+  ): void => {
     repairRouteBlockedItems++;
-    routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+    routeReasons.set(reason, (routeReasons.get(reason) ?? 0) + 1);
+    blockedRouteItems.push({ itemId: boundedRepairRouteItemId(item.id), reason });
+  };
+  const recordInspectionUnavailable = (item: WorkItem): void => {
+    trustedRouteItems++;
+    recordRouteBlock(item, 'inspection-unavailable');
   };
   let nextEligibleMs: number | null = null;
   for (const item of items) {
@@ -1263,7 +1288,7 @@ function buildQueueEligibility(
       repairDispatch = repairQueue?.dispatchState(item);
     } catch {
       if (isTrustedGeneratedRepairItem(item)) {
-        recordInspectionUnavailable();
+        recordInspectionUnavailable(item);
         continue;
       }
       if (item.tags.includes('proposal-repair')) {
@@ -1290,7 +1315,7 @@ function buildQueueEligibility(
       cooldownKeys = repairQueue?.cooldownKeys(item) ?? [item.id];
     } catch {
       if (isTrustedGeneratedRepairItem(item)) {
-        recordInspectionUnavailable();
+        recordInspectionUnavailable(item);
         continue;
       }
       if (item.tags.includes('proposal-repair')) {
@@ -1316,8 +1341,7 @@ function buildQueueEligibility(
     if (isTrustedGeneratedRepairItem(item)) {
       trustedRouteItems++;
       if (repairQueue === null) {
-        repairRouteBlockedItems++;
-        routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+        recordRouteBlock(item, 'inspection-unavailable');
         continue;
       }
       let route: GeneratedRepairRouteFeasibility;
@@ -1325,20 +1349,26 @@ function buildQueueEligibility(
         const policy = repairQueue.retryPolicy(item);
         route = inspectGeneratedRepairRouteFeasibility(item, cfg, policy);
       } catch {
-        repairRouteBlockedItems++;
-        routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+        recordRouteBlock(item, 'inspection-unavailable');
         continue;
       }
-      if (route.feasible) feasibleRouteItems++;
       if (route.requiresAlternative) requiresAlternativeItems++;
-      routeReasons.set(route.reason, (routeReasons.get(route.reason) ?? 0) + 1);
       if (!route.feasible) {
-        repairRouteBlockedItems++;
+        const reason = route.reason === 'feasible' ? 'inspection-unavailable' : route.reason;
+        recordRouteBlock(item, reason);
         continue;
       }
+      feasibleRouteItems++;
+      routeReasons.set(route.reason, (routeReasons.get(route.reason) ?? 0) + 1);
     }
     eligibleItems.push(item);
   }
+
+  const sortedBlockedRouteItems = blockedRouteItems
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+  const visibleBlockedRouteItems = sortedBlockedRouteItems
+    .slice(0, MAX_GENERATED_REPAIR_ROUTE_BLOCKED_ITEMS);
+  const blockedItemsOmitted = sortedBlockedRouteItems.length - visibleBlockedRouteItems.length;
 
   return {
     eligibleItems,
@@ -1360,6 +1390,10 @@ function buildQueueEligibility(
         byReason: [...routeReasons.entries()]
           .map(([reason, count]) => ({ reason, count }))
           .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason)),
+        ...(visibleBlockedRouteItems.length > 0 ? {
+          blockedItems: visibleBlockedRouteItems,
+        } : {}),
+        ...(blockedItemsOmitted > 0 ? { blockedItemsOmitted } : {}),
       },
     } : {}),
     nextEligibleAt: isoFromMs(nextEligibleMs),

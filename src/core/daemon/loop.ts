@@ -33,6 +33,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
@@ -85,6 +86,8 @@ import {
   generatedRepairExecutionBackendAllowed,
   inspectGeneratedRepairRouteFeasibility,
   routeBackend,
+  type GeneratedRepairRouteFeasibility,
+  type GeneratedRepairRouteReason,
 } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
@@ -155,6 +158,7 @@ import {
 import {
   causalMetadata,
   evidenceOutcomeSummary,
+  ROUTER_POLICY_VERSION,
   routeSnapshot,
   runEventSummary,
 } from '../learning/causal.js';
@@ -711,6 +715,40 @@ function boundedText(value: string, max = 220): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;
 }
 
+interface GeneratedRepairRouteEvaluation {
+  attemptId?: string;
+  feasibility: GeneratedRepairRouteFeasibility;
+}
+
+function preclaimRouteAttemptId(itemId: string, reason: GeneratedRepairRouteReason): string {
+  const digest = createHash('sha256')
+    .update(JSON.stringify([
+      'ashlr:preclaim-route-attempt:v1',
+      itemId,
+      reason,
+      ROUTER_POLICY_VERSION,
+    ]))
+    .digest('hex')
+    .slice(0, 32);
+  return `attempt-${digest}`;
+}
+
+function generatedRepairRouteReason(value: unknown): GeneratedRepairRouteReason {
+  switch (value) {
+    case 'feasible':
+    case 'provenance-unavailable':
+    case 'lifecycle-unavailable':
+    case 'editing-backend-unavailable':
+    case 'same-tier-backend-unavailable':
+    case 'same-tier-alternative-unavailable':
+    case 'inspection-unavailable':
+    case 'route-capacity-unavailable':
+      return value;
+    default:
+      return 'inspection-unavailable';
+  }
+}
+
 function drainTag(mode: DaemonDrainMode): string {
   return `${DRAIN_MODE_TAG_PREFIX}${mode}`;
 }
@@ -907,12 +945,13 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   baseCooldownMs: number;
   repairRecoveryHealthy: boolean;
   dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
+  routeEvaluationByItem?: Map<WorkItem, GeneratedRepairRouteEvaluation>;
 }): void {
   const selectedIds = new Set(fields.selectedItems.map((item) => item.id));
   const claimedIds = new Set(fields.claimedItems.map((item) => item.id));
-  const generatedItems = fields.items
-    .filter((item) => isTrustedGeneratedRepairItem(item))
-    .slice(0, MAX_GENERATED_REPAIR_DECISION_EVENTS);
+  const allGeneratedItems = fields.items.filter((item) => isTrustedGeneratedRepairItem(item));
+  const generatedItems = allGeneratedItems.slice(0, MAX_GENERATED_REPAIR_DECISION_EVENTS);
+  const droppedDecisionCount = Math.max(0, allGeneratedItems.length - generatedItems.length);
   if (generatedItems.length === 0) return;
   recordAgentAction(generatedItems.map((item): AgentActionEvent => {
     const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
@@ -926,6 +965,20 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
     const selected = selectedIds.has(item.id);
     const claimed = claimedIds.has(item.id);
     const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
+    const routeEvaluation = fields.routeEvaluationByItem?.get(item);
+    const inspectedRoute = routeEvaluation?.feasibility;
+    const blockedRouteEvaluation = inspectedRoute && !inspectedRoute.feasible
+      ? routeEvaluation
+      : undefined;
+    const inspectedRouteReason = generatedRepairRouteReason(inspectedRoute?.reason);
+    const inspectedRouteSnapshot = inspectedRoute
+      ? routeSnapshot({
+          backend: inspectedRoute.feasible ? inspectedRoute.backend : null,
+          tier: inspectedRoute.requiredTier,
+          assignedBy: 'preclaim-route-inspection',
+          reason: inspectedRouteReason,
+        })
+      : undefined;
     const dispatchBlocked = dispatchPreflight !== undefined && dispatchPreflight !== 'dispatchable';
     const latest = latestGeneratedRepairWorkedEvent(fields.workedEvents, item);
     const fastRepairCooldown = effectiveCooldownMs < fields.baseCooldownMs;
@@ -961,6 +1014,15 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
       repo: item.repo,
       itemId: boundedText(item.id, 120),
       source: item.source,
+      ...(blockedRouteEvaluation?.attemptId
+        ? {
+            runId: blockedRouteEvaluation.attemptId,
+            trajectoryId: `run:${blockedRouteEvaluation.attemptId}`,
+          }
+        : {}),
+      ...(blockedRouteEvaluation && inspectedRouteSnapshot ? { routeSnapshot: inspectedRouteSnapshot } : {}),
+      learningSource: 'agent-action',
+      ...(inspectedRoute ? { labelBasis: 'preclaim-route-feasibility' } : {}),
       tags: [
         'generated-repair-decision',
         selected ? 'selected' : 'not-selected',
@@ -980,6 +1042,10 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
         cooldownBlocked: cooldownBlocked ? 1 : 0,
         dispatchEvaluated: dispatchPreflight ? 1 : 0,
         dispatchBlocked: dispatchBlocked ? 1 : 0,
+        routeEvaluated: inspectedRoute ? 1 : 0,
+        routeFeasible: inspectedRoute?.feasible ? 1 : 0,
+        routeRequiresAlternative: inspectedRoute?.requiresAlternative ? 1 : 0,
+        generatedRepairDecisionDropped: droppedDecisionCount,
         selected: selected ? 1 : 0,
         claimed: claimed ? 1 : 0,
       },
@@ -2759,25 +2825,39 @@ export async function tick(
       return null;
     }
   })();
-  const claimRouteFeasibility = new Map<WorkItem, boolean>();
+  const claimRouteEvaluations = new Map<WorkItem, GeneratedRepairRouteEvaluation>();
   const claimRouteUnavailableIds = new Set<string>();
   const hasFeasibleClaimRoute = (item: WorkItem): boolean => {
     if (!isTrustedGeneratedRepairItem(item)) return true;
-    const cached = claimRouteFeasibility.get(item);
-    if (cached !== undefined) return cached;
-    let feasible = false;
+    const cached = claimRouteEvaluations.get(item);
+    if (cached !== undefined) return cached.feasibility.feasible;
+    const fallbackPolicy = generatedRepairRetryPolicy(item);
+    let feasibility: GeneratedRepairRouteFeasibility = {
+      feasible: false,
+      requiredTier: fallbackPolicy.requiredTier ?? null,
+      requiresAlternative: fallbackPolicy.requireAlternative,
+      backend: null,
+      reason: 'inspection-unavailable',
+    };
     try {
-      feasible = claimRepairQueue !== null && inspectGeneratedRepairRouteFeasibility(
-        item,
-        routingCfg,
-        claimRepairQueue.retryPolicy(item),
-      ).feasible;
+      if (claimRepairQueue !== null) {
+        feasibility = inspectGeneratedRepairRouteFeasibility(
+          item,
+          routingCfg,
+          claimRepairQueue.retryPolicy(item),
+        );
+      }
     } catch {
-      feasible = false;
+      // Keep the categorical inspection-unavailable snapshot above.
     }
-    claimRouteFeasibility.set(item, feasible);
-    if (!feasible) claimRouteUnavailableIds.add(item.id);
-    return feasible;
+    claimRouteEvaluations.set(item, {
+      ...(!feasibility.feasible
+        ? { attemptId: preclaimRouteAttemptId(item.id, feasibility.reason) }
+        : {}),
+      feasibility,
+    });
+    if (!feasibility.feasible) claimRouteUnavailableIds.add(item.id);
+    return feasibility.feasible;
   };
   const isClaimEligible = (item: WorkItem): boolean =>
     !isSelectionBlocked(item) && hasFeasibleClaimRoute(item);
@@ -3128,6 +3208,7 @@ export async function tick(
     baseCooldownMs: cooldownMs,
     repairRecoveryHealthy,
     dispatchPreflightByItemId,
+    routeEvaluationByItem: claimRouteEvaluations,
   });
   const drain = drainMode
     ? drainSummary(

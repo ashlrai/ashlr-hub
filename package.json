@@ -61,7 +61,7 @@
   "scripts": {
     "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci",
     "prepack": "npm run build",
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/build-identity.mjs",
     "build:binary": "node scripts/build-sea.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
