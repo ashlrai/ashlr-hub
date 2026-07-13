@@ -1,19 +1,20 @@
 /**
  * Swarm persistence store.
  *
- * Provides atomic-ish read/write for SwarmRun records to ~/.ashlr/swarms/.
+ * Provides atomic-replacement persistence for SwarmRun records under
+ * ~/.ashlr/swarms/.
  * All functions are synchronous (matching the RunState/config store pattern),
  * never throw, and never carry secret values in any logged/persisted output.
  *
  * Layout:
  *   ~/.ashlr/swarms/<id>.json   — pretty-printed SwarmRun (one file per run)
  *
- * Atomic-ish write strategy: write to a .tmp sibling, then rename over the
- * target.  On POSIX this is an atomic rename; on Windows it is best-effort
- * (rename over existing file may fail, in which case we fall back to a direct
- * write).  Avoids leaving a partially-written record visible to readers.
+ * Atomic write strategy: write to a collision-resistant .tmp sibling, then
+ * rename over the target. If replacement fails, the prior record remains
+ * untouched and the temporary file is removed.
  */
 
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +23,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 
@@ -96,6 +98,25 @@ function swarmPath(dir: string, id: string): string {
     throw new Error('Invalid swarm id');
   }
   return join(dir, `${id}.json`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Minimal common read guard for both direct loads and directory listings. */
+function isValidPersistedSwarm(
+  value: unknown,
+  expectedId: string,
+): value is Record<string, unknown> {
+  if (!isRecord(value) || !/^[\w.-]+$/.test(expectedId)) return false;
+
+  const tasks = value['tasks'];
+  return (
+    value['id'] === expectedId &&
+    Array.isArray(tasks) &&
+    tasks.every(isRecord)
+  );
 }
 
 /** Build a downgrade-safe persistence copy without mutating caller state. */
@@ -214,37 +235,35 @@ function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
  * Strategy:
  *   1. Ensure the swarms directory exists.
  *   2. Serialize to pretty-printed JSON (trailing newline for POSIX hygiene).
- *   3. Write to a `.tmp` sibling file.
+ *   3. Exclusively write to a collision-resistant `.tmp` sibling file.
  *   4. Rename the `.tmp` over the target path (atomic on POSIX).
- *   5. If the rename fails (e.g. Windows cross-device), fall back to a direct
- *      overwrite.
+ *   5. Clean up the temporary file whether replacement succeeds or fails.
  *
  * Never throws; failures are silently swallowed so a persistence error never
  * crashes the swarm runner mid-execution.
  */
 export function saveSwarm(s: SwarmRun): void {
+  let tmp: string | undefined;
   try {
     const dir = swarmsDir();
     ensureDir(dir);
 
     const target = swarmPath(dir, s.id);
-    const tmp = `${target}.tmp`;
+    tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     const json = JSON.stringify(prepareForPersistence(s), null, 2) + '\n';
 
-    writeFileSync(tmp, json, 'utf8');
-
-    try {
-      renameSync(tmp, target);
-    } catch {
-      // Rename failed (Windows cross-device, or race) — direct overwrite.
-      try {
-        writeFileSync(target, json, 'utf8');
-      } catch {
-        // Last-resort: swallow; the .tmp may be readable for recovery.
-      }
-    }
+    writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx' });
+    renameSync(tmp, target);
   } catch {
     // Never propagate persistence failures to the caller.
+  } finally {
+    if (tmp !== undefined) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // The rename succeeded or cleanup is not possible; never throw.
+      }
+    }
   }
 }
 
@@ -268,17 +287,11 @@ export function loadSwarm(id: string): SwarmRun | null {
     const raw = readFileSync(path, 'utf8');
     const parsed: unknown = JSON.parse(raw);
 
-    // Basic shape guard: must be an object with a matching id field.
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      Array.isArray(parsed) ||
-      (parsed as Record<string, unknown>)['id'] !== id
-    ) {
+    if (!isValidPersistedSwarm(parsed, id)) {
       return null;
     }
 
-    return rehydrateFromPersistence(parsed as Record<string, unknown>);
+    return rehydrateFromPersistence(parsed);
   } catch {
     return null;
   }
@@ -320,16 +333,11 @@ export function listSwarms(): SwarmRun[] {
       try {
         const raw = readFileSync(join(dir, file), 'utf8');
         const parsed: unknown = JSON.parse(raw);
+        const expectedId = file.slice(0, -'.json'.length);
 
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          Array.isArray(parsed)
-        ) {
-          continue;
-        }
+        if (!isValidPersistedSwarm(parsed, expectedId)) continue;
 
-        swarms.push(rehydrateFromPersistence(parsed as Record<string, unknown>));
+        swarms.push(rehydrateFromPersistence(parsed));
       } catch {
         // Skip unreadable / malformed records silently.
       }
