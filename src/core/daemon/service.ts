@@ -17,6 +17,7 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildToolPath } from '../run/tool-path.js';
+import { installLaunchdPlistTransaction, removeLaunchdPlistTransaction } from './launchd-plist-transaction.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -301,14 +302,18 @@ function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// File write helper (idempotent + backup)
+// File write helpers (idempotent + backup)
 // ---------------------------------------------------------------------------
 
-function writeServiceFile(filePath: string, content: string): void {
+function ensureServiceFileDir(filePath: string): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+function writeServiceFile(filePath: string, content: string): void {
+  ensureServiceFileDir(filePath);
   // Backup existing file
   if (fs.existsSync(filePath)) {
     const backup = filePath + '.bak';
@@ -353,16 +358,21 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
 
-  writeServiceFile(def.filePath, def.content);
-
   if (platform === 'darwin') {
-    // Unload first (ignore errors — may not be loaded)
-    runCmd(['launchctl', 'unload', def.filePath]);
-    const { ok, stderr } = runCmd(def.registerArgs);
-    if (!ok) {
-      throw new Error(`launchctl load failed: ${stderr}`);
-    }
+    const home = resolveHome(opts.homeDir);
+    installLaunchdPlistTransaction({
+      plistPath: def.filePath,
+      trustedRoot: home,
+      content: def.content,
+      lockDir: path.join(home, '.ashlr', 'locks'),
+      unload: () => runCmd(['launchctl', 'unload', def.filePath]),
+      load: () => {
+        const result = runCmd(def.registerArgs);
+        return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
+      },
+    });
   } else if (platform === 'linux') {
+    writeServiceFile(def.filePath, def.content);
     // daemon-reload first
     runCmd(['systemctl', '--user', 'daemon-reload']);
     const { ok, stderr } = runCmd(def.registerArgs);
@@ -377,6 +387,7 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       );
     }
   } else if (platform === 'win32') {
+    writeServiceFile(def.filePath, def.content);
     const { ok, stderr } = runCmd(def.registerArgs);
     if (!ok) {
       console.warn(
@@ -397,15 +408,22 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
 
-  runCmd(def.unregisterArgs);
-
-  // Additional unload step for launchd
-  if (platform === 'darwin' && def.unloadArgs) {
-    runCmd(def.unloadArgs);
-  }
-
-  if (fs.existsSync(def.filePath)) {
-    fs.unlinkSync(def.filePath);
+  if (platform === 'darwin') {
+    const home = resolveHome(opts.homeDir);
+    try {
+      removeLaunchdPlistTransaction({
+        plistPath: def.filePath,
+        trustedRoot: home,
+        lockDir: path.join(home, '.ashlr', 'locks'),
+        unload: () => {
+          const result = runCmd(def.unregisterArgs);
+          return { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+        },
+      });
+    } catch { /* uninstall remains best-effort */ }
+  } else {
+    runCmd(def.unregisterArgs);
+    if (fs.existsSync(def.filePath)) fs.unlinkSync(def.filePath);
   }
   clearServiceStatusCache();
 }

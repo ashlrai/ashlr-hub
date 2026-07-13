@@ -901,6 +901,13 @@ describe('M342 dispatch production ledger', () => {
       unattributedEvents: 0,
       distinctUnits: 6,
       replayedEvents: 0,
+      minimumTerminalUnitsPerArm: 3,
+      arms: [
+        { repairTreatment: 'baseline-reslice', attributedUnits: 3, terminalUnits: 3, remaining: 0 },
+        { repairTreatment: 'target-localization', attributedUnits: 3, terminalUnits: 3, remaining: 0 },
+      ],
+      gate: 'ready',
+      blockers: [],
     });
     expect(generated?.treatmentConversions).toEqual([
       { repairTreatment: 'baseline-reslice', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
@@ -908,14 +915,190 @@ describe('M342 dispatch production ledger', () => {
     ]);
     const terminalWitness = events.find((event) => event.repairTreatmentOutcome !== undefined)!;
     const active = summarizeDispatchProductionYield(events.filter((event) => event !== terminalWitness))?.generatedRepairAttempts;
+    expect(active?.treatmentAttribution).toMatchObject({
+      gate: 'collecting',
+      blockers: ['in-flight'],
+      arms: expect.arrayContaining([
+        expect.objectContaining({
+          repairTreatment: terminalWitness.repairTreatment,
+          attributedUnits: 3,
+          terminalUnits: 2,
+          remaining: 1,
+        }),
+      ]),
+    });
     expect(active).not.toHaveProperty('treatmentConversions');
     const mismatched = summarizeDispatchProductionYield(events.map((event) =>
       event === terminalWitness ? { ...event, repairTreatmentAttemptHash: 'f'.repeat(64) } : event
     ))?.generatedRepairAttempts;
+    expect(mismatched?.treatmentAttribution).toMatchObject({
+      gate: 'withheld',
+      blockers: ['in-flight', 'unattributed'],
+      arms: expect.arrayContaining([
+        expect.objectContaining({
+          repairTreatment: terminalWitness.repairTreatment,
+          attributedUnits: 3,
+          terminalUnits: 2,
+          remaining: 1,
+        }),
+      ]),
+    });
     expect(mismatched).not.toHaveProperty('treatmentConversions');
+    const duplicateWitness = summarizeDispatchProductionYield([...events, terminalWitness])?.generatedRepairAttempts;
+    expect(duplicateWitness?.treatmentAttribution).toMatchObject({
+      gate: 'withheld',
+      blockers: ['in-flight', 'unmatched-terminal', 'replayed'],
+      arms: expect.arrayContaining([
+        expect.objectContaining({
+          repairTreatment: terminalWitness.repairTreatment,
+          attributedUnits: 3,
+          terminalUnits: 2,
+          remaining: 1,
+        }),
+      ]),
+    });
+    expect(duplicateWitness).not.toHaveProperty('treatmentConversions');
     const replayed = summarizeDispatchProductionYield([...events, replay])?.generatedRepairAttempts;
     expect(replayed?.treatmentAttribution?.replayedEvents).toBe(1);
     expect(replayed).not.toHaveProperty('treatmentConversions');
+  });
+
+  it('reports sorted per-arm terminal progress for imbalanced treatment samples', () => {
+    const events = treatmentEvents();
+    const targetUnits = [...new Set(events
+      .filter((event) => event.repairTreatment === 'target-localization')
+      .map((event) => event.repairTreatmentUnitId))];
+    const summary = summarizeDispatchProductionYield(events.filter((event) =>
+      event.repairTreatmentUnitId !== targetUnits.at(-1)
+    ))?.generatedRepairAttempts?.treatmentAttribution;
+
+    expect(summary).toMatchObject({
+      minimumTerminalUnitsPerArm: 3,
+      gate: 'collecting',
+      blockers: [],
+      arms: [
+        { repairTreatment: 'baseline-reslice', attributedUnits: 3, terminalUnits: 3, remaining: 0 },
+        { repairTreatment: 'target-localization', attributedUnits: 2, terminalUnits: 2, remaining: 1 },
+      ],
+    });
+  });
+
+  it('keeps an otherwise sufficient sample collecting while an extra unit is in flight', () => {
+    const events = treatmentEvents();
+    const raw = events.find((event) =>
+      event.repairTreatment === 'baseline-reslice' &&
+      event.basis !== 'repair-lifecycle-candidate' &&
+      event.basis !== 'repair-lifecycle-outcome'
+    )!;
+    const extraUnitId = repairTreatmentUnitId({
+      kind: 'no-diff-reslice',
+      repo: '/tmp/repo',
+      parentItemId: 'repo:goal:extra-in-flight',
+      parentObjectiveHash: 'f'.repeat(64),
+    })!;
+    const extra = {
+      ...raw,
+      itemId: 'ashlr-hub:proposal-repair-nodiff:eeeeeeeeeeee',
+      runId: 'run-extra-in-flight',
+      repairTreatmentUnitId: extraUnitId,
+      repairTreatment: repairTreatmentForUnitId(extraUnitId)!,
+    };
+    const generated = summarizeDispatchProductionYield([...events, extra])?.generatedRepairAttempts;
+
+    expect(generated?.treatmentAttribution).toMatchObject({
+      gate: 'collecting',
+      blockers: ['in-flight'],
+      arms: expect.arrayContaining([
+        expect.objectContaining({
+          repairTreatment: extra.repairTreatment,
+          attributedUnits: 4,
+          terminalUnits: 3,
+          remaining: 0,
+        }),
+      ]),
+    });
+    expect(generated).not.toHaveProperty('treatmentConversions');
+  });
+
+  it('withholds a ready-looking sample when an extra terminal witness has no raw execution', () => {
+    const events = treatmentEvents();
+    const terminal = events.find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    const extraUnitId = repairTreatmentUnitId({
+      kind: 'no-diff-reslice',
+      repo: '/tmp/repo',
+      parentItemId: 'repo:goal:terminal-only',
+      parentObjectiveHash: 'e'.repeat(64),
+    })!;
+    const terminalOnly = {
+      ...terminal,
+      itemId: 'ashlr-hub:proposal-repair-nodiff:abababababab',
+      runId: 'run-terminal-only',
+      trajectoryId: 'trajectory-terminal-only',
+      repairTreatmentUnitId: extraUnitId,
+      repairTreatment: repairTreatmentForUnitId(extraUnitId)!,
+      repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash('trajectory-terminal-only'),
+    };
+    const generated = summarizeDispatchProductionYield([...events, terminalOnly])?.generatedRepairAttempts;
+
+    expect(generated?.treatmentAttribution).toMatchObject({
+      gate: 'withheld',
+      blockers: expect.arrayContaining(['unmatched-terminal']),
+      distinctUnits: 7,
+    });
+    expect(generated).not.toHaveProperty('treatmentConversions');
+  });
+
+  it('withholds attribution progress with bounded replay and unattributed blockers', () => {
+    const events = treatmentEvents();
+    const raw = events.find((event) => event.basis === 'run-proposal-outcome')!;
+    const replay = { ...raw, runId: 'replayed-execution' };
+    const unattributed = { ...raw, itemId: 'ashlr-hub:proposal-repair-nodiff:dddddddddddd', repairTreatmentUnitId: undefined };
+    const summary = summarizeDispatchProductionYield([...events, replay, unattributed])
+      ?.generatedRepairAttempts?.treatmentAttribution;
+
+    expect(summary).toMatchObject({
+      gate: 'withheld',
+      blockers: ['unattributed', 'replayed'],
+      unattributedEvents: 1,
+      replayedEvents: 1,
+    });
+    expect(summary?.blockers.every((blocker) =>
+      ['in-flight', 'unmatched-terminal', 'unattributed', 'replayed'].includes(blocker)
+    )).toBe(true);
+  });
+
+  it('exposes treatment progress without raw identities, objectives, paths, or payloads', () => {
+    const rawId = 'RAW_TREATMENT_ID_CANARY_M342';
+    const rawObjective = 'RAW_TREATMENT_OBJECTIVE_CANARY_M342';
+    const rawPath = '/private/treatment/path/canary';
+    const rawPayload = 'RAW_TREATMENT_PAYLOAD_CANARY_M342';
+    const events = treatmentEvents().map((event) => ({
+      ...event,
+      rawId,
+      objective: rawObjective,
+      path: rawPath,
+      payload: rawPayload,
+    } as DispatchProductionEvent));
+    const attribution = summarizeDispatchProductionYield(events)
+      ?.generatedRepairAttempts?.treatmentAttribution;
+    const serialized = JSON.stringify(attribution);
+
+    expect(attribution).toBeDefined();
+    expect(serialized).not.toContain(rawId);
+    expect(serialized).not.toContain(rawObjective);
+    expect(serialized).not.toContain(rawPath);
+    expect(serialized).not.toContain(rawPayload);
+    expect(Object.keys(attribution!)).toEqual([
+      'eligibleEvents',
+      'attributedEvents',
+      'unattributedEvents',
+      'distinctUnits',
+      'replayedEvents',
+      'minimumTerminalUnitsPerArm',
+      'arms',
+      'gate',
+      'blockers',
+    ]);
   });
 
   it('appends a terminal lifecycle witness idempotently across acknowledgement retries', () => {
@@ -976,6 +1159,10 @@ describe('M342 dispatch production ledger', () => {
     expect(truncated.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
     expect(truncated.sourceQuality.stopReasons).toContain('row-limit');
     expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution?.distinctUnits).toBeLessThan(6);
+    expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({
+      gate: 'withheld',
+      blockers: expect.arrayContaining(['source-incomplete']),
+    });
     expect(truncated.summary?.generatedRepairAttempts).not.toHaveProperty('treatmentConversions');
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });
@@ -987,7 +1174,11 @@ describe('M342 dispatch production ledger', () => {
     );
     const degraded = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 100 });
     expect(degraded.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
-    expect(degraded.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({ distinctUnits: 6 });
+    expect(degraded.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({
+      distinctUnits: 6,
+      gate: 'withheld',
+      blockers: expect.arrayContaining(['source-incomplete']),
+    });
     expect(degraded.summary?.generatedRepairAttempts).not.toHaveProperty('treatmentConversions');
   });
 

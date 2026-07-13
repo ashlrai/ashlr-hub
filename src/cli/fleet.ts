@@ -412,6 +412,8 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
     const repairYield = formatGeneratedRepairYield(dispatchProduction.generatedRepairAttempts);
     if (repairYield) lines.push(`  repair yield: ${repairYield}`);
+    const treatmentProgress = formatGeneratedRepairTreatmentProgress(dispatchProduction.generatedRepairAttempts);
+    if (treatmentProgress) lines.push(`  treatment: ${treatmentProgress}`);
     if (s.dispatchYieldDiagnostics) {
       lines.push(`  diagnosis: ${formatDispatchYieldDiagnostics(s.dispatchYieldDiagnostics)}`);
     }
@@ -1018,6 +1020,36 @@ function formatGeneratedRepairYield(
   }
   const kindSummary = parts.length > 0 ? `${parts.join(', ')}; ` : '';
   return `${kindSummary}${generated.proposalsCreated}/${generated.attempts} converted (${formatPercent(generated.proposalRate ?? 0)})`;
+}
+
+function formatGeneratedRepairTreatmentProgress(
+  generated: NonNullable<FleetStatus['dispatchProduction']>['generatedRepairAttempts'],
+): string {
+  const attribution = generated?.treatmentAttribution;
+  if (!attribution) return '';
+
+  const arms = attribution.arms
+    .slice()
+    .sort((left, right) => left.repairTreatment.localeCompare(right.repairTreatment))
+    .map((arm) =>
+      `${arm.repairTreatment} ${arm.terminalUnits}/${attribution.minimumTerminalUnitsPerArm} terminal`
+    )
+    .join(', ');
+  const blockers = attribution.blockers.slice(0, 3);
+  const blockerOverflow = attribution.blockers.length - blockers.length;
+  const blockerText = blockers.length === 0
+    ? 'none'
+    : `${blockers.join(', ')}${blockerOverflow > 0 ? ` (+${blockerOverflow} more)` : ''}`;
+  const conversions = generated.treatmentConversions
+    ?.slice()
+    .sort((left, right) => left.repairTreatment.localeCompare(right.repairTreatment))
+    .map((arm) =>
+      `${arm.repairTreatment} ${arm.proposalsCreated}/${arm.attempts} (${formatPercent(arm.proposalRate)})`
+    )
+    .join(', ');
+
+  return `${arms}; gate ${attribution.gate}; blockers ${blockerText}` +
+    (conversions ? `; proposal conversion ${conversions}` : '');
 }
 
 function formatDispatchYieldDiagnostics(

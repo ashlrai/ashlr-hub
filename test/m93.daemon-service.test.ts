@@ -19,6 +19,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
+const installLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
+const removeLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
+
 // ---------------------------------------------------------------------------
 // We import the module AFTER setting up vi.mock so spawnSync is interceptable
 // ---------------------------------------------------------------------------
@@ -36,9 +39,15 @@ vi.mock('node:fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
     copyFileSync: vi.fn(),
+    renameSync: vi.fn(),
     unlinkSync: vi.fn(),
   };
 });
+
+vi.mock('../src/core/daemon/launchd-plist-transaction.js', () => ({
+  installLaunchdPlistTransaction: installLaunchdPlistTransactionMock,
+  removeLaunchdPlistTransaction: removeLaunchdPlistTransactionMock,
+}));
 
 import * as cp from 'node:child_process';
 import {
@@ -68,6 +77,17 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
     intervalMs: 1_800_000,
     parallel: 1,
   };
+}
+
+function useSuccessfulLaunchdTransactionMock(): void {
+  installLaunchdPlistTransactionMock.mockImplementation((options: {
+    unload: () => unknown;
+    load: () => { ok: boolean; stderr: string };
+  }) => {
+    options.unload();
+    const loaded = options.load();
+    if (!loaded.ok) throw new Error(`launchctl load failed: ${loaded.stderr}`);
+  });
 }
 
 describe('daemonServiceInstallOptions', () => {
@@ -334,6 +354,7 @@ describe('install() — mocked spawnSync', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useSuccessfulLaunchdTransactionMock();
     spawnSyncMock.mockReturnValue({ status: 0, stdout: '', stderr: '', error: undefined });
     existsSyncMock.mockReturnValue(false);
   });
@@ -355,6 +376,17 @@ describe('install() — mocked spawnSync', () => {
     expect(loadCall).toBeDefined();
     const plistPath = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
     expect((loadCall as [string, string[]])[1]).toContain(plistPath);
+  });
+
+  it('darwin: treats launchctl zero-exit error output as a load failure', async () => {
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
+      args.includes('load')
+        ? { status: 0, stdout: '', stderr: 'Load failed: 5: Input/output error', error: undefined }
+        : { status: 0, stdout: '', stderr: '', error: undefined });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'launchctl load failed: Load failed: 5: Input/output error',
+    );
   });
 
   it('linux: calls systemctl --user daemon-reload then enable --now', async () => {
@@ -384,6 +416,24 @@ describe('install() — mocked spawnSync', () => {
   });
 });
 
+describe('install() — transactional launchd plist', () => {
+  it('delegates the daemon plist and private lock directory to the shared transaction', async () => {
+    const home = '/tmp/ashlr-launchd-transaction';
+    useSuccessfulLaunchdTransactionMock();
+    (cp.spawnSync as ReturnType<typeof vi.fn>).mockReturnValue({ status: 0, stdout: '', stderr: '' });
+
+    await install({ ...baseOpts('darwin'), homeDir: home });
+
+    expect(installLaunchdPlistTransactionMock).toHaveBeenCalledWith(expect.objectContaining({
+      plistPath: path.join(home, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'),
+      lockDir: path.join(home, '.ashlr', 'locks'),
+      content: expect.stringContaining('<string>ai.ashlr.daemon</string>'),
+      unload: expect.any(Function),
+      load: expect.any(Function),
+    }));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 5. uninstall() — child_process mock assertions
 // ---------------------------------------------------------------------------
@@ -396,6 +446,14 @@ describe('uninstall() — mocked spawnSync', () => {
     vi.clearAllMocks();
     spawnSyncMock.mockReturnValue({ status: 0, stdout: '', stderr: '', error: undefined });
     existsSyncMock.mockReturnValue(true);
+    removeLaunchdPlistTransactionMock.mockImplementation((options: {
+      unload: () => { ok: boolean };
+      plistPath: string;
+    }) => {
+      const unloaded = options.unload();
+      if (!unloaded.ok) throw new Error('unload failed; plist retained');
+      fs.unlinkSync(options.plistPath);
+    });
   });
 
   it('darwin: calls launchctl unload', async () => {
@@ -423,6 +481,17 @@ describe('uninstall() — mocked spawnSync', () => {
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
     await uninstall(baseOpts('darwin'));
     expect(unlinkMock).toHaveBeenCalled();
+  });
+
+  it('darwin: retains the service file after a false-zero unload failure', async () => {
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
+      args.includes('unload')
+        ? { status: 0, stdout: '', stderr: 'Unload failed: 5: Input/output error', error: undefined }
+        : { status: 0, stdout: '', stderr: '', error: undefined });
+    const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
+
+    await expect(uninstall(baseOpts('darwin'))).resolves.toBeUndefined();
+    expect(unlinkMock).not.toHaveBeenCalled();
   });
 });
 

@@ -20,6 +20,7 @@ import {
   buildRepairHandoffRolloutStatus,
   repairHandoffProjectionTick,
   buildSkillCorpusReadiness,
+  type FleetStatus,
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
@@ -6107,6 +6108,163 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
     expect(emptyDiagnosticOut).not.toContain('reasons:');
     expect(emptyDiagnosticOut).not.toContain('proposal filing disabled');
+  });
+
+  it('renders bounded per-arm treatment progress without exposing raw metadata', () => {
+    const rawId = 'RAW_TREATMENT_ID_CANARY_M49';
+    const rawPayload = 'RAW_TREATMENT_PAYLOAD_CANARY_M49';
+    const dispatchProduction: NonNullable<FleetStatus['dispatchProduction']> = {
+      windowHours: 24,
+      attempts: 5,
+      events: 5,
+      proposalsCreated: 2,
+      noProposal: 3,
+      proposalRate: 0.4,
+      spentUsd: 0,
+      generatedRepairAttempts: {
+        attempts: 5,
+        proposalsCreated: 2,
+        noProposal: 3,
+        proposalRate: 0.4,
+        captureRepairs: 0,
+        diagnosticReslices: 5,
+        proposalRepairs: 0,
+        treatmentAttribution: {
+          eligibleEvents: 7,
+          attributedEvents: 5,
+          unattributedEvents: 1,
+          distinctUnits: 5,
+          replayedEvents: 1,
+          minimumTerminalUnitsPerArm: 3,
+          arms: [
+            { repairTreatment: 'target-localization', attributedUnits: 3, terminalUnits: 2, remaining: 1 },
+            { repairTreatment: 'baseline-reslice', attributedUnits: 2, terminalUnits: 1, remaining: 2 },
+          ],
+          gate: 'withheld',
+          blockers: ['in-flight', 'unmatched-terminal', 'unattributed', 'replayed', 'source-incomplete'],
+          ...{ rawId, rawPayload },
+        },
+      },
+      outcomes: {
+        proposalCreated: 2,
+        emptyDiff: 3,
+        gateBlocked: 0,
+        engineFailed: 0,
+        sandboxFailed: 0,
+        proposalCaptureError: 0,
+        proposalDisabled: 0,
+        unknown: 0,
+      },
+      topReasons: [],
+      diagnosticTopReasons: [],
+      byBackend: [],
+      bySource: [],
+      byRepo: [],
+      byBackendModel: [],
+      byBackendSource: [],
+    };
+    const base = {
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+
+    const out = formatFleetStatus({ ...base, dispatchProduction });
+
+    expect(out).toContain(
+      'treatment: baseline-reslice 1/3 terminal, target-localization 2/3 terminal; ' +
+        'gate withheld; blockers in-flight, unmatched-terminal, unattributed (+2 more)',
+    );
+    expect(out).not.toContain(rawId);
+    expect(out).not.toContain(rawPayload);
+
+    const withoutTreatment = formatFleetStatus({
+      ...base,
+      dispatchProduction: {
+        ...dispatchProduction,
+        generatedRepairAttempts: {
+          ...dispatchProduction.generatedRepairAttempts!,
+          treatmentAttribution: undefined,
+        },
+      },
+    });
+    expect(withoutTreatment).not.toContain('  treatment:');
+  });
+
+  it('labels treatment rates as proposal conversion only', () => {
+    const dispatchProduction: NonNullable<FleetStatus['dispatchProduction']> = {
+      windowHours: 24,
+      attempts: 6,
+      events: 6,
+      proposalsCreated: 3,
+      noProposal: 3,
+      proposalRate: 0.5,
+      spentUsd: 0,
+      generatedRepairAttempts: {
+        attempts: 6,
+        proposalsCreated: 3,
+        noProposal: 3,
+        proposalRate: 0.5,
+        captureRepairs: 0,
+        diagnosticReslices: 6,
+        proposalRepairs: 0,
+        treatmentAttribution: {
+          eligibleEvents: 6,
+          attributedEvents: 6,
+          unattributedEvents: 0,
+          distinctUnits: 6,
+          replayedEvents: 0,
+          minimumTerminalUnitsPerArm: 3,
+          arms: [
+            { repairTreatment: 'target-localization', attributedUnits: 3, terminalUnits: 3, remaining: 0 },
+            { repairTreatment: 'baseline-reslice', attributedUnits: 3, terminalUnits: 3, remaining: 0 },
+          ],
+          gate: 'ready',
+          blockers: [],
+        },
+        treatmentConversions: [
+          { repairTreatment: 'target-localization', attempts: 3, proposalsCreated: 2, noProposal: 1, proposalRate: 2 / 3 },
+          { repairTreatment: 'baseline-reslice', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
+        ],
+      },
+      outcomes: {
+        proposalCreated: 3,
+        emptyDiff: 3,
+        gateBlocked: 0,
+        engineFailed: 0,
+        sandboxFailed: 0,
+        proposalCaptureError: 0,
+        proposalDisabled: 0,
+        unknown: 0,
+      },
+      topReasons: [],
+      diagnosticTopReasons: [],
+      byBackend: [],
+      bySource: [],
+      byRepo: [],
+      byBackendModel: [],
+      byBackendSource: [],
+    };
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      dispatchProduction,
+      merges: { recent: 0 },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'treatment: baseline-reslice 3/3 terminal, target-localization 3/3 terminal; gate ready; blockers none; ' +
+        'proposal conversion baseline-reslice 1/3 (33%), target-localization 2/3 (67%)',
+    );
+    expect(out).not.toMatch(/treatment:.*(?:verified|verification|merged|merge quality)/i);
   });
 
   it('renders all sections and flags the paused banner when killed', () => {

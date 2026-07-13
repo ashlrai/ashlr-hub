@@ -229,7 +229,25 @@ export interface RepairTreatmentAttributionSummary {
   unattributedEvents: number;
   distinctUnits: number;
   replayedEvents: number;
+  minimumTerminalUnitsPerArm: 3;
+  arms: RepairTreatmentAttributionArmSummary[];
+  gate: 'collecting' | 'ready' | 'withheld';
+  blockers: RepairTreatmentAttributionBlocker[];
 }
+
+export interface RepairTreatmentAttributionArmSummary {
+  repairTreatment: RepairTreatment;
+  attributedUnits: number;
+  terminalUnits: number;
+  remaining: number;
+}
+
+export type RepairTreatmentAttributionBlocker =
+  | 'in-flight'
+  | 'unmatched-terminal'
+  | 'unattributed'
+  | 'replayed'
+  | 'source-incomplete';
 
 export interface RepairTreatmentConversionSummary {
   repairTreatment: RepairTreatment;
@@ -1560,12 +1578,51 @@ function treatmentAttributionSummary(
 ): RepairTreatmentAttributionSummary | undefined {
   if (attribution.eligibleEvents === 0) return undefined;
   const distinctUnits = [...attribution.units.values()].reduce((sum, units) => sum + units.size, 0);
+  const arms = REPAIR_TREATMENTS
+    .map((repairTreatment): RepairTreatmentAttributionArmSummary => {
+      const units = [...(attribution.units.get(repairTreatment)?.values() ?? [])];
+      const attributedUnits = units.filter((unit) => unit.rawAttempts.size > 0).length;
+      const terminalUnits = units.filter((unit) =>
+        unit.witnessEvents === 1 &&
+        unit.witness !== undefined &&
+        unit.rawAttempts.has(unit.witness.executionKey)
+      ).length;
+      return {
+        repairTreatment,
+        attributedUnits,
+        terminalUnits,
+        remaining: Math.max(0, MIN_REPAIR_TREATMENT_ATTEMPTS - terminalUnits),
+      };
+    })
+    .sort((left, right) => left.repairTreatment.localeCompare(right.repairTreatment));
+  const blockers: RepairTreatmentAttributionBlocker[] = [];
+  if (arms.some((arm) => arm.attributedUnits > arm.terminalUnits)) blockers.push('in-flight');
+  const hasUnmatchedTerminal = [...attribution.units.values()].some((units) =>
+    [...units.values()].some((unit) =>
+      unit.witnessEvents > 0 && (
+        unit.witnessEvents !== 1 ||
+        unit.witness === undefined ||
+        !unit.rawAttempts.has(unit.witness.executionKey)
+      )
+    )
+  );
+  if (hasUnmatchedTerminal) blockers.push('unmatched-terminal');
+  if (attribution.unattributedEvents > 0) blockers.push('unattributed');
+  if (attribution.replayedEvents > 0) blockers.push('replayed');
+  const integrityWithheld = blockers.includes('unmatched-terminal') ||
+    blockers.includes('unattributed') ||
+    blockers.includes('replayed');
+  const ready = arms.every((arm) => arm.remaining === 0) && !blockers.includes('in-flight');
   return {
     eligibleEvents: attribution.eligibleEvents,
     attributedEvents: attribution.attributedEvents,
     unattributedEvents: attribution.unattributedEvents,
     distinctUnits,
     replayedEvents: attribution.replayedEvents,
+    minimumTerminalUnitsPerArm: MIN_REPAIR_TREATMENT_ATTEMPTS,
+    arms,
+    gate: integrityWithheld ? 'withheld' : ready ? 'ready' : 'collecting',
+    blockers,
   };
 }
 
@@ -1901,7 +1958,17 @@ export function summarizeDispatchProductionYield(
 
 function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | undefined): void {
   if (!summary) return;
-  delete summary.generatedRepairAttempts?.treatmentConversions;
+  const withhold = (generated: GeneratedRepairAttemptSummary | undefined): void => {
+    if (!generated) return;
+    delete generated.treatmentConversions;
+    const attribution = generated.treatmentAttribution;
+    if (!attribution) return;
+    attribution.gate = 'withheld';
+    if (!attribution.blockers.includes('source-incomplete')) {
+      attribution.blockers = [...attribution.blockers, 'source-incomplete'];
+    }
+  };
+  withhold(summary.generatedRepairAttempts);
   for (const buckets of [
     summary.byBackend,
     summary.bySource,
@@ -1909,7 +1976,7 @@ function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | 
     summary.byBackendModel,
     summary.byBackendSource,
   ]) {
-    for (const bucket of buckets) delete bucket.generatedRepairAttempts?.treatmentConversions;
+    for (const bucket of buckets) withhold(bucket.generatedRepairAttempts);
   }
 }
 

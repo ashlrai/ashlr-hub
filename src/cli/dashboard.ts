@@ -33,6 +33,10 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { makeColors, isTty } from './ui.js';
+import {
+  installLaunchdPlistTransaction,
+  removeLaunchdPlistTransaction,
+} from '../core/daemon/launchd-plist-transaction.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -228,7 +232,8 @@ export function queryServeService(homeDir?: string): ServeServiceStatus {
 
 /**
  * Write the plist to ~/Library/LaunchAgents/ and load it via launchctl.
- * Idempotent: unloads first (ignore errors), then loads.
+ * Idempotent: atomically replaces the plist, unloads first (ignore errors),
+ * then loads. If loading fails, restores and reloads the prior plist.
  *
  * @throws on write failure or launchctl load failure.
  */
@@ -250,27 +255,18 @@ export function installServeAgent(opts: {
     fs.mkdirSync(logDir, { recursive: true });
   }
 
-  // Ensure LaunchAgents dir exists
-  const launchAgentsDir = path.dirname(pp);
-  if (!fs.existsSync(launchAgentsDir)) {
-    fs.mkdirSync(launchAgentsDir, { recursive: true });
-  }
-
-  // Write plist (backup existing)
   const content = generateServePlist(opts);
-  if (fs.existsSync(pp)) {
-    fs.copyFileSync(pp, pp + '.bak');
-  }
-  fs.writeFileSync(pp, content, { encoding: 'utf8' });
-
-  // Unload first (ignore errors — not loaded is fine)
-  exec(['launchctl', 'unload', pp]);
-
-  // Load
-  const { ok, stderr } = exec(['launchctl', 'load', pp]);
-  if (!ok) {
-    throw new Error(`launchctl load failed: ${stderr.trim() || 'exit non-zero'}`);
-  }
+  installLaunchdPlistTransaction({
+    plistPath: pp,
+    trustedRoot: home,
+    content,
+    lockDir: path.join(home, '.ashlr', 'locks'),
+    unload: () => exec(['launchctl', 'unload', pp]),
+    load: () => {
+      const result = exec(['launchctl', 'load', pp]);
+      return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
+    },
+  });
 }
 
 export function servePlistNeedsUpgrade(opts: {
@@ -295,11 +291,17 @@ export function uninstallServeAgent(opts: {
   _runCmd?: typeof runCmd;
 }): void {
   const exec = opts._runCmd ?? runCmd;
+  const home = opts.homeDir ?? os.homedir();
   const pp = plistPath(opts.homeDir);
-  exec(['launchctl', 'unload', pp]);
-  if (fs.existsSync(pp)) {
-    fs.unlinkSync(pp);
-  }
+  removeLaunchdPlistTransaction({
+    plistPath: pp,
+    trustedRoot: home,
+    lockDir: path.join(home, '.ashlr', 'locks'),
+    unload: () => {
+      const result = exec(['launchctl', 'unload', pp]);
+      return { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
