@@ -365,6 +365,23 @@ describe('cross-process persistence generation CAS', () => {
     expect(persistenceRevision(path.join(tmpHome, '.ashlr', 'runs', `${id}.json`))).toBe(2);
   }, 30_000);
 
+  it('allows exactly one cross-process case spelling to own a fresh run id', async () => {
+    prepareStoreDir('run');
+    const writers = [
+      spawnWriter('run', 'fresh', 'm389-Case-Run', 'case-run-upper'),
+      spawnWriter('run', 'fresh', 'm389-case-run', 'case-run-lower'),
+    ];
+    await Promise.all(writers.map((writer) => writer.ready));
+    writers.forEach((writer) => writer.go());
+
+    const outcomes = await Promise.all(writers.map(finish));
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(1);
+    const records = fs.readdirSync(path.join(tmpHome, '.ashlr', 'runs'))
+      .filter((entry) => entry.toLowerCase() === 'm389-case-run.json');
+    expect(records).toHaveLength(1);
+  }, 30_000);
+
   it('returns discriminated saveSwarm results for two fresh same-id writers', async () => {
     const id = 'm389-fresh-swarm';
     prepareStoreDir('swarm');
@@ -400,5 +417,22 @@ describe('cross-process persistence generation CAS', () => {
 
     expect(loadSwarm(id)).toMatchObject({ status: 'done', result: 'first-terminal' });
     expect(persistenceRevision(path.join(tmpHome, '.ashlr', 'swarms', `${id}.json`))).toBe(2);
+  }, 30_000);
+
+  it('allows exactly one cross-process case spelling to own a fresh swarm id', async () => {
+    prepareStoreDir('swarm');
+    const writers = [
+      spawnWriter('swarm', 'fresh', 'm389-Case-Swarm', 'case-swarm-upper'),
+      spawnWriter('swarm', 'fresh', 'm389-case-swarm', 'case-swarm-lower'),
+    ];
+    await Promise.all(writers.map((writer) => writer.ready));
+    writers.forEach((writer) => writer.go());
+
+    const outcomes = await Promise.all(writers.map(finish));
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+    expect(outcomes).toContainEqual({ ok: false, reason: 'conflict' });
+    const records = fs.readdirSync(path.join(tmpHome, '.ashlr', 'swarms'))
+      .filter((entry) => entry.toLowerCase() === 'm389-case-swarm.json');
+    expect(records).toHaveLength(1);
   }, 30_000);
 });

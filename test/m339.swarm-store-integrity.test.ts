@@ -121,11 +121,10 @@ describe('swarm store record integrity', () => {
     saveSwarm(makeRun('casesensitiveid'));
     saveSwarm(loadSwarm(original.id)!);
     fs.rmSync(path.join(swarmsDir(), `${original.id}.json`));
-    saveSwarm(makeRun('casesensitiveid'));
-    expect(loadSwarm('casesensitiveid')).toBeNull();
-    expect(saveSwarm(original)).toEqual({ ok: true, revision: 1 });
-    expect(loadSwarm(original.id)).toEqual(original);
-    expect(listSwarms().map((run) => run.id)).toEqual([original.id]);
+    expect(saveSwarm(makeRun('casesensitiveid'))).toEqual({ ok: true, revision: 1 });
+    expect(saveSwarm(original)).toEqual({ ok: false, reason: 'conflict' });
+    expect(loadSwarm('casesensitiveid')?.id).toBe('casesensitiveid');
+    expect(listSwarms().map((run) => run.id)).toEqual(['casesensitiveid']);
   });
 
   it('does not mutate historical regular file or directory modes on read', () => {
@@ -376,8 +375,9 @@ describe('swarm store atomic replacement', () => {
 
     expect(loadSwarm(run.id)).toEqual(run);
     expect(fs.readFileSync(legacyTmp, 'utf8')).toBe('leave-me-alone');
-    expect(renameState.sources).toHaveLength(1);
-    expect(renameState.sources[0]).not.toBe(legacyTmp);
+    expect(renameState.sources).toHaveLength(3);
+    expect(renameState.sources).not.toContain(legacyTmp);
+    expect(renameState.sources.some((source) => source.startsWith(`${target}.`))).toBe(true);
     if (process.platform !== 'win32') {
       expect(fs.statSync(swarmsDir()).mode & 0o777).toBe(0o700);
       expect(fs.statSync(target).mode & 0o777).toBe(0o600);

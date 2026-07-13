@@ -2088,3 +2088,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add stale terminal rollback, cancellation, legacy-writer, lock-contention, and cross-process regressions.
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
 - [x] Commit, push, observe cross-platform CI, and stage exact source without activating the busy production daemon.
+
+## Current Overnight Cycle - Recoverable Persistence Ownership
+- [x] Rehydrate the clean exact-source mirror, immutable release proof, production boundary, and persistence P1 handoff.
+- [x] Audit recoverable case ownership, bounded private-mode migration, and pre-first-commit lifecycle leases in parallel.
+- [x] Select and implement the smallest complete high-leverage persistence slice without weakening generation-CAS.
+- [x] Add cross-process, crash-recovery, retention, portability, and downgrade-safety regressions appropriate to the slice.
+- [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
+- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+- Verification note: Vitest 3.2 rejects the attempted `--repeat` convenience flag. The isolated concurrency test and its complete 48-test file both passed after the committed-record fast path removed claim-maintenance overhead.

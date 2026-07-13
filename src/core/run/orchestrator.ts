@@ -126,6 +126,13 @@ import {
   persistenceSnapshot,
   stripPersistenceMarker,
 } from '../util/persistence-generation.js';
+import {
+  acquireCaseFoldedOwnership,
+  completeCaseFoldedOwnership,
+  isCaseFoldedOwnershipMetadataEntry,
+  MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
+  type CaseOwnershipClaim,
+} from '../util/case-folded-ownership.js';
 import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
@@ -406,31 +413,6 @@ function recordRunReadFailure(result: RunsReadResult, reason: StableFileReadFail
   result.complete = false;
 }
 
-function assertCaseFoldedRunOwnership(file: string, id: string): void {
-  const expected = path.basename(file);
-  const folded = expected.toLowerCase();
-  const collision = fs.readdirSync(path.dirname(file)).find(
-    (entry) => entry !== expected && entry.toLowerCase() === folded,
-  );
-  if (collision) {
-    throw new Error(`Run id collides with existing persisted id: ${collision}`);
-  }
-
-  const claim = path.join(
-    path.dirname(file),
-    `.id-claim-${createHash('sha256').update(id.toLowerCase()).digest('hex')}`,
-  );
-  try {
-    fs.writeFileSync(claim, id, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (!fs.lstatSync(claim).isFile() || fs.readFileSync(claim, 'utf8') !== id) {
-      throw new Error(`Run id collides with an existing case-folded ownership claim`);
-    }
-    fs.chmodSync(claim, 0o600);
-  }
-}
-
 /**
  * Load a persisted RunState by id. Returns null if absent, unreadable, or invalid JSON.
  */
@@ -476,12 +458,23 @@ export function listRunsDetailed(options: ListRunsDetailedOptions = {}): RunsRea
 
     const result = emptyRunsRead('healthy', { sourcePresent: true });
     const candidates: RunFileCandidate[] = [];
+    let ownershipMetadataEntries = 0;
     let handle: fs.Dir | undefined;
     try {
       handle = fs.opendirSync(dir);
       while (true) {
         const entry = handle.readSync();
         if (entry === null) break;
+        if (isCaseFoldedOwnershipMetadataEntry(entry.name)) {
+          ownershipMetadataEntries += 1;
+          if (ownershipMetadataEntries > MAX_CASE_OWNERSHIP_METADATA_ENTRIES) {
+            result.complete = false;
+            result.sourceState = 'degraded';
+            pushRunStopReason(result.stopReasons, 'directory-limit');
+            break;
+          }
+          continue;
+        }
         if (result.entriesExamined >= maxDirectoryEntries) {
           result.complete = false;
           result.sourceState = 'degraded';
@@ -1015,8 +1008,15 @@ export function saveRun(s: RunState): void {
   if (!lock) throw new Error(`Run persistence lock unavailable for ${s.id}`);
   const legacyTmp = `${dest}.tmp`;
   let tmp: string | undefined;
+  let ownershipClaim: CaseOwnershipClaim | null = null;
   try {
-    assertCaseFoldedRunOwnership(dest, s.id);
+    ownershipClaim = acquireCaseFoldedOwnership({
+      anchorPath: stateRoot(),
+      storeDir: runsDir(),
+      recordFile: dest,
+      id: s.id,
+      label: 'Run',
+    });
     try {
       if (fs.lstatSync(legacyTmp).isDirectory()) {
         throw new Error(`Refusing to save run with invalid legacy temporary path: ${legacyTmp}`);
@@ -1068,6 +1068,8 @@ export function saveRun(s: RunState): void {
     fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     fs.renameSync(tmp, dest);
     tmp = undefined;
+    completeCaseFoldedOwnership(ownershipClaim);
+    ownershipClaim = null;
     Object.assign(s, normalized);
     bindPersistenceSnapshot(s, payload, revision);
   } finally {

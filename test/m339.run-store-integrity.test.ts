@@ -87,10 +87,10 @@ describe('run-store read integrity', () => {
     expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
     saveRun(loadRun(original.id)!);
     fs.rmSync(runPath(original.id));
-    expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
-    saveRun(original);
-    expect(loadRun(original.id)?.id).toBe(original.id);
-    expect(listRuns().map((run) => run.id)).toEqual([original.id]);
+    saveRun(makeState('casesensitiveid'));
+    expect(() => saveRun(original)).toThrow(/collides/);
+    expect(loadRun('casesensitiveid')?.id).toBe('casesensitiveid');
+    expect(listRuns().map((run) => run.id)).toEqual(['casesensitiveid']);
   });
 
   it('does not mutate historical file or directory modes while reading', () => {

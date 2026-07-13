@@ -23,8 +23,6 @@ import {
   lstatSync,
   mkdirSync,
   opendirSync,
-  readdirSync,
-  readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -45,6 +43,14 @@ import {
   persistenceSnapshot,
   stripPersistenceMarker,
 } from '../util/persistence-generation.js';
+import {
+  acquireCaseFoldedOwnership,
+  CaseFoldedOwnershipConflictError,
+  completeCaseFoldedOwnership,
+  isCaseFoldedOwnershipMetadataEntry,
+  MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
+  type CaseOwnershipClaim,
+} from '../util/case-folded-ownership.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -173,30 +179,6 @@ function secureExistingSwarmDir(dir: string): boolean {
 
 function stateRoot(): string {
   return join(homedir(), '.ashlr');
-}
-
-function assertCaseFoldedSwarmOwnership(dir: string, file: string, id: string): void {
-  const folded = file.toLowerCase();
-  const collision = readdirSync(dir).find(
-    (entry) => entry !== file && entry.toLowerCase() === folded,
-  );
-  if (collision) {
-    throw new Error(`Swarm id collides with existing persisted id: ${collision}`);
-  }
-
-  const claim = join(
-    dir,
-    `.id-claim-${createHash('sha256').update(id.toLowerCase()).digest('hex')}`,
-  );
-  try {
-    writeFileSync(claim, id, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (!lstatSync(claim).isFile() || readFileSync(claim, 'utf8') !== id) {
-      throw new Error('Swarm id collides with an existing case-folded ownership claim');
-    }
-    chmodSync(claim, 0o600);
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,6 +350,7 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
 
   let tmp: string | undefined;
   let lock: ReturnType<typeof acquireLocalStoreLock> = null;
+  let ownershipClaim: CaseOwnershipClaim | null = null;
   try {
     const dir = swarmsDir();
     ensureDir(dir);
@@ -376,7 +359,13 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
     const foldedId = createHash('sha256').update(s.id.toLowerCase()).digest('hex');
     lock = acquireLocalStoreLock(join(dir, `.write-lock-${foldedId}`));
     if (!lock) return { ok: false, reason: 'unavailable' };
-    assertCaseFoldedSwarmOwnership(dir, `${s.id}.json`, s.id);
+    ownershipClaim = acquireCaseFoldedOwnership({
+      anchorPath: stateRoot(),
+      storeDir: dir,
+      recordFile: target,
+      id: s.id,
+      label: 'Swarm',
+    });
 
     let currentRaw: string | null = null;
     try {
@@ -421,10 +410,14 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
     writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(tmp, target);
     tmp = undefined;
+    completeCaseFoldedOwnership(ownershipClaim);
+    ownershipClaim = null;
     bindPersistenceSnapshot(s, json, revision);
     return { ok: true, revision };
-  } catch {
-    return { ok: false, reason: 'unavailable' };
+  } catch (error) {
+    return error instanceof CaseFoldedOwnershipConflictError
+      ? { ok: false, reason: 'conflict' }
+      : { ok: false, reason: 'unavailable' };
   } finally {
     if (tmp !== undefined) {
       try {
@@ -556,12 +549,23 @@ function listSwarmsDetailedUnsafe(
 
   const result = emptyDetailed('healthy');
   const candidates: SwarmFileCandidate[] = [];
+  let ownershipMetadataEntries = 0;
   let directory;
   try {
     directory = opendirSync(dir);
     while (true) {
       const entry = directory.readSync();
       if (entry === null) break;
+      if (isCaseFoldedOwnershipMetadataEntry(entry.name)) {
+        ownershipMetadataEntries += 1;
+        if (ownershipMetadataEntries > MAX_CASE_OWNERSHIP_METADATA_ENTRIES) {
+          result.complete = false;
+          result.sourceState = 'degraded';
+          pushStopReason(result.stopReasons, 'directory-limit');
+          break;
+        }
+        continue;
+      }
       if (result.entriesExamined >= maxDirectoryEntries) {
         result.complete = false;
         result.sourceState = 'degraded';
