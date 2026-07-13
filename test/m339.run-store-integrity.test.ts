@@ -85,7 +85,7 @@ describe('run-store read integrity', () => {
 
     expect(loadRun('casesensitiveid')).toBeNull();
     expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
-    saveRun(original);
+    saveRun(loadRun(original.id)!);
     fs.rmSync(runPath(original.id));
     expect(() => saveRun(makeState('casesensitiveid'))).toThrow(/collides/);
     saveRun(original);
@@ -360,5 +360,65 @@ describe('run-store write integrity', () => {
     expect(
       fs.readdirSync(runsDir()).filter((name) => name.startsWith(`.${state.id}.json.`)),
     ).toEqual([]);
+  });
+
+  it('rejects stale same-id terminal rollback and advances a private revision', () => {
+    const original = makeState('generation-cas');
+    saveRun(original);
+    const winner = loadRun(original.id)!;
+    const stale = loadRun(original.id)!;
+
+    winner.status = 'done';
+    winner.result = 'Authoritative completion';
+    winner.updatedAt = '2026-07-13T15:00:00.000Z';
+    saveRun(winner);
+
+    stale.status = 'running';
+    stale.updatedAt = '2026-07-13T16:00:00.000Z';
+    expect(() => saveRun(stale)).toThrow(/Stale run persistence generation/);
+    expect(loadRun(original.id)).toMatchObject({
+      status: 'done',
+      result: 'Authoritative completion',
+    });
+    const raw = JSON.parse(fs.readFileSync(runPath(original.id), 'utf8'));
+    expect(raw['_ashlrPersistence']).toEqual({ schemaVersion: 1, revision: 2 });
+    expect(loadRun(original.id)).not.toHaveProperty('_ashlrPersistence');
+  });
+
+  it('rejects a stale cancellation after another writer completes the run', () => {
+    const original = makeState('stale-cancellation');
+    saveRun(original);
+    const winner = loadRun(original.id)!;
+    const cancelled = loadRun(original.id)!;
+
+    winner.status = 'done';
+    winner.result = 'Completed before cancellation arrived';
+    saveRun(winner);
+
+    cancelled.status = 'aborted';
+    cancelled.result = 'Run cancelled.';
+    cancelled.terminationReason = 'cancelled';
+    expect(() => saveRun(cancelled)).toThrow(/Stale run persistence generation/);
+    expect(loadRun(original.id)).toMatchObject({
+      status: 'done',
+      result: 'Completed before cancellation arrived',
+    });
+  });
+
+  it('detects a lock-unaware writer even when it preserves the revision marker', () => {
+    const state = makeState('legacy-writer-conflict');
+    saveRun(state);
+    const stale = loadRun(state.id)!;
+    const legacy = JSON.parse(fs.readFileSync(runPath(state.id), 'utf8'));
+    legacy.status = 'done';
+    legacy.result = 'Written by a lock-unaware older process';
+    fs.writeFileSync(runPath(state.id), JSON.stringify(legacy, null, 2), { mode: 0o600 });
+
+    stale.status = 'aborted';
+    expect(() => saveRun(stale)).toThrow(/Stale run persistence generation/);
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'done',
+      result: 'Written by a lock-unaware older process',
+    });
   });
 });

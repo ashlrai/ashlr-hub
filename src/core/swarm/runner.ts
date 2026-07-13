@@ -399,13 +399,23 @@ function touch(run: SwarmRun): void {
 }
 
 /** Persist + update timestamp. */
-function persist(run: SwarmRun): void {
-  touch(run);
-  try {
-    saveSwarm(run);
-  } catch {
-    // best-effort persistence; never crash the run
+class SwarmPersistenceError extends Error {
+  constructor(
+    readonly run: SwarmRun,
+    readonly reason: 'conflict' | 'invalid' | 'unavailable',
+  ) {
+    super(`Swarm persistence ${reason} for ${run.id}`);
+    this.name = 'SwarmPersistenceError';
   }
+}
+
+function persist(run: SwarmRun): ReturnType<typeof saveSwarm> {
+  touch(run);
+  const outcome = saveSwarm(run);
+  if (outcome?.ok === false) {
+    throw new SwarmPersistenceError(run, outcome.reason);
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,7 +1249,15 @@ function captureSandboxAndCleanup(
   }
 
   run.proposalOutcome = outcome;
-  if (persistOutcome) persist(run);
+  let persistenceError: SwarmPersistenceError | undefined;
+  if (persistOutcome) {
+    try {
+      persist(run);
+    } catch (error) {
+      if (!(error instanceof SwarmPersistenceError)) throw error;
+      persistenceError = error;
+    }
+  }
 
   // Always remove sandbox (worktree + scratch branch). Never touches source tree.
   if (_removeSandbox !== null) {
@@ -1275,6 +1293,7 @@ function captureSandboxAndCleanup(
       } catch { /* audit best-effort */ }
     }
   }
+  if (persistenceError) throw persistenceError;
   return outcome;
 }
 
@@ -1299,7 +1318,7 @@ function captureSandboxAndCleanup(
  *    opts.approved: when set alongside opts.resumeId, resumes a swarm that
  *    is in 'needs-approval' status (set by ashlr swarm approve <id>).
  */
-export async function runSwarm(
+async function runSwarmInternal(
   input: { goal: string; specId?: string },
   cfg: AshlrConfig,
   opts: SwarmOptions & { noCapture?: boolean; approved?: boolean },
@@ -1636,7 +1655,15 @@ export async function runSwarm(
   // -------------------------------------------------------------------------
   if (opts.background && !opts.resumeId) {
     // Persist the skeleton record so the worker can find it.
-    persist(run);
+    try {
+      persist(run);
+    } catch (error) {
+      if (!(error instanceof SwarmPersistenceError)) throw error;
+      run.status = 'failed';
+      run.result = `Background swarm was not launched: persistence ${error.reason}.`;
+      emitLog(sink, run.result);
+      return run;
+    }
     spawnBackgroundWorker(run.id);
     emitLog(sink, `Swarm ${run.id} launched in background.`);
     return run;
@@ -1909,4 +1936,25 @@ export async function runSwarm(
   if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
 
   return run;
+}
+
+export async function runSwarm(
+  input: { goal: string; specId?: string },
+  cfg: AshlrConfig,
+  opts: SwarmOptions & { noCapture?: boolean; approved?: boolean },
+  sink: StreamSink,
+): Promise<SwarmRun> {
+  try {
+    return await runSwarmInternal(input, cfg, opts, sink);
+  } catch (error) {
+    if (!(error instanceof SwarmPersistenceError)) throw error;
+    const run = error.run;
+    run.status = 'failed';
+    run.result = error.reason === 'conflict'
+      ? `Swarm stopped: persistence generation conflict for ${run.id}.`
+      : `Swarm stopped: persistence ${error.reason} for ${run.id}.`;
+    run.updatedAt = new Date().toISOString();
+    emitLog(sink, run.result);
+    return run;
+  }
 }

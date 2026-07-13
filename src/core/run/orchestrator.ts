@@ -117,6 +117,15 @@ import {
   readStableRegularFile,
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import {
+  addPersistenceMarker,
+  bindPersistenceSnapshot,
+  inheritPersistenceSnapshot,
+  persistenceDigest,
+  persistenceSnapshot,
+  stripPersistenceMarker,
+} from '../util/persistence-generation.js';
 import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
@@ -289,15 +298,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parsePersistedRun(raw: string, expectedId: string): RunState | null {
   const parsed: unknown = JSON.parse(raw);
+  if (!isRecord(parsed)) return null;
+  const persisted = stripPersistenceMarker(parsed);
   if (
-    !isRecord(parsed) ||
-    parsed['id'] !== expectedId ||
-    !Array.isArray(parsed['tasks']) ||
-    !parsed['tasks'].every(isRecord)
+    persisted.record['id'] !== expectedId ||
+    !Array.isArray(persisted.record['tasks']) ||
+    !persisted.record['tasks'].every(isRecord)
   ) {
     return null;
   }
-  return rehydrateRunStateFromPersistence(parsed as unknown as PersistedRunState);
+  const state = rehydrateRunStateFromPersistence(
+    persisted.record as unknown as PersistedRunState,
+  );
+  bindPersistenceSnapshot(state, raw, persisted.revision);
+  return state;
 }
 
 const DEFAULT_RUN_LIST_LIMIT = 200;
@@ -984,34 +998,78 @@ function newCancelledRunState(
 
 /**
  * Atomically persist a RunState to ~/.ashlr/runs/<id>.json (write-then-rename).
+ * Existing records require generation authority from the exact loaded object.
  * ONLY writes under runsDir() — never touches repos or Desktop.
  */
 export function saveRun(s: RunState): void {
-  ensureRunsDir();
-  const dest = runFilePath(s.id);
-  assertCaseFoldedRunOwnership(dest, s.id);
-  const legacyTmp = `${dest}.tmp`;
-  try {
-    if (fs.lstatSync(legacyTmp).isDirectory()) {
-      throw new Error(`Refusing to save run with invalid legacy temporary path: ${legacyTmp}`);
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  let tmp: string | undefined = path.join(
-    path.dirname(dest),
-    `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
-  );
   const normalized = normalizeRunStateForPersistence(s);
-  const payload = JSON.stringify(downgradeRunStateForPersistence(normalized), null, 2);
-  if (Buffer.byteLength(payload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
+  const semantic = downgradeRunStateForPersistence(normalized);
+  const semanticPayload = JSON.stringify(semantic, null, 2);
+  if (Buffer.byteLength(semanticPayload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
     throw new Error(`Refusing run record larger than ${MAX_PERSISTED_RUN_BYTES} bytes`);
   }
+  ensureRunsDir();
+  const dest = runFilePath(s.id);
+  const foldedId = createHash('sha256').update(s.id.toLowerCase()).digest('hex');
+  const lock = acquireLocalStoreLock(path.join(runsDir(), `.write-lock-${foldedId}`));
+  if (!lock) throw new Error(`Run persistence lock unavailable for ${s.id}`);
+  const legacyTmp = `${dest}.tmp`;
+  let tmp: string | undefined;
   try {
+    assertCaseFoldedRunOwnership(dest, s.id);
+    try {
+      if (fs.lstatSync(legacyTmp).isDirectory()) {
+        throw new Error(`Refusing to save run with invalid legacy temporary path: ${legacyTmp}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    let currentRaw: string | null = null;
+    try {
+      fs.lstatSync(dest);
+      const loaded = readStableRegularFile(dest, {
+        anchorPath: stateRoot(),
+        maxFileBytes: MAX_PERSISTED_RUN_BYTES,
+        remainingBytes: MAX_PERSISTED_RUN_BYTES,
+      });
+      if (!loaded.ok) throw new Error(`Run persistence source is unsafe: ${loaded.reason}`);
+      currentRaw = loaded.text;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    const expected = persistenceSnapshot(s);
+    if (
+      (currentRaw === null && expected !== undefined) ||
+      (currentRaw !== null && (expected === undefined || persistenceDigest(currentRaw) !== expected.digest))
+    ) {
+      throw new Error(`Stale run persistence generation for ${s.id}`);
+    }
+
+    let currentRevision = 0;
+    if (currentRaw !== null) {
+      const parsed: unknown = JSON.parse(currentRaw);
+      if (!isRecord(parsed)) throw new Error(`Invalid current run persistence record for ${s.id}`);
+      currentRevision = stripPersistenceMarker(parsed).revision;
+    }
+    const revision = currentRevision + 1;
+    const payload = JSON.stringify(addPersistenceMarker(
+      semantic as unknown as Record<string, unknown>,
+      revision,
+    ), null, 2);
+    if (Buffer.byteLength(payload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
+      throw new Error(`Refusing run record larger than ${MAX_PERSISTED_RUN_BYTES} bytes`);
+    }
+    tmp = path.join(
+      path.dirname(dest),
+      `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
+    );
     fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     fs.renameSync(tmp, dest);
     tmp = undefined;
     Object.assign(s, normalized);
+    bindPersistenceSnapshot(s, payload, revision);
   } finally {
     if (tmp) {
       try {
@@ -1020,6 +1078,7 @@ export function saveRun(s: RunState): void {
         // Best-effort cleanup after a failed write or rename.
       }
     }
+    releaseLocalStoreLock(lock);
   }
 }
 
@@ -2701,6 +2760,7 @@ export async function runGoal(
       terminationReason: undefined,
       updatedAt: new Date().toISOString(),
     };
+    inheritPersistenceSnapshot(existing, state);
     // Reset tasks that should re-run with the (presumably larger) new budget:
     //  - 'running': were mid-flight when the previous invocation stopped.
     //  - interruption failures: tasks marked by either cancellation or the

@@ -119,11 +119,11 @@ describe('swarm store record integrity', () => {
 
     expect(loadSwarm('casesensitiveid')).toBeNull();
     saveSwarm(makeRun('casesensitiveid'));
-    saveSwarm(original);
+    saveSwarm(loadSwarm(original.id)!);
     fs.rmSync(path.join(swarmsDir(), `${original.id}.json`));
     saveSwarm(makeRun('casesensitiveid'));
     expect(loadSwarm('casesensitiveid')).toBeNull();
-    saveSwarm(original);
+    expect(saveSwarm(original)).toEqual({ ok: true, revision: 1 });
     expect(loadSwarm(original.id)).toEqual(original);
     expect(listSwarms().map((run) => run.id)).toEqual([original.id]);
   });
@@ -387,23 +387,20 @@ describe('swarm store atomic replacement', () => {
   it('preserves the last valid record and cleans unique sibling temps on failure', () => {
     const original = makeRun('replace-failure', { goal: 'Last valid goal' });
     saveSwarm(original);
+    const committed = structuredClone(original);
 
     renameState.sources.length = 0;
     renameState.existedAtRename.length = 0;
     renameState.fail = true;
 
-    saveSwarm({
-      ...original,
-      goal: 'Uncommitted update one',
-      updatedAt: '2026-07-13T13:00:00.000Z',
-    });
-    saveSwarm({
-      ...original,
-      goal: 'Uncommitted update two',
-      updatedAt: '2026-07-13T13:30:00.000Z',
-    });
+    original.goal = 'Uncommitted update one';
+    original.updatedAt = '2026-07-13T13:00:00.000Z';
+    expect(saveSwarm(original)).toEqual({ ok: false, reason: 'unavailable' });
+    original.goal = 'Uncommitted update two';
+    original.updatedAt = '2026-07-13T13:30:00.000Z';
+    expect(saveSwarm(original)).toEqual({ ok: false, reason: 'unavailable' });
 
-    expect(loadSwarm(original.id)).toEqual(original);
+    expect(loadSwarm(original.id)).toEqual(committed);
     expect(renameState.existedAtRename).toEqual([true, true]);
     expect(new Set(renameState.sources).size).toBe(2);
 
@@ -418,6 +415,49 @@ describe('swarm store atomic replacement', () => {
     }
     expect(fs.readdirSync(swarmsDir()).filter((file) => file.endsWith('.tmp')))
       .toEqual([]);
+  });
+
+  it('rejects stale same-id terminal rollback and advances a private revision', () => {
+    const original = makeRun('generation-cas');
+    expect(saveSwarm(original)).toEqual({ ok: true, revision: 1 });
+    const winner = loadSwarm(original.id)!;
+    const stale = loadSwarm(original.id)!;
+
+    winner.status = 'done';
+    winner.result = 'Authoritative completion';
+    winner.updatedAt = '2026-07-13T15:00:00.000Z';
+    expect(saveSwarm(winner)).toEqual({ ok: true, revision: 2 });
+
+    stale.status = 'running';
+    stale.updatedAt = '2026-07-13T16:00:00.000Z';
+    expect(saveSwarm(stale)).toEqual({ ok: false, reason: 'conflict' });
+    expect(loadSwarm(original.id)).toMatchObject({
+      status: 'done',
+      result: 'Authoritative completion',
+    });
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(swarmsDir(), `${original.id}.json`), 'utf8'),
+    );
+    expect(raw['_ashlrPersistence']).toEqual({ schemaVersion: 1, revision: 2 });
+    expect(loadSwarm(original.id)).not.toHaveProperty('_ashlrPersistence');
+  });
+
+  it('detects a lock-unaware writer even when it preserves the revision marker', () => {
+    const run = makeRun('legacy-writer-conflict');
+    saveSwarm(run);
+    const stale = loadSwarm(run.id)!;
+    const file = path.join(swarmsDir(), `${run.id}.json`);
+    const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+    legacy.status = 'done';
+    legacy.result = 'Written by a lock-unaware older process';
+    fs.writeFileSync(file, JSON.stringify(legacy, null, 2), { mode: 0o600 });
+
+    stale.status = 'aborted';
+    expect(saveSwarm(stale)).toEqual({ ok: false, reason: 'conflict' });
+    expect(loadSwarm(run.id)).toMatchObject({
+      status: 'done',
+      result: 'Written by a lock-unaware older process',
+    });
   });
 });
 

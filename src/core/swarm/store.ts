@@ -37,6 +37,14 @@ import {
   readStableRegularFile,
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import {
+  addPersistenceMarker,
+  bindPersistenceSnapshot,
+  persistenceDigest,
+  persistenceSnapshot,
+  stripPersistenceMarker,
+} from '../util/persistence-generation.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -316,6 +324,15 @@ function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
   return { ...parsed, tasks } as unknown as SwarmRun;
 }
 
+function parsePersistedSwarm(raw: string, expectedId: string): SwarmRun | null {
+  const parsed: unknown = JSON.parse(raw);
+  if (!isValidPersistedSwarm(parsed, expectedId)) return null;
+  const persisted = stripPersistenceMarker(parsed);
+  const swarm = rehydrateFromPersistence(persisted.record);
+  bindPersistenceSnapshot(swarm, raw, persisted.revision);
+  return swarm;
+}
+
 // ---------------------------------------------------------------------------
 // saveSwarm
 // ---------------------------------------------------------------------------
@@ -330,25 +347,84 @@ function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
  *   4. Rename the `.tmp` over the target path (atomic on POSIX).
  *   5. Clean up the temporary file whether replacement succeeds or fails.
  *
- * Never throws; failures are silently swallowed so a persistence error never
- * crashes the swarm runner mid-execution.
+ * Never throws. The discriminated result lets each mutation boundary surface
+ * generation conflicts and storage failures without exception-based store I/O.
  */
-export function saveSwarm(s: SwarmRun): void {
+export type SwarmSaveResult =
+  | { ok: true; revision: number }
+  | { ok: false; reason: 'conflict' | 'invalid' | 'unavailable' };
+
+export function saveSwarm(s: SwarmRun): SwarmSaveResult {
+  let semantic: PersistedSwarmRun;
+  try {
+    semantic = prepareForPersistence(s);
+    const semanticPayload = JSON.stringify(semantic, null, 2) + '\n';
+    if (Buffer.byteLength(semanticPayload, 'utf8') > MAX_PERSISTED_SWARM_BYTES) {
+      return { ok: false, reason: 'invalid' };
+    }
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+
   let tmp: string | undefined;
+  let lock: ReturnType<typeof acquireLocalStoreLock> = null;
   try {
     const dir = swarmsDir();
     ensureDir(dir);
 
     const target = swarmPath(dir, s.id);
+    const foldedId = createHash('sha256').update(s.id.toLowerCase()).digest('hex');
+    lock = acquireLocalStoreLock(join(dir, `.write-lock-${foldedId}`));
+    if (!lock) return { ok: false, reason: 'unavailable' };
     assertCaseFoldedSwarmOwnership(dir, `${s.id}.json`, s.id);
-    tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    const json = JSON.stringify(prepareForPersistence(s), null, 2) + '\n';
-    if (Buffer.byteLength(json, 'utf8') > MAX_PERSISTED_SWARM_BYTES) return;
 
+    let currentRaw: string | null = null;
+    try {
+      lstatSync(target);
+      const loaded = readStableRegularFile(target, {
+        anchorPath: stateRoot(),
+        maxFileBytes: MAX_PERSISTED_SWARM_BYTES,
+        remainingBytes: MAX_PERSISTED_SWARM_BYTES,
+      });
+      if (!loaded.ok) return { ok: false, reason: 'unavailable' };
+      currentRaw = loaded.text;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { ok: false, reason: 'unavailable' };
+      }
+    }
+
+    const expected = persistenceSnapshot(s);
+    if (
+      (currentRaw === null && expected !== undefined) ||
+      (currentRaw !== null && (expected === undefined || persistenceDigest(currentRaw) !== expected.digest))
+    ) {
+      return { ok: false, reason: 'conflict' };
+    }
+
+    let currentRevision = 0;
+    if (currentRaw !== null) {
+      const parsed: unknown = JSON.parse(currentRaw);
+      if (!isRecord(parsed)) return { ok: false, reason: 'unavailable' };
+      currentRevision = stripPersistenceMarker(parsed).revision;
+    }
+    const revision = currentRevision + 1;
+    const json = JSON.stringify(addPersistenceMarker(
+      semantic as unknown as Record<string, unknown>,
+      revision,
+    ), null, 2) + '\n';
+    if (Buffer.byteLength(json, 'utf8') > MAX_PERSISTED_SWARM_BYTES) {
+      return { ok: false, reason: 'invalid' };
+    }
+
+    tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(tmp, target);
+    tmp = undefined;
+    bindPersistenceSnapshot(s, json, revision);
+    return { ok: true, revision };
   } catch {
-    // Never propagate persistence failures to the caller.
+    return { ok: false, reason: 'unavailable' };
   } finally {
     if (tmp !== undefined) {
       try {
@@ -357,6 +433,7 @@ export function saveSwarm(s: SwarmRun): void {
         // The rename succeeded or cleanup is not possible; never throw.
       }
     }
+    releaseLocalStoreLock(lock);
   }
 }
 
@@ -386,13 +463,7 @@ export function loadSwarm(id: string): SwarmRun | null {
     });
     if (!loaded.ok) return null;
 
-    const parsed: unknown = JSON.parse(loaded.text);
-
-    if (!isValidPersistedSwarm(parsed, id)) {
-      return null;
-    }
-
-    return rehydrateFromPersistence(parsed);
+    return parsePersistedSwarm(loaded.text, id);
   } catch {
     return null;
   }
@@ -591,15 +662,15 @@ function listSwarmsDetailedUnsafe(
       result.bytesRead += loaded.bytesRead;
 
       try {
-        const parsed: unknown = JSON.parse(loaded.text);
         const expectedId = candidate.file.slice(0, -'.json'.length);
-        if (!isValidPersistedSwarm(parsed, expectedId)) {
+        const parsed = parsePersistedSwarm(loaded.text, expectedId);
+        if (!parsed) {
           result.invalidFiles += 1;
           result.sourceState = 'degraded';
           pushStopReason(result.stopReasons, 'invalid-file');
           continue;
         }
-        result.swarms.push(rehydrateFromPersistence(parsed));
+        result.swarms.push(parsed);
       } catch {
         result.invalidFiles += 1;
         result.sourceState = 'degraded';

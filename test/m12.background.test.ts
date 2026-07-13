@@ -120,6 +120,24 @@ afterEach(() => {
 });
 
 describe('runSwarm — --background spawns the worker correctly', () => {
+  it('does not spawn a worker when the skeleton cannot be persisted', async () => {
+    fs.mkdirSync(path.join(tmpHome, '.ashlr'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.ashlr', 'swarms'), 'not a directory');
+
+    const result = await runSwarm(
+      { goal: 'unpersistable background' },
+      makeConfig(),
+      { background: true },
+      nullSink,
+    );
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      result: expect.stringMatching(/not launched.*persistence unavailable/i),
+    });
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it('persists a skeleton and returns the id immediately (no execution)', async () => {
     const result = await runSwarm(
       { goal: 'bg goal' },

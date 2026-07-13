@@ -2079,3 +2079,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add per-ID revision/CAS fencing so concurrent same-ID saves cannot roll completed state backward.
 - [ ] Replace permanent case-fold claims with recoverable ownership plus bounded retention.
 - [ ] Move historical owner-only mode repair into an explicit bounded migration so observational reads remain non-mutating without preserving permissive legacy state indefinitely.
+
+## Current Overnight Cycle - Persistence Generation CAS
+- [x] Rehydrate clean source, exact release proof, live production ownership, and the persistence P1 handoff.
+- [x] Audit run, swarm, case-claim, and legacy-mode boundaries in parallel without interrupting production.
+- [x] Add shared exact-generation snapshots and crash-recoverable per-ID mutation locks for run and swarm records.
+- [x] Make stale writers fail closed without weakening downgrade-safe cancellation or swarm's never-throw storage API.
+- [x] Add stale terminal rollback, cancellation, legacy-writer, lock-contention, and cross-process regressions.
+- [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
+- [ ] Commit, push, observe cross-platform CI, and stage exact source without activating the busy production daemon.

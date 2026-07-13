@@ -63,7 +63,9 @@ async function importRunner(): Promise<RunnerMod> {
 type StoreMod = {
   loadSwarm: (id: string) => SwarmRun | null;
   listSwarms: () => SwarmRun[];
-  saveSwarm: (s: SwarmRun) => void;
+  saveSwarm: (s: SwarmRun) =>
+    | { ok: true; revision: number }
+    | { ok: false; reason: 'conflict' | 'invalid' | 'unavailable' };
 };
 
 async function importStore(): Promise<StoreMod> {
@@ -889,10 +891,15 @@ async function cmdSwarmApprove(id: string): Promise<number> {
   // runner clears the pause to 'running' itself only when opts.approved is set —
   // this keeps approval an explicit, threaded signal rather than a silent flip.
   swarm.updatedAt = new Date().toISOString();
-  try {
-    store.saveSwarm(swarm);
-  } catch {
-    // best-effort; runner will re-persist after first step
+  const saveOutcome = store.saveSwarm(swarm);
+  if (!saveOutcome.ok) {
+    const detail = saveOutcome.reason === 'conflict'
+      ? 'the swarm changed after it was loaded'
+      : `persistence is ${saveOutcome.reason}`;
+    process.stderr.write(
+      red('error: ') + `Approval was not persisted because ${detail}. Retry the command.\n`,
+    );
+    return 1;
   }
 
   console.log(`  ${cyan('Resuming swarm…')}`);

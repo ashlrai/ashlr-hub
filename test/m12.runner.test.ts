@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import type {
   AshlrConfig,
   SwarmOptions,
@@ -36,6 +37,10 @@ import type {
   RunUsage,
 } from '../src/core/types.js';
 import type { StreamSink } from '../src/core/run/streaming.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../src/core/fleet/local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Mock modules before any import of the runner
@@ -106,6 +111,7 @@ let runSwarm: (
 let swarmsDir: () => string;
 let loadSwarm: (id: string) => SwarmRun | null;
 let listSwarms: () => SwarmRun[];
+let saveSwarm: (run: SwarmRun) => { ok: true; revision: number } | { ok: false; reason: string };
 
 async function ensureImported(): Promise<void> {
   if (!runSwarm) {
@@ -115,6 +121,7 @@ async function ensureImported(): Promise<void> {
     swarmsDir = store.swarmsDir;
     loadSwarm = store.loadSwarm;
     listSwarms = store.listSwarms;
+    saveSwarm = store.saveSwarm;
   }
 }
 
@@ -848,6 +855,96 @@ describe('runSwarm — persists state after each step', () => {
     expect(second.result).toMatch(/already exists/i);
     expect(loadSwarm(runId)?.goal).toBe('first owner');
   });
+
+  it('surfaces a concurrent resume conflict without throwing or overwriting the winner', async () => {
+    const runId = 'concurrent-resume-generation';
+    const goal = 'concurrent resume';
+    const now = new Date().toISOString();
+    const initial: SwarmRun = {
+      id: runId,
+      goal,
+      specId: null,
+      project: null,
+      createdAt: now,
+      updatedAt: now,
+      budget: { maxTokens: 50_000, maxSteps: 100, allowCloud: false },
+      usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+      parallel: 1,
+      status: 'aborted',
+      plan: minimalPlan(goal),
+      tasks: [
+        { id: 'scaffold-1', phase: 'scaffold', status: 'pending' },
+        { id: 'build-1', phase: 'build', status: 'pending' },
+      ],
+    };
+    expect(saveSwarm(initial)).toEqual({ ok: true, revision: 1 });
+
+    const resumed = runSwarm(
+      { goal },
+      makeConfig(),
+      { resumeId: runId },
+      nullSink,
+    );
+    const winner = loadSwarm(runId)!;
+    winner.status = 'done';
+    winner.result = 'Concurrent winner';
+    expect(saveSwarm(winner)).toEqual({ ok: true, revision: 2 });
+
+    await expect(resumed).resolves.toMatchObject({
+      id: runId,
+      status: 'failed',
+      result: expect.stringMatching(/persistence generation conflict/i),
+    });
+    expect(loadSwarm(runId)).toMatchObject({
+      status: 'done',
+      result: 'Concurrent winner',
+    });
+  });
+
+  it('stops a resumed swarm before task side effects when its write lock is unavailable', async () => {
+    const runId = 'locked-resume-generation';
+    const goal = 'locked resume';
+    const now = new Date().toISOString();
+    const initial: SwarmRun = {
+      id: runId,
+      goal,
+      specId: null,
+      project: null,
+      createdAt: now,
+      updatedAt: now,
+      budget: { maxTokens: 50_000, maxSteps: 100, allowCloud: false },
+      usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+      parallel: 1,
+      status: 'aborted',
+      plan: minimalPlan(goal),
+      tasks: [
+        { id: 'scaffold-1', phase: 'scaffold', status: 'pending' },
+        { id: 'build-1', phase: 'build', status: 'pending' },
+      ],
+    };
+    expect(saveSwarm(initial)).toEqual({ ok: true, revision: 1 });
+    const folded = createHash('sha256').update(runId.toLowerCase()).digest('hex');
+    const lock = acquireLocalStoreLock(path.join(swarmsDir(), `.write-lock-${folded}`));
+    expect(lock).not.toBeNull();
+
+    try {
+      await expect(runSwarm(
+        { goal },
+        makeConfig(),
+        { resumeId: runId },
+        nullSink,
+      )).resolves.toMatchObject({
+        id: runId,
+        status: 'failed',
+        result: expect.stringMatching(/persistence unavailable/i),
+      });
+    } finally {
+      releaseLocalStoreLock(lock);
+    }
+
+    expect(runGoalCalls).toHaveLength(0);
+    expect(loadSwarm(runId)).toMatchObject({ status: 'aborted' });
+  }, 10_000);
 
   it('swarm file exists on disk after runSwarm completes', async () => {
     mockPlanSwarm.mockResolvedValueOnce(minimalPlan('persist test'));
