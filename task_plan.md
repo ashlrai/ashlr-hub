@@ -2135,4 +2135,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add authenticated immutable terminal-pack retention with crash-safe POSIX cleanup and a proven Windows durability boundary.
 - [ ] Add exact no-replay execution-lease reconciliation after effect disposition without clearing or replaying the run.
 - [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
-- [ ] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
+- [x] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
