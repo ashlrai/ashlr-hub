@@ -2087,4 +2087,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make stale writers fail closed without weakening downgrade-safe cancellation or swarm's never-throw storage API.
 - [x] Add stale terminal rollback, cancellation, legacy-writer, lock-contention, and cross-process regressions.
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
-- [ ] Commit, push, observe cross-platform CI, and stage exact source without activating the busy production daemon.
+- [x] Commit, push, observe cross-platform CI, and stage exact source without activating the busy production daemon.
