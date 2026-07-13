@@ -139,6 +139,38 @@ function runsDir(): string {
  */
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
 const CANCELLED_TASK_ERROR = 'Task cancelled.';
+const CANCELLED_MARKER = '_ashlrCancelled' as const;
+
+type PersistedRunTask = RunTask & {
+  [CANCELLED_MARKER]?: unknown;
+};
+
+type PersistedRunState = Omit<RunState, 'tasks'> & {
+  tasks: PersistedRunTask[];
+  [CANCELLED_MARKER]?: unknown;
+};
+
+function rehydrateRunStateFromPersistence(state: PersistedRunState): RunState {
+  const markedCancelled =
+    state.status === 'aborted' &&
+    state[CANCELLED_MARKER] === true &&
+    (state.terminationReason === undefined || state.terminationReason === 'cancelled');
+  const { [CANCELLED_MARKER]: _runMarker, ...semanticState } = state;
+  return {
+    ...semanticState,
+    ...(markedCancelled ? { terminationReason: 'cancelled' as const } : {}),
+    tasks: state.tasks.map((task) => {
+      const taskMarkedCancelled =
+        task.status === 'failed' &&
+        task[CANCELLED_MARKER] === true &&
+        task.error === ABORT_TASK_ERROR;
+      const { [CANCELLED_MARKER]: _taskMarker, ...semanticTask } = task;
+      return taskMarkedCancelled
+        ? { ...semanticTask, error: CANCELLED_TASK_ERROR }
+        : semanticTask;
+    }),
+  };
+}
 
 function reportedModelUsage(value: unknown): { tokensIn: number; tokensOut: number } | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -193,7 +225,7 @@ export function loadRun(id: string): RunState | null {
   try {
     const file = runFilePath(id);
     const raw = fs.readFileSync(file, 'utf8');
-    return JSON.parse(raw) as RunState;
+    return rehydrateRunStateFromPersistence(JSON.parse(raw) as PersistedRunState);
   } catch {
     return null;
   }
@@ -210,7 +242,7 @@ export function listRuns(): RunState[] {
     for (const file of files) {
       try {
         const raw = fs.readFileSync(path.join(runsDir(), file), 'utf8');
-        const state = JSON.parse(raw) as RunState;
+        const state = rehydrateRunStateFromPersistence(JSON.parse(raw) as PersistedRunState);
         runs.push(state);
       } catch {
         // Skip corrupt/unreadable files silently
@@ -341,6 +373,32 @@ function normalizeRunStateForPersistence(state: RunState): RunState {
     ...state,
     ...meta,
   };
+}
+
+function downgradeRunStateForPersistence(state: RunState): PersistedRunState {
+  const { [CANCELLED_MARKER]: _runMarker, ...semanticState } = state as PersistedRunState;
+  const persisted: PersistedRunState = {
+    ...semanticState,
+    tasks: state.tasks.map((task) => {
+      const { [CANCELLED_MARKER]: _taskMarker, ...semanticTask } = task as PersistedRunTask;
+      if (task.status === 'failed' && task.error === CANCELLED_TASK_ERROR) {
+        return {
+          ...semanticTask,
+          error: ABORT_TASK_ERROR,
+          [CANCELLED_MARKER]: true,
+        };
+      }
+      return semanticTask;
+    }),
+  };
+
+  if (state.status === 'aborted' && state.terminationReason === 'cancelled') {
+    delete persisted.terminationReason;
+    persisted[CANCELLED_MARKER] = true;
+  } else {
+    if (persisted.terminationReason === 'cancelled') delete persisted.terminationReason;
+  }
+  return persisted;
 }
 
 function actionCountsForProposalCapture(state: RunState): RunActionCounts | undefined {
@@ -571,7 +629,7 @@ export function saveRun(s: RunState): void {
   const dest = runFilePath(s.id);
   const tmp = dest + '.tmp';
   const normalized = normalizeRunStateForPersistence(s);
-  const payload = JSON.stringify(normalized, null, 2);
+  const payload = JSON.stringify(downgradeRunStateForPersistence(normalized), null, 2);
   fs.writeFileSync(tmp, payload, 'utf8');
   fs.renameSync(tmp, dest);
   Object.assign(s, normalized);
