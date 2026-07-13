@@ -30,13 +30,16 @@
  *   - createSandbox throws when kill switch is on even with allowAnyRepo
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Sandbox } from '../src/core/types.js';
+
+// Windows CI can spend several seconds in each real git worktree subprocess.
+vi.setConfig({ testTimeout: 30_000 });
 
 // ---------------------------------------------------------------------------
 // HOME isolation
