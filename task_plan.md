@@ -1939,4 +1939,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve queue eligibility, `queue.next`, daemon claim authority, and no-directory/no-chmod status invariants.
 - [x] Add focused lifecycle, route, and FleetStatus coverage.
 - [x] Pass static, adjacent, exhaustive, and independent verification.
-- [ ] Commit, push, observe CI, reload production, and canary live feasibility truth.
+- [x] Commit, push, observe CI, reload production, and canary live feasibility truth.
