@@ -2124,3 +2124,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add same-machine ABA, strict-expiry, takeover, ambiguity, corrupt-state, lock, daemon-launch, and Windows regressions.
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
 - [x] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+
+## Current Overnight Cycle - Effect Journal Authority
+- [x] Rehydrate exact merged master, immutable release proof, production ownership, CI state, Entire state, and the effect-authority P1 handoff.
+- [x] Audit provider, tool, verifier, sandbox, PR, lifecycle, durability, downgrade, and operator-recovery boundaries in parallel.
+- [x] Define one explicit prepared/committed effect contract with generation-bound identity, bounded metadata, and fail-closed uncertainty.
+- [x] Implement the smallest complete effect-journal slice that materially narrows replay ambiguity without claiming universal exactly-once behavior.
+- [x] Add bounded authenticated reconciliation that can attest or abandon ambiguous effects but cannot blindly authorize replay.
+- [x] Add crash-window, stale-writer, duplicate-key, tamper, corruption, signing-key, privacy, cross-generation, CLI, and safety-class regressions.
+- [ ] Add authenticated immutable terminal-pack retention with crash-safe POSIX cleanup and a proven Windows durability boundary.
+- [ ] Add exact no-replay execution-lease reconciliation after effect disposition without clearing or replaying the run.
+- [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
+- [ ] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.

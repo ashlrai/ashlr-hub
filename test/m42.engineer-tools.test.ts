@@ -23,6 +23,7 @@ import {
   buildEngineerToolSpecs,
   buildNativeToolSpecsWithFn,
 } from '../src/core/mcp-native-engineer.js';
+import { nativeToolSafety } from '../src/core/mcp-native.js';
 
 let prevAllowAny: string | undefined;
 
@@ -633,6 +634,14 @@ describe('buildEngineerToolSpecs', () => {
       expect(s.type).toBe('function');
       expect(s.function.name).toBe(s.name);
     }
+    expect(Object.fromEntries(full.map((spec) => [spec.name, spec.safety]))).toEqual({
+      read_file: 'read',
+      glob: 'read',
+      grep: 'read',
+      write_file: 'write',
+      edit_file: 'write',
+      bash: 'exec',
+    });
   });
 
   it('a built spec fn executes through the gated pipeline', async () => {
@@ -653,6 +662,8 @@ describe('buildNativeToolSpecsWithFn', () => {
       expect(s.type).toBe('function');
       expect(typeof s.function.name).toBe('string');
       expect(s.function.name).toBe(s.name);
+      expect(['read', 'append', 'proposal', 'write', 'exec']).toContain(s.safety);
+      expect(s.safety).toBe(nativeToolSafety(s.name));
     }
   });
 

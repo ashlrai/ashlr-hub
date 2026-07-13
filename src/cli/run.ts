@@ -792,7 +792,7 @@ function printRunHelp(): void {
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],
     ['--no-memory',             `Skip genome recall injection into sub-agent prompts.`],
     ['--engineer',              `Give the local agent sandboxed edit tools (writes → inbox, never the live tree).`],
-    ['--bash',                  `With --engineer, also allow sandboxed bash/test execution.`],
+    ['--bash',                  `Reserved: refused until OS-enforced filesystem confinement is active.`],
     ['--resume <id>',           `Resume a previously aborted/incomplete run.`],
     ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
     ['--stream',                `Stream live progress as it happens (default: on when stderr is a TTY).`],

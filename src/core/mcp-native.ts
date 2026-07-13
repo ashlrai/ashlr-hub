@@ -21,7 +21,7 @@
  * size-capped so a tool reply can never blow agent context or leak credentials.
  */
 
-import type { AshlrConfig, NativeToolDef, ProposalStatus } from './types.js';
+import type { AshlrConfig, NativeToolDef, NativeToolSafety, ProposalStatus } from './types.js';
 import { loadConfig } from './config.js';
 import { killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
@@ -941,6 +941,11 @@ export function listNativeTools(): { name: string; description: string; inputSch
 /** True when `name` is a native tool (used by the gateway router). */
 export function isNativeTool(name: string): boolean {
   return TOOLS.some((t) => t.name === name);
+}
+
+/** Internal execution classification; unlike tools/list this is not sent over MCP. */
+export function nativeToolSafety(name: string): NativeToolSafety | null {
+  return TOOLS.find((tool) => tool.name === name)?.safety ?? null;
 }
 
 // ---------------------------------------------------------------------------
