@@ -1940,3 +1940,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused lifecycle, route, and FleetStatus coverage.
 - [x] Pass static, adjacent, exhaustive, and independent verification.
 - [x] Commit, push, observe CI, reload production, and canary live feasibility truth.
+
+## Current Overnight Cycle - Pre-Claim Repair Route Authority
+- [x] Rehydrate the exact deployed route-observability source, live 15/14/1 partition, git state, and durable notes.
+- [x] Audit every scheduler lane converging on the atomic shared claim and preserve the final execution guard.
+- [x] Read one point-in-time repair queue snapshot and memoize route feasibility for each trusted repair candidate.
+- [x] Exclude provably unroutable repairs before normal, automatic-drain, explicit-drain, fairness, and refill claims.
+- [x] Preserve lane-scoped causal telemetry with one coherent raw selection denominator.
+- [x] Add normal refill, explicit-drain attribution, lifecycle-unavailable, automatic-drain, local-only, and late-divergence coverage.
+- [x] Pass exhaustive verification and independent final review.
+- [ ] Commit, push, observe CI, deploy exact green source, and inspect production route truth without exceeding the daily cap.

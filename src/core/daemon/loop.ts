@@ -83,6 +83,7 @@ import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import {
   generatedRepairCandidateAllowed,
   generatedRepairExecutionBackendAllowed,
+  inspectGeneratedRepairRouteFeasibility,
   routeBackend,
 } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
@@ -206,6 +207,7 @@ import {
   generatedRepairCooldownKey,
   generatedRepairCooldownKeys,
   generatedRepairRetryPolicy,
+  readGeneratedRepairQueueSnapshot,
   acknowledgeGeneratedRepairTreatmentOutcome,
   readPendingGeneratedRepairTreatmentOutcomes,
   recordGeneratedRepairLifecycle,
@@ -841,6 +843,7 @@ function recordQueueSelectionAgentAction(fields: {
   eligibleItems: number;
   pendingBlocked: number;
   cooldownBlocked: number;
+  routeBlocked: number;
   fastRepairCooldown: number;
   rawSelectCount: number;
   selectCount: number;
@@ -864,7 +867,7 @@ function recordQueueSelectionAgentAction(fields: {
     summary:
       `${lane}: claimed ${fields.claimedItems.length}/${fields.selectedItems.length} ` +
       `from ${fields.eligibleItems}/${fields.backlogItems} eligible; ` +
-      `cooldown ${fields.cooldownBlocked}, pending ${fields.pendingBlocked}`,
+      `cooldown ${fields.cooldownBlocked}, pending ${fields.pendingBlocked}, route ${fields.routeBlocked}`,
     reason: fields.dryRun ? 'dry-run' : fields.claimedItems.length > 0 ? 'selected' : 'no-claim',
     ...(first?.repo ? { repo: first.repo } : {}),
     ...(first?.id ? { itemId: boundedText(first.id, 120) } : {}),
@@ -882,6 +885,7 @@ function recordQueueSelectionAgentAction(fields: {
       eligibleItems: fields.eligibleItems,
       pendingBlocked: fields.pendingBlocked,
       cooldownBlocked: fields.cooldownBlocked,
+      routeBlocked: fields.routeBlocked,
       fastRepairCooldown: fields.fastRepairCooldown,
       rawSelectCount: fields.rawSelectCount,
       selectCount: fields.selectCount,
@@ -2748,14 +2752,45 @@ export async function tick(
       cooldownMsForSelectionItem(selectionWorkedEvents, item, cooldownMs, repairRecoveryHealthy),
     ) ||
     pendingItemKeys.has(workItemCoverageKey(item));
+  const claimRepairQueue = (() => {
+    try {
+      return readGeneratedRepairQueueSnapshot();
+    } catch {
+      return null;
+    }
+  })();
+  const claimRouteFeasibility = new Map<WorkItem, boolean>();
+  const claimRouteUnavailableIds = new Set<string>();
+  const hasFeasibleClaimRoute = (item: WorkItem): boolean => {
+    if (!isTrustedGeneratedRepairItem(item)) return true;
+    const cached = claimRouteFeasibility.get(item);
+    if (cached !== undefined) return cached;
+    let feasible = false;
+    try {
+      feasible = claimRepairQueue !== null && inspectGeneratedRepairRouteFeasibility(
+        item,
+        routingCfg,
+        claimRepairQueue.retryPolicy(item),
+      ).feasible;
+    } catch {
+      feasible = false;
+    }
+    claimRouteFeasibility.set(item, feasible);
+    if (!feasible) claimRouteUnavailableIds.add(item.id);
+    return feasible;
+  };
+  const isClaimEligible = (item: WorkItem): boolean =>
+    !isSelectionBlocked(item) && hasFeasibleClaimRoute(item);
 
   const explicitDrainMode = opts.drain;
   const autoDrainMode: DaemonDrainMode | undefined =
-    canAutoDrainDiagnosticReslices(opts, directionPlan) ? 'diagnostic-reslices' : undefined;
+    explicitDrainMode === undefined && canAutoDrainDiagnosticReslices(opts, directionPlan)
+      ? 'diagnostic-reslices'
+      : undefined;
   const autoDrainAvailableItems = autoDrainMode
     ? backlogItems.filter((item) => isDrainCandidate(item, autoDrainMode))
     : [];
-  const autoDrainEligibleItems = autoDrainAvailableItems.filter((item) => !isSelectionBlocked(item));
+  const autoDrainEligibleItems = autoDrainAvailableItems.filter(isClaimEligible);
   const diagnosticRoute = (item: WorkItem): { backend: EngineId; tier: EngineTier | null } => {
     const routed = routeBackend(item, routingCfg);
     const backend = enforceLocalBackend(routed.backend, directionPlan);
@@ -2785,10 +2820,13 @@ export async function tick(
     : serialDispatchableRepairs;
   const autoDrainDispatchableIds = new Set(autoDrainDispatchableItems.map((item) => item.id));
   const dispatchPreflightByItemId = new Map<string, DispatchPreflightState>();
-  for (const item of autoDrainEligibleItems) {
+  for (const item of autoDrainAvailableItems) {
+    if (isSelectionBlocked(item)) continue;
     dispatchPreflightByItemId.set(
       item.id,
-      autoDrainDispatchableIds.has(item.id)
+      claimRouteUnavailableIds.has(item.id)
+        ? 'route-unavailable'
+        : autoDrainDispatchableIds.has(item.id)
         ? 'dispatchable'
         : concurrentDispatchEnabled
           ? selectionResourceSnapshot
@@ -2797,13 +2835,26 @@ export async function tick(
           : 'route-unavailable',
     );
   }
-  const dispatchBlockedRepairIds = new Set(
-    autoDrainEligibleItems
-      .filter((item) => !autoDrainDispatchableIds.has(item.id))
-      .map((item) => item.id),
-  );
   const drainMode = explicitDrainMode ?? (autoDrainDispatchableItems.length > 0 ? autoDrainMode : undefined);
   const automaticDrain = explicitDrainMode === undefined && drainMode !== undefined;
+  const claimRouteCandidateItems = explicitDrainMode && drainMode
+    ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
+    : backlogItems;
+  for (const item of claimRouteCandidateItems) {
+    if (isTrustedGeneratedRepairItem(item) && !isSelectionBlocked(item)) hasFeasibleClaimRoute(item);
+  }
+  for (const item of claimRouteCandidateItems) {
+    if (
+      claimRouteUnavailableIds.has(item.id) &&
+      !dispatchPreflightByItemId.has(item.id)
+    ) dispatchPreflightByItemId.set(item.id, 'route-unavailable');
+  }
+  const dispatchBlockedRepairIds = new Set([
+    ...autoDrainEligibleItems
+      .filter((item) => !autoDrainDispatchableIds.has(item.id))
+      .map((item) => item.id),
+    ...claimRouteUnavailableIds,
+  ]);
   const drainAvailableItems = drainMode
     ? automaticDrain
       ? autoDrainDispatchableItems
@@ -2816,13 +2867,21 @@ export async function tick(
     ? ordinarySelectionItems.filter((item) => !isDrainCandidate(item, drainMode))
     : [];
   const automaticOrdinaryEligibleItems = automaticOrdinarySelectionItems.filter(
-    (item) => !isSelectionBlocked(item),
+    isClaimEligible,
   );
   const selectionItems = automaticDrain
     ? [...drainAvailableItems, ...automaticOrdinarySelectionItems]
     : drainMode
       ? drainAvailableItems
       : ordinarySelectionItems;
+  const selectionTelemetryItems = automaticDrain && drainMode
+    ? [
+        ...autoDrainAvailableItems,
+        ...backlogItems.filter((item) => !isDrainCandidate(item, drainMode)),
+      ]
+    : drainMode
+      ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
+      : backlogItems;
   const rawSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
@@ -2839,6 +2898,7 @@ export async function tick(
     let eligibleItems = 0;
     let pendingBlocked = 0;
     let cooldownBlocked = 0;
+    let routeBlocked = 0;
     let fastRepairCooldown = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
@@ -2846,7 +2906,9 @@ export async function tick(
       const cooling = generatedRepairShouldSkip(selectionWorkedEvents, item, itemCooldownMs);
       if (pending) pendingBlocked++;
       if (cooling) cooldownBlocked++;
-      if (!pending && !cooling) eligibleItems++;
+      const routeUnavailable = !pending && !cooling && !hasFeasibleClaimRoute(item);
+      if (routeUnavailable) routeBlocked++;
+      if (!pending && !cooling && !routeUnavailable) eligibleItems++;
       if (
         repairRecoveryHealthy &&
         itemCooldownMs < cooldownMs &&
@@ -2855,7 +2917,7 @@ export async function tick(
         fastRepairCooldown++;
       }
     }
-    return { eligibleItems, pendingBlocked, cooldownBlocked, fastRepairCooldown };
+    return { eligibleItems, pendingBlocked, cooldownBlocked, routeBlocked, fastRepairCooldown };
   };
 
   const selectRoundRobinCandidates = (items: WorkItem[], count: number): WorkItem[] => {
@@ -2889,7 +2951,7 @@ export async function tick(
         let advance = cursor;
         while (advance < group.length) {
           const candidate = group[advance]!;
-          if (!isSelectionBlocked(candidate)) break;
+          if (isClaimEligible(candidate)) break;
           advance++;
         }
         repoCursors.set(repo, advance);
@@ -2913,9 +2975,9 @@ export async function tick(
   };
 
   const normalOrdinaryEligibleItems = selectionItems.filter((item) =>
-    !isTrustedGeneratedRepairItem(item) && !isSelectionBlocked(item));
+    !isTrustedGeneratedRepairItem(item) && isClaimEligible(item));
   const normalGeneratedEligibleItems = selectionItems.filter((item) =>
-    isTrustedGeneratedRepairItem(item) && !isSelectionBlocked(item));
+    isTrustedGeneratedRepairItem(item) && isClaimEligible(item));
   const normalRepairFairness = !automaticDrain && explicitDrainMode === undefined && selectCount > 1 &&
     normalOrdinaryEligibleItems.length > 0 && normalGeneratedEligibleItems.length > 0;
 
@@ -2956,7 +3018,6 @@ export async function tick(
       if (ordinary) selected = [...selected.slice(0, Math.max(0, selectCount - 1)), ordinary];
     }
   }
-  const selectionTelemetryItems = selectionItems;
   const selectionTelemetryRawSelectCount = rawSelectCount;
   const selectionTelemetrySelectCount = selectCount;
   const selectionTelemetryDrainMode = drainMode;
@@ -3048,6 +3109,7 @@ export async function tick(
     eligibleItems: selectionBlockers.eligibleItems,
     pendingBlocked: selectionBlockers.pendingBlocked,
     cooldownBlocked: selectionBlockers.cooldownBlocked,
+    routeBlocked: selectionBlockers.routeBlocked,
     fastRepairCooldown: selectionBlockers.fastRepairCooldown,
     rawSelectCount: selectionTelemetryRawSelectCount,
     selectCount: selectionTelemetrySelectCount,

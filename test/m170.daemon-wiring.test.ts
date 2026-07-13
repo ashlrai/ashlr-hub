@@ -167,6 +167,7 @@ vi.mock('../src/core/fleet/router.js', () => ({
   routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
   generatedRepairCandidateAllowed: () => true,
   generatedRepairExecutionBackendAllowed: () => true,
+  inspectGeneratedRepairRouteFeasibility: () => ({ feasible: true, reason: 'feasible' }),
 }));
 
 // And withinLimit — always allow.

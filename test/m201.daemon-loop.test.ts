@@ -175,10 +175,13 @@ vi.mock('../src/core/fleet/regression-sentinel.js', () => ({
 
 const mockRouteBackend = vi.fn();
 const mockGeneratedRepairCandidateAllowed = vi.fn();
+const mockInspectGeneratedRepairRouteFeasibility = vi.fn();
 vi.mock('../src/core/fleet/router.js', () => ({
   routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
   generatedRepairCandidateAllowed: (...args: unknown[]) => mockGeneratedRepairCandidateAllowed(...args),
   generatedRepairExecutionBackendAllowed: (...args: unknown[]) => mockGeneratedRepairCandidateAllowed(...args),
+  inspectGeneratedRepairRouteFeasibility: (...args: unknown[]) =>
+    mockInspectGeneratedRepairRouteFeasibility(...args),
 }));
 
 vi.mock('../src/core/fleet/quota.js', () => ({
@@ -356,6 +359,8 @@ beforeEach(() => {
   mockRouteBackend.mockReset();
   mockGeneratedRepairCandidateAllowed.mockReset();
   mockGeneratedRepairCandidateAllowed.mockReturnValue(true);
+  mockInspectGeneratedRepairRouteFeasibility.mockReset();
+  mockInspectGeneratedRepairRouteFeasibility.mockReturnValue({ feasible: true, reason: 'feasible' });
   mockEngineTierOf.mockReset();
   mockRecommendRoute.mockReset();
   mockRecoverWithinBudget.mockReset();
@@ -1061,6 +1066,105 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.itemsConsidered).toBe(2);
     expect(dispatchedIds).toContain(generic.id);
     expect(dispatchedIds.filter((id) => id === firstRepair.id || id === secondRepair.id)).toHaveLength(1);
+  });
+
+  it('A1-generated-repair-route-prefilter: replaces an infeasible repair with later ordinary work before claim', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [firstOrdinary, secondOrdinary] = makeItems(repo.dir, 2);
+    const repair: WorkItem = {
+      ...firstOrdinary!,
+      id: `${basename(repo.dir)}:proposal-repair:abcdef123456`,
+      source: 'self',
+      title: 'Proposal repair: restore a complete scheduler change',
+      detail:
+        'Proposal repair: recover a complete scheduler change.\n' +
+        'Proposal: prop-route-blocked\n' +
+        'Original work item: repo:goal:route-blocked\n' +
+        'Produce a fresh complete fix and verify it.',
+      score: 100,
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+    };
+    mockInspectGeneratedRepairRouteFeasibility.mockImplementation((item: WorkItem) => ({
+      feasible: item.id !== repair.id,
+      reason: item.id === repair.id ? 'same-tier-backend-unavailable' : 'feasible',
+    }));
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair, firstOrdinary!, secondOrdinary!],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 2, parallel: 2 }), { dryRun: false });
+    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+    const decision = readAgentActions().find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === repair.id,
+    );
+    const selection = readAgentActions().find((event) => event.action === 'daemon:selection');
+
+    expect(result.itemsConsidered).toBe(2);
+    expect(dispatchedIds).toEqual(expect.arrayContaining([firstOrdinary!.id, secondOrdinary!.id]));
+    expect(dispatchedIds).not.toContain(repair.id);
+    expect(decision).toMatchObject({
+      outcome: 'blocked',
+      reason: 'dispatch-route-unavailable',
+      counts: { dispatchBlocked: 1, selected: 0, claimed: 0 },
+    });
+    expect(selection).toMatchObject({
+      counts: expect.objectContaining({
+        backlogItems: 3,
+        eligibleItems: 2,
+        routeBlocked: 1,
+        claimed: 2,
+      }),
+    });
+  });
+
+  it('A1-generated-repair-route-prefilter: explicit drains do not attribute out-of-scope route failures', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'cabfeed12345', 10);
+    const unrelatedRepair: WorkItem = {
+      ...makeItems(repo.dir, 1)[0]!,
+      id: `${basename(repo.dir)}:proposal-repair:fedcba654321`,
+      source: 'self',
+      title: 'Proposal repair: unrelated capture recovery',
+      detail:
+        'Proposal repair: recover an unrelated proposal.\n' +
+        'Proposal: prop-unrelated\n' +
+        'Original work item: repo:goal:unrelated\n' +
+        'Produce a fresh complete fix and verify it.',
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+    };
+    mockInspectGeneratedRepairRouteFeasibility.mockImplementation((item: WorkItem) => ({
+      feasible: item.id === reslice.id,
+      reason: item.id === reslice.id ? 'feasible' : 'same-tier-backend-unavailable',
+    }));
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, unrelatedRepair],
+    });
+
+    await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      dryRun: true,
+      drain: 'diagnostic-reslices',
+    });
+
+    const decision = readAgentActions().find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === unrelatedRepair.id,
+    );
+    expect(decision).toMatchObject({
+      outcome: 'skipped',
+      reason: 'not-selected',
+      counts: { dispatchEvaluated: 0, dispatchBlocked: 0, selected: 0, claimed: 0 },
+    });
+    expect(decision?.tags).toEqual(expect.arrayContaining(['dispatch-not-evaluated']));
+    expect(mockInspectGeneratedRepairRouteFeasibility).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: unrelatedRepair.id }),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('A1-drain-auto-single-slot-fairness: persisted automatic repair selection yields the next slot to ordinary work', async () => {
