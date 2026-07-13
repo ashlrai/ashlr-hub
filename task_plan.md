@@ -2009,5 +2009,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add adversarial install/remove, symlink, ownership, mode, rollback, retention, source-health, privacy, and experiment-imbalance regressions.
 - [x] Pass focused, adjacent, static, build, dependency, and exhaustive verification on the frozen release tree.
 - [x] Commit, push, observe the complete CI matrix, and stage an immutable exact-SHA release outside Desktop.
-- [ ] Activate the immutable daemon and Mission Control release only after the live child exits naturally; verify no Desktop paths, exact build identity, HTTP health, and clear guard state.
+- [x] Activate the immutable daemon and Mission Control release only after the live child exits naturally; verify no Desktop paths, exact build identity, HTTP health, and clear guard state.
 - [ ] Add a metadata-only daemon activity ledger so lock heartbeat and actual child progress are no longer conflated.
