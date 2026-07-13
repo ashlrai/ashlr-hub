@@ -111,6 +111,12 @@ import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { causalMetadata } from '../learning/causal.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import {
+  assureStableRegularFiles,
+  openStableDirectoryGuard,
+  readStableRegularFile,
+  type StableFileReadFailureReason,
+} from '../util/stable-file-read.js';
 import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
@@ -132,6 +138,10 @@ export const DEFAULT_PARALLEL = 2;
 /** Re-resolved at call time so tests can relocate HOME (matches swarmsDir()). */
 function runsDir(): string {
   return path.join(os.homedir(), '.ashlr', 'runs');
+}
+
+function stateRoot(): string {
+  return path.join(os.homedir(), '.ashlr');
 }
 /**
  * Sentinel error attached to tasks that were force-failed by a budget abort
@@ -290,24 +300,96 @@ function parsePersistedRun(raw: string, expectedId: string): RunState | null {
   return rehydrateRunStateFromPersistence(parsed as unknown as PersistedRunState);
 }
 
-function hasExactRunFilename(file: string): boolean {
-  return fs.readdirSync(path.dirname(file)).includes(path.basename(file));
+const DEFAULT_RUN_LIST_LIMIT = 200;
+const DEFAULT_RUN_DIRECTORY_ENTRIES = 10_000;
+const DEFAULT_RUN_CANDIDATES = DEFAULT_RUN_DIRECTORY_ENTRIES;
+const DEFAULT_RUN_BYTES = 8 * 1024 * 1024;
+const DEFAULT_RUN_FILE_BYTES = 1024 * 1024;
+const MAX_PERSISTED_RUN_BYTES = 64 * 1024 * 1024;
+
+export interface ListRunsDetailedOptions {
+  limit?: number;
+  maxDirectoryEntries?: number;
+  maxCandidates?: number;
+  maxBytes?: number;
+  maxFileBytes?: number;
 }
 
-function secureExactRunFile(file: string): boolean {
-  const dir = path.dirname(file);
-  const root = path.dirname(dir);
-  if (
-    !fs.existsSync(root) ||
-    !fs.lstatSync(root).isDirectory() ||
-    !fs.existsSync(dir) ||
-    !fs.lstatSync(dir).isDirectory()
-  ) return false;
-  fs.chmodSync(root, 0o700);
-  fs.chmodSync(dir, 0o700);
-  if (!hasExactRunFilename(file) || !fs.lstatSync(file).isFile()) return false;
-  fs.chmodSync(file, 0o600);
-  return true;
+export type RunReadStopReason =
+  | StableFileReadFailureReason
+  | 'directory-limit'
+  | 'candidate-limit'
+  | 'invalid-file';
+
+export interface RunsReadResult {
+  runs: RunState[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: RunReadStopReason[];
+  entriesExamined: number;
+  filesDiscovered: number;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+  oversizedFiles: number;
+}
+
+interface RunFileCandidate {
+  name: string;
+  mtimeMs: number;
+}
+
+function boundedRunReadOption(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+function emptyRunsRead(
+  sourceState: RunsReadResult['sourceState'],
+  overrides: Partial<RunsReadResult> = {},
+): RunsReadResult {
+  return {
+    runs: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    entriesExamined: 0,
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    oversizedFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushRunStopReason(reasons: RunReadStopReason[], reason: RunReadStopReason): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function runFreshness(run: RunState): number {
+  const updated = Date.parse(run.updatedAt);
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(run.createdAt);
+  return Number.isFinite(created) ? created : Number.NEGATIVE_INFINITY;
+}
+
+function sortRunsNewestFirst(left: RunState, right: RunState): number {
+  const freshness = runFreshness(right) - runFreshness(left);
+  return freshness !== 0 ? freshness : left.id.localeCompare(right.id);
+}
+
+function recordRunReadFailure(result: RunsReadResult, reason: StableFileReadFailureReason): void {
+  pushRunStopReason(result.stopReasons, reason);
+  if (reason === 'per-file-byte-limit') result.oversizedFiles += 1;
+  else if (reason !== 'byte-limit') result.unreadableFiles += 1;
+  result.sourceState = 'degraded';
+  result.complete = false;
 }
 
 function assertCaseFoldedRunOwnership(file: string, id: string): void {
@@ -341,39 +423,185 @@ function assertCaseFoldedRunOwnership(file: string, id: string): void {
 export function loadRun(id: string): RunState | null {
   try {
     const file = runFilePath(id);
-    if (!secureExactRunFile(file)) return null;
-    const raw = fs.readFileSync(file, 'utf8');
-    return parsePersistedRun(raw, id);
+    const loaded = readStableRegularFile(file, {
+      anchorPath: stateRoot(),
+      maxFileBytes: MAX_PERSISTED_RUN_BYTES,
+      remainingBytes: MAX_PERSISTED_RUN_BYTES,
+    });
+    return loaded.ok ? parsePersistedRun(loaded.text, id) : null;
   } catch {
     return null;
   }
 }
 
 /**
- * List all persisted runs, newest first by createdAt.
+ * List recent persisted runs through bounded, descriptor-bound reads.
  */
-export function listRuns(): RunState[] {
+export function listRunsDetailed(options: ListRunsDetailedOptions = {}): RunsReadResult {
   try {
-    ensureRunsDir();
-    const files = fs.readdirSync(runsDir()).filter((f) => f.endsWith('.json'));
-    const runs: RunState[] = [];
-    for (const file of files) {
-      try {
-        const expectedId = file.slice(0, -'.json'.length);
-        const persistedFile = runFilePath(expectedId);
-        if (!fs.lstatSync(persistedFile).isFile()) continue;
-        fs.chmodSync(persistedFile, 0o600);
-        const raw = fs.readFileSync(persistedFile, 'utf8');
-        const state = parsePersistedRun(raw, expectedId);
-        if (state) runs.push(state);
-      } catch {
-        // Skip corrupt/unreadable files silently
-      }
+    const limit = boundedRunReadOption(options.limit, DEFAULT_RUN_LIST_LIMIT);
+    const maxDirectoryEntries = boundedRunReadOption(
+      options.maxDirectoryEntries,
+      DEFAULT_RUN_DIRECTORY_ENTRIES,
+    );
+    const maxCandidates = boundedRunReadOption(options.maxCandidates, DEFAULT_RUN_CANDIDATES);
+    const maxBytes = boundedRunReadOption(options.maxBytes, DEFAULT_RUN_BYTES);
+    const maxFileBytes = boundedRunReadOption(options.maxFileBytes, DEFAULT_RUN_FILE_BYTES);
+    const dir = runsDir();
+    const directoryGuard = openStableDirectoryGuard(dir, { anchorPath: stateRoot() });
+    if (!directoryGuard.ok) {
+      return directoryGuard.reason === 'missing'
+        ? emptyRunsRead('missing')
+        : emptyRunsRead('degraded', {
+            sourcePresent: true,
+            complete: false,
+            stopReasons: [directoryGuard.reason],
+            unreadableFiles: 1,
+          });
     }
-    return runs.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
+
+    const result = emptyRunsRead('healthy', { sourcePresent: true });
+    const candidates: RunFileCandidate[] = [];
+    let handle: fs.Dir | undefined;
+    try {
+      handle = fs.opendirSync(dir);
+      while (true) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        if (result.entriesExamined >= maxDirectoryEntries) {
+          result.complete = false;
+          result.sourceState = 'degraded';
+          pushRunStopReason(result.stopReasons, 'directory-limit');
+          break;
+        }
+        result.entriesExamined += 1;
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const expectedId = entry.name.slice(0, -'.json'.length);
+        if (!/^[\w.-]+$/.test(expectedId)) {
+          result.invalidFiles += 1;
+          result.sourceState = 'degraded';
+          pushRunStopReason(result.stopReasons, 'invalid-file');
+          continue;
+        }
+        try {
+          const metadata = fs.lstatSync(path.join(dir, entry.name));
+          if (!metadata.isFile()) continue;
+          candidates.push({ name: entry.name, mtimeMs: metadata.mtimeMs });
+        } catch {
+          result.unreadableFiles += 1;
+          result.complete = false;
+          result.sourceState = 'degraded';
+          pushRunStopReason(result.stopReasons, 'io-error');
+        }
+      }
+    } catch {
+      result.sourceState = 'degraded';
+      result.complete = false;
+      result.unreadableFiles += 1;
+      pushRunStopReason(result.stopReasons, 'io-error');
+    } finally {
+      try { handle?.closeSync(); } catch { /* best-effort bounded enumeration */ }
+    }
+
+    const directoryFailure = directoryGuard.finish();
+    if (directoryFailure !== null) {
+      return emptyRunsRead('degraded', {
+        sourcePresent: true,
+        complete: false,
+        stopReasons: [directoryFailure],
+        entriesExamined: result.entriesExamined,
+        filesDiscovered: candidates.length,
+        unreadableFiles: result.unreadableFiles + 1,
+      });
+    }
+
+    candidates.sort((left, right) =>
+      right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name),
+    );
+    result.filesDiscovered = candidates.length;
+    const selected = candidates.slice(0, maxCandidates);
+    if (selected.length < candidates.length) {
+      result.complete = false;
+      result.sourceState = 'degraded';
+      pushRunStopReason(result.stopReasons, 'candidate-limit');
+    }
+
+    let byteLimitReached = false;
+    for (let batchStart = 0; batchStart < selected.length; batchStart += 512) {
+      const batch = selected.slice(batchStart, batchStart + 512);
+      const batchAssurance = assureStableRegularFiles(
+        batch.map((candidate) => path.join(dir, candidate.name)),
+        stateRoot(),
+      );
+      if (!batchAssurance.ok) {
+        return emptyRunsRead('degraded', {
+          sourcePresent: true,
+          complete: false,
+          stopReasons: [batchAssurance.reason],
+          entriesExamined: result.entriesExamined,
+          filesDiscovered: result.filesDiscovered,
+          unreadableFiles: batch.length,
+        });
+      }
+
+      for (const candidate of batch) {
+        const remainingBytes = maxBytes - result.bytesRead;
+        if (remainingBytes <= 0) {
+          result.complete = false;
+          result.sourceState = 'degraded';
+          pushRunStopReason(result.stopReasons, 'byte-limit');
+          byteLimitReached = true;
+          break;
+        }
+        result.filesRead += 1;
+        const expectedId = candidate.name.slice(0, -'.json'.length);
+        const loaded = readStableRegularFile(path.join(dir, candidate.name), {
+          anchorPath: stateRoot(),
+          maxFileBytes,
+          remainingBytes,
+          batchAssurance: batchAssurance.token,
+        });
+        if (!loaded.ok) {
+          recordRunReadFailure(result, loaded.reason);
+          if (loaded.reason === 'byte-limit') {
+            byteLimitReached = true;
+            break;
+          }
+          continue;
+        }
+        result.bytesRead += loaded.bytesRead;
+        try {
+          const state = parsePersistedRun(loaded.text, expectedId);
+          if (state) result.runs.push(state);
+          else {
+            result.invalidFiles += 1;
+            result.sourceState = 'degraded';
+            pushRunStopReason(result.stopReasons, 'invalid-file');
+          }
+        } catch {
+          result.invalidFiles += 1;
+          result.sourceState = 'degraded';
+          pushRunStopReason(result.stopReasons, 'invalid-file');
+        }
+      }
+      if (byteLimitReached) break;
+    }
+
+    result.runs.sort(sortRunsNewestFirst);
+    result.runs = result.runs.slice(0, limit);
+    return result;
   } catch {
-    return [];
+    return emptyRunsRead('degraded', {
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
   }
+}
+
+/** Compatibility wrapper around the bounded detailed reader. */
+export function listRuns(options: ListRunsDetailedOptions = {}): RunState[] {
+  return listRunsDetailed(options).runs;
 }
 
 function runDurationMs(state: RunState): number | undefined {
@@ -776,6 +1004,9 @@ export function saveRun(s: RunState): void {
   );
   const normalized = normalizeRunStateForPersistence(s);
   const payload = JSON.stringify(downgradeRunStateForPersistence(normalized), null, 2);
+  if (Buffer.byteLength(payload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
+    throw new Error(`Refusing run record larger than ${MAX_PERSISTED_RUN_BYTES} bytes`);
+  }
   try {
     fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     fs.renameSync(tmp, dest);

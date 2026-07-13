@@ -2067,9 +2067,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit/push, observe CI, and stage exact source.
 - [ ] Activate only at a natural stable boundary with no daemon tick, descendants, or spend guard.
 
-## Next P1 - Bounded Race-Safe Persistence Reads
-- [ ] Replace full-history `listRuns()`/dashboard/SSE scans with a bounded recent-record reader that counts only valid records.
-- [ ] Read records through opened, `fstat`-verified handles with size and schema bounds to close pathname TOCTOU races.
-- [ ] Reuse the reader for swarm history so malformed early directory entries cannot hide valid recent records.
+## Current Overnight Cycle - Bounded Race-Safe Persistence Reads
+- [x] Replace full-history `listRuns()`/dashboard/SSE scans with bounded recent-record readers that count only valid records.
+- [x] Read records through opened, `fstat`-verified handles with owner, link, size, byte, identity, and state-root bounds.
+- [x] Reuse the reader for swarm history so malformed early directory entries cannot hide valid recent records.
+- [x] Share one short-lived bounded run/swarm projection across all SSE clients while preserving REST array compatibility.
+- [x] Pass focused integrity/cancellation/API tests, exact exhaustive verification, static/build/dependency gates, and a real-store latency benchmark.
+- [ ] Commit, push, observe exhaustive cross-platform CI, and stage exact source without interrupting the active production tick.
+
+## Next P1 - Persistence Write Linearizability
 - [ ] Add per-ID revision/CAS fencing so concurrent same-ID saves cannot roll completed state backward.
 - [ ] Replace permanent case-fold claims with recoverable ownership plus bounded retention.
+- [ ] Move historical owner-only mode repair into an explicit bounded migration so observational reads remain non-mutating without preserving permissive legacy state indefinitely.

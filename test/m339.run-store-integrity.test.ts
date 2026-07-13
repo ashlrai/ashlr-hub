@@ -3,7 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunState } from '../src/core/types.js';
-import { listRuns, loadRun, saveRun } from '../src/core/run/orchestrator.js';
+import {
+  listRuns,
+  listRunsDetailed,
+  loadRun,
+  saveRun,
+} from '../src/core/run/orchestrator.js';
 
 let previousHome: string | undefined;
 let tmpHome: string;
@@ -88,7 +93,7 @@ describe('run-store read integrity', () => {
     expect(listRuns().map((run) => run.id)).toEqual([original.id]);
   });
 
-  it('migrates historical regular files and directories to private modes on read', () => {
+  it('does not mutate historical file or directory modes while reading', () => {
     if (process.platform === 'win32') return;
     const state = makeState('historical-mode');
     writeNamed(`${state.id}.json`, state);
@@ -96,8 +101,167 @@ describe('run-store read integrity', () => {
     fs.chmodSync(runPath(state.id), 0o644);
 
     expect(loadRun(state.id)?.id).toBe(state.id);
-    expect(fs.statSync(runsDir()).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(runPath(state.id)).mode & 0o777).toBe(0o600);
+    expect(listRuns().map((run) => run.id)).toContain(state.id);
+    expect(fs.statSync(runsDir()).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(runPath(state.id)).mode & 0o777).toBe(0o644);
+  });
+
+  it('does not let malformed newer files consume the valid run limit', () => {
+    const older = makeState('valid-older', {
+      createdAt: '2026-07-13T11:00:00.000Z',
+      updatedAt: '2026-07-13T11:00:00.000Z',
+    });
+    writeNamed(`${older.id}.json`, older);
+    const newestMtime = Date.now() + 60_000;
+    for (let index = 0; index < 8; index += 1) {
+      const file = path.join(runsDir(), `malformed-${index}.json`);
+      fs.writeFileSync(file, '{', 'utf8');
+      const newer = new Date(newestMtime + index * 1_000);
+      fs.utimesSync(file, newer, newer);
+    }
+
+    const detailed = listRunsDetailed({ limit: 1, maxCandidates: 16 });
+
+    expect(detailed.runs.map((run) => run.id)).toEqual([older.id]);
+    expect(detailed.invalidFiles).toBe(8);
+    expect(detailed.filesRead).toBe(9);
+    expect(detailed.sourceState).toBe('degraded');
+  });
+
+  it('samples beyond a full malformed candidate window to recover valid history', () => {
+    const valid = makeState('valid-beyond-candidate-window', {
+      updatedAt: '2026-07-13T10:00:00.000Z',
+    });
+    writeNamed(`${valid.id}.json`, valid);
+    const validMtime = new Date('2026-07-13T09:00:00.000Z');
+    fs.utimesSync(runPath(valid.id), validMtime, validMtime);
+    for (let index = 0; index < 513; index += 1) {
+      const file = path.join(runsDir(), `candidate-flood-${index.toString().padStart(3, '0')}.json`);
+      fs.writeFileSync(file, '{', 'utf8');
+      const newer = new Date(Date.parse('2026-07-13T11:00:00.000Z') + index);
+      fs.utimesSync(file, newer, newer);
+    }
+
+    const detailed = listRunsDetailed({ limit: 1 });
+    expect(detailed.runs.map((run) => run.id)).toEqual([valid.id]);
+    expect(detailed).toMatchObject({ complete: true, sourceState: 'degraded' });
+    expect(detailed.stopReasons).toContain('invalid-file');
+  });
+
+  it('reports bounded directory and candidate scans as incomplete', () => {
+    for (let index = 0; index < 6; index += 1) {
+      const id = `bounded-${index}`;
+      writeNamed(`${id}.json`, makeState(id, {
+        updatedAt: new Date(Date.parse('2026-07-13T13:00:00.000Z') + index).toISOString(),
+      }));
+    }
+
+    const directoryLimited = listRunsDetailed({ limit: 6, maxDirectoryEntries: 2 });
+    expect(directoryLimited).toMatchObject({
+      complete: false,
+      entriesExamined: 2,
+      sourceState: 'degraded',
+    });
+    expect(directoryLimited.stopReasons).toContain('directory-limit');
+
+    const candidateLimited = listRunsDetailed({ limit: 6, maxCandidates: 2 });
+    expect(candidateLimited).toMatchObject({
+      complete: false,
+      filesDiscovered: 6,
+      filesRead: 2,
+      sourceState: 'degraded',
+    });
+    expect(candidateLimited.stopReasons).toContain('candidate-limit');
+  });
+
+  it('keeps the compatibility wrapper bounded by the default result limit', () => {
+    for (let index = 0; index < 205; index += 1) {
+      const id = `default-bound-${index.toString().padStart(3, '0')}`;
+      writeNamed(`${id}.json`, makeState(id));
+    }
+
+    expect(listRuns()).toHaveLength(200);
+    expect(listRunsDetailed()).toMatchObject({
+      complete: true,
+      filesDiscovered: 205,
+      filesRead: 205,
+      runs: expect.arrayContaining([expect.objectContaining({ id: expect.any(String) })]),
+    });
+  });
+
+  it('round-trips a valid direct-load record larger than the list projection cap', () => {
+    const state = makeState('large-direct-load', { result: 'x'.repeat(2 * 1024 * 1024) });
+
+    saveRun(state);
+
+    expect(loadRun(state.id)?.result).toBe(state.result);
+    expect(listRunsDetailed().oversizedFiles).toBe(1);
+  });
+
+  it('enforces per-file and aggregate byte limits without consuming result slots', () => {
+    writeNamed('oversized.json', {
+      ...makeState('oversized'),
+      result: 'x'.repeat(4_096),
+    });
+    writeNamed('small.json', makeState('small', {
+      updatedAt: '2026-07-13T12:59:00.000Z',
+    }));
+    const oversizedMtime = new Date(Date.now() + 60_000);
+    fs.utimesSync(runPath('oversized'), oversizedMtime, oversizedMtime);
+
+    const oversized = listRunsDetailed({ limit: 1, maxFileBytes: 1_024, maxBytes: 8_192 });
+    expect(oversized.runs.map((run) => run.id)).toEqual(['small']);
+    expect(oversized.oversizedFiles).toBe(1);
+    expect(oversized.stopReasons).toContain('per-file-byte-limit');
+
+    const aggregateLimited = listRunsDetailed({ limit: 2, maxFileBytes: 8_192, maxBytes: 1 });
+    expect(aggregateLimited).toMatchObject({
+      runs: [],
+      bytesRead: 0,
+      complete: false,
+      sourceState: 'degraded',
+    });
+    expect(aggregateLimited.stopReasons).toContain('byte-limit');
+  });
+
+  it('sorts valid results by semantic freshness with a deterministic id tie-break', () => {
+    writeNamed('z-last.json', makeState('z-last', {
+      createdAt: '2026-07-13T13:00:00.000Z',
+      updatedAt: '2026-07-13T13:01:00.000Z',
+    }));
+    writeNamed('a-first.json', makeState('a-first', {
+      createdAt: '2026-07-13T13:00:00.000Z',
+      updatedAt: '2026-07-13T13:01:00.000Z',
+    }));
+    writeNamed('older.json', makeState('older', {
+      createdAt: '2026-07-13T12:00:00.000Z',
+      updatedAt: '2026-07-13T12:00:00.000Z',
+    }));
+
+    expect(listRunsDetailed({ limit: 3 }).runs.map((run) => run.id)).toEqual([
+      'a-first',
+      'z-last',
+      'older',
+    ]);
+  });
+
+  it('selects the semantic newest record even when filesystem mtimes are inverted', () => {
+    const semanticNewest = makeState('semantic-newest', {
+      updatedAt: '2026-07-13T14:00:00.000Z',
+    });
+    const semanticOlder = makeState('semantic-older', {
+      updatedAt: '2026-07-13T13:00:00.000Z',
+    });
+    writeNamed(`${semanticNewest.id}.json`, semanticNewest);
+    writeNamed(`${semanticOlder.id}.json`, semanticOlder);
+    const newerMtime = new Date('2026-07-13T15:00:00.000Z');
+    const olderMtime = new Date('2026-07-13T12:00:00.000Z');
+    fs.utimesSync(runPath(semanticNewest.id), olderMtime, olderMtime);
+    fs.utimesSync(runPath(semanticOlder.id), newerMtime, newerMtime);
+
+    expect(listRunsDetailed({ limit: 1 }).runs.map((run) => run.id)).toEqual([
+      semanticNewest.id,
+    ]);
   });
 
   it('preserves cancellation markers through validated load and list paths', () => {
@@ -129,6 +293,30 @@ describe('run-store read integrity', () => {
 });
 
 describe('run-store write integrity', () => {
+  it('refuses a linked Ashlr state root on read and write paths', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-root-outside-'));
+    const externalRuns = path.join(outside, 'runs');
+    fs.mkdirSync(externalRuns, { recursive: true });
+    fs.writeFileSync(
+      path.join(externalRuns, 'external.json'),
+      JSON.stringify(makeState('external')),
+      'utf8',
+    );
+    fs.symlinkSync(outside, path.join(tmpHome, '.ashlr'), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      expect(loadRun('external')).toBeNull();
+      expect(listRunsDetailed()).toMatchObject({
+        runs: [],
+        sourceState: 'degraded',
+        stopReasons: expect.arrayContaining(['unsafe-path']),
+      });
+      expect(() => saveRun(makeState('escape-root'))).toThrow(/state root/);
+      expect(fs.existsSync(path.join(externalRuns, 'escape-root.json'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a linked store directory instead of escaping the state root', () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-outside-'));
     fs.mkdirSync(path.dirname(runsDir()), { recursive: true });

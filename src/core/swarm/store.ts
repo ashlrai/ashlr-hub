@@ -22,6 +22,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -30,13 +31,58 @@ import {
 } from 'node:fs';
 
 import type { SwarmRun, SwarmTaskRun } from '../types.js';
+import {
+  assureStableRegularFiles,
+  openStableDirectoryGuard,
+  readStableRegularFile,
+  type StableFileReadFailureReason,
+} from '../util/stable-file-read.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
 // Prevents pathological I/O if the directory grows very large.
 // ---------------------------------------------------------------------------
 
-const MAX_LIST = 200;
+const DEFAULT_LIST_LIMIT = 200;
+const DEFAULT_MAX_DIRECTORY_ENTRIES = 10_000;
+const DEFAULT_MAX_CANDIDATES = DEFAULT_MAX_DIRECTORY_ENTRIES;
+const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
+const MAX_PERSISTED_SWARM_BYTES = 64 * 1024 * 1024;
+
+export type SwarmListStopReason =
+  | 'directory-limit'
+  | 'candidate-limit'
+  | 'invalid-file'
+  | 'per-file-byte-limit'
+  | 'byte-limit'
+  | 'unsafe-path'
+  | 'unsafe-file'
+  | 'changed-during-read'
+  | 'io-error';
+
+export interface ListSwarmsOptions {
+  limit?: number;
+  maxDirectoryEntries?: number;
+  maxCandidates?: number;
+  maxBytes?: number;
+  maxFileBytes?: number;
+}
+
+export interface ListSwarmsDetailedResult {
+  swarms: SwarmRun[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: SwarmListStopReason[];
+  entriesExamined: number;
+  filesDiscovered: number;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+  oversizedFiles: number;
+}
 
 // New task statuses must remain safe when a persisted run is read by an older
 // Ashlr version. `pending` makes readers that predate explicit cancellation
@@ -106,10 +152,6 @@ function swarmPath(dir: string, id: string): string {
   return join(dir, `${id}.json`);
 }
 
-function hasExactSwarmFilename(dir: string, file: string): boolean {
-  return readdirSync(dir).includes(file);
-}
-
 function secureExistingSwarmDir(dir: string): boolean {
   const root = join(homedir(), '.ashlr');
   if (
@@ -118,17 +160,11 @@ function secureExistingSwarmDir(dir: string): boolean {
     !existsSync(dir) ||
     !lstatSync(dir).isDirectory()
   ) return false;
-  chmodSync(root, 0o700);
-  chmodSync(dir, 0o700);
   return true;
 }
 
-function secureExactSwarmFile(dir: string, file: string): boolean {
-  if (!secureExistingSwarmDir(dir) || !hasExactSwarmFilename(dir, file)) return false;
-  const persistedFile = join(dir, file);
-  if (!lstatSync(persistedFile).isFile()) return false;
-  chmodSync(persistedFile, 0o600);
-  return true;
+function stateRoot(): string {
+  return join(homedir(), '.ashlr');
 }
 
 function assertCaseFoldedSwarmOwnership(dir: string, file: string, id: string): void {
@@ -307,6 +343,7 @@ export function saveSwarm(s: SwarmRun): void {
     assertCaseFoldedSwarmOwnership(dir, `${s.id}.json`, s.id);
     tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     const json = JSON.stringify(prepareForPersistence(s), null, 2) + '\n';
+    if (Buffer.byteLength(json, 'utf8') > MAX_PERSISTED_SWARM_BYTES) return;
 
     writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(tmp, target);
@@ -338,10 +375,18 @@ export function loadSwarm(id: string): SwarmRun | null {
     const dir = swarmsDir();
     const path = swarmPath(dir, id);
 
-    if (!secureExactSwarmFile(dir, `${id}.json`)) return null;
+    if (!secureExistingSwarmDir(dir)) {
+      return null;
+    }
 
-    const raw = readFileSync(path, 'utf8');
-    const parsed: unknown = JSON.parse(raw);
+    const loaded = readStableRegularFile(path, {
+      anchorPath: stateRoot(),
+      maxFileBytes: MAX_PERSISTED_SWARM_BYTES,
+      remainingBytes: MAX_PERSISTED_SWARM_BYTES,
+    });
+    if (!loaded.ok) return null;
+
+    const parsed: unknown = JSON.parse(loaded.text);
 
     if (!isValidPersistedSwarm(parsed, id)) {
       return null;
@@ -357,62 +402,258 @@ export function loadSwarm(id: string): SwarmRun | null {
 // listSwarms
 // ---------------------------------------------------------------------------
 
+function boundedOption(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+function emptyDetailed(
+  sourceState: ListSwarmsDetailedResult['sourceState'],
+  overrides: Partial<ListSwarmsDetailedResult> = {},
+): ListSwarmsDetailedResult {
+  return {
+    swarms: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    entriesExamined: 0,
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    oversizedFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushStopReason(
+  reasons: SwarmListStopReason[],
+  reason: SwarmListStopReason,
+): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function markReadFailure(
+  result: ListSwarmsDetailedResult,
+  reason: StableFileReadFailureReason,
+): void {
+  result.sourceState = 'degraded';
+  pushStopReason(result.stopReasons, reason);
+  if (reason === 'per-file-byte-limit') {
+    result.oversizedFiles += 1;
+  } else if (reason !== 'byte-limit') {
+    result.unreadableFiles += 1;
+  }
+  result.complete = false;
+}
+
+interface SwarmFileCandidate {
+  file: string;
+  mtimeMs: number;
+}
+
 /**
- * List all persisted SwarmRun records, sorted by `updatedAt` descending
- * (most-recent first).
- *
- * - Reads at most `MAX_LIST` (200) files to bound I/O on large directories.
- * - Skips `.tmp` sidecars and any file that fails to parse.
- * - Never throws.
+ * Read a bounded, provenance-aware snapshot of recent persisted swarms.
+ * Invalid records never consume the requested valid-record limit.
  */
-export function listSwarms(): SwarmRun[] {
+function listSwarmsDetailedUnsafe(
+  options: ListSwarmsOptions = {},
+): ListSwarmsDetailedResult {
+  const limit = boundedOption(options.limit, DEFAULT_LIST_LIMIT);
+  const maxDirectoryEntries = boundedOption(
+    options.maxDirectoryEntries,
+    DEFAULT_MAX_DIRECTORY_ENTRIES,
+  );
+  const maxCandidates = boundedOption(options.maxCandidates, DEFAULT_MAX_CANDIDATES);
+  const maxBytes = boundedOption(options.maxBytes, DEFAULT_MAX_BYTES);
+  const maxFileBytes = boundedOption(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
+
+  const dir = swarmsDir();
+  const directoryGuard = openStableDirectoryGuard(dir, { anchorPath: stateRoot() });
+  if (!directoryGuard.ok) {
+    return directoryGuard.reason === 'missing'
+      ? emptyDetailed('missing')
+      : emptyDetailed('degraded', {
+          complete: false,
+          stopReasons: [directoryGuard.reason],
+          unreadableFiles: 1,
+        });
+  }
+
+  const result = emptyDetailed('healthy');
+  const candidates: SwarmFileCandidate[] = [];
+  let directory;
   try {
-    const dir = swarmsDir();
-
-    if (!secureExistingSwarmDir(dir)) return [];
-
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return [];
-    }
-
-    // Filter to *.json (exclude .tmp sidecars and other artefacts), then cap.
-    const jsonFiles = entries
-      .filter((f) => f.endsWith('.json') && !f.endsWith('.tmp.json'))
-      .slice(0, MAX_LIST);
-
-    const swarms: SwarmRun[] = [];
-
-    for (const file of jsonFiles) {
+    directory = opendirSync(dir);
+    while (true) {
+      const entry = directory.readSync();
+      if (entry === null) break;
+      if (result.entriesExamined >= maxDirectoryEntries) {
+        result.complete = false;
+        result.sourceState = 'degraded';
+        pushStopReason(result.stopReasons, 'directory-limit');
+        break;
+      }
+      result.entriesExamined += 1;
+      if (!entry.name.endsWith('.json')) continue;
+      const expectedId = entry.name.slice(0, -'.json'.length);
+      if (!/^[\w.-]+$/.test(expectedId)) {
+        result.invalidFiles += 1;
+        result.sourceState = 'degraded';
+        pushStopReason(result.stopReasons, 'invalid-file');
+        continue;
+      }
       try {
-        const persistedFile = join(dir, file);
-        if (!lstatSync(persistedFile).isFile()) continue;
-        chmodSync(persistedFile, 0o600);
-        const raw = readFileSync(persistedFile, 'utf8');
-        const parsed: unknown = JSON.parse(raw);
-        const expectedId = file.slice(0, -'.json'.length);
-
-        if (!isValidPersistedSwarm(parsed, expectedId)) continue;
-
-        swarms.push(rehydrateFromPersistence(parsed));
+        const stat = lstatSync(join(dir, entry.name));
+        candidates.push({ file: entry.name, mtimeMs: stat.mtimeMs });
       } catch {
-        // Skip unreadable / malformed records silently.
+        result.unreadableFiles += 1;
+        result.sourceState = 'degraded';
+        result.complete = false;
+        pushStopReason(result.stopReasons, 'io-error');
       }
     }
+  } catch {
+    result.complete = false;
+    result.sourceState = 'degraded';
+    result.unreadableFiles += 1;
+    pushStopReason(result.stopReasons, 'io-error');
+  } finally {
+    try { directory?.closeSync(); } catch { /* never throw from observational reads */ }
+  }
 
-    // Sort: most-recently-updated first.
-    swarms.sort((a, b) => {
-      const ta = a.updatedAt ?? '';
-      const tb = b.updatedAt ?? '';
-      // ISO timestamps sort lexicographically; descending = b before a.
-      if (tb > ta) return 1;
-      if (tb < ta) return -1;
-      return 0;
+  const directoryFailure = directoryGuard.finish();
+  if (directoryFailure !== null) {
+    return emptyDetailed('degraded', {
+      complete: false,
+      stopReasons: [directoryFailure],
+      entriesExamined: result.entriesExamined,
+      filesDiscovered: candidates.length,
+      unreadableFiles: result.unreadableFiles + 1,
     });
+  }
 
-    return swarms;
+  candidates.sort((left, right) =>
+    right.mtimeMs - left.mtimeMs || left.file.localeCompare(right.file));
+  result.filesDiscovered = candidates.length;
+  const selected = candidates.slice(0, maxCandidates);
+  if (candidates.length > selected.length) {
+    result.complete = false;
+    result.sourceState = 'degraded';
+    pushStopReason(result.stopReasons, 'candidate-limit');
+  }
+
+  let byteLimitReached = false;
+  for (let batchStart = 0; batchStart < selected.length; batchStart += 512) {
+    const batch = selected.slice(batchStart, batchStart + 512);
+    const batchAssurance = assureStableRegularFiles(
+      batch.map((candidate) => join(dir, candidate.file)),
+      stateRoot(),
+    );
+    if (!batchAssurance.ok) {
+      return emptyDetailed('degraded', {
+        complete: false,
+        stopReasons: [batchAssurance.reason],
+        entriesExamined: result.entriesExamined,
+        filesDiscovered: result.filesDiscovered,
+        unreadableFiles: batch.length,
+      });
+    }
+
+    for (const candidate of batch) {
+      const remainingBytes = maxBytes - result.bytesRead;
+      if (remainingBytes <= 0) {
+        result.complete = false;
+        result.sourceState = 'degraded';
+        pushStopReason(result.stopReasons, 'byte-limit');
+        byteLimitReached = true;
+        break;
+      }
+
+      result.filesRead += 1;
+      const loaded = readStableRegularFile(join(dir, candidate.file), {
+        anchorPath: stateRoot(),
+        maxFileBytes,
+        remainingBytes,
+        batchAssurance: batchAssurance.token,
+      });
+      if (!loaded.ok) {
+        markReadFailure(result, loaded.reason);
+        if (loaded.reason === 'byte-limit') {
+          byteLimitReached = true;
+          break;
+        }
+        continue;
+      }
+      result.bytesRead += loaded.bytesRead;
+
+      try {
+        const parsed: unknown = JSON.parse(loaded.text);
+        const expectedId = candidate.file.slice(0, -'.json'.length);
+        if (!isValidPersistedSwarm(parsed, expectedId)) {
+          result.invalidFiles += 1;
+          result.sourceState = 'degraded';
+          pushStopReason(result.stopReasons, 'invalid-file');
+          continue;
+        }
+        result.swarms.push(rehydrateFromPersistence(parsed));
+      } catch {
+        result.invalidFiles += 1;
+        result.sourceState = 'degraded';
+        pushStopReason(result.stopReasons, 'invalid-file');
+      }
+    }
+    if (byteLimitReached) break;
+  }
+
+  result.swarms.sort((left, right) => {
+    const leftUpdated = Date.parse(left.updatedAt);
+    const rightUpdated = Date.parse(right.updatedAt);
+    const leftFreshness = Number.isFinite(leftUpdated)
+      ? leftUpdated
+      : Date.parse(left.createdAt);
+    const rightFreshness = Number.isFinite(rightUpdated)
+      ? rightUpdated
+      : Date.parse(right.createdAt);
+    const normalizedLeft = Number.isFinite(leftFreshness)
+      ? leftFreshness
+      : Number.NEGATIVE_INFINITY;
+    const normalizedRight = Number.isFinite(rightFreshness)
+      ? rightFreshness
+      : Number.NEGATIVE_INFINITY;
+    const freshness = normalizedRight - normalizedLeft;
+    return freshness || left.id.localeCompare(right.id);
+  });
+  result.swarms = result.swarms.slice(0, limit);
+  return result;
+}
+
+export function listSwarmsDetailed(
+  options: ListSwarmsOptions = {},
+): ListSwarmsDetailedResult {
+  try {
+    return listSwarmsDetailedUnsafe(options);
+  } catch {
+    return emptyDetailed('degraded', {
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
+  }
+}
+
+/**
+ * List recent persisted SwarmRun records, sorted by `updatedAt` and id.
+ *
+ * Uses the same bounded defaults as `listSwarmsDetailed`.
+ * - Never throws.
+ */
+export function listSwarms(options: ListSwarmsOptions = {}): SwarmRun[] {
+  try {
+    return listSwarmsDetailed(options).swarms;
   } catch {
     return [];
   }

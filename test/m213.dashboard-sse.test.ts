@@ -316,6 +316,27 @@ describe('M213 Dashboard SSE — /api/events', () => {
     mockedBuildSnapshot.mockResolvedValue({ generatedAt: new Date().toISOString() } as any);
   });
 
+  it('shares one bounded run/swarm projection across concurrent SSE clients', async () => {
+    vi.useFakeTimers();
+    const orchestrator = await import('../src/core/run/orchestrator.js');
+    const swarmStore = await import('../src/core/swarm/store.js');
+    const mockedListRuns = vi.mocked(orchestrator.listRuns);
+    const mockedListSwarms = vi.mocked(swarmStore.listSwarms);
+    mockedListRuns.mockClear();
+    mockedListSwarms.mockClear();
+
+    const first = makeSseRes();
+    const second = makeSseRes();
+    await handleApi(makeReq('/api/events'), first, makeConfig() as any, BASE_CTX);
+    await handleApi(makeReq('/api/events'), second, makeConfig() as any, BASE_CTX);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    expect(mockedListRuns).toHaveBeenCalledTimes(1);
+    expect(mockedListRuns).toHaveBeenCalledWith({ limit: 20 });
+    expect(mockedListSwarms).toHaveBeenCalledTimes(1);
+    expect(mockedListSwarms).toHaveBeenCalledWith({ limit: 20 });
+  });
+
   // ── 7a–e. Existing named events still emitted ────────────────────────────
 
   it('still emits "runs" named event', async () => {

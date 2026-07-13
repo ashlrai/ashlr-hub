@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import type { SwarmRun, SwarmTaskRun } from '../src/core/types.js';
 import {
+  listSwarmsDetailed,
   listSwarms,
   loadSwarm,
   saveSwarm,
@@ -128,6 +129,17 @@ describe('swarm cancellation persistence compatibility', () => {
     expect(listed).toEqual([newer, older]);
     expect(listed[0]!.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
     expect(listed[1]!.tasks[0]).not.toHaveProperty(TASK_CANCELLED_MARKER);
+
+    const detailed = listSwarmsDetailed({ limit: 2 });
+    expect(detailed.swarms).toEqual([newer, older]);
+    expect(detailed).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+      oversizedFiles: 0,
+    });
   });
 
   it('uses a status recognized by a pre-cancellation reader', () => {

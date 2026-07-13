@@ -26,6 +26,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import {
+  listSwarmsDetailed,
   listSwarms,
   loadSwarm,
   saveSwarm,
@@ -127,7 +128,7 @@ describe('swarm store record integrity', () => {
     expect(listSwarms().map((run) => run.id)).toEqual([original.id]);
   });
 
-  it('migrates historical regular files and directories to private modes on read', () => {
+  it('does not mutate historical regular file or directory modes on read', () => {
     if (process.platform === 'win32') return;
     const original = makeRun('historical-mode');
     writeRecord(original.id, original);
@@ -136,12 +137,220 @@ describe('swarm store record integrity', () => {
     fs.chmodSync(persistedFile, 0o644);
 
     expect(loadSwarm(original.id)).toEqual(original);
-    expect(fs.statSync(swarmsDir()).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(persistedFile).mode & 0o777).toBe(0o600);
+    expect(listSwarms()).toEqual([original]);
+    expect(fs.statSync(swarmsDir()).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(persistedFile).mode & 0o777).toBe(0o644);
+  });
+
+  it('does not let malformed recent files starve older valid swarms', () => {
+    const valid = makeRun('valid-after-malformed', {
+      updatedAt: '2026-07-13T10:00:00.000Z',
+    });
+    writeRecord(valid.id, valid);
+
+    for (let index = 0; index < 250; index += 1) {
+      writeRecord(`malformed-${index.toString().padStart(3, '0')}`, '{');
+    }
+
+    const detailed = listSwarmsDetailed();
+    expect(detailed.swarms.map((run) => run.id)).toContain(valid.id);
+    expect(detailed.invalidFiles).toBe(250);
+    expect(detailed.complete).toBe(true);
+    expect(detailed.sourceState).toBe('degraded');
+    expect(detailed.stopReasons).toContain('invalid-file');
+    expect(listSwarms().map((run) => run.id)).toContain(valid.id);
+  });
+
+  it('samples beyond a full malformed candidate window to recover valid history', () => {
+    const valid = makeRun('valid-beyond-candidate-window', {
+      updatedAt: '2026-07-13T10:00:00.000Z',
+    });
+    writeRecord(valid.id, valid);
+    const validMtime = new Date('2026-07-13T09:00:00.000Z');
+    fs.utimesSync(path.join(swarmsDir(), `${valid.id}.json`), validMtime, validMtime);
+    for (let index = 0; index < 513; index += 1) {
+      const id = `candidate-flood-${index.toString().padStart(3, '0')}`;
+      writeRecord(id, '{');
+      const newer = new Date(Date.parse('2026-07-13T11:00:00.000Z') + index);
+      const file = path.join(swarmsDir(), `${id}.json`);
+      fs.utimesSync(file, newer, newer);
+    }
+
+    const detailed = listSwarmsDetailed({ limit: 1 });
+    expect(detailed.swarms.map((run) => run.id)).toEqual([valid.id]);
+    expect(detailed).toMatchObject({ complete: true, sourceState: 'degraded' });
+    expect(detailed.stopReasons).toContain('invalid-file');
+  });
+
+  it('reports bounded candidate and byte work as incomplete', () => {
+    for (let index = 0; index < 8; index += 1) {
+      const id = `bounded-${index}`;
+      writeRecord(id, makeRun(id, {
+        updatedAt: `2026-07-13T12:00:0${index}.000Z`,
+      }));
+    }
+
+    const candidateBounded = listSwarmsDetailed({
+      limit: 8,
+      maxCandidates: 3,
+    });
+    expect(candidateBounded.complete).toBe(false);
+    expect(candidateBounded.filesRead).toBe(3);
+    expect(candidateBounded.swarms).toHaveLength(3);
+    expect(candidateBounded.stopReasons).toContain('candidate-limit');
+
+    const byteBounded = listSwarmsDetailed({
+      limit: 8,
+      maxBytes: 1,
+    });
+    expect(byteBounded.complete).toBe(false);
+    expect(byteBounded.bytesRead).toBe(0);
+    expect(byteBounded.stopReasons).toContain('byte-limit');
+  });
+
+  it('applies the output limit only after validating candidates', () => {
+    const invalidPaths: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      writeRecord(`invalid-${index}`, null);
+      invalidPaths.push(path.join(swarmsDir(), `invalid-${index}.json`));
+    }
+    const older = makeRun('older-valid', {
+      updatedAt: '2026-07-13T11:00:00.000Z',
+    });
+    const newer = makeRun('newer-valid', {
+      updatedAt: '2026-07-13T13:00:00.000Z',
+    });
+    writeRecord(older.id, older);
+    writeRecord(newer.id, newer);
+    const malformedMtime = new Date('2026-07-13T14:00:00.000Z');
+    for (const invalidPath of invalidPaths) {
+      fs.utimesSync(invalidPath, malformedMtime, malformedMtime);
+    }
+
+    const detailed = listSwarmsDetailed({ limit: 2 });
+    expect(detailed.swarms.map((run) => run.id)).toEqual([
+      newer.id,
+      older.id,
+    ]);
+    expect(detailed.invalidFiles).toBe(4);
+  });
+
+  it('reports directory enumeration limits without throwing', () => {
+    for (let index = 0; index < 6; index += 1) {
+      const id = `directory-bound-${index}`;
+      writeRecord(id, makeRun(id));
+    }
+
+    const detailed = listSwarmsDetailed({ maxDirectoryEntries: 2 });
+    expect(detailed.complete).toBe(false);
+    expect(detailed.entriesExamined).toBe(2);
+    expect(detailed.filesDiscovered).toBe(2);
+    expect(detailed.stopReasons).toContain('directory-limit');
+  });
+
+  it('reports oversized records without allocating them into results', () => {
+    const id = 'oversized-record';
+    writeRecord(id, makeRun(id, { goal: 'x'.repeat(4_096) }));
+
+    const detailed = listSwarmsDetailed({
+      maxFileBytes: 512,
+      maxBytes: 1_024,
+    });
+    expect(detailed.swarms).toEqual([]);
+    expect(detailed.oversizedFiles).toBe(1);
+    expect(detailed.complete).toBe(false);
+    expect(detailed.stopReasons).toContain('per-file-byte-limit');
+    expect(loadSwarm(id)).toEqual(makeRun(id, { goal: 'x'.repeat(4_096) }));
+  });
+
+  it('round-trips a valid direct-load record larger than the list projection cap', () => {
+    const run = makeRun('large-direct-load', { goal: 'x'.repeat(2 * 1024 * 1024) });
+
+    saveSwarm(run);
+
+    expect(loadSwarm(run.id)).toEqual(run);
+    expect(listSwarmsDetailed().oversizedFiles).toBe(1);
+  });
+
+  it('selects the semantic newest record even when filesystem mtimes are inverted', () => {
+    const semanticNewest = makeRun('semantic-newest', {
+      updatedAt: '2026-07-13T14:00:00.000Z',
+    });
+    const semanticOlder = makeRun('semantic-older', {
+      updatedAt: '2026-07-13T13:00:00.000Z',
+    });
+    writeRecord(semanticNewest.id, semanticNewest);
+    writeRecord(semanticOlder.id, semanticOlder);
+    const newerMtime = new Date('2026-07-13T15:00:00.000Z');
+    const olderMtime = new Date('2026-07-13T12:00:00.000Z');
+    fs.utimesSync(path.join(swarmsDir(), `${semanticNewest.id}.json`), olderMtime, olderMtime);
+    fs.utimesSync(path.join(swarmsDir(), `${semanticOlder.id}.json`), newerMtime, newerMtime);
+
+    expect(listSwarmsDetailed({ limit: 1 }).swarms.map((run) => run.id)).toEqual([
+      semanticNewest.id,
+    ]);
+  });
+
+  it('sorts invalid persisted timestamps after valid semantic history', () => {
+    writeRecord('a-invalid-time', makeRun('a-invalid-time', {
+      createdAt: 'not-a-date',
+      updatedAt: 'also-not-a-date',
+    }));
+    writeRecord('z-valid-time', makeRun('z-valid-time', {
+      updatedAt: '2026-07-13T13:00:00.000Z',
+    }));
+
+    expect(listSwarmsDetailed({ limit: 2 }).swarms.map((run) => run.id)).toEqual([
+      'z-valid-time',
+      'a-invalid-time',
+    ]);
+  });
+
+  it('rejects record symlinks without mutating their external targets', () => {
+    if (process.platform === 'win32') return;
+    const id = 'linked-record';
+    const outside = path.join(tmpHome, 'external-sentinel.json');
+    fs.mkdirSync(swarmsDir(), { recursive: true });
+    fs.writeFileSync(outside, JSON.stringify(makeRun(id)), { mode: 0o644 });
+    fs.symlinkSync(outside, path.join(swarmsDir(), `${id}.json`));
+
+    expect(loadSwarm(id)).toBeNull();
+    expect(listSwarmsDetailed()).toMatchObject({
+      swarms: [],
+      sourceState: 'degraded',
+      unreadableFiles: 1,
+      stopReasons: ['unsafe-file'],
+    });
+    expect(fs.statSync(outside).mode & 0o777).toBe(0o644);
+    expect(fs.readFileSync(outside, 'utf8')).toBe(JSON.stringify(makeRun(id)));
   });
 });
 
 describe('swarm store atomic replacement', () => {
+  it('refuses a linked Ashlr state root on read and write paths', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-root-outside-'));
+    const externalSwarms = path.join(outside, 'swarms');
+    fs.mkdirSync(externalSwarms, { recursive: true });
+    fs.writeFileSync(
+      path.join(externalSwarms, 'external.json'),
+      JSON.stringify(makeRun('external')),
+      'utf8',
+    );
+    fs.symlinkSync(outside, path.join(tmpHome, '.ashlr'), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      expect(loadSwarm('external')).toBeNull();
+      expect(listSwarmsDetailed()).toMatchObject({
+        swarms: [],
+        sourceState: 'degraded',
+        stopReasons: expect.arrayContaining(['unsafe-path']),
+      });
+      saveSwarm(makeRun('escape-root'));
+      expect(fs.existsSync(path.join(externalSwarms, 'escape-root.json'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a linked store directory instead of escaping the state root', () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m339-outside-'));
     fs.mkdirSync(path.dirname(swarmsDir()), { recursive: true });

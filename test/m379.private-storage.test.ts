@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assurePrivateStoragePath,
+  assurePrivateStoragePaths,
   type PrivateStorageInvocation,
   type PrivateStorageRunner,
 } from '../src/core/util/private-storage.js';
@@ -17,7 +18,10 @@ afterEach(() => {
   }
 });
 
-function successfulRunner(calls: PrivateStorageInvocation[]): PrivateStorageRunner {
+function successfulRunner(
+  calls: PrivateStorageInvocation[],
+  reason = 'exact-private-dacl',
+): PrivateStorageRunner {
   return (invocation) => {
     calls.push(invocation);
     const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
@@ -27,7 +31,7 @@ function successfulRunner(calls: PrivateStorageInvocation[]): PrivateStorageRunn
         nonce: request.nonce,
         operation: request.operation,
         ok: true,
-        reason: 'exact-private-dacl',
+        reason,
       }),
     };
   };
@@ -88,6 +92,31 @@ describe('M379 Windows private-storage assurance', () => {
     expect(assurePrivateStoragePath('C:\\tmp\\private', 'directory', 'inspect-existing', {
       ...base, runner: authenticatedFailure,
     })).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
+  });
+
+  it('supports non-mutating owner and ancestor assurance for observational reads', () => {
+    const calls: PrivateStorageInvocation[] = [];
+    expect(assurePrivateStoragePath('C:\\tmp\\record.json', 'file', 'inspect-owned', {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+      runner: successfulRunner(calls, 'owned-safe-path'),
+    })).toEqual({ ok: true, reason: 'owned-safe-path' });
+    expect(JSON.parse(calls[0]!.input)).toMatchObject({ mode: 'inspect-owned' });
+  });
+
+  it('checks a bounded file batch in one authenticated adapter invocation', () => {
+    const calls: PrivateStorageInvocation[] = [];
+    expect(assurePrivateStoragePaths([
+      'C:\\tmp\\one.json',
+      'C:\\tmp\\two.json',
+    ], {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+      runner: successfulRunner(calls, 'owned-safe-paths'),
+    })).toEqual({ ok: true, reason: 'owned-safe-paths' });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.input)).toMatchObject({
+      operation: 'assure-private-paths',
+      paths: ['C:\\tmp\\one.json', 'C:\\tmp\\two.json'],
+    });
   });
 
   it('rejects invalid paths and bypasses PowerShell on POSIX', () => {

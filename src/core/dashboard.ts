@@ -621,8 +621,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   const runs: DashboardSnapshot['runs'] = [];
 
   try {
-    const allRuns = listRuns();
-    for (const run of allRuns.slice(0, MAX_RUNS)) {
+    const allRuns = listRuns({ limit: MAX_RUNS });
+    for (const run of allRuns) {
       runs.push({
         id: run.id,
         goal: run.goal,
@@ -638,8 +638,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   const swarms: DashboardSnapshot['swarms'] = [];
 
   try {
-    const allSwarms = listSwarms();
-    for (const swarm of allSwarms.slice(0, MAX_SWARMS)) {
+    const allSwarms = listSwarms({ limit: MAX_SWARMS });
+    for (const swarm of allSwarms) {
       // Compute burndown from per-task execution state.
       const tasksDone = swarm.tasks.filter(
         (t) => t.status === 'done' || t.status === 'skipped',

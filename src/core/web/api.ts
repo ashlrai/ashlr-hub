@@ -123,6 +123,7 @@ export function drainSseConnections(): void {
     }
   }
   _sseCleanups.clear();
+  sseHistoryProjection = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,7 @@ export function drainSseConnections(): void {
 // ---------------------------------------------------------------------------
 
 const SSE_POLL_MS = 1500;
+const SSE_HISTORY_CACHE_MS = 1000;
 
 /**
  * Maximum concurrent SSE connections. Each connection holds a socket + a
@@ -139,6 +141,14 @@ const SSE_POLL_MS = 1500;
  * self-limit to ~6 per origin, but the server must not rely on that.
  */
 const SSE_MAX_CONNECTIONS = 64;
+
+interface SseHistoryProjection {
+  runs: unknown;
+  swarms: unknown;
+  expiresAt: number;
+}
+
+let sseHistoryProjection: SseHistoryProjection | null = null;
 
 const SNAPSHOT_CACHE_MS = 5_000;
 
@@ -316,8 +326,8 @@ function reqPath(req: IncomingMessage): string {
 // ---------------------------------------------------------------------------
 
 /** Build the current runs slice payload for SSE. */
-function sseRunsPayload(): unknown {
-  return listRuns().slice(0, 20).map((r) => ({
+function buildSseRunsPayload(): unknown {
+  return listRuns({ limit: 20 }).map((r) => ({
     id: r.id,
     goal: r.goal,
     status: r.status,
@@ -327,8 +337,8 @@ function sseRunsPayload(): unknown {
 }
 
 /** Build the current swarms slice payload for SSE. */
-function sseSwarmsPayload(): unknown {
-  return listSwarms().slice(0, 20).map((s) => ({
+function buildSseSwarmsPayload(): unknown {
+  return listSwarms({ limit: 20 }).map((s) => ({
     id: s.id,
     goal: s.goal,
     status: s.status,
@@ -338,6 +348,20 @@ function sseSwarmsPayload(): unknown {
     tasksTotal: s.tasks.length,
     updatedAt: s.updatedAt,
   }));
+}
+
+/** Share one bounded history projection across every SSE client in a poll window. */
+function cachedSseHistoryProjection(): SseHistoryProjection {
+  const now = Date.now();
+  if (sseHistoryProjection && now < sseHistoryProjection.expiresAt) {
+    return sseHistoryProjection;
+  }
+  sseHistoryProjection = {
+    runs: buildSseRunsPayload(),
+    swarms: buildSseSwarmsPayload(),
+    expiresAt: now + SSE_HISTORY_CACHE_MS,
+  };
+  return sseHistoryProjection;
 }
 
 /**
@@ -403,8 +427,9 @@ function handleSseEvents(
     if (updateInFlight) return;
     updateInFlight = true;
     try {
-      sendNamed('runs', sseRunsPayload());
-      sendNamed('swarms', sseSwarmsPayload());
+      const history = cachedSseHistoryProjection();
+      sendNamed('runs', history.runs);
+      sendNamed('swarms', history.swarms);
       // M32: live inbox + daemon state for the web command center. Metadata
       // only — the inbox event carries id/title/kind, never diffs.
       try {
@@ -633,7 +658,7 @@ export async function handleApi(
 
     // ── GET /api/runs ────────────────────────────────────────────────────────
     if (path === '/api/runs' && method === 'GET') {
-      const runs = listRuns();
+      const runs = listRuns({ limit: 200 });
       sendJson(res, 200, runs);
       return true;
     }
@@ -656,7 +681,7 @@ export async function handleApi(
 
     // ── GET /api/swarms ──────────────────────────────────────────────────────
     if (path === '/api/swarms' && method === 'GET') {
-      const swarms = listSwarms();
+      const swarms = listSwarms({ limit: 200 });
       sendJson(res, 200, swarms);
       return true;
     }

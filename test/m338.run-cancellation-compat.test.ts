@@ -3,7 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunState } from '../src/core/types.js';
-import { listRuns, loadRun, saveRun } from '../src/core/run/orchestrator.js';
+import {
+  listRuns,
+  listRunsDetailed,
+  loadRun,
+  saveRun,
+} from '../src/core/run/orchestrator.js';
 
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
 const CANCELLED_TASK_ERROR = 'Task cancelled.';
@@ -187,6 +192,9 @@ describe('explicit run cancellation persistence compatibility', () => {
       tasks: [],
     });
     expect(listRuns().find((run) => run.id === state.id)?.terminationReason).toBe('cancelled');
+    expect(
+      listRunsDetailed({ limit: 1 }).runs.find((run) => run.id === state.id)?.terminationReason,
+    ).toBe('cancelled');
   });
 
   it.each([
