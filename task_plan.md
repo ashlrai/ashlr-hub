@@ -2095,5 +2095,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Select and implement the smallest complete high-leverage persistence slice without weakening generation-CAS.
 - [x] Add cross-process, crash-recovery, retention, portability, and downgrade-safety regressions appropriate to the slice.
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
-- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+- [x] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
 - Verification note: Vitest 3.2 rejects the attempted `--repeat` convenience flag. The isolated concurrency test and its complete 48-test file both passed after the committed-record fast path removed claim-maintenance overhead.
