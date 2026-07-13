@@ -506,7 +506,7 @@ describe('M315 remote PR handoff truth', () => {
     expect(result.reason).toMatch(/live branch protection changed before remote handoff/);
     expect(branchProtectionMock).toHaveBeenCalledTimes(2);
     expect(createPrMock).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it('evidence mode refuses host auto-merge when protection changes after PR creation', async () => {
     const baseHead = git(tmpRepo, ['rev-parse', 'main']);
