@@ -133,6 +133,12 @@ import {
   MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
   type CaseOwnershipClaim,
 } from '../util/case-folded-ownership.js';
+import {
+  abandonExecutionAuthority,
+  acquireExecutionAuthority,
+  beginExecutionAuthority,
+  finishExecutionAuthority,
+} from '../util/execution-lease.js';
 import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
@@ -427,6 +433,21 @@ export function loadRun(id: string): RunState | null {
     return loaded.ok ? parsePersistedRun(loaded.text, id) : null;
   } catch {
     return null;
+  }
+}
+
+function ownsCurrentRunGeneration(state: RunState): boolean {
+  const expected = persistenceSnapshot(state);
+  if (!expected) return false;
+  try {
+    const loaded = readStableRegularFile(runFilePath(state.id), {
+      anchorPath: stateRoot(),
+      maxFileBytes: MAX_PERSISTED_RUN_BYTES,
+      remainingBytes: MAX_PERSISTED_RUN_BYTES,
+    });
+    return loaded.ok && persistenceDigest(loaded.text) === expected.digest;
+  } catch {
+    return false;
   }
 }
 
@@ -1845,6 +1866,48 @@ function foundryWantsSandbox(cfg: AshlrConfig, engine: EngineId): boolean {
  * best-effort. Disabled via opts.noMemory or cfg.genome?.injectOnRun === false.
  */
 export async function runGoal(
+  goal: string,
+  cfg: AshlrConfig,
+  opts: RunOptions,
+): Promise<RunState> {
+  if (opts.signal?.aborted === true) return runGoalInternal(goal, cfg, opts);
+  if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
+
+  const id = assertSafeExecutionIdentity(opts.resumeId ?? opts.runId ?? generateRunId());
+  if (!opts.resumeId) opts = { ...opts, runId: id };
+  ensureRunsDir();
+  const acquired = acquireExecutionAuthority('run', id);
+  if (!acquired.ok) {
+    throw new Error(
+      `Run execution authority ${acquired.reason} for ${id}; ` +
+      'another live or uncertain owner may have executed it',
+    );
+  }
+  const existing = loadRun(id);
+  if (!opts.resumeId && existing !== null) {
+    finishExecutionAuthority(acquired.authority);
+    throw new Error(`Run "${id}" already exists; use resumeId to continue it`);
+  }
+  if (opts.resumeId && existing === null) {
+    finishExecutionAuthority(acquired.authority);
+    throw new Error(`Run "${id}" not found in ${runsDir()}`);
+  }
+  if (!beginExecutionAuthority(acquired.authority)) {
+    abandonExecutionAuthority(acquired.authority);
+    throw new Error(`Run execution authority unavailable for ${id}`);
+  }
+  let clearAuthority = false;
+  try {
+    const state = await runGoalInternal(goal, cfg, opts);
+    clearAuthority = ownsCurrentRunGeneration(state);
+    return state;
+  } finally {
+    if (clearAuthority) finishExecutionAuthority(acquired.authority);
+    else abandonExecutionAuthority(acquired.authority);
+  }
+}
+
+async function runGoalInternal(
   goal: string,
   cfg: AshlrConfig,
   opts: RunOptions,

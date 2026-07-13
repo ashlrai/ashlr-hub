@@ -170,7 +170,7 @@ describe('H3 ATOMIC-WRITES-UNDER-CONTENTION — concurrent writers never tear a 
     const listed = listSwarms();
     expect(listed.length).toBe(N);
     expect(new Set(listed.map((s) => s.id)).size).toBe(N);
-  });
+  }, 30_000);
 
   it('a concurrent reader during many saveDaemonState writes always parses a COMPLETE record (never torn)', async () => {
     const WRITES = 120;

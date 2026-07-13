@@ -37,6 +37,7 @@
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import * as child_process from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import type {
@@ -59,7 +60,7 @@ import type {
 import type { StreamSink } from '../run/streaming.js';
 import { newUsage, addUsage, overBudget } from '../run/budget.js';
 import { planSwarm } from './planner.js';
-import { saveSwarm, loadSwarm } from './store.js';
+import { ensureSwarmsDir, loadSwarm, ownsCurrentSwarmGeneration, saveSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { scrubSecrets as scrubSensitiveText } from '../util/scrub.js';
@@ -70,6 +71,12 @@ import {
   PROPOSAL_PERSISTENCE_MISMATCH_REASON,
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from '../inbox/persistence-mismatch.js';
+import {
+  abandonExecutionAuthority,
+  acquireExecutionAuthority,
+  beginExecutionAuthority,
+  finishExecutionAuthority,
+} from '../util/execution-lease.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -206,6 +213,9 @@ async function loadM21(): Promise<void> {
 
 const DEFAULT_PARALLEL = 3;
 const MAX_PARALLEL = 8;
+const BACKGROUND_HANDOFF_WAIT_MS = 5 * 60 * 1_000;
+const BACKGROUND_HANDOFF_ACK_MS = 15_000;
+const BACKGROUND_HANDOFF_PROTOCOL = 'ashlr-background-handoff-v1';
 const DEFAULT_MAX_TOKENS = 200_000;
 const DEFAULT_MAX_STEPS = 200;
 
@@ -858,7 +868,7 @@ async function executePhase(
  * The --_worker flag suppresses --background recursion and signals the
  * CLI to run the swarm synchronously (no further detach).
  */
-function spawnBackgroundWorker(swarmId: string): void {
+function spawnBackgroundWorker(swarmId: string): Promise<boolean> {
   // Locate the bin entry point relative to this file.
   // __dirname equivalent for ESM:
   const thisFile = fileURLToPath(import.meta.url);
@@ -866,20 +876,64 @@ function spawnBackgroundWorker(swarmId: string): void {
   const projectRoot = path.resolve(path.dirname(thisFile), '..', '..', '..');
   const binPath = path.join(projectRoot, 'bin', 'ashlr');
 
+  const handoffToken = randomUUID();
   const child = child_process.spawn(
     process.execPath,
     [binPath, 'swarm', '--resume', swarmId, '--_worker'],
     {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       env: {
         ...process.env,
         // Worker must NOT set ASHLR_IN_SWARM itself — it IS the swarm runner.
         ASHLR_IN_SWARM: undefined as unknown as string,
+        ASHLR_BACKGROUND_HANDOFF_TOKEN: handoffToken,
       },
     },
   );
-  child.unref();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('error', onFailure);
+      child.removeListener('exit', onFailure);
+      child.removeListener('message', onMessage);
+      if (ready) {
+        child.disconnect();
+        child.unref();
+      } else {
+        child.kill();
+      }
+      resolve(ready);
+    };
+    const onFailure = (): void => finish(false);
+    const onMessage = (message: unknown): void => {
+      if (
+        typeof message === 'object' && message !== null &&
+        (message as Record<string, unknown>)['protocol'] === BACKGROUND_HANDOFF_PROTOCOL &&
+        (message as Record<string, unknown>)['swarmId'] === swarmId &&
+        (message as Record<string, unknown>)['token'] === handoffToken
+      ) finish(true);
+    };
+    const timer = setTimeout(() => finish(false), BACKGROUND_HANDOFF_ACK_MS);
+    child.once('error', onFailure);
+    child.once('exit', onFailure);
+    child.on('message', onMessage);
+  });
+}
+
+async function signalBackgroundHandoffReady(swarmId: string): Promise<boolean> {
+  const handoffToken = process.env['ASHLR_BACKGROUND_HANDOFF_TOKEN'];
+  delete process.env['ASHLR_BACKGROUND_HANDOFF_TOKEN'];
+  if (!handoffToken || typeof process.send !== 'function' || process.connected !== true) return false;
+  return new Promise((resolve) => {
+    process.send?.(
+      { protocol: BACKGROUND_HANDOFF_PROTOCOL, swarmId, token: handoffToken },
+      (error) => resolve(error === null),
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,31 +1539,31 @@ async function runSwarmInternal(
   // inside createSandbox — the swarm MUST abort and execute ZERO tasks rather
   // than silently falling back to run.project (the user's real working tree).
   const requireSandbox = opts.sandbox === true && opts.requireSandbox === true;
+  let run: SwarmRun;
 
   const abortNoSandbox = (reason: string): SwarmRun => {
-    const ts = new Date().toISOString();
-    const aborted: SwarmRun = {
-      id: opts.runId ?? makeId(),
-      goal: input.goal,
-      specId: input.specId ?? null,
-      project,
-      createdAt: ts,
-      updatedAt: ts,
-      budget,
-      usage: newUsage(),
-      parallel,
-      status: 'failed',
-      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
-      tasks: [],
-      result:
-        `Refused: a mandatory sandbox could not be created (${reason}). ` +
-        'No tasks were executed; the working tree was NOT touched.',
-      proposalOutcome: {
-        kind: 'sandbox-unavailable',
-        reason,
-      },
-    };
-    emitLog(sink, aborted.result ?? '');
+    const result =
+      `Refused: a mandatory sandbox could not be created (${reason}). ` +
+      'No tasks were executed; the working tree was NOT touched.';
+    const aborted = opts.resumeId
+      ? {
+          ...run,
+          updatedAt: new Date().toISOString(),
+          status: 'failed' as const,
+          plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+          tasks: [],
+          result,
+          proposalOutcome: { kind: 'sandbox-unavailable' as const, reason },
+        }
+      : run;
+    if (!opts.resumeId) {
+      aborted.status = 'failed';
+      aborted.plan = { specId: input.specId ?? null, goal: input.goal, tasks: [] };
+      aborted.tasks = [];
+      aborted.result = result;
+      aborted.proposalOutcome = { kind: 'sandbox-unavailable', reason };
+    }
+    emitLog(sink, result);
     try {
       _audit?.({
         action: 'sandbox:create',
@@ -1519,7 +1573,9 @@ async function runSwarmInternal(
         result: 'error',
       });
     } catch { /* audit is best-effort */ }
-    if (!opts.dryRun) persist(aborted);
+    // A resume refusal leaves the prior crash checkpoint untouched so it can
+    // be retried after policy recovers. Fresh attempts persist their refusal.
+    if (!opts.dryRun && !opts.resumeId) persist(aborted);
     return aborted;
   };
 
@@ -1562,8 +1618,6 @@ async function runSwarmInternal(
   // -------------------------------------------------------------------------
   // RESUME: load existing SwarmRun if resumeId provided.
   // -------------------------------------------------------------------------
-  let run: SwarmRun;
-
   if (opts.resumeId) {
     const existing = resumeSnapshot;
     if (!existing) {
@@ -1646,6 +1700,7 @@ async function runSwarmInternal(
       ...(opts.requireSandbox === true ? { requireSandbox: true } : {}),
       ...(opts.propose === true ? { propose: true } : {}),
       ...(opts.noCapture === true ? { noCapture: true } : {}),
+      ...(opts.background === true ? { backgroundHandoff: true } : {}),
     };
     if (Object.keys(resumeOptions).length > 0) run.resumeOptions = resumeOptions;
   }
@@ -1664,7 +1719,13 @@ async function runSwarmInternal(
       emitLog(sink, run.result);
       return run;
     }
-    spawnBackgroundWorker(run.id);
+    if (!await spawnBackgroundWorker(run.id)) {
+      run.status = 'failed';
+      run.result = 'Background swarm was not launched: worker handoff was not acknowledged.';
+      persist(run);
+      emitLog(sink, run.result);
+      return run;
+    }
     emitLog(sink, `Swarm ${run.id} launched in background.`);
     return run;
   }
@@ -1944,17 +2005,115 @@ export async function runSwarm(
   opts: SwarmOptions & { noCapture?: boolean; approved?: boolean },
   sink: StreamSink,
 ): Promise<SwarmRun> {
+  const refuseAuthority = (refusedId: string, reason: string): SwarmRun => {
+    const now = new Date().toISOString();
+    const refused: SwarmRun = {
+      id: refusedId,
+      goal: input.goal,
+      specId: input.specId ?? null,
+      project: opts.project ?? null,
+      createdAt: now,
+      updatedAt: now,
+      budget: buildBudget(opts),
+      usage: newUsage(),
+      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      status: 'failed',
+      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+      tasks: [],
+      result: `Refused: ${reason} for swarm "${refusedId}". No swarm work was executed.`,
+      proposalOutcome: {
+        kind: 'engine-failed-no-diff',
+        reason: 'swarm execution authority unavailable',
+      },
+    };
+    emitLog(sink, refused.result ?? 'Swarm execution authority unavailable.');
+    return refused;
+  };
+
+  let persistenceFailed = false;
+  const execute = async (): Promise<SwarmRun> => {
+    try {
+      return await runSwarmInternal(input, cfg, opts, sink);
+    } catch (error) {
+      if (!(error instanceof SwarmPersistenceError)) throw error;
+      persistenceFailed = true;
+      const run = error.run;
+      run.status = 'failed';
+      run.result = error.reason === 'conflict'
+        ? `Swarm stopped: persistence generation conflict for ${run.id}.`
+        : `Swarm stopped: persistence ${error.reason} for ${run.id}.`;
+      run.updatedAt = new Date().toISOString();
+      emitLog(sink, run.result);
+      return run;
+    }
+  };
+
+  if (process.env['ASHLR_IN_SWARM'] || opts.signal?.aborted === true) return execute();
+  if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
+
+  let id: string;
   try {
-    return await runSwarmInternal(input, cfg, opts, sink);
-  } catch (error) {
-    if (!(error instanceof SwarmPersistenceError)) throw error;
-    const run = error.run;
-    run.status = 'failed';
-    run.result = error.reason === 'conflict'
-      ? `Swarm stopped: persistence generation conflict for ${run.id}.`
-      : `Swarm stopped: persistence ${error.reason} for ${run.id}.`;
-    run.updatedAt = new Date().toISOString();
-    emitLog(sink, run.result);
+    id = assertSafeExecutionIdentity(opts.resumeId ?? opts.runId ?? makeId());
+  } catch {
+    return refuseAuthority(makeId(), 'caller-supplied run id is invalid');
+  }
+  if (!opts.resumeId) opts = { ...opts, runId: id };
+
+  try {
+    ensureSwarmsDir();
+  } catch {
+    return refuseAuthority(
+      id,
+      opts.background === true
+        ? 'background swarm was not launched: persistence unavailable'
+        : 'swarm persistence preparation is unavailable',
+    );
+  }
+
+  const handoffHint = opts.resumeId
+    ? loadSwarm(id)?.resumeOptions?.backgroundHandoff === true
+    : false;
+  const acknowledgedHandoff = handoffHint
+    ? await signalBackgroundHandoffReady(id)
+    : false;
+  const acquired = acquireExecutionAuthority(
+    'swarm',
+    id,
+    acknowledgedHandoff
+      ? Number.POSITIVE_INFINITY
+      : handoffHint ? BACKGROUND_HANDOFF_WAIT_MS : undefined,
+  );
+  if (!acquired.ok) {
+    return refuseAuthority(id,
+      `execution authority ${acquired.reason}; another live or uncertain owner may have executed it`,
+    );
+  }
+  const existing = loadSwarm(id);
+  if (!opts.resumeId && existing !== null) {
+    finishExecutionAuthority(acquired.authority);
+    return refuseAuthority(id, `swarm "${id}" already exists; use resumeId to continue it`);
+  }
+  if (opts.resumeId && existing === null) {
+    finishExecutionAuthority(acquired.authority);
+    return refuseAuthority(id, `swarm resume target "${id}" was not found`);
+  }
+  const backgroundHandoff = opts.background === true && !opts.resumeId;
+  if (!backgroundHandoff && !beginExecutionAuthority(acquired.authority)) {
+    abandonExecutionAuthority(acquired.authority);
+    return refuseAuthority(id, 'execution authority unavailable');
+  }
+  let clearAuthority = backgroundHandoff;
+  try {
+    const run = await execute();
+    const conclusivelyNoExecution = run.tasks.length === 0 && run.plan.tasks.length === 0 && (
+      run.result?.startsWith('Refused:') === true ||
+      /resume target .* not found/i.test(run.result ?? '')
+    );
+    clearAuthority = clearAuthority || opts.dryRun === true || conclusivelyNoExecution ||
+      (!persistenceFailed && ownsCurrentSwarmGeneration(run));
     return run;
+  } finally {
+    if (clearAuthority) finishExecutionAuthority(acquired.authority);
+    else abandonExecutionAuthority(acquired.authority);
   }
 }

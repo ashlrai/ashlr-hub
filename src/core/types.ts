@@ -2626,6 +2626,8 @@ export interface SwarmRun {
     requireSandbox?: true;
     propose?: true;
     noCapture?: true;
+    /** Detached launcher persisted a claimed-authority handoff for its worker. */
+    backgroundHandoff?: true;
   };
   /** ISO timestamp the swarm was created. */
   createdAt: string;

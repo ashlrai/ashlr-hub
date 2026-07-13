@@ -2097,3 +2097,20 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
 - [x] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
 - Verification note: Vitest 3.2 rejects the attempted `--repeat` convenience flag. The isolated concurrency test and its complete 48-test file both passed after the committed-record fast path removed claim-maintenance overhead.
+
+## Current Overnight Cycle - Pre-Execution Lifecycle Authority
+- [x] Rehydrate exact remote source in an isolated persistent worktree without touching unrelated canonical routing edits.
+- [x] Audit run, Best-of-N, swarm, background handoff, local-lock, and crash-recovery boundaries with parallel agents.
+- [x] Add case-folded run/swarm authority with explicit `claimed` and durable `executing` phases.
+- [x] Recover pre-execution crashes, retain post-effect uncertainty as `ambiguous`, and clear only generation-proven or conclusively no-work outcomes.
+- [x] Add a cooperating stale-lock reclaimer election, exact lock ownership probes, and live legacy-lock compatibility.
+- [x] Make background launch a claimed-authority handoff with a persisted worker takeover hint, authenticated IPC acknowledgment, and no timeout for the acknowledged worker.
+- [x] Add independent-process race, dead-owner, background handoff, setup refusal, post-effect checkpoint failure, run/swarm overlap, and Best-of-N regressions.
+- [x] Pass the definitive exhaustive suite and final independent adversarial re-review.
+- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+
+## Next P1 - Effect And Migration Authority
+- [ ] Add queue owner token/epoch fencing so an expired shared queue lease cannot authorize duplicate swarms.
+- [ ] Add prepared/committed idempotency evidence around tool effects for finer-grained crash recovery than whole-attempt ambiguity.
+- [ ] Add an explicit bounded owner-only persistence migration, including protected Windows temporary creation before bytes are written.
+- [ ] Add a bounded operator/doctor resolution path for durable ambiguous execution markers with forensic evidence and audit.
