@@ -2123,4 +2123,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bind daemon launch, renewal loss, completion, and release to the exact claim generation with per-item cancellation.
 - [x] Add same-machine ABA, strict-expiry, takeover, ambiguity, corrupt-state, lock, daemon-launch, and Windows regressions.
 - [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
-- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+- [x] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
