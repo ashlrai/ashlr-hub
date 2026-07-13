@@ -61,7 +61,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type {
   AshlrConfig,
@@ -246,7 +246,7 @@ const GENOME_INJECT_CHAR_CAP = 1500;
  * Only creates entries under ~/.ashlr/runs — never repos/Desktop.
  */
 function ensureRunsDir(): void {
-  fs.mkdirSync(runsDir(), { recursive: true });
+  fs.mkdirSync(runsDir(), { recursive: true, mode: 0o700 });
 }
 
 /**
@@ -261,6 +261,23 @@ function runFilePath(id: string): string {
   return path.join(runsDir(), `${id}.json`);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parsePersistedRun(raw: string, expectedId: string): RunState | null {
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    !isRecord(parsed) ||
+    parsed['id'] !== expectedId ||
+    !Array.isArray(parsed['tasks']) ||
+    !parsed['tasks'].every(isRecord)
+  ) {
+    return null;
+  }
+  return rehydrateRunStateFromPersistence(parsed as unknown as PersistedRunState);
+}
+
 /**
  * Load a persisted RunState by id. Returns null if absent, unreadable, or invalid JSON.
  */
@@ -268,7 +285,7 @@ export function loadRun(id: string): RunState | null {
   try {
     const file = runFilePath(id);
     const raw = fs.readFileSync(file, 'utf8');
-    return rehydrateRunStateFromPersistence(JSON.parse(raw) as PersistedRunState);
+    return parsePersistedRun(raw, id);
   } catch {
     return null;
   }
@@ -284,9 +301,10 @@ export function listRuns(): RunState[] {
     const runs: RunState[] = [];
     for (const file of files) {
       try {
-        const raw = fs.readFileSync(path.join(runsDir(), file), 'utf8');
-        const state = rehydrateRunStateFromPersistence(JSON.parse(raw) as PersistedRunState);
-        runs.push(state);
+        const expectedId = file.slice(0, -'.json'.length);
+        const raw = fs.readFileSync(runFilePath(expectedId), 'utf8');
+        const state = parsePersistedRun(raw, expectedId);
+        if (state) runs.push(state);
       } catch {
         // Skip corrupt/unreadable files silently
       }
@@ -682,12 +700,34 @@ function newCancelledRunState(
 export function saveRun(s: RunState): void {
   ensureRunsDir();
   const dest = runFilePath(s.id);
-  const tmp = dest + '.tmp';
+  const legacyTmp = `${dest}.tmp`;
+  try {
+    if (fs.lstatSync(legacyTmp).isDirectory()) {
+      throw new Error(`Refusing to save run with invalid legacy temporary path: ${legacyTmp}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  let tmp: string | undefined = path.join(
+    path.dirname(dest),
+    `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
+  );
   const normalized = normalizeRunStateForPersistence(s);
   const payload = JSON.stringify(downgradeRunStateForPersistence(normalized), null, 2);
-  fs.writeFileSync(tmp, payload, 'utf8');
-  fs.renameSync(tmp, dest);
-  Object.assign(s, normalized);
+  try {
+    fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fs.renameSync(tmp, dest);
+    tmp = undefined;
+    Object.assign(s, normalized);
+  } finally {
+    if (tmp) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // Best-effort cleanup after a failed write or rename.
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
