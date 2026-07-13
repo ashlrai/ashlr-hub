@@ -2239,16 +2239,16 @@ function renderDaemon() {
 
   // Info grid
   const pairs = [
-    ['Last tick', d.lastTick ? fmtRelative(d.lastTick) : '—'],
-    ['Today spend', d.todaySpendUsd != null ? `$${d.todaySpendUsd.toFixed(4)}` : '—'],
+    ['Last tick', d.lastTickAt ? fmtRelative(d.lastTickAt) : '—'],
+    ['Today spend', d.todaySpentUsd != null ? `$${d.todaySpentUsd.toFixed(4)}` : '—'],
     ['Spend cap', d.spendCapUsd != null ? `$${d.spendCapUsd.toFixed(2)}` : '—'],
     ['Pending proposals', d.pendingProposals ?? state.inboxBadge ?? '—'],
   ];
   card.appendChild(infoGrid(pairs));
 
   // Spend vs cap mini bar
-  if (d.spendCapUsd != null && d.todaySpendUsd != null) {
-    const pct = Math.min(100, (d.todaySpendUsd / d.spendCapUsd) * 100);
+  if (d.spendCapUsd != null && d.todaySpentUsd != null) {
+    const pct = Math.min(100, (d.todaySpentUsd / d.spendCapUsd) * 100);
     const level = pct >= 90 ? 'var(--status-failed)' : pct >= 70 ? 'var(--status-aborted)' : 'var(--status-done)';
     const track = el('div', { cls: 'daemon-spend-track' });
     track.appendChild(el('div', {

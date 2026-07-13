@@ -2022,3 +2022,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove readiness, next-action, mission-brief, and learning authority remain independent of the observational journal.
 - [x] Pass focused, adjacent, exhaustive, static, dependency, and two independent adversarial review gates.
 - [x] Commit, push, observe CI, and leave production on the proven immutable release until a separate exact-source activation boundary.
+
+## Current Overnight Cycle - Activity Journal Activation And Control-Plane Parity
+- [x] Rehydrate exact release proof, production identity, daemon state, git state, Entire state, and durable notes.
+- [x] Independently audit immutable activation, rollback criteria, raw daemon API disagreement, and remaining child-liveness gaps.
+- [x] Stage and verify an immutable exact-feature release without modifying the live services.
+- [ ] Prove a real zero-child activation boundary using process-backed evidence, then transactionally activate Mission Control and daemon.
+- [ ] Canary fresh journal rows, FleetStatus truth, exact build identity, HTTP health, guard health, and rollback readiness.
+- [x] Implement one bounded control-plane parity improvement only if activation evidence exposes a concrete safe gap.
+- [ ] Pass targeted and adversarial verification, update durable notes, and commit/push any resulting code or documentation.

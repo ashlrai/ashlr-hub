@@ -504,6 +504,17 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).not.toContain("'none observed'");
   });
 
+  it('app.js uses canonical daemon state field names instead of hiding live values', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain("['Last tick', d.lastTickAt ? fmtRelative(d.lastTickAt) : '—']");
+    expect(src).toContain('d.todaySpentUsd.toFixed(4)');
+    expect(src).not.toContain('d.lastTick ?');
+    expect(src).not.toContain('d.todaySpendUsd');
+  });
+
   it('app.js surfaces aggregate-only trajectory learning in Mission Control and Fleet Dashboard', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
