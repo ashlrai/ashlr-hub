@@ -1950,3 +1950,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add normal refill, explicit-drain attribution, lifecycle-unavailable, automatic-drain, local-only, and late-divergence coverage.
 - [x] Pass exhaustive verification and independent final review.
 - [ ] Commit, push, observe CI, deploy exact green source, and inspect production route truth without exceeding the daily cap.
+
+## Current Overnight Cycle - Route Inventory Truth And Context Hygiene
+- [x] Preserve the genuine in-flight Phantom dispatch lease while continuing on disjoint control-plane work.
+- [x] Audit route-blocked treatment, proposal conversion, causal telemetry, and generated-worktree context pollution in parallel.
+- [x] Make FleetStatus eligibility and `queue.next` match the daemon's pre-claim route authority.
+- [x] Keep route-blocked repairs visible with a distinct count, route-gated effectiveness, readiness blocker, and read-only restore-routes action.
+- [x] Fail closed per trusted repair when route inspection is unavailable while preserving ordinary work.
+- [x] Exclude agent/generated worktree roots from repo maps, invalidate legacy scan-policy caches, and refuse symlink traversal.
+- [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
+- [x] Pass exhaustive verification and independent adversarial review.
+- [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.

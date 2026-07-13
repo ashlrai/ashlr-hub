@@ -18,10 +18,11 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import { buildRepoMap, renderRepoMap } from '../src/core/run/repo-map.js';
 import { localize, renderLocalization } from '../src/core/run/localize.js';
@@ -32,6 +33,7 @@ import type { RepoMap } from '../src/core/run/repo-map.js';
 // ---------------------------------------------------------------------------
 
 const tmpDirs: string[] = [];
+const tmpFiles: string[] = [];
 
 function mkTmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -40,6 +42,9 @@ function mkTmp(prefix: string): string {
 }
 
 afterEach(() => {
+  for (const f of tmpFiles.splice(0)) {
+    try { rmSync(f, { force: true }); } catch { /* idempotent */ }
+  }
   for (const d of tmpDirs.splice(0)) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* idempotent */ }
   }
@@ -249,6 +254,39 @@ describe('M154 buildRepoMap — ignores vendored / generated dirs', () => {
     expect(paths.some((p) => p.startsWith('vendor/'))).toBe(false);
     expect(paths).toContain('src/main.ts');
   });
+
+  it('does NOT scan agent or generated worktree roots', () => {
+    const generatedRoots = ['.claude', '.codex', '.agents', '.worktrees', '.ashlr'];
+    const files: Record<string, string> = {
+      'src/main.ts': 'export function main() {}\n',
+    };
+    for (const root of generatedRoots) {
+      files[`${root}/worktrees/generated/src/leaked.ts`] =
+        `export function leakedFrom${root.slice(1)}() {}\n`;
+    }
+
+    const map = buildRepoMap(makeRepo(files));
+    const paths = map.files.map((f) => f.path);
+
+    expect(paths).toContain('src/main.ts');
+    for (const root of generatedRoots) {
+      expect(paths.some((p) => p === root || p.startsWith(`${root}/`))).toBe(false);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('does NOT follow directory symlinks outside the repository', () => {
+    const dir = makeRepo({
+      'src/main.ts': 'export function main() {}\n',
+    });
+    const outside = mkTmp('ashlr-m154-outside-');
+    writeFileSync(join(outside, 'escaped.ts'), 'export function escaped() {}\n', 'utf8');
+    symlinkSync(outside, join(dir, 'linked-outside'), 'dir');
+
+    const paths = buildRepoMap(dir).files.map((f) => f.path);
+
+    expect(paths).toContain('src/main.ts');
+    expect(paths.some((p) => p.startsWith('linked-outside/'))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -288,6 +326,43 @@ describe('M154 buildRepoMap — caching', () => {
       found = entries.some((e: string) => e.endsWith('.json'));
     } catch { /* ignore */ }
     expect(found).toBe(true);
+  });
+
+  it('invalidates legacy HEAD-keyed caches from the previous scan policy', () => {
+    const dir = makeRepo({
+      'src/current.ts': 'export function current() {}\n',
+    });
+    const sha = execFileSync('git', ['-C', dir, 'rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
+    const repoHash = createHash('sha1').update(dir).digest('hex').slice(0, 8);
+    const legacyCache = join(homedir(), '.ashlr', 'repo-map', `${repoHash}-${sha}.json`);
+    tmpFiles.push(legacyCache);
+    mkdirSync(join(homedir(), '.ashlr', 'repo-map'), { recursive: true });
+    writeFileSync(legacyCache, JSON.stringify({
+      sha,
+      files: [{ path: '.claude/worktrees/stale.ts', symbols: [], refCount: 999 }],
+    }), 'utf8');
+
+    const paths = buildRepoMap(dir).files.map((f) => f.path);
+
+    expect(paths).toContain('src/current.ts');
+    expect(paths).not.toContain('.claude/worktrees/stale.ts');
+  });
+
+  it('bypasses HEAD caches while the working tree is dirty', () => {
+    const dir = makeRepo({
+      'src/current.ts': 'export function current() {}\n',
+    });
+    expect(buildRepoMap(dir).files.map((file) => file.path)).toEqual(['src/current.ts']);
+
+    const transient = join(dir, 'src', 'transient.ts');
+    writeFileSync(transient, 'export function transient() {}\n', 'utf8');
+    expect(buildRepoMap(dir).files.map((file) => file.path)).toContain('src/transient.ts');
+
+    rmSync(transient);
+    expect(buildRepoMap(dir).files.map((file) => file.path)).not.toContain('src/transient.ts');
   });
 });
 

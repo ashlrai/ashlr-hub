@@ -164,6 +164,7 @@ export type GeneratedRepairRouteReason =
   | 'editing-backend-unavailable'
   | 'same-tier-backend-unavailable'
   | 'same-tier-alternative-unavailable'
+  | 'inspection-unavailable'
   | 'route-capacity-unavailable';
 
 export interface GeneratedRepairRouteFeasibility {

@@ -81,6 +81,24 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseConfig(), foundry };
 }
 
+function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): AshlrConfig {
+  return withFoundry({
+    ...foundry,
+    allowedBackends: ['local-coder'],
+    engines: {
+      ...foundry.engines,
+      'local-coder': {
+        id: 'local-coder',
+        kind: 'cli-agent',
+        tier: 'mid',
+        bin: 'node',
+        bins: ['node'],
+        argv: ['$GOAL'],
+      },
+    },
+  });
+}
+
 async function withTemporaryEnv<T>(entries: Record<string, string>, fn: () => Promise<T>): Promise<T> {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(entries)) {
@@ -1442,7 +1460,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
-  it('projects ordinary and active generated work as dispatchable', async () => {
+  it('projects ordinary work while retaining route-blocked generated work as visible inventory', async () => {
     const repo = join(tmpHome, 'repo');
     const ordinary = makeBacklogItem(repo, 'repo:goal:ordinary', 'Ordinary work', 5);
     const active = makeTrustedProposalRepairItem(repo);
@@ -1460,15 +1478,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       disposition: 'active',
     });
 
+    writeRunningDaemon(tmpHome);
     const status = await buildFleetStatus(baseConfig());
     expect(status.queue).toMatchObject({
       backlogItems: 2,
-      eligibleBacklogItems: 2,
+      eligibleBacklogItems: 1,
       cooldownItems: 0,
       pendingItems: 0,
+      repairRouteBlockedItems: 1,
     });
     expect(status.queue.repairControlBlockedItems).toBeUndefined();
-    expect(status.queue.next?.map((item) => item.id)).toEqual(expect.arrayContaining([ordinary.id, active.id]));
+    expect(status.queue.next?.map((item) => item.id)).toEqual([ordinary.id]);
     expect(status.queue.generatedRepairRoutes).toEqual({
       scope: 'eligible-claim-candidates',
       authority: 'observation-only',
@@ -1478,6 +1498,45 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       requiresAlternativeItems: 0,
       byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
     });
+    const actionIds = status.nextActions?.map((action) => action.id) ?? [];
+    expect(actionIds.indexOf('build-backlog')).toBeGreaterThanOrEqual(0);
+    expect(actionIds.indexOf('build-backlog')).toBeLessThan(actionIds.indexOf('restore-repair-routes'));
+  });
+
+  it('withholds trusted repairs when proposal repair dispatch is disabled', async () => {
+    const repo = join(tmpHome, 'repo');
+    const repair = makeTrustedProposalRepairItem(repo);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [repair]);
+
+    const status = await buildFleetStatus(withRoutableMid({ proposalRepair: false }));
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 0,
+      repairControlBlockedItems: 1,
+    });
+    expect(status.queue.next).toBeUndefined();
+    expect(status.queue.repairRouteBlockedItems).toBeUndefined();
+  });
+
+  it('withholds trusted repairs in filesystem shared-queue mode', async () => {
+    const repo = join(tmpHome, 'repo');
+    const repair = makeTrustedProposalRepairItem(repo);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [repair]);
+    const cfg = withRoutableMid();
+    cfg.fleet = { sharedQueue: { mode: 'filesystem', path: join(tmpHome, 'shared-queue') } };
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 0,
+      repairControlBlockedItems: 1,
+    });
+    expect(status.queue.next).toBeUndefined();
+    expect(status.queue.repairRouteBlockedItems).toBeUndefined();
   });
 
   it('does not create lifecycle storage or a failure marker while building status', async () => {
@@ -1489,7 +1548,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const status = await buildFleetStatus(baseConfig());
 
-    expect(status.queue.eligibleBacklogItems).toBe(1);
+    expect(status.queue.eligibleBacklogItems).toBe(0);
+    expect(status.queue.repairRouteBlockedItems).toBe(1);
+    expect(status.queue.next).toBeUndefined();
     expect(status.queue.generatedRepairRoutes).toMatchObject({
       authority: 'observation-only',
       trustedItems: 1,
@@ -1500,7 +1561,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(existsSync(`${lifecyclePath}.failed`)).toBe(false);
   });
 
-  it('aggregates an active retry with no configured editing alternative without changing eligibility', async () => {
+  it('retains an active retry with no configured editing alternative without advertising it as eligible', async () => {
     const repo = join(tmpHome, 'repo');
     const retry = makeTrustedProposalRepairItem(repo, 'repo:proposal-repair:dddddddddddd');
     recordGeneratedRepairLifecycle(retry, {
@@ -1510,11 +1571,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       tier: 'mid',
     });
     writeBacklogSnapshot(tmpHome, repo, [retry]);
+    writeRunningDaemon(tmpHome);
 
-    const status = await buildFleetStatus(baseConfig());
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
 
-    expect(status.queue.eligibleBacklogItems).toBe(1);
-    expect(status.queue.next?.map((item) => item.id)).toEqual([retry.id]);
+    expect(status.queue.eligibleBacklogItems).toBe(0);
+    expect(status.queue.repairRouteBlockedItems).toBe(1);
+    expect(status.queue.next).toBeUndefined();
     expect(status.queue.generatedRepairRoutes).toEqual({
       scope: 'eligible-claim-candidates',
       authority: 'observation-only',
@@ -1523,6 +1588,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       unavailableItems: 1,
       requiresAlternativeItems: 1,
       byReason: [{ reason: 'editing-backend-unavailable', count: 1 }],
+    });
+    expect(status.autonomyEffectiveness).toMatchObject({
+      phase: 'route-gated',
+      bottleneck: 'routing',
+      counts: { repairRouteBlockedItems: 1 },
+    });
+    expect(status.nextActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'restore-repair-routes' }),
+    ]));
+    expect(status.autonomousShipReadiness?.topBlocker).toMatchObject({
+      id: 'repair-route-unavailable',
+      source: 'queue',
     });
   });
 
@@ -2319,7 +2396,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     ]);
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(withRoutableMid());
 
     expect(s.dispatchProductionSource).toMatchObject({
       sourceState: 'healthy',
@@ -3578,7 +3655,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     ]);
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(withRoutableMid());
     const actionIds = s.nextActions?.map((candidate) => candidate.id) ?? [];
     const repairAction = s.nextActions?.find((candidate) => candidate.id === 'process-capture-repairs');
     const yieldAction = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
@@ -3695,7 +3772,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ...generatedRepairEvents,
     ]);
 
-    const s = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true, trustBasis: 'verification' } }));
+    const s = await buildFleetStatus(withRoutableMid({ autoMerge: { enabled: true, trustBasis: 'verification' } }));
     const actionIds = s.nextActions?.map((action) => action.id) ?? [];
 
     expect(s.dispatchYieldDiagnostics).toMatchObject({
@@ -3826,7 +3903,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
     recordOutcome(generatedRepairCooldownKey(repair), 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(withRoutableMid());
 
     expect(s.dispatchYieldDiagnostics).toMatchObject({
       verdict: 'actionable',
@@ -3857,7 +3934,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
     recordOutcome(generatedRepairCooldownKey(repair), 'dispatch-blocked', new Date(Date.now() - 6 * 60 * 1000).toISOString());
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(withRoutableMid());
 
     expect(s.queue.cooldownItems).toBe(0);
     expect(s.queue.eligibleBacklogItems).toBe(2);
@@ -3931,7 +4008,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { ...baseEvent, itemId: 'item-reslice-c' },
     ]);
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(withRoutableMid());
     const actionIds = s.nextActions?.map((action) => action.id) ?? [];
     const drainAction = s.nextActions?.find((candidate) => candidate.id === 'drain-diagnostic-reslices');
 
@@ -4003,7 +4080,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         },
       },
     ], now);
-    const stalledStatus = await buildFleetStatus(baseConfig());
+    const stalledStatus = await buildFleetStatus(withRoutableMid());
     const stalledDrainAction = stalledStatus.nextActions?.find((candidate) => candidate.id === 'drain-diagnostic-reslices');
     expect(stalledStatus.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
@@ -4093,7 +4170,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       }),
       'utf8',
     );
-    const cfg = withFoundry({
+    const cfg = withRoutableMid({
       autoMerge: {
         enabled: true,
         trustBasis: 'verification',

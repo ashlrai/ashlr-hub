@@ -11,11 +11,11 @@
  *  - Never throws: every public entry point returns a safe default on any error.
  *  - Flag-gated: only reached when cfg.foundry?.repoMap === true (default OFF).
  *  - Reuses the IGNORE_DIRS / isIgnoredPath predicate from M136 scanners.
- *  - Cache: keyed on git HEAD sha under ~/.ashlr/repo-map/<sha>.json; stale
- *    entries are silently discarded and rebuilt.
+ *  - Cache: keyed on repository, git HEAD sha, and scan-policy version under
+ *    ~/.ashlr/repo-map; stale entries are silently discarded and rebuilt.
  */
 
-import { readdirSync, readFileSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, lstatSync } from 'node:fs';
 import { join, relative, extname, basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -28,7 +28,8 @@ import { execFileSync } from 'node:child_process';
 /** Mirror of IGNORE_DIRS from scanners.ts — kept local to avoid a circular dep. */
 const IGNORE_DIRS: ReadonlySet<string> = new Set([
   'node_modules', 'dist', 'build', 'out', 'coverage', '.next', 'target',
-  '.vscode', '.git', 'vendor', '.turbo', 'bench', 'benchmark', 'benchmarks',
+  '.vscode', '.git', '.claude', '.codex', '.agents', '.worktrees', '.ashlr',
+  'vendor', '.turbo', 'bench', 'benchmark', 'benchmarks',
   'refs', 'third_party', 'third-party', 'vendors', 'examples', 'fixtures',
   '__pycache__', '.venv', 'site-packages', 'migrations', 'pandas',
 ]);
@@ -208,13 +209,21 @@ export interface RepoMapOptions {
 // Cache
 // ---------------------------------------------------------------------------
 
+/** Bump whenever scanning policy changes so old HEAD-keyed maps are not reused. */
+const CACHE_POLICY_VERSION = 2;
+
+interface RepoMapCache {
+  policyVersion: number;
+  map: RepoMap;
+}
+
 function cacheDir(): string {
   return join(homedir(), '.ashlr', 'repo-map');
 }
 
 function cacheKey(repoDir: string, sha: string): string {
   const repoHash = createHash('sha1').update(repoDir).digest('hex').slice(0, 8);
-  return join(cacheDir(), `${repoHash}-${sha}.json`);
+  return join(cacheDir(), `${repoHash}-${sha}-p${CACHE_POLICY_VERSION}.json`);
 }
 
 function loadCache(repoDir: string, sha: string): RepoMap | null {
@@ -222,8 +231,10 @@ function loadCache(repoDir: string, sha: string): RepoMap | null {
   try {
     const p = cacheKey(repoDir, sha);
     const raw = readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw) as RepoMap;
-    if (parsed.sha === sha) return parsed;
+    const parsed = JSON.parse(raw) as RepoMapCache;
+    if (parsed.policyVersion === CACHE_POLICY_VERSION && parsed.map?.sha === sha) {
+      return parsed.map;
+    }
   } catch {
     // cache miss or corrupt — rebuild
   }
@@ -235,7 +246,8 @@ function saveCache(repoDir: string, map: RepoMap): void {
   try {
     mkdirSync(cacheDir(), { recursive: true });
     const p = cacheKey(repoDir, map.sha);
-    writeFileSync(p, JSON.stringify(map), 'utf8');
+    const cache: RepoMapCache = { policyVersion: CACHE_POLICY_VERSION, map };
+    writeFileSync(p, JSON.stringify(cache), 'utf8');
   } catch {
     // cache save is best-effort
   }
@@ -254,6 +266,18 @@ function getHeadSha(repoDir: string): string {
     }).trim();
   } catch {
     return '';
+  }
+}
+
+function isWorktreeClean(repoDir: string): boolean {
+  try {
+    return execFileSync(
+      'git',
+      ['-C', repoDir, 'status', '--porcelain=v1', '--untracked-files=all'],
+      { encoding: 'utf8', stdio: 'pipe', timeout: 5_000 },
+    ).trim().length === 0;
+  } catch {
+    return false;
   }
 }
 
@@ -276,7 +300,8 @@ function walkSources(dir: string, repoDir: string, out: string[], depth = 0): vo
     let isDir = false;
     let isFile = false;
     try {
-      const st = statSync(abs);
+      const st = lstatSync(abs);
+      if (st.isSymbolicLink()) continue;
       isDir = st.isDirectory();
       isFile = st.isFile();
     } catch {
@@ -305,10 +330,14 @@ export function buildRepoMap(repoDir: string, opts?: RepoMapOptions): RepoMap {
 
   try {
     const sha = getHeadSha(repoDir);
+    const cacheable = sha.length > 0 && isWorktreeClean(repoDir);
 
-    // Cache hit
-    const cached = loadCache(repoDir, sha);
-    if (cached) return cached;
+    // Dirty trees are always rebuilt so uncommitted source cannot survive in a
+    // cache keyed only by HEAD. Clean trees remain stable and cacheable.
+    if (cacheable) {
+      const cached = loadCache(repoDir, sha);
+      if (cached) return cached;
+    }
 
     // Walk first-party sources
     const absFiles: string[] = [];
@@ -399,7 +428,7 @@ export function buildRepoMap(repoDir: string, opts?: RepoMapOptions): RepoMap {
     const capped = entries.slice(0, maxFiles);
 
     const map: RepoMap = { sha, files: capped };
-    saveCache(repoDir, map);
+    if (cacheable) saveCache(repoDir, map);
     return map;
   } catch {
     return { sha: '', files: [] };

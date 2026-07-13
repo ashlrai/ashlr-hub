@@ -42,9 +42,11 @@ import {
 } from '../autonomy/attempt-records.js';
 import {
   readGeneratedRepairQueueSnapshot,
+  type GeneratedRepairDispatchState,
 } from './generated-repair-lifecycle.js';
 import {
   inspectGeneratedRepairRouteFeasibility,
+  type GeneratedRepairRouteFeasibility,
   type GeneratedRepairRouteReason,
 } from './router.js';
 import {
@@ -336,6 +338,7 @@ export type FleetAutonomyEffectivenessPhase =
   | 'verification-needed'
   | 'merge-blocked'
   | 'proposal-starved'
+  | 'route-gated'
   | 'cooldown-gated'
   | 'idle';
 
@@ -349,6 +352,7 @@ export interface FleetAutonomyEffectivenessStatus {
     | 'verification'
     | 'merge-gate'
     | 'proposal-production'
+    | 'routing'
     | 'cooldown'
     | 'none';
   summary: string;
@@ -357,6 +361,7 @@ export interface FleetAutonomyEffectivenessStatus {
     eligibleBacklogItems?: number;
     cooldownItems?: number;
     pendingItems?: number;
+    repairRouteBlockedItems?: number;
     nextEligibleAt?: string | null;
     pendingProposals: number;
     frontierPending: number;
@@ -999,6 +1004,7 @@ export interface FleetStatus {
     eligibleBacklogItems?: number;
     cooldownItems?: number;
     pendingItems?: number;
+    repairRouteBlockedItems?: number;
     repairControlBlockedItems?: number;
     repairLifecycleUnavailableItems?: number;
     repairTerminalItems?: number;
@@ -1191,6 +1197,7 @@ interface FleetQueueEligibility {
   eligibleItems: WorkItem[];
   cooldownItems: number;
   pendingItems: number;
+  repairRouteBlockedItems: number;
   repairControlBlockedItems: number;
   repairLifecycleUnavailableItems: number;
   repairTerminalItems: number;
@@ -1218,13 +1225,20 @@ function buildQueueEligibility(
   const nowMs = Date.now();
   const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
   const workedEvents = selectWorkQueueCoordinator(cfg).readWorkedEvents();
-  const repairQueue = readGeneratedRepairQueueSnapshot();
+  const repairQueue = (() => {
+    try {
+      return readGeneratedRepairQueueSnapshot();
+    } catch {
+      return null;
+    }
+  })();
 
   const blockingPendingProposals = blockingPendingProposalsForBacklog(pendingProposals, cfg);
   const pendingItemKeys = pendingProposalItemKeysForBacklog(items, blockingPendingProposals);
   const eligibleItems: WorkItem[] = [];
   let cooldownItems = 0;
   let pendingItems = 0;
+  let repairRouteBlockedItems = 0;
   let repairControlBlockedItems = 0;
   let repairLifecycleUnavailableItems = 0;
   let repairTerminalItems = 0;
@@ -1233,14 +1247,31 @@ function buildQueueEligibility(
   let feasibleRouteItems = 0;
   let requiresAlternativeItems = 0;
   const routeReasons = new Map<GeneratedRepairRouteReason, number>();
+  const recordInspectionUnavailable = (): void => {
+    trustedRouteItems++;
+    repairRouteBlockedItems++;
+    routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+  };
   let nextEligibleMs: number | null = null;
   for (const item of items) {
     if (!repairControlAvailable && item.tags.includes('proposal-repair')) {
       repairControlBlockedItems++;
       continue;
     }
-    const repairDispatch = repairQueue.dispatchState(item);
-    if (repairDispatch.applies && !repairDispatch.dispatchable) {
+    let repairDispatch: GeneratedRepairDispatchState | undefined;
+    try {
+      repairDispatch = repairQueue?.dispatchState(item);
+    } catch {
+      if (isTrustedGeneratedRepairItem(item)) {
+        recordInspectionUnavailable();
+        continue;
+      }
+      if (item.tags.includes('proposal-repair')) {
+        repairControlBlockedItems++;
+        continue;
+      }
+    }
+    if (repairDispatch?.applies && !repairDispatch.dispatchable) {
       repairControlBlockedItems++;
       if (repairDispatch.state === 'lifecycle-unavailable') {
         repairLifecycleUnavailableItems++;
@@ -1254,7 +1285,21 @@ function buildQueueEligibility(
       pendingItems++;
       continue;
     }
-    const lastEvent = latestWorkedEventForKeys(workedEvents, repairQueue.cooldownKeys(item));
+    let cooldownKeys: string[];
+    try {
+      cooldownKeys = repairQueue?.cooldownKeys(item) ?? [item.id];
+    } catch {
+      if (isTrustedGeneratedRepairItem(item)) {
+        recordInspectionUnavailable();
+        continue;
+      }
+      if (item.tags.includes('proposal-repair')) {
+        repairControlBlockedItems++;
+        continue;
+      }
+      cooldownKeys = [item.id];
+    }
+    const lastEvent = latestWorkedEventForKeys(workedEvents, cooldownKeys);
     const lastMs = lastEvent ? Date.parse(lastEvent.ts) : Number.NaN;
     const last = lastEvent && Number.isFinite(lastMs)
       ? { event: lastEvent, tsMs: lastMs, suppressible: isSuppressibleWorkedOutcome(lastEvent.outcome) }
@@ -1270,11 +1315,27 @@ function buildQueueEligibility(
     }
     if (isTrustedGeneratedRepairItem(item)) {
       trustedRouteItems++;
-      const policy = repairQueue.retryPolicy(item);
-      const route = inspectGeneratedRepairRouteFeasibility(item, cfg, policy);
+      if (repairQueue === null) {
+        repairRouteBlockedItems++;
+        routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+        continue;
+      }
+      let route: GeneratedRepairRouteFeasibility;
+      try {
+        const policy = repairQueue.retryPolicy(item);
+        route = inspectGeneratedRepairRouteFeasibility(item, cfg, policy);
+      } catch {
+        repairRouteBlockedItems++;
+        routeReasons.set('inspection-unavailable', (routeReasons.get('inspection-unavailable') ?? 0) + 1);
+        continue;
+      }
       if (route.feasible) feasibleRouteItems++;
       if (route.requiresAlternative) requiresAlternativeItems++;
       routeReasons.set(route.reason, (routeReasons.get(route.reason) ?? 0) + 1);
+      if (!route.feasible) {
+        repairRouteBlockedItems++;
+        continue;
+      }
     }
     eligibleItems.push(item);
   }
@@ -1283,6 +1344,7 @@ function buildQueueEligibility(
     eligibleItems,
     cooldownItems,
     pendingItems,
+    repairRouteBlockedItems,
     repairControlBlockedItems,
     repairLifecycleUnavailableItems,
     repairTerminalItems,
@@ -1477,6 +1539,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let eligibleBacklogItems = 0;
   let cooldownItems = 0;
   let pendingItems = 0;
+  let repairRouteBlockedItems = 0;
   let repairControlBlockedItems = 0;
   let repairLifecycleUnavailableItems = 0;
   let repairTerminalItems = 0;
@@ -1675,11 +1738,15 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       visibleQueueItems,
       pendingProposals,
       cfg,
-      repairHandoffSummary !== undefined && repairHandoffSummary.sourceState !== 'degraded',
+      repairHandoffSummary !== undefined &&
+        repairHandoffSummary.sourceState !== 'degraded' &&
+        (cfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
+        cfg.fleet?.sharedQueue?.mode !== 'filesystem',
     );
     eligibleBacklogItems = eligibility.eligibleItems.length;
     cooldownItems = eligibility.cooldownItems;
     pendingItems = eligibility.pendingItems;
+    repairRouteBlockedItems = eligibility.repairRouteBlockedItems;
     repairControlBlockedItems = eligibility.repairControlBlockedItems;
     repairLifecycleUnavailableItems = eligibility.repairLifecycleUnavailableItems;
     repairTerminalItems = eligibility.repairTerminalItems;
@@ -1898,6 +1965,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       eligibleBacklogItems,
       cooldownItems,
       pendingItems,
+      ...(repairRouteBlockedItems > 0 ? { repairRouteBlockedItems } : {}),
       ...(repairControlBlockedItems > 0 ? { repairControlBlockedItems } : {}),
       ...(repairLifecycleUnavailableItems > 0 ? { repairLifecycleUnavailableItems } : {}),
       ...(repairTerminalItems > 0 ? { repairTerminalItems } : {}),
@@ -3212,6 +3280,7 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     eligibleBacklogItems,
     cooldownItems: status.queue.cooldownItems ?? 0,
     pendingItems: status.queue.pendingItems ?? 0,
+    repairRouteBlockedItems: status.queue.repairRouteBlockedItems ?? 0,
     nextEligibleAt: status.queue.nextEligibleAt ?? null,
     pendingProposals: status.proposals.pending,
     frontierPending: status.proposals.frontierPending,
@@ -3308,6 +3377,17 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     };
   }
   if (counts.pendingProposals === 0 && counts.backlogItems > 0 && eligibleBacklogItems === 0) {
+    if ((counts.repairRouteBlockedItems ?? 0) > 0) {
+      return {
+        phase: 'route-gated',
+        canAutoMergeNow: false,
+        bottleneck: 'routing',
+        summary:
+          `No claimable backlog work is visible; ${counts.repairRouteBlockedItems} generated repair item(s) ` +
+          `lack an authorized route and remain queued for reevaluation.`,
+        counts,
+      };
+    }
     const nextEligible = counts.nextEligibleAt ? ` Next eligible at ${counts.nextEligibleAt}.` : '';
     return {
       phase: 'cooldown-gated',
@@ -3590,7 +3670,27 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     });
   }
 
+  const routeBlockedItems = status.queue.repairRouteBlockedItems ?? 0;
+  const addRestoreRepairRoutes = (): void => {
+    if (routeBlockedItems === 0 || controlBlocked) return;
+    const topReason = status.queue.generatedRepairRoutes?.byReason.find((entry) => entry.reason !== 'feasible');
+    add({
+      id: 'restore-repair-routes',
+      priority: 'medium',
+      label: 'Restore repair routes',
+      detail:
+        `${routeBlockedItems} generated repair item(s) remain queued but cannot be claimed` +
+        `${topReason ? `; top reason: ${topReason.reason} (${topReason.count})` : ''}.`,
+      commands: [
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        nextActionCommand('Inspect resources', ['ashlr', 'resources', '--json'], 'read-only'),
+        nextActionCommand('Inspect direction', ['ashlr', 'fleet', 'direction', '--json'], 'read-only'),
+      ],
+    });
+  };
+
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
+  if (eligibleBacklogItems === 0) addRestoreRepairRoutes();
   if (eligibleBacklogItems > 0 && !controlBlocked) {
     const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
     if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
@@ -3654,6 +3754,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         }),
       ],
     });
+    addRestoreRepairRoutes();
   } else if (status.queue.backlogItems > 0 && !controlBlocked) {
     const cooling = status.queue.cooldownItems ?? 0;
     const pending = status.queue.pendingItems ?? 0;
@@ -4552,6 +4653,18 @@ function chooseReadinessBlocker(
   }
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (status.queue.backlogItems > 0 && eligibleBacklogItems === 0 && status.proposals.pending === 0) {
+    const routeBlocked = status.queue.repairRouteBlockedItems ?? 0;
+    if (routeBlocked > 0) {
+      const topReason = status.queue.generatedRepairRoutes?.byReason.find((entry) => entry.reason !== 'feasible');
+      return readinessBlocker(
+        'repair-route-unavailable',
+        'Repair routes unavailable',
+        `${routeBlocked} generated repair item(s) remain queued but cannot be claimed` +
+          `${topReason ? `; top reason: ${topReason.reason} (${topReason.count})` : ''}.`,
+        'medium',
+        'queue',
+      );
+    }
     const repairBlocked = status.queue.repairControlBlockedItems ?? 0;
     if (repairBlocked > 0) {
       const unavailable = status.queue.repairLifecycleUnavailableItems ?? 0;
