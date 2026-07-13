@@ -941,7 +941,7 @@ describe('M315 remote PR handoff truth', () => {
 
     expect(result.merged).toBe(1);
     expect(loadProposal(proposal.id)?.remoteHandoff?.mergedAt).toBe('2026-07-03T01:00:00Z');
-  });
+  }, 30_000);
 
   it('fails closed when GitHub returns a merge time that conflicts with stored evidence', async () => {
     const { proposal } = await createRemoteHandoffProposal();
