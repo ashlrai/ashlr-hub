@@ -2073,7 +2073,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Reuse the reader for swarm history so malformed early directory entries cannot hide valid recent records.
 - [x] Share one short-lived bounded run/swarm projection across all SSE clients while preserving REST array compatibility.
 - [x] Pass focused integrity/cancellation/API tests, exact exhaustive verification, static/build/dependency gates, and a real-store latency benchmark.
-- [ ] Commit, push, observe exhaustive cross-platform CI, and stage exact source without interrupting the active production tick.
+- [x] Commit, push, observe exhaustive cross-platform CI, and stage exact source without interrupting the active production tick.
 
 ## Next P1 - Persistence Write Linearizability
 - [ ] Add per-ID revision/CAS fencing so concurrent same-ID saves cannot roll completed state backward.
