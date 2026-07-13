@@ -1995,6 +1995,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Correct the live evidence policy mismatch by setting `allowSelfMerge:false`.
 - [x] Reload Mission Control and the daemon only at a clear guard/zero-child boundary; preserve HTTP health.
 - [x] Let the post-reload child finish naturally, then reload the reverted backend allowlist without interrupting work.
-- [ ] Commit, push, observe CI, deploy exact green source, then re-enable Grok with per-engine OS confinement and network egress.
+- [x] Commit, push, and observe exhaustive Ubuntu/package plus all Windows portability CI.
+- [ ] Deploy exact green source, then re-enable Grok with per-engine OS confinement and network egress.
 - [ ] Observe the first Grok repair attempt and compare durable proposal conversion against the prior local-coder cohort.
 - [ ] Restore canonical Desktop access and deploy the exact green release build.
