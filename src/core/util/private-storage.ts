@@ -73,7 +73,8 @@ try {
   if (-not $reachedAnchor) { Finish $false 'anchor-not-reached' }
   $stage = 'read-owner'
   $itemAcl = $item.GetAccessControl()
-  if ($itemAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { Finish $false 'wrong-owner' }
+  if ($request.mode -ne 'secure-created' -and
+    $itemAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current.Value) { Finish $false 'wrong-owner' }
   if ($request.mode -eq 'inspect-owned') {
     $itemRules = @($itemAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($itemRule in $itemRules) {
