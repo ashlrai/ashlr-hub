@@ -2042,3 +2042,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add adversarial Unix/Windows, repeated-stop, late-completion, no-proposal, provider-fallback, and no-signal regressions; use invocation-local process-group authority rather than persisted PID signaling.
 - [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent review gates.
 - [ ] Commit, push, observe CI, stage exact source, and activate only at a natural process-backed boundary.
+
+## Current Overnight Cycle - Run And Swarm Persistence Integrity
+- [x] Rehydrate the exact production split, durable notes, clean release mirror, CI baseline, and active daemon boundary without interrupting work.
+- [x] Harden run and swarm structural validation, embedded-id binding, atomic replacement, randomized temporary cleanup, and cancellation compatibility.
+- [x] Make state private at rest and migrate historical regular records to owner-only directory/file modes during successful reads.
+- [x] Close case-insensitive direct-load/list disagreement and concurrent case-variant collisions with atomic persistent ownership claims.
+- [x] Reject linked state roots, linked store directories, junctions, reparse paths, record symlinks, and non-regular persistence entries.
+- [x] Pass focused cancellation/integrity/concurrency tests, exact exhaustive verification, full static/build/dependency gates, and repeated adversarial review.
+- [x] Commit, push, pass exhaustive Ubuntu/package plus all Windows CI, and stage a clean no-hardlinks immutable exact-SHA release.
+- [x] Promote Mission Control only and prove three exact-identity, guard-clear, owner-matched HTTP canaries without changing the daemon or `current`.
+- [ ] Activate the exact daemon and atomically advance `current` only at a stable natural boundary with no tick, descendants, or spend guard.
