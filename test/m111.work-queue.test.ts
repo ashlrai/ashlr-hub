@@ -17,7 +17,7 @@
  *  7. selectWorkQueueCoordinator — returns Local (off / absent) vs Shared (filesystem+path).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -55,7 +55,13 @@ function makeStore(dir: string, leaseMs = 10_000): SharedStore {
 }
 
 function makeSharedCoordinator(store: SharedStore, machineId: string, leaseMs = 10_000): SharedWorkQueueCoordinator {
-  return new SharedWorkQueueCoordinator(store, machineId, leaseMs);
+  return new SharedWorkQueueCoordinator(store, machineId, leaseMs, true);
+}
+
+function makeUnusableStorePath(): string {
+  const blocker = path.join(tmpDir, 'blocker-file');
+  fs.writeFileSync(blocker, 'not a directory');
+  return path.join(blocker, 'ashlr-fleet', 'shared');
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -220,14 +227,12 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
   });
 
   it('renew extends an active claim owned by the same machine', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(100_000);
     const store = makeStore(tmpDir, 10_000);
     const coord = makeSharedCoordinator(store, 'machine-A', 10_000);
     coord.claimItems([makeItem('renew-owned')], 1, 'machine-A');
 
-    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
-    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
-    snap.claims['renew-owned']!.leaseUntil = Date.now() + 100;
-    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+    now.mockReturnValue(100_100);
 
     expect(coord.renew(['renew-owned'], 'machine-A')).toEqual(['renew-owned']);
     const renewed = store.readSnapshot().claims['renew-owned'];
@@ -248,36 +253,32 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(after.leaseUntil).toBe(before);
   });
 
-  it('renew extends a late same-machine claim before another machine reclaims it', () => {
+  it('renew refuses an expired same-machine claim before another machine reclaims it', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(200_000);
     const store = makeStore(tmpDir, 10_000);
     const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
     const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
     const item = makeItem('renew-late');
     coordA.claimItems([item], 1, 'machine-A');
 
-    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
-    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
-    snap.claims['renew-late']!.leaseUntil = Date.now() - 100;
-    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+    now.mockReturnValue(210_000);
 
-    expect(coordA.renew(['renew-late'], 'machine-A')).toEqual(['renew-late']);
-    expect(coordB.claimItems([item], 1, 'machine-B')).toEqual([]);
-    const renewed = store.readSnapshot().claims['renew-late']!;
-    expect(renewed.machineId).toBe('machine-A');
-    expect(renewed.leaseUntil).toBeGreaterThan(Date.now() + 5_000);
+    expect(coordA.renew(['renew-late'], 'machine-A')).toEqual([]);
+    expect(coordB.claimItems([item], 1, 'machine-B').map((claimed) => claimed.id))
+      .toEqual(['renew-late']);
+    const reclaimed = store.readSnapshot().claims['renew-late']!;
+    expect(reclaimed.machineId).toBe('machine-B');
   });
 
   it('renew cannot steal back a claim after another machine reclaims it', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(300_000);
     const store = makeStore(tmpDir, 10_000);
     const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
     const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
     const item = makeItem('renew-reclaimed');
     coordA.claimItems([item], 1, 'machine-A');
 
-    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
-    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
-    snap.claims['renew-reclaimed']!.leaseUntil = Date.now() - 100;
-    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+    now.mockReturnValue(310_000);
 
     expect(coordB.claimItems([item], 1, 'machine-B').map((i) => i.id)).toEqual(['renew-reclaimed']);
     expect(coordA.renew(['renew-reclaimed'], 'machine-A')).toEqual([]);
@@ -292,6 +293,28 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     const snap = store.readSnapshot();
     expect(snap.claims['out1']).toBeUndefined(); // claim released
     expect(snap.worked.some(e => e.itemId === 'out1' && e.outcome === 'diff')).toBe(true);
+  });
+
+  it('binds completion to the claim-time cooldown identity', () => {
+    const store = makeStore(tmpDir);
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const item = makeItem('frozen-completion-key');
+    const policies = new Map([[
+      item.id,
+      { itemIds: ['frozen-completion-key::generation:g1'], cooldownMs: 60_000 },
+    ]]);
+
+    expect(coord.claimItemsByLane([{ candidates: [item], limit: 1 }], 1, 'machine-A', policies))
+      .toEqual([item]);
+    expect(coord.beginExecution(item.id, 'machine-A')).toBe(true);
+    expect(coord.recordClaimOutcome(item.id, 'wrong-recomputed-key', 'diff', 'machine-A')).toBe(true);
+
+    expect(store.readSnapshot().worked).toEqual([
+      expect.objectContaining({
+        itemId: 'frozen-completion-key::generation:g1',
+        outcome: 'diff',
+      }),
+    ]);
   });
 
   it('shouldSkip returns true within cooldown after "empty"', () => {
@@ -326,7 +349,7 @@ describe('M111 SharedStore health snapshot', () => {
     expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(false);
   });
 
-  it('summarizes active, owned, expired, cooldown, usage, and lock state', () => {
+  it('summarizes active, legacy-ambiguous, cooldown, usage, and lock state', () => {
     const now = 2_000_000;
     const store = makeStore(tmpDir, 10_000);
     expect(store.claimItems(['owned-1', 'owned-2'], 2, 'machine-A')).toEqual(['owned-1', 'owned-2']);
@@ -339,30 +362,40 @@ describe('M111 SharedStore health snapshot', () => {
       claims: Record<string, { machineId: string; leaseUntil: number }>;
       worked: Array<{ itemId: string; outcome: string; ts: string }>;
       usage: unknown[];
+      schemaVersion?: number;
+      queueId?: string;
+      nextClaimEpoch?: number;
     };
+    snap.claims['owned-1']!.machineId = 'machine-A';
+    snap.claims['owned-2']!.machineId = 'machine-A';
+    snap.claims['other-1']!.machineId = 'machine-B';
     snap.claims['owned-1']!.leaseUntil = now + 1_000;
     snap.claims['owned-2']!.leaseUntil = now - 2_000;
     snap.claims['other-1']!.leaseUntil = now + 5_000;
     snap.worked = [{ itemId: 'cooling-item', outcome: 'empty', ts: new Date(now - 100).toISOString() }];
+    delete snap.schemaVersion;
+    delete snap.queueId;
+    delete snap.nextClaimEpoch;
     fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
 
     const lockPath = path.join(tmpDir, 'ashlr-fleet-queue.json.lock');
     fs.writeFileSync(lockPath, '');
-    fs.utimesSync(lockPath, new Date(now - 30_000), new Date(now - 30_000));
+    fs.utimesSync(lockPath, new Date(now - 60_000), new Date(now - 60_000));
 
     const health = store.readHealth({ machineId: 'machine-A', cooldownMs: 1_000, now });
 
     expect(health.readable).toBe(true);
     expect(health.activeClaims).toBe(2);
     expect(health.ownedClaims).toBe(1);
-    expect(health.expiredClaims).toBe(1);
-    expect(health.reclaimableClaims).toBe(1);
+    expect(health.expiredClaims).toBe(0);
+    expect(health.reclaimableClaims).toBe(0);
+    expect(health.ambiguousClaims).toBe(1);
     expect(health.nextLeaseExpiryAt).toBe(new Date(now + 1_000).toISOString());
-    expect(health.oldestExpiredMs).toBe(2_000);
+    expect(health.oldestExpiredMs).toBeNull();
     expect(health.cooldownItems).toBe(1);
     expect(health.usageEntries).toBe(1);
     expect(health.claimsByMachine).toEqual([
-      { machineId: 'machine-A', active: 1, expired: 1 },
+      { machineId: 'machine-A', active: 1, expired: 0, ambiguous: 1 },
       { machineId: 'machine-B', active: 1, expired: 0 },
     ]);
     expect(health.claimSamples).toEqual([
@@ -384,11 +417,17 @@ describe('M111 SharedStore health snapshot', () => {
         itemId: 'owned-2',
         machineId: 'machine-A',
         leaseUntil: new Date(now - 2_000).toISOString(),
-        state: 'reclaimable',
+        state: 'ambiguous',
         owned: true,
       },
     ]);
-    expect(health.lock).toEqual({ present: true, ageMs: 30_000, stale: true });
+    expect(health.lock).toEqual({
+      present: true,
+      ageMs: 60_000,
+      stale: true,
+      links: 1,
+      recoveryRequired: false,
+    });
   });
 
   it('marks corrupt queue files unreadable and keeps the health method never-throwing', () => {
@@ -473,18 +512,14 @@ describe('M111 SharedWorkQueueCoordinator — two machines, no double-claim', ()
 
 describe('M111 SharedStore — expired lease reclaimable', () => {
   it('machine B can reclaim an item whose lease has expired', () => {
-    // Use a very short leaseMs so we can backdate the leaseUntil.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(400_000);
     const store = makeStore(tmpDir, 1); // 1 ms lease
     const coordA = makeSharedCoordinator(store, 'machine-A', 1);
 
     const item = makeItem('failover-item');
     coordA.claimItems([item], 1, 'machine-A');
 
-    // Manually expire the lease by backdating it in the queue file.
-    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
-    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
-    snap.claims['failover-item']!.leaseUntil = Date.now() - 10_000; // 10s in the past
-    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+    now.mockReturnValue(400_001);
 
     // Machine B can now reclaim it.
     const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
@@ -526,7 +561,7 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
     expect(coordB.shouldSkip('global-judged-noise', 6 * 60 * 60 * 1000)).toBe(true);
   });
 
-  it('claimItems trusts the caller cooldown filter and only coordinates leases', () => {
+  it('claimItems rechecks a safe default cooldown when the caller omits policy', () => {
     const store = makeStore(tmpDir);
     const coordA = makeSharedCoordinator(store, 'machine-A');
     const coordB = makeSharedCoordinator(store, 'machine-B');
@@ -537,7 +572,7 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
 
     const claimed = coordB.claimItems([declined, fresh], 2, 'machine-B');
 
-    expect(claimed.map((item) => item.id)).toEqual(['global-judged-decline', 'global-fresh']);
+    expect(claimed.map((item) => item.id)).toEqual(['global-fresh']);
     expect(coordB.readWorkedEvents()).toEqual(store.readSnapshot().worked);
   });
 
@@ -595,35 +630,34 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
 
 describe('M111 SharedStore — degraded / unwritable path', () => {
   it('claimItems returns [] when dir does not exist and cannot be created', () => {
-    // Use a path whose parent doesn't exist and can't be created.
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
-    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    const store = new SharedStore(makeUnusableStorePath());
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
     expect(() => coord.claimItems([makeItem('x')], 1, 'machine-X')).not.toThrow();
     expect(coord.claimItems([makeItem('x')], 1, 'machine-X')).toEqual([]);
   });
 
   it('release never throws on bad path', () => {
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
-    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    const store = new SharedStore(makeUnusableStorePath());
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
     expect(() => coord.release(['a', 'b'], 'machine-X')).not.toThrow();
   });
 
   it('recordOutcome never throws on bad path', () => {
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
-    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    const store = new SharedStore(makeUnusableStorePath());
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
     expect(coord.recordOutcome('x', 'empty', 'machine-X')).toBe(false);
   });
 
   it('renew returns [] and never throws on bad path', () => {
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
-    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    const store = new SharedStore(makeUnusableStorePath());
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
     expect(() => coord.renew(['x'], 'machine-X')).not.toThrow();
     expect(coord.renew(['x'], 'machine-X')).toEqual([]);
   });
 
   it('shouldSkip returns false (fail-open) on bad path', () => {
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
-    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    const store = new SharedStore(makeUnusableStorePath());
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
     expect(coord.shouldSkip('any', 1000)).toBe(false);
   });
 
@@ -680,9 +714,24 @@ describe('M111 selectWorkQueueCoordinator', () => {
     expect(coord).toBeInstanceOf(LocalWorkQueueCoordinator);
   });
 
-  it('returns SharedWorkQueueCoordinator when mode is "filesystem" and path is set', () => {
+  it('returns a fail-closed shared coordinator without coherent-storage attestation', () => {
     const coord = selectWorkQueueCoordinator(baseCfg({ fleet: { sharedQueue: { mode: 'filesystem', path: tmpDir } } }));
     expect(coord).toBeInstanceOf(SharedWorkQueueCoordinator);
+    expect(coord.claimItems([makeItem('unattested')], 1, 'machine-A')).toEqual([]);
+  });
+
+  it('enables shared authority only with explicit coherent-storage attestation', () => {
+    const coord = selectWorkQueueCoordinator(baseCfg({
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: tmpDir,
+          trustedCoherentStorage: true,
+        },
+      },
+    }));
+    expect(coord).toBeInstanceOf(SharedWorkQueueCoordinator);
+    expect(coord.claimItems([makeItem('attested')], 1, 'machine-A')).toHaveLength(1);
   });
 
   it('Local coordinator still works correctly after selection (regression)', () => {

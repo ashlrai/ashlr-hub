@@ -40,9 +40,10 @@ describe('M30 CI workflow', () => {
     expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
   });
 
-  it('runs Ubuntu exhaustively and Windows as three fixed portability partitions', () => {
+  it('runs Ubuntu exhaustively with fixed Windows and macOS portability partitions', () => {
     expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
     expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(3);
+    expect(ciYml.match(/os:\s*macos-latest/g)).toHaveLength(1);
     for (const partition of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
@@ -57,6 +58,8 @@ describe('M30 CI workflow', () => {
       'test/m21.worktree.test.ts',
       'test/m23.apply.test.ts',
       'test/m43.verify-commands.test.ts',
+      'test/m111.work-queue.test.ts',
+      'test/m113.coordinator-wire.test.ts',
       'test/m100.web-open.test.ts',
       'test/m119.quality-metrics.test.ts',
       'test/m220.anticlog-verdict-feedback.test.ts',
@@ -64,13 +67,15 @@ describe('M30 CI workflow', () => {
       'test/m315.remote-handoff-truth.test.ts',
       'test/m332.outcome-watcher.test.ts',
       'test/m372.test-ci-watchdog.test.ts',
+      'test/m373.directory-durability.test.ts',
       'test/m379.private-storage.test.ts',
       'test/m385.cutoff-checkpoint-windows.test.ts',
+      'test/m392.queue-lease-epochs.test.ts',
     ];
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     expect(new Set(declaredFiles).size).toBe(declaredFiles.length);
     for (const file of declaredFiles) {
-      expect(existsSync(resolve(repoRoot, file)), `missing Windows CI test: ${file}`).toBe(true);
+      expect(existsSync(resolve(repoRoot, file)), `missing native CI test: ${file}`).toBe(true);
     }
     expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
   });

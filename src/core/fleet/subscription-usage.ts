@@ -88,6 +88,7 @@ interface SharedQueueCfg {
   mode?: string;
   path?: string;
   machineId?: string;
+  trustedCoherentStorage?: boolean;
 }
 
 /** Extract sharedQueue config from whatever shape cfg happens to be. */
@@ -299,7 +300,7 @@ export function subscriptionAllows(
 function _maybePublish(engine: EngineId, local: SubscriptionUsage | null, cfg: unknown): void {
   try {
     const sq = sharedQueueCfg(cfg);
-    if (!sq || sq.mode !== 'filesystem' || !sq.path) return;
+    if (!sq || sq.mode !== 'filesystem' || !sq.path || sq.trustedCoherentStorage !== true) return;
 
     const machineId = sq.machineId ?? os.hostname();
     const store = new SharedStore(sq.path);
@@ -338,7 +339,7 @@ function _maybePublish(engine: EngineId, local: SubscriptionUsage | null, cfg: u
 function _aggregateSharedUsage(engine: EngineId, cfg: unknown): SubscriptionUsage | null {
   try {
     const sq = sharedQueueCfg(cfg);
-    if (!sq || sq.mode !== 'filesystem' || !sq.path) return null;
+    if (!sq || sq.mode !== 'filesystem' || !sq.path || sq.trustedCoherentStorage !== true) return null;
 
     const store = new SharedStore(sq.path);
     const entries = store.readUsageEntries(engine, { maxAgeMs: DEFAULT_LEDGER_MAX_AGE_MS });

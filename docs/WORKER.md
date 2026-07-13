@@ -36,9 +36,63 @@ ashlr worker setup --user "worker-2" \
   --yes
 ```
 
-This stores the queue path in `cfg.fleet.sharedQueue.path` so the worker's
-daemon loop picks tasks from the shared queue instead of running standalone
-repo scans.
+This stores the queue path in `cfg.fleet.sharedQueue.path`. It does not attest
+that the path is safe for distributed execution authority. After independently
+verifying that every worker mounts the same coherent filesystem, set the
+attestation in `~/.ashlr/config.json`:
+
+```json
+{
+  "fleet": {
+    "sharedQueue": {
+      "mode": "filesystem",
+      "path": "/Volumes/shared/ashlr-queue",
+      "trustedCoherentStorage": true
+    }
+  }
+}
+```
+
+`trustedCoherentStorage` defaults to `false`. The worker must fail closed for
+filesystem queue authority unless it is exactly `true`. Treat enabling it as a
+protocol migration barrier: drain every legacy worker first, then point the v2
+fleet at a fresh empty queue path. Old writers are not compatible authority
+participants; if one rewrites v2 metadata, modern readers fail closed.
+
+The queue path must be on a coherent shared filesystem that supports
+linearizable exclusive create, rename, hard links, fsync, and read-after-write.
+Replicated sync folders such as iCloud Drive and Dropbox are not supported for
+execution authority. Ashlr probes local filesystem primitives before its first
+queue mutation, but that probe cannot verify cross-host linearizability or prove
+that separate machines observe the same storage. The explicit operator
+attestation is therefore required in addition to a successful local probe.
+
+On POSIX, Ashlr requires file and parent-directory fsync. Windows does not
+portably expose parent-directory fsync through Node, so its explicit policy is
+file fsync plus atomic rename; Fleet Status reports that policy rather than
+claiming directory-fsync verification. `trustedCoherentStorage:true` is also an
+operator acceptance that the selected Windows storage provides the required
+durability and cross-host visibility under that policy.
+
+If Fleet Status reports `lock recovery required`, Ashlr deliberately stops
+shared authority. A hard-link guard may belong to a paused writer, so elapsed
+time alone is never used to remove it. Drain and stop every worker that can
+access the queue before performing operator-led lock recovery.
+
+Each daemon selection carries its worked-ledger cooldown keys and policy into
+the atomic claim transaction. The store rechecks the latest outcome while the
+queue lock is held, so a worker cannot reclaim an item from a stale pre-completion
+snapshot. Claims then cross a durable `claimed` to `executing` boundary; expired
+executing or phase-unknown legacy work is never automatically reassigned.
+All workers must maintain synchronized wall clocks; keep maximum host skew well
+below the configured lease and shortest cooldown windows. Clock health is part
+of the operator's coherent-storage attestation because lease and cooldown
+deadlines are cross-host epoch timestamps.
+
+Repairable no-proposal outcomes in shared mode remain immediately retryable
+until their repair handoff has a shared durable authority store. Ashlr settles
+the exact executing claim without recording cooldown and reports the tick as a
+state-persistence failure instead of silently stranding or suppressing the item.
 
 Without `--queue` the worker operates in **repo-partition** mode: it runs
 autonomous work only on its enrolled repos.

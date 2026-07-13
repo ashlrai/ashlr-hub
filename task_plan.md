@@ -2114,3 +2114,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add prepared/committed idempotency evidence around tool effects for finer-grained crash recovery than whole-attempt ambiguity.
 - [ ] Add an explicit bounded owner-only persistence migration, including protected Windows temporary creation before bytes are written.
 - [ ] Add a bounded operator/doctor resolution path for durable ambiguous execution markers with forensic evidence and audit.
+
+## Current Overnight Cycle - Shared Queue Execution Epochs
+- [x] Rehydrate exact merged source in an isolated worktree without touching unrelated canonical routing edits.
+- [x] Audit shared-store, coordinator, daemon, lifecycle, effect, portability, downgrade, and security boundaries with parallel agents.
+- [x] Add downgrade-preserving exact claim capabilities, queue incarnation/epoch metadata, and claimed-to-executing authority.
+- [x] Make corrupt reads and stale-lock release fail closed, and expose non-reclaimable executing ambiguity honestly.
+- [x] Bind daemon launch, renewal loss, completion, and release to the exact claim generation with per-item cancellation.
+- [x] Add same-machine ABA, strict-expiry, takeover, ambiguity, corrupt-state, lock, daemon-launch, and Windows regressions.
+- [x] Pass focused, exhaustive, static, dependency, and independent adversarial verification.
+- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.

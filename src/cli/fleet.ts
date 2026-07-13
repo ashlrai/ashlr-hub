@@ -1237,16 +1237,26 @@ export function formatResourceStrategyReport(report: ResourceStrategyReport): st
 }
 
 function formatSharedQueueSummary(shared: NonNullable<FleetStatus['queue']['shared']>): string {
-  const state = shared.readable ? 'ok' : 'unreadable';
+  const state = shared.authorityReady
+    ? 'authority-ready'
+    : !shared.trustedCoherentStorage
+      ? 'attestation-required'
+      : !shared.capability.verified
+        ? `primitive-failed:${shared.capability.failure ?? 'unknown'}`
+        : shared.readable ? 'authority-unavailable' : 'unreadable';
   const parts = [
     state,
     `${shared.activeClaims} active`,
     `${shared.ownedClaims} owned`,
     `${shared.reclaimableClaims} reclaimable`,
+    ...((shared.executingClaims ?? 0) > 0 ? [`${shared.executingClaims} executing`] : []),
+    ...((shared.ambiguousClaims ?? 0) > 0 ? [`${shared.ambiguousClaims} ambiguous`] : []),
     `${shared.cooldownItems} cooling`,
   ];
   if (shared.lock.present) {
-    parts.push(shared.lock.stale ? 'stale lock' : 'locked');
+    parts.push(shared.lock.recoveryRequired
+      ? 'lock recovery required'
+      : shared.lock.stale ? 'stale lock' : 'locked');
   }
   return parts.join(' / ');
 }
@@ -1256,7 +1266,10 @@ function formatSharedQueueMachines(
 ): string {
   return machines
     .slice(0, 6)
-    .map((m) => `${m.machineId}:${m.active}${m.expired > 0 ? `(+${m.expired} reclaimable)` : ''}`)
+    .map((m) => `${m.machineId}:${m.active}` +
+      `${m.executing ? `(${m.executing} executing)` : ''}` +
+      `${m.expired > 0 ? `(+${m.expired} reclaimable)` : ''}` +
+      `${m.ambiguous ? `(+${m.ambiguous} ambiguous)` : ''}`)
     .join(', ');
 }
 

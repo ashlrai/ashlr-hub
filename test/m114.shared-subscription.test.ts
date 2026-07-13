@@ -78,6 +78,7 @@ function sharedCfg(dir: string, machineId: string): unknown {
         mode: 'filesystem',
         path: dir,
         machineId,
+        trustedCoherentStorage: true,
       },
     },
   };
@@ -159,6 +160,37 @@ describe('flag-off: no sharedQueue cfg → local-only behavior (byte-identical t
     const result = subscriptionAllows('builtin');
     expect(result.allowed).toBe(true);
     expect(result.reason).toContain('not a subscription engine');
+  });
+});
+
+describe('unattested filesystem mode', () => {
+  it('neither reads nor publishes shared throttle authority', () => {
+    const store = new SharedStore(tmpDir);
+    seedEntry(
+      store,
+      'machine-A',
+      'codex',
+      99,
+      '5h',
+      Math.floor(Date.now() / 1000) + 3600,
+    );
+    mockRateLimitsReturn = makeRateLimits(10);
+    const cfg = {
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: tmpDir,
+          machineId: 'machine-B',
+          trustedCoherentStorage: false,
+        },
+      },
+    };
+
+    const result = subscriptionAllows('codex', { maxPercent: 80, cfg });
+
+    expect(result.allowed).toBe(true);
+    expect(result.reason).not.toContain('cross-machine');
+    expect(store.readUsageEntries('codex')).toHaveLength(1);
   });
 });
 

@@ -175,6 +175,8 @@ export interface FleetSharedQueueStatus extends SharedQueueHealth {
   enabled: boolean;
   mode: 'filesystem';
   machineId: string;
+  trustedCoherentStorage: boolean;
+  authorityReady: boolean;
 }
 
 export type FleetPhantomState = 'ready' | 'not-installed' | 'not-initialized' | 'degraded';
@@ -4651,6 +4653,21 @@ function chooseReadinessBlocker(
   if (guardBlock) {
     return readinessBlocker('guard-block', 'Guard block', guardBlock.detail, 'critical', 'guard');
   }
+  const sharedQueue = status.queue.shared;
+  if (sharedQueue && !sharedQueue.authorityReady) {
+    const detail = !sharedQueue.trustedCoherentStorage
+      ? 'Filesystem queue authority requires trustedCoherentStorage:true after the operator verifies one coherent cross-host mount.'
+      : !sharedQueue.capability.verified
+        ? `Local filesystem primitive probe failed at ${sharedQueue.capability.failure ?? 'an unknown step'}.`
+        : 'The shared queue is configured but its authority source is unavailable.';
+    return readinessBlocker(
+      'shared-queue-authority-unavailable',
+      'Shared queue authority unavailable',
+      detail,
+      'high',
+      'queue',
+    );
+  }
   const readiness = status.autoMergeReadiness;
   if (!readiness) {
     return readinessBlocker(
@@ -5354,6 +5371,7 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       ? Math.floor(sq.leaseMs)
       : 5 * 60 * 1000;
   const cooldownMs = configCooldownMs(cfg);
+  const trustedCoherentStorage = sq.trustedCoherentStorage === true;
 
   try {
     const { SharedStore } = await import('./shared-store.js');
@@ -5364,6 +5382,9 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       mode: 'filesystem',
       machineId,
       ...health,
+      trustedCoherentStorage,
+      authorityReady: trustedCoherentStorage && health.capability.verified && health.readable &&
+        health.lock.recoveryRequired === false,
     };
   } catch {
     return {
@@ -5373,10 +5394,23 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       machineId,
       leaseMs,
       readable: false,
+      capability: {
+        scope: 'local-primitives-only',
+        durabilityPolicy: process.platform === 'win32'
+          ? 'windows-file-fsync-atomic-rename'
+          : 'posix-file-and-directory-fsync',
+        checked: false,
+        verified: false,
+        failure: 'status-unavailable',
+      },
+      trustedCoherentStorage,
+      authorityReady: false,
       activeClaims: 0,
       ownedClaims: 0,
       expiredClaims: 0,
       reclaimableClaims: 0,
+      executingClaims: 0,
+      ambiguousClaims: 0,
       claimsByMachine: [],
       claimSamples: [],
       nextLeaseExpiryAt: null,
@@ -5384,7 +5418,7 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       workedEvents: 0,
       cooldownItems: 0,
       usageEntries: 0,
-      lock: { present: false, ageMs: null, stale: false },
+      lock: { present: false, ageMs: null, stale: false, links: null, recoveryRequired: false },
     };
   }
 }
