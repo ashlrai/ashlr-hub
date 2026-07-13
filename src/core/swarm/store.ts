@@ -35,8 +35,8 @@ import type { SwarmRun, SwarmTaskRun } from '../types.js';
 const MAX_LIST = 200;
 
 // New task statuses must remain safe when a persisted run is read by an older
-// Ashlr version. The boolean marker carries no user content, while `failed` is
-// a terminal status understood by readers that predate explicit cancellation.
+// Ashlr version. The boolean marker carries no user content, while `pending`
+// makes readers that predate explicit cancellation safely re-execute the task.
 const TASK_CANCELLED_MARKER = '_ashlrCancelled' as const;
 
 type PersistedSwarmTaskRun = Omit<SwarmTaskRun, 'status'> & {
@@ -107,7 +107,7 @@ function prepareForPersistence(swarm: SwarmRun): PersistedSwarmRun {
 
       return {
         ...semanticTask,
-        status: 'failed',
+        status: 'pending',
         [TASK_CANCELLED_MARKER]: true,
       };
     }),
@@ -135,7 +135,7 @@ function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
       ...semanticTask
     } = record;
 
-    return semanticTask['status'] === 'failed'
+    return semanticTask['status'] === 'pending'
       ? { ...semanticTask, status: 'cancelled' }
       : semanticTask;
   });

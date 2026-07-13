@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 describe('swarm cancellation persistence compatibility', () => {
-  it('writes cancelled tasks as failed with a boolean marker without mutating the caller', () => {
+  it('writes cancelled tasks as pending with a boolean marker without mutating the caller', () => {
     const run = makeRun('raw-json');
     const callerSnapshot = structuredClone(run);
 
@@ -74,7 +74,7 @@ describe('swarm cancellation persistence compatibility', () => {
     const tasks = persisted['tasks'] as Array<Record<string, unknown>>;
     expect(tasks[0]).toMatchObject({
       id: 'cancelled-task',
-      status: 'failed',
+      status: 'pending',
       [TASK_CANCELLED_MARKER]: true,
     });
     expect(tasks[1]).toMatchObject({ id: 'failed-task', status: 'failed' });
@@ -103,7 +103,7 @@ describe('swarm cancellation persistence compatibility', () => {
     }
   });
 
-  it('remains a recognized terminal failure to a pre-cancellation reader', () => {
+  it('uses a status recognized by a pre-cancellation reader', () => {
     const run = makeRun('legacy-reader');
     saveSwarm(run);
 
@@ -118,8 +118,18 @@ describe('swarm cancellation persistence compatibility', () => {
     ]);
 
     expect(legacyStatuses.has(task['status'] as string)).toBe(true);
-    expect(task['status']).toBe('failed');
-    expect(task['status']).not.toBe('pending');
+    expect(task['status']).toBe('pending');
     expect(task[TASK_CANCELLED_MARKER]).toBe(true);
+  });
+
+  it('is included by a pre-cancellation reader pending selector', () => {
+    const run = makeRun('legacy-pending-selector');
+    saveSwarm(run);
+
+    const persisted = readRaw(run.id);
+    const legacyPendingTasks = (persisted['tasks'] as Array<Record<string, unknown>>)
+      .filter((candidate) => candidate['status'] === 'pending');
+    expect(legacyPendingTasks.map((candidate) => candidate['id']))
+      .toContain('cancelled-task');
   });
 });
