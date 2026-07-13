@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 
-import type { SwarmRun } from '../types.js';
+import type { SwarmRun, SwarmTaskRun } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -33,6 +33,20 @@ import type { SwarmRun } from '../types.js';
 // ---------------------------------------------------------------------------
 
 const MAX_LIST = 200;
+
+// New task statuses must remain safe when a persisted run is read by an older
+// Ashlr version. The boolean marker carries no user content, while `failed` is
+// a terminal status understood by readers that predate explicit cancellation.
+const TASK_CANCELLED_MARKER = '_ashlrCancelled' as const;
+
+type PersistedSwarmTaskRun = Omit<SwarmTaskRun, 'status'> & {
+  status: Exclude<SwarmTaskRun['status'], 'cancelled'>;
+  [TASK_CANCELLED_MARKER]?: true;
+};
+
+type PersistedSwarmRun = Omit<SwarmRun, 'tasks'> & {
+  tasks: PersistedSwarmTaskRun[];
+};
 
 // ---------------------------------------------------------------------------
 // swarmsDir
@@ -77,6 +91,58 @@ function swarmPath(dir: string, id: string): string {
   return join(dir, `${id}.json`);
 }
 
+/** Build a downgrade-safe persistence copy without mutating caller state. */
+function prepareForPersistence(swarm: SwarmRun): PersistedSwarmRun {
+  return {
+    ...swarm,
+    tasks: swarm.tasks.map((task) => {
+      const {
+        [TASK_CANCELLED_MARKER]: _persistedMarker,
+        ...semanticTask
+      } = task as SwarmTaskRun & { [TASK_CANCELLED_MARKER]?: unknown };
+
+      if (task.status !== 'cancelled') {
+        return semanticTask as PersistedSwarmTaskRun;
+      }
+
+      return {
+        ...semanticTask,
+        status: 'failed',
+        [TASK_CANCELLED_MARKER]: true,
+      };
+    }),
+  };
+}
+
+/** Restore the current semantic status and hide the persistence-only marker. */
+function rehydrateFromPersistence(parsed: Record<string, unknown>): SwarmRun {
+  if (!Array.isArray(parsed['tasks'])) {
+    return parsed as unknown as SwarmRun;
+  }
+
+  const tasks = parsed['tasks'].map((task: unknown) => {
+    if (typeof task !== 'object' || task === null || Array.isArray(task)) {
+      return task;
+    }
+
+    const record = task as Record<string, unknown>;
+    if (record[TASK_CANCELLED_MARKER] !== true) {
+      return task;
+    }
+
+    const {
+      [TASK_CANCELLED_MARKER]: _persistedMarker,
+      ...semanticTask
+    } = record;
+
+    return semanticTask['status'] === 'failed'
+      ? { ...semanticTask, status: 'cancelled' }
+      : semanticTask;
+  });
+
+  return { ...parsed, tasks } as unknown as SwarmRun;
+}
+
 // ---------------------------------------------------------------------------
 // saveSwarm
 // ---------------------------------------------------------------------------
@@ -102,7 +168,7 @@ export function saveSwarm(s: SwarmRun): void {
 
     const target = swarmPath(dir, s.id);
     const tmp = `${target}.tmp`;
-    const json = JSON.stringify(s, null, 2) + '\n';
+    const json = JSON.stringify(prepareForPersistence(s), null, 2) + '\n';
 
     writeFileSync(tmp, json, 'utf8');
 
@@ -151,7 +217,7 @@ export function loadSwarm(id: string): SwarmRun | null {
       return null;
     }
 
-    return parsed as SwarmRun;
+    return rehydrateFromPersistence(parsed as Record<string, unknown>);
   } catch {
     return null;
   }
@@ -202,7 +268,7 @@ export function listSwarms(): SwarmRun[] {
           continue;
         }
 
-        swarms.push(parsed as SwarmRun);
+        swarms.push(rehydrateFromPersistence(parsed as Record<string, unknown>));
       } catch {
         // Skip unreadable / malformed records silently.
       }
