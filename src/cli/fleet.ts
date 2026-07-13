@@ -37,6 +37,17 @@ import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
 
+function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
+  if (!daemon.running) return null;
+  const activity = daemon.activity;
+  if (!activity || activity.sourceState !== 'healthy') return 'activity unavailable';
+  if (activity.freshness !== 'fresh') return `activity ${activity.freshness}`;
+  if (!activity.ownerMatches || activity.ownerState !== 'alive') return 'activity owner unavailable';
+  if (daemon.tickInProgress) return 'tick active';
+  if (daemon.childActivity) return `${activity.activeChildren ?? 0} children active`;
+  return activity.phase ? `activity ${activity.phase}` : 'activity available';
+}
+
 // ---------------------------------------------------------------------------
 // Pure formatter — exported for unit testing (no I/O, no color deps).
 // ---------------------------------------------------------------------------
@@ -71,6 +82,13 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`  last tick:     ${s.daemon.lastTickAt ?? '—'}`);
   if (s.daemon.tickInProgress) {
     lines.push('  current tick:  in progress');
+  }
+  if (s.daemon.childActivity) {
+    lines.push(`  child work:    ${s.daemon.activity?.activeChildren ?? 0} active`);
+  }
+  if (s.daemon.activity) {
+    const activityLabel = daemonActivitySummary(s.daemon) ?? 'not applicable';
+    lines.push(`  activity:      ${activityLabel}`);
   }
   if (s.daemon.lockHeartbeatAt) {
     lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
@@ -1428,6 +1446,7 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
   const fs = fleetStatus;
   if (fs) {
     const state = fs.daemon.running ? (fs.killed ? 'PAUSED' : 'running') : 'idle';
+    const activitySummary = daemonActivitySummary(fs.daemon);
     const header = [
       `fleet: ${state}`,
       `queue ${fs.queue.backlogItems}`,
@@ -1445,13 +1464,16 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
           : fs.workspace.sourceQuality?.sourceState === 'missing' ? 'missing' : 'degraded'}`
         : null,
       `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
-      fs.daemon.tickInProgress ? 'tick active' : null,
+      activitySummary,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');
     if (fs.killed) {
       console.log('  ' + yellow(bold(header)));
-    } else if (fs.daemon.running) {
+    } else if (fs.daemon.running && activitySummary && !activitySummary.includes('unavailable') &&
+      !activitySummary.includes('stale') && !activitySummary.includes('future')) {
       console.log('  ' + green(header));
+    } else if (fs.daemon.running) {
+      console.log('  ' + yellow(header));
     } else {
       console.log('  ' + dim(header));
     }

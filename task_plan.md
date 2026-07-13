@@ -2011,3 +2011,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit, push, observe the complete CI matrix, and stage an immutable exact-SHA release outside Desktop.
 - [x] Activate the immutable daemon and Mission Control release only after the live child exits naturally; verify no Desktop paths, exact build identity, HTTP health, and clear guard state.
 - [ ] Add a metadata-only daemon activity ledger so lock heartbeat and actual child progress are no longer conflated.
+
+## Current Overnight Cycle - Truthful Daemon Activity
+- [x] Rehydrate the immutable production release, durable notes, git state, and daemon/status surfaces.
+- [x] Audit writer ownership, privacy boundaries, freshness, process reuse, and UI false-zero risks in parallel.
+- [x] Add an append-only, metadata-only daily activity journal with exact schema, owner-only storage, bounded retention, and no merge or learning authority.
+- [x] Publish starting, tick, post-tick child, idle, stopping, and heartbeat observations from one daemon instance identity.
+- [x] Require healthy, fresh, process-matched evidence before FleetStatus asserts active ticks or post-tick children.
+- [x] Render missing, degraded, stale, future, and owner-mismatched evidence honestly across CLI, Fleet, Mission Control, and Fleet Dashboard.
+- [x] Prove readiness, next-action, mission-brief, and learning authority remain independent of the observational journal.
+- [x] Pass focused, adjacent, exhaustive, static, dependency, and two independent adversarial review gates.
+- [ ] Commit, push, observe CI, and leave production on the proven immutable release until a separate exact-source activation boundary.

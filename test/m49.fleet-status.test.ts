@@ -58,6 +58,7 @@ import {
 } from '../src/core/fleet/skill-records.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
+import { writeDaemonActivity } from '../src/core/daemon/activity.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -5149,6 +5150,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const repo = join(tmpHome, 'repo');
     writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
     writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    expect(writeDaemonActivity({
+      instanceId: '123e4567-e89b-42d3-a456-426614174000',
+      daemonStartedAt: '2026-07-03T00:00:00.000Z',
+      phase: 'idle',
+    })).toBe(true);
     const cfg = withFoundry({
       autoMerge: {
         enabled: true,
@@ -5304,6 +5310,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
       writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
       writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174001',
+        daemonStartedAt: '2026-07-03T00:00:00.000Z',
+        phase: 'tick',
+      })).toBe(true);
 
       const s = await buildFleetStatus(baseConfig());
       const daemonSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'daemon');
@@ -5314,16 +5325,98 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         lastTickAt: '2026-07-02T23:55:00.000Z',
         lockHeartbeatAt: '2026-07-03T00:01:00.000Z',
         tickInProgress: true,
+        activity: {
+          sourceState: 'healthy',
+          phase: 'tick',
+          ownerMatches: true,
+        },
       });
       expect(daemonSource).toMatchObject({
         status: 'healthy',
         freshness: 'fresh',
         observedAt: '2026-07-03T00:01:00.000Z',
-        detail: 'daemon running; tick in progress since 2026-07-03T00:00:00.000Z; last completed tick 2026-07-02T23:55:00.000Z',
+        detail: 'daemon running; last tick 2026-07-02T23:55:00.000Z',
         sourceQuality: {
           badge: 'healthy-source',
           sourcePresent: true,
         },
+      });
+    });
+  });
+
+  it('does not infer tick progress or change readiness from missing activity evidence', async () => {
+    await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
+      writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
+      writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+
+      const status = await buildFleetStatus(baseConfig());
+      const daemonSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'daemon');
+
+      expect(status.daemon.tickInProgress).toBeUndefined();
+      expect(status.daemon.activity).toMatchObject({
+        sourceState: 'missing',
+        phase: null,
+        ownerMatches: false,
+      });
+      expect(daemonSource).toMatchObject({
+        status: 'healthy',
+        freshness: 'fresh',
+        detail: 'daemon running; last tick 2026-07-02T23:55:00.000Z',
+        sourceQuality: { badge: 'healthy-source', sourcePresent: true },
+      });
+    });
+  });
+
+  it('keeps forged owner activity outside readiness, actions, and learning authority', async () => {
+    await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
+      writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
+      writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+      const baseline = await buildFleetStatus(baseConfig());
+
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174003',
+        daemonStartedAt: '2026-07-02T00:00:00.000Z',
+        phase: 'tick',
+      })).toBe(true);
+      const forged = await buildFleetStatus(baseConfig());
+
+      expect(forged.daemon.activity).toMatchObject({ sourceState: 'healthy', ownerMatches: false });
+      expect(forged.daemon.tickInProgress).toBeUndefined();
+      const readinessAuthority = (value: FleetStatus) => ({
+        verdict: value.autonomousShipReadiness?.verdict,
+        confidence: value.autonomousShipReadiness?.confidence,
+        topBlocker: value.autonomousShipReadiness?.topBlocker,
+        primaryAction: value.autonomousShipReadiness?.primaryAction,
+        daemonSource: value.autonomousShipReadiness?.sources.find((source) => source.id === 'daemon'),
+      });
+      expect(readinessAuthority(forged)).toEqual(readinessAuthority(baseline));
+      expect(forged.missionBrief).toEqual(baseline.missionBrief);
+      expect(forged.nextActions).toEqual(baseline.nextActions);
+      expect(forged.learning).toEqual(baseline.learning);
+    });
+  });
+
+  it('reports explicit post-tick child activity without calling it an active tick', async () => {
+    await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
+      writeRunningDaemon(tmpHome, [], '2026-07-03T00:00:30.000Z');
+      writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174002',
+        daemonStartedAt: '2026-07-03T00:00:00.000Z',
+        phase: 'post-tick',
+        activeChildren: 2,
+      })).toBe(true);
+
+      const status = await buildFleetStatus(baseConfig());
+      const daemonSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'daemon');
+      expect(status.daemon.tickInProgress).toBeUndefined();
+      expect(status.daemon.childActivity).toBe(true);
+      expect(status.daemon.activity).toMatchObject({
+        sourceState: 'healthy', phase: 'post-tick', activeChildren: 2, ownerMatches: true,
+      });
+      expect(daemonSource).toMatchObject({
+        status: 'healthy',
+        detail: 'daemon running; last tick 2026-07-03T00:00:30.000Z',
       });
     });
   });
@@ -6028,6 +6121,18 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         lastTickAt: '2026-06-17T00:00:00.000Z',
         lockHeartbeatAt: '2026-06-17T00:02:00.000Z',
         tickInProgress: true,
+        activity: {
+          source: 'daemon-activity',
+          sourceState: 'healthy',
+          freshness: 'fresh',
+          ownerState: 'alive',
+          phase: 'tick',
+          phaseStartedAt: '2026-06-17T00:01:30.000Z',
+          observedAt: '2026-06-17T00:02:00.000Z',
+          ageMs: 0,
+          activeChildren: null,
+          ownerMatches: true,
+        },
         todaySpentUsd: 0,
       },
       backends: [],
@@ -6040,7 +6145,67 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('started:       2026-06-17T00:01:00.000Z');
     expect(out).toContain('last tick:     2026-06-17T00:00:00.000Z');
     expect(out).toContain('current tick:  in progress');
+    expect(out).toContain('activity:      tick active');
     expect(out).toContain('heartbeat:     2026-06-17T00:02:00.000Z');
+  });
+
+  it('renders post-tick child activity separately from tick progress', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:03:00.000Z',
+      daemon: {
+        running: true,
+        lastTickAt: '2026-06-17T00:02:00.000Z',
+        childActivity: true,
+        activity: {
+          source: 'daemon-activity', sourceState: 'healthy', freshness: 'fresh', ownerState: 'alive', phase: 'post-tick',
+          phaseStartedAt: '2026-06-17T00:02:01.000Z', observedAt: '2026-06-17T00:02:30.000Z',
+          ageMs: 30_000, activeChildren: 2, ownerMatches: true,
+        },
+        todaySpentUsd: 0,
+      },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    });
+
+    expect(out).toContain('child work:    2 active');
+    expect(out).toContain('activity:      2 children active');
+    expect(out).not.toContain('current tick:  in progress');
+  });
+
+  it('labels stale, missing, and owner-mismatched activity without false zeroes', () => {
+    const base = {
+      generatedAt: '2026-06-17T00:03:00.000Z',
+      backends: [], queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 }, killed: false,
+    };
+    const activityBase = {
+      source: 'daemon-activity' as const,
+      phase: 'idle' as const,
+      phaseStartedAt: '2026-06-17T00:02:01.000Z',
+      observedAt: '2026-06-17T00:02:30.000Z',
+      ageMs: 30_000,
+      activeChildren: null,
+      ownerMatches: true,
+      ownerState: 'alive' as const,
+    };
+    const render = (activity: FleetStatus['daemon']['activity']) => formatFleetStatus({
+      ...base,
+      daemon: { running: true, lastTickAt: null, todaySpentUsd: 0, activity },
+    });
+
+    expect(render({ ...activityBase, sourceState: 'healthy', freshness: 'stale' }))
+      .toContain('activity:      activity stale');
+    expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
+      .toContain('activity:      activity unavailable');
+    expect(render({
+      ...activityBase, sourceState: 'healthy', freshness: 'fresh', ownerMatches: false,
+    })).toContain('activity:      activity owner unavailable');
+    expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
+      .not.toMatch(/child work:|0 active/);
   });
 
   it('renders dispatch-yield diagnostic reasons without falling back to raw policy-disabled reasons', () => {

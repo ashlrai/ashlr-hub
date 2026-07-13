@@ -83,6 +83,7 @@ import {
   loadDaemonState,
   saveDaemonState,
 } from '../src/core/daemon/state.js';
+import { readDaemonActivity } from '../src/core/daemon/activity.js';
 
 import {
   enroll,
@@ -748,6 +749,46 @@ describe('M24 runDaemon — RE-ENTRANCY: refuses when ASHLR_IN_DAEMON or ASHLR_I
 // ===========================================================================
 
 describe('M24 runDaemon --once — exactly one tick', () => {
+  it('publishes explicit tick activity while work is pending and appends stopping on exit', async () => {
+    enroll(tmpRepo);
+    const backlogPath = path.join(tmpHome, '.ashlr', 'backlog.json');
+    fs.mkdirSync(path.dirname(backlogPath), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(backlogPath, JSON.stringify({
+      generatedAt: now,
+      repos: [tmpRepo],
+      items: [{
+        id: 'activity-item', repo: tmpRepo, source: 'todo', title: 'Observe active tick',
+        detail: '// TODO: observe', file: path.join(tmpRepo, 'activity.ts'), line: 1,
+        value: 5, effort: 1, score: 5, tags: [], ts: now,
+      }],
+    }), 'utf8');
+
+    let finish!: (value: unknown) => void;
+    mockRunSwarm.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const running = runDaemon(makeCfg(), { once: true, dryRun: false });
+    for (let attempt = 0; attempt < 100 && mockRunSwarm.mock.calls.length === 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(readDaemonActivity()).toMatchObject({
+      sourceState: 'healthy',
+      ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
+      activity: { phase: 'tick', pid: process.pid, activeChildren: null },
+    });
+
+    finish({
+      id: 'activity-run', status: 'done', goal: 'observe', result: 'done',
+      usage: { totalTokens: 1, estCostUsd: 0, steps: 1 },
+    });
+    await running;
+    expect(readDaemonActivity()).toMatchObject({
+      sourceState: 'healthy',
+      activity: { authority: 'none', phase: 'stopping' },
+    });
+  });
+
   it('--once runs exactly one tick and stops', async () => {
     // We verify via the state: lastTickAt should be set, running=false after
     delete process.env.ASHLR_IN_DAEMON;

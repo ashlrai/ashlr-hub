@@ -3367,6 +3367,18 @@ function autonomyRecentRows(autonomy) {
   return rows;
 }
 
+function daemonActivityDisplay(daemon) {
+  const activity = daemon?.activity;
+  if (daemon?.running !== true) return 'not applicable';
+  if (!activity || activity.sourceState !== 'healthy') return 'activity unavailable';
+  if (activity.freshness !== 'fresh') return `activity ${activity.freshness}`;
+  if (!activity.ownerMatches || activity.ownerState !== 'alive') return 'activity owner unavailable';
+  if (activity.phase === 'post-tick' && daemon.childActivity) {
+    return `${activity.activeChildren} children active`;
+  }
+  return activity.phase ?? 'activity available';
+}
+
 function renderFleet() {
   if (state.activeView !== 'fleet') return;
   const main = getMain();
@@ -3407,6 +3419,7 @@ function renderFleet() {
   const activeWork = f.queue?.activeWork;
   const summaryRows = [
     ['Daemon', f.daemon.running ? 'running' : 'stopped'],
+    ['Activity', daemonActivityDisplay(f.daemon)],
     ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
@@ -3772,14 +3785,15 @@ function renderControl() {
 
   // ── 1. Fleet Pulse (hero) ──────────────────────────────────────────────
   const fleet = d.fleet ?? d.daemon ?? {};
-  const daemon = d.daemon ?? fleet.daemon ?? {};
+  const daemon = d.daemon ?? {};
+  const fleetDaemon = d.fleet?.daemon ?? fleet.daemon ?? daemon;
   const queue  = d.fleet?.queue ?? fleet.queue ?? {};
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
   const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
   const direction = d.fleet?.autonomyDirection ?? fleet.autonomyDirection ?? null;
   const activeDirectionMode = daemon.activeDirectionMode ?? null;
-  const isRunning = daemon.running ?? false;
+  const isRunning = fleetDaemon.running ?? daemon.running ?? false;
   const isKilled  = d.fleet?.killed ?? false;
   const service = daemon.service ?? {};
   const serviceLabel = service.running ? 'running' : service.installed ? 'installed' : 'missing';
@@ -3803,13 +3817,14 @@ function renderControl() {
   const heroPulse = el('div', { cls: 'ctrl-hero' });
   const daemonStatusEl = el('div', { cls: 'ctrl-daemon-status' },
     el('span', { cls: `ctrl-live-dot${isRunning ? ' running' : ''}`, title: isRunning ? 'Running' : 'Stopped' }),
-    el('span', { cls: `ctrl-daemon-label${isRunning ? ' running' : ''}` }, isRunning ? 'Daemon running' : 'Daemon stopped'),
+    el('span', { cls: `ctrl-daemon-label${isRunning ? ' running' : ''}` },
+      isRunning ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}` : 'Daemon stopped'),
     daemon.pid ? el('span', { cls: 'ctrl-pid' }, `PID ${daemon.pid}`) : null
   );
   heroPulse.appendChild(daemonStatusEl);
 
-  if (daemon.lastTickAt) {
-    heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(daemon.lastTickAt)}`));
+  if (fleetDaemon.lastTickAt ?? daemon.lastTickAt) {
+    heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(fleetDaemon.lastTickAt ?? daemon.lastTickAt)}`));
   }
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
@@ -5070,7 +5085,8 @@ function fdRenderReadinessRail(snap) {
 
 function fdRenderStatusPanel(snap) {
   const daemon = snap.daemon ?? {};
-  const isRunning = daemon.running === true;
+  const fleetDaemon = snap.fleet?.daemon ?? snap.control?.fleet?.daemon ?? daemon;
+  const isRunning = fleetDaemon.running === true;
   const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
   const queue = snap.fleet?.queue ?? snap.control?.fleet?.queue ?? {};
   const sharedQueue = queue.shared ?? null;
@@ -5086,11 +5102,11 @@ function fdRenderStatusPanel(snap) {
   const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });
   const label = el('span', {
     cls: isRunning ? 'fd-daemon-label fd-daemon-label--running' : 'fd-daemon-label fd-daemon-label--stopped',
-  }, isRunning ? 'Daemon running' : 'Daemon stopped');
+  }, isRunning ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}` : 'Daemon stopped');
   body.appendChild(el('div', { cls: 'fd-status-row' }, dot, label));
 
   // Meta grid
-  const lastTick = daemon.lastTickAt ? fmtRelative(daemon.lastTickAt) : '—';
+  const lastTick = fleetDaemon.lastTickAt ? fmtRelative(fleetDaemon.lastTickAt) : '—';
   const spend = daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—';
   const pendingCount = daemon.pendingProposals ?? snap.inbox?.pending ?? 0;
 

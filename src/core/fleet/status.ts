@@ -1016,6 +1016,19 @@ export interface FleetStatus {
     lastTickAt: string | null;
     lockHeartbeatAt?: string | null;
     tickInProgress?: boolean;
+    childActivity?: boolean;
+    activity?: {
+      source: 'daemon-activity';
+      sourceState: 'missing' | 'healthy' | 'degraded';
+      freshness: 'fresh' | 'stale' | 'future' | 'unknown';
+      ownerState: 'alive' | 'dead' | 'reused' | 'unknown';
+      phase: 'starting' | 'tick' | 'post-tick' | 'idle' | 'stopping' | null;
+      phaseStartedAt: string | null;
+      observedAt: string | null;
+      ageMs: number | null;
+      activeChildren: number | null;
+      ownerMatches: boolean;
+    };
     todaySpentUsd: number;
   };
   backends: FleetBackendStatus[];
@@ -1511,25 +1524,42 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let recentTicks: DaemonTick[] = [];
   try {
     const { loadDaemonState, readDaemonLockOwner } = await import('../daemon/state.js');
+    const { readDaemonActivity } = await import('../daemon/activity.js');
     const ds = loadDaemonState();
     const startedAt = ds.startedAt ?? null;
     const lastTickAt = ds.lastTickAt ?? null;
-    const startedMs = startedAt ? Date.parse(startedAt) : NaN;
-    const lastTickMs = lastTickAt ? Date.parse(lastTickAt) : NaN;
     const lockOwner = readDaemonLockOwner();
     const lockHeartbeatAt = ds.running === true && lockOwner?.pid === ds.pid
       ? lockOwner.heartbeatAt
       : null;
-    const tickInProgress = ds.running === true &&
-      typeof startedAt === 'string' &&
-      Number.isFinite(startedMs) &&
-      (!Number.isFinite(lastTickMs) || startedMs > lastTickMs);
+    const activityRead = readDaemonActivity();
+    const activity = activityRead.activity;
+    const ownerMatches = ds.running === true && activity !== null && activity.pid === ds.pid &&
+      activity.daemonStartedAt === startedAt;
+    const activityHealthy = ownerMatches && activityRead.sourceState === 'healthy' &&
+      activityRead.freshness === 'fresh' && activityRead.ownerState === 'alive';
+    const tickInProgress = activityHealthy && activity?.phase === 'tick';
+    const childActivity = activityHealthy && activity?.phase === 'post-tick' &&
+      typeof activity.activeChildren === 'number' && activity.activeChildren > 0;
     daemon = {
       running: ds.running === true,
       startedAt,
       lastTickAt,
       ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
       ...(tickInProgress ? { tickInProgress } : {}),
+      ...(childActivity ? { childActivity } : {}),
+      activity: {
+        source: 'daemon-activity',
+        sourceState: activityRead.sourceState,
+        freshness: activityRead.freshness,
+        ownerState: activityRead.ownerState,
+        phase: activity?.phase ?? null,
+        phaseStartedAt: activityRead.phaseStartedAt,
+        observedAt: activity?.observedAt ?? null,
+        ageMs: activityRead.ageMs,
+        activeChildren: activity?.activeChildren ?? null,
+        ownerMatches,
+      },
       todaySpentUsd: typeof ds.todaySpentUsd === 'number' ? ds.todaySpentUsd : 0,
     };
     recentTicks = Array.isArray(ds.ticks) ? ds.ticks : [];
@@ -4373,12 +4403,9 @@ function shipReadinessSources(
   status: FleetStatus,
   inputs: AutonomousShipReadinessInputs,
 ): FleetReadinessSourceHealth[] {
-  const daemonObservedAt = status.daemon.lockHeartbeatAt ??
-    (status.daemon.tickInProgress ? status.daemon.startedAt ?? null : status.daemon.lastTickAt);
+  const daemonObservedAt = status.daemon.lockHeartbeatAt ?? status.daemon.lastTickAt;
   const daemonDetail = status.daemon.running
-    ? status.daemon.tickInProgress
-      ? `daemon running; tick in progress since ${status.daemon.startedAt ?? 'unknown'}; last completed tick ${status.daemon.lastTickAt ?? 'never'}`
-      : `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
+    ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
     : 'daemon is stopped';
   const daemonSource = readinessSource(
     'daemon',

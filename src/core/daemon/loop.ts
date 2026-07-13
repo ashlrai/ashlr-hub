@@ -33,7 +33,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
@@ -76,6 +76,10 @@ import {
   saveDaemonStateResult,
 } from './state.js';
 import type { DaemonLock } from './state.js';
+import {
+  writeDaemonActivity,
+  type DaemonActivityPhase,
+} from './activity.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
@@ -528,9 +532,9 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
   return typeof model === 'string' && model.trim() ? model : null;
 }
 
-function startDaemonLockHeartbeat(lock: DaemonLock): () => void {
+function startDaemonLockHeartbeat(lock: DaemonLock, afterHeartbeat?: () => void): () => void {
   const interval = setInterval(() => {
-    heartbeatDaemonLock(lock);
+    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
   return () => clearInterval(interval);
@@ -5130,8 +5134,29 @@ export async function runDaemon(
     });
     return loadDaemonState();
   }
+  const daemonStartedAt = state.startedAt;
+  const daemonActivityInstanceId = randomUUID();
+  let activityPhase: DaemonActivityPhase = 'starting';
+  let activityActiveChildren: number | null = null;
+  let activityEpoch = 0;
+  const refreshActivity = (): void => {
+    writeDaemonActivity({
+      instanceId: daemonActivityInstanceId,
+      daemonStartedAt,
+      phase: activityPhase,
+      ...(activityPhase === 'post-tick' ? { activeChildren: activityActiveChildren ?? 0 } : {}),
+    });
+  };
+  const transitionActivity = (phase: DaemonActivityPhase, activeChildren: number | null = null): number => {
+    activityPhase = phase;
+    activityActiveChildren = phase === 'post-tick' ? Math.max(0, activeChildren ?? 0) : null;
+    activityEpoch++;
+    refreshActivity();
+    return activityEpoch;
+  };
+  refreshActivity();
   heartbeatDaemonLock(daemonLock);
-  const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock);
+  const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock, refreshActivity);
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
   let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
   const shutdown = new AbortController();
@@ -5227,6 +5252,7 @@ export async function runDaemon(
       // Single-tick mode — reload full config so a manual tick picks up disk changes.
       const liveCfg = reloadLiveConfigForDaemon(cfg);
       if (heartbeatDaemonLock(daemonLock)) {
+        transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(opts.drain ? { drain: opts.drain } : {}),
@@ -5237,6 +5263,7 @@ export async function runDaemon(
           opts,
           reloadLiveConfigForDaemon(liveCfg),
         );
+        transitionActivity('idle');
       }
     } else {
       // M85/M116/M309: choose loop strategy from live config every iteration.
@@ -5262,6 +5289,7 @@ export async function runDaemon(
           });
           break;
         }
+        transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(opts.drain ? { drain: opts.drain } : {}),
@@ -5289,6 +5317,23 @@ export async function runDaemon(
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
         scheduledCutoffCapture = scheduleCutoffCheckpointAfterTick(tickResult, opts);
+        const postTickChildren: Promise<unknown>[] = [];
+        if (scheduledResolutionObserver?.disposition === 'scheduled' ||
+          scheduledResolutionObserver?.disposition === 'overlap-suppressed') {
+          postTickChildren.push(scheduledResolutionObserver.completion);
+        }
+        if (scheduledCutoffCapture?.disposition === 'scheduled' ||
+          scheduledCutoffCapture?.disposition === 'overlap-suppressed') {
+          postTickChildren.push(scheduledCutoffCapture.completion);
+        }
+        if (postTickChildren.length > 0) {
+          const postTickEpoch = transitionActivity('post-tick', postTickChildren.length);
+          void Promise.allSettled(postTickChildren).then(() => {
+            if (activityEpoch === postTickEpoch) transitionActivity('idle');
+          });
+        } else {
+          transitionActivity('idle');
+        }
         recordContextRollupAfterTick(tickResult, opts, afterTickCfg);
         const afterLoopCfg = resolveCfg(afterTickCfg);
         const afterTick = afterTickLoaded.state;
@@ -5324,6 +5369,7 @@ export async function runDaemon(
   } catch {
     // Unexpected error — swallow; still clean up running state below.
   }
+  transitionActivity('stopping');
   await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
   if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
   process.removeListener('SIGINT', requestSigint);

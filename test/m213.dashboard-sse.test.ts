@@ -490,6 +490,20 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
   });
 
+  it('app.js renders activity evidence without a misleading healthy zero', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain('function daemonActivityDisplay');
+    expect(src).toContain("return 'activity unavailable'");
+    expect(src).toContain('activity.ownerState');
+    expect(src).toContain('children active');
+    expect(src).toContain('d.fleet?.daemon ?? fleet.daemon ?? daemon');
+    expect(src).not.toContain("['Child work',");
+    expect(src).not.toContain("'none observed'");
+  });
+
   it('app.js surfaces aggregate-only trajectory learning in Mission Control and Fleet Dashboard', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
