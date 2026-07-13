@@ -2021,4 +2021,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render missing, degraded, stale, future, and owner-mismatched evidence honestly across CLI, Fleet, Mission Control, and Fleet Dashboard.
 - [x] Prove readiness, next-action, mission-brief, and learning authority remain independent of the observational journal.
 - [x] Pass focused, adjacent, exhaustive, static, dependency, and two independent adversarial review gates.
-- [ ] Commit, push, observe CI, and leave production on the proven immutable release until a separate exact-source activation boundary.
+- [x] Commit, push, observe CI, and leave production on the proven immutable release until a separate exact-source activation boundary.
