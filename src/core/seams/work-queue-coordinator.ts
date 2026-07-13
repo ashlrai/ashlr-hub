@@ -9,7 +9,7 @@
  *   recordOutcome = per-machine worked-ledger.
  *
  * SHARED = multi-machine fleet (filesystem-backed SharedStore):
- *   claimItems atomically claims up to `count` UNCLAIMED (or expired) candidates;
+ *   claimItems atomically claims up to `count` UNCLAIMED (or safely expired) candidates;
  *   shouldSkip = GLOBAL cooldown from the shared worked ledger;
  *   recordOutcome writes to the shared worked ledger + releases the claim.
  *   No two machines ever receive the same item for the same tick.
@@ -30,8 +30,10 @@ import {
   recentlyDeclined as localRecentlyDeclined,
 } from '../fleet/worked-ledger.js';
 import { SharedStore } from '../fleet/shared-store.js';
+import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-store.js';
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
   id: 'workQueueCoordinator' as const,
@@ -51,8 +53,10 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
  *                  this machine should process (atomically claimed in multi-
  *                  machine mode; top-K pass-through in single-machine mode).
  * `renew`:         Extend leases for in-flight shared claims during long runs.
+ * `beginExecution`: Durably cross the shared pre-effect boundary.
  * `release`:       Release uncompleted claims (e.g. on clean shutdown).
  * `recordOutcome`: Write the work result + release the claim.
+ * `recordClaimOutcome`: Atomically complete one exact claimed generation.
  * `shouldSkip`:    Returns true when the item should be skipped due to a recent
  *                  'empty' outcome within cooldownMs.
  */
@@ -62,10 +66,22 @@ export interface WorkQueueCoordinator {
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
     machineId: string,
+    cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[];
   renew(itemIds: string[], machineId: string): string[];
+  /** Return every item whose current claim still authorizes this coordinator. */
+  fence(itemIds: string[], machineId: string): string[];
+  beginExecution(itemId: string, machineId: string): boolean;
+  /** Clear an exact executing claim after a terminal result with no cooldown. */
+  settleClaim(claimItemId: string, machineId: string): boolean;
   release(itemIds: string[], machineId: string): void;
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean;
+  recordClaimOutcome(
+    claimItemId: string,
+    workedItemId: string,
+    outcome: WorkedOutcome,
+    machineId: string,
+  ): boolean;
   shouldSkip(itemId: string, cooldownMs: number): boolean;
   readWorkedEvents(): WorkedEvent[];
 }
@@ -94,6 +110,7 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
     _machineId: string,
+    _cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
     const claimed: WorkItem[] = [];
     const seen = new Set<string>();
@@ -120,8 +137,29 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     return [];
   }
 
+  fence(itemIds: string[], _machineId: string): string[] {
+    return [...itemIds];
+  }
+
+  beginExecution(_itemId: string, _machineId: string): boolean {
+    return true;
+  }
+
+  settleClaim(_claimItemId: string, _machineId: string): boolean {
+    return true;
+  }
+
   recordOutcome(itemId: string, outcome: WorkedOutcome, _machineId: string): boolean {
     return localRecord(itemId, outcome);
+  }
+
+  recordClaimOutcome(
+    _claimItemId: string,
+    workedItemId: string,
+    outcome: WorkedOutcome,
+    _machineId: string,
+  ): boolean {
+    return localRecord(workedItemId, outcome);
   }
 
   shouldSkip(itemId: string, cooldownMs: number): boolean {
@@ -141,30 +179,52 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
  * Multi-machine coordinator backed by a SharedStore.
  *
  *  - claimItems: atomically claims up to `count` candidates not already claimed
- *    by another machine (or with an expired lease → failover path). Items where
- *    shouldSkip returns true are filtered out before claiming.
+ *    by another machine. Daemon cooldown policies are rechecked under the claim
+ *    lock so a concurrent completion cannot be reclaimed from a stale selection.
  *  - shouldSkip: checks the GLOBAL cross-machine worked ledger cooldown.
  *  - recordOutcome: writes to the global ledger and releases the claim.
  *  - release: releases all named claims from this machine.
  *
  * Atomicity: the SharedStore's withLock gate (O_EXCL sentinel) ensures two
- * machines that call claimItems concurrently receive DISJOINT items. Expired
- * leases (older than leaseMs) are reclaimable — a crashed machine's items
- * become available after the lease window.
+ * machines that call claimItems concurrently receive DISJOINT items. Only an
+ * expired modern `claimed` lease is reclaimable. Executing and phase-unknown
+ * legacy work remains ambiguous until explicit reconciliation.
  */
 export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
   private readonly store: SharedStore;
+  private readonly claims = new Map<string, QueueClaimRef>();
+  private readonly claimWorkedItemIds = new Map<string, string>();
+  private readonly authorityEnabled: boolean;
+  private readonly leaseMs: number;
 
-  constructor(store: SharedStore, _machineId: string, _leaseMs: number) {
+  constructor(store: SharedStore, _machineId: string, leaseMs: number, authorityEnabled = false) {
     this.store = store;
+    this.authorityEnabled = authorityEnabled;
+    this.leaseMs = leaseMs;
+  }
+
+  private mutationDeadline(): number {
+    return Date.now() + Math.min(30_000, Math.max(1_000, this.leaseMs));
+  }
+
+  private refreshClaim(ref: QueueClaimRef): QueueClaimRef | null {
+    const [renewed] = this.store.renewClaims([ref]);
+    if (renewed) return renewed;
+    return this.store.validateClaims([ref])[0] ?? null;
   }
 
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
-    const claimedIds = this.store.claimItems(
+    if (!this.authorityEnabled) return [];
+    const claimedRefs = this.store.claimLeases(
       candidates.map((i) => i.id),
       count,
       machineId,
     );
+    for (const ref of claimedRefs) {
+      this.claims.set(ref.itemId, ref);
+      this.claimWorkedItemIds.set(ref.itemId, ref.itemId);
+    }
+    const claimedIds = claimedRefs.map((ref) => ref.itemId);
     const claimedSet = new Set(claimedIds);
     return candidates.filter((item) => claimedSet.has(item.id));
   }
@@ -173,12 +233,23 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
     machineId: string,
+    cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
-    const claimedIds = this.store.claimItemsByLane(
+    if (!this.authorityEnabled) return [];
+    const claimedRefs = this.store.claimLeasesByLane(
       lanes.map((lane) => ({ candidateIds: lane.candidates.map((item) => item.id), limit: lane.limit })),
       count,
       machineId,
+      cooldownPolicies,
     );
+    for (const ref of claimedRefs) {
+      this.claims.set(ref.itemId, ref);
+      this.claimWorkedItemIds.set(
+        ref.itemId,
+        cooldownPolicies?.get(ref.itemId)?.itemIds[0] ?? ref.itemId,
+      );
+    }
+    const claimedIds = claimedRefs.map((ref) => ref.itemId);
     const byId = new Map(lanes.flatMap((lane) => lane.candidates).map((item) => [item.id, item]));
     return claimedIds.flatMap((id) => {
       const item = byId.get(id);
@@ -187,22 +258,118 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
   }
 
   release(itemIds: string[], machineId: string): void {
-    this.store.releaseItems(itemIds, machineId);
+    if (!this.authorityEnabled) return;
+    const refs = itemIds.flatMap((id) => {
+      const ref = this.claims.get(id);
+      return ref?.machineId === machineId ? [ref] : [];
+    });
+    for (const id of this.store.releaseClaims(refs)) {
+      this.claims.delete(id);
+      this.claimWorkedItemIds.delete(id);
+    }
   }
 
   renew(itemIds: string[], machineId: string): string[] {
-    return this.store.renewItems(itemIds, machineId);
+    if (!this.authorityEnabled) return [];
+    const refs = itemIds.flatMap((id) => {
+      const ref = this.claims.get(id);
+      return ref?.machineId === machineId ? [ref] : [];
+    });
+    const renewed = this.store.renewClaims(refs);
+    const renewedIds = new Set(renewed.map((ref) => ref.itemId));
+    const validated = this.store.validateClaims(
+      refs.filter((ref) => !renewedIds.has(ref.itemId)),
+    );
+    const authoritative = [...renewed, ...validated];
+    for (const ref of authoritative) this.claims.set(ref.itemId, ref);
+    return authoritative.map((ref) => ref.itemId);
+  }
+
+  fence(itemIds: string[], machineId: string): string[] {
+    return this.renew(itemIds, machineId);
+  }
+
+  beginExecution(itemId: string, machineId: string): boolean {
+    if (!this.authorityEnabled) return false;
+    let ref = this.claims.get(itemId);
+    if (!ref || ref.machineId !== machineId) return false;
+    const deadline = this.mutationDeadline();
+    for (;;) {
+      const result = this.store.beginClaimExecutionResult(ref);
+      if (result.status === 'success') {
+        this.claims.set(itemId, result.value);
+        return true;
+      }
+      if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
+      const refreshed = this.refreshClaim(ref);
+      if (!refreshed) return false;
+      ref = refreshed;
+      this.claims.set(itemId, ref);
+    }
+  }
+
+  settleClaim(claimItemId: string, machineId: string): boolean {
+    if (!this.authorityEnabled) return false;
+    let ref = this.claims.get(claimItemId);
+    if (!ref || ref.machineId !== machineId) return false;
+    const deadline = this.mutationDeadline();
+    for (;;) {
+      const result = this.store.settleClaimResult(ref);
+      if (result.status === 'success') {
+        this.claims.delete(claimItemId);
+        this.claimWorkedItemIds.delete(claimItemId);
+        return true;
+      }
+      if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
+      const refreshed = this.refreshClaim(ref);
+      if (!refreshed) return false;
+      ref = refreshed;
+      this.claims.set(claimItemId, ref);
+    }
   }
 
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean {
+    if (!this.authorityEnabled) return false;
+    if (this.claims.has(itemId)) {
+      return this.recordClaimOutcome(itemId, itemId, outcome, machineId);
+    }
     return this.store.recordOutcome(itemId, outcome, machineId);
   }
 
+  recordClaimOutcome(
+    claimItemId: string,
+    workedItemId: string,
+    outcome: WorkedOutcome,
+    machineId: string,
+  ): boolean {
+    if (!this.authorityEnabled) return false;
+    let ref = this.claims.get(claimItemId);
+    if (!ref || ref.machineId !== machineId) return false;
+    const completionId = randomUUID();
+    const deadline = this.mutationDeadline();
+    for (;;) {
+      const frozenWorkedItemId = this.claimWorkedItemIds.get(claimItemId) ?? workedItemId;
+      const result = this.store.completeClaimResult(ref, frozenWorkedItemId, outcome, completionId);
+      if (result.status === 'success') {
+        this.claims.delete(claimItemId);
+        this.claimWorkedItemIds.delete(claimItemId);
+        return true;
+      }
+      if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
+      const refreshed = this.refreshClaim(ref);
+      if (!refreshed) return false;
+      ref = refreshed;
+      this.claims.set(claimItemId, ref);
+    }
+  }
+
   shouldSkip(itemId: string, cooldownMs: number): boolean {
+    if (!this.authorityEnabled) return false;
     return this.store.recentlyDeclined(itemId, cooldownMs);
   }
 
   readWorkedEvents(): WorkedEvent[] {
+    if (!this.authorityEnabled) return [];
     return this.store.readSnapshot().worked;
   }
 }
@@ -226,7 +393,12 @@ export function selectWorkQueueCoordinator(cfg: AshlrConfig): WorkQueueCoordinat
     const leaseMs = sq.leaseMs ?? 5 * 60 * 1000;
     const machineId = sq.machineId ?? hostname();
     const store = new SharedStore(sq.path, leaseMs);
-    return new SharedWorkQueueCoordinator(store, machineId, leaseMs);
+    return new SharedWorkQueueCoordinator(
+      store,
+      machineId,
+      leaseMs,
+      sq.trustedCoherentStorage === true,
+    );
   }
   return new LocalWorkQueueCoordinator();
 }

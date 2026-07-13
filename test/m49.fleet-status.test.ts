@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -5021,6 +5021,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           path: sharedPath,
           machineId: 'machine-A',
           leaseMs: 20_000,
+          trustedCoherentStorage: true,
         },
       },
     };
@@ -5033,6 +5034,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       machineId: 'machine-A',
       leaseMs: 20_000,
       readable: true,
+      trustedCoherentStorage: true,
+      authorityReady: true,
+      capability: expect.objectContaining({
+        scope: 'local-primitives-only',
+        verified: true,
+      }),
       activeClaims: 2,
       ownedClaims: 1,
       reclaimableClaims: 0,
@@ -5059,6 +5066,84 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('claim sample:');
     expect(formatted).toContain('owned:active/owned');
     expect(formatted).toContain('other:active/machine-B');
+  });
+
+  it('fails shared queue authority closed without removing hardlink recovery residue', async () => {
+    const sharedPath = join(tmpHome, 'shared-queue-recovery');
+    const store = new SharedStore(sharedPath, 20_000);
+    expect(store.claimItems(['attested'], 1, 'machine-A')).toEqual(['attested']);
+
+    const lockPath = join(sharedPath, 'ashlr-fleet-queue.json.lock');
+    const recoveryPath = join(sharedPath, 'ashlr-fleet-queue.json.lock.recovery');
+    const residue = 'operator recovery required\n';
+    writeFileSync(lockPath, residue, 'utf8');
+    linkSync(lockPath, recoveryPath);
+    expect(statSync(lockPath).nlink).toBe(2);
+
+    const cfg: AshlrConfig = {
+      ...baseConfig(),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'machine-A',
+          leaseMs: 20_000,
+          trustedCoherentStorage: true,
+        },
+      },
+    };
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.queue.shared).toMatchObject({
+      readable: true,
+      trustedCoherentStorage: true,
+      authorityReady: false,
+      capability: { checked: true, verified: true, failure: null },
+      lock: {
+        present: true,
+        links: 2,
+        recoveryRequired: true,
+      },
+    });
+    expect(readFileSync(lockPath, 'utf8')).toBe(residue);
+    expect(readFileSync(recoveryPath, 'utf8')).toBe(residue);
+    expect(statSync(lockPath).nlink).toBe(2);
+    expect(statSync(recoveryPath).nlink).toBe(2);
+  });
+
+  it('reports an absent configured shared queue as unverified without creating its path', async () => {
+    const sharedPath = join(tmpHome, 'missing-shared-queue');
+    expect(existsSync(sharedPath)).toBe(false);
+
+    const cfg: AshlrConfig = {
+      ...baseConfig(),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'machine-A',
+          trustedCoherentStorage: true,
+        },
+      },
+    };
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.queue.shared).toMatchObject({
+      path: sharedPath,
+      readable: true,
+      trustedCoherentStorage: true,
+      authorityReady: false,
+      capability: {
+        scope: 'local-primitives-only',
+        checked: false,
+        verified: false,
+        failure: 'unavailable',
+      },
+      lock: { present: false },
+    });
+    expect(existsSync(sharedPath)).toBe(false);
   });
 
   it('surfaces daemon spend guard active work without exposing the guard token', async () => {
@@ -6616,6 +6701,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           machineId: 'machine-A',
           leaseMs: 300_000,
           readable: true,
+          capability: {
+            scope: 'local-primitives-only',
+            durabilityPolicy: 'posix-file-and-directory-fsync',
+            checked: true,
+            verified: true,
+            failure: null,
+          },
+          trustedCoherentStorage: true,
+          authorityReady: true,
           activeClaims: 2,
           ownedClaims: 1,
           expiredClaims: 1,
@@ -6979,7 +7073,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         'c [python: detected python project(s), but no verify command is configured]',
     );
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
-    expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
+    expect(out).toContain('shared:        authority-ready / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');
     expect(out).toContain('machine-B:1(+1 reclaimable)');
     expect(out).toContain('frontier pending:  1');

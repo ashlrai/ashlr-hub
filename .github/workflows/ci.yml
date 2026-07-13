@@ -25,6 +25,7 @@ jobs:
             test_args: >-
               test/setup/home.test.ts test/classify.test.ts
               test/m2.doctor.test.ts test/m43.verify-commands.test.ts
+              test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
           - os: windows-latest
             label: windows, portability 2/3
             test_args: >-
@@ -37,6 +38,10 @@ jobs:
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m332.outcome-watcher.test.ts test/m372.test-ci-watchdog.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
+          - os: macos-latest
+            label: macos, shared queue authority
+            test_args: >-
+              test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
     runs-on: ${{ matrix.os }}
 
     steps:

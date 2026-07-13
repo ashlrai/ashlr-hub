@@ -424,10 +424,13 @@ export function defaultConfig(): AshlrConfig {
     // user: { id: 'you@example.com', name: 'Your Name' },
 
     // M111: multi-machine work-queue coordination — absent by default (single-machine).
-    // To enable shared queue on a network/cloud folder, set e.g.:
-    //   fleet: { sharedQueue: { mode: 'filesystem', path: '/path/to/shared/folder' } }
+    // trustedCoherentStorage defaults to false. To enable authority on a
+    // verified coherent shared filesystem (not iCloud/Dropbox), set e.g.:
+    //   fleet: { sharedQueue: { mode: 'filesystem', path: '/path/to/shared/folder', trustedCoherentStorage: true } }
+    // This operator attestation is separate from local filesystem probing,
+    // which cannot establish cross-host linearizability.
     // machineId defaults to os.hostname() when not explicitly set.
-    // fleet: { sharedQueue: { mode: 'off' } },
+    // fleet: { sharedQueue: { mode: 'off', trustedCoherentStorage: false } },
 
     // M124: value filter gate — drop items below this value threshold before
     // the fleet selects work. Default 2 drops value-1 trivia. Configurable:

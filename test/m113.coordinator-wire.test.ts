@@ -95,6 +95,8 @@ import {
   SharedWorkQueueCoordinator,
 } from '../src/core/seams/work-queue-coordinator.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { loadFleetQuota } from '../src/core/fleet/quota.js';
+import { readAudit } from '../src/core/sandbox/audit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -339,6 +341,172 @@ describe('tick() with no sharedQueue (Local path)', () => {
 // ---------------------------------------------------------------------------
 
 describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
+  it('terminally settles proposal-disabled execution without recording a cooldown', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-disabled-'));
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      const settleSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'settleClaim');
+      try {
+        const cfg = makeCfg({
+          daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+          fleet: {
+            sharedQueue: {
+              mode: 'filesystem',
+              path: sharedDir,
+              machineId: 'A',
+              leaseMs: 30_000,
+              trustedCoherentStorage: true,
+            },
+          },
+        });
+        mockLoadConfig.mockReturnValue(cfg);
+        backlogItems = [makeItem('disabled-1', tmpRepo, { score: 3 })];
+        mockRunSwarm.mockResolvedValueOnce({
+          id: 'run-proposal-disabled',
+          status: 'failed',
+          goal: 'proposal-disabled test',
+          usage: { tokensIn: 0, tokensOut: 0, estCostUsd: 0, steps: 0 },
+          proposalOutcome: {
+            kind: 'proposal-disabled',
+            reason: 'proposal filing disabled for this sandboxed attempt',
+          },
+        });
+
+        enroll(tmpRepo);
+        const result = await tick(cfg, { dryRun: false });
+
+        expect(result.reason).toBe('ok');
+        expect(result.dispatches?.[0]?.production).toMatchObject({
+          outcome: 'proposal-disabled',
+          reason: 'proposal filing disabled for this sandboxed attempt',
+        });
+        expect(settleSpy).toHaveBeenCalledWith('disabled-1', 'A');
+        expect(settleSpy.mock.invocationCallOrder[0]).toBeLessThan(
+          clearIntervalSpy.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+        );
+        const snapshot = new SharedStore(sharedDir, 30_000).readSnapshot();
+        expect(snapshot.claims).toEqual({});
+        expect(snapshot.worked).toEqual([]);
+      } finally {
+        settleSpy.mockRestore();
+      }
+    } finally {
+      clearIntervalSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports terminal shared settlement failure as state persistence failure', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-settle-fail-'));
+    const settleSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'settleClaim').mockReturnValue(false);
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem', path: sharedDir, machineId: 'A', leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [makeItem('disabled-fail-1', tmpRepo, { score: 3 })];
+      mockRunSwarm.mockResolvedValueOnce({
+        id: 'run-proposal-disabled-fail', status: 'failed', goal: 'settlement failure',
+        usage: { tokensIn: 0, tokensOut: 0, estCostUsd: 0, steps: 0 },
+        proposalOutcome: { kind: 'proposal-disabled', reason: 'proposal filing disabled' },
+      });
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(settleSpy).toHaveBeenCalledWith('disabled-fail-1', 'A');
+    } finally {
+      settleSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('settles repairable shared outcomes while reporting unavailable handoff persistence', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-repairable-'));
+    const settleSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'settleClaim');
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem', path: sharedDir, machineId: 'A', leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [makeItem('shared-repairable-1', tmpRepo, { source: 'goal', score: 3 })];
+      mockRunSwarm.mockImplementationOnce(async (_input, _config, opts) => ({
+        id: (opts as { runId: string }).runId,
+        status: 'done',
+        goal: 'repairable shared outcome',
+        usage: { tokensIn: 10, tokensOut: 10, estCostUsd: 0.001, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'no file changes' },
+      }));
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+      const snapshot = new SharedStore(sharedDir, 30_000).readSnapshot();
+
+      expect(result.dispatches?.[0]?.production?.outcome).toBe('empty-diff');
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(settleSpy).toHaveBeenCalledWith('shared-repairable-1', 'A');
+      expect(readAudit()).toContainEqual(expect.objectContaining({
+        action: 'daemon:tick',
+        result: 'error',
+      }));
+      expect(snapshot.claims).toEqual({});
+      expect(snapshot.worked).toEqual([]);
+    } finally {
+      settleSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops lease renewal when pre-dispatch setup throws', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-renewer-'));
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [makeItem('setup-throw-1', tmpRepo, { score: 3 })];
+      mockRouteBackend.mockImplementation(() => {
+        throw new Error('post-renew setup boom');
+      });
+
+      enroll(tmpRepo);
+      await expect(tick(cfg, { dryRun: false })).rejects.toThrow('post-renew setup boom');
+
+      expect(intervalSpy).toHaveBeenCalled();
+      const renewalHandle = intervalSpy.mock.results.find((result) => result.type === 'return')?.value;
+      expect(renewalHandle).toBeDefined();
+      expect(clearIntervalSpy).toHaveBeenCalledWith(renewalHandle);
+    } finally {
+      intervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
   it('tick() dry-run releases shared queue claims before returning', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-dry-'));
     try {
@@ -350,6 +518,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
             path: sharedDir,
             machineId: 'A',
             leaseMs: 30_000,
+            trustedCoherentStorage: true,
           },
         },
       });
@@ -374,14 +543,115 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
     }
   });
 
+  it('refuses producer launch when the exact claim expires after selection', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-fence-'));
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [makeItem('fenced-1', tmpRepo, { score: 3 })];
+      let expired = false;
+      mockRouteBackend.mockImplementation(() => {
+        const queuePath = path.join(sharedDir, 'ashlr-fleet-queue.json');
+        if (!expired && fs.existsSync(queuePath)) {
+          const queue = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as {
+            claims: Record<string, { leaseUntil: number }>;
+          };
+          if (queue.claims['fenced-1']) {
+            queue.claims['fenced-1'].leaseUntil = Date.now() - 1;
+            fs.writeFileSync(queuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+            expired = true;
+          }
+        }
+        return routeResult;
+      });
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+
+      expect(expired).toBe(true);
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(result.dispatches?.[0]).toMatchObject({
+        dispatched: false,
+        skipReason: 'queue-lease-lost',
+      });
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
+    } finally {
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not consume frontier quota when the pre-launch queue fence refuses execution', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-quota-'));
+    const beginSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'beginExecution')
+      .mockReturnValue(false);
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      routeResult = { backend: 'claude', tier: 'frontier', reason: 'frontier test' };
+      backlogItems = [makeItem('quota-fenced-1', tmpRepo, { score: 3 })];
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(result.dispatches?.[0]).toMatchObject({
+        dispatched: false,
+        skipReason: 'queue-lease-lost',
+      });
+      expect(loadFleetQuota().events).toEqual([]);
+    } finally {
+      beginSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps pre-effect ordering explicit in builtin, direct, and Best-of-N launch branches', () => {
+    const source = fs.readFileSync(path.resolve('src/core/daemon/loop.ts'), 'utf8');
+    const builtin = source.slice(source.indexOf("if (backend === 'builtin')"), source.indexOf("if (backend === 'builtin')") + 3_000);
+    const bestOfN = source.slice(source.indexOf('if (fanOut)'), source.indexOf('if (fanOut)') + 3_000);
+    const direct = source.slice(source.indexOf('} else {', source.indexOf('if (fanOut)')), source.indexOf('} else {', source.indexOf('if (fanOut)')) + 2_500);
+
+    expect(builtin.indexOf('beginQueueExecution()')).toBeLessThan(builtin.indexOf('recordDispatchStartAgentAction'));
+    expect(builtin.indexOf('recordDispatchStartAgentAction')).toBeLessThan(builtin.indexOf('return runSwarm('));
+    for (const branch of [bestOfN, direct]) {
+      expect(branch.indexOf('beginQueueExecution()')).toBeLessThan(branch.indexOf('recordUse(backend!)'));
+      expect(branch.indexOf('recordUse(backend!)')).toBeLessThan(branch.indexOf('recordDispatchStartAgentAction'));
+    }
+    expect(bestOfN.indexOf('recordDispatchStartAgentAction')).toBeLessThan(bestOfN.indexOf('return runBestOfN('));
+    expect(direct.indexOf('recordDispatchStartAgentAction')).toBeLessThan(direct.indexOf('return runGoal('));
+  });
+
   it('machines A and B claim disjoint items from the same backlog', () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-'));
     try {
       const leaseMs = 5 * 60 * 1000;
       const storeA = new SharedStore(sharedDir, leaseMs);
       const storeB = new SharedStore(sharedDir, leaseMs);
-      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs);
-      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs);
+      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs, true);
+      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs, true);
 
       const items: WorkItem[] = [
         makeItem('job-1', tmpRepo),
@@ -416,8 +686,8 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       const leaseMs = 5 * 60 * 1000;
       const storeA = new SharedStore(sharedDir, leaseMs);
       const storeB = new SharedStore(sharedDir, leaseMs);
-      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs);
-      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs);
+      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs, true);
+      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs, true);
 
       // Machine A records 'empty' for job-1
       coordA.recordOutcome('job-1', 'empty', 'A');
@@ -442,8 +712,8 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       const leaseMs = 5 * 60 * 1000;
       const storeA = new SharedStore(sharedDir, leaseMs);
       const storeB = new SharedStore(sharedDir, leaseMs);
-      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs);
-      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs);
+      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs, true);
+      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs, true);
 
       const items: WorkItem[] = [makeItem('job-x', tmpRepo)];
 

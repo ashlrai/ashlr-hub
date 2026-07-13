@@ -1338,9 +1338,12 @@ export interface AshlrConfig {
    * M111: Multi-machine fleet work-queue coordination. DEFAULT ABSENT (off) —
    * single-machine behavior is unchanged when this block is missing.
    *
-   * When `mode` is 'filesystem' and `path` points to a shared folder (iCloud,
-   * Dropbox, NFS, etc.), multiple Macs running ashlr will atomically claim
-   * disjoint work items — no machine duplicates another's work.
+   * `filesystem` authority requires an explicit `trustedCoherentStorage:true`
+   * operator attestation for a coherent shared filesystem with linearizable
+   * exclusive create, rename, hard-link, fsync, and read-after-write semantics.
+   * Local primitive probing cannot verify cross-host linearizability. Replicated
+   * sync folders such as iCloud Drive and Dropbox are unsupported: they are not
+   * consensus stores and cannot provide execution authority.
    */
   fleet?: {
     sharedQueue?: {
@@ -1354,6 +1357,15 @@ export interface AshlrConfig {
        * stored. Required when mode is 'filesystem'. Ignored when mode is 'off'.
        */
       path?: string;
+      /**
+       * Explicit operator attestation that every worker accesses the same
+       * coherent filesystem and observes linearizable queue operations.
+       * Defaults to false. Filesystem queue authority must fail closed unless
+       * this is exactly true; a local capability probe is not this attestation.
+       * Enabling also attests that legacy writers were drained and the v2 fleet
+       * was moved to a fresh queue path.
+       */
+      trustedCoherentStorage?: boolean;
       /**
        * Stable identifier for this machine in the shared queue.
        * Defaults to os.hostname(). Override when two machines share a hostname.

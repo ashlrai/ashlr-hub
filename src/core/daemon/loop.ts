@@ -173,6 +173,7 @@ import { readSkillCards } from '../fleet/skill-records.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
+import type { QueueClaimCooldownPolicy } from '../fleet/shared-store.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import {
@@ -180,6 +181,7 @@ import {
   latestWorkedEventForKeys,
   sweepJudgedProposals,
   type WorkedEvent,
+  type WorkedOutcome,
   workedEventIsCooling,
 } from '../fleet/worked-ledger.js';
 import {
@@ -258,22 +260,18 @@ function flushPendingRepairTreatmentOutcomes(): void {
   }
 }
 
-function latestGeneratedRepairWorkedEvent(
-  workedEvents: readonly WorkedEvent[],
-  item: WorkItem,
-) {
-  return latestWorkedEventForKeys(
-    workedEvents,
-    generatedRepairCooldownKeys(item),
-  );
-}
-
 function generatedRepairShouldSkip(
   workedEvents: readonly WorkedEvent[],
-  item: WorkItem,
-  cooldownMs: number,
+  policy: QueueClaimCooldownPolicy,
 ): boolean {
-  return workedEventIsCooling(latestGeneratedRepairWorkedEvent(workedEvents, item), cooldownMs);
+  const latest = latestWorkedEventForKeys(workedEvents, policy.itemIds);
+  if (!latest) return false;
+  const override = policy.outcomeCooldownMs?.[latest.outcome];
+  if (override !== undefined) {
+    const eventMs = Date.parse(latest.ts);
+    return !Number.isFinite(eventMs) || Date.now() - eventMs < override;
+  }
+  return workedEventIsCooling(latest, policy.cooldownMs);
 }
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
@@ -1024,6 +1022,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   workedEvents: readonly WorkedEvent[];
   baseCooldownMs: number;
   repairRecoveryHealthy: boolean;
+  cooldownPolicies: ReadonlyMap<string, QueueClaimCooldownPolicy>;
   dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
   routeEvaluationByItem?: Map<WorkItem, GeneratedRepairRouteEvaluation>;
 }): void {
@@ -1035,13 +1034,10 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   if (generatedItems.length === 0) return;
   recordAgentAction(generatedItems.map((item): AgentActionEvent => {
     const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
-    const effectiveCooldownMs = cooldownMsForSelectionItem(
-      fields.workedEvents,
-      item,
-      fields.baseCooldownMs,
-      fields.repairRecoveryHealthy,
-    );
-    const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, item, effectiveCooldownMs);
+    const policy = fields.cooldownPolicies.get(item.id) ??
+      claimCooldownPolicyForSelectionItem(item, fields.baseCooldownMs, fields.repairRecoveryHealthy);
+    const effectiveCooldownMs = cooldownMsForSelectionItem(fields.workedEvents, policy);
+    const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, policy);
     const selected = selectedIds.has(item.id);
     const claimed = claimedIds.has(item.id);
     const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
@@ -1060,7 +1056,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
         })
       : undefined;
     const dispatchBlocked = dispatchPreflight !== undefined && dispatchPreflight !== 'dispatchable';
-    const latest = latestGeneratedRepairWorkedEvent(fields.workedEvents, item);
+    const latest = latestWorkedEventForKeys(fields.workedEvents, policy.itemIds);
     const fastRepairCooldown = effectiveCooldownMs < fields.baseCooldownMs;
     const reason = claimed
       ? 'claimed'
@@ -2134,22 +2130,33 @@ function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
 
 function cooldownMsForSelectionItem(
   workedEvents: readonly WorkedEvent[],
+  policy: QueueClaimCooldownPolicy,
+): number {
+  const latest = latestWorkedEventForKeys(workedEvents, policy.itemIds);
+  return latest ? policy.outcomeCooldownMs?.[latest.outcome] ?? policy.cooldownMs : policy.cooldownMs;
+}
+
+function claimCooldownPolicyForSelectionItem(
   item: WorkItem,
   baseCooldownMs: number,
   repairRecoveryHealthy: boolean,
-): number {
-  const latest = latestGeneratedRepairWorkedEvent(workedEvents, item);
-  if (latest?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
-    return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
+): QueueClaimCooldownPolicy {
+  const outcomeCooldownMs: Partial<Record<WorkedOutcome, number>> = {};
+  outcomeCooldownMs.diff = baseCooldownMs;
+  if (isTrustedGeneratedRepairItem(item)) {
+    outcomeCooldownMs['dispatch-blocked'] = Math.min(
+      baseCooldownMs,
+      GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
+    );
+    if (repairRecoveryHealthy) {
+      outcomeCooldownMs.empty = Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
+    }
   }
-  if (
-    repairRecoveryHealthy &&
-    latest?.outcome === 'empty' &&
-    isTrustedGeneratedRepairItem(item)
-  ) {
-    return Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
-  }
-  return baseCooldownMs;
+  return {
+    itemIds: generatedRepairCooldownKeys(item),
+    cooldownMs: baseCooldownMs,
+    ...(Object.keys(outcomeCooldownMs).length > 0 ? { outcomeCooldownMs } : {}),
+  };
 }
 
 /**
@@ -3133,12 +3140,16 @@ export async function tick(
   }
 
   const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
+  const claimCooldownPolicies = new Map<string, QueueClaimCooldownPolicy>(
+    backlogItems.map((item) => [
+      item.id,
+      claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
+    ]),
+  );
+  const frozenWorkedItemId = (item: WorkItem): string =>
+    claimCooldownPolicies.get(item.id)?.itemIds[0] ?? item.id;
   const isSelectionBlocked = (item: WorkItem): boolean =>
-    generatedRepairShouldSkip(
-      selectionWorkedEvents,
-      item,
-      cooldownMsForSelectionItem(selectionWorkedEvents, item, cooldownMs, repairRecoveryHealthy),
-    ) ||
+    generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(item.id)!) ||
     pendingItemKeys.has(workItemCoverageKey(item));
   const claimRepairQueue = (() => {
     try {
@@ -3304,8 +3315,9 @@ export async function tick(
     let fastRepairCooldown = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
-      const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, item, cooldownMs, repairRecoveryHealthy);
-      const cooling = generatedRepairShouldSkip(selectionWorkedEvents, item, itemCooldownMs);
+      const itemPolicy = claimCooldownPolicies.get(item.id)!;
+      const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, itemPolicy);
+      const cooling = generatedRepairShouldSkip(selectionWorkedEvents, itemPolicy);
       if (pending) pendingBlocked++;
       if (cooling) cooldownBlocked++;
       const routeUnavailable = !pending && !cooling && !hasFeasibleClaimRoute(item);
@@ -3479,8 +3491,22 @@ export async function tick(
           limit: selectCount,
         }];
   // One atomic claim preserves total capacity and per-lane quotas under
-  // cross-machine contention. Lock/storage failure remains fail-closed.
-  const workedSet = coordinator.claimItemsByLane(claimLanes, selectCount, machineId);
+  // cross-machine contention. Cooldown evidence is re-read under the same lock
+  // so a completion that raced selection cannot be immediately reclaimed.
+  for (const item of claimLanes.flatMap((lane) => lane.candidates)) {
+    if (!claimCooldownPolicies.has(item.id)) {
+      claimCooldownPolicies.set(
+        item.id,
+        claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
+      );
+    }
+  }
+  const workedSet = coordinator.claimItemsByLane(
+    claimLanes,
+    selectCount,
+    machineId,
+    claimCooldownPolicies,
+  );
   selected = workedSet;
   const drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
@@ -3532,6 +3558,7 @@ export async function tick(
     workedEvents: selectionWorkedEvents,
     baseCooldownMs: cooldownMs,
     repairRecoveryHealthy,
+    cooldownPolicies: claimCooldownPolicies,
     dispatchPreflightByItemId,
     routeEvaluationByItem: claimRouteEvaluations,
   });
@@ -3592,6 +3619,54 @@ export async function tick(
     });
   }
 
+  const workedSetIds = workedSet.map((i) => i.id);
+  const leaseAbortControllers = new Map(
+    workedSetIds.map((itemId) => [itemId, new AbortController()] as const),
+  );
+  let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
+  const abortLostClaims = (renewedIds: string[]): void => {
+    const renewed = new Set(renewedIds);
+    for (const itemId of workedSetIds) {
+      if (renewed.has(itemId)) continue;
+      const controller = leaseAbortControllers.get(itemId);
+      if (controller && !controller.signal.aborted) {
+        controller.abort(new Error(`shared queue claim authority lost for ${itemId}`));
+      }
+    }
+  };
+  const renewClaimLeases = (): string[] => {
+    if (workedSetIds.length === 0 || !stillOwnsTick()) return [];
+    try {
+      const renewed = coordinator.fence(workedSetIds, machineId);
+      abortLostClaims(renewed);
+      return renewed;
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick coordinator fence failed:', (err as Error)?.message ?? err);
+      abortLostClaims([]);
+      return [];
+    }
+  };
+  const startLeaseRenewer = (): string[] => {
+    if (workedSetIds.length === 0) return [];
+    const renewed = renewClaimLeases();
+    const intervalMs = Math.max(1, Math.min(60_000, Math.floor(sharedQueueLeaseMs / 3)));
+    leaseRenewInterval = setInterval(renewClaimLeases, intervalMs);
+    (leaseRenewInterval as { unref?: () => void }).unref?.();
+    return renewed;
+  };
+  const stopLeaseRenewer = (): void => {
+    if (leaseRenewInterval) {
+      clearInterval(leaseRenewInterval);
+      leaseRenewInterval = null;
+    }
+  };
+  try {
+  const initiallyRenewed = startLeaseRenewer();
+  if (workedSetIds.length > 0 && initiallyRenewed.length === 0) {
+    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    return persistenceRefusal('tick refused: shared queue claim authority unavailable after selection');
+  }
+
   // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
   // guard so queued work discovery and regression watches do not extend an
   // in-flight accounting guard for selected dispatches.
@@ -3602,12 +3677,14 @@ export async function tick(
   }
 
   if (!stillOwnsTick()) {
+    stopLeaseRenewer();
+    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
     return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
-  const workedSetIds = workedSet.map((i) => i.id);
   const spendGuard = armDaemonSpendGuard(workedSetIds);
   if (!spendGuard.ok) {
+    stopLeaseRenewer();
     try {
       if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
     } catch (err) {
@@ -3615,29 +3692,6 @@ export async function tick(
     }
     return persistenceRefusal(`tick refused: failed to arm spend guard (${spendGuard.error})`);
   }
-  let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
-  const renewClaimLeases = (): void => {
-    if (workedSetIds.length === 0 || !stillOwnsTick()) return;
-    try {
-      coordinator.renew(workedSetIds, machineId);
-    } catch (err) {
-      console.warn('[ashlr] daemon:tick coordinator renew failed:', (err as Error)?.message ?? err);
-    }
-  };
-  const startLeaseRenewer = (): void => {
-    if (workedSetIds.length === 0) return;
-    renewClaimLeases();
-    const intervalMs = Math.max(1, Math.min(60_000, Math.floor(sharedQueueLeaseMs / 3)));
-    leaseRenewInterval = setInterval(renewClaimLeases, intervalMs);
-    (leaseRenewInterval as { unref?: () => void }).unref?.();
-  };
-  const stopLeaseRenewer = (): void => {
-    if (leaseRenewInterval) {
-      clearInterval(leaseRenewInterval);
-      leaseRenewInterval = null;
-    }
-  };
-  startLeaseRenewer();
 
   const shadowSkillSelectedAt = new Date().toISOString();
   let shadowSkillCards: readonly SkillCard[] = [];
@@ -3728,6 +3782,12 @@ export async function tick(
   });
 
   const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  class QueueClaimAuthorityError extends Error {
+    constructor(itemId: string) {
+      super(`shared queue claim authority unavailable for ${itemId}`);
+      this.name = 'QueueClaimAuthorityError';
+    }
+  }
   const authorityUnavailableOutcome = (item: WorkItem, attemptId: string): ItemOutcome => ({
     item,
     spentUsd: 0,
@@ -3757,13 +3817,39 @@ export async function tick(
       }),
     };
   };
+  const queueLeaseLostOutcome = (item: WorkItem, attemptId: string): ItemOutcome => ({
+    item,
+    spentUsd: 0,
+    dispatched: false,
+    dispatch: dispatchTrace(item, {
+      assignedBy: 'queue-lease',
+      reason: 'shared queue claim generation is expired, superseded, or unavailable',
+      dispatched: false,
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+      skipReason: 'queue-lease-lost',
+    }),
+  });
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
+    const leaseController = leaseAbortControllers.get(item.id)!;
+    const dispatchSignal = opts.signal
+      ? AbortSignal.any([opts.signal, leaseController.signal])
+      : leaseController.signal;
+    const beginQueueExecution = (): void => {
+      if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
+        if (!leaseController.signal.aborted) {
+          leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
+        }
+        throw new QueueClaimAuthorityError(item.id);
+      }
+    };
     return ({
     tier: itemTiers[_taskIdx] ?? 'local',
     run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (stopRequested()) return stopRequestedOutcome(item, attemptId);
+      if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
       // In-tick budget short-circuit: if cumulative realized spend has already
       // reached the remaining daily headroom, do NOT dispatch further items.
       if (tickSpent >= remainingBudget) {
@@ -4252,6 +4338,7 @@ export async function tick(
         if (stopRequested()) return stopRequestedOutcome(item, attemptId);
         const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
           if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before swarm launch');
+          beginQueueExecution();
           recordDispatchStartAgentAction(item, {
             ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
             tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'swarm',
@@ -4264,7 +4351,7 @@ export async function tick(
               budget: itemBudget, parallel: 1, dryRun: false, noCapture: true,
               runId: attemptId, workItemId: item.id, workItemGenerationId,
               workSource: item.source, delegationScope,
-              ...(opts.signal ? { signal: opts.signal } : {}),
+              signal: dispatchSignal,
             },
             sink,
           );
@@ -4298,7 +4385,7 @@ export async function tick(
         const effectiveSwarmOutcome = swarmRun.proposalOutcome;
         const swarmCancelled = effectiveSwarmOutcome === undefined &&
           swarmRun.status === 'aborted' &&
-          opts.signal?.aborted === true &&
+          dispatchSignal.aborted === true &&
           resultDescribesCancellation(swarmRun.result);
         const swarmFailed = effectiveSwarmOutcome === undefined &&
           (swarmRun.status === 'aborted' || swarmRun.status === 'failed');
@@ -4401,8 +4488,6 @@ export async function tick(
           assignedBy = 'ashlrcode-executor';
           assignmentReason = `${assignmentReason}; ashlrcodeExecutor sandboxed ${previousBackend} via ashlrcode`;
         }
-        recordUse(backend);
-
         // M334: shadow the about-to-dispatch legacy decision (observe-only).
         await shadowGateway({
           backend: String(backend ?? 'builtin'),
@@ -4454,6 +4539,8 @@ export async function tick(
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n launch');
+            beginQueueExecution();
+            recordUse(backend!);
             recordDispatchStartAgentAction(item, {
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
@@ -4464,7 +4551,7 @@ export async function tick(
               ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
-              ...(opts.signal ? { signal: opts.signal } : {}),
+              signal: dispatchSignal,
             });
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
@@ -4506,7 +4593,7 @@ export async function tick(
               swarmSpent,
             );
             const cancelled = authoritativeProduction === undefined &&
-              (opts.signal?.aborted === true || bestOfNWasCancelled(bonResult));
+              (dispatchSignal.aborted === true || bestOfNWasCancelled(bonResult));
             const production = authoritativeProduction ?? (cancelled
               ? cancelledDispatchProduction(attemptId, `best-of-${bestOfN} selection cancelled by owner`, swarmSpent)
               : bestOfNNoWinnerProduction(bestOfN));
@@ -4544,6 +4631,8 @@ export async function tick(
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
+            beginQueueExecution();
+            recordUse(backend!);
             recordDispatchStartAgentAction(item, {
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
@@ -4554,7 +4643,7 @@ export async function tick(
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
-              ...(opts.signal ? { signal: opts.signal } : {}),
+              signal: dispatchSignal,
             });
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
@@ -4646,7 +4735,7 @@ export async function tick(
         const directOutcome = runState.proposalOutcome;
         const directCancelled = directOutcome === undefined && runState.status === 'aborted' && (
           runState.terminationReason === 'cancelled' || (
-            opts.signal?.aborted === true && resultDescribesCancellation(runState.result)
+            dispatchSignal.aborted === true && resultDescribesCancellation(runState.result)
           )
         );
         const directFailed = directOutcome === undefined &&
@@ -4739,6 +4828,9 @@ export async function tick(
         });
       }
 		    } catch (err) {
+		      if (err instanceof QueueClaimAuthorityError) {
+		        return queueLeaseLostOutcome(item, attemptId);
+		      }
 		      const msg = err instanceof Error ? err.message : String(err);
 		      const errorReason = 'dispatch-error: executor threw';
 		      dispatch = dispatchTrace(item, {
@@ -4916,6 +5008,7 @@ export async function tick(
       dryRun: false,
     });
     if (!stillOwnsTick()) {
+      stopLeaseRenewer();
       return ownershipLostTick({
         ts: now,
         itemsConsidered: workedSet.length,
@@ -5027,8 +5120,9 @@ export async function tick(
       ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
       : await tieredBounded(tasks, tierPool);
   }
-  } finally {
+  } catch (err) {
     stopLeaseRenewer();
+    throw err;
   }
 
   const postDispatchOwnershipLost = (): DaemonTick | null => {
@@ -5044,6 +5138,7 @@ export async function tick(
   };
   const postSettlementFence = acquireTickMutationFence();
   if (opts.ownerLock && !postSettlementFence) {
+    stopLeaseRenewer();
     return postDispatchOwnershipLost() ?? {
       ts: now,
       itemsConsidered: workedSet.length,
@@ -5086,7 +5181,12 @@ export async function tick(
     try {
       for (const item of drainSelectedItems) {
         if (dispatchedItemIds.has(item.id)) continue;
-        coordinator.recordOutcome(generatedRepairCooldownKey(item), 'dispatch-blocked', machineId);
+        coordinator.recordClaimOutcome(
+          item.id,
+          frozenWorkedItemId(item),
+          'dispatch-blocked',
+          machineId,
+        );
       }
     } catch (err) {
       console.warn('[ashlr] daemon:tick dispatch-blocked cooldown failed:', (err as Error)?.message ?? err);
@@ -5124,11 +5224,12 @@ export async function tick(
   });
   const handoffFailedItemIds = new Set<string>();
   const workedOutcomeFailedItemIds = new Set<string>();
+  const sharedQueueMode = liveCfg.fleet?.sharedQueue?.mode === 'filesystem';
   const ownershipLostBeforeDispatchWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeDispatchWrites) return ownershipLostBeforeDispatchWrites;
   for (const event of productionEvents) {
     const repairable = repairHandoffFromDispatchEvent(event) !== null;
-    if (liveCfg.fleet?.sharedQueue?.mode === 'filesystem') {
+    if (sharedQueueMode) {
       const parentWrite = recordDispatchProduction(event);
       if (parentWrite.recorded !== 1 && repairable) handoffFailedItemIds.add(event.itemId);
       if (repairable) handoffFailedItemIds.add(event.itemId);
@@ -5176,20 +5277,33 @@ export async function tick(
       }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          if (handoffFailedItemIds.has(outcome.value.item.id)) continue;
+          const handoffFailed = handoffFailedItemIds.has(outcome.value.item.id);
+          if (handoffFailed && !sharedQueueMode) continue;
+          if (handoffFailed) {
+            // The parent attempt is terminal, but failed repair projection grants
+            // no cooldown authority. Clear only this exact executing generation
+            // and keep the parent immediately retryable.
+            coordinator.settleClaim(outcome.value.item.id, machineId);
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
           const production = outcome.value.dispatch?.production;
           const duplicateDiff = production?.outcome === 'proposal-disabled' &&
             production.reason?.startsWith('duplicate diff skipped;') === true;
           if (production?.runEventSummary?.status === 'aborted') continue;
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
+            if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+              workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            }
             continue;
           }
           const outcomeLabel =
             (duplicateDiff ? 'empty' : workedOutcomeFromDispatchProduction(production)) ??
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
-          if (!coordinator.recordOutcome(
-            generatedRepairCooldownKey(outcome.value.item),
+          if (!coordinator.recordClaimOutcome(
+            outcome.value.item.id,
+            frozenWorkedItemId(outcome.value.item),
             outcomeLabel,
             machineId,
           )) workedOutcomeFailedItemIds.add(outcome.value.item.id);
@@ -5198,6 +5312,11 @@ export async function tick(
     } catch (err) {
       // Ledger recording must never crash the tick.
       console.warn('[ashlr] daemon:tick ledger recordOutcome failed:', (err as Error)?.message ?? err);
+      for (const outcome of outcomes) {
+        if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+          workedOutcomeFailedItemIds.add(outcome.value.item.id);
+        }
+      }
     }
   }
 
@@ -5447,7 +5566,9 @@ export async function tick(
     spentUsd: tickSpent,
     reason: stopRequested()
       ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
-      : 'ok',
+      : workedOutcomeFailedItemIds.size > 0
+        ? 'state-persistence-failed'
+        : 'ok',
 	    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
 	    ...(directionMode ? { directionMode } : {}),
 	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -5571,12 +5692,15 @@ export async function tick(
     repo: null,
     sandboxId: null,
     summary: `tick ${tickRecord.reason}: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${tickSpent.toFixed(4)} spent`,
-    result: 'ok',
+    result: tickRecord.reason === 'state-persistence-failed' ? 'error' : 'ok',
   });
 
   return tickRecord;
   } finally {
     releaseLocalStoreLock(postSettlementFence);
+  }
+  } finally {
+    stopLeaseRenewer();
   }
 }
 

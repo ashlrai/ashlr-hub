@@ -614,6 +614,7 @@ describe('M220 tick() integration — antiClog default ON', () => {
           path: sharedDir,
           machineId: 'machine-A',
           leaseMs: 10_000,
+          trustedCoherentStorage: true,
         },
       },
     } as AshlrConfig;

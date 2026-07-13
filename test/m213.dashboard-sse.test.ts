@@ -886,6 +886,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('claimSamples');
     expect(src).toContain('nextLeaseExpiryAt');
     expect(src).toContain('oldestExpiredMs');
+    expect(src).toContain('ambiguousClaims');
+    expect(src).toContain("'Ambiguous'");
     expect(src).toContain('fdRenderLeaseBoard(sharedQueue, activeWork)');
     expect(src).toContain('claimsByMachine.slice(0, 6)');
     expect(src).toContain('claimSamples.slice(0, 6)');

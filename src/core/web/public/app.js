@@ -2296,9 +2296,18 @@ function quotaTag(quota) {
 
 function sharedQueueMetric(shared) {
   if (!shared) return null;
+  if (!shared.trustedCoherentStorage) return 'operator attestation required';
+  if (!shared.capability?.verified) {
+    return `local primitive probe failed: ${shared.capability?.failure || 'unknown'}`;
+  }
+  if (!shared.authorityReady) return 'authority unavailable';
   if (!shared.readable) return 'unreadable';
-  const suffix = shared.lock?.stale ? ' · stale lock' : '';
-  return `${shared.activeClaims ?? 0} active / ${shared.reclaimableClaims ?? 0} reclaimable${suffix}`;
+  const suffix = shared.lock?.recoveryRequired
+    ? ' · lock recovery required'
+    : shared.lock?.stale ? ' · stale lock' : '';
+  const ambiguous = shared.ambiguousClaims ?? 0;
+  return `${shared.activeClaims ?? 0} active / ${shared.reclaimableClaims ?? 0} reclaimable` +
+    `${ambiguous > 0 ? ` / ${ambiguous} ambiguous` : ''}${suffix}`;
 }
 
 function queueEligibilityMetric(queue) {
@@ -3884,6 +3893,9 @@ function renderControl() {
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));
+    if ((sharedQueue.ambiguousClaims ?? 0) > 0) {
+      heroMetrics.appendChild(controlMetric('Ambiguous', sharedQueue.ambiguousClaims, '#ef4444'));
+    }
   }
   const activeWork = d.fleet?.queue?.activeWork ?? fleet.queue?.activeWork ?? null;
   if (activeWork) {
@@ -4975,23 +4987,32 @@ function fdRenderLeaseBoard(sharedQueue, activeWork) {
   const visibleClaims = claimsByMachine.slice(0, 6);
   const visibleClaimSamples = claimSamples.slice(0, 6);
   const unreadable = sharedQueue?.readable === false;
+  const authorityUnavailable = sharedQueue?.authorityReady === false;
   const staleLock = sharedQueue?.lock?.stale === true;
+  const lockRecoveryRequired = sharedQueue?.lock?.recoveryRequired === true;
   const malformedActiveWork = activeWork?.malformed === true;
   const reclaimable = sharedQueue?.reclaimableClaims ?? 0;
+  const ambiguous = sharedQueue?.ambiguousClaims ?? 0;
   const active = sharedQueue?.activeClaims ?? 0;
   const owned = sharedQueue?.ownedClaims ?? 0;
-  const statusText = unreadable
+  const statusText = authorityUnavailable
+    ? !sharedQueue?.trustedCoherentStorage ? 'Attestation required' : 'Authority unavailable'
+    : unreadable
     ? 'Unreadable'
     : malformedActiveWork
       ? 'Guard malformed'
+    : lockRecoveryRequired
+      ? 'Lock recovery required'
     : staleLock
       ? 'Stale lock'
+      : ambiguous > 0
+        ? 'Ambiguous'
       : reclaimable > 0
         ? 'Reclaimable'
         : activeWork && !sharedQueue
           ? 'Active work'
         : 'Healthy';
-  const statusTone = unreadable || staleLock || reclaimable > 0 || malformedActiveWork ? 'warn' : 'ok';
+  const statusTone = authorityUnavailable || unreadable || staleLock || lockRecoveryRequired || ambiguous > 0 || reclaimable > 0 || malformedActiveWork ? 'warn' : 'ok';
   const mode = sharedQueue?.mode ?? (sharedQueue?.enabled ? 'shared' : 'local');
   const machineLabel = sharedQueue?.machineId ?? activeWork?.hostname ?? 'unknown';
   const nextExpiryTitle = sharedQueue?.nextLeaseExpiryAt ? fmtDate(sharedQueue.nextLeaseExpiryAt) : 'No active lease expiry';
@@ -5013,6 +5034,7 @@ function fdRenderLeaseBoard(sharedQueue, activeWork) {
     fdRenderLeaseMetric('This machine', compactFleetReason(machineLabel, 34), null, machineLabel),
     fdRenderLeaseMetric('Active / owned', `${active} / ${owned}`),
     fdRenderLeaseMetric('Reclaimable', String(reclaimable), reclaimable > 0 ? 'warn' : null),
+    fdRenderLeaseMetric('Ambiguous', String(ambiguous), ambiguous > 0 ? 'warn' : null),
     fdRenderLeaseMetric('Next expiry', nextExpiry, null, nextExpiryTitle),
     fdRenderLeaseMetric('Expired age', expiredAge, expiredAge !== '—' ? 'warn' : null),
     fdRenderLeaseMetric('Cooldown / worked / usage', `${sharedQueue?.cooldownItems ?? 0} / ${sharedQueue?.workedEvents ?? 0} / ${sharedQueue?.usageEntries ?? 0}`),
@@ -5159,7 +5181,9 @@ function fdRenderStatusPanel(snap) {
   grid.appendChild(mkMeta('Items processed', String(daemon.itemsProcessed ?? 0)));
   if (sharedQueue) {
     grid.appendChild(mkMeta('Shared queue', sharedQueueMetric(sharedQueue),
-      !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 || sharedQueue.lock?.stale ? 'fd-meta-val--warn' : null));
+      !sharedQueue.authorityReady || !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 ||
+      (sharedQueue.ambiguousClaims ?? 0) > 0 || sharedQueue.lock?.stale ||
+      sharedQueue.lock?.recoveryRequired ? 'fd-meta-val--warn' : null));
     grid.appendChild(mkMeta('Owned leases', String(sharedQueue.ownedClaims ?? 0)));
   }
   if (activeWork) {

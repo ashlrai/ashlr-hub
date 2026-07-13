@@ -1434,7 +1434,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
-      fleet: { sharedQueue: { mode: 'filesystem', path: sharedPath, machineId: 'm201-refill' } },
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'm201-refill',
+          trustedCoherentStorage: true,
+        },
+      },
     } as AshlrConfig, { dryRun: false });
     const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
 

@@ -5,13 +5,13 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
-  type Stats,
+  type BigIntStats,
 } from 'node:fs';
 
 export interface DirectoryDurabilityFs {
-  lstatSync(path: string): Stats;
+  lstatSync(path: string, options: { bigint: true }): BigIntStats;
   openSync(path: string, flags: number): number;
-  fstatSync(fd: number): Stats;
+  fstatSync(fd: number, options: { bigint: true }): BigIntStats;
   fsyncSync(fd: number): void;
   closeSync(fd: number): void;
 }
@@ -22,9 +22,9 @@ export interface DirectoryDurabilityOptions {
 }
 
 const DEFAULT_FS: DirectoryDurabilityFs = {
-  lstatSync,
+  lstatSync: (path, options) => lstatSync(path, options),
   openSync,
-  fstatSync,
+  fstatSync: (fd, options) => fstatSync(fd, options),
   fsyncSync,
   closeSync,
 };
@@ -43,12 +43,12 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 
-function sameIdentity(left: Stats, right: Stats): boolean {
-  return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
+function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
-function requireNamedDirectory(path: string, fs: DirectoryDurabilityFs): Stats {
-  const named = fs.lstatSync(path);
+function requireNamedDirectory(path: string, fs: DirectoryDurabilityFs): BigIntStats {
+  const named = fs.lstatSync(path, { bigint: true });
   if (named.isSymbolicLink() || !named.isDirectory()) {
     throw new Error(`durability path is not a named directory: ${path}`);
   }
@@ -84,7 +84,7 @@ export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions
       throw error;
     }
 
-    const opened = fs.fstatSync(fd);
+    const opened = fs.fstatSync(fd, { bigint: true });
     if (!opened.isDirectory() || !sameIdentity(named, opened)) {
       throw new Error(`durability directory identity changed: ${path}`);
     }

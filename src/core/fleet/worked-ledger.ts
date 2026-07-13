@@ -74,6 +74,8 @@ export interface WorkedEvent {
   ts: string;
   /** Rejected proposal already swept into this outcome, when applicable. */
   proposalId?: string;
+  /** Exact shared-claim completion marker for indeterminate-commit readback. */
+  claimCompletionId?: string;
 }
 
 /** The persisted worked ledger. */
