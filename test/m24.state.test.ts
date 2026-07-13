@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -507,6 +508,91 @@ describe('M24 daemon singleton lock', () => {
       expect(releaseDaemonLock(acquired.lock)).toBe(true);
     }
   });
+
+  it('allows exactly one concurrent process to reclaim the same stale lock', async () => {
+    const p = daemonLockPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        pid: 2 ** 22,
+        token: 'concurrent-dead-owner',
+        hostname: 'test-host',
+        acquiredAt: '2026-01-01T00:00:00.000Z',
+        heartbeatAt: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf8',
+    );
+
+    const goPath = path.join(tmpHome, 'reclaim-go');
+    const releasePath = path.join(tmpHome, 'reclaim-release');
+    const stateModuleUrl = new URL('../src/core/daemon/state.ts', import.meta.url).href;
+    const waitForFiles = async (paths: string[]): Promise<void> => {
+      const deadline = Date.now() + 5_000;
+      while (!paths.every((file) => fs.existsSync(file))) {
+        if (Date.now() >= deadline) throw new Error(`timed out waiting for ${paths.join(', ')}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const children = [0, 1].map((index) => {
+      const readyPath = path.join(tmpHome, `reclaim-ready-${index}`);
+      const resultPath = path.join(tmpHome, `reclaim-result-${index}.json`);
+      const script = `
+        import { existsSync, writeFileSync } from 'node:fs';
+        import { acquireDaemonLock, releaseDaemonLock } from ${JSON.stringify(stateModuleUrl)};
+        const sleep = new Int32Array(new SharedArrayBuffer(4));
+        writeFileSync(${JSON.stringify(readyPath)}, 'ready');
+        while (!existsSync(${JSON.stringify(goPath)})) Atomics.wait(sleep, 0, 0, 5);
+        const result = acquireDaemonLock({ staleMs: 0 });
+        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result.acquired
+          ? { acquired: true, token: result.lock.token, replacedStale: result.replacedStale }
+          : { acquired: false, reason: result.reason, ownerToken: result.owner?.token ?? null }));
+        if (result.acquired) {
+          while (!existsSync(${JSON.stringify(releasePath)})) Atomics.wait(sleep, 0, 0, 5);
+          releaseDaemonLock(result.lock);
+        }
+        process.exit(0);
+      `;
+      const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+        env: { ...process.env, HOME: tmpHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+      return { child, readyPath, resultPath, stderr: () => stderr };
+    });
+
+    try {
+      await waitForFiles(children.map(({ readyPath }) => readyPath));
+      fs.writeFileSync(goPath, 'go', 'utf8');
+
+      await waitForFiles(children.map(({ resultPath }) => resultPath));
+      const outcomes = children.map(({ resultPath }) =>
+        JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>);
+      const winners = outcomes.filter((outcome) => outcome['acquired'] === true);
+      expect(winners).toHaveLength(1);
+      expect(winners[0]?.['replacedStale']).toBe(true);
+      expect(outcomes.filter((outcome) => outcome['acquired'] === false)).toHaveLength(1);
+
+      const installed = JSON.parse(fs.readFileSync(p, 'utf8')) as { token: string };
+      expect(installed.token).toBe(winners[0]?.['token']);
+    } finally {
+      fs.writeFileSync(goPath, 'go', 'utf8');
+      fs.writeFileSync(releasePath, 'release', 'utf8');
+      await Promise.all(children.map(({ child, stderr }) => new Promise<void>((resolve, reject) => {
+        if (child.exitCode !== null) {
+          if (child.exitCode === 0) resolve();
+          else reject(new Error(`lock contender exited ${child.exitCode}: ${stderr()}`));
+          return;
+        }
+        child.once('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`lock contender exited ${code}: ${stderr()}`));
+        });
+      })));
+    }
+  }, 15_000);
 });
 
 // ===========================================================================

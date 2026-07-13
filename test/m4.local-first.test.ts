@@ -443,6 +443,58 @@ describe('getActiveClient (ollama) — chat function smoke test', () => {
     expect(result.usage.tokensIn).toBeGreaterThanOrEqual(0);
     expect(result.usage.tokensOut).toBeGreaterThanOrEqual(0);
   });
+
+  it('aborts a stalled response body after headers and removes the caller listener', async () => {
+    let requestSignal: AbortSignal | undefined;
+    let markBodyStarted!: () => void;
+    const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (String(url).includes('11434/api/tags')) {
+        return Promise.resolve(mockResponse({ models: [{ name: 'llama3:8b' }] }));
+      }
+      if (String(url).includes('11434/api/chat')) {
+        requestSignal = init?.signal ?? undefined;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => {
+            markBodyStarted();
+            return new Promise((_resolve, reject) => {
+              requestSignal?.addEventListener(
+                'abort',
+                () => reject(requestSignal?.reason),
+                { once: true },
+              );
+            });
+          },
+        } as unknown as Response);
+      }
+      return Promise.reject(new Error('unexpected'));
+    }) as unknown as typeof fetch);
+
+    const cfg = makeConfig(['ollama']);
+    const client = await getActiveClient(cfg, { allowCloud: false });
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    const pending = client.chat(
+      [{ role: 'user', content: 'Hello' }],
+      undefined,
+      controller.signal,
+    );
+    const rejection = expect(pending).rejects.toThrow('cancelled Ollama body');
+    await bodyStarted;
+
+    expect(addSpy).toHaveBeenCalledOnce();
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    controller.abort(new Error('cancelled Ollama body'));
+
+    await rejection;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(removeSpy).toHaveBeenCalledOnce();
+    expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
 });
 
 // ---------------------------------------------------------------------------

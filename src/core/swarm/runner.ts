@@ -439,8 +439,16 @@ async function executeTask(
   const taskRun = run.tasks.find((t) => t.id === taskId);
   if (!taskRun) return 'continue';
 
-  // Skip if already done (resume path).
-  if (taskRun.status === 'done') return 'continue';
+  // Resume only work that is explicitly pending. Ordinary failures and skips
+  // remain terminal; owner-cancelled tasks are reset to pending on resume.
+  if (taskRun.status !== 'pending') return 'continue';
+
+  if (opts.signal?.aborted) {
+    taskRun.status = 'cancelled';
+    taskRun.error = 'Cancelled by the swarm owner.';
+    persist(run);
+    return 'continue';
+  }
 
   // Check hard budget before starting.
   if (overBudget(run.usage, run.budget)) {
@@ -598,21 +606,33 @@ async function executeTask(
       // subprocess. That single assignment is the load-bearing guard; this task
       // sets nothing per-call.
       noMemory: false,
+      ...(opts.signal ? { signal: opts.signal } : {}),
       ...(taskDelegationScope ? { delegationScope: taskDelegationScope } : {}),
     });
 
     // Accumulate usage into swarm totals.
     run.usage = addUsage(run.usage, taskResult.usage);
 
-    taskRun.status = taskResult.status === 'done' ? 'done' : 'failed';
+    taskRun.status = taskResult.status === 'done'
+      ? 'done'
+      : opts.signal?.aborted || taskResult.terminationReason === 'cancelled'
+        ? 'cancelled'
+        : 'failed';
     taskRun.result = taskResult.result;
     taskRun.usage = taskResult.usage;
-    if (taskResult.status !== 'done') {
+    if (taskRun.status === 'cancelled') {
+      taskRun.error = 'Cancelled by the swarm owner.';
+    } else if (taskResult.status !== 'done') {
       taskRun.error = `Task ended with status: ${taskResult.status}`;
     }
   } catch (err) {
-    taskRun.status = 'failed';
-    taskRun.error = err instanceof Error ? err.message : String(err);
+    if (opts.signal?.aborted) {
+      taskRun.status = 'cancelled';
+      taskRun.error = 'Cancelled by the swarm owner.';
+    } else {
+      taskRun.status = 'failed';
+      taskRun.error = err instanceof Error ? err.message : String(err);
+    }
   }
 
   emit(
@@ -633,6 +653,11 @@ async function executeTask(
     } catch {
       // best-effort; absent signature means downstream verification skips this dep
     }
+  }
+
+  if (taskRun.status === 'cancelled') {
+    persist(run);
+    return 'continue';
   }
 
   // -------------------------------------------------------------------------
@@ -707,6 +732,7 @@ async function executePhase(
     );
 
     for (let i = 0; i < pending.length; i += parallelCap) {
+      if (opts.signal?.aborted) return false;
       // Abort entire phase if budget is already blown.
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
@@ -722,6 +748,7 @@ async function executePhase(
       const reserved = { tokens: 0, steps: 0 };
       const launches: Promise<'continue' | 'escalate'>[] = [];
       for (let b = 0; b < batch.length; b++) {
+        if (opts.signal?.aborted) break;
         const t = batch[b]!;
         const remainingInBatch = batch.length - b;
         // Snapshot the per-task slice this task will be authorized so we can
@@ -752,6 +779,7 @@ async function executePhase(
         );
       }
       const results = await Promise.all(launches);
+      if (opts.signal?.aborted) return false;
 
       // If any task in the batch triggered an escalation gate, stop the phase.
       if (results.includes('escalate')) {
@@ -772,6 +800,7 @@ async function executePhase(
   } else {
     // All other phases: sequential execution respecting deps.
     for (const taskSpec of phaseTasks) {
+      if (opts.signal?.aborted) return false;
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
         return false;
@@ -1311,6 +1340,31 @@ export async function runSwarm(
     return failedRun;
   }
 
+  const resumeSnapshot = opts.resumeId ? loadSwarm(opts.resumeId) : null;
+
+  if (opts.signal?.aborted) {
+    if (resumeSnapshot !== null) {
+      emitLog(sink, `Resume of swarm ${resumeSnapshot.id} cancelled before execution.`);
+      return resumeSnapshot;
+    }
+    const now = new Date().toISOString();
+    return {
+      id: opts.resumeId ?? opts.runId ?? makeId(),
+      goal: input.goal,
+      specId: input.specId ?? null,
+      project: opts.project ?? null,
+      createdAt: now,
+      updatedAt: now,
+      budget: buildBudget(opts),
+      usage: newUsage(),
+      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      status: 'aborted',
+      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+      tasks: [],
+      result: 'Swarm cancelled before execution.',
+    };
+  }
+
   const refuseFreshIdentity = (reason: string): SwarmRun => {
     const now = new Date().toISOString();
     const failed: SwarmRun = {
@@ -1349,7 +1403,6 @@ export async function runSwarm(
     opts = { ...opts, runId };
   }
 
-  const resumeSnapshot = opts.resumeId ? loadSwarm(opts.resumeId) : null;
   if (resumeSnapshot) {
     opts = {
       ...opts,
@@ -1545,6 +1598,14 @@ export async function runSwarm(
     }
 
     run = existing;
+    for (const task of run.tasks) {
+      if (task.status !== 'cancelled') continue;
+      task.status = 'pending';
+      delete task.result;
+      delete task.usage;
+      delete task.error;
+      delete task.signature;
+    }
     emitLog(sink, `Resuming swarm ${run.id} (status: ${run.status})`);
   } else {
     // Fresh swarm — generate id.
@@ -1606,7 +1667,18 @@ export async function runSwarm(
       // if needed. The planner accepts undefined specBody and works goal-only.
       const specBody: string | undefined = undefined;
 
-      const plan = await planSwarm({ goal: input.goal, specBody }, cfg);
+      const plan = await planSwarm({ goal: input.goal, specBody }, cfg, opts.signal);
+      if (plan.usage !== undefined) {
+        run.usage = addUsage(run.usage, plan.usage);
+      }
+      if (opts.signal?.aborted) {
+        run.status = 'aborted';
+        run.result = 'Swarm cancelled during planning.';
+        maybePersist(run);
+        emitLog(sink, run.result);
+        await fireEmitSwarm(run, cfg);
+        return run;
+      }
       run.plan = plan;
       // Initialise task run records from the plan (preserve any from resume).
       const existingIds = new Set(run.tasks.map((t) => t.id));
@@ -1618,6 +1690,14 @@ export async function runSwarm(
       maybePersist(run);
       emitLog(sink, `Plan ready: ${plan.tasks.length} task(s) across phases`);
     } catch (err) {
+      if (opts.signal?.aborted) {
+        run.status = 'aborted';
+        run.result = 'Swarm cancelled during planning.';
+        maybePersist(run);
+        emitLog(sink, run.result);
+        await fireEmitSwarm(run, cfg);
+        return run;
+      }
       run.status = 'failed';
       run.result = `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
       maybePersist(run);
@@ -1628,6 +1708,15 @@ export async function runSwarm(
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
     }
+  }
+
+  if (opts.signal?.aborted) {
+    run.status = 'aborted';
+    run.result = 'Swarm cancelled after planning.';
+    maybePersist(run);
+    emitLog(sink, run.result);
+    await fireEmitSwarm(run, cfg);
+    return run;
   }
 
   // -------------------------------------------------------------------------
@@ -1699,6 +1788,17 @@ export async function runSwarm(
 
   try {
     for (const phase of PHASE_ORDER) {
+      if (opts.signal?.aborted) {
+        run.status = 'aborted';
+        run.result = `Swarm cancelled before phase ${phase}.`;
+        persist(run);
+        emitLog(sink, run.result);
+        if (activeSandbox !== null) {
+          captureSandboxAndCleanup(activeSandbox, run, sink, false, cfg, causal, !opts.dryRun);
+        }
+        await fireEmitSwarm(run, cfg);
+        return run;
+      }
       // Check hard budget before each phase.
       if (overBudget(run.usage, run.budget)) {
         run.status = 'aborted';
@@ -1714,6 +1814,18 @@ export async function runSwarm(
       }
 
       const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel, sandboxCwd);
+
+      if (opts.signal?.aborted) {
+        run.status = 'aborted';
+        run.result = `Swarm cancelled during phase ${phase}.`;
+        persist(run);
+        emitLog(sink, run.result);
+        if (activeSandbox !== null) {
+          captureSandboxAndCleanup(activeSandbox, run, sink, false, cfg, causal, !opts.dryRun);
+        }
+        await fireEmitSwarm(run, cfg);
+        return run;
+      }
 
       if (phaseResult === 'escalate') {
         // Swarm already set to 'needs-approval' and persisted by escalate().

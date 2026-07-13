@@ -684,6 +684,178 @@ describe('M199 runGoal — happy path', () => {
   });
 });
 
+describe('M199 runGoal — cancellation accounting and verification guards', () => {
+  it('preserves parsed raw-engine usage and cost in the aborted state', async () => {
+    const controller = new AbortController();
+    vi.mocked(engineInstalled).mockReturnValue(true);
+    vi.mocked(buildEngineCommand).mockReturnValue({
+      bin: 'claude',
+      args: ['--print', 'goal'],
+      cwd: '/tmp',
+    } as any);
+    vi.mocked(spawnEngine).mockImplementationOnce(async (_cmd, _cfg, opts) => {
+      expect(opts?.signal).toBe(controller.signal);
+      controller.abort();
+      return {
+        ok: false,
+        output: 'partial output',
+        usage: { tokensIn: 1_000, tokensOut: 500 },
+        terminationReason: 'cancelled',
+      } as any;
+    });
+
+    const state = await runGoal('goal', makeConfig(), makeOpts({
+      engine: 'claude',
+      signal: controller.signal,
+    }));
+
+    expect(state).toMatchObject({
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      usage: {
+        tokensIn: 1_000,
+        tokensOut: 500,
+        steps: 1,
+      },
+    });
+    expect(state.usage.estCostUsd).toBeCloseTo(0.0105);
+  });
+
+  it('does not start model verification after task execution cancels the run', async () => {
+    const controller = new AbortController();
+    const planJson = '[{"id":"t1","goal":"task one","deps":[]}]';
+    const client = makeClient('ollama');
+    vi.mocked(client.chat)
+      .mockResolvedValueOnce({ content: planJson, usage: { tokensIn: 5, tokensOut: 5 } })
+      .mockResolvedValue({ content: 'stale synthesis', usage: { tokensIn: 1, tokensOut: 1 } });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementationOnce(async (task: any) => {
+      task.status = 'done';
+      task.result = 'task output';
+      controller.abort();
+    });
+
+    const state = await runGoal('goal', makeConfig(), makeOpts({ signal: controller.signal }));
+
+    expect(state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled' });
+    expect(verifyTaskStructured).not.toHaveBeenCalled();
+  });
+
+  it('does not start browser verification after structured verification cancels the run', async () => {
+    const controller = new AbortController();
+    const planJson = '[{"id":"t1","goal":"task one","deps":[]}]';
+    const client = makeClient('ollama');
+    vi.mocked(client.chat)
+      .mockResolvedValueOnce({ content: planJson, usage: { tokensIn: 5, tokensOut: 5 } })
+      .mockResolvedValue({ content: 'stale synthesis', usage: { tokensIn: 1, tokensOut: 1 } });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementationOnce(async (task: any) => {
+      task.status = 'done';
+      task.result = 'task output';
+    });
+    vi.mocked(verifyTaskStructured).mockImplementationOnce(async () => {
+      controller.abort();
+      return { ok: true, reason: 'verified before cancellation' } as any;
+    });
+    vi.mocked(isWebApp).mockReturnValue(true);
+
+    const cfg = makeConfig({ foundry: { browserVerify: true } as any });
+    const state = await runGoal('goal', cfg, makeOpts({ signal: controller.signal }));
+
+    expect(state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled' });
+    expect(verifyTaskStructured).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(verifyTaskStructured).mock.calls[0]?.[4]).toMatchObject({
+      signal: controller.signal,
+    });
+    expect(isWebApp).not.toHaveBeenCalled();
+    expect(verifyInBrowser).not.toHaveBeenCalled();
+  });
+
+  it('passes the owner signal to browser verification and reports in-flight cancellation as aborted', async () => {
+    const controller = new AbortController();
+    const planJson = '[{"id":"t1","goal":"task one","deps":[]}]';
+    const client = makeClient('ollama');
+    vi.mocked(client.chat).mockResolvedValueOnce({
+      content: planJson,
+      usage: { tokensIn: 5, tokensOut: 5 },
+    });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementationOnce(async (task: any) => {
+      task.status = 'done';
+      task.result = 'task output';
+    });
+    vi.mocked(verifyTaskStructured).mockResolvedValue({ ok: true, reason: 'verified' } as any);
+    vi.mocked(isWebApp).mockReturnValue(true);
+    vi.mocked(verifyInBrowser).mockImplementationOnce(async (_repo, _cfg, options) => {
+      expect(options?.signal).toBe(controller.signal);
+      controller.abort();
+      return {
+        ok: false,
+        aborted: true,
+        renderOk: false,
+        consoleErrors: [],
+        detail: 'browser verify aborted',
+      };
+    });
+
+    const state = await runGoal(
+      'goal',
+      makeConfig({ foundry: { browserVerify: true } as any }),
+      makeOpts({ signal: controller.signal }),
+    );
+
+    expect(verifyInBrowser).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Object),
+      { signal: controller.signal },
+    );
+    expect(state).toMatchObject({
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      result: 'Run cancelled.',
+    });
+    expect(state.tasks[0]?.result).toBe('task output');
+    expect(client.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves synthesis usage and cost when cancellation races the response', async () => {
+    const controller = new AbortController();
+    const planJson = '[{"id":"t1","goal":"task one","deps":[]}]';
+    const client = makeClient('claude');
+    vi.mocked(client.chat)
+      .mockResolvedValueOnce({ content: planJson, usage: { tokensIn: 10, tokensOut: 5 } })
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        return { content: 'completed synthesis', usage: { tokensIn: 1_000, tokensOut: 500 } };
+      });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementationOnce(async (task: any) => {
+      task.status = 'done';
+      task.result = 'task output';
+    });
+    vi.mocked(verifyTaskStructured).mockResolvedValue({ ok: true, reason: 'verified' } as any);
+
+    const state = await runGoal('goal', makeConfig(), makeOpts({ signal: controller.signal }));
+
+    expect(state).toMatchObject({
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      result: 'Run cancelled.',
+      usage: {
+        tokensIn: 1_010,
+        tokensOut: 505,
+        steps: 2,
+      },
+    });
+    expect(state.usage.estCostUsd).toBeCloseTo(0.010605);
+    expect(state.steps.at(-1)).toMatchObject({
+      kind: 'synthesize',
+      summary: 'Synthesis complete',
+      usage: { tokensIn: 1_000, tokensOut: 500, steps: 1 },
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 7. runGoal — HARD BUDGET abort
 // ---------------------------------------------------------------------------

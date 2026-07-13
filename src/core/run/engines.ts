@@ -321,6 +321,49 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 // spawnEngine
 // ---------------------------------------------------------------------------
 
+interface SpawnEngineOptions {
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  launcher?: { bin: string; prefixArgs: string[] };
+  onEvent?: (ev: RunEvent) => void;
+  /**
+   * Caller ownership contract. Signaled POSIX runs own their invocation's
+   * detached process group only. Descendants that deliberately escape it via
+   * setsid()/a detached spawn are outside this termination scope.
+   */
+  signal?: AbortSignal;
+  /** Grace period between SIGINT and SIGKILL. Tests inject small values. */
+  _stallGraceMs?: number;
+  /** Bounded pipe-drain period after SIGKILL. Tests inject small values. */
+  _terminationDrainMs?: number;
+  /** Hermetic process-ownership test seams; production callers leave these unset. */
+  _platform?: NodeJS.Platform;
+  _processKill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+}
+
+interface SpawnEngineResult {
+  ok: boolean;
+  output: string;
+  usage?: { tokensIn: number; tokensOut: number };
+  error?: string;
+  terminationReason?: TerminationReason;
+  configRecoveryAttempts?: number;
+}
+
+function cancelledEngineResult(
+  output = '',
+  usage?: { tokensIn: number; tokensOut: number },
+): SpawnEngineResult {
+  const result: SpawnEngineResult = {
+    ok: false,
+    output,
+    error: 'cancelled',
+    terminationReason: 'cancelled',
+  };
+  if (usage) result.usage = usage;
+  return result;
+}
+
 /**
  * Spawn a resolved EngineCommand and capture its result.
  *
@@ -341,35 +384,32 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
  *
  * RETURN CONTRACT (preserved from pre-M236 for m233/m45/m52 compatibility):
  *   { ok: boolean; output: string; usage?: { tokensIn, tokensOut }; error?: string }
+ *
+ * TERMINATION SCOPE: cancellation owns only the invocation's detached POSIX
+ * process group while the unreaped leader proves that group's identity. It
+ * neither targets nor claims cleanup of descendants that deliberately escape
+ * that group with setsid() or a detached spawn.
  */
 export async function spawnEngine(
   cmd: EngineCommand,
   cfg: AshlrConfig,
-  opts?: {
-    env?: NodeJS.ProcessEnv;
-    timeoutMs?: number;
-    /**
-     * M52: optional OS-level sandbox launcher. When present, the engine is
-     * spawned as `launcher.bin [...launcher.prefixArgs, cmd.bin, ...cmd.args]`
-     * (the phantomWrap, if any, composes BEFORE the launcher -- jail wraps the
-     * whole thing). When absent => exactly v4 behavior (default-off parity).
-     */
-    launcher?: { bin: string; prefixArgs: string[] };
-    /**
-     * M236: callback invoked for each normalised RunEvent from the child
-     * process stdout/stderr. Used by run-monitor.ts for stall detection.
-     * When absent, events are collected internally only (no stall monitoring).
-     */
-    onEvent?: (ev: RunEvent) => void;
-    /** M236 test hook: grace period (ms) between SIGINT and SIGKILL in stall-stop. */
-    _stallGraceMs?: number;
-  },
-): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason; configRecoveryAttempts?: number }> {
+  opts?: SpawnEngineOptions,
+): Promise<SpawnEngineResult> {
   // CONTRACT: spawnEngine NEVER throws. Any failure is reported as { ok:false, error }.
   try {
+    if (opts?.signal?.aborted) return cancelledEngineResult();
+    if (opts?.signal && (opts._platform ?? process.platform) === 'win32') {
+      return {
+        ok: false,
+        output: '',
+        error: 'AbortSignal-owned external execution is unsupported on Windows because complete process-tree ownership cannot be guaranteed',
+        terminationReason: 'error-exit',
+      };
+    }
     const first = await spawnEngineInner(cmd, cfg, opts);
     const recovery = codexReasoningConfigRecovery(cmd, first);
     if (!recovery) return first;
+    if (opts?.signal?.aborted) return cancelledEngineResult(first.output, first.usage);
     const recovered = await spawnEngineInner(recovery, cfg, opts);
     return { ...recovered, configRecoveryAttempts: 1 };
   } catch (err) {
@@ -540,15 +580,18 @@ function isClaudeEngineBin(bin: string): boolean {
 async function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
-  opts?: {
-    env?: NodeJS.ProcessEnv;
-    timeoutMs?: number;
-    launcher?: { bin: string; prefixArgs: string[] };
-    onEvent?: (ev: RunEvent) => void;
-    /** Grace period between SIGINT and SIGKILL during stall-stop (ms). Tests inject small values. */
-    _stallGraceMs?: number;
-  },
-): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason }> {
+  opts?: SpawnEngineOptions,
+): Promise<SpawnEngineResult> {
+  if (opts?.signal?.aborted) return cancelledEngineResult();
+  const platform = opts?._platform ?? process.platform;
+  if (opts?.signal && platform === 'win32') {
+    return {
+      ok: false,
+      output: '',
+      error: 'AbortSignal-owned external execution is unsupported on Windows because complete process-tree ownership cannot be guaranteed',
+      terminationReason: 'error-exit',
+    };
+  }
   // Apply phantom-exec wrap when enabled, installed, AND the cwd contains
   // .phantom.toml. Self-authenticating CLIs (claude, codex) run in sandbox
   // worktrees that have no .phantom.toml -- wrapping them is both unnecessary
@@ -588,21 +631,39 @@ async function spawnEngineInner(
   return new Promise((resolve) => {
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
+    let stdoutBuf = '';
+    let stderrBuf = '';
     const callerOnEvent = opts?.onEvent;
     const captureClaudeRateLimitEvents = isClaudeEngineBin(cmd.bin);
+    const ownsProcessGroup = opts?.signal !== undefined && platform !== 'win32';
+    const processKill = opts?._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
+      process.kill(pid, signal);
+    });
     let terminationReason: TerminationReason | undefined;
     let settled = false;
+    let terminationRequested = false;
+    let escalationTimer: ReturnType<typeof setTimeout> | null = null;
+    let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    let backstopTimer: ReturnType<typeof setTimeout> | null = null;
+    let childClosed = false;
+    let leaderExited = false;
+    let hardKillSent = false;
+    let groupAuthorityFailure: string | undefined;
 
     function captureClaudeRateLimitLine(line: string): void {
       if (!captureClaudeRateLimitEvents) return;
       recordClaudeRateLimitEventLine(line);
     }
 
-    function settle(
-      result: { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason },
-    ): void {
+    function settle(result: SpawnEngineResult): void {
       if (settled) return;
       settled = true;
+      monitor.detach();
+      if (backstopTimer !== null) clearTimeout(backstopTimer);
+      if (escalationTimer !== null) clearTimeout(escalationTimer);
+      if (drainTimer !== null) clearTimeout(drainTimer);
+      opts?.signal?.removeEventListener('abort', onAbort);
+      releaseProcessResources();
       resolve(result);
     }
 
@@ -611,36 +672,215 @@ async function spawnEngineInner(
       env: childEnv,
       // pipe stdout + stderr for line reading; stdin closed (no input).
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(ownsProcessGroup ? { detached: true } : {}),
     });
+
+    // A detached POSIX child is its process-group leader, so its invocation-local
+    // PID is also the only PGID we are authorized to signal. The group can outlive
+    // its leader, so retain this invocation-scoped authority until the group is
+    // proven absent or the bounded termination protocol finishes.
+    let ownedPgid = ownsProcessGroup && typeof child.pid === 'number' && child.pid > 0
+      ? child.pid
+      : null;
+
+    function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+      if (timer.unref) timer.unref();
+    }
+
+    function revokeOwnedPgid(): void {
+      ownedPgid = null;
+    }
+
+    function releaseProcessResources(): void {
+      // A descendant can inherit the leader's pipe writers. Destroy our readers
+      // and unref the ChildProcess so those inherited descriptors cannot keep the
+      // daemon alive after this invocation's bounded settlement deadline.
+      child.stdout?.removeAllListeners();
+      child.stderr?.removeAllListeners();
+      if (typeof child.stdout?.destroy === 'function') child.stdout.destroy();
+      if (typeof child.stderr?.destroy === 'function') child.stderr.destroy();
+      child.removeAllListeners();
+      child.on('error', () => { /* ignore events after bounded settlement */ });
+      if (typeof child.unref === 'function') child.unref();
+    }
+
+    function capturedOutputAndUsage(): {
+      output: string;
+      usage?: { tokensIn: number; tokensOut: number };
+    } {
+      const lines = stdoutBuf.trim() ? [...stdoutLines, stdoutBuf] : stdoutLines;
+      const output = lines.join('\n').trim();
+      const usage = parseUsageFromLines(lines, cmd.bin);
+      return usage ? { output, usage } : { output };
+    }
+
+    function processSignalError(err: unknown, operation: string): 'absent' | 'failed' {
+      const code = typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code ?? '')
+        : '';
+      if (code === 'ESRCH') {
+        revokeOwnedPgid();
+        return 'absent';
+      }
+      groupAuthorityFailure = `${operation} failed${code ? ` (${code})` : ''}: ${err instanceof Error ? err.message : String(err)}`;
+      return 'failed';
+    }
+
+    function leaderIdentityIsLive(): boolean {
+      // Before Node reaps the leader, its PID cannot be reused. Once exitCode or
+      // signalCode is populated (or `exit` fires), the numeric PGID alone is not
+      // sufficient authorization for any delayed group operation.
+      return !leaderExited && child.exitCode === null && child.signalCode === null;
+    }
+
+    function failUnverifiableGroupIdentity(operation: string): 'failed' {
+      groupAuthorityFailure ??= `${operation} refused: process-group leader identity is no longer provable`;
+      return 'failed';
+    }
+
+    function signalOwnedGroup(signal: NodeJS.Signals): 'sent' | 'absent' | 'failed' {
+      if (ownedPgid === null) return 'absent';
+      if (!leaderIdentityIsLive()) return failUnverifiableGroupIdentity(`${signal} process-group signal`);
+      try {
+        processKill(-ownedPgid, signal);
+        return 'sent';
+      } catch (err) {
+        return processSignalError(err, `${signal} process-group signal`);
+      }
+    }
+
+    function probeOwnedGroup(): 'present' | 'absent' | 'failed' {
+      if (ownedPgid === null) return 'absent';
+      if (!leaderIdentityIsLive()) return failUnverifiableGroupIdentity('process-group exit probe');
+      try {
+        processKill(-ownedPgid, 0);
+        return 'present';
+      } catch (err) {
+        return processSignalError(err, 'process-group exit probe');
+      }
+    }
+
+    function settleAtTerminationDeadline(groupState?: 'present' | 'absent' | 'failed'): void {
+      const captured = capturedOutputAndUsage();
+      const observedGroupState = groupState ?? (
+        groupAuthorityFailure
+          ? 'failed'
+          : (ownsProcessGroup ? probeOwnedGroup() : (childClosed ? 'absent' : 'present'))
+      );
+      if (groupAuthorityFailure || observedGroupState === 'failed') {
+        settle({
+          ok: false,
+          ...captured,
+          error: `termination authority lost: ${groupAuthorityFailure ?? 'process-group state could not be authenticated'}`,
+          terminationReason: 'error-exit',
+        });
+        return;
+      }
+      if (observedGroupState === 'present') {
+        settle({
+          ok: false,
+          ...captured,
+          error: 'termination deadline elapsed with process-group exit unconfirmed',
+          terminationReason: 'error-exit',
+        });
+        return;
+      }
+      if (!childClosed) {
+        settle({
+          ok: false,
+          ...captured,
+          error: 'termination deadline elapsed with process and stdio closure unconfirmed',
+          terminationReason: 'error-exit',
+        });
+        return;
+      }
+      if (terminationReason === 'cancelled') {
+        settle(cancelledEngineResult(captured.output, captured.usage));
+        return;
+      }
+      settle({
+        ok: false,
+        ...captured,
+        error: `termination deadline elapsed (${terminationReason ?? 'unknown'})`,
+        terminationReason,
+      });
+    }
+
+    function beginTerminationDrain(): void {
+      if (settled || drainTimer !== null) return;
+      const drainMs = opts?._terminationDrainMs ?? 100;
+      drainTimer = setTimeout(() => {
+        drainTimer = null;
+        settleAtTerminationDeadline();
+      }, drainMs);
+      // Deliberately referenced: this is the final bounded ownership deadline.
+    }
+
+    const monitor = attachStallMonitor(cfg, (reason) => requestTermination(reason, true));
+
+    function requestTermination(reason: TerminationReason, graceful: boolean): void {
+      if (settled || terminationRequested) return;
+      terminationRequested = true;
+      terminationReason = reason;
+      monitor.detach();
+
+      const stallGraceMs = opts?._stallGraceMs ?? 15_000;
+      if (ownsProcessGroup) {
+        const firstSignal = graceful ? 'SIGINT' : 'SIGKILL';
+        const firstResult = signalOwnedGroup(firstSignal);
+        if (!graceful) hardKillSent = firstResult === 'sent';
+        if (firstResult === 'failed') {
+          beginTerminationDrain();
+          return;
+        }
+        if (!graceful) {
+          beginTerminationDrain();
+          return;
+        }
+        // The leader may exit while descendants remain in its detached group.
+        // Keep the PGID authority and escalate the original group at deadline.
+        escalationTimer = setTimeout(() => {
+          escalationTimer = null;
+          const killResult = signalOwnedGroup('SIGKILL');
+          hardKillSent = killResult === 'sent';
+          beginTerminationDrain();
+        }, stallGraceMs);
+        return;
+      }
+
+      if (!graceful) {
+        try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
+        hardKillSent = true;
+        beginTerminationDrain();
+        return;
+      }
+      try { if (!child.killed) child.kill('SIGINT'); } catch { /* already dead */ }
+      escalationTimer = setTimeout(() => {
+        try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
+        hardKillSent = true;
+        beginTerminationDrain();
+      }, stallGraceMs);
+    }
+
+    function onAbort(): void {
+      requestTermination('cancelled', true);
+    }
 
     // ---------------------------------------------------------------------------
     // M236: Stall monitor — graceful-stop ladder owned here (we have child ref).
     // SIGINT → grace → SIGKILL. Grace period is short for tests, 15s in prod.
     // ---------------------------------------------------------------------------
-    const stallGraceMs = opts?._stallGraceMs ?? 15_000;
-    const monitor = attachStallMonitor(cfg, (reason) => {
-      terminationReason = reason;
-      // Graceful stop: SIGINT first, then SIGKILL after grace period.
-      try { if (!child.killed) child.kill('SIGINT'); } catch { /* already dead */ }
-      const killTimer = setTimeout(() => {
-        try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
-      }, stallGraceMs);
-      if (killTimer.unref) killTimer.unref();
-    });
+    opts?.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts?.signal?.aborted) onAbort();
 
     // Backstop kill timer (runaway-cost safety net — fires only after timeoutMs).
     const backstopMs = opts?.timeoutMs ?? 5 * 60 * 1000;
-    const backstopTimer = setTimeout(() => {
-      terminationReason = 'backstop-timeout';
-      monitor.detach();
-      try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
-    }, backstopMs);
-    if (backstopTimer.unref) backstopTimer.unref();
+    backstopTimer = setTimeout(() => requestTermination('backstop-timeout', false), backstopMs);
+    unrefTimer(backstopTimer);
 
     // ---------------------------------------------------------------------------
     // Line reader — stdout
     // ---------------------------------------------------------------------------
-    let stdoutBuf = '';
     child.stdout!.on('data', (chunk: Buffer) => {
       stdoutBuf += chunk.toString('utf8');
       let nl: number;
@@ -658,7 +898,6 @@ async function spawnEngineInner(
     // ---------------------------------------------------------------------------
     // Line reader — stderr (collected for error messages; not fed to monitor)
     // ---------------------------------------------------------------------------
-    let stderrBuf = '';
     child.stderr!.on('data', (chunk: Buffer) => {
       stderrBuf += chunk.toString('utf8');
       let nl: number;
@@ -671,14 +910,47 @@ async function spawnEngineInner(
     });
 
     child.on('error', (err: Error) => {
-      clearTimeout(backstopTimer);
       monitor.detach();
-      settle({ ok: false, output: '', error: err.message, terminationReason });
+      if (terminationRequested && ownsProcessGroup) {
+        // A late ChildProcess error does not prove that the detached group is
+        // gone. In particular, never let it erase a prior EPERM/authority
+        // failure or downgrade that failure to ordinary cancellation.
+        if (groupAuthorityFailure) return;
+        const groupState = probeOwnedGroup();
+        if (groupState === 'failed' || groupState === 'absent' || hardKillSent) {
+          beginTerminationDrain();
+        }
+        return;
+      }
+      revokeOwnedPgid();
+      const captured = capturedOutputAndUsage();
+      if (terminationReason === 'cancelled') {
+        settle(cancelledEngineResult(captured.output, captured.usage));
+      } else {
+        settle({ ok: false, ...captured, error: err.message, terminationReason });
+      }
+    });
+
+    child.on('exit', () => {
+      leaderExited = true;
+      if (!terminationRequested || !ownsProcessGroup) return;
+      if (hardKillSent) {
+        // SIGKILL was authorized while the unreaped leader still proved the
+        // invocation PGID. Do not perform any later numeric-PGID operation.
+        revokeOwnedPgid();
+        return;
+      }
+      failUnverifiableGroupIdentity('delayed process-group escalation');
+      if (escalationTimer !== null) {
+        clearTimeout(escalationTimer);
+        escalationTimer = null;
+      }
+      beginTerminationDrain();
     });
 
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
-      clearTimeout(backstopTimer);
       monitor.detach();
+      childClosed = true;
 
       // Flush any remaining partial line buffers.
       if (stdoutBuf.trim()) {
@@ -691,22 +963,45 @@ async function spawnEngineInner(
         stderrLines.push(stderrBuf);
         captureClaudeRateLimitLine(stderrBuf);
       }
+      stdoutBuf = '';
+      stderrBuf = '';
 
       const exitedClean = code === 0 && signal === null;
+      const rawOutput = stdoutLines.join('\n').trim();
+      const usage = parseUsageFromLines(stdoutLines, cmd.bin);
 
-      if (!exitedClean) {
-        const rawOutput = stdoutLines.join('\n').trim();
+      if (terminationRequested && ownsProcessGroup) {
+        const groupState = probeOwnedGroup();
+        if (groupState === 'absent') {
+          if (terminationReason === 'cancelled') {
+            settle(cancelledEngineResult(rawOutput, usage));
+          } else {
+            settle({
+              ok: false,
+              output: rawOutput,
+              usage,
+              error: signal ? `killed by signal ${signal}` : `terminated (${terminationReason ?? 'unknown'})`,
+              terminationReason,
+            });
+          }
+        } else if (groupState === 'failed') {
+          settleAtTerminationDeadline(groupState);
+        } else if (hardKillSent) {
+          beginTerminationDrain();
+        }
+      } else if (terminationReason === 'cancelled') {
+        settle(cancelledEngineResult(rawOutput, usage));
+      } else if (!exitedClean) {
+        revokeOwnedPgid();
         const errMsg =
           signal
             ? `killed by signal ${signal}`
             : (stderrLines.join('\n').trim() || `exit ${code ?? 'unknown'}`);
-        settle({ ok: false, output: rawOutput, error: errMsg, terminationReason });
-        return;
+        settle({ ok: false, output: rawOutput, usage, error: errMsg, terminationReason });
+      } else {
+        revokeOwnedPgid();
+        settle({ ok: true, output: rawOutput, usage });
       }
-
-      const rawOutput = stdoutLines.join('\n').trim();
-      const usage = parseUsageFromLines(stdoutLines, cmd.bin);
-      settle({ ok: true, output: rawOutput, usage });
     });
   });
 }

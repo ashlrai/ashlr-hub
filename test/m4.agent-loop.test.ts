@@ -365,6 +365,178 @@ describe('runTask — model error sets task.status to failed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Caller cancellation
+// ---------------------------------------------------------------------------
+
+describe('runTask — caller cancellation', () => {
+  it('marks a pre-aborted task as cancelled without calling the model', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = mockClient([textResult('must not run')]);
+    const task = makeTask();
+    const { steps, onStep } = collectSteps();
+
+    await runTask(task, client, {
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      signal: controller.signal,
+    });
+
+    expect(task.status).toBe('failed');
+    expect(task.error).toBe('Task cancelled.');
+    expect(task.result).toBeUndefined();
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(steps).toEqual([]);
+  });
+
+  it('marks an in-flight model abort as cancellation rather than a model failure', async () => {
+    const controller = new AbortController();
+    const chat = vi.fn(() => new Promise<ChatResult>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), {
+        once: true,
+      });
+    }));
+    const client: ProviderClient = { id: 'abortable', supportsTools: false, chat };
+    const task = makeTask();
+    const usage = newUsage();
+    const { steps, onStep } = collectSteps(usage);
+
+    const pending = runTask(task, client, {
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await pending;
+
+    expect(task.status).toBe('failed');
+    expect(task.error).toBe('Task cancelled.');
+    expect(task.error).not.toContain('Model call failed');
+    expect(chat).toHaveBeenCalledOnce();
+    expect(usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 1 });
+    expect(task.usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 1 });
+    expect(steps.filter((step) => step.kind === 'model')).toEqual([
+      expect.objectContaining({
+        summary: 'Model call attempted and cancelled.',
+        usage: expect.objectContaining({ tokensIn: 0, tokensOut: 0, steps: 1 }),
+      }),
+    ]);
+  });
+
+  it('passes the signal and records the completed tool before stopping later work', async () => {
+    const controller = new AbortController();
+    const firstTool = vi.fn(async (_args: unknown, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      controller.abort();
+      return 'first result';
+    });
+    const secondTool = vi.fn(async () => 'second result');
+    const client = mockClient([{
+      content: '',
+      toolCalls: [
+        { id: 'tc-1', name: 'first', arguments: {} },
+        { id: 'tc-2', name: 'second', arguments: {} },
+      ],
+      usage: { tokensIn: 20, tokensOut: 10 },
+    }]);
+    const task = makeTask();
+    const { steps, onStep } = collectSteps();
+
+    await runTask(task, client, {
+      tools: [
+        { name: 'first', fn: firstTool },
+        { name: 'second', fn: secondTool },
+      ],
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      signal: controller.signal,
+    });
+
+    expect(firstTool).toHaveBeenCalledOnce();
+    expect(secondTool).not.toHaveBeenCalled();
+    expect(client.chat).toHaveBeenCalledOnce();
+    expect(steps.filter((step) => step.kind === 'tool')).toEqual([
+      expect.objectContaining({ summary: 'first: first result' }),
+    ]);
+    expect(task.status).toBe('failed');
+    expect(task.error).toBe('Task cancelled.');
+    expect(task.result).toBeUndefined();
+  });
+
+  it('retains usage reported by a model response that races with cancellation', async () => {
+    const controller = new AbortController();
+    const chat = vi.fn(async (): Promise<ChatResult> => {
+      controller.abort();
+      return textResult('completed as cancellation arrived', 37, 19);
+    });
+    const client: ProviderClient = { id: 'cancel-race', supportsTools: false, chat };
+    const task = makeTask();
+    const usage = newUsage();
+    const { steps, onStep } = collectSteps();
+
+    await runTask(task, client, {
+      budget: makeBudget(),
+      usage,
+      onStep,
+      signal: controller.signal,
+    });
+
+    expect(task.status).toBe('failed');
+    expect(task.error).toBe('Task cancelled.');
+    expect(task.result).toBeUndefined();
+    expect(usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 0 });
+    expect(task.usage).toMatchObject({ tokensIn: 37, tokensOut: 19, steps: 1 });
+    expect(steps.filter((step) => step.kind === 'model')).toHaveLength(1);
+    expect(chat).toHaveBeenCalledOnce();
+  });
+
+  it('retains a tool result whose promise settled before the abort race', async () => {
+    const controller = new AbortController();
+    let resolveTool!: (value: string) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const toolResult = new Promise<string>((resolve) => { resolveTool = resolve; });
+    const executor = vi.fn((_args: unknown, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      markStarted();
+      return toolResult;
+    });
+    const client = mockClient([
+      toolCallResult('commit_action', { value: 1 }),
+      textResult('must not run'),
+    ]);
+    const task = makeTask();
+    const { steps, onStep } = collectSteps();
+
+    const pending = runTask(task, client, {
+      tools: [{ name: 'commit_action', fn: executor }],
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      signal: controller.signal,
+    });
+    await started;
+
+    // Promise settlement is synchronous; the abort wins only the continuation race.
+    resolveTool('durable tool result');
+    controller.abort();
+    await pending;
+
+    expect(executor).toHaveBeenCalledOnce();
+    expect(client.chat).toHaveBeenCalledOnce();
+    expect(steps.filter((step) => step.kind === 'tool')).toEqual([
+      expect.objectContaining({ summary: 'commit_action: durable tool result' }),
+    ]);
+    expect(task.status).toBe('failed');
+    expect(task.error).toBe('Task cancelled.');
+    expect(task.usage).toMatchObject({ tokensIn: 20, tokensOut: 10, steps: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ctx.usage mutation — verifies accumulation across steps
 // ---------------------------------------------------------------------------
 

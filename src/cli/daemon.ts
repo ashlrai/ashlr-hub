@@ -14,7 +14,7 @@
  *       NO swarm/proposal). REFUSES (nonzero, clear message) when
  *       ASHLR_IN_DAEMON / ASHLR_IN_SWARM is set (no fork bomb).
  *   daemon stop
- *       Set the kill switch + clear running state. Idempotent.
+ *       Set the kill switch and request an orderly resident shutdown. Idempotent.
  *   daemon status
  *       Print running?, last tick, today's spend vs cap, items processed,
  *       pending proposals (M23 pendingCount). READ-ONLY.
@@ -338,8 +338,11 @@ async function cmdDaemonStop(): Promise<number> {
   loop.stopDaemon();
 
   console.log('');
-  console.log(col.green('  ✓ daemon stopped') + col.dim(' — kill switch set; running state cleared.'));
-  console.log(col.dim('  Any running loop halts on its next tick.'));
+  console.log(
+    col.green('  ✓ daemon stop requested') +
+      col.dim(' — kill switch set; resident state clears after current work settles.'),
+  );
+  console.log(col.dim('  The resident loop aborts current work and clears state after it settles.'));
   console.log(col.dim('  Re-enable with `ashlr sandbox kill --off` before starting again.'));
   console.log('');
   return 0;

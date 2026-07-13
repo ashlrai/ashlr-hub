@@ -310,6 +310,43 @@ describe('verifyTask — model path locked ({ model: true })', () => {
     expect(verdict.ok).toBe(true);
   });
 
+  it('does not start model verification when the invocation is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = mockClientText('yes');
+    const verdict = await verifyTask(inconclusiveTask(), client, makeBudget(), newUsage(), {
+      model: true,
+      signal: controller.signal,
+    });
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(verdict).toMatchObject({ ok: false, method: 'model' });
+    expect(verdict.reason).toContain('cancelled');
+  });
+
+  it('propagates a mid-call abort to model verification and returns non-green', async () => {
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const client: ProviderClient = {
+      id: 'mock-verify-abort',
+      supportsTools: false,
+      chat: vi.fn(async (_messages, _tools, signal): Promise<ChatResult> => {
+        observedSignal = signal;
+        return await new Promise<ChatResult>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }),
+    };
+    const pending = verifyTask(inconclusiveTask(), client, makeBudget(), newUsage(), {
+      model: true,
+      signal: controller.signal,
+    });
+    controller.abort();
+    const verdict = await pending;
+    expect(observedSignal).toBe(controller.signal);
+    expect(verdict).toMatchObject({ ok: false, method: 'model' });
+    expect(verdict.reason).toContain('cancelled');
+  });
+
   it('mutates usage by exactly the model-call tokens (10 in / 5 out, +1 step)', async () => {
     const client = mockClientText('yes — looks right');
     const usage = newUsage(); // { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 }

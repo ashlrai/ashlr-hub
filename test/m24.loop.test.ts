@@ -80,6 +80,7 @@ import {
 } from '../src/core/daemon/loop.js';
 
 import {
+  daemonStatePath,
   loadDaemonState,
   saveDaemonState,
 } from '../src/core/daemon/state.js';
@@ -749,7 +750,7 @@ describe('M24 runDaemon — RE-ENTRANCY: refuses when ASHLR_IN_DAEMON or ASHLR_I
 // ===========================================================================
 
 describe('M24 runDaemon --once — exactly one tick', () => {
-  it('publishes explicit tick activity while work is pending and appends stopping on exit', async () => {
+  it('retains resident state while pending work aborts and suppresses late idle activity', async () => {
     enroll(tmpRepo);
     const backlogPath = path.join(tmpHome, '.ashlr', 'backlog.json');
     fs.mkdirSync(path.dirname(backlogPath), { recursive: true });
@@ -777,12 +778,30 @@ describe('M24 runDaemon --once — exactly one tick', () => {
       ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
       activity: { phase: 'tick', pid: process.pid, activeChildren: null },
     });
+    const signal = (mockRunSwarm.mock.calls[0]?.[2] as { signal?: AbortSignal }).signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    stopDaemon();
+    stopDaemon();
+    await vi.waitFor(() => expect(signal?.aborted).toBe(true), { timeout: 1_000, interval: 10 });
+
+    expect(loadDaemonState()).toMatchObject({ running: true, pid: process.pid });
+    expect(readDaemonActivity()).toMatchObject({
+      sourceState: 'healthy',
+      activity: { authority: 'none', phase: 'stopping', pid: process.pid },
+    });
+    expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
+    expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    kill.mockRestore();
 
     finish({
       id: 'activity-run', status: 'done', goal: 'observe', result: 'done',
       usage: { totalTokens: 1, estCostUsd: 0, steps: 1 },
     });
-    await running;
+    const finalState = await running;
+    expect(finalState).toMatchObject({ running: false, pid: null });
     expect(readDaemonActivity()).toMatchObject({
       sourceState: 'healthy',
       activity: { authority: 'none', phase: 'stopping' },
@@ -837,10 +856,10 @@ describe('M24 runDaemon --once — exactly one tick', () => {
 });
 
 // ===========================================================================
-// stopDaemon — sets kill switch + clears running state
+// stopDaemon — request-only kill switch
 // ===========================================================================
 
-describe('M24 stopDaemon — sets kill switch + clears running state', () => {
+describe('M24 stopDaemon — requests resident shutdown without claiming ownership', () => {
   it('sets the kill switch', () => {
     stopDaemon();
     expect(killSwitchOn()).toBe(true);
@@ -858,7 +877,7 @@ describe('M24 stopDaemon — sets kill switch + clears running state', () => {
     expect(killSwitchOn()).toBe(true);
   });
 
-  it('clears running=false in daemon state', () => {
+  it('retains running state for the resident process to clear', () => {
     // Pre-set running=true to simulate a running daemon
     saveDaemonState({
       running: true,
@@ -873,11 +892,14 @@ describe('M24 stopDaemon — sets kill switch + clears running state', () => {
 
     stopDaemon();
 
-    const state = loadDaemonState();
-    expect(state.running).toBe(false);
+    const state = JSON.parse(fs.readFileSync(daemonStatePath(), 'utf8')) as {
+      running: boolean;
+      pid: number | null;
+    };
+    expect(state).toMatchObject({ running: true, pid: 12345 });
   });
 
-  it('clears pid to null in daemon state', () => {
+  it('never acts on a persisted pid', () => {
     saveDaemonState({
       running: true,
       pid: 99999,
@@ -889,10 +911,16 @@ describe('M24 stopDaemon — sets kill switch + clears running state', () => {
       ticks: [],
     });
 
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
     stopDaemon();
 
-    const state = loadDaemonState();
-    expect(state.pid).toBeNull();
+    const state = JSON.parse(fs.readFileSync(daemonStatePath(), 'utf8')) as {
+      running: boolean;
+      pid: number | null;
+    };
+    expect(state).toMatchObject({ running: true, pid: 99999 });
+    expect(kill).not.toHaveBeenCalled();
+    kill.mockRestore();
   });
 
   it('tick returns "kill-switch" reason after stopDaemon', async () => {

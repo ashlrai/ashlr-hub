@@ -231,8 +231,8 @@ describe('M171 source audit — wiring hooks present in orchestrator.ts', () => 
     expect(src).toMatch(/browserVerify === true[\s\S]{0,200}isWebApp\(repoRoot\)/);
   });
 
-  it('calls verifyInBrowser(repoRoot, cfg) inside the guard', () => {
-    expect(src).toMatch(/verifyInBrowser\(repoRoot,\s*cfg\)/);
+  it('calls verifyInBrowser with the run cancellation signal inside the guard', () => {
+    expect(src).toMatch(/verifyInBrowser\(\s*repoRoot,\s*cfg,\s*opts\.signal\s*\?/);
   });
 
   it('calls foldBrowserVerify with bvResult', () => {

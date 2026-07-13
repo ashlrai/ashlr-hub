@@ -90,7 +90,11 @@ function overcrowdedBuildPhaseResponse(): string {
 // Import under test (lazy, after mocks are in place)
 // ---------------------------------------------------------------------------
 
-let planSwarm: (input: { goal: string; specBody?: string }, cfg: AshlrConfig) => Promise<SwarmPlan>;
+let planSwarm: (
+  input: { goal: string; specBody?: string },
+  cfg: AshlrConfig,
+  signal?: AbortSignal,
+) => Promise<SwarmPlan>;
 
 async function ensureImported(): Promise<void> {
   if (!planSwarm) {
@@ -337,5 +341,40 @@ describe('planSwarm — local-first provider usage', () => {
     expect(plan.tasks.length).toBeGreaterThan(0);
     // The mock was invoked (local provider path was taken)
     expect(mockChatFn).toHaveBeenCalled();
+  });
+});
+
+describe('planSwarm — cancellation and usage', () => {
+  it('passes the owner signal to the provider and does not fall back on cancellation', async () => {
+    await ensureImported();
+    const controller = new AbortController();
+    const reason = new Error('stop planning');
+    reason.name = 'AbortError';
+    mockChatFn.mockImplementationOnce(
+      async (_messages: unknown, _tools: unknown, signal?: AbortSignal) => {
+        expect(signal).toBe(controller.signal);
+        controller.abort(reason);
+        throw reason;
+      },
+    );
+
+    await expect(
+      planSwarm({ goal: 'Cancelled planner' }, makeConfig(), controller.signal),
+    ).rejects.toBe(reason);
+    expect(mockChatFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves exact provider token usage without fabricating other fields', async () => {
+    await ensureImported();
+    mockChatFn.mockResolvedValueOnce({
+      content: validPlanResponse(),
+      usage: { tokensIn: 37, tokensOut: 91 },
+    });
+
+    const plan = await planSwarm({ goal: 'Usage-aware planner' }, makeConfig());
+
+    expect(plan.usage).toEqual({ tokensIn: 37, tokensOut: 91 });
+    expect(plan.usage).not.toHaveProperty('steps');
+    expect(plan.usage).not.toHaveProperty('estCostUsd');
   });
 });

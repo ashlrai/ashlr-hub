@@ -108,6 +108,7 @@ async function harness(opts: {
   cli: ReturnType<typeof vi.fn>;
   api: ReturnType<typeof vi.fn>;
   judgeScores?: number[];
+  runTests?: ReturnType<typeof vi.fn>;
   subscriptionEngines?: string[];
   draftMode?: boolean;
 }): Promise<Harness> {
@@ -126,6 +127,10 @@ async function harness(opts: {
       const safeIdx = Number.isFinite(idx) ? idx : 0;
       const now = new Date().toISOString();
       const diff = `DRAFT_DIFF_${safeIdx}`;
+      const isPartial = capOpts['isPartial'] === true;
+      const producerStatus = capOpts['producerStatus'] === 'failed' || capOpts['producerStatus'] === 'aborted'
+        ? capOpts['producerStatus']
+        : 'done';
       const baseProposal = {
         id: `draft-${sandboxId}`,
         repo: sb?.sourceRepo ?? MOCK_REPO,
@@ -143,6 +148,7 @@ async function harness(opts: {
         status: 'pending' as const,
         createdAt: now,
         updatedAt: now,
+        ...(isPartial ? { isPartial: true } : {}),
       };
       if (capOpts['draftOnly'] === true) {
         return {
@@ -159,17 +165,18 @@ async function harness(opts: {
       filedProposals.set(proposal.id, proposal);
       const proposalOutcome = {
         kind: 'filed',
-        reason: 'proposal filed',
+        reason: isPartial ? 'partial proposal filed' : 'proposal filed',
         proposalId: proposal.id,
         files: 1,
         insertions: 1,
         deletions: 0,
+        ...(isPartial ? { isPartial: true } : {}),
       };
       return {
         state: {
           id: String(capOpts['runId'] ?? `run-${safeIdx}`),
-          status: 'done',
-          result: 'proposal filed',
+          status: producerStatus,
+          result: isPartial ? 'partial proposal filed' : 'proposal filed',
           usage: capOpts['usage'] ?? { estCostUsd: 0 },
           proposalOutcome,
         },
@@ -206,6 +213,9 @@ async function harness(opts: {
   vi.doMock('../src/core/fleet/manager.js', () => ({
     judgeProposal,
   }));
+  if (opts.runTests) {
+    vi.doMock('../src/core/run/run-tests.js', () => ({ runTests: opts.runTests }));
+  }
   const setStatus = vi.fn();
   vi.doMock('../src/core/inbox/store.js', () => ({
     loadProposal: vi.fn((id: string) => filedProposals.get(id) ?? null),
@@ -249,6 +259,7 @@ afterEach(() => {
   vi.doUnmock('../src/core/run/sandboxed-engine.js');
   vi.doUnmock('../src/core/sandbox/worktree.js');
   vi.doUnmock('../src/core/fleet/manager.js');
+  vi.doUnmock('../src/core/run/run-tests.js');
   vi.doUnmock('../src/core/inbox/store.js');
   vi.doUnmock('../src/core/fleet/best-of-n-ledger.js');
   vi.doUnmock('../src/core/fleet/subscription-usage.js');
@@ -501,6 +512,30 @@ describe('M333 — full-cost accounting', () => {
 // ---------------------------------------------------------------------------
 
 describe('M333 — file-once proposal capture', () => {
+  it.each([
+    ['file-once', true],
+    ['legacy', false],
+  ] as const)('pre-cancelled %s path starts no candidate work', async (_label, draftMode) => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+      signal: controller.signal,
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({ error: 'cancelled' });
+    expect(result.candidates[0]).not.toHaveProperty('costUsd');
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox?.mock.calls.length ?? 0).toBe(0);
+    expect(h.judgeProposal).not.toHaveBeenCalled();
+    expect(h.recordBestOfN).toHaveBeenCalledTimes(1);
+  });
+
   it('files only the selected winner while losers remain metadata-only', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const api = makeSandboxMock(0.0, 'api');
@@ -565,6 +600,309 @@ describe('M333 — file-once proposal capture', () => {
 
     expect(result.candidates[0]?.error).toContain('draft capture failed');
     expect(h.removeSandbox).toHaveBeenCalledTimes(1);
+  });
+
+  it('quarantines a shared candidate worktree when process cleanup is unconfirmed', async () => {
+    const controller = new AbortController();
+    const cli = vi.fn(async (_engine, _goal, _cfg, runOptions: Record<string, unknown>) => {
+      const sandbox = runOptions['existingWorktree'] as { id: string; worktreePath: string };
+      controller.abort();
+      return {
+        state: {
+          id: String(runOptions['runId']),
+          status: 'failed',
+          result: 'engine failed with sandbox retained: process-group exit unconfirmed',
+          usage: { tokensIn: 3, tokensOut: 1, steps: 1, estCostUsd: 0.2 },
+          terminationReason: 'error-exit',
+        },
+        sandboxRetention: {
+          status: 'retained',
+          reason: 'process-cleanup-unconfirmed',
+          sandboxId: sandbox.id,
+          worktreePath: sandbox.worktreePath,
+          recovery: 'orphan-sweep',
+        },
+      };
+    });
+    const h = await harness({ cli, api: cli, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+      signal: controller.signal,
+    });
+
+    expect(cli.mock.calls[0]?.[3]).toMatchObject({
+      existingWorktree: { id: 'sb-0', worktreePath: '/tmp/sb-0' },
+    });
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      error: expect.stringContaining('process-group exit unconfirmed'),
+      sandboxRetention: {
+        status: 'retained',
+        sandboxId: 'sb-0',
+        recovery: 'orphan-sweep',
+      },
+    });
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+    expect(h.removeSandbox).not.toHaveBeenCalled();
+  });
+
+  it('ranks and owns the strongest failed-producer partial without erasing failure facts', async () => {
+    let producerIndex = 0;
+    const costs = [0.2, 0.3, 0.4];
+    const cli = vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
+      const index = producerIndex++;
+      const proposalOutcome = {
+        kind: 'proposal-disabled',
+        reason: `proposal filing disabled for failed candidate ${index}`,
+      };
+      return {
+        state: {
+          id: String(runOpts['runId']),
+          status: 'failed',
+          result: `producer ${index} failed after material draft`,
+          usage: { estCostUsd: costs[index] },
+          proposalOutcome,
+        },
+        proposalOutcome,
+      };
+    });
+    const h = await harness({
+      cli,
+      api: cli,
+      judgeScores: [4, 5, 5],
+      subscriptionEngines: [],
+      draftMode: true,
+    });
+    const lifecycle: string[] = [];
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      const captured = await originalCapture(...args);
+      if (args[3]?.['draftOnly'] !== true && captured.proposalId) {
+        lifecycle.push(`owned:${captured.proposalId}`);
+      }
+      return captured;
+    });
+    h.removeSandbox?.mockImplementation((sandbox: { id: string }) => {
+      lifecycle.push(`removed:${sandbox.id}`);
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 3,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+      ],
+    });
+
+    expect(h.judgeProposal).toHaveBeenCalledTimes(3);
+    expect(result.critique).toMatchObject({
+      nonEmpty: 3,
+      judged: 3,
+      winnerIndex: 1,
+      totalCostUsd: 0.9,
+      billableCostUsd: 0.9,
+    });
+    expect(result.winner).toMatchObject({
+      index: 1,
+      proposalId: 'proposal-sb-1',
+      diff: 'DRAFT_DIFF_1',
+      error: 'producer 1 failed after material draft',
+      proposalOutcome: { kind: 'filed', isPartial: true },
+    });
+    expect(result.candidates.map((candidate) => candidate.error)).toEqual([
+      'producer 0 failed after material draft',
+      'producer 1 failed after material draft',
+      'producer 2 failed after material draft',
+    ]);
+    expect(h.filedProposals?.get('proposal-sb-1')).toMatchObject({ isPartial: true });
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toEqual([
+      expect.arrayContaining([
+        'claude',
+        expect.any(String),
+        expect.any(Object),
+        expect.objectContaining({
+          existingWorktree: expect.objectContaining({ id: 'sb-1' }),
+          isPartial: true,
+          producerStatus: 'failed',
+          usage: { estCostUsd: 0.3 },
+        }),
+      ]),
+    ]);
+    expect(h.recordBestOfN).toHaveBeenCalledTimes(1);
+    const record = h.recordBestOfN.mock.calls[0]?.[0] as {
+      winnerIndex: number;
+      winnerProposalId: string | null;
+      totalCostUsd: number;
+      candidates: Array<{ error?: string; costUsd?: number; proposalId: string | null; won: boolean }>;
+    };
+    expect(record).toMatchObject({
+      winnerIndex: 1,
+      winnerProposalId: 'proposal-sb-1',
+      totalCostUsd: 0.9,
+    });
+    expect(record.candidates).toEqual([
+      expect.objectContaining({ error: 'producer 0 failed after material draft', costUsd: 0.2, proposalId: null, won: false }),
+      expect.objectContaining({ error: 'producer 1 failed after material draft', costUsd: 0.3, proposalId: 'proposal-sb-1', won: true }),
+      expect.objectContaining({ error: 'producer 2 failed after material draft', costUsd: 0.4, proposalId: null, won: false }),
+    ]);
+    expect(lifecycle).toEqual([
+      'owned:proposal-sb-1',
+      'removed:sb-0',
+      'removed:sb-1',
+      'removed:sb-2',
+    ]);
+  });
+
+  it('does not judge or file a winner after caller cancellation', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, judgeScores: [5, 4, 3], draftMode: true });
+    const controller = new AbortController();
+    h.judgeProposal.mockImplementation(async (_proposal, _cfg, _client, options) => {
+      expect(options.signal).toBe(controller.signal);
+      controller.abort();
+      return {
+        proposalId: 'cancelled-verdict',
+        verdict: 'ship' as const,
+        value: 5,
+        correctness: 5,
+        scope: 1,
+        alignment: 5,
+        rationale: 'mock',
+        wouldMerge: true,
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 3,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+      ],
+      signal: controller.signal,
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.noProposalReasons).toEqual([{ reason: 'selection cancelled', count: 1 }]);
+    expect(result.critique.nonEmpty).toBe(3);
+    expect(result.critique.judged).toBe(1);
+    expect(result.candidates.every((candidate) => candidate.error !== 'cancelled')).toBe(true);
+    expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(0);
+    expect(h.filedProposals?.size).toBe(0);
+    expect(h.removeSandbox).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains paid generation cost on cancellation and keeps subscription usage non-billable', async () => {
+    const controller = new AbortController();
+    const cli = vi.fn(async () => {
+      controller.abort();
+      return {
+        state: {
+          id: 'cancelled-paid-run',
+          status: 'aborted',
+          result: 'cancelled after provider usage',
+          usage: { estCostUsd: 0.75 },
+          terminationReason: 'cancelled',
+        },
+      };
+    });
+    const h = await harness({ cli, api: cli, subscriptionEngines: ['claude'] });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+      signal: controller.signal,
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.totalCostUsd).toBeCloseTo(0.75, 5);
+    expect(result.critique.billableCostUsd).toBe(0);
+    expect(result.critique.noProposalReasons).toEqual([
+      { reason: 'selection cancelled', count: 1 },
+      { reason: 'cancelled after provider usage', count: 1 },
+    ]);
+    expect(h.judgeProposal).not.toHaveBeenCalled();
+    expect(h.recordBestOfN).toHaveBeenCalledTimes(1);
+  });
+
+  it('owns a winner whose durable proposal write completes before cancellation', async () => {
+    const controller = new AbortController();
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, judgeScores: [5], draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const original = capture.getMockImplementation()!;
+    capture.mockImplementation(async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
+      const captureOpts = args[3] as Record<string, unknown>;
+      if (captureOpts['draftOnly'] !== true) controller.abort();
+      return result;
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+      signal: controller.signal,
+    });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.winner?.proposalId).toBe('proposal-sb-0');
+    expect(h.filedProposals?.has('proposal-sb-0')).toBe(true);
+    const record = h.recordBestOfN.mock.calls[0]?.[0] as {
+      winnerProposalId: string | null;
+      candidates: Array<{ won: boolean }>;
+    };
+    expect(record.winnerProposalId).toBe('proposal-sb-0');
+    expect(record.candidates).toEqual([expect.objectContaining({ won: true })]);
+  });
+
+  it('propagates mid-cancel through legacy judging and tests while retaining settled evidence', async () => {
+    const controller = new AbortController();
+    let testsStarted!: () => void;
+    const started = new Promise<void>((resolve) => { testsStarted = resolve; });
+    const runTests = vi.fn(async (
+      _proposalId: string,
+      _cfg: unknown,
+      _profile: string,
+      options?: { signal?: AbortSignal },
+    ) => {
+      expect(options?.signal).toBe(controller.signal);
+      testsStarted();
+      await new Promise<void>((resolve) => {
+        options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return true;
+    });
+    const cli = makeSandboxMock(0.4, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, judgeScores: [5], runTests });
+
+    const pending = h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+      signal: controller.signal,
+    });
+    await started;
+    const judgeOptions = h.judgeProposal.mock.calls[0]?.[3] as { signal?: AbortSignal };
+    expect(judgeOptions.signal).toBe(controller.signal);
+    controller.abort();
+    const result = await pending;
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      proposalId: 'proposal-cli-0',
+      verdict: { verdict: 'ship' },
+      testsPassed: true,
+      costUsd: 0.4,
+    });
+    expect(result.critique).toMatchObject({ judged: 1, totalCostUsd: 0.4, winnerIndex: -1 });
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      winnerIndex: -1,
+      totalCostUsd: 0.4,
+      candidates: [expect.objectContaining({ score: 19, testsPassed: true, costUsd: 0.4 })],
+    }));
   });
 });
 

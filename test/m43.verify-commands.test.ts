@@ -10,9 +10,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { PassThrough } from 'node:stream';
 import type {
   RunTask,
   ProviderClient,
@@ -25,6 +27,7 @@ import {
   detectVerifyCommands,
   runVerifyCommand,
   runVerifyCommandAsync,
+  runVerifySubprocessAsync,
   spawnOptionsFor,
   type VerifyCommand,
 } from '../src/core/run/verify-commands.js';
@@ -56,6 +59,27 @@ function makeFixture(): string {
 
 function writePkg(dir: string, pkg: unknown): void {
   writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg), 'utf8');
+}
+
+function writeVerifyContract(dir: string, cmd: string[]): void {
+  writeFileSync(join(dir, 'ashlr.verify.json'), JSON.stringify({
+    schemaVersion: 1,
+    mode: 'replace-detected',
+    commands: [{ id: 'cancel-probe', kind: 'typecheck', cmd, required: true }],
+  }), 'utf8');
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function esrchError(): NodeJS.ErrnoException {
+  return Object.assign(new Error('process group is gone'), { code: 'ESRCH' });
 }
 
 /** Minimal cfg — runVerifyCommand never reads it. */
@@ -549,6 +573,238 @@ describe('runVerifyCommandAsync', () => {
     }
     expect(alive).toBe(false);
   });
+
+  it('returns a truthful pre-abort result without starting the command', async () => {
+    const markerPath = join(workdir, 'pre-abort-started');
+    const controller = new AbortController();
+    controller.abort();
+    const vc: VerifyCommand = {
+      kind: 'test',
+      cmd: ['node', '-e', `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "started")`],
+    };
+
+    const res = await runVerifyCommandAsync(vc, workdir, cfg, {
+      timeoutMs: 5_000,
+      signal: controller.signal,
+    });
+
+    expect(res).toMatchObject({
+      ok: false,
+      exitCode: -1,
+      timedOut: false,
+      cancelled: true,
+      failureCategory: 'cancelled',
+    });
+    expect(res.output).toContain('cancelled before subprocess start');
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('fails closed after an aborted leader exits while preserving captured output', async () => {
+    const readyPath = join(workdir, 'mid-abort-ready');
+    const script = [
+      'const fs = require("node:fs");',
+      'console.log("OUTPUT_BEFORE_ABORT");',
+      `fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");`,
+      'setInterval(() => {}, 1000);',
+    ].join(' ');
+    const controller = new AbortController();
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script] };
+    const pending = runVerifyCommandAsync(vc, workdir, cfg, {
+      timeoutMs: 5_000,
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(existsSync(readyPath)).toBe(true), { timeout: 2_000 });
+    controller.abort();
+    const res = await pending;
+
+    expect(res).toMatchObject({
+      ok: false,
+      exitCode: -1,
+      timedOut: false,
+      failureCategory: 'infra',
+    });
+    expect(res.cancelled).not.toBe(true);
+    expect(res.output).toContain('OUTPUT_BEFORE_ABORT');
+    expect(res.output).toContain('cancelled by invocation owner');
+    expect(res.output).toContain('ownership identity lost after leader exit before escalation');
+  });
+
+  it('fails closed without spawning signal-owned verification on Windows', async () => {
+    const controller = new AbortController();
+    const spawnFake = vi.fn();
+    const processKill = vi.fn();
+
+    const res = await runVerifySubprocessAsync(['node', '-e', 'process.exit(0)'], {
+      cwd: workdir,
+      env: process.env,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      _platform: 'win32',
+      _spawn: spawnFake as unknown as typeof import('node:child_process').spawn,
+      _processKill: processKill,
+    });
+
+    expect(res.cancelled).toBe(false);
+    expect(res.error).toContain('unsupported on Windows');
+    expect(spawnFake).not.toHaveBeenCalled();
+    expect(processKill).not.toHaveBeenCalled();
+  });
+
+  it('bounds escalation and releases inherited pipes without signaling outside the owned PGID', async () => {
+    const controller = new AbortController();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      pid: 24_680,
+      stdout,
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnFake = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    let groupGone = false;
+    const processKill = vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
+      if (signal === 'SIGKILL') groupGone = true;
+      if (signal === 0 && groupGone) throw esrchError();
+    });
+
+    const pending = runVerifySubprocessAsync(['node', '-e', 'setInterval(() => {}, 1000)'], {
+      cwd: workdir,
+      env: process.env,
+      timeoutMs: 5_000,
+      signal: controller.signal,
+      _platform: 'linux',
+      _spawn: spawnFake,
+      _processKill: processKill,
+      _terminationGraceMs: 20,
+      _terminationDrainMs: 20,
+    });
+    stdout.write('FAKE_CAPTURE_BEFORE_ABORT\n');
+    controller.abort();
+    const res = await pending;
+
+    expect(res.cancelled).toBe(true);
+    expect(res.timedOut).toBe(false);
+    expect(res.stdout).toContain('FAKE_CAPTURE_BEFORE_ABORT');
+    expect(processKill.mock.calls.map(([, signal]) => signal)).toContain('SIGINT');
+    expect(processKill.mock.calls.map(([, signal]) => signal)).toContain('SIGKILL');
+    expect(processKill.mock.calls.every(([pid]) => pid === -24_680)).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.unref).toHaveBeenCalledTimes(1);
+    expect(stdout.destroyed).toBe(true);
+    expect(stderr.destroyed).toBe(true);
+    expect(spawnFake).toHaveBeenCalledWith(
+      'node',
+      ['-e', 'setInterval(() => {}, 1000)'],
+      expect.objectContaining({ cwd: workdir, detached: true, shell: false }),
+    );
+  });
+
+  it('never signals a recycled PGID after the original leader exits', async () => {
+    const controller = new AbortController();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      pid: 31_337,
+      stdout,
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnFake = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    let pgidReused = false;
+    const processKill = vi.fn((_pid: number, _signal: NodeJS.Signals | 0) => {
+      if (pgidReused) throw new Error('test attempted to signal a recycled process group');
+    });
+
+    const pending = runVerifySubprocessAsync(['node', '-e', 'setInterval(() => {}, 1000)'], {
+      cwd: workdir,
+      env: process.env,
+      timeoutMs: 5_000,
+      signal: controller.signal,
+      _platform: 'linux',
+      _spawn: spawnFake,
+      _processKill: processKill,
+      _terminationGraceMs: 20,
+      _terminationDrainMs: 10,
+    });
+    stdout.write('LEADER_OUTPUT_BEFORE_EXIT\n');
+    controller.abort();
+    expect(processKill).toHaveBeenCalledTimes(1);
+    expect(processKill).toHaveBeenLastCalledWith(-31_337, 'SIGINT');
+
+    pgidReused = true;
+    child.emit('exit', null, 'SIGINT');
+    const res = await pending;
+    await new Promise((resolveDone) => setTimeout(resolveDone, 30));
+
+    expect(res.cancelled).toBe(false);
+    expect(res.stdout).toContain('LEADER_OUTPUT_BEFORE_EXIT');
+    expect(res.error).toContain('ownership identity lost after leader exit before escalation');
+    expect(processKill).toHaveBeenCalledTimes(1);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.unref).toHaveBeenCalledTimes(1);
+    expect(stdout.destroyed).toBe(true);
+    expect(stderr.destroyed).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'escalates while the original leader remains alive when its descendant ignores SIGINT',
+    async () => {
+      const leaderPidPath = join(workdir, 'ignored-sigint-leader.pid');
+      const descendantPidPath = join(workdir, 'ignored-sigint-descendant.pid');
+      const descendantScript = [
+        'const fs = require("node:fs");',
+        'process.on("SIGINT", () => {});',
+        `fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(process.pid));`,
+        'console.log("DESCENDANT_IGNORING_SIGINT");',
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const leaderScript = [
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        `fs.writeFileSync(${JSON.stringify(leaderPidPath)}, String(process.pid));`,
+        `spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: ["ignore", "inherit", "inherit"] });`,
+        'console.log("LEADER_READY_FOR_ABORT");',
+        'process.on("SIGINT", () => {});',
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const controller = new AbortController();
+      let leaderPid = 0;
+      let descendantPid = 0;
+
+      try {
+        const pending = runVerifySubprocessAsync(['node', '-e', leaderScript], {
+          cwd: workdir,
+          env: process.env,
+          timeoutMs: 5_000,
+          signal: controller.signal,
+          _terminationGraceMs: 100,
+          _terminationDrainMs: 750,
+        });
+        await vi.waitFor(() => expect(existsSync(descendantPidPath)).toBe(true), { timeout: 2_000 });
+        leaderPid = Number(readFileSync(leaderPidPath, 'utf8'));
+        descendantPid = Number(readFileSync(descendantPidPath, 'utf8'));
+
+        controller.abort();
+        const res = await pending;
+
+        expect(res.cancelled).toBe(true);
+        expect(res.timedOut).toBe(false);
+        expect(res.stdout).toContain('LEADER_READY_FOR_ABORT');
+        expect(res.stdout).toContain('DESCENDANT_IGNORING_SIGINT');
+        expect(res.stderr).toContain('cancelled by invocation owner');
+        await vi.waitFor(() => expect(processIsAlive(descendantPid)).toBe(false), { timeout: 2_000 });
+      } finally {
+        if (leaderPid > 0) {
+          try { process.kill(-leaderPid, 'SIGKILL'); } catch { /* already gone */ }
+        } else if (descendantPid > 0) {
+          try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }
+    },
+  );
 });
 
 describe('verification runner packaging', () => {
@@ -617,6 +873,91 @@ describe('spawnOptionsFor', () => {
 // ---------------------------------------------------------------------------
 
 describe('verifyTaskStructured', () => {
+  it('returns a distinct cancelled verdict for a pre-aborted signal', async () => {
+    const dir = makeFixture();
+    const markerPath = join(dir, 'pre-abort-started');
+    const controller = new AbortController();
+    controller.abort();
+
+    try {
+      writeVerifyContract(dir, [
+        process.execPath,
+        '-e',
+        `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'started')`,
+      ]);
+
+      const verdict = await verifyTaskStructured(
+        makeTask('build a thing', 'some result'),
+        mockClientText('yes'),
+        makeBudget(),
+        newUsage(),
+        { workspaceRoot: dir, allowExec: true, cfg, signal: controller.signal },
+      );
+
+      expect(verdict).toMatchObject({ ok: false, cancelled: true, method: 'command' });
+      expect(verdict.reason).toContain('cancelled');
+      expect(existsSync(markerPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'waits for verifier settlement after a 100ms mid-command abort',
+    async () => {
+      const dir = makeFixture();
+      const startedPath = join(dir, 'mid-abort-started');
+      const settledPath = join(dir, 'mid-abort-settled');
+      const pidPath = join(dir, 'mid-abort.pid');
+      const controller = new AbortController();
+      let verifierPid = 0;
+      const script = [
+        'const fs = require("node:fs")',
+        `fs.writeFileSync(${JSON.stringify(startedPath)}, 'started')`,
+        `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))`,
+        'let stopping = false',
+        'process.on("SIGINT", () => {',
+        '  if (stopping) return',
+        '  stopping = true',
+        '  setTimeout(() => {',
+        `    fs.writeFileSync(${JSON.stringify(settledPath)}, 'settled')`,
+        '    process.exit(0)',
+        '  }, 50)',
+        '})',
+        'setInterval(() => {}, 1000)',
+      ].join(';');
+
+      writeVerifyContract(dir, [process.execPath, '-e', script]);
+      const pending = verifyTaskStructured(
+        makeTask('build a thing', 'some result'),
+        mockClientText('yes'),
+        makeBudget(),
+        newUsage(),
+        { workspaceRoot: dir, allowExec: true, cfg, signal: controller.signal },
+      );
+
+      try {
+        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 2_000 });
+        verifierPid = Number(readFileSync(pidPath, 'utf8'));
+        await new Promise((resolveDone) => setTimeout(resolveDone, 100));
+        controller.abort();
+
+        const verdict = await pending;
+        expect(verdict).toMatchObject({ ok: false, cancelled: true, method: 'command' });
+        expect(verdict.reason).toContain('cancelled');
+        expect(existsSync(settledPath)).toBe(true);
+        expect(processIsAlive(verifierPid)).toBe(false);
+      } finally {
+        controller.abort();
+        await pending;
+        if (verifierPid > 0 && processIsAlive(verifierPid)) {
+          try { process.kill(verifierPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('returns a command-failure verdict when a detected test command exits non-zero', async () => {
     const dir = makeFixture();
     try {

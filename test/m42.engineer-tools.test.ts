@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { readFileSync, writeFileSync, symlinkSync, mkdtempSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, symlinkSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -511,6 +511,79 @@ describe('bash (runBash)', () => {
       else process.env.ANTHROPIC_API_KEY = prev;
     }
   });
+
+  it('does not spawn when the invocation signal is pre-aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const out = await callEngineerTool(
+      'bash',
+      { command: 'echo touched > cancelled-before-start.txt' },
+      fullCtx(),
+      controller.signal,
+    );
+
+    expect(out).toContain('cancelled before execution');
+    expect(existsSync(join(repo.dir, 'cancelled-before-start.txt'))).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports cleanup as unverified when cancellation makes the leader exit',
+    async () => {
+      const controller = new AbortController();
+      const pending = callEngineerTool(
+        'bash',
+        { command: 'sleep 30' },
+        fullCtx(),
+        controller.signal,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const startedAt = Date.now();
+      controller.abort();
+
+      const out = await pending;
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(out).toContain(
+        'cancellation requested but process-group cleanup unverified after leader exit',
+      );
+      expect(out).toContain('"cancellationRequested": true');
+      expect(out).toContain('"cancelled": false');
+      expect(out).toContain('"cleanupVerified": false');
+      expect(out).not.toContain('cancelled by invocation owner');
+      expect(out).not.toContain('"cancelled": true');
+      expect(out).not.toContain('"cleanupVerified": true');
+    },
+    3_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'escalates and settles boundedly when bash ignores graceful termination',
+    async () => {
+      const controller = new AbortController();
+      const pending = callEngineerTool(
+        'bash',
+        { command: 'echo "owned-pid=$$"; trap "" INT TERM; while :; do sleep 1; done' },
+        fullCtx(),
+        controller.signal,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const startedAt = Date.now();
+      controller.abort();
+
+      const out = await pending;
+      const elapsed = Date.now() - startedAt;
+      const ownedPid = Number(/owned-pid=(\d+)/.exec(out)?.[1]);
+
+      expect(out).toContain('"cancellationRequested": true');
+      expect(out).toContain('"cancelled": true');
+      expect(out).toContain('"cleanupVerified": true');
+      expect(out).not.toContain('cleanup unverified');
+      expect(Number.isInteger(ownedPid)).toBe(true);
+      expect(elapsed).toBeLessThan(7_000);
+      expect(() => process.kill(-ownedPid, 0)).toThrow();
+    },
+    10_000,
+  );
 });
 
 // ---------------------------------------------------------------------------

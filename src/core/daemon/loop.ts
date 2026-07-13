@@ -6,7 +6,7 @@
  *    sandboxed swarms, create PENDING inbox proposals, record spend + state.
  *  - runDaemon(cfg, opts): loop ticks on an interval (or once); REFUSES when
  *    nested; marks running state; stops on kill switch; idles on budget exhaustion.
- *  - stopDaemon(): set kill switch + clear running state.
+ *  - stopDaemon(): request shutdown by setting the kill switch.
  *
  * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
  *  1. PROPOSAL-FIRST (proposal-only by default): every dispatch produces a
@@ -59,24 +59,26 @@ import type {
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
-import { audit } from '../sandbox/audit.js';
+import { audit as persistAudit } from '../sandbox/audit.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import {
   acquireDaemonLock,
   armDaemonSpendGuard,
   clearDaemonSpendGuard,
-  heartbeatDaemonLock,
+  daemonStatePath,
   loadDaemonState,
   loadDaemonStateStrict,
+  readDaemonLockOwner,
   readDaemonSpendGuard,
   releaseDaemonLock,
   resetDayIfNeeded,
-  saveDaemonState,
   saveDaemonStateResult,
 } from './state.js';
-import type { DaemonLock } from './state.js';
+import type { DaemonLock, SaveDaemonStateResult } from './state.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import {
+  readDaemonActivity,
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
@@ -285,6 +287,7 @@ const MAX_GENERATED_REPAIR_DECISION_EVENTS = 20;
 const CONTEXT_ROLLUP_MAX_EVENTS = 5_000;
 const DEFAULT_CONTEXT_ROLLUP_CADENCE_HOURS = 24;
 const DEFAULT_CONTEXT_ROLLUP_MIN_TERMINAL_TRAJECTORIES = 50;
+const audit = persistAudit;
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -296,6 +299,7 @@ const DEFAULTS: DaemonConfig = {
   parallel: 2,             // at most 2 concurrent sandboxed swarms per tick
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
+const KILL_SWITCH_POLL_MS = 50;
 
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
 const DRAIN_MODE_TAG_PREFIX = 'drain:';
@@ -307,6 +311,10 @@ interface TickOptions {
   dryRun: boolean;
   drain?: DaemonDrainMode;
   drainLimit?: number;
+  signal?: AbortSignal;
+  /** Resident ownership fence for asynchronous state callbacks. */
+  ownerLock?: DaemonLock;
+  onOwnershipLost?: () => void;
 }
 interface DaemonRunOptions extends TickOptions {
   once: boolean;
@@ -532,12 +540,65 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
   return typeof model === 'string' && model.trim() ? model : null;
 }
 
-function startDaemonLockHeartbeat(lock: DaemonLock, afterHeartbeat?: () => void): () => void {
+function startDaemonLockHeartbeat(
+  lock: DaemonLock,
+  afterHeartbeat?: () => void,
+  onOwnershipLost?: () => void,
+): () => void {
   const interval = setInterval(() => {
-    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
+    if (daemonLockOwned(lock)) afterHeartbeat?.();
+    else onOwnershipLost?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
   return () => clearInterval(interval);
+}
+
+function daemonLockOwned(lock: DaemonLock): boolean {
+  const owner = readDaemonLockOwner();
+  return owner?.pid === lock.pid && owner.token === lock.token;
+}
+
+function updateResidentDaemonState(
+  lock: DaemonLock,
+  update: (current: DaemonState) => DaemonState | null,
+): SaveDaemonStateResult {
+  const path = daemonStatePath();
+  const stateLock = acquireLocalStoreLock(`${path}.resident.lock`);
+  if (!stateLock) return { ok: false, path, error: 'could not acquire resident state lock' };
+  try {
+    if (!daemonLockOwned(lock)) {
+      return { ok: false, path, error: 'daemon lock ownership lost before state save' };
+    }
+    const loaded = loadDaemonStateStrict();
+    if (!loaded.ok) return { ok: false, path, error: loaded.error };
+    const next = update(loaded.state);
+    return next === null ? { ok: true, path } : saveDaemonStateResult(next);
+  } finally {
+    releaseLocalStoreLock(stateLock);
+  }
+}
+
+/** Serialize resident state writes and validate the exact daemon token in-lock. */
+export function saveResidentDaemonState(
+  lock: DaemonLock,
+  state: DaemonState,
+): SaveDaemonStateResult {
+  return updateResidentDaemonState(lock, () => state);
+}
+
+function staleResidentProof(state: DaemonState): 'dead' | 'reused' | null {
+  if (state.running !== true || typeof state.pid !== 'number' || state.pid === process.pid) return null;
+  try {
+    process.kill(state.pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH' ? 'dead' : null;
+  }
+  const activity = readDaemonActivity();
+  return activity.ownerState === 'reused' &&
+    activity.activity?.pid === state.pid &&
+    activity.activity.daemonStartedAt === state.startedAt
+    ? 'reused'
+    : null;
 }
 
 function lastProducerMaintenanceAtMs(state: DaemonState): number | null {
@@ -1184,6 +1245,7 @@ export function workedOutcomeFromDispatchProduction(
   production: DaemonDispatchProduction | undefined,
 ): 'diff' | 'empty' | undefined {
   if (!production) return undefined;
+  if (production.runEventSummary?.status === 'aborted') return undefined;
   if (production.outcome === 'proposal-disabled') return undefined;
   return production.outcome === 'proposal-created' ? 'diff' : 'empty';
 }
@@ -1217,6 +1279,30 @@ function bestOfNNoWinnerProduction(result: BestOfNRunResult, n: number): DaemonD
   return {
     outcome: noProposalOutcomeFromReason(reason),
     reason: boundedText(reason, 220),
+  };
+}
+
+function bestOfNWasCancelled(result: BestOfNRunResult): boolean {
+  return result.critique.noProposalReasons?.some((entry) => entry.reason === 'selection cancelled') === true ||
+    (result.candidates.length > 0 && result.candidates.every((candidate) => candidate.error === 'cancelled'));
+}
+
+function cancelledDispatchProduction(
+  runId: string,
+  reason: string,
+  costUsd: number,
+): DaemonDispatchProduction {
+  return {
+    outcome: 'engine-failed',
+    runId,
+    reason,
+    runEventSummary: runEventSummary({
+      runId,
+      status: 'aborted',
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      costUsd,
+    }),
   };
 }
 
@@ -1956,6 +2042,24 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
+  let ownershipLost = false;
+  const stillOwnsTick = (): boolean => {
+    if (!opts.ownerLock) return true;
+    if (ownershipLost) return false;
+    if (daemonLockOwned(opts.ownerLock)) return true;
+    ownershipLost = true;
+    opts.onOwnershipLost?.();
+    return false;
+  };
+  const saveTickState = (nextState: DaemonState): SaveDaemonStateResult =>
+    opts.ownerLock
+      ? saveResidentDaemonState(opts.ownerLock, nextState)
+      : saveDaemonStateResult(nextState);
+  const stopRequested = (): boolean =>
+    opts.signal?.aborted === true || killSwitchOn() || !stillOwnsTick();
+  const audit = (entry: Parameters<typeof persistAudit>[0]): void => {
+    if (stillOwnsTick()) persistAudit(entry);
+  };
   // tick() respects the cfg it is GIVEN — tests and callers inject it directly.
   // M85 live-reload happens in runDaemon's LOOP (it reloads config from disk
   // before each tick and passes the fresh cfg in here), so on-disk daemon tuning
@@ -1976,6 +2080,20 @@ export async function tick(
   const _tickStartMs = Date.now();
   let backlogSnapshotAt: string | undefined;
   let backlogSnapshotId: string | undefined;
+  const ownershipLostTick = (t: DaemonTick): DaemonTick => ({
+    ...t,
+    reason: 'shutdown-requested',
+    durationMs: t.durationMs ?? Date.now() - _tickStartMs,
+  });
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'shutdown-requested',
+    });
+  }
   recordTickStartAgentAction({
     ts: now,
     dryRun: opts.dryRun,
@@ -1985,7 +2103,7 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
-  if (!opts.dryRun) flushPendingRepairTreatmentOutcomes();
+  if (!opts.dryRun && !stopRequested()) flushPendingRepairTreatmentOutcomes();
   const recordTick = (t: DaemonTick): DaemonTick => {
     const tick: DaemonTick = {
       ...(opts.dryRun ? { ...t, dryRun: true } : t),
@@ -1993,6 +2111,7 @@ export async function tick(
       ...(backlogSnapshotId ? { backlogSnapshotId } : {}),
       durationMs: t.durationMs ?? Date.now() - _tickStartMs,
     };
+    if (!stillOwnsTick()) return ownershipLostTick(tick);
     try {
       const loaded = loadDaemonStateStrict();
       if (!loaded.ok) {
@@ -2004,7 +2123,7 @@ export async function tick(
       s = resetDayIfNeeded(s);
       s.lastTickAt = tick.ts;
       s.ticks = [...s.ticks, tick];
-      const saveResult = saveDaemonStateResult(s);
+      const saveResult = saveTickState(s);
       if (!saveResult.ok) {
         console.warn('[ashlr] daemon:recordTick persistence failed:', saveResult.error);
         const failedTick = { ...tick, reason: 'state-persistence-failed' };
@@ -2021,6 +2140,15 @@ export async function tick(
     return tick;
   };
   const persistenceRefusal = (summary: string, result: 'refused' | 'error' = 'refused'): DaemonTick => {
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'shutdown-requested',
+      });
+    }
     audit({
       action: 'daemon:persistence-failed',
       repo: null,
@@ -2037,7 +2165,7 @@ export async function tick(
     });
   };
   const runAutoMergeMaintenancePass = async (): Promise<AutoMergePassResult | null> => {
-    if (opts.dryRun) return null;
+    if (opts.dryRun || stopRequested()) return null;
     try {
       return await runAutoMergePass(liveCfg);
     } catch (err) {
@@ -2050,7 +2178,7 @@ export async function tick(
   let remoteHandoffReconcileResult: RemoteHandoffReconcileResult | null = null;
   let remoteHandoff: DaemonTick['remoteHandoff'] | undefined;
   const runRemoteHandoffReconciliation = (): RemoteHandoffReconcileResult | null => {
-    if (opts.dryRun || remoteHandoffReconcileResult !== null) return remoteHandoffReconcileResult;
+    if (opts.dryRun || stopRequested() || remoteHandoffReconcileResult !== null) return remoteHandoffReconcileResult;
     try {
       remoteHandoffReconcileResult = reconcileRemoteHandoffs();
       const summary = remoteHandoffTickSummary(remoteHandoffReconcileResult);
@@ -2216,7 +2344,7 @@ export async function tick(
     return false;
   };
   const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
-    if (opts.dryRun || selfHealMaintenanceRan) return;
+    if (opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
     try {
       if (targetRepos && targetRepos.length > 0) {
@@ -2230,7 +2358,7 @@ export async function tick(
     }
   };
   const runProposalRepairMaintenance = async (): Promise<ProposalRepairWorkResult | null> => {
-    if (opts.dryRun || proposalRepairMaintenanceRan) return proposalRepairMaintenanceResult;
+    if (opts.dryRun || stopRequested() || proposalRepairMaintenanceRan) return proposalRepairMaintenanceResult;
     if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] === false) return null;
     proposalRepairMaintenanceRan = true;
     try {
@@ -2257,7 +2385,7 @@ export async function tick(
     }
   };
   const runInventMaintenance = async (): Promise<boolean> => {
-    if (opts.dryRun || inventMaintenanceRan || skipInventAfterSelfHealRefill) return false;
+    if (opts.dryRun || stopRequested() || inventMaintenanceRan || skipInventAfterSelfHealRefill) return false;
     if (directionPlan?.forceLocalOnly === true) return false;
     if ((liveCfg.foundry as Record<string, unknown>)?.generative !== true) return false;
     inventMaintenanceRan = true;
@@ -2270,11 +2398,12 @@ export async function tick(
     }
   };
   const runAncillaryMaintenance = async (): Promise<void> => {
-    if (opts.dryRun || ancillaryMaintenanceRan) return;
+    if (opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
     ancillaryMaintenanceRan = true;
 
     // M187: Counterfactual replay — low-cadence judge calibration.
     if (
+      !stopRequested() &&
       (liveCfg.foundry as Record<string, unknown>)?.counterfactual === true &&
       state.ticks.length % 20 === 0
     ) {
@@ -2284,7 +2413,7 @@ export async function tick(
     // Outcome findings remain signed observation-only evidence. They are not
     // allowed to rewrite judge labels or skill lifecycle state while cohort
     // enumeration is incomplete.
-    if ((liveCfg.foundry as Record<string, unknown>)?.['outcomeWatcher'] !== false) {
+    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['outcomeWatcher'] !== false) {
       try {
         const { scanRealWorldOutcomes } = await import('../fleet/outcome-watcher.js');
         await scanRealWorldOutcomes(liveCfg, { enrolledRepos: listEnrolled() });
@@ -2295,7 +2424,8 @@ export async function tick(
 
     // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
     const regressionSentinel = (liveCfg.foundry as Record<string, unknown>)?.regressionSentinel;
-    if (regressionSentinel === true || (typeof regressionSentinel === 'object' && regressionSentinel !== null)) {
+    if (!stopRequested() &&
+      (regressionSentinel === true || (typeof regressionSentinel === 'object' && regressionSentinel !== null))) {
       let attemptedCursor: ReturnType<typeof buildMonitoringCursor> = null;
       let attemptedExpectedCursor: ReturnType<typeof buildMonitoringCursor> = null;
       let attemptedRepo: string | undefined;
@@ -2334,7 +2464,7 @@ export async function tick(
             ].sort((left, right) => left.repoDigest.localeCompare(right.repoDigest));
           }
         }
-        if (r.regressed) {
+        if (r.regressed && !stopRequested()) {
           const bisect = await bisectAndRevert(liveCfg, monitoredRepo);
           const culpritProposalId = bisect.revertProposal?.culpritProposalId;
           const gitOid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
@@ -2424,6 +2554,7 @@ export async function tick(
     }
   };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
+    if (stopRequested()) return [];
     try {
       const backlog = await buildBacklog({ repos: enrolled });
       backlogSnapshotAt = backlog.generatedAt;
@@ -2457,12 +2588,12 @@ export async function tick(
   // -------------------------------------------------------------------------
   // 1. Kill-switch check.
   // -------------------------------------------------------------------------
-  if (killSwitchOn()) {
+  if (stopRequested()) {
     audit({
       action: 'daemon:tick',
       repo: null,
       sandboxId: null,
-      summary: 'tick skipped: kill switch is ON',
+      summary: killSwitchOn() ? 'tick skipped: kill switch is ON' : 'tick skipped: shutdown requested',
       result: 'ok',
     });
     return recordTick({
@@ -2470,7 +2601,7 @@ export async function tick(
       itemsConsidered: 0,
       proposalsCreated: 0,
       spentUsd: 0,
-      reason: 'kill-switch',
+      reason: killSwitchOn() ? 'kill-switch' : 'shutdown-requested',
     });
   }
 
@@ -2491,14 +2622,20 @@ export async function tick(
   }
   let state = loadedState.state;
   state = resetDayIfNeeded(state);
-  const initialSave = saveDaemonStateResult(state);
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+  }
+  const initialSave = saveTickState(state);
   if (!initialSave.ok) {
     return persistenceRefusal(`tick refused: failed to persist daemon state before dispatch (${initialSave.error})`, 'error');
   }
 
   const remainingBudget = dcfg.dailyBudgetUsd - state.todaySpentUsd;
   if (remainingBudget <= 0) {
-    saveDaemonState(state);
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+    }
+    saveTickState(state);
     audit({
       action: 'daemon:tick',
       repo: null,
@@ -2520,7 +2657,10 @@ export async function tick(
   // -------------------------------------------------------------------------
   const enrolled = listEnrolled();
   if (enrolled.length === 0) {
-    saveDaemonState(state);
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+    }
+    saveTickState(state);
     audit({
       action: 'daemon:tick',
       repo: null,
@@ -2557,6 +2697,9 @@ export async function tick(
     }
 
     routingCfg = directionPlan.forceLocalOnly ? constrainToLocalBackends(liveCfg) : liveCfg;
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+    }
     if (directionPlan.mode !== 'pause') {
       runRemoteHandoffReconciliation();
       remoteHandoff = remoteHandoffTickSummary(remoteHandoffReconcileResult);
@@ -2568,7 +2711,10 @@ export async function tick(
         : null;
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;
-      saveDaemonState(state);
+      if (!stillOwnsTick()) {
+        return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+      }
+      saveTickState(state);
       audit({
         action: 'daemon:tick',
         repo: null,
@@ -2614,6 +2760,9 @@ export async function tick(
     proposalRepairResult?.proposalInboxAvailable === false
   ) repairHandoffControlAvailable = false;
   backlogItems = filterGeneratedRepairDispatch(backlogItems);
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+  }
 
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();
@@ -2644,7 +2793,10 @@ export async function tick(
         result: 'ok',
       });
     } else {
-      saveDaemonState(state);
+      if (!stillOwnsTick()) {
+        return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+      }
+      saveTickState(state);
       audit({
         action: 'daemon:tick',
         repo: null,
@@ -2697,7 +2849,10 @@ export async function tick(
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;
 
-      saveDaemonState(state);
+      if (!stillOwnsTick()) {
+        return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+      }
+      saveTickState(state);
       audit({
         action: 'daemon:tick',
         repo: null,
@@ -3198,6 +3353,9 @@ export async function tick(
     }
   }
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({ ts: now, itemsConsidered: selected.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+  }
   recordQueueSelectionAgentAction({
     ts: now,
     machineId,
@@ -3258,13 +3416,16 @@ export async function tick(
   // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
   // -------------------------------------------------------------------------
   if (opts.dryRun) {
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+    }
     try {
       const claimedIds = workedSet.map((i) => i.id);
       if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
     } catch (err) {
       console.warn('[ashlr] daemon:tick dry-run coordinator release failed:', (err as Error)?.message ?? err);
     }
-    saveDaemonState(state);
+    saveTickState(state);
     audit({
       action: 'daemon:tick',
       repo: null,
@@ -3292,6 +3453,10 @@ export async function tick(
     await runAncillaryMaintenance();
   }
 
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+  }
+
   const workedSetIds = workedSet.map((i) => i.id);
   const spendGuard = armDaemonSpendGuard(workedSetIds);
   if (!spendGuard.ok) {
@@ -3304,7 +3469,7 @@ export async function tick(
   }
   let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
   const renewClaimLeases = (): void => {
-    if (workedSetIds.length === 0) return;
+    if (workedSetIds.length === 0 || !stillOwnsTick()) return;
     try {
       coordinator.renew(workedSetIds, machineId);
     } catch (err) {
@@ -3428,27 +3593,29 @@ export async function tick(
       skipReason: 'repair-authority-unavailable',
     }),
   });
+  const stopRequestedOutcome = (item: WorkItem, attemptId: string): ItemOutcome => {
+    const killed = killSwitchOn();
+    return {
+      item,
+      spentUsd: 0,
+      dispatched: false,
+      dispatch: dispatchTrace(item, {
+        assignedBy: 'preflight',
+        reason: killed ? 'kill switch is ON' : 'shutdown requested',
+        dispatched: false,
+        runId: attemptId,
+        trajectoryId: `run:${attemptId}`,
+        skipReason: killed ? 'kill-switch' : 'shutdown-requested',
+      }),
+    };
+  };
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     return ({
     tier: itemTiers[_taskIdx] ?? 'local',
     run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
-      if (killSwitchOn()) {
-        return {
-          item,
-          spentUsd: 0,
-          dispatched: false,
-          dispatch: dispatchTrace(item, {
-            assignedBy: 'preflight',
-            reason: 'kill switch is ON',
-            dispatched: false,
-            runId: attemptId,
-            trajectoryId: `run:${attemptId}`,
-            skipReason: 'kill-switch',
-          }),
-        };
-      }
+      if (stopRequested()) return stopRequestedOutcome(item, attemptId);
       // In-tick budget short-circuit: if cumulative realized spend has already
       // reached the remaining daily headroom, do NOT dispatch further items.
       if (tickSpent >= remainingBudget) {
@@ -3934,11 +4101,14 @@ export async function tick(
       const sink = nullSink();
 
       if (backend === 'builtin') {
+        if (stopRequested()) return stopRequestedOutcome(item, attemptId);
         const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+          if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before swarm launch');
           recordDispatchStartAgentAction(item, {
             ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
             tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'swarm',
           });
+          if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before swarm producer start');
           return runSwarm(
             { goal }, dispatchCfg,
             {
@@ -3946,6 +4116,7 @@ export async function tick(
               budget: itemBudget, parallel: 1, dryRun: false, noCapture: true,
               runId: attemptId, workItemId: item.id, workItemGenerationId,
               workSource: item.source, delegationScope,
+              ...(opts.signal ? { signal: opts.signal } : {}),
             },
             sink,
           );
@@ -3954,6 +4125,33 @@ export async function tick(
         dispatched = true;
         backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
         const swarmRun = await launch.value;
+        if (!stillOwnsTick()) {
+          swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
+          tickSpent += swarmSpent;
+          return {
+            item,
+            spentUsd: swarmSpent,
+            dispatched: true,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy,
+              reason: assignmentReason,
+              dispatched: true,
+              spentUsd: swarmSpent,
+              runId: swarmRun.id,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'daemon-lock-lost',
+              production: cancelledDispatchProduction(swarmRun.id, 'daemon lock ownership lost', swarmSpent),
+            }),
+          };
+        }
+        const swarmCancelled = swarmRun.status === 'aborted' ||
+          (opts.signal?.aborted === true && swarmRun.proposalOutcome?.kind !== 'filed');
+        const effectiveSwarmOutcome = swarmRun.proposalOutcome ?? (swarmCancelled
+          ? { kind: 'engine-failed-no-diff' as const, reason: 'swarm cancelled by owner' }
+          : undefined);
 
         const swarmExecuted = swarmRun.status === 'done';
         if (swarmExecuted && swarmRun.proposalOutcome?.kind !== 'kill-switch') {
@@ -3974,25 +4172,25 @@ export async function tick(
 
         const swarmRunSummary = runEventSummary({
           runId: swarmRun.id,
-          status: swarmRun.status,
-          outcome: swarmRun.proposalOutcome?.kind ?? swarmRun.status,
-          proposalCreated: swarmRun.proposalOutcome?.kind === 'filed',
-          proposalId: swarmRun.proposalOutcome?.proposalId,
-          diffFiles: swarmRun.proposalOutcome?.files,
+          status: swarmCancelled ? 'aborted' : swarmRun.status,
+          outcome: swarmCancelled ? 'engine-failed' : effectiveSwarmOutcome?.kind ?? swarmRun.status,
+          proposalCreated: effectiveSwarmOutcome?.kind === 'filed',
+          proposalId: effectiveSwarmOutcome?.proposalId,
+          diffFiles: effectiveSwarmOutcome?.files,
           diffLines:
-            typeof swarmRun.proposalOutcome?.insertions === 'number' ||
-            typeof swarmRun.proposalOutcome?.deletions === 'number'
-              ? (swarmRun.proposalOutcome?.insertions ?? 0) + (swarmRun.proposalOutcome?.deletions ?? 0)
+            typeof effectiveSwarmOutcome?.insertions === 'number' ||
+            typeof effectiveSwarmOutcome?.deletions === 'number'
+              ? (effectiveSwarmOutcome?.insertions ?? 0) + (effectiveSwarmOutcome?.deletions ?? 0)
               : undefined,
           tokensIn: swarmRun.usage?.tokensIn,
           tokensOut: swarmRun.usage?.tokensOut,
           costUsd: swarmRun.usage?.estCostUsd,
         });
         dispatchProduction = dispatchProductionFromProposalOutcome(
-          swarmRun.proposalOutcome,
+          effectiveSwarmOutcome,
           swarmRun.id,
           swarmRunSummary,
-          { proposalRequired: swarmRun.proposalOutcome?.kind !== 'proposal-disabled' },
+          { proposalRequired: effectiveSwarmOutcome?.kind !== 'proposal-disabled' },
         );
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
@@ -4042,6 +4240,7 @@ export async function tick(
           model: selectedModel ?? null,
           dispatched: true,
         });
+        if (stopRequested()) return stopRequestedOutcome(item, attemptId);
 
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
@@ -4082,16 +4281,20 @@ export async function tick(
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
+          if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n launch');
             recordDispatchStartAgentAction(item, {
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
             });
+            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n producer start');
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
+              ...(opts.signal ? { signal: opts.signal } : {}),
             });
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
@@ -4099,12 +4302,37 @@ export async function tick(
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           const bonResult = await launch.value;
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
+          if (!stillOwnsTick()) {
+            swarmSpent = bonBillable;
+            tickSpent += swarmSpent;
+            return {
+              item,
+              spentUsd: swarmSpent,
+              dispatched: true,
+              dispatch: dispatchTrace(item, {
+                backend,
+                tier: backendTier,
+                model: selectedModel,
+                assignedBy,
+                reason: assignmentReason,
+                dispatched: true,
+                spentUsd: swarmSpent,
+                runId: attemptId,
+                trajectoryId: `run:${attemptId}`,
+                skipReason: 'daemon-lock-lost',
+                production: cancelledDispatchProduction(attemptId, 'daemon lock ownership lost', swarmSpent),
+              }),
+            };
+          }
           if (!bonResult.winner) {
             // All candidates were empty/failing — still count what the fan-out
             // actually spent (M333: the pre-M333 $0 under-reported real spend).
             swarmSpent = bonBillable;
             tickSpent += swarmSpent;
-            const production = bestOfNNoWinnerProduction(bonResult, bestOfN);
+            const cancelled = opts.signal?.aborted === true || bestOfNWasCancelled(bonResult);
+            const production = cancelled
+              ? cancelledDispatchProduction(attemptId, `best-of-${bestOfN} selection cancelled by owner`, swarmSpent)
+              : bestOfNNoWinnerProduction(bonResult, bestOfN);
             audit({
               action: 'daemon:no-proposal',
               repo: item.repo,
@@ -4136,22 +4364,48 @@ export async function tick(
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
         } else {
+          if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
             recordDispatchStartAgentAction(item, {
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
             });
+            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct producer start');
             return runGoal(goal, dispatchCfg, {
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
+              ...(opts.signal ? { signal: opts.signal } : {}),
             });
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
           dispatched = true;
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           runState = await launch.value;
+          if (!stillOwnsTick()) {
+            swarmSpent = isSubscriptionEngine(backend ?? 'builtin') ? 0 : (runState.usage?.estCostUsd ?? 0);
+            tickSpent += swarmSpent;
+            return {
+              item,
+              spentUsd: swarmSpent,
+              dispatched: true,
+              dispatch: dispatchTrace(item, {
+                backend,
+                tier: backendTier,
+                model: selectedModel,
+                assignedBy,
+                reason: assignmentReason,
+                dispatched: true,
+                spentUsd: swarmSpent,
+                runId: runState.id,
+                trajectoryId: `run:${attemptId}`,
+                skipReason: 'daemon-lock-lost',
+                production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
+              }),
+            };
+          }
           const runActionCounts = runState.runEventSummary?.actionCounts;
           const runExecuted = runState.status === 'done' || [
             runActionCounts?.spawnAttempts,
@@ -4212,7 +4466,28 @@ export async function tick(
             }
           }
         }
-        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, {
+        const directCancelled = runState.status === 'aborted' || runState.terminationReason === 'cancelled';
+        const directOutcome = runState.proposalOutcome ??
+          (directCancelled
+            ? {
+                kind: 'engine-failed-no-diff' as const,
+                reason: runState.terminationReason === 'cancelled'
+                  ? 'run cancelled by owner'
+                  : 'run aborted without a proposal',
+              }
+            : undefined);
+        const directRunSummary = runEventSummary({
+          ...(runState.runEventSummary ?? {}),
+          runId: runState.id,
+          status: directCancelled ? 'aborted' : runState.status,
+          outcome: directCancelled ? 'engine-failed' : directOutcome?.kind ?? runState.status,
+          proposalCreated: directCancelled ? false : directOutcome?.kind === 'filed',
+          proposalId: directCancelled ? undefined : directOutcome?.proposalId,
+          tokensIn: runState.usage?.tokensIn,
+          tokensOut: runState.usage?.tokensOut,
+          costUsd: runState.usage?.estCostUsd,
+        });
+        dispatchProduction = dispatchProductionFromProposalOutcome(directOutcome, runState.id, directRunSummary, {
           proposalRequired: true,
           evidenceOutcome: runState.evidenceOutcome,
         });
@@ -4232,8 +4507,31 @@ export async function tick(
             : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
 
+        if (!stillOwnsTick()) {
+          return {
+            item,
+            spentUsd: swarmSpent,
+            dispatched: true,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy,
+              reason: assignmentReason,
+              dispatched: true,
+              spentUsd: swarmSpent,
+              runId: runState.id,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'daemon-lock-lost',
+              production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
+            }),
+          };
+        }
+
         audit({
-          action: 'daemon:proposal-created',
+          action: dispatchProduction?.outcome === 'proposal-created'
+            ? 'daemon:proposal-created'
+            : 'daemon:no-proposal',
           repo: item.repo,
           sandboxId: null,
           summary: `${backend} run ${runState.id} finished (status=${runState.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
@@ -4288,7 +4586,7 @@ export async function tick(
     // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
     // file a TuningProposal. NEVER auto-apply. This block imports NO
     // apply/merge/push/deploy primitive.
-    if (dispatched && swarmSpent > 0) {
+    if (dispatched && swarmSpent > 0 && !stopRequested()) {
       const intelRaw2 = routingCfg.foundry?.intelligence;
       if (intelRaw2 !== undefined && intelRaw2 !== null) {
         const intelCfg2 = intelRaw2 as { anomalyK?: number };
@@ -4297,7 +4595,7 @@ export async function tick(
         const goal2 = buildItemGoal(item);
         const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, routingCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
         const p50 = est2?.estCostUsd.median ?? 0;
-        if (p50 > 0 && swarmSpent > anomalyK * p50) {
+        if (p50 > 0 && swarmSpent > anomalyK * p50 && !stopRequested()) {
           audit({
             action: 'daemon:anomaly-hold',
             repo: item.repo,
@@ -4417,6 +4715,15 @@ export async function tick(
       resourceSnapshotAt: concurrentSnap.generatedAt,
       dryRun: false,
     });
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({
+        ts: now,
+        itemsConsidered: workedSet.length,
+        proposalsCreated: 0,
+        spentUsd: tickSpent,
+        reason: 'shutdown-requested',
+      });
+    }
     dispatchManifest = recordDispatchManifest(dispatchManifestEvent);
 
     // runConcurrentDispatch: executes plan with full cross-backend parallelism.
@@ -4522,6 +4829,17 @@ export async function tick(
   }
   } finally {
     stopLeaseRenewer();
+  }
+
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({
+      ts: now,
+      itemsConsidered: workedSet.length,
+      proposalsCreated: 0,
+      spentUsd: tickSpent,
+      reason: 'shutdown-requested',
+      ...(dispatchesFromOutcomes(outcomes) ? { dispatches: dispatchesFromOutcomes(outcomes) } : {}),
+    });
   }
 
   // itemsProcessed counts items whose swarm was actually dispatched (not those
@@ -4639,6 +4957,7 @@ export async function tick(
           const production = outcome.value.dispatch?.production;
           const duplicateDiff = production?.outcome === 'proposal-disabled' &&
             production.reason?.startsWith('duplicate diff skipped;') === true;
+          if (production?.runEventSummary?.status === 'aborted') continue;
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             continue;
           }
@@ -4786,7 +5105,7 @@ export async function tick(
       }
     }
   }
-  flushPendingRepairTreatmentOutcomes();
+  if (!stopRequested()) flushPendingRepairTreatmentOutcomes();
 
   if (dispatchedCount > 0) {
     try {
@@ -4835,6 +5154,17 @@ export async function tick(
   merged = autoMergePassResult?.merged ?? 0;
   const producerMaintenance = producerMaintenanceSummary();
 
+  if (!stillOwnsTick()) {
+    return ownershipLostTick({
+      ts: now,
+      itemsConsidered: selected.length,
+      proposalsCreated,
+      spentUsd: tickSpent,
+      reason: 'shutdown-requested',
+      ...(dispatches ? { dispatches } : {}),
+    });
+  }
+
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
   // -------------------------------------------------------------------------
@@ -4880,7 +5210,9 @@ export async function tick(
     itemsConsidered: selected.length,
     proposalsCreated,
     spentUsd: tickSpent,
-    reason: 'ok',
+    reason: stopRequested()
+      ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
+      : 'ok',
 	    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
 	    ...(directionMode ? { directionMode } : {}),
 	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -4894,7 +5226,7 @@ export async function tick(
 	    ...(merged > 0 ? { merged } : {}),
 	  };
   state.ticks = [...state.ticks, tickRecord];
-  const saveResult = saveDaemonStateResult(state);
+  const saveResult = saveTickState(state);
   if (!saveResult.ok) {
     audit({
       action: 'daemon:persistence-failed',
@@ -4935,17 +5267,21 @@ export async function tick(
   // the LATEST state immediately before writing, touching ONLY lastPulseExportAt,
   // so it cannot clobber a concurrent tick's todaySpentUsd / itemsProcessed /
   // ticks accounting.
-  if (cfg.pulse?.enabled) {
+  if (!stopRequested() && cfg.pulse?.enabled) {
     const sinceTs = state.lastPulseExportAt; // captured from the state we already saved
     void import('../fleet/pulse-export.js').then(async ({ exportToPulse }) => {
       try {
         const ok = await exportToPulse(cfg, { sinceTs });
-        if (ok) {
-          // Narrow read-modify-write: reload freshest state, touch ONLY the
-          // watermark, then save — never clobbers concurrent tick accounting.
-          const fresh = loadDaemonState();
-          fresh.lastPulseExportAt = tickRecord.ts;
-          saveDaemonState(fresh);
+        if (ok && opts.ownerLock) {
+          updateResidentDaemonState(opts.ownerLock, (fresh) => {
+            if (
+              fresh.running !== true ||
+              fresh.pid !== opts.ownerLock!.pid ||
+              fresh.startedAt !== state.startedAt ||
+              fresh.lastTickAt !== tickRecord.ts
+            ) return null;
+            return { ...fresh, lastPulseExportAt: tickRecord.ts };
+          });
         }
       } catch (err) {
         // Best-effort — telemetry must never crash the daemon.
@@ -4954,34 +5290,9 @@ export async function tick(
     }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-export lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
   }
 
-  // ── Phase H: fleet→pulse ROUND-TRIP (cloud orchestrates, local executes). ──
-  // On each live tick: emit a 'tick' heartbeat span, then POLL the cloud's
-  // fleet_command queue (read-scoped PAT), CLAIM + APPLY each pending command
-  // LOCALLY (assign_goal→createGoal / approve|reject_proposal→inbox setStatus /
-  // enroll_repo→enrollment), PATCH the metadata-only outcome back, and ship
-  // enrolled-repo dependency edges as `deps` spans.
-  //
-  // FULLY GATED + NO-THROW: pulse-sync is a complete no-op unless BOTH a Pulse
-  // endpoint (PULSE_URL / cfg.pulse.endpoint) AND a PAT (PULSE_FLEET_PAT /
-  // ASHLR_PULSE_*) are configured. It performs NO outward git action of its own
-  // — assign_goal only PLANS, approve_proposal only flips a proposal's STATUS
-  // (the diff is NOT applied here), enroll_repo only adds to the registry — so
-  // the daemon's enrollment / kill-switch / proposal-only floor is unweakened.
-  // LAZY-imported (keeps loop.ts's static outward-primitive grep-guards intact)
-  // and fire-and-forget so a Pulse outage never blocks or breaks the tick.
-  // DRY-RUN never reaches here (it returns earlier), so this only runs live.
-  void import('../integrations/pulse-sync.js').then(async ({ runPulseSync }) => {
-    try {
-      await runPulseSync(cfg, { tickTs: tickRecord.ts });
-    } catch (err) {
-      // Best-effort — the round-trip must never crash the daemon.
-      console.warn('[ashlr] daemon:tick pulse-sync failed:', (err as Error)?.message ?? err);
-    }
-  }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-sync lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
-
   // M214: fire-and-forget tick-cost emit to Pulse OTLP — additive, never throws, no control-flow change.
   // Lazy-imported (mirrors the pulse-sync pattern) so loop.ts's static grep-guards stay intact.
-  void import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
+  if (!stopRequested()) void import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
     try {
       await emitTickCost(cfg, tickRecord.ts, tickRecord.spentUsd, tickRecord.proposalsCreated, merged);
     } catch {
@@ -4994,7 +5305,7 @@ export async function tick(
   // cfg.comms.director is absent/false — byte-identical to absent).
   // SAFETY: director is READ-ONLY god-view access in M257. No goal mutations,
   // no merge/push/apply, no bypass of any safety gate.
-  void (() => {
+  if (!stopRequested()) void (() => {
     try {
       const directorEnabled =
         (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
@@ -5024,11 +5335,35 @@ export async function tick(
     action: 'daemon:tick',
     repo: null,
     sandboxId: null,
-    summary: `tick ok: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${tickSpent.toFixed(4)} spent`,
+    summary: `tick ${tickRecord.reason}: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${tickSpent.toFixed(4)} spent`,
     result: 'ok',
   });
 
   return tickRecord;
+}
+
+async function runOwnedPulseSync(
+  cfg: AshlrConfig,
+  tickResult: DaemonTick,
+  lock: DaemonLock,
+  signal: AbortSignal,
+  onOwnershipLost: () => void,
+): Promise<void> {
+  if (signal.aborted || tickResult.dryRun || tickResult.reason !== 'ok') return;
+  if (!daemonLockOwned(lock)) {
+    onOwnershipLost();
+    return;
+  }
+  try {
+    const { runPulseSync } = await import('../integrations/pulse-sync.js');
+    if (signal.aborted || !daemonLockOwned(lock)) {
+      if (!signal.aborted) onOwnershipLost();
+      return;
+    }
+    await runPulseSync(cfg, { tickTs: tickResult.ts, signal });
+  } catch (err) {
+    console.warn('[ashlr] daemon: pulse-sync failed:', (err as Error)?.message ?? err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5091,15 +5426,32 @@ export async function runDaemon(
   }
   let state = startLoadedState.state;
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
-    releaseDaemonLock(daemonLock);
+    const takeoverProof = staleResidentProof(state);
+    if (!takeoverProof) {
+      releaseDaemonLock(daemonLock);
+      audit({
+        action: 'daemon:start',
+        repo: null,
+        sandboxId: null,
+        summary: `daemon start refused: persisted resident pid ${state.pid} is still live or cannot be disproved`,
+        result: 'refused',
+      });
+      return loadDaemonState();
+    }
     audit({
-      action: 'daemon:start',
+      action: 'daemon:stale-state-recovered',
       repo: null,
       sandboxId: null,
-      summary: `daemon start refused: existing live daemon state pid ${state.pid}`,
-      result: 'refused',
+      summary: `authoritative lock acquired; clearing ${takeoverProof} resident state pid ${state.pid}`,
+      result: 'ok',
     });
-    return state;
+    state.running = false;
+    state.pid = null;
+    const recovered = saveResidentDaemonState(daemonLock, state);
+    if (!recovered.ok) {
+      releaseDaemonLock(daemonLock);
+      return loadDaemonState();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -5120,7 +5472,7 @@ export async function runDaemon(
   state.running = true;
   state.pid = process.pid;
   state.startedAt = new Date().toISOString();
-  const startSave = saveDaemonStateResult(state);
+  const startSave = saveResidentDaemonState(daemonLock, state);
   if (!startSave.ok) {
     releaseDaemonLock(daemonLock);
     if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
@@ -5136,10 +5488,13 @@ export async function runDaemon(
   }
   const daemonStartedAt = state.startedAt;
   const daemonActivityInstanceId = randomUUID();
+  const shutdown = new AbortController();
+  let ownershipLost = false;
   let activityPhase: DaemonActivityPhase = 'starting';
   let activityActiveChildren: number | null = null;
   let activityEpoch = 0;
   const refreshActivity = (): void => {
+    if (ownershipLost) return;
     writeDaemonActivity({
       instanceId: daemonActivityInstanceId,
       daemonStartedAt,
@@ -5155,29 +5510,55 @@ export async function runDaemon(
     return activityEpoch;
   };
   refreshActivity();
-  heartbeatDaemonLock(daemonLock);
-  const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock, refreshActivity);
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
   let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
-  const shutdown = new AbortController();
   let forcedShutdownTimer: ReturnType<typeof setTimeout> | null = null;
-  const requestShutdown = (signal: 'SIGINT' | 'SIGTERM'): void => {
-    shutdown.abort();
+  const transitionToStopping = (): void => {
+    if (ownershipLost) return;
+    if (activityPhase !== 'stopping') transitionActivity('stopping');
+  };
+  const requestShutdown = (signal?: 'SIGINT' | 'SIGTERM'): void => {
+    transitionToStopping();
+    if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
     if (forcedShutdownTimer === null) {
+      const finalSignal = signal ?? 'SIGTERM';
       forcedShutdownTimer = setTimeout(() => {
         process.removeListener('SIGINT', requestSigint);
         process.removeListener('SIGTERM', requestSigterm);
-        process.kill(process.pid, signal);
+        process.kill(process.pid, finalSignal);
       }, CUTOFF_CAPTURE_DEADLINE_MS);
       forcedShutdownTimer.unref?.();
     }
   };
   const requestSigint = (): void => requestShutdown('SIGINT');
   const requestSigterm = (): void => requestShutdown('SIGTERM');
+  const requestOwnershipLoss = (): void => {
+    if (ownershipLost) return;
+    ownershipLost = true;
+    if (!shutdown.signal.aborted) shutdown.abort();
+    scheduledResolutionObserver?.cancel();
+    scheduledCutoffCapture?.cancel();
+  };
+  const ownsDaemonLock = (): boolean => {
+    if (ownershipLost) return false;
+    if (daemonLockOwned(daemonLock)) return true;
+    requestOwnershipLoss();
+    return false;
+  };
+  const stopLockHeartbeat = startDaemonLockHeartbeat(
+    daemonLock,
+    refreshActivity,
+    requestOwnershipLoss,
+  );
   process.once('SIGINT', requestSigint);
   process.once('SIGTERM', requestSigterm);
+  const killSwitchPoll = setInterval(() => {
+    if (killSwitchOn()) requestShutdown();
+    else if (!daemonLockOwned(daemonLock)) requestOwnershipLoss();
+  }, KILL_SWITCH_POLL_MS);
+  killSwitchPoll.unref?.();
 
   audit({
     action: 'daemon:start',
@@ -5251,19 +5632,26 @@ export async function runDaemon(
     if (opts.once) {
       // Single-tick mode — reload full config so a manual tick picks up disk changes.
       const liveCfg = reloadLiveConfigForDaemon(cfg);
-      if (heartbeatDaemonLock(daemonLock)) {
+      if (killSwitchOn()) requestShutdown();
+      if (!shutdown.signal.aborted && ownsDaemonLock()) {
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
+          signal: shutdown.signal,
+          ownerLock: daemonLock,
+          onOwnershipLost: requestOwnershipLoss,
         });
-        recordContextRollupAfterTick(
-          tickResult,
-          opts,
-          reloadLiveConfigForDaemon(liveCfg),
-        );
-        transitionActivity('idle');
+        await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+        if (!shutdown.signal.aborted && ownsDaemonLock()) {
+          recordContextRollupAfterTick(
+            tickResult,
+            opts,
+            reloadLiveConfigForDaemon(liveCfg),
+          );
+        }
+        if (!shutdown.signal.aborted) transitionActivity('idle');
       }
     } else {
       // M85/M116/M309: choose loop strategy from live config every iteration.
@@ -5272,7 +5660,7 @@ export async function runDaemon(
       let cyclesLeft = opts.maxCycles ?? Infinity;
       while (true) {
         if (shutdown.signal.aborted) break;
-        if (!heartbeatDaemonLock(daemonLock)) break;
+        if (!ownsDaemonLock()) break;
         if (cyclesLeft-- <= 0) break;
         if (killSwitchOn() || shutdown.signal.aborted) break;
 
@@ -5294,13 +5682,17 @@ export async function runDaemon(
           dryRun: opts.dryRun,
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
+          signal: shutdown.signal,
+          ownerLock: daemonLock,
+          onOwnershipLost: requestOwnershipLoss,
         });
+        await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration
         // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
         if (opts.dryRun) break;
 
-        if (killSwitchOn() || shutdown.signal.aborted) break;
+        if (killSwitchOn() || shutdown.signal.aborted || !ownsDaemonLock()) break;
         const afterTickLoaded = loadDaemonStateStrict();
         if (!afterTickLoaded.ok) {
           audit({
@@ -5362,14 +5754,15 @@ export async function runDaemon(
           if (!(await sleep(afterLoopCfg.intervalMs, shutdown.signal))) break;
         }
 
-        if (!heartbeatDaemonLock(daemonLock)) break;
+        if (!ownsDaemonLock()) break;
         if (killSwitchOn() || shutdown.signal.aborted) break;
       }
     }
   } catch {
     // Unexpected error — swallow; still clean up running state below.
   }
-  transitionActivity('stopping');
+  transitionToStopping();
+  clearInterval(killSwitchPoll);
   await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
   if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
   process.removeListener('SIGINT', requestSigint);
@@ -5379,13 +5772,12 @@ export async function runDaemon(
   // -------------------------------------------------------------------------
   // Clear running state on exit.
   // -------------------------------------------------------------------------
-  const stillOwnsLock = heartbeatDaemonLock(daemonLock);
-  const stopLoadedState = loadDaemonStateStrict();
-  state = stopLoadedState.ok ? stopLoadedState.state : loadDaemonState();
-  if (stillOwnsLock && stopLoadedState.ok && state.pid === process.pid) {
-    state.running = false;
-    state.pid = null;
-    const stopSave = saveDaemonStateResult(state);
+  const stillOwnsLock = ownsDaemonLock();
+  if (stillOwnsLock) {
+    const stopSave = updateResidentDaemonState(daemonLock, (current) =>
+      current.pid === daemonLock.pid
+        ? { ...current, running: false, pid: null }
+        : null);
     if (!stopSave.ok) {
       audit({
         action: 'daemon:persistence-failed',
@@ -5395,23 +5787,18 @@ export async function runDaemon(
         result: 'error',
       });
     }
-  } else if (stillOwnsLock && !stopLoadedState.ok) {
+  }
+  state = loadDaemonState();
+
+  if (stillOwnsLock) {
     audit({
-      action: 'daemon:persistence-failed',
+      action: 'daemon:stop',
       repo: null,
       sandboxId: null,
-      summary: `daemon stop skipped state update: daemon state ${stopLoadedState.reason} (${stopLoadedState.error})`,
-      result: 'error',
+      summary: 'daemon stopped',
+      result: 'ok',
     });
   }
-
-  audit({
-    action: 'daemon:stop',
-    repo: null,
-    sandboxId: null,
-    summary: 'daemon stopped',
-    result: 'ok',
-  });
 
   // Restore ASHLR_IN_DAEMON to its prior value so a fresh runDaemon can run
   // again in the same process (a CLI process exits anyway; this matters for
@@ -5445,13 +5832,13 @@ export async function cancelDaemonPostTickChildren(
 }
 
 // ---------------------------------------------------------------------------
-// stopDaemon — halt the operator
+// stopDaemon — request an orderly halt
 // ---------------------------------------------------------------------------
 
 /**
- * Set the kill switch (M21 ~/.ashlr/KILL) AND mark running=false, pid=null in
- * persisted state. Idempotent; never throws. A running loop sees the kill
- * switch on the next iteration and stops cleanly.
+ * Set the kill switch (M21 ~/.ashlr/KILL). Idempotent; never throws. The
+ * resident loop observes the request, aborts in-flight work, and remains the
+ * sole authority that clears running/pid after the current tick settles.
  */
 export function stopDaemon(): void {
   try {
@@ -5460,19 +5847,11 @@ export function stopDaemon(): void {
     // setKill is idempotent + never throws by contract; extra guard
   }
   try {
-    const state = loadDaemonState();
-    state.running = false;
-    state.pid = null;
-    saveDaemonState(state);
-  } catch {
-    // Persistence failure — swallow; kill switch was already set above
-  }
-  try {
     audit({
       action: 'daemon:stop',
       repo: null,
       sandboxId: null,
-      summary: 'stopDaemon() called: kill switch set + running=false',
+      summary: 'stopDaemon() called: stop requested via kill switch',
       result: 'ok',
     });
   } catch {
@@ -5525,7 +5904,7 @@ async function sleepUntilNextUtcBudgetDay(lock: DaemonLock, signal?: AbortSignal
     const remainingMs = msUntilUtcTimestamp(wakeAtMs);
     if (remainingMs <= 0) return true;
     if (!(await sleep(Math.min(maxChunkMs, remainingMs + 1), signal))) return false;
-    if (!heartbeatDaemonLock(lock)) return false;
+    if (!daemonLockOwned(lock)) return false;
   }
 }
 

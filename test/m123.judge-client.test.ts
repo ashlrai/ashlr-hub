@@ -169,6 +169,71 @@ describe('runManager direct-Ollama fallback', () => {
   });
 });
 
+describe('judgeProposal cancellation', () => {
+  const proposal = {
+    id: 'p-cancel-judge',
+    repo: null,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Judge cancellation',
+    summary: 'Exercise cancellation propagation.',
+    diff: '+const settled = true;\n',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } as const;
+
+  it('does not call the provider when already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const complete = vi.fn(async () => '');
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+
+    await expect(judgeProposal(
+      proposal as never,
+      SPARSE_CFG,
+      { complete },
+      { signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('forwards mid-cancel and preserves a response that settles with the abort', async () => {
+    const controller = new AbortController();
+    let providerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const complete = vi.fn(async (_system: string, _user: string, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      providerStarted();
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return JSON.stringify({
+        verdict: 'ship',
+        value: 4,
+        correctness: 5,
+        scope: 1,
+        alignment: 5,
+        rationale: 'Provider completed before cancellation settlement.',
+      });
+    });
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+
+    const pending = judgeProposal(
+      proposal as never,
+      SPARSE_CFG,
+      { complete },
+      { recordTrace: false, signal: controller.signal },
+    );
+    await started;
+    controller.abort();
+    const verdict = await pending;
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(verdict).toMatchObject({ verdict: 'ship', correctness: 5, alignment: 5 });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 3. runStrategist falls through to buildOpenAICompatibleClient
 // ---------------------------------------------------------------------------

@@ -18,15 +18,17 @@
  * must never be disqualified because a repo has no test suite. A diff that
  * FAILS TO APPLY or whose checks FAIL is a real negative (passed: false).
  *
- * Never throws. No network. Worktree is always cleaned up.
+ * Infrastructure failures never throw. Caller cancellation rejects from the
+ * boolean wrapper after bounded cleanup. No network. Worktrees are retained
+ * for orphan recovery when subprocess closure cannot be confirmed.
  */
 
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AshlrConfig } from '../types.js';
+import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
 import { createSandbox, removeSandbox } from '../sandbox/worktree.js';
 
 type Sandbox = ReturnType<typeof createSandbox>;
@@ -34,6 +36,7 @@ import { detectRepoExecutionProfile } from './repo-profile.js';
 import {
   filterVerifyCommandsForProfile,
   runVerifyCommandAsync,
+  runVerifySubprocessAsync,
   type VerifyCommand,
   type VerifyFailureCategory,
   type VerifyCommandProfile,
@@ -57,14 +60,44 @@ export interface TestRunCommandResult {
 export interface TestRunResult {
   passed: boolean;
   commands: TestRunCommandResult[];
-  /** Set when verification could not run — NEUTRAL unless 'apply-failed'. */
-  skipped?: 'no-proposal' | 'no-diff' | 'sandbox-failed' | 'apply-failed' | 'no-commands';
+  /** Set when verification could not run; apply/cleanup failures are non-neutral. */
+  skipped?:
+    | 'no-proposal'
+    | 'no-diff'
+    | 'sandbox-failed'
+    | 'apply-failed'
+    | 'no-commands'
+    | 'cancelled'
+    | 'process-cleanup-unconfirmed';
+  /** Present when the worktree remains intact because subprocess closure was not proven. */
+  sandboxRetention?: SandboxRetentionEvidence;
+}
+
+export interface RunTestsOptions {
+  signal?: AbortSignal;
 }
 
 /** Cheap-first ordering: typecheck → lint → build → test. */
 const KIND_RANK: Record<VerifyCommand['kind'], number> = { typecheck: 0, lint: 1, build: 2, test: 3 };
 
 const PER_COMMAND_TIMEOUT_MS = 180_000;
+
+const PROCESS_CLEANUP_UNCONFIRMED_RE =
+  /(?:termination authority lost|termination deadline elapsed[^\n]*(?:unconfirmed|could not be authenticated)|process(?:-group)?[^\n]*(?:closure|exit)[^\n]*unconfirmed)/i;
+
+function processCleanupUnconfirmed(detail: string | undefined): boolean {
+  return PROCESS_CLEANUP_UNCONFIRMED_RE.test(detail ?? '');
+}
+
+function retainedSandboxEvidence(sb: Sandbox): SandboxRetentionEvidence {
+  return {
+    status: 'retained',
+    reason: 'process-cleanup-unconfirmed',
+    sandboxId: sb.id,
+    worktreePath: sb.worktreePath,
+    recovery: 'orphan-sweep',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -78,8 +111,15 @@ export async function runTests(
   proposalId: string,
   cfg: AshlrConfig,
   profile: VerifyCommandProfile = 'merge',
+  options: RunTestsOptions = {},
 ): Promise<boolean> {
-  const detailed = await runTestsDetailed(proposalId, cfg, profile);
+  const detailed = await runTestsDetailed(proposalId, cfg, profile, options);
+  if (detailed.skipped === 'cancelled') {
+    if (options.signal?.reason instanceof Error) throw options.signal.reason;
+    const error = new Error('Test run cancelled');
+    error.name = 'AbortError';
+    throw error;
+  }
   return detailed.passed;
 }
 
@@ -88,9 +128,21 @@ export async function runTestsDetailed(
   proposalId: string,
   cfg: AshlrConfig,
   profile: VerifyCommandProfile = 'merge',
+  options: RunTestsOptions = {},
 ): Promise<TestRunResult> {
   let sb: Sandbox | null = null;
+  let sandboxRetention: SandboxRetentionEvidence | undefined;
+  const results: TestRunCommandResult[] = [];
+  const cancelled = (): TestRunResult => ({ passed: false, commands: results, skipped: 'cancelled' });
+  const cleanupUnconfirmed = (): TestRunResult => ({
+    passed: false,
+    commands: results,
+    skipped: 'process-cleanup-unconfirmed',
+    sandboxRetention: sandboxRetention!,
+  });
   try {
+    if (options.signal?.aborted) return cancelled();
+
     // 1. Load the proposal (lazy import mirrors best-of-n.ts conventions so
     //    test mocks intercept cleanly).
     let repo: string | undefined;
@@ -103,6 +155,7 @@ export async function runTestsDetailed(
     } catch {
       /* fall through to no-proposal */
     }
+    if (options.signal?.aborted) return cancelled();
     if (!repo) return { passed: true, commands: [], skipped: 'no-proposal' };
     if (!diff || diff.trim().length === 0) {
       return { passed: true, commands: [], skipped: 'no-diff' };
@@ -115,6 +168,7 @@ export async function runTestsDetailed(
     } catch {
       return { passed: true, commands: [], skipped: 'sandbox-failed' };
     }
+    if (options.signal?.aborted) return cancelled();
 
     // 3. Apply the diff. A diff that does not apply is a REAL negative — the
     //    candidate's patch is broken against the current tree.
@@ -122,12 +176,25 @@ export async function runTestsDetailed(
     const patchFile = join(patchDir, 'proposal.patch');
     try {
       writeFileSync(patchFile, diff.endsWith('\n') ? diff : diff + '\n', 'utf8');
-      execFileSync('git', ['apply', '--whitespace=nowarn', patchFile], {
-        cwd: sb.worktreePath,
-        stdio: 'pipe',
-        timeout: 30_000,
-      });
+      const applied = await runVerifySubprocessAsync(
+        ['git', 'apply', '--whitespace=nowarn', patchFile],
+        {
+          cwd: sb.worktreePath,
+          env: process.env,
+          timeoutMs: 30_000,
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+      );
+      if (processCleanupUnconfirmed(applied.error)) {
+        sandboxRetention = retainedSandboxEvidence(sb);
+        return cleanupUnconfirmed();
+      }
+      if (applied.cancelled || options.signal?.aborted) return cancelled();
+      if (applied.error || applied.timedOut || applied.exitCode !== 0) {
+        return { passed: false, commands: [], skipped: 'apply-failed' };
+      }
     } catch {
+      if (options.signal?.aborted) return cancelled();
       return { passed: false, commands: [], skipped: 'apply-failed' };
     } finally {
       try {
@@ -137,39 +204,61 @@ export async function runTestsDetailed(
       }
     }
 
+    if (options.signal?.aborted) return cancelled();
+
     // 4. Detect verification commands INSIDE the patched worktree.
     const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
-    const commands = filterVerifyCommandsForProfile(
+    const verifyCommands = filterVerifyCommandsForProfile(
       executionProfile.verifyCommands,
       profile,
     ).sort(
       (a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind],
     );
-    if (commands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
+    if (verifyCommands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
 
     // 5. Run cheap-first; stop at the first failure.
-    const results: TestRunCommandResult[] = [];
-    for (const vc of commands) {
+    for (const [index, vc] of verifyCommands.entries()) {
+      if (options.signal?.aborted) return cancelled();
       const r = await runVerifyCommandAsync(vc, sb.worktreePath, cfg, {
         timeoutMs: vc.timeoutMs ?? PER_COMMAND_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
       });
-      results.push({
+      const commandCleanupUnconfirmed =
+        r.failureCategory === 'infra' && processCleanupUnconfirmed(r.output);
+      const commandCancelled = r.cancelled === true || (
+        options.signal?.aborted === true && r.failureCategory === 'infra' && !commandCleanupUnconfirmed
+      );
+      const result: TestRunCommandResult = {
         kind: vc.kind,
         command: r.command,
         exitCode: r.exitCode,
         ok: r.ok,
         timedOut: r.timedOut,
-        ...(r.failureCategory ? { failureCategory: r.failureCategory } : {}),
+        ...(commandCancelled
+          ? { failureCategory: 'cancelled' as const }
+          : (r.failureCategory ? { failureCategory: r.failureCategory } : {})),
         outputTail: r.output.slice(-4_096),
-      });
+      };
+      results.push(result);
+      if (commandCleanupUnconfirmed) {
+        sandboxRetention = retainedSandboxEvidence(sb);
+        return cleanupUnconfirmed();
+      }
+      if (commandCancelled) return cancelled();
       if (!r.ok && vc.required !== false) return { passed: false, commands: results };
+      if (options.signal?.aborted) {
+        if (index === verifyCommands.length - 1) return { passed: true, commands: results };
+        return cancelled();
+      }
     }
     return { passed: true, commands: results };
   } catch {
+    if (sandboxRetention) return cleanupUnconfirmed();
+    if (options.signal?.aborted) return cancelled();
     // Never throws — an infrastructure error is neutral, not a candidate fault.
     return { passed: true, commands: [], skipped: 'sandbox-failed' };
   } finally {
-    if (sb) {
+    if (sb && !sandboxRetention) {
       try {
         removeSandbox(sb);
       } catch {

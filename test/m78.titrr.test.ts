@@ -254,6 +254,158 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     return m.runGoal;
   }
 
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label cancellation waits for verifier settlement before removing the sandbox', async ({ engine }) => {
+    engineMockFn.mockResolvedValue({
+      state: makeRunState({ status: 'done', result: 'producer completed' }),
+    });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    let settleVerifier!: (result: {
+      ok: boolean;
+      command: string;
+      exitCode: number;
+      output: string;
+      timedOut: boolean;
+    }) => void;
+    runVCMockFn.mockReturnValue(new Promise((resolve) => {
+      settleVerifier = resolve;
+    }));
+    const controller = new AbortController();
+    const runGoal = await loadRunGoal();
+
+    let runSettled = false;
+    const pending = runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      signal: controller.signal,
+    }).finally(() => {
+      runSettled = true;
+    });
+    await vi.waitFor(() => expect(runVCMockFn).toHaveBeenCalledTimes(1));
+    expect(runVCMockFn.mock.calls[0]?.[3]).toMatchObject({
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runSettled).toBe(false);
+    expect(removeSandboxMockFn).not.toHaveBeenCalled();
+
+    settleVerifier({
+      ok: false,
+      command: 'npm test',
+      exitCode: 1,
+      output: 'cancelled',
+      timedOut: false,
+    });
+    const state = await pending;
+
+    expect(state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled' });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label cancellation before attempt 1 returns aborted without dereferencing a producer', async ({ engine }) => {
+    const controller = new AbortController();
+    createSandboxMockFn.mockImplementationOnce(() => {
+      controller.abort();
+      return {
+        id: 'mock-sb',
+        worktreePath: '/mock/wt',
+        sourceRepo: '/mock/repo',
+        branch: 'scratch/mock',
+      };
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      signal: controller.signal,
+    });
+
+    expect(state).toMatchObject({
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      result: 'Run cancelled before execution.',
+    });
+    expect(engineMockFn).not.toHaveBeenCalled();
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label cancellation after a done producer returns aborted and preserves usage', async ({ engine }) => {
+    const controller = new AbortController();
+    const usage = { tokensIn: 23, tokensOut: 17, steps: 2, estCostUsd: 0.42 };
+    engineMockFn.mockImplementationOnce(async () => {
+      controller.abort();
+      return { state: makeRunState({ status: 'done', result: 'stale success', usage }) };
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      signal: controller.signal,
+    });
+
+    expect(engineMockFn.mock.calls[0]?.[3]).toMatchObject({ signal: controller.signal });
+    expect(state).toMatchObject({
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      result: 'Run cancelled.',
+      usage,
+    });
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(runVCMockFn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label capture abort is not relabeled as producer done', async ({ engine }) => {
+    const producer = makeRunState({ status: 'done', result: 'producer completed' });
+    engineMockFn.mockResolvedValue({ state: producer });
+    detectVCMockFn.mockReturnValue([]);
+    captureMockFn.mockResolvedValueOnce({
+      state: {
+        ...makeRunState({ status: 'aborted', result: 'Capture cancelled.' }),
+        id: producer.id,
+        terminationReason: 'cancelled',
+      },
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(state).toMatchObject({
+      id: producer.id,
+      status: 'aborted',
+      terminationReason: 'cancelled',
+      result: expect.stringContaining('Capture cancelled.'),
+      usage: producer.usage,
+    });
+  });
+
   // ---- Test 1: tests pass on first attempt ----
   it('passing tests → proposes with "tests: pass (attempt 1)" annotation', async () => {
     engineMockFn.mockResolvedValue({
@@ -518,6 +670,49 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       status: 'failed',
       proposalOutcome: { kind: 'filed', isPartial: true },
       runEventSummary: { outcome: 'gate-blocked', proposalCreated: false },
+    });
+  });
+
+  it('retains a shared CLI worktree and durable recovery metadata when cleanup is unconfirmed', async () => {
+    const controller = new AbortController();
+    const failedState = {
+      ...makeRunState({ status: 'failed', result: 'process-group exit unconfirmed' }),
+      terminationReason: 'error-exit' as const,
+    };
+    const sandboxRetention = {
+      status: 'retained' as const,
+      reason: 'process-cleanup-unconfirmed' as const,
+      sandboxId: 'mock-sb',
+      worktreePath: '/mock/wt',
+      recovery: 'orphan-sweep' as const,
+    };
+    engineMockFn.mockImplementationOnce(async () => {
+      controller.abort();
+      return { state: failedState, sandboxRetention };
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      signal: controller.signal,
+    });
+
+    expect(state).toMatchObject({
+      status: 'failed',
+      terminationReason: 'error-exit',
+      sandboxRetention,
+    });
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    expect(removeSandboxMockFn).not.toHaveBeenCalled();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'failed',
+      terminationReason: 'error-exit',
+      sandboxRetention,
     });
   });
 

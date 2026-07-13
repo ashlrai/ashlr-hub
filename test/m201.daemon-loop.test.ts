@@ -121,6 +121,11 @@ vi.mock('../src/core/run/best-of-n.js', () => ({
   runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
 }));
 
+const mockRunPulseSync = vi.fn();
+vi.mock('../src/core/integrations/pulse-sync.js', () => ({
+  runPulseSync: (...args: unknown[]) => mockRunPulseSync(...args),
+}));
+
 const mockGetResourceSnapshot = vi.fn();
 vi.mock('../src/core/fabric/resource-monitor.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/fabric/resource-monitor.js')>();
@@ -278,10 +283,19 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 // Lazy imports — AFTER all mocks.
 // ---------------------------------------------------------------------------
 
-import { tick, runDaemon, buildItemGoal, workedOutcomeFromDispatchProduction } from '../src/core/daemon/loop.js';
+import {
+  tick,
+  runDaemon,
+  saveResidentDaemonState,
+  stopDaemon,
+  buildItemGoal,
+  workedOutcomeFromDispatchProduction,
+} from '../src/core/daemon/loop.js';
 import {
   acquireDaemonLock,
+  daemonLockPath,
   loadDaemonState,
+  readDaemonSpendGuard,
   releaseDaemonLock,
   saveDaemonState,
 } from '../src/core/daemon/state.js';
@@ -290,6 +304,7 @@ import {
   pendingCount,
   setStatus,
 } from '../src/core/inbox/store.js';
+import { readAudit } from '../src/core/sandbox/audit.js';
 import {
   readDispatchProductionEvents,
   recordDispatchProduction,
@@ -349,6 +364,7 @@ beforeEach(() => {
   mockRunConcurrentDispatch.mockReset();
   mockGetResourceSnapshot.mockReset();
   mockRunBestOfN.mockReset();
+  mockRunPulseSync.mockReset();
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
   mockQueueProposalRepairWorkForPendingProposals.mockReset();
@@ -411,6 +427,13 @@ beforeEach(() => {
     },
     candidates: [],
     critique: { n: 1, nonEmpty: 1, judged: 1, topScore: 10, winnerIndex: 0 },
+  });
+  mockRunPulseSync.mockResolvedValue({
+    enabled: false,
+    tickEmitted: false,
+    commands: [],
+    depEdgesShipped: 0,
+    detail: 'disabled in daemon loop tests',
   });
   mockDetectRegression.mockResolvedValue({ regressed: false, details: [] });
   mockBisectAndRevert.mockResolvedValue({ reverted: false });
@@ -2896,6 +2919,148 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h2a: cancelled direct execution retains spend and audits no proposal', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'cancel accounting' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const shutdown = new AbortController();
+    mockRunGoal.mockImplementationOnce(async () => {
+      shutdown.abort();
+      return {
+        id: 'run-cancelled-paid',
+        status: 'aborted',
+        terminationReason: 'cancelled',
+        result: 'Run cancelled.',
+        usage: { tokensIn: 70, tokensOut: 30, totalTokens: 100, estCostUsd: 0.123, steps: 1 },
+      };
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'] },
+      } as AshlrConfig,
+      { dryRun: false, signal: shutdown.signal },
+    );
+
+    expect(result).toMatchObject({
+      reason: 'shutdown-requested',
+      spentUsd: 0.123,
+      proposalsCreated: 0,
+      dispatches: [expect.objectContaining({
+        itemId: items[0]!.id,
+        dispatched: true,
+        spentUsd: 0.123,
+        production: expect.objectContaining({
+          outcome: 'engine-failed',
+          reason: 'run cancelled by owner',
+          runEventSummary: expect.objectContaining({
+            status: 'aborted',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+          }),
+        }),
+      })],
+    });
+    expect(loadDaemonState()).toMatchObject({ todaySpentUsd: 0.123 });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+    const itemAudit = readAudit().filter((entry) => entry.repo === items[0]!.repo);
+    expect(itemAudit.some((entry) => entry.action === 'daemon:proposal-created')).toBe(false);
+    expect(itemAudit.some((entry) => entry.action === 'daemon:no-proposal')).toBe(true);
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+  });
+
+  it('A1h2a1: cancelled builtin swarm records aborted production without empty-work learning', async () => {
+    const { items } = enrollWithItems(1);
+    const shutdown = new AbortController();
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => {
+      shutdown.abort();
+      return {
+        id: (opts as { runId: string }).runId,
+        status: 'aborted',
+        goal: items[0]!.title,
+        result: 'Swarm cancelled.',
+        usage: { tokensIn: 40, tokensOut: 10, totalTokens: 50, estCostUsd: 0.045, steps: 1 },
+      };
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      dryRun: false,
+      signal: shutdown.signal,
+    });
+
+    expect(result).toMatchObject({
+      reason: 'shutdown-requested',
+      spentUsd: 0.045,
+      dispatches: [expect.objectContaining({
+        itemId: items[0]!.id,
+        production: expect.objectContaining({
+          outcome: 'engine-failed',
+          reason: 'swarm cancelled by owner',
+          runEventSummary: expect.objectContaining({
+            status: 'aborted',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+          }),
+        }),
+      })],
+    });
+    expect(loadDaemonState().todaySpentUsd).toBe(0.045);
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+  });
+
+  it('A1h2a2: cancelled Best-of-N records aborted production and all candidate spend', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'cancelled fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const shutdown = new AbortController();
+    mockRunBestOfN.mockImplementationOnce(async () => {
+      shutdown.abort();
+      return {
+        winner: undefined,
+        candidates: [
+          { index: 0, engine: 'local-coder', diff: '', score: 0, error: 'cancelled', costUsd: 0.02 },
+          { index: 1, engine: 'local-coder', diff: '', score: 0, error: 'cancelled', costUsd: 0.03 },
+        ],
+        critique: {
+          n: 2,
+          nonEmpty: 0,
+          judged: 0,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.05,
+          billableCostUsd: 0.05,
+          noProposalReasons: [{ reason: 'selection cancelled', count: 1 }],
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false, signal: shutdown.signal });
+
+    expect(result).toMatchObject({
+      reason: 'shutdown-requested',
+      spentUsd: 0.05,
+      dispatches: [expect.objectContaining({
+        itemId: items[0]!.id,
+        production: expect.objectContaining({
+          outcome: 'engine-failed',
+          reason: 'best-of-2 selection cancelled by owner',
+          runEventSummary: expect.objectContaining({
+            status: 'aborted',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            costUsd: 0.05,
+          }),
+        }),
+      })],
+    });
+    expect(loadDaemonState().todaySpentUsd).toBe(0.05);
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+  });
+
   it('A1h2b: trivial proposal outcomes persist as gate-blocked no-proposal production', async () => {
     const { items } = enrollWithItems(1);
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder trivial' });
@@ -4950,8 +5115,9 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
 
     const result = await tick(cfgBuiltin({ perTickItems: 4, parallel: 1 }), { dryRun: false });
 
-    // Tick should return 'ok' (the kill was set mid-item, not before the tick).
-    expect(result.reason).toBe('ok');
+    // The completed tick retains its work accounting while surfacing the
+    // mid-item stop request truthfully.
+    expect(result.reason).toBe('kill-switch');
     // Only the first item was dispatched; subsequent items saw kill=ON and skipped.
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     const starts = readAgentActions().filter((event) => event.action === 'daemon:dispatch-start');
@@ -5309,6 +5475,348 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     }
   });
 
+  it('E3d: request-only KILL polling aborts promptly and cleans up timers/listeners after work settles', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    let release!: () => void;
+    let settled = false;
+    mockRunSwarm.mockImplementation((_input, _cfg, opts) => new Promise((resolveRun) => {
+      release = () => resolveRun({
+        id: 'request-only-stop', status: 'done', goal: '', result: '',
+        usage: { totalTokens: 1, estCostUsd: 0, steps: 1 },
+      });
+      expect((opts as { signal?: AbortSignal }).signal?.aborted).toBe(false);
+    }));
+    const sigintBefore = process.listenerCount('SIGINT');
+    const sigtermBefore = process.listenerCount('SIGTERM');
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    const running = runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      once: false, dryRun: false, maxCycles: 10,
+    }).finally(() => { settled = true; });
+
+    try {
+      await vi.waitFor(() => expect(mockRunSwarm).toHaveBeenCalledTimes(1));
+      const signal = (mockRunSwarm.mock.calls[0]?.[2] as { signal?: AbortSignal }).signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+
+      stopDaemon();
+      stopDaemon();
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true), { timeout: 1_000, interval: 10 });
+      expect(loadDaemonState()).toMatchObject({ running: true, pid: process.pid });
+      expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
+      expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGTERM');
+
+      const pollIndex = intervalSpy.mock.calls.findIndex((call) => call[1] === 50);
+      expect(pollIndex).toBeGreaterThanOrEqual(0);
+      const pollHandle = intervalSpy.mock.results[pollIndex]?.value;
+      release();
+      const state = await running;
+
+      expect(state).toMatchObject({ running: false, pid: null });
+      expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
+      expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore);
+      expect(clearIntervalSpy).toHaveBeenCalledWith(pollHandle);
+    } finally {
+      if (!settled) {
+        release?.();
+        await running;
+      }
+      kill.mockRestore();
+      clearIntervalSpy.mockRestore();
+      intervalSpy.mockRestore();
+    }
+  });
+
+  it('E3e: a pre-aborted tick starts no dispatch or maintenance work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    const shutdown = new AbortController();
+    shutdown.abort();
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      dryRun: false,
+      signal: shutdown.signal,
+    });
+
+    expect(result.reason).toBe('shutdown-requested');
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockQueueProposalRepairWorkForPendingProposals).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+  });
+
+  it('E3f: tick threads its owner signal into direct runGoal execution', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'direct signal test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const shutdown = new AbortController();
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false, signal: shutdown.signal });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ signal: shutdown.signal });
+  });
+
+  it('E3g: tick threads its owner signal into Best-of-N fan-out', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'fan-out signal test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const shutdown = new AbortController();
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false, signal: shutdown.signal });
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({ signal: shutdown.signal });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('E3h: Pulse command sync settles before shutdown releases daemon ownership', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    let releasePulse!: () => void;
+    let pulseSignal: AbortSignal | undefined;
+    let settled = false;
+    mockRunPulseSync.mockImplementationOnce((_cfg, pulseOpts) => new Promise((resolvePulse) => {
+      pulseSignal = (pulseOpts as { signal?: AbortSignal }).signal;
+      releasePulse = () => resolvePulse({
+        enabled: true,
+        tickEmitted: true,
+        commands: [],
+        depEdgesShipped: 0,
+        detail: 'settled',
+      });
+    }));
+    const running = runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      once: true,
+      dryRun: false,
+    }).finally(() => { settled = true; });
+
+    try {
+      await vi.waitFor(() => expect(mockRunPulseSync).toHaveBeenCalledTimes(1));
+      expect(pulseSignal).toBeInstanceOf(AbortSignal);
+      expect(loadDaemonState()).toMatchObject({
+        running: true,
+        pid: process.pid,
+        todaySpentUsd: 0.001,
+        itemsProcessed: 1,
+      });
+
+      stopDaemon();
+      await vi.waitFor(() => expect(pulseSignal?.aborted).toBe(true), { timeout: 1_000, interval: 10 });
+      expect(settled).toBe(false);
+      expect(loadDaemonState()).toMatchObject({ running: true, pid: process.pid, todaySpentUsd: 0.001 });
+
+      releasePulse();
+      const finalState = await running;
+      expect(finalState).toMatchObject({ running: false, pid: null, todaySpentUsd: 0.001, itemsProcessed: 1 });
+    } finally {
+      if (!settled) {
+        releasePulse?.();
+        await running;
+      }
+    }
+  });
+
+  it('E3i: an unsettled Pulse sync cannot overlap the next daemon tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 10),
+    });
+    const liveCfg = cfgBuiltin({ perTickItems: 1, parallel: 1 });
+    mockLoadConfig.mockReturnValue(liveCfg);
+    let releaseFirstPulse!: () => void;
+    mockRunPulseSync.mockImplementationOnce(() => new Promise((resolvePulse) => {
+      releaseFirstPulse = () => resolvePulse({
+        enabled: true,
+        tickEmitted: true,
+        commands: [],
+        depEdgesShipped: 0,
+        detail: 'first settled',
+      });
+    }));
+
+    const running = runDaemon(liveCfg, {
+      once: false,
+      dryRun: false,
+      maxCycles: 2,
+    });
+
+    await vi.waitFor(() => expect(mockRunPulseSync).toHaveBeenCalledTimes(1));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 75));
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+
+    releaseFirstPulse();
+    const finalState = await running;
+    expect(mockRunSwarm).toHaveBeenCalledTimes(2);
+    expect(mockRunPulseSync).toHaveBeenCalledTimes(2);
+    expect(finalState).toMatchObject({ running: false, pid: null, itemsProcessed: 2, todaySpentUsd: 0.002 });
+  });
+
+  it('E3j: lock theft aborts active work and fences successor state and spend guard', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const items = makeItems(repo.dir, 1);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items,
+    });
+    const pendingBefore = pendingCount();
+    let releaseSwarm!: () => void;
+    let settled = false;
+    mockRunSwarm.mockImplementation((_input, _cfg, runOpts) => new Promise((resolveRun) => {
+      releaseSwarm = () => {
+        const ownedOpts = runOpts as { runId: string; signal?: AbortSignal };
+        if (!ownedOpts.signal?.aborted) {
+          createProposal({
+            repo: repo.dir,
+            origin: 'swarm',
+            kind: 'patch',
+            title: 'must be fenced after lock theft',
+            summary: 'adversarial stale-owner proposal',
+            diff: 'diff --git a/x.ts b/x.ts\n',
+            workItemId: items[0]!.id,
+            workSource: items[0]!.source,
+            runId: ownedOpts.runId,
+          });
+        }
+        resolveRun({
+          id: ownedOpts.runId,
+          status: 'aborted',
+          goal: 'stolen lock',
+          result: 'cancelled',
+          usage: { totalTokens: 10, estCostUsd: 0.111, steps: 1 },
+        });
+      };
+    }));
+    const running = runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      once: true,
+      dryRun: false,
+    }).finally(() => { settled = true; });
+
+    try {
+      await vi.waitFor(() => expect(mockRunSwarm).toHaveBeenCalledTimes(1));
+      const ownerSignal = (mockRunSwarm.mock.calls[0]?.[2] as { signal?: AbortSignal }).signal;
+      const successorStartedAt = '2026-07-13T12:00:00.000Z';
+      const successorState = {
+        running: true,
+        pid: process.pid,
+        startedAt: successorStartedAt,
+        lastTickAt: '2026-07-13T12:01:00.000Z',
+        todayDate: today(),
+        todaySpentUsd: 0.77,
+        itemsProcessed: 7,
+        ticks: [],
+      };
+      fs.writeFileSync(daemonLockPath(), JSON.stringify({
+        pid: process.pid,
+        token: 'successor-token',
+        hostname: 'successor-host',
+        acquiredAt: successorStartedAt,
+        heartbeatAt: successorStartedAt,
+      }, null, 2) + '\n', 'utf8');
+      saveDaemonState(successorState);
+      const successorStateRaw = fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8');
+
+      await vi.waitFor(() => expect(ownerSignal?.aborted).toBe(true), { timeout: 1_000, interval: 10 });
+
+      releaseSwarm();
+      const finalState = await running;
+      expect(finalState).toMatchObject(successorState);
+      expect(loadDaemonState()).toMatchObject(successorState);
+      expect(fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8')).toBe(successorStateRaw);
+      expect(readDaemonSpendGuard()).toMatchObject({ exists: true, malformed: false });
+      expect(JSON.parse(fs.readFileSync(daemonLockPath(), 'utf8'))).toMatchObject({
+        pid: process.pid,
+        token: 'successor-token',
+      });
+      expect(mockRunPulseSync).not.toHaveBeenCalled();
+      expect(pendingCount()).toBe(pendingBefore);
+      expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch')).toHaveLength(0);
+    } finally {
+      if (!settled) {
+        releaseSwarm?.();
+        await running;
+      }
+    }
+  });
+
+  it('E3k: token-validated resident save refuses to overwrite successor state', () => {
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    const successorStartedAt = '2026-07-13T13:00:00.000Z';
+    const successorState = {
+      running: true,
+      pid: process.pid,
+      startedAt: successorStartedAt,
+      lastTickAt: successorStartedAt,
+      todayDate: today(),
+      todaySpentUsd: 0.88,
+      itemsProcessed: 8,
+      ticks: [],
+    };
+    fs.writeFileSync(daemonLockPath(), JSON.stringify({
+      pid: process.pid,
+      token: 'replacement-owner-token',
+      hostname: 'replacement-host',
+      acquiredAt: successorStartedAt,
+      heartbeatAt: successorStartedAt,
+    }, null, 2) + '\n', 'utf8');
+    saveDaemonState(successorState);
+    const successorRaw = fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8');
+
+    const staleSave = saveResidentDaemonState(acquired.lock, {
+      ...successorState,
+      todaySpentUsd: 99,
+      itemsProcessed: 99,
+    });
+
+    expect(staleSave).toMatchObject({ ok: false });
+    expect(loadDaemonState()).toEqual(successorState);
+    expect(fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8')).toBe(successorRaw);
+  });
+
   it('E4: runDaemon re-entrancy guard — refuses when ASHLR_IN_DAEMON is already set', async () => {
     process.env['ASHLR_IN_DAEMON'] = '1';
     const cfg = cfgBuiltin();
@@ -5356,6 +5864,71 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(state.running).toBe(false);
     expect(releaseDaemonLock(held.lock)).toBe(true);
+  });
+
+  it('E5c: authoritative lock ownership repairs stale resident state before restart', async () => {
+    const stalePid = 424_243;
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === stalePid) {
+        throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+      }
+      return true;
+    });
+    saveDaemonState({
+      running: true,
+      pid: stalePid,
+      startedAt: '2026-07-13T00:00:00.000Z',
+      lastTickAt: null,
+      todayDate: new Date().toISOString().slice(0, 10),
+      todaySpentUsd: 0.25,
+      itemsProcessed: 2,
+      ticks: [],
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [],
+      items: [],
+    });
+
+    try {
+      const result = await runDaemon(cfgBuiltin(), { once: true, dryRun: false });
+
+      expect(result).toMatchObject({ running: false, pid: null, todaySpentUsd: 0.25 });
+      expect(kill).toHaveBeenCalledWith(stalePid, 0);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it('E5d: acquired lock does not erase a different persisted live resident pid', async () => {
+    const livePid = 424_244;
+    const persisted = {
+      running: true,
+      pid: livePid,
+      startedAt: '2026-07-13T00:00:00.000Z',
+      lastTickAt: null,
+      todayDate: today(),
+      todaySpentUsd: 0.31,
+      itemsProcessed: 3,
+      ticks: [],
+    };
+    saveDaemonState(persisted);
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+
+    try {
+      const result = await runDaemon(cfgBuiltin(), { once: true, dryRun: false });
+
+      expect(result).toEqual(persisted);
+      expect(loadDaemonState()).toEqual(persisted);
+      expect(mockBuildBacklog).not.toHaveBeenCalled();
+      expect(readAudit().some((entry) =>
+        entry.action === 'daemon:start' &&
+        entry.result === 'refused' &&
+        entry.summary.includes(`pid ${livePid}`),
+      )).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it('E6: runDaemon dry-run loop terminates after one tick (dry-run = bounded)', async () => {

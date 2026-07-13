@@ -20,6 +20,7 @@ import type {
   ProviderClient,
   ChatMessage,
   ChatResult,
+  ToolExecutor,
 } from '../types.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
@@ -30,13 +31,27 @@ import { assembleSystemPrompt } from './prompts/index.js';
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
 
+/** Completion handle returned after the caller atomically reserves a model step. */
+export interface ModelStepReservation {
+  finalize(
+    summary: string,
+    usage?: { tokensIn: number; tokensOut: number },
+  ): void;
+}
+
+/**
+ * Synchronous authority for the run-wide model-step budget. Returning undefined
+ * denies the call because no global step remains.
+ */
+export type ReserveModelStep = () => ModelStepReservation | undefined;
+
 /**
  * A tool executor passed through ctx. Each entry must have a callable `fn`.
  * We accept unknown[] from the contract; internally we cast when needed.
  */
 interface ToolSpec {
   name: string;
-  fn?: (args: unknown) => Promise<unknown>;
+  fn?: ToolExecutor;
   [key: string]: unknown;
 }
 
@@ -76,6 +91,10 @@ export async function runTask(
     adaptivePrompts?: boolean;
     /** M41: optional memory block to inject into the executor prompt. */
     memory?: string;
+    /** Optional caller cancellation for this task's model/tool loop. */
+    signal?: AbortSignal;
+    /** Run-wide authority that reserves a step before any external model call. */
+    reserveModelStep?: ReserveModelStep;
     /**
      * M264: optional context prefix prepended to the system prompt.
      * Used by local-context.ts to inject NORTH-STAR + ecosystem map +
@@ -87,7 +106,7 @@ export async function runTask(
   },
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
-  let taskUsage: RunUsage = newUsage();
+  let taskUsage: RunUsage = task.usage ? { ...task.usage } : newUsage();
   let stepCount = 0;
 
   // M11: resolve sink — default to nullSink when not provided.
@@ -137,6 +156,38 @@ export async function runTask(
     }
   }
 
+  function cancelIfRequested(): boolean {
+    if (!ctx.signal?.aborted) return false;
+    task.status = 'failed';
+    task.error = 'Task cancelled.';
+    delete task.result;
+    return true;
+  }
+
+  function stopForBudget(): void {
+    const partial = lastAssistantContent(messages);
+    if (partial) {
+      task.status = 'done';
+      task.result = `[budget exceeded — partial result]\n${partial}`;
+    } else {
+      task.status = 'failed';
+      task.error = 'Budget exceeded before any result was produced.';
+    }
+  }
+
+  function finalizeReservation(
+    reservation: ModelStepReservation | undefined,
+    summary: string,
+    usage?: { tokensIn: number; tokensOut: number },
+  ): void {
+    if (!reservation) return;
+    try {
+      reservation.finalize(summary, usage);
+    } catch {
+      // Reservation persistence/progress reporting must never crash the loop.
+    }
+  }
+
   // Resolve tools: only use them if client supports them AND tools provided.
   const useTools =
     client.supportsTools &&
@@ -145,7 +196,7 @@ export async function runTask(
   const toolSpecs = useTools ? (ctx.tools as unknown[]) : undefined;
 
   // Build a tool executor map keyed by name (best-effort; tools may lack fn).
-  const toolExecutors = new Map<string, (args: unknown) => Promise<unknown>>();
+  const toolExecutors = new Map<string, ToolExecutor>();
   if (useTools && ctx.tools) {
     for (const t of ctx.tools) {
       const spec = t as ToolSpec;
@@ -210,16 +261,11 @@ export async function runTask(
   try {
     // Main agent loop.
     while (true) {
+      if (cancelIfRequested()) break;
+
       // Pre-step budget check.
       if (overBudget(ctx.usage, ctx.budget)) {
-        const partial = lastAssistantContent(messages);
-        if (partial) {
-          task.status = 'done';
-          task.result = `[budget exceeded — partial result]\n${partial}`;
-        } else {
-          task.status = 'failed';
-          task.error = 'Budget exceeded before any result was produced.';
-        }
+        stopForBudget();
         break;
       }
 
@@ -236,7 +282,27 @@ export async function runTask(
         break;
       }
 
+      // The authority callback is synchronous: parallel tasks cannot all pass a
+      // stale pre-check and overshoot the run-wide ceiling as a whole batch.
+      let reservation: ModelStepReservation | undefined;
+      if (ctx.reserveModelStep) {
+        try {
+          reservation = ctx.reserveModelStep();
+        } catch (err) {
+          task.status = 'failed';
+          task.error = `Could not reserve model step: ${String(err)}`;
+          break;
+        }
+        if (!reservation) {
+          stopForBudget();
+          break;
+        }
+      }
+
       stepCount++;
+      // A reserved call is already an attempted model step, even if its promise
+      // later rejects because cancellation won the in-flight race.
+      accumulateUsage({ steps: 1 });
 
       // M11: Call the model via chatStream when available for live token streaming.
       // Falls back to client.chat() when chatStream is not implemented.
@@ -248,21 +314,39 @@ export async function runTask(
             messages,
             toolSpecs,
             (chunk: string) => {
-              if (chunk.length > 0) {
+              if (!ctx.signal?.aborted && chunk.length > 0) {
                 emitStream({ kind: 'model-delta', taskId: task.id, text: chunk });
               }
             },
+            ctx.signal,
           );
         } else {
           // Non-streaming fallback: emit the full content as a single delta.
-          result = await client.chat(messages, toolSpecs);
-          if (result.content.length > 0) {
+          result = await client.chat(messages, toolSpecs, ctx.signal);
+          if (!ctx.signal?.aborted && result.content.length > 0) {
             emitStream({ kind: 'model-delta', taskId: task.id, text: result.content });
           }
         }
       } catch (err) {
-        task.status = 'failed';
-        task.error = `Model call failed: ${String(err)}`;
+        const reportedUsage = usageReportedBy(err);
+        if (reportedUsage) accumulateUsage(reportedUsage);
+        const summary = ctx.signal?.aborted
+          ? 'Model call attempted and cancelled.'
+          : `Model call failed: ${truncate(String(err), 100)}`;
+        const stepUsage = {
+          ...newUsage(),
+          ...(reportedUsage ?? {}),
+          steps: 1,
+        };
+        if (reservation) {
+          finalizeReservation(reservation, summary, reportedUsage);
+        } else {
+          emitStep('model', summary, stepUsage);
+        }
+        if (!cancelIfRequested()) {
+          task.status = 'failed';
+          task.error = `Model call failed: ${String(err)}`;
+        }
         break;
       }
 
@@ -270,7 +354,6 @@ export async function runTask(
       const stepUsageDelta: Partial<RunUsage> = {
         tokensIn: result.usage.tokensIn,
         tokensOut: result.usage.tokensOut,
-        steps: 1,
       };
       accumulateUsage(stepUsageDelta);
 
@@ -280,7 +363,13 @@ export async function runTask(
         : result.toolCalls && result.toolCalls.length > 0
           ? `tool calls: ${result.toolCalls.map((tc) => tc.name).join(', ')}`
           : '(empty response)';
-      emitStep('model', modelSummary, { ...newUsage(), ...stepUsageDelta, steps: 1 });
+      if (reservation) {
+        finalizeReservation(reservation, modelSummary, result.usage);
+      } else {
+        emitStep('model', modelSummary, { ...newUsage(), ...stepUsageDelta, steps: 1 });
+      }
+
+      if (cancelIfRequested()) break;
 
       // Append assistant message.
       messages.push({
@@ -304,6 +393,8 @@ export async function runTask(
       // Handle tool calls if present.
       if (result.toolCalls && result.toolCalls.length > 0 && useTools) {
         for (const tc of result.toolCalls) {
+          if (cancelIfRequested()) break;
+
           // M11: emit tool-call stream event before execution.
           emitStream({
             kind: 'tool-call',
@@ -312,12 +403,14 @@ export async function runTask(
             data: { name: tc.name, arguments: tc.arguments },
           });
 
+          if (cancelIfRequested()) break;
+
           let toolResultContent: string;
           const executor = toolExecutors.get(tc.name);
 
           if (executor) {
             try {
-              const rawResult = await executor(tc.arguments);
+              const rawResult = await executor(tc.arguments, ctx.signal);
               toolResultContent =
                 typeof rawResult === 'string'
                   ? rawResult
@@ -339,7 +432,11 @@ export async function runTask(
 
           // Emit a tool step.
           emitStep('tool', `${tc.name}: ${truncate(toolResultContent, 80)}`);
+
+          if (cancelIfRequested()) break;
         }
+
+        if (cancelIfRequested()) break;
 
         // Continue the loop to let the model react to tool results.
         continue;
@@ -371,8 +468,10 @@ export async function runTask(
     }
   } catch (unexpectedErr) {
     // Catch-all: should not reach here, but ensure we never propagate.
-    task.status = 'failed';
-    task.error = `Unexpected error in agent loop: ${String(unexpectedErr)}`;
+    if (!cancelIfRequested()) {
+      task.status = 'failed';
+      task.error = `Unexpected error in agent loop: ${String(unexpectedErr)}`;
+    }
   }
 
   // Attach accumulated task-level usage.
@@ -403,4 +502,24 @@ function lastAssistantContent(messages: ChatMessage[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Best-effort token recovery for providers that attach usage to a rejected call. */
+function usageReportedBy(err: unknown): { tokensIn: number; tokensOut: number } | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const usage = (err as { usage?: { tokensIn?: unknown; tokensOut?: unknown } }).usage;
+  if (!usage) return undefined;
+  const tokensIn = usage.tokensIn;
+  const tokensOut = usage.tokensOut;
+  if (
+    typeof tokensIn !== 'number' ||
+    !Number.isFinite(tokensIn) ||
+    tokensIn < 0 ||
+    typeof tokensOut !== 'number' ||
+    !Number.isFinite(tokensOut) ||
+    tokensOut < 0
+  ) {
+    return undefined;
+  }
+  return { tokensIn, tokensOut };
 }

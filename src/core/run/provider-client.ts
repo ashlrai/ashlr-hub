@@ -173,25 +173,68 @@ function pickModel(models: string[], explicit?: string): string {
 // higher ceiling only lets slow frontier calls finish (env override below).
 const FETCH_TIMEOUT_MS = Number(process.env.ASHLR_FETCH_TIMEOUT_MS) || 300_000;
 
+/** Open a bounded request; the caller owns cleanup through response body consumption. */
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs = FETCH_TIMEOUT_MS,
-): Promise<Response> {
+  signal?: AbortSignal,
+): Promise<{ response: Response; cleanup: () => void }> {
+  throwIfAborted(signal);
   const controller = new AbortController();
+  const removeAbortListener = forwardAbort(signal, controller);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     clearTimeout(timer);
+    removeAbortListener();
+  };
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return { response, cleanup };
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(
+    typeof signal.reason === 'string' && signal.reason.length > 0
+      ? signal.reason
+      : 'The operation was aborted',
+  );
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+/** Forward caller cancellation into a deadline-owned controller. */
+function forwardAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+  if (!signal) return () => {};
+
+  let listening = true;
+  const onAbort = () => controller.abort(signal.reason);
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  return () => {
+    if (!listening) return;
+    listening = false;
+    signal.removeEventListener('abort', onAbort);
+  };
 }
 
 /**
  * Open a streaming connection whose AbortController stays alive AFTER the
  * response headers arrive, so the caller can keep it as an idle-watchdog
- * over the body read loop (fetchWithTimeout clears its timer the instant
- * headers resolve, leaving the body read unbounded — see the streaming loops).
+ * over the body read loop. Non-streaming callers keep fetchWithTimeout's
+ * deadline through body consumption; streaming callers use per-read deadlines.
  *
  * The connect timer bounds time-to-headers; the returned controller lets the
  * read loop abort a stalled/trickling body. Caller MUST clear the connect timer
@@ -201,8 +244,16 @@ async function fetchStream(
   url: string,
   init: RequestInit,
   connectTimeoutMs: number,
-): Promise<{ response: Response; controller: AbortController; clearConnectTimer: () => void }> {
+  signal?: AbortSignal,
+): Promise<{
+  response: Response;
+  controller: AbortController;
+  clearConnectTimer: () => void;
+  cleanup: () => void;
+}> {
+  throwIfAborted(signal);
   const controller = new AbortController();
+  const removeAbortListener = forwardAbort(signal, controller);
   const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
   let cleared = false;
   const clearConnectTimer = () => {
@@ -213,9 +264,10 @@ async function fetchStream(
   };
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
-    return { response, controller, clearConnectTimer };
+    return { response, controller, clearConnectTimer, cleanup: removeAbortListener };
   } catch (err) {
     clearConnectTimer();
+    removeAbortListener();
     throw err;
   }
 }
@@ -304,6 +356,7 @@ function buildOllamaClient(
   model: string,
   supportsTools: boolean,
   temperature?: number,
+  signal?: AbortSignal,
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/api/chat';
 
@@ -312,7 +365,8 @@ function buildOllamaClient(
     model,
     supportsTools,
 
-    async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
+    async chat(messages: ChatMessage[], tools?: unknown[], callSignal?: AbortSignal): Promise<ChatResult> {
+      const requestSignal = callSignal ?? signal;
       // Map ChatMessage roles to Ollama format
       // Ollama uses role: 'system'|'user'|'assistant'|'tool'
       const ollamaMessages = toOllamaMessages(messages);
@@ -331,27 +385,40 @@ function buildOllamaClient(
       }
 
       let response: Response;
+      let cleanupResponse = () => {};
       try {
-        response = await fetchWithTimeout(chatUrl, {
+        const opened = await fetchWithTimeout(chatUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        });
+        }, FETCH_TIMEOUT_MS, requestSignal);
+        response = opened.response;
+        cleanupResponse = opened.cleanup;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`Ollama fetch failed: ${msg}`);
       }
 
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        throw new Error(`Ollama HTTP ${response.status}: ${errText}`);
-      }
-
       let data: unknown;
       try {
-        data = (await response.json()) as unknown;
-      } catch {
-        throw new Error('Ollama returned non-JSON response');
+        if (!response.ok) {
+          let errText = '';
+          try {
+            errText = await response.text();
+          } catch {
+            throwIfAborted(requestSignal);
+          }
+          throw new Error(`Ollama HTTP ${response.status}: ${errText}`);
+        }
+
+        try {
+          data = (await response.json()) as unknown;
+        } catch {
+          throwIfAborted(requestSignal);
+          throw new Error('Ollama returned non-JSON response');
+        }
+      } finally {
+        cleanupResponse();
       }
 
       const d = data as Record<string, unknown>;
@@ -382,8 +449,11 @@ function buildOllamaClient(
       messages: ChatMessage[],
       tools: unknown[] | undefined,
       onDelta: (t: string) => void,
+      callSignal?: AbortSignal,
     ): Promise<ChatResult> {
+      const requestSignal = callSignal ?? signal;
       // Attempt streaming; fall back to chat() on any error.
+      let cleanupStream = () => {};
       try {
         const ollamaMessages = toOllamaMessages(messages);
 
@@ -410,9 +480,11 @@ function buildOllamaClient(
               body: JSON.stringify(body),
             },
             STREAM_TIMEOUT_MS,
+            requestSignal,
           );
           response = opened.response;
           streamController = opened.controller;
+          cleanupStream = opened.cleanup;
           // Headers are in; stop the connect timer. The read loop below arms its
           // own per-read idle watchdog via streamController so a stalled body
           // can't hang indefinitely.
@@ -519,12 +591,16 @@ function buildOllamaClient(
           usage: { tokensIn, tokensOut },
         };
       } catch {
+        cleanupStream();
+        if (requestSignal?.aborted) throw abortReason(requestSignal);
         // Streaming failed — fall back to non-streaming chat() and emit as one delta.
-        const result = await this.chat(messages, tools);
+        const result = await this.chat(messages, tools, requestSignal);
         if (result.content) {
           onDelta(result.content);
         }
         return result;
+      } finally {
+        cleanupStream();
       }
     },
   };
@@ -748,6 +824,7 @@ export function buildOpenAICompatibleClient(
   model: string,
   supportsTools: boolean,
   temperature?: number,
+  signal?: AbortSignal,
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/chat/completions';
 
@@ -762,7 +839,8 @@ export function buildOpenAICompatibleClient(
     model,
     supportsTools,
 
-    async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
+    async chat(messages: ChatMessage[], tools?: unknown[], callSignal?: AbortSignal): Promise<ChatResult> {
+      const requestSignal = callSignal ?? signal;
       const openaiMessages = toOpenAIMessages(messages);
 
       const body: Record<string, unknown> = {
@@ -779,27 +857,40 @@ export function buildOpenAICompatibleClient(
       }
 
       let response: Response;
+      let cleanupResponse = () => {};
       try {
-        response = await fetchWithTimeout(chatUrl, {
+        const opened = await fetchWithTimeout(chatUrl, {
           method: 'POST',
           headers: buildHeaders(),
           body: JSON.stringify(body),
-        });
+        }, FETCH_TIMEOUT_MS, requestSignal);
+        response = opened.response;
+        cleanupResponse = opened.cleanup;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`OpenAI-compat fetch failed (${chatUrl}): ${msg}`);
       }
 
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        throw new Error(`OpenAI-compat HTTP ${response.status}: ${errText}`);
-      }
-
       let data: unknown;
       try {
-        data = (await response.json()) as unknown;
-      } catch {
-        throw new Error('OpenAI-compat returned non-JSON response');
+        if (!response.ok) {
+          let errText = '';
+          try {
+            errText = await response.text();
+          } catch {
+            throwIfAborted(requestSignal);
+          }
+          throw new Error(`OpenAI-compat HTTP ${response.status}: ${errText}`);
+        }
+
+        try {
+          data = (await response.json()) as unknown;
+        } catch {
+          throwIfAborted(requestSignal);
+          throw new Error('OpenAI-compat returned non-JSON response');
+        }
+      } finally {
+        cleanupResponse();
       }
 
       const d = data as Record<string, unknown>;
@@ -845,8 +936,11 @@ export function buildOpenAICompatibleClient(
       messages: ChatMessage[],
       tools: unknown[] | undefined,
       onDelta: (t: string) => void,
+      callSignal?: AbortSignal,
     ): Promise<ChatResult> {
+      const requestSignal = callSignal ?? signal;
       // Attempt SSE streaming; fall back to chat() on any error.
+      let cleanupStream = () => {};
       try {
         const openaiMessages = toOpenAIMessages(messages);
 
@@ -874,9 +968,11 @@ export function buildOpenAICompatibleClient(
               body: JSON.stringify(body),
             },
             STREAM_TIMEOUT_MS,
+            requestSignal,
           );
           response = opened.response;
           streamController = opened.controller;
+          cleanupStream = opened.cleanup;
           opened.clearConnectTimer();
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1006,9 +1102,13 @@ export function buildOpenAICompatibleClient(
 
         return { content: streamContent, toolCalls, usage: { tokensIn, tokensOut } };
       } catch {
-        const result = await this.chat(messages, tools);
+        cleanupStream();
+        if (requestSignal?.aborted) throw abortReason(requestSignal);
+        const result = await this.chat(messages, tools, requestSignal);
         if (result.content) onDelta(result.content);
         return result;
+      } finally {
+        cleanupStream();
       }
     },
   };

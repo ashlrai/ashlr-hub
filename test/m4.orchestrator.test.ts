@@ -839,6 +839,27 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     expect(reloaded.usage.steps).toBe(5);
   });
 
+  it('reserves parallel model steps atomically without whole-batch maxSteps overshoot', async () => {
+    const plan = JSON.stringify([
+      { id: 'a', goal: 'A', deps: [] },
+      { id: 'b', goal: 'B', deps: [] },
+      { id: 'c', goal: 'C', deps: [] },
+    ]);
+    const { fetchMock } = scriptedOllama(plan, { tokIn: 7, tokOut: 3 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await runGoal('Tight parallel ceiling', makeConfig(), {
+      budget: { maxTokens: 1_000_000, maxSteps: 2 },
+      parallel: 3,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    expect(state.status).toBe('aborted');
+    expect(state.usage.steps).toBe(2);
+    expect(state.steps.filter((step) => step.kind === 'model')).toHaveLength(1);
+  });
+
   it('tight budget with parallel:2 aborts; overshoot is bounded', async () => {
     // Each chat costs 100 in / 100 out. maxTokens:50 → plan call alone exceeds it.
     const plan = JSON.stringify([
@@ -1004,6 +1025,81 @@ describe('runGoal — resume edge cases', () => {
     expect(state.tasks.find(t => t.id === 'a')!.status).toBe('done');
     expect(state.tasks.find(t => t.id === 'b')!.status).toBe('done');
     expect(state.status).toBe('done');
+  });
+
+  it('resumes cancelled and legacy-aborted tasks without changing completed work or prior usage', async () => {
+    const resumeId = uniqueRunId('resume-cancelled');
+    const priorUsage = { tokensIn: 100, tokensOut: 50, steps: 3, estCostUsd: 0.25 };
+    const completedTask = {
+      id: 'cached',
+      goal: 'CACHED_GOAL',
+      deps: [],
+      status: 'done' as const,
+      result: 'exact cached result',
+      usage: { tokensIn: 80, tokensOut: 40, steps: 2, estCostUsd: 0.2 },
+    };
+    const cancelled: RunState = {
+      id: resumeId,
+      goal: 'Resume cancellation goal',
+      engine: 'builtin',
+      provider: 'ollama',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      budget: { maxTokens: 50_000, maxSteps: 20, allowCloud: false },
+      usage: { ...priorUsage },
+      tasks: [
+        completedTask,
+        {
+          id: 'cancelled',
+          goal: 'CANCELLED_GOAL',
+          deps: ['cached'],
+          status: 'failed',
+          error: 'Task cancelled.',
+          usage: { tokensIn: 0, tokensOut: 0, steps: 1, estCostUsd: 0 },
+        },
+        { id: 'legacy', goal: 'LEGACY_GOAL', deps: ['cached'], status: 'failed', error: 'Aborted: run budget exceeded' },
+      ],
+      steps: [{
+        ts: new Date().toISOString(),
+        taskId: 'cancelled',
+        kind: 'model',
+        summary: 'Model call attempted and cancelled.',
+        usage: { tokensIn: 0, tokensOut: 0, steps: 1, estCostUsd: 0 },
+      }],
+      status: 'aborted',
+      result: 'Run cancelled.',
+      terminationReason: 'cancelled',
+    };
+    saveRun(cancelled);
+
+    const { fetchMock } = scriptedOllama('task result', { tokIn: 10, tokOut: 5 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await runGoal('Resume cancellation goal', makeConfig(), {
+      resumeId,
+      budget: { maxTokens: 1_000_000, maxSteps: 1000 },
+      parallel: 2,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    expect(state.tasks.find((task) => task.id === 'cached')).toEqual(completedTask);
+    expect(state.tasks.find((task) => task.id === 'cancelled')).toMatchObject({
+      status: 'done',
+      usage: { tokensIn: 10, tokensOut: 5, steps: 2 },
+    });
+    expect(state.tasks.find((task) => task.id === 'legacy')).toMatchObject({ status: 'done' });
+    expect(state.usage).toEqual({
+      tokensIn: priorUsage.tokensIn + 30,
+      tokensOut: priorUsage.tokensOut + 15,
+      steps: priorUsage.steps + 3,
+      estCostUsd: priorUsage.estCostUsd,
+    });
+    expect(state.steps).toContainEqual(expect.objectContaining({
+      taskId: 'cancelled',
+      summary: 'Model call attempted and cancelled.',
+    }));
+    expect(state.terminationReason).toBeUndefined();
   });
 
   it('resume re-runs the pending dependent task to done without re-issuing the cached task', async () => {

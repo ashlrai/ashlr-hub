@@ -178,8 +178,15 @@ export async function verifyTask(
   client: ProviderClient,
   budget: RunBudget,
   usage: RunUsage,
-  opts?: { model?: boolean },
+  opts?: { model?: boolean; signal?: AbortSignal },
 ): Promise<VerifyVerdict> {
+  if (opts?.signal?.aborted) {
+    return {
+      ok: false,
+      reason: 'Verification cancelled by invocation owner.',
+      method: 'model',
+    };
+  }
   // Stage 1: heuristic.
   const heuristic = heuristicVerify(task);
   if (heuristic !== null) {
@@ -212,7 +219,7 @@ export async function verifyTask(
   // Stage 2: cheap single model call.
   try {
     const messages = buildVerifyMessages(task);
-    const result = await client.chat(messages, /* tools */ undefined);
+    const result = await client.chat(messages, /* tools */ undefined, opts?.signal);
 
     // Account for the tokens used by the verification call.
     const delta = {
@@ -230,6 +237,13 @@ export async function verifyTask(
 
     return parseModelVerdict(result.content);
   } catch {
+    if (opts?.signal?.aborted) {
+      return {
+        ok: false,
+        reason: 'Verification cancelled by invocation owner.',
+        method: 'model',
+      };
+    }
     // Model check failed — fall back to a lenient heuristic pass.
     return {
       ok: true,
@@ -252,10 +266,26 @@ const FAILURE_TAIL_CHARS = 2 * 1024;
  * `failure` carries the tail of its output for the repair loop to feed back.
  */
 export interface StructuredVerdict extends VerifyVerdict {
+  /** True only when the caller requested cancellation. */
+  cancelled?: boolean;
   /** The verify command that produced this verdict (when method === 'command'). */
   command?: string;
   /** Tail of the failing command's output (~2KB), for repair feedback. */
   failure?: string;
+}
+
+function cancelledStructuredVerdict(
+  command?: string,
+  output?: string,
+): StructuredVerdict & { cancelled: true } {
+  return {
+    ok: false,
+    cancelled: true,
+    method: 'command',
+    reason: command ? `verification cancelled: ${command}` : 'verification cancelled',
+    ...(command ? { command } : {}),
+    ...(output ? { failure: output.slice(-FAILURE_TAIL_CHARS) } : {}),
+  };
 }
 
 /**
@@ -281,15 +311,27 @@ export async function verifyTaskStructured(
     workspaceRoot?: string;
     allowExec?: boolean;
     cfg?: AshlrConfig;
+    signal?: AbortSignal;
   },
 ): Promise<StructuredVerdict> {
-  const { workspaceRoot, allowExec, cfg } = opts;
+  const { workspaceRoot, allowExec, cfg, signal } = opts;
+
+  if (signal?.aborted) {
+    return cancelledStructuredVerdict();
+  }
 
   if (workspaceRoot && allowExec && cfg) {
     const commands = detectVerifyCommands(workspaceRoot);
     if (commands.length > 0) {
       for (const vc of commands) {
-        const res = await runVerifyCommandAsync(vc, workspaceRoot, cfg);
+        if (signal?.aborted) {
+          return cancelledStructuredVerdict();
+        }
+
+        const res = await runVerifyCommandAsync(vc, workspaceRoot, cfg, { signal });
+        if (res.cancelled || res.failureCategory === 'cancelled' || signal?.aborted) {
+          return cancelledStructuredVerdict(res.command, res.output);
+        }
         if (!res.ok && vc.required !== false) {
           return {
             ok: false,
@@ -299,6 +341,9 @@ export async function verifyTaskStructured(
             failure: res.output.slice(-FAILURE_TAIL_CHARS),
           };
         }
+      }
+      if (signal?.aborted) {
+        return cancelledStructuredVerdict();
       }
       return {
         ok: true,
@@ -310,6 +355,12 @@ export async function verifyTaskStructured(
 
   // Fall back to the heuristic/model verdict (already StructuredVerdict-shaped:
   // StructuredVerdict only adds optional fields over VerifyVerdict).
-  const verdict = await verifyTask(task, client, budget, usage, { model: opts.model });
+  const verdict = await verifyTask(task, client, budget, usage, {
+    model: opts.model,
+    signal,
+  });
+  if (signal?.aborted) {
+    return cancelledStructuredVerdict();
+  }
   return verdict;
 }

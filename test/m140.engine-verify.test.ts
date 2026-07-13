@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -568,6 +568,39 @@ describe('M140 lint-on-edit — typecheck fail rejects edit + rolls back', () =>
     const { readFileSync } = await import('node:fs');
     const afterContent = readFileSync(filePath, 'utf8');
     expect(afterContent).toBe(originalContent);
+  });
+
+  it('passes cancellation to typecheck and rolls back an interrupted edit', async () => {
+    const { dir, filePath } = makeLintDir();
+    const controller = new AbortController();
+    mockDetect.mockReturnValue([{ kind: 'typecheck', cmd: ['tsc', '--noEmit'] }]);
+    mockRun.mockImplementation((...args: unknown[]) => {
+      const opts = args[3] as { signal?: AbortSignal };
+      expect(opts.signal).toBe(controller.signal);
+      controller.abort();
+      return {
+        ok: false,
+        command: 'tsc --noEmit',
+        exitCode: -1,
+        output: 'typecheck cancelled',
+        timedOut: false,
+        cancelled: true,
+      };
+    });
+
+    const result = await callEngineerTool('edit_file', {
+      path: 'src.ts',
+      old_string: 'export const x = 1;',
+      new_string: 'export const x = 2;',
+    }, {
+      workspaceRoot: dir,
+      sourceRepo: dir,
+      allowWrite: true,
+      allowExec: false,
+    }, controller.signal);
+
+    expect(result).toContain('edit_file cancelled by invocation owner');
+    expect(readFileSync(filePath, 'utf8')).toBe('export const x = 1;\n');
   });
 
   it('edit is accepted when no typecheck command exists (graceful degrade)', async () => {

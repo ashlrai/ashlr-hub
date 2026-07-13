@@ -462,3 +462,277 @@ describe('buildOpenAICompatibleClient — error handling', () => {
     await expect(client.chat(makeMessages())).rejects.toThrow(/ECONNREFUSED/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Caller cancellation
+// ---------------------------------------------------------------------------
+
+describe('buildOpenAICompatibleClient — caller cancellation', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a pre-aborted chat without issuing a request', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+      undefined,
+      controller.signal,
+    );
+
+    await expect(client.chat(makeMessages())).rejects.toThrow(/abort/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('honors a call-scoped signal on an otherwise unbound client', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    await expect(client.chat(makeMessages(), undefined, controller.signal)).rejects.toThrow(/abort/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('aborts an in-flight non-streaming chat request', async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const fetchSpy = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener('abort', () => reject(requestSignal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+      undefined,
+      controller.signal,
+    );
+    const pending = client.chat(makeMessages());
+
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(/abort/i);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a stalled JSON body after headers and then removes the caller listener', async () => {
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    let requestSignal: AbortSignal | undefined;
+    let markBodyStarted!: () => void;
+    const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => {
+          markBodyStarted();
+          return new Promise((_resolve, reject) => {
+            requestSignal?.addEventListener('abort', () => reject(requestSignal?.reason), { once: true });
+          });
+        },
+      } as unknown as Response);
+    }));
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    const pending = client.chat(makeMessages(), undefined, controller.signal);
+    const rejection = expect(pending).rejects.toThrow('cancelled after headers');
+    await bodyStarted;
+
+    expect(requestSignal?.aborted).toBe(false);
+    expect(addSpy).toHaveBeenCalledOnce();
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    controller.abort(new Error('cancelled after headers'));
+
+    await rejection;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(removeSpy).toHaveBeenCalledOnce();
+    expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
+
+  it('aborts a stalled HTTP error body after headers', async () => {
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    let requestSignal: AbortSignal | undefined;
+    let markBodyStarted!: () => void;
+    const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        text: () => {
+          markBodyStarted();
+          return new Promise((_resolve, reject) => {
+            requestSignal?.addEventListener('abort', () => reject(requestSignal?.reason), { once: true });
+          });
+        },
+      } as unknown as Response);
+    }));
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    const pending = client.chat(makeMessages(), undefined, controller.signal);
+    const rejection = expect(pending).rejects.toThrow('cancelled error body');
+    await bodyStarted;
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    controller.abort(new Error('cancelled error body'));
+
+    await rejection;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(removeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('aborts an in-flight stream body without a non-streaming fallback request', async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const fetchSpy = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () => {
+              if (requestSignal?.aborted) return Promise.reject(requestSignal.reason);
+              return new Promise((_resolve, reject) => {
+                requestSignal?.addEventListener(
+                  'abort',
+                  () => reject(requestSignal?.reason),
+                  { once: true },
+                );
+              });
+            },
+            releaseLock: () => {},
+          }),
+        },
+      } as unknown as Response);
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+      undefined,
+      controller.signal,
+    );
+    const pending = client.chatStream!(makeMessages(), undefined, () => {});
+    await Promise.resolve();
+
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(/abort/i);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({ stream: true });
+  });
+
+  it('removes the caller abort listener after a completed chat', async () => {
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse(openAIResponse('done'))));
+
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+      undefined,
+      controller.signal,
+    );
+    await client.chat(makeMessages());
+
+    expect(addSpy).toHaveBeenCalledOnce();
+    expect(removeSpy).toHaveBeenCalledOnce();
+    expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
+
+  it('clears the deadline after a completed chat without a caller signal', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse(openAIResponse('done'))));
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    await client.chat(makeMessages());
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('removes the caller abort listener after a completed stream', async () => {
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    const chunks = [
+      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"done"}}]}\n\n'),
+    ];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({ done: false, value: chunks[0] })
+            .mockResolvedValueOnce({ done: true }),
+          releaseLock: () => {},
+        }),
+      },
+    } as unknown as Response));
+
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+      undefined,
+      controller.signal,
+    );
+    const result = await client.chatStream!(makeMessages(), undefined, () => {});
+
+    expect(result.content).toBe('done');
+    expect(addSpy).toHaveBeenCalledOnce();
+    expect(removeSpy).toHaveBeenCalledOnce();
+    expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
+});

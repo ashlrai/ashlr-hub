@@ -1,7 +1,7 @@
 /**
  * core/swarm/planner.ts — M12 swarm planner.
  *
- * planSwarm({goal, specBody?}, cfg): Promise<SwarmPlan>
+ * planSwarm({goal, specBody?}, cfg, signal?): Promise<SwarmPlan>
  *
  * Decomposes a goal (+ optional spec body) into a phased SwarmPlan via a
  * single bounded model call (LOCAL-first). Guardrails:
@@ -298,6 +298,31 @@ function defaultPlan(goal: string): SwarmPlan {
   };
 }
 
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(
+    typeof signal.reason === 'string' && signal.reason.length > 0
+      ? signal.reason
+      : 'Swarm planning cancelled.',
+  );
+  error.name = 'AbortError';
+  return error;
+}
+
+function plannerUsage(usage: unknown): SwarmPlan['usage'] {
+  if (!usage || typeof usage !== 'object') return undefined;
+  const value = usage as { tokensIn?: unknown; tokensOut?: unknown };
+  if (!Number.isFinite(value.tokensIn) || !Number.isFinite(value.tokensOut)) return undefined;
+  return {
+    tokensIn: value.tokensIn as number,
+    tokensOut: value.tokensOut as number,
+  };
+}
+
+function withUsage(plan: SwarmPlan, usage: SwarmPlan['usage']): SwarmPlan {
+  return usage === undefined ? plan : { ...plan, usage };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -306,10 +331,10 @@ function defaultPlan(goal: string): SwarmPlan {
  * Decompose a goal (+ optional spec body) into a phased SwarmPlan.
  *
  * CONTRACT (from docs/contracts/CONTRACT-M12.md):
- *   planSwarm(input: { goal: string; specBody?: string }, cfg: AshlrConfig): Promise<SwarmPlan>
+ *   planSwarm(input, cfg, signal?): Promise<SwarmPlan>
  *
  * Guardrails:
- *  - Single bounded model call; never throws.
+ *  - Single bounded model call; only owner cancellation throws.
  *  - Tasks per phase <= 6; total tasks <= 18.
  *  - BUILD-phase tasks are independent (deps = scaffold tasks only).
  *  - Falls back to a sensible default plan on any failure.
@@ -318,8 +343,11 @@ function defaultPlan(goal: string): SwarmPlan {
 export async function planSwarm(
   input: { goal: string; specBody?: string },
   cfg: AshlrConfig,
+  signal?: AbortSignal,
 ): Promise<SwarmPlan> {
   const { goal, specBody } = input;
+
+  if (signal?.aborted) throw abortReason(signal);
 
   // Build the user prompt
   const userPrompt = specBody
@@ -328,14 +356,19 @@ export async function planSwarm(
 
   // Attempt a single LOCAL-first model call
   let rawOutput: string;
+  let usage: SwarmPlan['usage'];
   try {
     const client = await getActiveClient(cfg, { allowCloud: false });
+    if (signal?.aborted) throw abortReason(signal);
     const result = await client.chat([
       { role: 'system', content: PLANNING_SYSTEM },
       { role: 'user', content: userPrompt },
-    ]);
+    ], undefined, signal);
     rawOutput = result.content;
+    usage = plannerUsage(result.usage);
+    if (signal?.aborted) throw abortReason(signal);
   } catch (err) {
+    if (signal?.aborted) throw abortReason(signal);
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[ashlr swarm] planner model call failed: ${msg} — using default plan\n`);
     return defaultPlan(goal);
@@ -345,7 +378,7 @@ export async function planSwarm(
   try {
     const plan = parsePlan(rawOutput, goal);
     if (plan && plan.tasks.length > 0) {
-      return plan;
+      return withUsage(plan, usage);
     }
   } catch (parseErr) {
     const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
@@ -356,5 +389,5 @@ export async function planSwarm(
   process.stderr.write(
     `[ashlr swarm] planner could not extract a valid plan from model output — using default plan\n`,
   );
-  return defaultPlan(goal);
+  return withUsage(defaultPlan(goal), usage);
 }

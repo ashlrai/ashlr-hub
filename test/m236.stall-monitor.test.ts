@@ -328,17 +328,427 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/core/run/completeness-gate.js', () => ({
+  runCompletenessGate: vi.fn(),
+}));
+
 import { spawnEngine } from '../src/core/run/engines.js';
+import { runCompletenessGate } from '../src/core/run/completeness-gate.js';
 import { runEngineSandboxed } from '../src/core/run/sandboxed-engine.js';
+import { estCostUsd } from '../src/core/run/budget.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
+import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
+import { selectInboxStore } from '../src/core/seams/inbox.js';
 import { withTmpHome } from './helpers/h1-fixture.js';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const spawnEngineMock = spawnEngine as ReturnType<typeof vi.fn>;
+const completenessGateMock = vi.mocked(runCompletenessGate);
 
 describe('M236 terminationReason on RunState', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    completenessGateMock.mockResolvedValue({ pass: true });
+  });
+
+  it('pre-aborted sandboxed runs do not spawn or file proposals', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const controller = new AbortController();
+        controller.abort();
+
+        const result = await runEngineSandboxed('claude', 'Do something', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+          signal: controller.signal,
+        });
+
+        expect(spawnEngineMock).not.toHaveBeenCalled();
+        expect(result.state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled' });
+        expect(result).not.toHaveProperty('proposalId');
+        expect(result).not.toHaveProperty('proposalOutcome');
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('cancelled engines never capture a partial diff as a proposal', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const controller = new AbortController();
+        spawnEngineMock.mockImplementationOnce((cmd: { cwd?: string }, _cfg, options) => {
+          if (cmd?.cwd && existsSync(cmd.cwd)) {
+            writeFileSync(join(cmd.cwd, 'cancelled.ts'), 'export const partial = true;\n', 'utf8');
+          }
+          expect(options?.signal).toBe(controller.signal);
+          controller.abort();
+          return Promise.resolve({
+            ok: false,
+            output: '',
+            error: 'cancelled',
+            terminationReason: 'cancelled' as const,
+          });
+        });
+
+        const result = await runEngineSandboxed('claude', 'Do something', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+          signal: controller.signal,
+        });
+
+        expect(result.state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled' });
+        expect(result).not.toHaveProperty('proposalId');
+        expect(result).not.toHaveProperty('proposalOutcome');
+        const event = readAgentActions().find((row) => row.runId === result.state.id);
+        expect(event).toMatchObject({ outcome: 'blocked', runEventSummary: { status: 'aborted' } });
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('preserves unconfirmed termination failure, retains the sandbox, and counts every cli invocation', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const controller = new AbortController();
+        spawnEngineMock.mockImplementationOnce(() => {
+          controller.abort();
+          return Promise.resolve({
+            ok: false,
+            output: '',
+            error: 'termination deadline elapsed with process-group exit unconfirmed',
+            terminationReason: 'error-exit' as const,
+            configRecoveryAttempts: 1,
+          });
+        });
+
+        const result = await runEngineSandboxed('claude', 'Retain unsafe cleanup', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+          signal: controller.signal,
+        });
+
+        expect(result.state).toMatchObject({
+          status: 'failed',
+          terminationReason: 'error-exit',
+          usage: { tokensIn: 0, tokensOut: 0, steps: 2, estCostUsd: 0 },
+        });
+        expect(result.state.result).toContain('process-group exit unconfirmed');
+        expect(result.sandboxRetention).toMatchObject({
+          status: 'retained',
+          reason: 'process-cleanup-unconfirmed',
+          recovery: 'orphan-sweep',
+        });
+        expect(existsSync(result.sandboxRetention!.worktreePath)).toBe(true);
+        expect(result).not.toHaveProperty('proposalId');
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('accumulates retry usage once across results, proposal metadata, and ledgers', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const cfg = makeConfig({
+          foundry: { completenessGate: false, dispatchRetries: 1 },
+        });
+        spawnEngineMock
+          .mockResolvedValueOnce({
+            ok: false,
+            output: '',
+            error: 'aborted_streaming',
+            usage: { tokensIn: 11, tokensOut: 4 },
+          })
+          .mockImplementationOnce((cmd: { cwd?: string }) => {
+            if (cmd.cwd && existsSync(cmd.cwd)) {
+              writeFileSync(join(cmd.cwd, 'retried.ts'), 'export const retried = true;\n', 'utf8');
+            }
+            return Promise.resolve({
+              ok: true,
+              output: 'retry succeeded',
+              usage: { tokensIn: 7, tokensOut: 3 },
+            });
+          });
+
+        const result = await runEngineSandboxed('claude', 'Retry exactly once', cfg, {
+          sourceRepo: repo.dir,
+          propose: true,
+        });
+        const expectedCost = estCostUsd('claude', 18, 7);
+
+        expect(spawnEngineMock).toHaveBeenCalledTimes(2);
+        expect(result.state).toMatchObject({
+          status: 'done',
+          usage: { tokensIn: 18, tokensOut: 7, steps: 2 },
+        });
+        expect(result.state.usage.estCostUsd).toBeCloseTo(expectedCost, 10);
+        expect(result.proposalId).toBeDefined();
+
+        const proposal = selectInboxStore(cfg).load(result.proposalId!);
+        expect(proposal?.runEventSummary).toMatchObject({
+          tokensIn: 18,
+          tokensOut: 7,
+          costUsd: expectedCost,
+        });
+        const [decision] = readDecisions({ proposalId: result.proposalId });
+        expect(decision).toMatchObject({
+          tokensIn: 18,
+          tokensOut: 7,
+          costUsd: expectedCost,
+        });
+        const event = readAgentActions().find((row) => row.runId === result.state.id);
+        expect(event).toMatchObject({
+          spentUsd: expectedCost,
+          runEventSummary: {
+            tokensIn: 18,
+            tokensOut: 7,
+            costUsd: expectedCost,
+            actionCounts: { spawnAttempts: 2, transientRetries: 1 },
+          },
+        });
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('preserves usage from paid transient attempts when a retry is cancelled', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const controller = new AbortController();
+        spawnEngineMock
+          .mockResolvedValueOnce({
+            ok: false,
+            output: '',
+            error: 'aborted_streaming',
+            usage: { tokensIn: 9, tokensOut: 4 },
+          })
+          .mockImplementationOnce((_cmd, _cfg, options) => {
+            expect(options?.signal).toBe(controller.signal);
+            controller.abort();
+            return Promise.resolve({
+              ok: false,
+              output: '',
+              error: 'cancelled',
+              terminationReason: 'cancelled' as const,
+              usage: { tokensIn: 5, tokensOut: 2 },
+            });
+          });
+
+        const result = await runEngineSandboxed('claude', 'Cancel the retry', makeConfig({
+          foundry: { completenessGate: false, dispatchRetries: 1 },
+        }), {
+          sourceRepo: repo.dir,
+          propose: true,
+          signal: controller.signal,
+        });
+        const expectedCost = estCostUsd('claude', 14, 6);
+
+        expect(result.state).toMatchObject({
+          status: 'aborted',
+          terminationReason: 'cancelled',
+          usage: { tokensIn: 14, tokensOut: 6, steps: 2 },
+        });
+        expect(result.state.usage.estCostUsd).toBeCloseTo(expectedCost, 10);
+        const event = readAgentActions().find((row) => row.runId === result.state.id);
+        expect(event).toMatchObject({
+          outcome: 'blocked',
+          spentUsd: expectedCost,
+          runEventSummary: {
+            status: 'aborted',
+            tokensIn: 14,
+            tokensOut: 6,
+            costUsd: expectedCost,
+            actionCounts: { spawnAttempts: 2, transientRetries: 1 },
+          },
+        });
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('books verify-to-green repair usage when cancellation lands after repair', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const controller = new AbortController();
+        completenessGateMock.mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' });
+        spawnEngineMock
+          .mockImplementationOnce((cmd: { cwd?: string }) => {
+            if (cmd.cwd && existsSync(cmd.cwd)) {
+              writeFileSync(join(cmd.cwd, 'repair-target.ts'), 'export const repaired = false;\n', 'utf8');
+            }
+            return Promise.resolve({
+              ok: true,
+              output: 'initial attempt',
+              usage: { tokensIn: 10, tokensOut: 5 },
+            });
+          })
+          .mockImplementationOnce((_cmd, _cfg, options) => {
+            expect(options?.signal).toBe(controller.signal);
+            controller.abort();
+            return Promise.resolve({
+              ok: false,
+              output: '',
+              error: 'cancelled after repair usage was reported',
+              terminationReason: 'cancelled' as const,
+              usage: { tokensIn: 7, tokensOut: 3 },
+            });
+          });
+
+        const result = await runEngineSandboxed('claude', 'Repair the target', makeConfig({
+          foundry: {
+            completenessGate: true,
+            verifyToGreen: { enabled: true, maxIterations: 1 },
+          },
+        }), {
+          sourceRepo: repo.dir,
+          propose: true,
+          signal: controller.signal,
+        });
+
+        expect(result.state).toMatchObject({
+          status: 'aborted',
+          terminationReason: 'cancelled',
+          usage: { tokensIn: 17, tokensOut: 8, steps: 2 },
+        });
+        expect(result.state.usage.estCostUsd).toBeCloseTo(estCostUsd('claude', 17, 8), 10);
+        expect(result).not.toHaveProperty('proposalId');
+        const event = readAgentActions().find((row) => row.runId === result.state.id);
+        expect(event).toMatchObject({
+          outcome: 'blocked',
+          spentUsd: result.state.usage.estCostUsd,
+          runEventSummary: {
+            status: 'aborted',
+            tokensIn: 17,
+            tokensOut: 8,
+          },
+        });
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('books one step and one token/cost delta for each paid verify-to-green repair', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        completenessGateMock
+          .mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' })
+          .mockResolvedValueOnce({ pass: true });
+        spawnEngineMock
+          .mockImplementationOnce((cmd: { cwd?: string }) => {
+            writeFileSync(join(cmd.cwd!, 'repair-target.ts'), 'export const repaired = false;\n', 'utf8');
+            return Promise.resolve({
+              ok: true,
+              output: 'initial attempt',
+              usage: { tokensIn: 10, tokensOut: 5 },
+            });
+          })
+          .mockImplementationOnce((cmd: { cwd?: string }) => {
+            writeFileSync(join(cmd.cwd!, 'repair-target.ts'), 'export const repaired = true;\n', 'utf8');
+            return Promise.resolve({
+              ok: true,
+              output: 'repair complete',
+              usage: { tokensIn: 7, tokensOut: 3 },
+            });
+          });
+
+        const result = await runEngineSandboxed('claude', 'Repair the target', makeConfig({
+          foundry: {
+            completenessGate: true,
+            verifyToGreen: { enabled: true, maxIterations: 1 },
+          },
+        }), {
+          sourceRepo: repo.dir,
+          propose: true,
+          budget: { maxSteps: 2 },
+        });
+
+        expect(spawnEngineMock).toHaveBeenCalledTimes(2);
+        expect(result.state.usage).toMatchObject({ tokensIn: 17, tokensOut: 8, steps: 2 });
+        expect(result.state.usage.estCostUsd).toBeCloseTo(estCostUsd('claude', 17, 8), 10);
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('does not start a verify-to-green repair after maxSteps is exhausted', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        completenessGateMock.mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' });
+        spawnEngineMock.mockImplementationOnce((cmd: { cwd?: string }) => {
+          writeFileSync(join(cmd.cwd!, 'repair-target.ts'), 'export const repaired = false;\n', 'utf8');
+          return Promise.resolve({
+            ok: true,
+            output: 'initial attempt',
+            usage: { tokensIn: 10, tokensOut: 5 },
+          });
+        });
+
+        const result = await runEngineSandboxed('claude', 'Repair the target', makeConfig({
+          foundry: {
+            completenessGate: true,
+            verifyToGreen: { enabled: true, maxIterations: 3 },
+          },
+        }), {
+          sourceRepo: repo.dir,
+          propose: true,
+          budget: { maxSteps: 1 },
+        });
+
+        expect(spawnEngineMock).toHaveBeenCalledTimes(1);
+        expect(result.state.usage).toMatchObject({ tokensIn: 10, tokensOut: 5, steps: 1 });
+        expect(result.proposalOutcome?.kind).toBe('completeness-gate');
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
 
   it('stall-terminated run records terminationReason on the failed RunState', async () => {
     await withTmpHome(async (fx) => {

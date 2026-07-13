@@ -14,6 +14,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -24,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { join } from 'node:path';
 import type { DaemonState } from '../types.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -420,6 +422,46 @@ function writeNewLock(path: string, owner: DaemonLockOwner): void {
   });
 }
 
+interface DaemonLockSnapshot {
+  dev: number;
+  ino: number;
+  raw: string;
+  owner: DaemonLockOwner | null;
+}
+
+function readDaemonLockSnapshot(path: string): DaemonLockSnapshot | null {
+  try {
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink()) return null;
+    const raw = readFileSync(path, 'utf8');
+    const after = lstatSync(path);
+    if (
+      !after.isFile() ||
+      after.isSymbolicLink() ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino
+    ) return null;
+    return { dev: after.dev, ino: after.ino, raw, owner: parseLockOwner(raw) };
+  } catch {
+    return null;
+  }
+}
+
+function sameDaemonLockSnapshot(
+  expected: DaemonLockSnapshot,
+  current: DaemonLockSnapshot | null,
+): boolean {
+  return current !== null &&
+    current.dev === expected.dev &&
+    current.ino === expected.ino &&
+    current.raw === expected.raw &&
+    current.owner?.token === expected.owner?.token;
+}
+
+function daemonLockMutationPath(path: string): string {
+  return `${path}.mutation.lock`;
+}
+
 /**
  * Acquire the same-machine daemon singleton lock.
  *
@@ -434,6 +476,10 @@ export function acquireDaemonLock(opts?: { staleMs?: number }): AcquireDaemonLoc
   const staleMs = Math.max(0, opts?.staleMs ?? DEFAULT_LOCK_STALE_MS);
   const token = randomUUID();
   const owner = makeLockOwner(token, new Date().toISOString());
+  const mutationLock = acquireLocalStoreLock(daemonLockMutationPath(path));
+  if (!mutationLock) {
+    return { acquired: false, path, owner: readDaemonLockOwner(), reason: 'busy' };
+  }
 
   try {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -444,59 +490,72 @@ export function acquireDaemonLock(opts?: { staleMs?: number }): AcquireDaemonLoc
     if (code !== 'EEXIST') {
       return { acquired: false, path, owner: null, reason: 'io-error' };
     }
-  }
 
-  const existing = readDaemonLockOwner();
-  if (!lockIsSafelyStale(existing, staleMs)) {
-    return { acquired: false, path, owner: existing, reason: 'busy' };
-  }
-
-  try {
-    unlinkSync(path);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | undefined)?.code;
-    if (code !== 'ENOENT') {
+    const snapshot = readDaemonLockSnapshot(path);
+    const existing = snapshot?.owner ?? readDaemonLockOwner();
+    if (!snapshot || !lockIsSafelyStale(existing, staleMs)) {
       return { acquired: false, path, owner: existing, reason: 'busy' };
     }
-  }
 
-  try {
-    writeNewLock(path, owner);
-    return { acquired: true, lock: { path, token, pid: process.pid }, owner, replacedStale: true };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | undefined)?.code;
-    return { acquired: false, path, owner: readDaemonLockOwner(), reason: code === 'EEXIST' ? 'busy' : 'io-error' };
+    const current = readDaemonLockSnapshot(path);
+    if (!sameDaemonLockSnapshot(snapshot, current)) {
+      return { acquired: false, path, owner: current?.owner ?? readDaemonLockOwner(), reason: 'busy' };
+    }
+
+    try {
+      unlinkSync(path);
+      writeNewLock(path, owner);
+      return { acquired: true, lock: { path, token, pid: process.pid }, owner, replacedStale: true };
+    } catch (reclaimErr) {
+      const reclaimCode = (reclaimErr as NodeJS.ErrnoException | undefined)?.code;
+      return {
+        acquired: false,
+        path,
+        owner: readDaemonLockOwner(),
+        reason: reclaimCode === 'EEXIST' ? 'busy' : 'io-error',
+      };
+    }
+  } finally {
+    releaseLocalStoreLock(mutationLock);
   }
 }
 
 /** Update the heartbeat for the current lock owner; returns false if ownership was lost. */
 export function heartbeatDaemonLock(lock: DaemonLock): boolean {
-  const current = readDaemonLockOwner();
-  if (!current || current.pid !== lock.pid || current.token !== lock.token) {
-    return false;
-  }
-  const next: DaemonLockOwner = { ...current, heartbeatAt: new Date().toISOString() };
+  const mutationLock = acquireLocalStoreLock(daemonLockMutationPath(lock.path));
+  if (!mutationLock) return false;
   try {
+    const current = readDaemonLockOwner();
+    if (!current || current.pid !== lock.pid || current.token !== lock.token) return false;
+    const next: DaemonLockOwner = { ...current, heartbeatAt: new Date().toISOString() };
     const tmp = `${lock.path}.${lock.token}.tmp`;
     writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
     renameSync(tmp, lock.path);
     return true;
   } catch {
     return false;
+  } finally {
+    releaseLocalStoreLock(mutationLock);
   }
 }
 
 /** Release the daemon lock only if this process still owns the same token. */
 export function releaseDaemonLock(lock: DaemonLock): boolean {
-  const current = readDaemonLockOwner();
-  if (!current || current.pid !== lock.pid || current.token !== lock.token) {
-    return false;
-  }
+  const mutationLock = acquireLocalStoreLock(daemonLockMutationPath(lock.path));
+  if (!mutationLock) return false;
   try {
+    const snapshot = readDaemonLockSnapshot(lock.path);
+    const current = snapshot?.owner;
+    if (!snapshot || !current || current.pid !== lock.pid || current.token !== lock.token) {
+      return false;
+    }
+    if (!sameDaemonLockSnapshot(snapshot, readDaemonLockSnapshot(lock.path))) return false;
     unlinkSync(lock.path);
     return true;
   } catch {
     return false;
+  } finally {
+    releaseLocalStoreLock(mutationLock);
   }
 }
 

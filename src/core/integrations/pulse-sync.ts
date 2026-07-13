@@ -159,6 +159,16 @@ export interface PulseSyncResult {
   detail: string;
 }
 
+export interface PulseSyncOptions {
+  tickTs?: string;
+  shipDeps?: boolean;
+  signal?: AbortSignal;
+}
+
+function aborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
+}
+
 // ---------------------------------------------------------------------------
 // (a) tick / event spans
 // ---------------------------------------------------------------------------
@@ -171,10 +181,13 @@ export interface PulseSyncResult {
 export async function emitFleetEvent(
   cfg: AshlrConfig,
   event: FleetSpanInput,
+  opts?: Pick<PulseSyncOptions, 'signal'>,
 ): Promise<boolean> {
-  if (!pulseSyncEnabled(cfg)) return false;
+  if (aborted(opts?.signal) || !pulseSyncEnabled(cfg)) return false;
   try {
+    if (aborted(opts?.signal)) return false;
     const res = await exportFleetEvents(exporterConfig(cfg), [event], patOpt());
+    if (aborted(opts?.signal)) return false;
     return res.ok && !res.skipped;
   } catch {
     return false;
@@ -189,8 +202,9 @@ export async function emitTick(
   cfg: AshlrConfig,
   tickTs: string,
   outcome = 'tick',
+  opts?: Pick<PulseSyncOptions, 'signal'>,
 ): Promise<boolean> {
-  return emitFleetEvent(cfg, { event: 'tick', refId: tickTs, outcome });
+  return emitFleetEvent(cfg, { event: 'tick', refId: tickTs, outcome }, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,33 +299,43 @@ function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
  */
 export async function pollAndApplyCommands(
   cfg: AshlrConfig,
+  opts?: Pick<PulseSyncOptions, 'signal'>,
 ): Promise<CommandApplyResult[]> {
-  if (!pulseSyncEnabled(cfg)) return [];
+  const signal = opts?.signal;
+  if (aborted(signal) || !pulseSyncEnabled(cfg)) return [];
   const out: CommandApplyResult[] = [];
   try {
     const xcfg = exporterConfig(cfg);
     const claimant = claimantId(cfg);
+    if (aborted(signal)) return out;
     const poll = await pollFleetCommands(xcfg, {
       ...patOpt(),
       status: 'pending',
       limit: MAX_COMMANDS_PER_TICK,
     });
+    if (aborted(signal)) return out;
     if (!poll.ok || poll.commands.length === 0) return out;
 
     for (const cmd of poll.commands.slice(0, MAX_COMMANDS_PER_TICK)) {
+      if (aborted(signal)) break;
       // 1. Atomically claim — skip if another machine got it first.
+      if (aborted(signal)) break;
       const claim = await claimFleetCommand(xcfg, cmd.id, claimant, patOpt());
+      if (aborted(signal)) break;
       if (!claim.ok) {
         out.push({ id: cmd.id, kind: cmd.kind, outcome: 'skipped', detail: claim.detail });
         continue;
       }
 
       // 2. Execute locally (never throws).
+      if (aborted(signal)) break;
       const applied = applyCommand(cfg, cmd);
       out.push(applied);
+      if (aborted(signal)) break;
 
       // 3. Write the outcome back (metadata-only result / error).
       try {
+        if (aborted(signal)) break;
         if (applied.outcome === 'done') {
           await patchFleetCommand(
             xcfg,
@@ -327,12 +351,14 @@ export async function pollAndApplyCommands(
             patOpt(),
           );
         }
+        if (aborted(signal)) break;
       } catch {
         // Writeback best-effort — the local action already happened; the cloud
         // can re-derive state from the next tick's spans.
       }
 
       // 4. Audit every applied command (metadata-only summary).
+      if (aborted(signal)) break;
       try {
         audit({
           action: 'pulse:command',
@@ -360,13 +386,19 @@ export async function pollAndApplyCommands(
  * METADATA ONLY — package names + ranges, never file contents. Returns the
  * total edge count shipped. Best-effort + no-throw.
  */
-export async function shipEnrolledRepoDeps(cfg: AshlrConfig): Promise<number> {
-  if (!pulseSyncEnabled(cfg)) return 0;
+export async function shipEnrolledRepoDeps(
+  cfg: AshlrConfig,
+  opts?: Pick<PulseSyncOptions, 'signal'>,
+): Promise<number> {
+  const signal = opts?.signal;
+  if (aborted(signal) || !pulseSyncEnabled(cfg)) return 0;
   let shipped = 0;
   try {
     const xcfg = exporterConfig(cfg);
+    if (aborted(signal)) return shipped;
     const repos = listEnrolled().slice(0, MAX_DEP_REPOS_PER_TICK);
     for (const repoPath of repos) {
+      if (aborted(signal)) break;
       try {
         // Resolve a full owner/name when gh is available; dep-parser falls back
         // to the directory basename otherwise (no network dependency).
@@ -376,14 +408,18 @@ export async function shipEnrolledRepoDeps(cfg: AshlrConfig): Promise<number> {
         } catch {
           repoFullName = null;
         }
+        if (aborted(signal)) break;
         const parsed = parseRepoDeps(repoPath, repoFullName);
+        if (aborted(signal)) break;
         if (parsed.edges.length === 0) continue;
+        if (aborted(signal)) break;
         const res = await shipDepEdges(
           xcfg,
           repoFullName ?? parsed.repoRef,
           parsed.edges,
           patOpt(),
         );
+        if (aborted(signal)) break;
         if (res.ok && !res.skipped) shipped += res.spanCount;
       } catch {
         // One bad repo never aborts the rest.
@@ -413,7 +449,7 @@ export async function shipEnrolledRepoDeps(cfg: AshlrConfig): Promise<number> {
  */
 export async function runPulseSync(
   cfg: AshlrConfig,
-  opts?: { tickTs?: string; shipDeps?: boolean },
+  opts?: PulseSyncOptions,
 ): Promise<PulseSyncResult> {
   const disabled: PulseSyncResult = {
     enabled: false,
@@ -422,19 +458,44 @@ export async function runPulseSync(
     depEdgesShipped: 0,
     detail: 'pulse-sync disabled (no PULSE_URL/endpoint or no PAT)',
   };
+  if (aborted(opts?.signal)) {
+    return { ...disabled, detail: 'pulse-sync aborted before start' };
+  }
   if (!pulseSyncEnabled(cfg)) return disabled;
 
   const tickTs = opts?.tickTs ?? new Date().toISOString();
   try {
     // (a) heartbeat — best-effort, independent of the rest.
-    const tickEmitted = await emitTick(cfg, tickTs);
+    const tickEmitted = await emitTick(cfg, tickTs, 'tick', { signal: opts?.signal });
+    if (aborted(opts?.signal)) {
+      return { ...disabled, enabled: true, detail: 'pulse-sync aborted after tick export' };
+    }
 
     // (b) command round-trip.
-    const commands = await pollAndApplyCommands(cfg);
+    const commands = await pollAndApplyCommands(cfg, { signal: opts?.signal });
+    if (aborted(opts?.signal)) {
+      return {
+        ...disabled,
+        enabled: true,
+        tickEmitted,
+        commands,
+        detail: 'pulse-sync aborted during command sync',
+      };
+    }
 
     // (c) dependency edges (opt-out via shipDeps:false for cheap ticks).
     const depEdgesShipped =
-      opts?.shipDeps === false ? 0 : await shipEnrolledRepoDeps(cfg);
+      opts?.shipDeps === false ? 0 : await shipEnrolledRepoDeps(cfg, { signal: opts?.signal });
+
+    if (aborted(opts?.signal)) {
+      return {
+        enabled: true,
+        tickEmitted,
+        commands,
+        depEdgesShipped,
+        detail: 'pulse-sync aborted during dependency shipping',
+      };
+    }
 
     const applied = commands.filter((c) => c.outcome === 'done').length;
     return {

@@ -2031,3 +2031,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Canary fresh journal rows, FleetStatus truth, exact build identity, HTTP health, guard health, and rollback readiness.
 - [x] Implement one bounded control-plane parity improvement only if activation evidence exposes a concrete safe gap.
 - [x] Pass targeted and adversarial verification, update durable notes, and commit/push any resulting code or documentation.
+
+## Current Overnight Cycle - Daemon-Owned Execution Cancellation
+- [x] Rehydrate the clean mirror, exact production split, live activity evidence, git/Entire state, and durable notes without interrupting the active tick.
+- Operational note: the first parallel explorer launch combined an explicit explorer role with full-history forking, which the agent runtime rejects. No work started and no files changed; agents were relaunched without history forking.
+- [x] Map daemon stop authority, tick cancellation propagation, owned process-tree supervision, and unbounded execution edges in parallel.
+- [x] Define one explicit daemon-owned execution contract that never signals unrelated or pre-existing processes.
+- [x] Implement bounded cancellation through the daemon tick and the smallest complete set of child execution paths.
+- [x] Keep activity and daemon state truthful through stopping, escalation, and child settlement.
+- [x] Add adversarial Unix/Windows, repeated-stop, late-completion, no-proposal, provider-fallback, and no-signal regressions; use invocation-local process-group authority rather than persisted PID signaling.
+- [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent review gates.
+- [ ] Commit, push, observe CI, stage exact source, and activate only at a natural process-backed boundary.

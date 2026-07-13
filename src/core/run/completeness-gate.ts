@@ -33,6 +33,8 @@ import {
 
 export interface CompletenessGateResult {
   pass: boolean;
+  /** True only when the caller requested cancellation. */
+  cancelled?: boolean;
   /** Human-readable reason for a blocked filing (absent on pass). */
   reason?: string;
 }
@@ -51,6 +53,8 @@ export interface RunCompletenessGateOpts {
   goal: string;
   /** Full ashlr config (used to pass to runVerifyCommand). */
   cfg: AshlrConfig;
+  /** Optional caller-owned cancellation for self-verification commands. */
+  signal?: AbortSignal;
   /**
    * True when the run ended via timeout or non-zero exit (isPartial flag).
    * When true the gate immediately blocks — no verify is attempted.
@@ -83,6 +87,10 @@ const LOCKFILE_NAMES = [
 
 function truncate(s: string): string {
   return s.length > REASON_OUTPUT_CAP ? s.slice(0, REASON_OUTPUT_CAP) + '…' : s;
+}
+
+function cancelledResult(reason: string): CompletenessGateResult & { cancelled: true } {
+  return { pass: false, cancelled: true, reason };
 }
 
 /**
@@ -178,8 +186,12 @@ async function collectFailingTests(
   dir: string,
   cfg: AshlrConfig,
   timeoutMs: number,
-): Promise<{ ok: boolean; ids: Set<string> } | null> {
-  const result = await runVerifyCommandAsync(cmd, dir, cfg, { timeoutMs });
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; ids: Set<string>; cancelled?: boolean } | null> {
+  const result = await runVerifyCommandAsync(cmd, dir, cfg, { timeoutMs, signal });
+  if (result.cancelled || signal?.aborted) {
+    return { ok: false, ids: new Set<string>(), cancelled: true };
+  }
   if (result.timedOut) return null;
   if (result.ok) return { ok: true, ids: new Set<string>() };
   return { ok: false, ids: parseFailedTestIds(result.output) };
@@ -207,14 +219,25 @@ export async function runDeltaAwareTestCheck(
   worktreePath: string,
   cfg: AshlrConfig,
   timeoutMs: number,
-): Promise<{ pass: boolean; reason?: string }> {
+  signal?: AbortSignal,
+): Promise<CompletenessGateResult> {
   try {
+    if (signal?.aborted) {
+      return cancelledResult('self-verify cancelled: test');
+    }
+
     // Step 1: stash agent changes to get a clean baseline
     const stashed = gitStashPush(worktreePath);
 
     if (!stashed) {
       // Cannot isolate baseline — fall back to direct run (original behaviour)
-      const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, { timeoutMs });
+      const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, {
+        timeoutMs,
+        signal,
+      });
+      if (result.cancelled || signal?.aborted) {
+        return cancelledResult('self-verify cancelled: test');
+      }
       if (!result.ok) {
         return {
           pass: false,
@@ -225,10 +248,21 @@ export async function runDeltaAwareTestCheck(
     }
 
     // Step 2: run baseline (pre-change)
-    const baseline = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+    let baseline: Awaited<ReturnType<typeof collectFailingTests>>;
+    try {
+      if (signal?.aborted) {
+        return cancelledResult('self-verify cancelled: test baseline');
+      }
+      baseline = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs, signal);
+    } finally {
+      // Step 3: restore agent changes before reporting any baseline outcome,
+      // including cancellation or an unexpected command error.
+      gitStashPop(worktreePath);
+    }
 
-    // Step 3: restore agent changes
-    gitStashPop(worktreePath);
+    if (baseline?.cancelled || signal?.aborted) {
+      return cancelledResult('self-verify cancelled: test baseline');
+    }
 
     if (baseline === null) {
       // Baseline run timed out — safe fallback: don't hard-block
@@ -236,7 +270,11 @@ export async function runDeltaAwareTestCheck(
     }
 
     // Step 4: run after (with agent changes)
-    const after = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+    const after = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs, signal);
+
+    if (after?.cancelled || signal?.aborted) {
+      return cancelledResult('self-verify cancelled: test');
+    }
 
     if (after === null) {
       // After run timed out — treat as unknown, don't hard-block
@@ -279,6 +317,9 @@ export async function runDeltaAwareTestCheck(
 
     return { pass: true };
   } catch (err) {
+    if (signal?.aborted) {
+      return cancelledResult('self-verify cancelled: test');
+    }
     // Never hard-block on infrastructure error — log and pass
     const msg = err instanceof Error ? err.message : String(err);
     // Surface as pass with logged warning; typecheck already guarded type safety
@@ -302,7 +343,11 @@ export async function runCompletenessGate(
   opts: RunCompletenessGateOpts,
 ): Promise<CompletenessGateResult> {
   try {
-    const { worktreePath, diff, cfg, isPartial } = opts;
+    const { worktreePath, diff, cfg, isPartial, signal } = opts;
+
+    if (signal?.aborted) {
+      return cancelledResult('completeness gate cancelled before verification');
+    }
 
     // -----------------------------------------------------------------------
     // 1. Partial marker — engine did not complete cleanly
@@ -351,7 +396,11 @@ export async function runCompletenessGate(
     if (typecheckCmd) {
       const result = await runVerifyCommandAsync(typecheckCmd, worktreePath, cfg, {
         timeoutMs: SELF_VERIFY_TIMEOUT_MS,
+        signal,
       });
+      if (result.cancelled || signal?.aborted) {
+        return cancelledResult('self-verify cancelled: typecheck');
+      }
       if (!result.ok) {
         return {
           pass: false,
@@ -368,15 +417,25 @@ export async function runCompletenessGate(
         worktreePath,
         cfg,
         SELF_VERIFY_TIMEOUT_MS,
+        signal,
       );
+      if (deltaResult.cancelled || signal?.aborted) {
+        return cancelledResult(deltaResult.reason ?? 'self-verify cancelled: test');
+      }
       if (!deltaResult.pass) {
         return { pass: false, reason: deltaResult.reason };
       }
     }
 
     // All checks passed.
+    if (signal?.aborted) {
+      return cancelledResult('completeness gate cancelled');
+    }
     return { pass: true };
   } catch (err) {
+    if (opts.signal?.aborted) {
+      return cancelledResult('completeness gate cancelled');
+    }
     // Never throws — surface unexpected errors as a non-filing result.
     const msg = err instanceof Error ? err.message : String(err);
     return { pass: false, reason: `completeness gate error: ${truncate(msg)}` };

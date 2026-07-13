@@ -32,6 +32,10 @@ import { EventEmitter } from 'node:events';
 
 interface FakeChildControl {
   child: ReturnType<typeof makeFakeChild>;
+  /** Emit leader exit while inherited pipes/group may remain open. */
+  exit(code: number | null, signal: NodeJS.Signals | null): void;
+  /** Emit final process/stdio close. */
+  close(code: number | null, signal: NodeJS.Signals | null, stdoutData?: string, stderrData?: string): void;
   /** Emit stdout data then close the child with the given code/signal. */
   resolve(code: number | null, signal: NodeJS.Signals | null, stdoutData?: string, stderrData?: string): void;
   /** Emit a spawn error then close. */
@@ -39,20 +43,36 @@ interface FakeChildControl {
 }
 
 function makeFakeChild() {
-  const stdout = new EventEmitter() as NodeJS.EventEmitter & { resume?: () => void };
-  const stderr = new EventEmitter() as NodeJS.EventEmitter & { resume?: () => void };
+  const stdout = new EventEmitter() as NodeJS.EventEmitter & {
+    destroyed: boolean;
+    destroy: ReturnType<typeof vi.fn>;
+  };
+  const stderr = new EventEmitter() as NodeJS.EventEmitter & {
+    destroyed: boolean;
+    destroy: ReturnType<typeof vi.fn>;
+  };
+  stdout.destroyed = false;
+  stderr.destroyed = false;
+  stdout.destroy = vi.fn(() => { stdout.destroyed = true; });
+  stderr.destroy = vi.fn(() => { stderr.destroyed = true; });
   const child = new EventEmitter() as NodeJS.EventEmitter & {
     stdout: typeof stdout;
     stderr: typeof stderr;
     killed: boolean;
     kill: (sig?: string) => void;
+    unref: ReturnType<typeof vi.fn>;
     pid: number;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
   };
   child.stdout = stdout;
   child.stderr = stderr;
   child.killed = false;
   child.kill = (_sig?: string) => { child.killed = true; };
+  child.unref = vi.fn();
   child.pid = 12345;
+  child.exitCode = null;
+  child.signalCode = null;
   return child;
 }
 
@@ -60,10 +80,19 @@ function makeFakeSpawnControl(): FakeChildControl {
   const child = makeFakeChild();
   const control: FakeChildControl = {
     child,
-    resolve(code, signal, stdoutData = '', stderrData = '') {
+    exit(code, signal) {
+      child.exitCode = code;
+      child.signalCode = signal;
+      child.emit('exit', code, signal);
+    },
+    close(code, signal, stdoutData = '', stderrData = '') {
       if (stdoutData) child.stdout.emit('data', Buffer.from(stdoutData));
       if (stderrData) child.stderr.emit('data', Buffer.from(stderrData));
       child.emit('close', code, signal);
+    },
+    resolve(code, signal, stdoutData = '', stderrData = '') {
+      this.exit(code, signal);
+      this.close(code, signal, stdoutData, stderrData);
     },
     reject(err) {
       child.emit('error', err);
@@ -92,6 +121,14 @@ vi.mock('node:child_process', () => ({
 function getSpawnControl(): FakeChildControl {
   if (!_spawnControl) throw new Error('spawn not yet called');
   return _spawnControl;
+}
+
+function makeOwnedGroupKillMock() {
+  return vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
+    if (signal === 0) {
+      throw Object.assign(new Error('no such process group'), { code: 'ESRCH' });
+    }
+  });
 }
 
 // Import after mocking so the module picks up the mock.
@@ -407,6 +444,10 @@ describe('spawnEngine — never throws on failure', () => {
     });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('returns { ok: true } on zero-exit with output', async () => {
     const cmd: EngineCommand = { bin: 'claude', args: ['-p', GOAL] };
     const p = spawnEngine(cmd, makeConfig());
@@ -424,6 +465,416 @@ describe('spawnEngine — never throws on failure', () => {
     const result = await p;
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
+  });
+
+  it('does not spawn or recover Codex when the signal is pre-aborted', async () => {
+    const { spawn } = await import('node:child_process');
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await spawnEngine(
+      { bin: 'codex', args: ['exec', '--json', GOAL] },
+      makeConfig(),
+      { signal: controller.signal, _platform: 'linux' },
+    );
+
+    expect(result).toMatchObject({ ok: false, terminationReason: 'cancelled' });
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('spawns signal-owned POSIX runs in a detached process group only', async () => {
+    const { spawn } = await import('node:child_process');
+    const controller = new AbortController();
+    const signaled = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      { signal: controller.signal, _platform: 'linux' },
+    );
+    expect(vi.mocked(spawn).mock.calls[0]![2]).toMatchObject({ detached: true });
+    getSpawnControl().resolve(0, null, 'ok\n');
+    await expect(signaled).resolves.toMatchObject({ ok: true });
+
+    const plain = spawnEngine({ bin: 'aw', args: ['auto', GOAL] }, makeConfig());
+    expect(vi.mocked(spawn).mock.calls[1]![2]).not.toHaveProperty('detached');
+    getSpawnControl().resolve(0, null, 'ok\n');
+    await expect(plain).resolves.toMatchObject({ ok: true });
+  });
+
+  it('sends one SIGINT then at most one SIGKILL before bounded settlement', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 20,
+      },
+    );
+
+    controller.abort();
+    controller.abort();
+    expect(processKill.mock.calls.filter(([, signal]) => signal === 'SIGINT')).toEqual([[-12345, 'SIGINT']]);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(processKill.mock.calls.filter(([, signal]) => signal === 'SIGKILL')).toEqual([[-12345, 'SIGKILL']]);
+    getSpawnControl().resolve(null, 'SIGKILL');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(processKill.mock.calls.filter(([, signal]) => signal === 0)).toEqual([]);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: 'cancelled',
+      terminationReason: 'cancelled',
+    });
+  });
+
+  it('keeps the bounded cancellation deadline referenced until settlement', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 10_000,
+      },
+    );
+
+    controller.abort();
+    const timerForDelay = (delay: number): NodeJS.Timeout => {
+      const index = setTimeoutSpy.mock.calls.findIndex((call) => call[1] === delay);
+      expect(index).toBeGreaterThanOrEqual(0);
+      return setTimeoutSpy.mock.results[index]!.value as NodeJS.Timeout;
+    };
+    expect(timerForDelay(10_000).hasRef()).toBe(true);
+    expect(timerForDelay(5 * 60 * 1000).hasRef()).toBe(false);
+
+    const deadlineTimer = timerForDelay(10_000);
+    const escalation = setTimeoutSpy.mock.calls.find((call) => call[1] === 10_000)![0];
+    (escalation as () => void)();
+    const drain = setTimeoutSpy.mock.calls.find((call) => call[1] === 100)![0];
+    (drain as () => void)();
+    await expect(pending).resolves.toMatchObject({
+      terminationReason: 'error-exit',
+      error: expect.stringContaining('stdio closure unconfirmed'),
+    });
+    expect(getSpawnControl().child.stdout.destroyed).toBe(true);
+    expect(getSpawnControl().child.stderr.destroyed).toBe(true);
+    expect(getSpawnControl().child.unref).toHaveBeenCalledOnce();
+    clearTimeout(deadlineTimer);
+    setTimeoutSpy.mockRestore();
+  });
+
+  it('refuses delayed group signaling after leader exit to prevent PGID reuse', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let numericGroupReused = false;
+    const processKill = vi.fn((_pid: number, _signal: NodeJS.Signals | 0) => {
+      if (numericGroupReused) {
+        throw new Error('test detected signaling of an unrelated reused process group');
+      }
+    });
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 20,
+      },
+    );
+
+    controller.abort();
+    expect(processKill).toHaveBeenCalledTimes(1);
+    expect(processKill).toHaveBeenLastCalledWith(-12345, 'SIGINT');
+    getSpawnControl().exit(0, null);
+    // Simulate the numeric PID/PGID becoming reusable by an unrelated process.
+    // No delayed SIGKILL or even signal-0 probe may target that number.
+    numericGroupReused = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(processKill.mock.calls).toEqual([[-12345, 'SIGINT']]);
+    getSpawnControl().close(null, 'SIGKILL');
+    await expect(pending).resolves.toMatchObject({
+      terminationReason: 'error-exit',
+      error: expect.stringContaining('leader identity is no longer provable'),
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed without claiming cleanup after a real process-group leader exits',
+    async () => {
+      const { spawn } = await import('node:child_process');
+      const actualChildProcess = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      vi.mocked(spawn).mockImplementationOnce((bin, args, options) =>
+        actualChildProcess.spawn(bin, args, options));
+
+      const descendantScript = [
+        "process.on('SIGINT', () => {});",
+        'setInterval(() => {}, 1_000);',
+      ].join('');
+      const leaderScript = [
+        "const { spawn } = require('node:child_process');",
+        `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], `,
+        "{ stdio: ['ignore', 'inherit', 'inherit'] });",
+        'child.unref();',
+        "process.stdout.write(`descendant:${child.pid}\\n`, () => process.exit(0));",
+      ].join('');
+      const controller = new AbortController();
+      let descendantPid: number | undefined;
+      let sawDescendant!: () => void;
+      const descendantStarted = new Promise<void>((resolve) => { sawDescendant = resolve; });
+      const pending = spawnEngine(
+        { bin: process.execPath, args: ['-e', leaderScript] },
+        makeConfig(),
+        {
+          signal: controller.signal,
+          _platform: process.platform,
+          _stallGraceMs: 30,
+          _terminationDrainMs: 300,
+          onEvent: (event) => {
+            const match = event.rawLine?.match(/^descendant:(\d+)$/);
+            if (!match) return;
+            descendantPid = Number(match[1]);
+            sawDescendant();
+          },
+        },
+      );
+
+      try {
+        await Promise.race([
+          descendantStarted,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('descendant did not start')), 1_000)),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        controller.abort();
+        const result = await pending;
+        expect(result).toMatchObject({
+          ok: false,
+          error: expect.stringContaining('leader identity is no longer provable'),
+          terminationReason: 'error-exit',
+        });
+        expect(result.output).toContain(`descendant:${descendantPid}`);
+        expect(() => process.kill(descendantPid!, 0)).not.toThrow();
+      } finally {
+        if (descendantPid) {
+          try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }
+    },
+    3_000,
+  );
+
+  it('fails closed when group signaling returns EPERM', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const processKill = vi.fn(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 20,
+      },
+    );
+
+    controller.abort();
+    expect(processKill).toHaveBeenCalledOnce();
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGINT');
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('termination authority lost'),
+      terminationReason: 'error-exit',
+    });
+    expect(processKill).toHaveBeenCalledOnce();
+    expect(getSpawnControl().child.stdout.destroyed).toBe(true);
+    expect(getSpawnControl().child.stderr.destroyed).toBe(true);
+    expect(getSpawnControl().child.unref).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an EPERM authority failure across a late child error race', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const processKill = vi.fn(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _terminationDrainMs: 30,
+      },
+    );
+
+    controller.abort();
+    getSpawnControl().reject(new Error('late child process error'));
+    await vi.advanceTimersByTimeAsync(30);
+
+    const result = await pending;
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('termination authority lost'),
+      terminationReason: 'error-exit',
+    });
+    expect(result.error).toContain('SIGINT process-group signal failed (EPERM)');
+    expect(result.error).not.toContain('late child process error');
+    expect(processKill).toHaveBeenCalledOnce();
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGINT');
+    expect(getSpawnControl().child.stdout.destroyed).toBe(true);
+    expect(getSpawnControl().child.stderr.destroyed).toBe(true);
+    expect(getSpawnControl().child.unref).toHaveBeenCalledOnce();
+  });
+
+  it('retains parsed usage when leader exit makes cancellation unverifiable', async () => {
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+    const usageLine = JSON.stringify({
+      type: 'result',
+      usage: { input_tokens: 42, output_tokens: 17 },
+    });
+    const pending = spawnEngine(
+      { bin: 'claude', args: ['-p', GOAL, '--output-format', 'stream-json'] },
+      makeConfig(),
+      { signal: controller.signal, _platform: 'linux', _processKill: processKill },
+    );
+
+    controller.abort();
+    getSpawnControl().resolve(null, 'SIGINT', `${usageLine}\n`);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('leader identity is no longer provable'),
+      terminationReason: 'error-exit',
+      usage: { tokensIn: 42, tokensOut: 17 },
+    });
+  });
+
+  it('drains buffered usage after SIGKILL before forced settlement', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+    const usageLine = JSON.stringify({
+      type: 'result',
+      usage: { input_tokens: 81, output_tokens: 23 },
+    });
+    const pending = spawnEngine(
+      { bin: 'claude', args: ['-p', GOAL, '--output-format', 'stream-json'] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 20,
+        _terminationDrainMs: 30,
+      },
+    );
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(10);
+    getSpawnControl().close(null, 'SIGKILL', `${usageLine}\n`);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: 'cancelled',
+      terminationReason: 'cancelled',
+      usage: { tokensIn: 81, tokensOut: 23 },
+    });
+    expect(getSpawnControl().child.stdout.destroyed).toBe(true);
+    expect(getSpawnControl().child.unref).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed and releases local handles when group exit remains unconfirmed', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const processKill = vi.fn();
+    const pending = spawnEngine(
+      { bin: 'aw', args: ['auto', GOAL] },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        _platform: 'linux',
+        _processKill: processKill,
+        _stallGraceMs: 20,
+        _terminationDrainMs: 30,
+      },
+    );
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('process-group exit unconfirmed'),
+      terminationReason: 'error-exit',
+    });
+    expect(processKill.mock.calls).toEqual([
+      [-12345, 'SIGINT'],
+      [-12345, 'SIGKILL'],
+      [-12345, 0],
+    ]);
+    expect(getSpawnControl().child.stdout.destroyed).toBe(true);
+    expect(getSpawnControl().child.stderr.destroyed).toBe(true);
+    expect(getSpawnControl().child.unref).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry Codex config recovery after cancellation', async () => {
+    const { spawn } = await import('node:child_process');
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+    const pending = spawnEngine(
+      { bin: 'codex', args: ['exec', '--json', GOAL] },
+      makeConfig(),
+      { signal: controller.signal, _platform: 'linux', _processKill: processKill },
+    );
+
+    controller.abort();
+    getSpawnControl().resolve(
+      1,
+      null,
+      '',
+      'Error loading config.toml: unknown variant `ultra` for model_reasoning_effort',
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      terminationReason: 'error-exit',
+      error: expect.stringContaining('leader identity is no longer provable'),
+    });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed on Windows without spawning or invoking an unsafe tree kill', async () => {
+    const { spawn } = await import('node:child_process');
+    const controller = new AbortController();
+    const processKill = makeOwnedGroupKillMock();
+
+    const result = await spawnEngine(
+      { bin: 'aw.exe', args: ['auto', GOAL] },
+      makeConfig(),
+      { signal: controller.signal, _platform: 'win32', _processKill: processKill },
+    );
+
+    expect(result).toMatchObject({ ok: false, terminationReason: 'error-exit' });
+    expect(result.error).toContain('complete process-tree ownership cannot be guaranteed');
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expect(processKill).not.toHaveBeenCalled();
+    expect(result.error).not.toContain('taskkill');
   });
 
   it('retries Codex once with a supported effort after an incompatible global preference', async () => {

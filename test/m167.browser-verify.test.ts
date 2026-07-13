@@ -14,17 +14,18 @@
  *  10. isWebApp: public/index.html static fallback detected.
  *
  * SAFETY / HERMETICITY:
- *  - No real subprocesses spawned (spawn is injected via _spawnFn).
+ *  - Spawn is injected; one POSIX regression uses only local Node subprocesses.
  *  - HOME overridden to a tmp dir in beforeEach.
  *  - tmp dirs swept in afterEach.
  *  - No network, no browser, no dev server.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn as spawnProcess } from 'node:child_process';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,15 @@ function mkTmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
   tmpDirs.push(d);
   return d;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +127,10 @@ function makeFakeServer(opts: {
     child.stderr = new EventEmitter();
     child.stdin = null;
     child.kill = killSpy;
+    killSpy.mockImplementation((signal?: NodeJS.Signals) => {
+      setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+      return true;
+    });
 
     if (opts.exitImmediately) {
       setImmediate(() => child.emit('exit', 1));
@@ -159,6 +173,10 @@ function makeComboSpawn(
     if (callCount === 1) {
       // Server: print URL after short delay
       child.kill = serverKillSpy;
+      serverKillSpy.mockImplementation((signal?: NodeJS.Signals) => {
+        setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+        return true;
+      });
       setTimeout(() => {
         child.stdout.emit('data', Buffer.from(`  Local: ${serverUrl}\n`));
       }, 10);
@@ -168,6 +186,7 @@ function makeComboSpawn(
       setImmediate(() => {
         child.stdout.emit('data', Buffer.from(JSON.stringify(browserResult) + '\n'));
         child.emit('exit', 0);
+        child.emit('close', 0);
       });
     }
 
@@ -604,12 +623,19 @@ describe('verifyInBrowser — server cleanup', () => {
       if (callCount === 1) {
         // Dev server: prints URL, stays alive
         child.kill = serverKillSpy;
+        serverKillSpy.mockImplementation((signal?: NodeJS.Signals) => {
+          setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+          return true;
+        });
         setTimeout(() => {
           child.stdout.emit('data', Buffer.from('  Local: http://localhost:5173\n'));
         }, 10);
       } else {
         // Browser: emits error → captured as failure
-        child.kill = vi.fn();
+        child.kill = vi.fn((signal?: NodeJS.Signals) => {
+          setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+          return true;
+        });
         setImmediate(() => child.emit('error', new Error('browser spawn failed')));
       }
       return child as unknown as ReturnType<typeof import('node:child_process').spawn>;
@@ -620,6 +646,319 @@ describe('verifyInBrowser — server cleanup', () => {
 
     expect(result.ok).toBe(false);
     expect(serverKillSpy).toHaveBeenCalled();
+  });
+
+  it('waits for dev-server settlement before resolving', async () => {
+    const repo = mkTmp('m167-cleanup-wait-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+
+    let serverChild!: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: ReturnType<typeof vi.fn> };
+    const spawnFn = vi.fn(() => {
+      const child = new EventEmitter() as typeof serverChild;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      if (!serverChild) {
+        serverChild = child;
+        child.kill = vi.fn(() => true);
+        setImmediate(() => child.stdout.emit('data', Buffer.from('Local: http://localhost:5173\n')));
+      } else {
+        child.kill = vi.fn(() => true);
+        setImmediate(() => {
+          child.stdout.emit('data', Buffer.from(JSON.stringify({ renderOk: true, consoleErrors: [], captured: true }) + '\n'));
+          child.emit('exit', 0);
+          child.emit('close', 0);
+        });
+      }
+      return child as unknown as ReturnType<typeof import('node:child_process').spawn>;
+    }) as unknown as typeof import('node:child_process').spawn;
+
+    let settled = false;
+    const pending = verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+      _spawnFn: spawnFn,
+    }).finally(() => { settled = true; });
+
+    await vi.waitFor(() => expect(serverChild.kill).toHaveBeenCalledWith('SIGTERM'));
+    expect(settled).toBe(false);
+    serverChild.emit('close', null, 'SIGTERM');
+    await expect(pending).resolves.toMatchObject({ ok: true });
+  });
+
+  it('reports dev-server teardown as unconfirmed when stop never settles', async () => {
+    const repo = mkTmp('m167-cleanup-unconfirmed-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+
+    const { spawnFn } = makeComboSpawn('http://localhost:5173', {
+      renderOk: true,
+      consoleErrors: [],
+      captured: true,
+    });
+    let callCount = 0;
+    const neverClosingSpawn = vi.fn((...args: Parameters<typeof spawnFn>) => {
+      const child = spawnFn(...args);
+      callCount++;
+      if (callCount === 1) child.kill = vi.fn(() => true);
+      return child;
+    }) as unknown as typeof import('node:child_process').spawn;
+
+    const result = await verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+      _spawnFn: neverClosingSpawn,
+      _terminationGraceMs: 5,
+      _terminationDrainMs: 5,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      teardownUnconfirmed: true,
+      reason: 'dev server teardown unconfirmed',
+    });
+    expect(result).not.toHaveProperty('aborted');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'escalates the authenticated server group when a descendant ignores SIGTERM',
+    async () => {
+      const repo = mkTmp('m167-server-group-');
+      writePackageJson(repo, { scripts: { dev: 'node server.js' } });
+      const leaderPidPath = join(repo, 'leader.pid');
+      const descendantPidPath = join(repo, 'descendant.pid');
+      const descendantScript = [
+        'const fs = require("node:fs");',
+        'process.on("SIGTERM", () => {});',
+        `fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(process.pid));`,
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const leaderScript = [
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        `fs.writeFileSync(${JSON.stringify(leaderPidPath)}, String(process.pid));`,
+        `spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: ["ignore", "inherit", "inherit"] });`,
+        'process.on("SIGTERM", () => {});',
+        'console.log("Local: http://127.0.0.1:4173");',
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const spawnFn = vi.fn((_cmd: string, _args: readonly string[], spawnOpts: object) => (
+        spawnProcess(process.execPath, ['-e', leaderScript], spawnOpts)
+      )) as unknown as typeof import('node:child_process').spawn;
+      let leaderPid = 0;
+      let descendantPid = 0;
+
+      try {
+        const server = await startDevServer(repo, {
+          _spawnFn: spawnFn,
+          _terminationGraceMs: 100,
+          _terminationDrainMs: 1_000,
+        });
+        await vi.waitFor(() => expect(existsSync(descendantPidPath)).toBe(true), { timeout: 2_000 });
+        leaderPid = Number(readFileSync(leaderPidPath, 'utf8'));
+        descendantPid = Number(readFileSync(descendantPidPath, 'utf8'));
+
+        await expect(server.stop()).resolves.toBe(true);
+        await vi.waitFor(() => expect(processIsAlive(descendantPid)).toBe(false), { timeout: 2_000 });
+      } finally {
+        if (leaderPid > 0) {
+          try { process.kill(-leaderPid, 'SIGKILL'); } catch { /* already gone */ }
+        } else if (descendantPid > 0) {
+          try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }
+    },
+  );
+});
+
+describe('verifyInBrowser — cancellation', () => {
+  it('returns an aborted result without spawning when already cancelled', async () => {
+    const repo = mkTmp('m167-cancelled-before-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+    const spawnFn = vi.fn();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+      signal: controller.signal,
+      _spawnFn: spawnFn as unknown as typeof import('node:child_process').spawn,
+    });
+
+    expect(result).toMatchObject({ ok: false, aborted: true, renderOk: false });
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it('terminates the active browser and waits for settlement before reporting abort', async () => {
+    const repo = mkTmp('m167-cancelled-browser-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+    const controller = new AbortController();
+    let browserChild!: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: ReturnType<typeof vi.fn> };
+    let callCount = 0;
+    const spawnFn = vi.fn(() => {
+      callCount++;
+      const child = new EventEmitter() as typeof browserChild;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      if (callCount === 1) {
+        child.kill = vi.fn((signal?: NodeJS.Signals) => {
+          setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+          return true;
+        });
+        setImmediate(() => child.stdout.emit('data', Buffer.from('Local: http://localhost:5173\n')));
+      } else {
+        browserChild = child;
+        child.kill = vi.fn(() => true);
+      }
+      return child as unknown as ReturnType<typeof import('node:child_process').spawn>;
+    }) as unknown as typeof import('node:child_process').spawn;
+
+    let settled = false;
+    const pending = verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+      signal: controller.signal,
+      _spawnFn: spawnFn,
+    }).finally(() => { settled = true; });
+    await vi.waitFor(() => expect(browserChild).toBeDefined());
+
+    controller.abort();
+    await vi.waitFor(() => expect(browserChild.kill).toHaveBeenCalledWith('SIGTERM'));
+    expect(settled).toBe(false);
+    browserChild.emit('close', null, 'SIGTERM');
+
+    await expect(pending).resolves.toMatchObject({ ok: false, aborted: true });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed without signaling a recycled browser PGID after leader close',
+    async () => {
+      const repo = mkTmp('m167-cancelled-browser-close-');
+      writePackageJson(repo, {
+        scripts: { dev: 'vite' },
+        devDependencies: { vite: '5.0.0' },
+      });
+      installFakePlaywright(repo);
+      const controller = new AbortController();
+      let browserChild!: EventEmitter & {
+        pid: number;
+        exitCode: number | null;
+        signalCode: NodeJS.Signals | null;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      let callCount = 0;
+      const spawnFn = vi.fn(() => {
+        callCount++;
+        const child = new EventEmitter() as typeof browserChild;
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn(() => true);
+        if (callCount === 1) {
+          child.kill = vi.fn((signal?: NodeJS.Signals) => {
+            setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+            return true;
+          });
+          setImmediate(() => child.stdout.emit('data', Buffer.from('Local: http://localhost:5173\n')));
+        } else {
+          browserChild = child;
+          child.pid = 31_337;
+          child.exitCode = null;
+          child.signalCode = null;
+        }
+        return child as unknown as ReturnType<typeof import('node:child_process').spawn>;
+      }) as unknown as typeof import('node:child_process').spawn;
+      let pgidReused = false;
+      const processKill = vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
+        if (pgidReused) throw new Error('test attempted to signal a recycled process group');
+        if (signal === 'SIGTERM') {
+          setImmediate(() => {
+            pgidReused = true;
+            browserChild.emit('exit', null, 'SIGTERM');
+            browserChild.emit('close', null, 'SIGTERM');
+          });
+        }
+      });
+
+      const pending = verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+        signal: controller.signal,
+        _spawnFn: spawnFn,
+        _processKill: processKill,
+        _terminationGraceMs: 20,
+        _terminationDrainMs: 10,
+      });
+      await vi.waitFor(() => expect(browserChild).toBeDefined());
+      controller.abort();
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        teardownUnconfirmed: true,
+        reason: 'browser process teardown unconfirmed',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(processKill.mock.calls).toEqual([[-31_337, 'SIGTERM']]);
+      expect(browserChild.kill).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bounds cancellation when the browser ignores graceful and hard stops', async () => {
+    const repo = mkTmp('m167-cancelled-bounded-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+    const controller = new AbortController();
+    let browserKill!: ReturnType<typeof vi.fn>;
+    let callCount = 0;
+    const spawnFn = vi.fn(() => {
+      callCount++;
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+        unref: ReturnType<typeof vi.fn>;
+      };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.unref = vi.fn();
+      if (callCount === 1) {
+        child.kill = vi.fn((signal?: NodeJS.Signals) => {
+          setImmediate(() => child.emit('close', null, signal ?? 'SIGTERM'));
+          return true;
+        });
+        setImmediate(() => child.stdout.emit('data', Buffer.from('Local: http://localhost:5173\n')));
+      } else {
+        browserKill = vi.fn(() => true);
+        child.kill = browserKill;
+      }
+      return child as unknown as ReturnType<typeof import('node:child_process').spawn>;
+    }) as unknown as typeof import('node:child_process').spawn;
+
+    const pending = verifyInBrowser(repo, makeCfg({ foundry: { browserVerify: true } }), {
+      signal: controller.signal,
+      _spawnFn: spawnFn,
+      _terminationGraceMs: 5,
+      _terminationDrainMs: 5,
+    });
+    await vi.waitFor(() => expect(browserKill).toBeDefined());
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      teardownUnconfirmed: true,
+      reason: 'browser process teardown unconfirmed',
+    });
+    await expect(pending).resolves.not.toHaveProperty('aborted');
+    expect(browserKill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL']);
   });
 });
 

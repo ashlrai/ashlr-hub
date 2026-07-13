@@ -117,6 +117,16 @@ export interface SandboxedEngineResult {
   proposalDraft?: Proposal;
   /** Metadata-only explanation of whether proposal filing happened. */
   proposalOutcome?: RunProposalOutcome;
+  /** Recovery evidence when process closure was not proven and cleanup was withheld. */
+  sandboxRetention?: SandboxRetentionEvidence;
+}
+
+export interface SandboxRetentionEvidence {
+  status: 'retained';
+  reason: 'process-cleanup-unconfirmed';
+  sandboxId: string;
+  worktreePath: string;
+  recovery: 'orphan-sweep';
 }
 
 export interface RunEngineSandboxedOptions {
@@ -140,6 +150,8 @@ export interface RunEngineSandboxedOptions {
   workSource?: WorkSource;
   /** Optional advisory delegation contract for context/result expectations. */
   delegationScope?: DelegationScope;
+  /** Cancellation owned by the daemon or direct caller that started this run. */
+  signal?: AbortSignal;
 }
 
 export interface CaptureSandboxedProposalOptions {
@@ -179,6 +191,8 @@ export interface CaptureSandboxedProposalOptions {
   actionCounts?: RunActionCounts;
   /** Optional metadata-only context summary from the producing run. */
   contextSummary?: RunContextSummary;
+  /** Cancellation authority inherited from the producer that owns this capture. */
+  signal?: AbortSignal;
 }
 
 type SpawnEngineResult = {
@@ -189,6 +203,31 @@ type SpawnEngineResult = {
   terminationReason?: TerminationReason;
   configRecoveryAttempts?: number;
 };
+
+const PROCESS_CLEANUP_UNCONFIRMED_RE =
+  /(?:termination authority lost|termination deadline elapsed[^\n]*(?:unconfirmed|could not be authenticated)|process(?:-group)?[^\n]*(?:closure|exit)[^\n]*unconfirmed)/i;
+
+function processCleanupUnconfirmed(result: SpawnEngineResult): boolean {
+  return result.terminationReason === 'error-exit' &&
+    PROCESS_CLEANUP_UNCONFIRMED_RE.test(result.error ?? '');
+}
+
+function retainedSandboxEvidence(sb: Sandbox): SandboxRetentionEvidence {
+  return {
+    status: 'retained',
+    reason: 'process-cleanup-unconfirmed',
+    sandboxId: sb.id,
+    worktreePath: sb.worktreePath,
+    recovery: 'orphan-sweep',
+  };
+}
+
+function withSandboxRetention(
+  state: RunState,
+  evidence: SandboxRetentionEvidence | undefined,
+): RunState {
+  return evidence ? ({ ...state, sandboxRetention: evidence } as RunState) : state;
+}
 
 /**
  * Default hard wall-clock for an autonomous external run (10 min).
@@ -400,6 +439,7 @@ function sandboxAgentOutcome(
   outcome: RunProposalOutcome | undefined,
   status: RunState['status'],
 ): AgentActionOutcome {
+  if (status === 'aborted') return 'blocked';
   switch (outcome?.kind) {
     case 'filed':
       return outcome.isPartial === true ? 'blocked' : 'ok';
@@ -972,9 +1012,20 @@ export async function captureSandboxedProposal(
     ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
+  const cancelledCapture = (): SandboxedEngineResult => ({
+    state: withProposalOutcome(
+      mk({ status: 'aborted', result: 'proposal capture cancelled', terminationReason: 'cancelled' }),
+      undefined,
+      actionCounts,
+      opts.contextSummary,
+    ),
+  });
+  let proposalCreationStarted = false;
+  if (opts.signal?.aborted) return cancelledCapture();
 
   try {
     const wt = await import('../sandbox/worktree.js');
+    if (opts.signal?.aborted) return cancelledCapture();
     const diff: SandboxDiff = wt.sandboxDiff(sb);
     setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
@@ -1020,6 +1071,7 @@ export async function captureSandboxedProposal(
         cfg,
         ...(opts.isPartial ? { isPartial: true } : {}),
       });
+      if (opts.signal?.aborted) return cancelledCapture();
       if (!gateResult.pass) {
         blockedOutcome = proposalOutcome(
           opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
@@ -1092,6 +1144,7 @@ export async function captureSandboxedProposal(
     } satisfies Omit<Proposal, 'id' | 'status' | 'createdAt'>;
 
     if (opts.draftOnly === true) {
+      if (opts.signal?.aborted) return cancelledCapture();
       const draft: Proposal = {
         ...proposalInput,
         id: draftId,
@@ -1104,7 +1157,13 @@ export async function captureSandboxedProposal(
       };
     }
 
+    // Cancellation is authoritative until proposal creation begins. Once create()
+    // returns, the proposal may be durable and must remain visible to the caller;
+    // finish persistence verification and report it as filed even if the signal
+    // becomes aborted during or after create().
+    if (opts.signal?.aborted) return cancelledCapture();
     const inbox = selectInboxStore(cfg);
+    proposalCreationStarted = true;
     const proposal = inbox.create(proposalInput);
     if (isDiffDedupResult(proposal)) {
       const outcome = duplicateDiffOutcome(proposal, diff);
@@ -1200,6 +1259,7 @@ export async function captureSandboxedProposal(
       proposalOutcome: outcome,
     };
   } catch (err) {
+    if (opts.signal?.aborted && !proposalCreationStarted) return cancelledCapture();
     const msg = err instanceof Error ? err.message : String(err);
     const outcome = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
     return {
@@ -1269,6 +1329,27 @@ export async function runEngineSandboxed(
     ...over,
   });
   const actionCounts: RunActionCounts = {};
+
+  if (opts.signal?.aborted) {
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      status: 'aborted',
+      actionCounts,
+    });
+    return {
+      state: withProposalOutcome(
+        mk({ status: 'aborted', result: 'run cancelled before execution', terminationReason: 'cancelled' }),
+        undefined,
+        actionCounts,
+      ),
+    };
+  }
 
   if (killSwitchOn() || (cfg.foundry as { killSwitch?: boolean } | undefined)?.killSwitch === true) {
     const outcome = proposalOutcome('kill-switch', 'autonomy kill-switch is ON');
@@ -1347,8 +1428,34 @@ export async function runEngineSandboxed(
     delegationScopeSummary = summarizeDelegationScope(delegationScope);
   }
 
+  if (opts.signal?.aborted) {
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      status: 'aborted',
+      actionCounts,
+    });
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    return {
+      state: withProposalOutcome(
+        mk({ status: 'aborted', result: 'run cancelled before engine spawn', terminationReason: 'cancelled' }),
+        undefined,
+        actionCounts,
+      ),
+    };
+  }
+
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
+  let sandboxRetention: SandboxRetentionEvidence | undefined;
+  let processCleanupFailure: SpawnEngineResult | undefined;
 
   // M248: inject CLAUDE_SESSION_ID so fleet savings land under nameable
   // ashlr-fleet-* keys in ~/.ashlr/stats.json — visible in ashlr__savings.
@@ -1481,19 +1588,36 @@ export async function runEngineSandboxed(
     const maxAttempts = dispatchMaxAttempts(cfg);
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
+    const usage = newUsage();
+    let hasReportedUsage = false;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (opts.signal?.aborted) {
+        res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
+        break;
+      }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
-      setRunActionCount(actionCounts, 'modelSteps', attempt);
-      setRunActionCount(actionCounts, 'totalSteps', attempt);
       const _spawnStart = Date.now();
       res = await spawnEngine(cmd, cfg, {
         env,
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
+        ...(opts.signal ? { signal: opts.signal } : {}),
       });
-      if (res.configRecoveryAttempts) incrementRunActionCount(actionCounts, 'spawnAttempts');
+      const invocationCount = 1 + (res.configRecoveryAttempts ?? 0);
+      if (res.configRecoveryAttempts) {
+        incrementRunActionCount(actionCounts, 'spawnAttempts', res.configRecoveryAttempts);
+      }
+      usage.steps += invocationCount;
+      setRunActionCount(actionCounts, 'modelSteps', usage.steps);
+      setRunActionCount(actionCounts, 'totalSteps', usage.steps);
       const invocationDurationMs = Date.now() - _spawnStart;
       _spawnDurationMs += invocationDurationMs;
+      if (res.usage) {
+        hasReportedUsage = true;
+        usage.tokensIn += res.usage.tokensIn;
+        usage.tokensOut += res.usage.tokensOut;
+        usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+      }
 
       // Persist one fixed-schema row per actual retry attempt. Raw prompt/argv,
       // output/error, paths, diffs, environment, and file content never cross
@@ -1516,6 +1640,8 @@ export async function runEngineSandboxed(
         error: measureAgentDiagnosticText(res.error),
       });
 
+      if (opts.signal?.aborted || res.terminationReason === 'cancelled') break;
+
       if (res.ok) break;
 
       let hasDiff = false;
@@ -1536,18 +1662,95 @@ export async function runEngineSandboxed(
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
 
-    const _resUsage = res.usage;
-    const _computedCost = _resUsage
-      ? estCostUsd(engine, _resUsage.tokensIn, _resUsage.tokensOut)
-      : 0;
-    const usage = _resUsage
-      ? {
-          tokensIn: _resUsage.tokensIn,
-          tokensOut: _resUsage.tokensOut,
-          steps: 1,
-          estCostUsd: _computedCost,
-        }
-      : newUsage();
+    const failedAfterAuthoritativeTermination = (
+      failure: SpawnEngineResult,
+      retainSandbox: boolean,
+      captured?: SandboxedEngineResult,
+    ): SandboxedEngineResult => {
+      if (retainSandbox) sandboxRetention = retainedSandboxEvidence(sb);
+      const capturedProposalId = captured?.proposalId;
+      const capturedOutcome = captured?.proposalOutcome;
+      const result = retainSandbox
+        ? `engine "${engine}" failed with sandbox retained: ${failure.error ?? 'process cleanup unconfirmed'}`
+        : `engine "${engine}" failed: ${failure.error ?? 'termination failed'}`;
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        proposalId: capturedProposalId,
+        outcome: capturedOutcome,
+        status: 'failed',
+        usage,
+        durationMs: _spawnDurationMs,
+        actionCounts,
+      });
+      return {
+        state: withSandboxRetention(
+          withProposalOutcome(
+            mk({ status: 'failed', result, usage, terminationReason: failure.terminationReason }),
+            capturedOutcome,
+            actionCounts,
+          ),
+          sandboxRetention,
+        ),
+        ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
+        ...(sandboxRetention ? { sandboxRetention } : {}),
+      };
+    };
+
+    const cancelledAfterSpawn = (captured?: SandboxedEngineResult): SandboxedEngineResult => {
+      // A settled error exit is process truth. A signal arriving while its
+      // partial diff is being captured cannot retroactively relabel it cancelled.
+      if (terminationReason === 'error-exit') {
+        return failedAfterAuthoritativeTermination(res, processCleanupUnconfirmed(res), captured);
+      }
+      const capturedProposalId = captured?.proposalId;
+      const capturedOutcome = captured?.proposalOutcome;
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        proposalId: capturedProposalId,
+        outcome: capturedOutcome,
+        status: 'aborted',
+        usage,
+        durationMs: _spawnDurationMs,
+        actionCounts,
+      });
+      return {
+        state: withProposalOutcome(
+          mk({ status: 'aborted', result: 'run cancelled', usage, terminationReason: 'cancelled' }),
+          capturedOutcome,
+          actionCounts,
+        ),
+        ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
+      };
+    };
+
+    if (processCleanupUnconfirmed(res)) {
+      return failedAfterAuthoritativeTermination(res, true);
+    }
+
+    if (terminationReason === 'error-exit' && opts.signal?.aborted) {
+      return failedAfterAuthoritativeTermination(res, false);
+    }
+
+    if (
+      terminationReason === 'cancelled' ||
+      (opts.signal?.aborted && terminationReason !== 'error-exit')
+    ) {
+      return cancelledAfterSpawn();
+    }
 
     if (!res.ok) {
       // M233: even on timeout/non-zero exit, attempt to capture a partial diff.
@@ -1566,12 +1769,16 @@ export async function runEngineSandboxed(
             workItemGenerationId: opts.workItemGenerationId,
             workSource: opts.workSource,
             delegationScope,
+            ...(opts.signal ? { signal: opts.signal } : {}),
             isPartial: true,
             usage,
             durationMs: _spawnDurationMs,
             producerStatus: 'failed',
             actionCounts,
           });
+          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+            return cancelledAfterSpawn(captured);
+          }
           proposalId = captured.proposalId;
           proposalOutcomeResult = captured.proposalOutcome;
           if (proposalOutcomeResult?.kind === 'empty-diff') {
@@ -1581,6 +1788,7 @@ export async function runEngineSandboxed(
             );
           }
         } catch (err) {
+          if (opts.signal?.aborted) return cancelledAfterSpawn();
           const msg = err instanceof Error ? err.message : String(err);
           proposalOutcomeResult = proposalOutcome('proposal-capture-error', `proposal capture failed after engine error: ${msg}`);
           // diff/proposal capture is best-effort — never fail the run on it.
@@ -1647,6 +1855,7 @@ export async function runEngineSandboxed(
               goal,
               cfg,
             });
+            if (opts.signal?.aborted) return cancelledAfterSpawn();
             // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
             // the gate fails, re-invoke the SAME engine inside the SAME confined
             // worktree (identical contained env + OS sandbox launcher — worktree
@@ -1654,16 +1863,16 @@ export async function runEngineSandboxed(
             // re-verify. Only a green worktree is filed, re-signed against the
             // repaired diff. Flag-off ⇒ the single-shot gate above, unchanged.
             const _v2g = cfg.foundry?.verifyToGreen;
-            // M337 (review fix): repair spend is REAL spend — accumulate the
-            // repair runs' tokens and book them into the run usage + the
-            // 'proposed' ledger entry (previously discarded at $0, skewing
-            // per-model ROI downward for exactly the models needing repairs).
-            const _v2gRepair = { tokensIn: 0, tokensOut: 0 };
+            // Repair invocations are model steps. Book each returned invocation
+            // directly into the shared usage exactly once so cancellation and
+            // proposal telemetry observe the same authoritative totals.
             if (!_gateResult.pass && _v2g?.enabled === true) {
               const _v2gOut = await iterateToGreen({
                 cfg,
                 initialFailure: String(_gateResult.reason ?? ''),
+                ...(opts.signal ? { signal: opts.signal } : {}),
                 verify: async () => {
+                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
                   const d = wt.sandboxDiff(sb);
                   incrementRunActionCount(actionCounts, 'completenessGateRuns');
                   const g = await runCompletenessGate({
@@ -1672,9 +1881,15 @@ export async function runEngineSandboxed(
                     goal,
                     cfg,
                   });
+                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
                   return { pass: g.pass, reason: String(g.reason ?? '') };
                 },
                 repair: async (failureTail: string) => {
+                  if (opts.signal?.aborted) return null;
+                  const maxSteps = opts.budget?.maxSteps;
+                  if (maxSteps !== undefined && usage.steps >= Math.max(0, maxSteps)) {
+                    return null;
+                  }
                   const repairGoal =
                     `${goal}\n\n[verify-to-green] A previous attempt failed verification. ` +
                     `Fix ONLY what is needed to make the checks pass — do not start new work.\n` +
@@ -1687,21 +1902,35 @@ export async function runEngineSandboxed(
                   if (!repairCmd) return null;
                   incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
-                  incrementRunActionCount(actionCounts, 'modelSteps');
-                  incrementRunActionCount(actionCounts, 'totalSteps');
                   const r = await spawnEngine(repairCmd, cfg, {
                     env,
                     timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
                     launcher: launcher ?? undefined,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                   });
-                  if (r.configRecoveryAttempts) incrementRunActionCount(actionCounts, 'spawnAttempts');
-                  if (r.usage) {
-                    _v2gRepair.tokensIn += r.usage.tokensIn;
-                    _v2gRepair.tokensOut += r.usage.tokensOut;
+                  const invocationCount = 1 + (r.configRecoveryAttempts ?? 0);
+                  if (r.configRecoveryAttempts) {
+                    incrementRunActionCount(actionCounts, 'spawnAttempts', r.configRecoveryAttempts);
                   }
+                  usage.steps += invocationCount;
+                  setRunActionCount(actionCounts, 'modelSteps', usage.steps);
+                  setRunActionCount(actionCounts, 'totalSteps', usage.steps);
+                  if (r.usage) {
+                    hasReportedUsage = true;
+                    usage.tokensIn += r.usage.tokensIn;
+                    usage.tokensOut += r.usage.tokensOut;
+                    usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+                  }
+                  if (processCleanupUnconfirmed(r)) processCleanupFailure = r;
                   return { ok: r.ok };
                 },
               });
+              if (processCleanupFailure) {
+                return failedAfterAuthoritativeTermination(processCleanupFailure, true);
+              }
+              if (opts.signal?.aborted || _v2gOut.stopped === 'cancelled') {
+                return cancelledAfterSpawn();
+              }
               if (_v2gOut.green) {
                 const repaired = wt.sandboxDiff(sb);
                 if (repaired.files > 0 && repaired.patch.trim().length > 0) {
@@ -1717,11 +1946,6 @@ export async function runEngineSandboxed(
                   console.log(`[M331] ${_gateResult.reason}`);
                 }
               }
-              if ((_v2gRepair.tokensIn > 0 || _v2gRepair.tokensOut > 0) && usage) {
-                usage.tokensIn += _v2gRepair.tokensIn;
-                usage.tokensOut += _v2gRepair.tokensOut;
-                usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
-              }
             }
             if (!_gateResult.pass) {
               console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
@@ -1734,6 +1958,7 @@ export async function runEngineSandboxed(
             }
           }
           if (_m275ShouldFile) {
+          if (opts.signal?.aborted) return cancelledAfterSpawn();
           const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', effDiff);
           const inbox = selectInboxStore(cfg);
           const proposal = inbox.create({
@@ -1816,14 +2041,25 @@ export async function runEngineSandboxed(
                 model: engineModel,
                 // M337 (review fix): `usage` includes verify-to-green repair
                 // spend when the loop ran — book the true totals.
-                costUsd: usage?.estCostUsd ?? _computedCost,
-                tokensIn: usage?.tokensIn ?? _resUsage?.tokensIn,
-                tokensOut: usage?.tokensOut ?? _resUsage?.tokensOut,
+                costUsd: usage.estCostUsd,
+                tokensIn: usage.tokensIn,
+                tokensOut: usage.tokensOut,
                 durationMs: _spawnDurationMs,
-                cacheHit: _resUsage ? (_resUsage.tokensIn === 0 && _computedCost === 0) : false,
+                cacheHit: hasReportedUsage ? (usage.tokensIn === 0 && usage.estCostUsd === 0) : false,
               });
             } catch {
               // telemetry is best-effort — never fails the run
+            }
+            if (opts.signal?.aborted) {
+              return cancelledAfterSpawn({
+                state: withProposalOutcome(
+                  mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
+                  proposalOutcomeResult,
+                  actionCounts,
+                ),
+                proposalId,
+                proposalOutcome: proposalOutcomeResult,
+              });
             }
             // M249: RunCache shadow write — record the (key → outcome) entry for
             // measurement. Fire-and-forget, never throws, never changes run behavior.
@@ -1894,12 +2130,14 @@ export async function runEngineSandboxed(
       proposalOutcome: proposalOutcomeResult,
     };
   } finally {
-    try {
-      rmSync(hooksDir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
+    if (!sandboxRetention) {
+      try {
+        rmSync(hooksDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
     }
-    if (createdHere) {
+    if (createdHere && !sandboxRetention) {
       try {
         wt.removeSandbox(sb);
       } catch {
@@ -2022,6 +2260,27 @@ export async function runApiModelSandboxed(
     ...over,
   });
 
+  if (opts.signal?.aborted) {
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      status: 'aborted',
+      actionCounts,
+    });
+    return {
+      state: withProposalOutcome(
+        mk({ status: 'aborted', result: 'run cancelled before execution', terminationReason: 'cancelled' }),
+        undefined,
+        actionCounts,
+      ),
+    };
+  }
+
   const wt = await import('../sandbox/worktree.js');
 
   // Acquire sandbox worktree (reuse caller's when provided).
@@ -2079,6 +2338,30 @@ export async function runApiModelSandboxed(
     delegationScopeSummary = summarizeDelegationScope(delegationScope);
   }
 
+  if (opts.signal?.aborted) {
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      status: 'aborted',
+      actionCounts,
+    });
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    return {
+      state: withProposalOutcome(
+        mk({ status: 'aborted', result: 'run cancelled before provider request', terminationReason: 'cancelled' }),
+        undefined,
+        actionCounts,
+      ),
+    };
+  }
+
   let proposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
   const runStartedAt = Date.now();
@@ -2097,7 +2380,14 @@ export async function runApiModelSandboxed(
     // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
     const supportsTools = true;
 
-    const client = buildOpenAICompatibleClient(baseUrl, apiKey, model, supportsTools);
+    const client = buildOpenAICompatibleClient(
+      baseUrl,
+      apiKey,
+      model,
+      supportsTools,
+      undefined,
+      opts.signal,
+    );
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
     // model can make real file edits inside the throwaway branch.
@@ -2161,6 +2451,7 @@ export async function runApiModelSandboxed(
         }
       },
       systemPrefix: m264SystemPrefix,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
 
     const finalUsage: RunUsage = {
@@ -2175,6 +2466,48 @@ export async function runApiModelSandboxed(
       typeof task.result === 'string' &&
       (task.result.startsWith('[budget exceeded') || task.result.startsWith('[step cap reached'));
 
+    const cancelledAfterTask = (captured?: SandboxedEngineResult): SandboxedEngineResult => {
+      const capturedProposalId = captured?.proposalId;
+      const capturedOutcome = captured?.proposalOutcome;
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        proposalId: capturedProposalId,
+        outcome: capturedOutcome,
+        status: 'aborted',
+        usage: finalUsage,
+        durationMs,
+        actionCounts,
+        contextSummary: m264ContextSummary,
+      });
+      return {
+        state: withProposalOutcome(
+          mk({
+            status: 'aborted',
+            result: 'run cancelled',
+            usage: finalUsage,
+            tasks: [task],
+            steps,
+            terminationReason: 'cancelled',
+          }),
+          capturedOutcome,
+          actionCounts,
+          m264ContextSummary,
+        ),
+        ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
+      };
+    };
+
+    if (opts.signal?.aborted) {
+      return cancelledAfterTask();
+    }
+
     if (task.status === 'failed') {
       if (opts.propose !== false) {
         const captured = await captureSandboxedProposal(engine, goal, cfg, {
@@ -2187,6 +2520,7 @@ export async function runApiModelSandboxed(
           workItemGenerationId: opts.workItemGenerationId,
           workSource: opts.workSource,
           delegationScope,
+          ...(opts.signal ? { signal: opts.signal } : {}),
           isPartial: true,
           sourceLabel: 'api-model',
           usage: finalUsage,
@@ -2195,6 +2529,9 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
+        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          return cancelledAfterTask(captured);
+        }
         proposalId = captured.proposalId;
         proposalOutcomeResult =
           captured.proposalOutcome?.kind === 'empty-diff'
@@ -2251,6 +2588,7 @@ export async function runApiModelSandboxed(
           workItemGenerationId: opts.workItemGenerationId,
           workSource: opts.workSource,
           delegationScope,
+          ...(opts.signal ? { signal: opts.signal } : {}),
           isPartial: isPartialResult,
           sourceLabel: 'api-model',
           usage: finalUsage,
@@ -2259,12 +2597,16 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
+        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          return cancelledAfterTask(captured);
+        }
         proposalId = captured.proposalId;
         proposalOutcomeResult = captured.proposalOutcome;
         if (proposalOutcomeResult?.kind === 'empty-diff') {
           proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
         }
       } catch (err) {
+        if (opts.signal?.aborted) return cancelledAfterTask();
         const msg = err instanceof Error ? err.message : String(err);
         proposalOutcomeResult = proposalOutcome('proposal-capture-error', `api-model proposal capture failed: ${msg}`);
         // diff/proposal capture is best-effort

@@ -19,7 +19,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +34,7 @@ import type { AshlrConfig } from '../src/core/types.js';
 let fixtureRepo = '';
 let fixtureProposal: { repo: string; diff: string } | null = null;
 const clones: string[] = [];
+const removedSandboxes: string[] = [];
 
 vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn(() => fixtureProposal),
@@ -46,7 +47,7 @@ vi.mock('../src/core/sandbox/worktree.js', () => ({
     clones.push(dir);
     return { id: `m331-${clones.length}`, sourceRepo, worktreePath: dir, branch: 'x' };
   }),
-  removeSandbox: vi.fn(() => {}),
+  removeSandbox: vi.fn((sandbox: { id: string }) => { removedSandboxes.push(sandbox.id); }),
 }));
 
 import { runTests, runTestsDetailed } from '../src/core/run/run-tests.js';
@@ -112,6 +113,7 @@ afterEach(() => {
   }
   created.length = 0;
   clones.length = 0;
+  removedSandboxes.length = 0;
 });
 
 function repoWith(pkg: Record<string, unknown>, diff: string): void {
@@ -134,6 +136,66 @@ function repoWithContract(commands: Array<Record<string, unknown>>, diff = ADD_F
 // ---------------------------------------------------------------------------
 
 describe('M331 runTestsDetailed', () => {
+  it('pre-cancelled run creates no sandbox or subprocess', async () => {
+    repoWith({ name: 'fx', version: '1.0.0', scripts: { test: REQUIRES_DIFF_FILE } }, ADD_FILE_DIFF);
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runTestsDetailed('p-pre-cancel', cfg, 'quick', {
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({ passed: false, commands: [], skipped: 'cancelled' });
+    expect(clones).toHaveLength(0);
+    expect(removedSandboxes).toHaveLength(0);
+    await expect(runTests('p-pre-cancel', cfg, 'quick', {
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('mid-cancel retains its sandbox when process cleanup is unconfirmed', async () => {
+    repoWithContract([{
+      id: 'wait-for-cancel',
+      kind: 'test',
+      cmd: [
+        'node',
+        '-e',
+        "require('fs').writeFileSync('verify-started', '1'); setInterval(() => {}, 1000)",
+      ],
+      required: true,
+      profiles: ['quick'],
+    }]);
+    const controller = new AbortController();
+
+    const pending = runTestsDetailed('p-mid-cancel', cfg, 'quick', {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect(clones[0]).toBeDefined();
+      expect(existsSync(join(clones[0]!, 'verify-started'))).toBe(true);
+    }, { timeout: 5_000 });
+    controller.abort();
+    const result = await pending;
+
+    expect(result.skipped).toBe('process-cleanup-unconfirmed');
+    expect(result.commands.at(-1)).toMatchObject({
+      ok: false,
+      failureCategory: 'infra',
+    });
+    expect(result).toMatchObject({
+      passed: false,
+      skipped: 'process-cleanup-unconfirmed',
+      sandboxRetention: {
+        status: 'retained',
+        reason: 'process-cleanup-unconfirmed',
+        recovery: 'orphan-sweep',
+      },
+    });
+    expect(result.commands.at(-1)?.failureCategory).toBe('infra');
+    expect(existsSync(result.sandboxRetention!.worktreePath)).toBe(true);
+    expect(removedSandboxes).toEqual([]);
+  }, 10_000);
+
   it('applies the diff BEFORE running: script requiring the added file passes', async () => {
     repoWith({ name: 'fx', version: '1.0.0', scripts: { test: REQUIRES_DIFF_FILE } }, ADD_FILE_DIFF);
     const r = await runTestsDetailed('p1', cfg);
@@ -359,5 +421,52 @@ describe('M331 iterateToGreen', () => {
     });
     expect(seen[0]!.length).toBe(512);
     expect(seen[0]!.endsWith('THE-END')).toBe(true);
+  });
+
+  it('pre-cancelled -> no repair or verification work starts', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const repair = vi.fn(async () => ({ ok: true }));
+    const verify = vi.fn(async () => ({ pass: true, reason: '' }));
+
+    const out = await iterateToGreen({
+      cfg: cfgOn(),
+      initialFailure: 'boom',
+      repair,
+      verify,
+      signal: controller.signal,
+    });
+
+    expect(out).toEqual({
+      green: false,
+      iterations: 0,
+      stopped: 'cancelled',
+      lastFailure: 'boom',
+    });
+    expect(repair).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('cancellation during repair prevents verification and another iteration', async () => {
+    const controller = new AbortController();
+    const repair = vi.fn(async () => {
+      controller.abort();
+      return { ok: true };
+    });
+    const verify = vi.fn(async () => ({ pass: true, reason: '' }));
+
+    const out = await iterateToGreen({
+      cfg: cfgOn({ maxIterations: 5 }),
+      initialFailure: 'boom',
+      repair,
+      verify,
+      signal: controller.signal,
+    });
+
+    expect(out.stopped).toBe('cancelled');
+    expect(out.iterations).toBe(1);
+    expect(out.green).toBe(false);
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(verify).not.toHaveBeenCalled();
   });
 });

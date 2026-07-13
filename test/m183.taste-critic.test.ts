@@ -191,6 +191,57 @@ function makeTasteMock(overalls: number[]) {
 describe('M183 — scoreTaste axes', () => {
   afterEach(() => { vi.resetModules(); });
 
+  it('does not resolve a frontier client when already cancelled', async () => {
+    const resolveFrontierJudgeClient = vi.fn(() => null);
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      resolveFrontierJudgeClient,
+      judgeProposal: vi.fn(),
+    }));
+    const controller = new AbortController();
+    controller.abort();
+    const { scoreTaste } = await import('../src/core/fleet/taste-critic.js?' + randomUUID());
+
+    await expect(scoreTaste(
+      makeProposal(),
+      { repo: MOCK_REPO },
+      makeConfig(),
+      { signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(resolveFrontierJudgeClient).not.toHaveBeenCalled();
+  });
+
+  it('forwards mid-cancel and preserves a score that settles with the abort', async () => {
+    const controller = new AbortController();
+    let providerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const complete = vi.fn(async (_system: string, _user: string, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      providerStarted();
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return makeTasteJson(5, 4, 5, 4.8, 'gold');
+    });
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      resolveFrontierJudgeClient: vi.fn(() => ({ complete, model: 'mock-opus' })),
+      judgeProposal: vi.fn(),
+    }));
+    const { scoreTaste } = await import('../src/core/fleet/taste-critic.js?' + randomUUID());
+
+    const pending = scoreTaste(
+      makeProposal(),
+      { repo: MOCK_REPO },
+      makeConfig(),
+      { signal: controller.signal },
+    );
+    await started;
+    controller.abort();
+    const result = await pending;
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ alignment: 5, design: 5, overall: 4.8, verdict: 'gold' });
+  });
+
   it('returns alignment, ambition, design, overall, verdict, rationale', async () => {
     const mockComplete = vi.fn(async () => makeTasteJson(4, 5, 4, 4.3, 'gold'));
 

@@ -59,6 +59,7 @@ export type TerminationReason =
   | 'loop-stall'
   | 'no-diff-stall'
   | 'backstop-timeout'
+  | 'cancelled'
   | 'clean-exit'
   | 'error-exit';
 

@@ -44,6 +44,12 @@ const MAX_TIMEOUT_MS = 600_000;
 /** Extra grace for the wrapper itself after it asks the child tree to exit. */
 const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
 
+/** Graceful cancellation/timeout window before escalating the owned group. */
+const ASYNC_TERMINATION_GRACE_MS = 5_000;
+
+/** Final bounded window for close events and pipe data after SIGKILL. */
+const ASYNC_TERMINATION_DRAIN_MS = 150;
+
 /** Prefix for per-command HOME directories used by verification subprocesses. */
 const VERIFY_HOME_PREFIX = 'ashlr-verify-home-';
 
@@ -82,6 +88,7 @@ export type VerifyFailureCategory =
   | 'tool'
   | 'timeout'
   | 'infra'
+  | 'cancelled'
   | 'invalid-command';
 
 /** Outcome of running one VerifyCommand. */
@@ -93,8 +100,40 @@ export interface VerifyCommandResult {
   /** Combined stdout+stderr, secret-scrubbed and size-capped (≤32KB). */
   output: string;
   timedOut: boolean;
+  /** True only when the invocation owner requested cancellation. */
+  cancelled?: boolean;
   /** Present only for non-OK results; lets autonomous repair loops avoid infra false positives. */
   failureCategory?: VerifyFailureCategory;
+}
+
+export interface VerifySubprocessOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  /** Windows package-manager shims only; ignored on POSIX. */
+  windowsShell?: boolean;
+  signal?: AbortSignal;
+  /** Hermetic ownership-test seams; production callers leave these unset. */
+  _platform?: NodeJS.Platform;
+  _spawn?: typeof spawn;
+  _processKill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  _terminationGraceMs?: number;
+  _terminationDrainMs?: number;
+}
+
+export interface VerifySubprocessResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  cancelled: boolean;
+  error?: string;
+}
+
+export interface RunVerifyCommandAsyncOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,22 +491,361 @@ export function runVerifyCommand(
 }
 
 // ---------------------------------------------------------------------------
+// Public: runVerifySubprocessAsync
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one argv-only subprocess with invocation-local process ownership.
+ *
+ * POSIX children start as detached process-group leaders. Cancellation targets
+ * only that invocation-owned process group; descendants that deliberately leave
+ * it with setsid(2) or another detached spawn are outside this ownership scope
+ * and are not claimed to be terminated. Once the leader exits, its numeric PGID
+ * is no longer a sufficient ownership identity, so delayed probes/escalations
+ * fail closed instead of risking a recycled, unrelated group. A signaled Windows
+ * invocation also fails closed because Node cannot prove complete tree ownership.
+ */
+export async function runVerifySubprocessAsync(
+  argv: string[],
+  opts: VerifySubprocessOptions,
+): Promise<VerifySubprocessResult> {
+  const emptyResult = (overrides: Partial<VerifySubprocessResult> = {}): VerifySubprocessResult => ({
+    stdout: '',
+    stderr: '',
+    exitCode: -1,
+    signal: null,
+    timedOut: false,
+    cancelled: false,
+    ...overrides,
+  });
+
+  if (argv.length === 0 || argv.some((arg) => typeof arg !== 'string')) {
+    return emptyResult({ error: 'invalid argv: expected a non-empty string array' });
+  }
+  if (opts.signal?.aborted) {
+    return emptyResult({
+      stderr: '[verify-runner] cancelled before subprocess start',
+      cancelled: true,
+    });
+  }
+
+  const platform = opts._platform ?? process.platform;
+  if (opts.signal && platform === 'win32') {
+    return emptyResult({
+      error: 'AbortSignal-owned verification is unsupported on Windows because complete process-tree ownership cannot be guaranteed',
+    });
+  }
+
+  return await new Promise<VerifySubprocessResult>((resolveDone) => {
+    const stdout = createBoundedStreamCapture();
+    const stderr = createBoundedStreamCapture();
+    const processKill = opts._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
+      process.kill(pid, signal);
+    });
+    const spawnImpl = opts._spawn ?? spawn;
+    const ownsProcessGroup = platform !== 'win32';
+    let settled = false;
+    let childClosed = false;
+    let leaderExited = false;
+    let exitCode: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
+    let terminationReason: 'cancelled' | 'timeout' | null = null;
+    let terminationRequested = false;
+    let hardKillSent = false;
+    let authorityFailure: string | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let escalationTimer: ReturnType<typeof setTimeout> | null = null;
+    let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawnImpl(argv[0]!, argv.slice(1), {
+        cwd: opts.cwd,
+        env: opts.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: platform === 'win32' && opts.windowsShell === true,
+        windowsHide: true,
+        ...(ownsProcessGroup ? { detached: true } : {}),
+      });
+    } catch (err) {
+      resolveDone(emptyResult({ error: err instanceof Error ? err.message : String(err) }));
+      return;
+    }
+
+    // detached:true makes this invocation's PID its PGID while the leader is
+    // alive. Never derive or signal any broader group (including the daemon's).
+    let ownedPgid = ownsProcessGroup && typeof child.pid === 'number' && child.pid > 0
+      ? child.pid
+      : null;
+
+    function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr'> {
+      return { stdout: stdout.text(), stderr: stderr.text() };
+    }
+
+    function releaseProcessResources(): void {
+      child.stdout?.removeAllListeners();
+      child.stderr?.removeAllListeners();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.removeAllListeners();
+      child.on('error', () => { /* ignore events after bounded settlement */ });
+      child.unref();
+    }
+
+    function settle(result: VerifySubprocessResult): void {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (escalationTimer !== null) clearTimeout(escalationTimer);
+      if (drainTimer !== null) clearTimeout(drainTimer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      releaseProcessResources();
+      resolveDone(result);
+    }
+
+    function processSignalError(err: unknown, operation: string): 'absent' | 'failed' {
+      const code = typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code ?? '')
+        : '';
+      if (code === 'ESRCH') {
+        ownedPgid = null;
+        return 'absent';
+      }
+      authorityFailure = `${operation} failed${code ? ` (${code})` : ''}: ${err instanceof Error ? err.message : String(err)}`;
+      return 'failed';
+    }
+
+    function signalOwnedGroup(signal: NodeJS.Signals): 'sent' | 'absent' | 'failed' {
+      if (ownedPgid === null) return 'absent';
+      if (leaderExited) {
+        authorityFailure = 'process-group ownership identity lost after leader exit; refusing delayed signal';
+        ownedPgid = null;
+        return 'failed';
+      }
+      try {
+        processKill(-ownedPgid, signal);
+        return 'sent';
+      } catch (err) {
+        return processSignalError(err, `${signal} process-group signal`);
+      }
+    }
+
+    function probeOwnedGroup(): 'present' | 'absent' | 'failed' {
+      if (ownedPgid === null) return 'absent';
+      if (leaderExited) {
+        authorityFailure = 'process-group ownership identity lost after leader exit; refusing delayed probe';
+        ownedPgid = null;
+        return 'failed';
+      }
+      try {
+        processKill(-ownedPgid, 0);
+        return 'present';
+      } catch (err) {
+        return processSignalError(err, 'process-group exit probe');
+      }
+    }
+
+    function settleTermination(): void {
+      const output = captured();
+
+      if (authorityFailure) {
+        settle(emptyResult({
+          ...output,
+          exitCode: exitCode ?? -1,
+          signal: exitSignal,
+          timedOut: terminationReason === 'timeout',
+          error: `termination authority lost: ${authorityFailure ?? 'process-group state could not be authenticated'}`,
+        }));
+        return;
+      }
+      // SIGKILL was delivered while the original leader still authenticated
+      // the PGID. An escaped setsid/detached descendant is out of scope and may
+      // still hold a copied pipe; bounded resource release below does not claim
+      // that such an escaped process was terminated.
+      if (ownsProcessGroup && leaderExited && hardKillSent) {
+        if (terminationReason === 'cancelled') {
+          settle(emptyResult({ ...output, signal: exitSignal, cancelled: true }));
+          return;
+        }
+        settle(emptyResult({ ...output, exitCode: 124, signal: exitSignal, timedOut: true }));
+        return;
+      }
+
+      const groupState = ownsProcessGroup
+        ? probeOwnedGroup()
+        : (childClosed ? 'absent' : 'present');
+      if (groupState === 'failed') {
+        settle(emptyResult({
+          ...output,
+          exitCode: exitCode ?? -1,
+          signal: exitSignal,
+          timedOut: terminationReason === 'timeout',
+          error: `termination authority lost: ${authorityFailure ?? 'process-group state could not be authenticated'}`,
+        }));
+        return;
+      }
+      if (groupState === 'present') {
+        settle(emptyResult({
+          ...output,
+          exitCode: exitCode ?? -1,
+          signal: exitSignal,
+          timedOut: terminationReason === 'timeout',
+          error: 'termination deadline elapsed with process-group exit unconfirmed',
+        }));
+        return;
+      }
+      if (terminationReason === 'cancelled') {
+        settle(emptyResult({ ...output, signal: exitSignal, cancelled: true }));
+        return;
+      }
+      if (terminationReason === 'timeout') {
+        settle(emptyResult({ ...output, exitCode: 124, signal: exitSignal, timedOut: true }));
+        return;
+      }
+      settle(emptyResult({ ...output, exitCode: exitCode ?? -1, signal: exitSignal }));
+    }
+
+    function beginTerminationDrain(): void {
+      if (settled || drainTimer !== null) return;
+      drainTimer = setTimeout(() => {
+        drainTimer = null;
+        settleTermination();
+      }, opts._terminationDrainMs ?? ASYNC_TERMINATION_DRAIN_MS);
+      // Deliberately referenced: this is the final ownership deadline.
+    }
+
+    function requestTermination(reason: 'cancelled' | 'timeout'): void {
+      if (settled || terminationRequested) return;
+      terminationRequested = true;
+      terminationReason = reason;
+      stderr.append(
+        reason === 'cancelled'
+          ? '\n[verify-runner] cancelled by invocation owner; terminating process group'
+          : `\n[verify-runner] timed out after ${opts.timeoutMs}ms; terminating process group`,
+      );
+
+      if (ownsProcessGroup) {
+        if (leaderExited) {
+          authorityFailure = 'process-group ownership identity lost after leader exit; refusing termination signal';
+          ownedPgid = null;
+          beginTerminationDrain();
+          return;
+        }
+        const firstSignal: NodeJS.Signals = reason === 'cancelled' ? 'SIGINT' : 'SIGTERM';
+        const firstResult = signalOwnedGroup(firstSignal);
+        if (firstResult !== 'sent') {
+          beginTerminationDrain();
+          return;
+        }
+      } else {
+        try {
+          child.kill(reason === 'cancelled' ? 'SIGINT' : 'SIGTERM');
+        } catch (err) {
+          authorityFailure = `child termination failed: ${err instanceof Error ? err.message : String(err)}`;
+          beginTerminationDrain();
+          return;
+        }
+      }
+
+      escalationTimer = setTimeout(() => {
+        escalationTimer = null;
+        if (ownsProcessGroup) {
+          hardKillSent = signalOwnedGroup('SIGKILL') === 'sent';
+        } else {
+          try {
+            hardKillSent = child.kill('SIGKILL');
+          } catch (err) {
+            authorityFailure = `SIGKILL child termination failed: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+        beginTerminationDrain();
+      }, opts._terminationGraceMs ?? ASYNC_TERMINATION_GRACE_MS);
+      // Deliberately referenced so graceful termination always escalates.
+    }
+
+    function onAbort(): void {
+      requestTermination('cancelled');
+    }
+
+    child.stdout?.on('data', (chunk) => { stdout.append(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr.append(chunk); });
+
+    child.on('error', (err) => {
+      if (terminationRequested) {
+        if (!authorityFailure) authorityFailure = `subprocess error during termination: ${err.message}`;
+        beginTerminationDrain();
+        return;
+      }
+      settle(emptyResult({ ...captured(), error: err.message }));
+    });
+
+    child.on('exit', (code, signal) => {
+      leaderExited = true;
+      exitCode = code;
+      exitSignal = signal;
+      if (!terminationRequested || hardKillSent) {
+        ownedPgid = null;
+        return;
+      }
+
+      // The leader PID can be recycled after this event. Without a separate
+      // kernel-backed identity, retaining its numeric PGID for a later SIGKILL
+      // could target an unrelated group. Revoke it and fail closed.
+      if (escalationTimer !== null) {
+        clearTimeout(escalationTimer);
+        escalationTimer = null;
+      }
+      authorityFailure = 'process-group ownership identity lost after leader exit before escalation';
+      ownedPgid = null;
+      beginTerminationDrain();
+    });
+
+    child.on('close', (code, signal) => {
+      childClosed = true;
+      exitCode = code;
+      exitSignal = signal;
+
+      if (terminationRequested) {
+        if (leaderExited) {
+          settleTermination();
+          return;
+        }
+        beginTerminationDrain();
+        return;
+      }
+
+      ownedPgid = null;
+      settle(emptyResult({
+        ...captured(),
+        exitCode: code ?? (signal ? 1 : -1),
+        signal,
+      }));
+    });
+
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.signal?.aborted) onAbort();
+
+    timeoutTimer = setTimeout(() => requestTermination('timeout'), opts.timeoutMs);
+    timeoutTimer.unref?.();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Public: runVerifyCommandAsync
 // ---------------------------------------------------------------------------
 
 /**
  * Async twin of runVerifyCommand().
  *
- * It preserves the same wrapper, isolated HOME, timeout, output, and audit
- * contract, but waits without blocking Node's event loop. Daemon callers should
- * prefer this path so lock heartbeats, shared-queue lease renewal, and status
- * polling can continue during long repo verification.
+ * It preserves the isolated HOME, timeout, output, and audit contract, but
+ * waits without blocking Node's event loop. With a signal, the caller owns the
+ * invocation through runVerifySubprocessAsync's bounded process-group teardown.
  */
 export async function runVerifyCommandAsync(
   vc: VerifyCommand,
   workspaceRoot: string,
   _cfg: AshlrConfig,
-  opts?: { timeoutMs?: number },
+  opts?: RunVerifyCommandAsyncOptions,
 ): Promise<VerifyCommandResult> {
   const command = formatVerifyCommand(vc, workspaceRoot);
   const commandRoot = commandRootFor(vc, workspaceRoot);
@@ -496,6 +874,26 @@ export async function runVerifyCommandAsync(
     };
   }
 
+  if (opts?.signal?.aborted) {
+    const output = renderToolText(`${command}\n[verify-runner] cancelled before subprocess start`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → cancelled before start`,
+      result: 'error',
+    });
+    return {
+      ok: false,
+      command,
+      exitCode: -1,
+      output,
+      timedOut: false,
+      cancelled: true,
+      failureCategory: 'cancelled',
+    };
+  }
+
   let isolated: { env: NodeJS.ProcessEnv; cleanup: () => void } | null = null;
   try {
     const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
@@ -503,112 +901,103 @@ export async function runVerifyCommandAsync(
     });
     const runner = verifyRunnerPath();
     isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
-
-    const child = runner
-      ? spawn(
+    const useWindowsWrapper = process.platform === 'win32';
+    if (useWindowsWrapper && !runner) {
+      throw new Error('verification process-tree runner is unavailable on Windows');
+    }
+    const argv = useWindowsWrapper
+      ? [
           process.execPath,
-          [
-            runner,
-            String(timeout),
-            commandRoot,
-            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
-          ],
-          {
-            cwd: commandRoot,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            shell: false,
-            windowsHide: true,
-            env: {
-              ...isolated.env,
-              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
-            },
-          },
-        )
-      : spawn(bin, vc.cmd.slice(1), {
-          cwd: commandRoot,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          shell: baseOptions.shell === true,
-          windowsHide: true,
-          env: isolated.env,
-        });
-
-    return await new Promise<VerifyCommandResult>((resolveDone) => {
-      const stdout = createBoundedStreamCapture();
-      const stderr = createBoundedStreamCapture();
-      let spawnError: Error | undefined;
-      let wrapperTimedOut = false;
-      let settled = false;
-
-      const parentTimeout = runner ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout;
-      const wrapperTimer = setTimeout(() => {
-        wrapperTimedOut = true;
-        stderr.append(`\n[verify-runner] wrapper timed out after ${parentTimeout}ms`);
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          try { child.kill(); } catch { /* best effort */ }
-        }
-      }, parentTimeout);
-
-      const finish = (result: VerifyCommandResult) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(wrapperTimer);
-        isolated?.cleanup();
-        resolveDone(result);
-      };
-
-      child.stdout?.on('data', (chunk) => { stdout.append(chunk); });
-      child.stderr?.on('data', (chunk) => { stderr.append(chunk); });
-
-      child.on('error', (err) => {
-        spawnError = err;
-      });
-
-      child.on('close', (code, signal) => {
-        const timedOut =
-          wrapperTimedOut ||
-          code === 124 ||
-          (spawnError !== undefined && (spawnError as NodeJS.ErrnoException).code === 'ETIMEDOUT');
-
-        if (spawnError) {
-          const output = renderToolText(
-            `${command}\n${stdout.text()}${stderr.text()}\n${spawnError.message}`,
-          );
-          const failureCategory = verifyFailureCategory(output, {
-            exitCode: -1,
-            timedOut,
-            error: spawnError,
-          });
-          audit({
-            action: 'verify:command',
-            repo: workspaceRoot,
-            sandboxId: null,
-            summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : 'spawn error'}`,
-            result: 'error',
-          });
-          finish({ ok: false, command, exitCode: -1, output, timedOut, failureCategory });
-          return;
-        }
-
-        const exitCode = code ?? (signal ? 1 : -1);
-        const ok = exitCode === 0 && !wrapperTimedOut;
-        const output = renderToolText(`${stdout.text()}${stderr.text()}`);
-        const failureCategory = ok
-          ? undefined
-          : verifyFailureCategory(output, { exitCode, timedOut });
-
-        audit({
-          action: 'verify:command',
-          repo: workspaceRoot,
-          sandboxId: null,
-          summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : `exit ${exitCode}`}`,
-          result: ok ? 'ok' : 'error',
-        });
-
-        finish({ ok, command, exitCode, output, timedOut, ...(failureCategory ? { failureCategory } : {}) });
-      });
+          runner!,
+          String(timeout),
+          commandRoot,
+          Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+        ]
+      : vc.cmd;
+    const subprocess = await runVerifySubprocessAsync(argv, {
+      cwd: commandRoot,
+      env: useWindowsWrapper
+        ? {
+            ...isolated.env,
+            ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+          }
+        : isolated.env,
+      timeoutMs: useWindowsWrapper ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout,
+      windowsShell: useWindowsWrapper ? false : baseOptions.shell === true,
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     });
+    isolated.cleanup();
+    isolated = null;
+
+    const timedOut = subprocess.timedOut || subprocess.exitCode === 124;
+    const capturedOutput = `${subprocess.stdout}${subprocess.stderr}`;
+    if (subprocess.cancelled) {
+      const output = renderToolText(capturedOutput);
+      audit({
+        action: 'verify:command',
+        repo: workspaceRoot,
+        sandboxId: null,
+        summary: `${vc.kind}: ${command} → cancelled`,
+        result: 'error',
+      });
+      return {
+        ok: false,
+        command,
+        exitCode: -1,
+        output,
+        timedOut: false,
+        cancelled: true,
+        failureCategory: 'cancelled',
+      };
+    }
+
+    if (subprocess.error) {
+      const output = renderToolText(`${command}\n${capturedOutput}\n${subprocess.error}`);
+      const failureCategory = verifyFailureCategory(output, {
+        exitCode: subprocess.exitCode,
+        timedOut,
+        error: new Error(subprocess.error),
+      });
+      audit({
+        action: 'verify:command',
+        repo: workspaceRoot,
+        sandboxId: null,
+        summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : 'subprocess error'}`,
+        result: 'error',
+      });
+      return {
+        ok: false,
+        command,
+        exitCode: subprocess.exitCode,
+        output,
+        timedOut,
+        failureCategory,
+      };
+    }
+
+    const exitCode = subprocess.exitCode;
+    const ok = exitCode === 0 && !timedOut;
+    const output = renderToolText(capturedOutput);
+    const failureCategory = ok
+      ? undefined
+      : verifyFailureCategory(output, { exitCode, timedOut });
+
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : `exit ${exitCode}`}`,
+      result: ok ? 'ok' : 'error',
+    });
+
+    return {
+      ok,
+      command,
+      exitCode,
+      output,
+      timedOut,
+      ...(failureCategory ? { failureCategory } : {}),
+    };
   } catch (err) {
     isolated?.cleanup();
     const msg = err instanceof Error ? err.message : String(err);

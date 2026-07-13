@@ -62,6 +62,29 @@ export interface JudgeProposalOptions {
    * selection where no real proposal/outcome will ever exist.
    */
   recordTrace?: boolean;
+  /** Cancellation authority owned by the caller that requested this verdict. */
+  signal?: AbortSignal;
+}
+
+type JudgeComplete = (
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+) => Promise<string>;
+
+function judgeAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(
+    typeof signal.reason === 'string' && signal.reason.length > 0
+      ? signal.reason
+      : 'Judge call cancelled',
+  );
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfJudgeCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw judgeAbortReason(signal);
 }
 
 /** Full oversight report produced by runManager. */
@@ -491,7 +514,7 @@ function autoMergeBounds(cfg: AshlrConfig): {
 export async function judgeProposal(
   proposal: Proposal,
   cfg: AshlrConfig,
-  client: { complete: (system: string, user: string) => Promise<string> },
+  client: { complete: JudgeComplete },
   options: JudgeProposalOptions = {},
 ): Promise<ManagerVerdict> {
   const fallback = (): ManagerVerdict => ({
@@ -505,8 +528,11 @@ export async function judgeProposal(
     wouldMerge: false,
   });
 
+  throwIfJudgeCancelled(options.signal);
+
   // Load vision spec context for this proposal's repo (best-effort; null = no spec).
   const specCtx = await loadSpecForProposal(proposal.repo ?? undefined);
+  throwIfJudgeCancelled(options.signal);
 
   // M149: ACE Playbook — inject accumulated judge lessons into the rubric when flag on.
   const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
@@ -518,8 +544,13 @@ export async function judgeProposal(
   let raw: string;
   let fullReasoning = '';
   try {
-    raw = await client.complete(effectiveJudgeSystem, buildJudgePrompt(proposal, specCtx));
+    raw = await client.complete(
+      effectiveJudgeSystem,
+      buildJudgePrompt(proposal, specCtx),
+      options.signal,
+    );
   } catch {
+    throwIfJudgeCancelled(options.signal);
     return fallback();
   }
 
@@ -528,13 +559,17 @@ export async function judgeProposal(
   fullReasoning = parsed.fullReasoning;
   // ONE-SHOT RETRY: if parse failed, re-prompt the model asking for JSON only.
   if (!obj) {
+    throwIfJudgeCancelled(options.signal);
     try {
       const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
-      const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt);
+      const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt, options.signal);
       const retryParsed = parseJudgeResponse(raw2);
       obj = retryParsed.obj;
       fullReasoning = fullReasoning || retryParsed.fullReasoning;
-    } catch { /* retry failed — fall through to fallback */ }
+    } catch {
+      throwIfJudgeCancelled(options.signal);
+      /* retry failed — fall through to fallback */
+    }
   }
   // M300d: parse scores/verdict from the structured <reasoning> prose
   // (VALUE: N / CORRECTNESS: N / ... / VERDICT: x) as a robust fallback. Some
@@ -611,9 +646,18 @@ export async function judgeProposal(
 // ---------------------------------------------------------------------------
 
 interface MinimalProviderClient {
-  complete?: (system: string, user: string) => Promise<string>;
-  chat?: (messages: Array<{ role: string; content: string }>) => Promise<{ content: string }>;
-  completions?: { create: (opts: Record<string, unknown>) => Promise<{ choices: Array<{ message: { content: string } }> }> };
+  complete?: JudgeComplete;
+  chat?: (
+    messages: Array<{ role: string; content: string }>,
+    tools?: unknown[],
+    signal?: AbortSignal,
+  ) => Promise<{ content: string }>;
+  completions?: {
+    create: (
+      opts: Record<string, unknown>,
+      requestOptions?: { signal?: AbortSignal },
+    ) => Promise<{ choices: Array<{ message: { content: string } }> }>;
+  };
   model?: string;
 }
 
@@ -623,7 +667,7 @@ interface MinimalProviderClient {
  */
 function wrapClient(
   raw: MinimalProviderClient,
-): { complete: (system: string, user: string) => Promise<string>; model: string } | null {
+): { complete: JudgeComplete; model: string } | null {
   // Shape 1: already has a .complete() method (test mocks use this)
   if (typeof raw.complete === 'function') {
     return { complete: raw.complete.bind(raw), model: raw.model ?? 'unknown' };
@@ -634,7 +678,7 @@ function wrapClient(
     const completions = raw.completions;
     return {
       model: raw.model ?? 'unknown',
-      complete: async (system: string, user: string): Promise<string> => {
+      complete: async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
         const resp = await completions.create({
           model: raw.model ?? 'gpt-4',
           messages: [
@@ -643,7 +687,7 @@ function wrapClient(
           ],
           max_tokens: 512,
           temperature: 0,
-        });
+        }, signal ? { signal } : undefined);
         return resp.choices[0]?.message?.content ?? '';
       },
     };
@@ -654,11 +698,11 @@ function wrapClient(
     const chat = raw.chat.bind(raw);
     return {
       model: raw.model ?? 'unknown',
-      complete: async (system: string, user: string): Promise<string> => {
+      complete: async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
         const resp = await chat([
           { role: 'system', content: system },
           { role: 'user', content: user },
-        ]);
+        ], undefined, signal);
         return resp.content;
       },
     };
@@ -678,10 +722,14 @@ async function ollamaDirectComplete(
   user: string,
   maxTokens: number,
   temperature: number,
+  signal?: AbortSignal,
 ): Promise<string> {
+  throwIfJudgeCancelled(signal);
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -703,6 +751,7 @@ async function ollamaDirectComplete(
     return data.choices?.[0]?.message?.content ?? '';
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -754,7 +803,7 @@ function buildClaudeCliComplete(
   cfg: AshlrConfig,
   model: string,
   stats?: JudgeCallStats,
-): (system: string, user: string) => Promise<string> {
+): JudgeComplete {
   const primary = buildClaudeCliCompleteSingle(cfg, model, stats);
   // M320: Fable 5 judge calls fall back to Opus 4.8 when the primary call
   // fails, is refused by safety classifiers, or returns empty — the empty
@@ -763,9 +812,10 @@ function buildClaudeCliComplete(
   // pre-M320 single-shot behavior.
   if (model !== CLAUDE5_FABLE_API_ID) return primary;
   const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL, stats);
-  return async (system: string, user: string): Promise<string> => {
-    const out = await primary(system, user);
-    return out || fallback(system, user);
+  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+    const out = await primary(system, user, signal);
+    if (out || signal?.aborted) return out;
+    return fallback(system, user, signal);
   };
 }
 
@@ -773,8 +823,8 @@ function buildClaudeCliCompleteSingle(
   cfg: AshlrConfig,
   model: string,
   stats?: JudgeCallStats,
-): (system: string, user: string) => Promise<string> {
-  return async (system: string, user: string): Promise<string> => {
+): JudgeComplete {
+  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
     try {
       // M337 (review fix): reset the shared holder EVERY call — a failed or
       // usage-less call must record NOTHING, never the previous proposal's
@@ -790,7 +840,10 @@ function buildClaudeCliCompleteSingle(
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
       if (!cmd) return '';
-      const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
+      const result = await spawnEngine(cmd, cfg, {
+        timeoutMs: 300_000,
+        ...(signal ? { signal } : {}),
+      }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
       // claude --output-format json → { result: "<text>", total_cost_usd, usage, ... }
       try {
@@ -839,8 +892,8 @@ function buildCodexCliComplete(
   cfg: AshlrConfig,
   model: string,
   stats?: JudgeCallStats,
-): (system: string, user: string) => Promise<string> {
-  return async (system: string, user: string): Promise<string> => {
+): JudgeComplete {
+  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
     try {
       // M337 (review fix): reset the shared holder EVERY call (see the claude
       // single-shot builder above).
@@ -855,7 +908,10 @@ function buildCodexCliComplete(
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });
       if (!cmd) return '';
-      const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
+      const result = await spawnEngine(cmd, cfg, {
+        timeoutMs: 300_000,
+        ...(signal ? { signal } : {}),
+      }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
       // codex output is plain text — model + latency only (no parseable usage).
       if (stats) {
@@ -888,7 +944,7 @@ function resolveJudgeClient(
   ollamaBaseUrl: string,
   judgeModel: string,
 ): {
-  complete: (system: string, user: string) => Promise<string>;
+  complete: JudgeComplete;
   judgeEngine: string;
   /** M322: shared telemetry holder — populated per call by the CLI complete fns. */
   stats: JudgeCallStats;
@@ -963,8 +1019,8 @@ function resolveJudgeClient(
   const localBaseUrl = ollamaBaseUrl;
   const localModel = judgeModel;
   return {
-    complete: (system: string, user: string) =>
-      ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0),
+    complete: (system: string, user: string, signal?: AbortSignal) =>
+      ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0, signal),
     judgeEngine: localModel,
     stats,
   };
@@ -993,7 +1049,7 @@ function resolveJudgeClient(
  */
 export function resolveFrontierJudgeClient(
   cfg: AshlrConfig,
-): { complete: (system: string, user: string) => Promise<string>; model: string } | null {
+): { complete: JudgeComplete; model: string } | null {
   try {
     const judgeModel =
       ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
@@ -1155,7 +1211,7 @@ export async function runManager(
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
-    let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+    let judgeClient: { complete: JudgeComplete } | null = null;
     let judgeStats: JudgeCallStats | null = null;
 
     // Step 1: resolveJudgeClient — Claude CLI when allowed+installed, else local-72b.

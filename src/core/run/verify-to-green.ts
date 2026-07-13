@@ -28,7 +28,7 @@ export interface IterateToGreenResult {
   green: boolean;
   /** Repair iterations actually spent (0 when disabled). */
   iterations: number;
-  stopped: 'green' | 'max-iterations' | 'repair-failed' | 'disabled';
+  stopped: 'green' | 'max-iterations' | 'repair-failed' | 'disabled' | 'cancelled';
   /** The last verification failure text ('' when green). */
   lastFailure: string;
 }
@@ -45,6 +45,8 @@ export async function iterateToGreen(opts: {
    * the proposal is simply not filed; nothing is ever force-merged).
    */
   repair: (failureTail: string) => Promise<{ ok: boolean } | null>;
+  /** Owner cancellation shared by repair and verification. */
+  signal?: AbortSignal;
 }): Promise<IterateToGreenResult> {
   const v2g = (opts.cfg.foundry?.verifyToGreen ?? {}) as VerifyToGreenCfg;
   if (v2g.enabled !== true) {
@@ -55,12 +57,21 @@ export async function iterateToGreen(opts: {
 
   let failure = opts.initialFailure;
   for (let i = 1; i <= maxIter; i++) {
+    if (opts.signal?.aborted) {
+      return { green: false, iterations: i - 1, stopped: 'cancelled', lastFailure: failure };
+    }
     try {
       const r = await opts.repair(failure.slice(-tailBytes));
+      if (opts.signal?.aborted) {
+        return { green: false, iterations: i, stopped: 'cancelled', lastFailure: failure };
+      }
       if (!r || !r.ok) {
         return { green: false, iterations: i, stopped: 'repair-failed', lastFailure: failure };
       }
       const v = await opts.verify();
+      if (opts.signal?.aborted) {
+        return { green: false, iterations: i, stopped: 'cancelled', lastFailure: failure };
+      }
       if (v.pass) return { green: true, iterations: i, stopped: 'green', lastFailure: '' };
       failure = v.reason;
     } catch {

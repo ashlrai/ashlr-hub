@@ -259,6 +259,200 @@ describe('RECURSION GUARD — refuses when ASHLR_IN_SWARM is set', () => {
   });
 });
 
+describe('runSwarm — owner cancellation', () => {
+  it('returns aborted without planning or executing when pre-cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runSwarm(
+      { goal: 'cancelled swarm' },
+      makeConfig(),
+      { signal: controller.signal },
+      nullSink,
+    );
+
+    expect(result.status).toBe('aborted');
+    expect(result.result).toContain('cancelled before execution');
+    expect(mockPlanSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('forwards cancellation to builtin tasks and stops later phases', async () => {
+    const controller = new AbortController();
+    mockPlanSwarm.mockResolvedValueOnce(minimalPlan('cancel in flight'));
+    mockRunGoal.mockImplementationOnce(async (_goal: string, _cfg: AshlrConfig, runOpts: { signal?: AbortSignal }) => {
+      expect(runOpts.signal).toBe(controller.signal);
+      controller.abort();
+      return {
+        id: 'cancelled-task',
+        goal: 'cancel in flight',
+        status: 'aborted',
+        result: 'Run cancelled.',
+        usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+        tasks: [],
+        steps: [],
+      } as RunState;
+    });
+
+    const result = await runSwarm(
+      { goal: 'cancel in flight' },
+      makeConfig(),
+      { signal: controller.signal },
+      nullSink,
+    );
+
+    expect(result.status).toBe('aborted');
+    expect(result.result).toContain('cancelled during phase scaffold');
+    expect(result.tasks[0]?.status).toBe('cancelled');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops a cancelled planner before sandbox, tasks, or proposal capture', async () => {
+    const controller = new AbortController();
+    const reason = new Error('planning cancelled');
+    reason.name = 'AbortError';
+    mockPlanSwarm.mockImplementationOnce(
+      async (_input: unknown, _cfg: AshlrConfig, signal?: AbortSignal) => {
+        expect(signal).toBe(controller.signal);
+        controller.abort(reason);
+        throw reason;
+      },
+    );
+
+    const result = await runSwarm(
+      { goal: 'cancel during planning' },
+      makeConfig(),
+      {
+        signal: controller.signal,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        project: path.join(tmpHome, 'not-a-repository'),
+      },
+      nullSink,
+    );
+
+    expect(result.status).toBe('aborted');
+    expect(result.result).toBe('Swarm cancelled during planning.');
+    expect(result.tasks).toEqual([]);
+    expect(result.proposalOutcome).toBeUndefined();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('returns a pre-cancelled resume with its persisted identity and state unchanged', async () => {
+    const plan: SwarmPlan = {
+      specId: null,
+      goal: 'preserve resume state',
+      tasks: [{ id: 'scaffold-1', phase: 'scaffold', goal: 'Fail once', deps: [] }],
+    };
+    mockPlanSwarm.mockResolvedValueOnce(plan);
+    mockRunGoal.mockRejectedValueOnce(new Error('ordinary failure'));
+
+    const first = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      {},
+      nullSink,
+    );
+    const snapshot = loadSwarm(first.id);
+    expect(snapshot).not.toBeNull();
+    const callsBeforeResume = mockRunGoal.mock.calls.length;
+
+    delete process.env.ASHLR_IN_SWARM;
+    const controller = new AbortController();
+    controller.abort();
+    const resumed = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      { resumeId: first.id, signal: controller.signal },
+      nullSink,
+    );
+
+    expect(resumed).toEqual(snapshot);
+    expect(resumed.id).toBe(first.id);
+    expect(mockRunGoal).toHaveBeenCalledTimes(callsBeforeResume);
+  });
+
+  it('resets only a cancelled task when resuming the same swarm', async () => {
+    const controller = new AbortController();
+    const plan: SwarmPlan = {
+      specId: null,
+      goal: 'resume cancelled task',
+      tasks: [{ id: 'scaffold-1', phase: 'scaffold', goal: 'Retry me', deps: [] }],
+    };
+    mockPlanSwarm.mockResolvedValueOnce(plan);
+    mockRunGoal.mockImplementationOnce(async () => {
+      controller.abort();
+      return {
+        id: 'cancelled-task',
+        goal: 'Retry me',
+        status: 'aborted',
+        result: 'Run cancelled.',
+        terminationReason: 'cancelled',
+        usage: { tokensIn: 4, tokensOut: 2, steps: 0, estCostUsd: 0 },
+        tasks: [],
+        steps: [],
+      } as RunState;
+    });
+
+    const first = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      { signal: controller.signal },
+      nullSink,
+    );
+    expect(first.status).toBe('aborted');
+    expect(first.tasks[0]?.status).toBe('cancelled');
+
+    delete process.env.ASHLR_IN_SWARM;
+    const resumed = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      { resumeId: first.id },
+      nullSink,
+    );
+
+    expect(resumed.id).toBe(first.id);
+    expect(resumed.status).toBe('done');
+    expect(resumed.tasks[0]?.status).toBe('done');
+    expect(mockPlanSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal).toHaveBeenCalledTimes(2);
+    expect(resumed.usage.tokensIn).toBe(104);
+    expect(resumed.usage.tokensOut).toBe(52);
+  });
+
+  it('does not rerun an ordinary failed task on resume', async () => {
+    const plan: SwarmPlan = {
+      specId: null,
+      goal: 'do not retry failure',
+      tasks: [{ id: 'scaffold-1', phase: 'scaffold', goal: 'Fail normally', deps: [] }],
+    };
+    mockPlanSwarm.mockResolvedValueOnce(plan);
+    mockRunGoal.mockRejectedValueOnce(new Error('ordinary failure'));
+
+    const first = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      {},
+      nullSink,
+    );
+    expect(first.status).toBe('failed');
+    expect(first.tasks[0]?.status).toBe('failed');
+
+    delete process.env.ASHLR_IN_SWARM;
+    const resumed = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      { resumeId: first.id },
+      nullSink,
+    );
+
+    expect(resumed.status).toBe('failed');
+    expect(resumed.tasks[0]?.status).toBe('failed');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // --dry-run — plan without executing
 // ---------------------------------------------------------------------------
@@ -735,6 +929,27 @@ describe('runSwarm — successful completion', () => {
     // 2 tasks × 50 tokensIn = 100 tokensIn minimum
     expect(result.usage.tokensIn).toBeGreaterThanOrEqual(100);
     expect(result.usage.tokensOut).toBeGreaterThanOrEqual(50);
+  });
+
+  it('includes exact planner tokens without inventing planner steps or cost', async () => {
+    runGoalUsagePerTask = { tokensIn: 50, tokensOut: 25, steps: 1, estCostUsd: 0 };
+    const plan = minimalPlan('planner usage aggregate');
+    plan.usage = { tokensIn: 7, tokensOut: 3 };
+    mockPlanSwarm.mockResolvedValueOnce(plan);
+
+    const result = await runSwarm(
+      { goal: plan.goal },
+      makeConfig(),
+      { budget: { maxTokens: 1_000_000, maxSteps: 1000 }, parallel: 1 },
+      nullSink,
+    );
+
+    expect(result.usage).toEqual({
+      tokensIn: 107,
+      tokensOut: 53,
+      steps: 2,
+      estCostUsd: 0,
+    });
   });
 
   it('result.goal matches the input goal', async () => {

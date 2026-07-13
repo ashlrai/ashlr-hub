@@ -335,6 +335,115 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
   });
 });
 
+describe('pulse-sync — cancellation fences', () => {
+  beforeEach(enablePulse);
+
+  it('a pre-aborted full sync performs no network or local command work', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runPulseSync(cfg, { signal: controller.signal });
+
+    expect(result.detail).toContain('aborted before start');
+    expect(exporter.exportFleetEvents).not.toHaveBeenCalled();
+    expect(exporter.pollFleetCommands).not.toHaveBeenCalled();
+    expect(exporter.claimFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.shipDepEdges).not.toHaveBeenCalled();
+    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(inbox.setStatus).not.toHaveBeenCalled();
+    expect(policy.enroll).not.toHaveBeenCalled();
+  });
+
+  it('an abort while a claim is outstanding prevents its apply and all later commands', async () => {
+    const controller = new AbortController();
+    queueCommands([
+      cmd({ id: 'first', kind: 'enroll_repo', payload: { path: '/repo/first' } }),
+      cmd({ id: 'second', kind: 'assign_goal', payload: { objective: 'must not run' } }),
+    ]);
+    let settleClaim!: () => void;
+    vi.mocked(exporter.claimFleetCommand).mockImplementationOnce(() => new Promise((resolveClaim) => {
+      settleClaim = () => resolveClaim({ ok: true, skipped: false, status: 200, detail: 'claimed' });
+    }));
+
+    const running = runPulseSync(cfg, { signal: controller.signal });
+    await vi.waitFor(() => expect(exporter.claimFleetCommand).toHaveBeenCalledTimes(1));
+    controller.abort();
+    settleClaim();
+    const result = await running;
+
+    expect(result.detail).toContain('aborted during command sync');
+    expect(exporter.claimFleetCommand).toHaveBeenCalledTimes(1);
+    expect(policy.enroll).not.toHaveBeenCalled();
+    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.shipDepEdges).not.toHaveBeenCalled();
+  });
+
+  it('an abort during a local apply preserves that outcome but prevents writeback and later commands', async () => {
+    const controller = new AbortController();
+    queueCommands([
+      cmd({ id: 'applied', kind: 'enroll_repo', payload: { path: '/repo/applied' } }),
+      cmd({ id: 'later', kind: 'assign_goal', payload: { objective: 'must not run' } }),
+    ]);
+    vi.mocked(policy.enroll).mockImplementationOnce(() => controller.abort());
+
+    const result = await runPulseSync(cfg, { signal: controller.signal });
+
+    expect(result.detail).toContain('aborted during command sync');
+    expect(result.commands).toEqual([
+      expect.objectContaining({ id: 'applied', outcome: 'done' }),
+    ]);
+    expect(policy.enroll).toHaveBeenCalledTimes(1);
+    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(exporter.claimFleetCommand).toHaveBeenCalledTimes(1);
+    expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.shipDepEdges).not.toHaveBeenCalled();
+  });
+
+  it('an abort while tick export is outstanding prevents command polling', async () => {
+    const controller = new AbortController();
+    let settleExport!: () => void;
+    vi.mocked(exporter.exportFleetEvents).mockImplementationOnce(() => new Promise((resolveExport) => {
+      settleExport = () => resolveExport({ ok: true, skipped: false, status: 200, spanCount: 1, detail: 'ok' });
+    }));
+
+    const running = runPulseSync(cfg, { signal: controller.signal });
+    await vi.waitFor(() => expect(exporter.exportFleetEvents).toHaveBeenCalledTimes(1));
+    controller.abort();
+    settleExport();
+    const result = await running;
+
+    expect(result.detail).toContain('aborted after tick export');
+    expect(exporter.pollFleetCommands).not.toHaveBeenCalled();
+    expect(exporter.claimFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.shipDepEdges).not.toHaveBeenCalled();
+  });
+
+  it('an abort while dependency shipping is outstanding starts no later repo shipment', async () => {
+    const controller = new AbortController();
+    vi.mocked(policy.listEnrolled).mockReturnValue(['/repo/first', '/repo/second']);
+    const dep = await import('../src/core/integrations/dep-parser.js');
+    vi.mocked(dep.parseRepoDeps).mockReturnValue({
+      repoRef: 'org/repo',
+      edges: [{ src: 's', dst: 'd', kind: 'depends_on', ecosystem: 'npm', name: 'd', depKind: 'prod', range: '^1' }],
+    } as ReturnType<typeof dep.parseRepoDeps>);
+    let settleShip!: () => void;
+    vi.mocked(exporter.shipDepEdges).mockImplementationOnce(() => new Promise((resolveShip) => {
+      settleShip = () => resolveShip({ ok: true, skipped: false, status: 200, spanCount: 1, detail: 'ok' });
+    }));
+
+    const running = shipEnrolledRepoDeps(cfg, { signal: controller.signal });
+    await vi.waitFor(() => expect(exporter.shipDepEdges).toHaveBeenCalledTimes(1));
+    controller.abort();
+    settleShip();
+
+    await expect(running).resolves.toBe(0);
+    expect(exporter.shipDepEdges).toHaveBeenCalledTimes(1);
+    expect(dep.parseRepoDeps).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // (c) NEVER THROWS on a simulated Pulse HTTP failure (best-effort)
 // ---------------------------------------------------------------------------

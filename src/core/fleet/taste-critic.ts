@@ -12,7 +12,8 @@
  *   import { scoreTaste } from '../fleet/taste-critic.js'
  *   const taste = await scoreTaste(proposal, { repo, direction }, cfg)
  *
- * Never throws — on any failure returns a neutral 'solid' verdict.
+ * Provider failures return a neutral 'solid' verdict. Caller cancellation is
+ * rethrown after the owned provider settles.
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
@@ -47,6 +48,21 @@ export interface TasteContext {
    * When absent the critic falls back to built-in ashlr direction summary.
    */
   direction?: string | null;
+}
+
+export interface ScoreTasteOptions {
+  signal?: AbortSignal;
+}
+
+function tasteAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(
+    typeof signal.reason === 'string' && signal.reason.length > 0
+      ? signal.reason
+      : 'Taste scoring cancelled',
+  );
+  error.name = 'AbortError';
+  return error;
 }
 
 // ---------------------------------------------------------------------------
@@ -211,21 +227,29 @@ function parseVerdict(v: unknown, overall: number): TasteVerdict {
  * @param proposal The proposal to score (diff + title + summary used).
  * @param ctx      Repo + direction context for vision-alignment judgment.
  * @param cfg      AshlrConfig — used for frontier client resolution.
- * @returns        TasteScore — never throws; returns neutral on any failure.
+ * @returns        TasteScore — returns neutral on provider/parse failure.
  */
 export async function scoreTaste(
   proposal: Proposal,
   ctx: TasteContext,
   cfg: AshlrConfig,
+  options: ScoreTasteOptions = {},
 ): Promise<TasteScore> {
+  if (options.signal?.aborted) throw tasteAbortReason(options.signal);
+
   // Resolve the frontier client via the M176 resolver (same as automerge-pass).
-  let client: { complete: (system: string, user: string) => Promise<string> } | null = null;
+  let client: {
+    complete: (system: string, user: string, signal?: AbortSignal) => Promise<string>;
+  } | null = null;
   try {
     const { resolveFrontierJudgeClient } = await import('./manager.js');
     client = resolveFrontierJudgeClient(cfg);
   } catch {
+    if (options.signal?.aborted) throw tasteAbortReason(options.signal);
     return neutralScore('Frontier client unavailable (manager.js import failed).');
   }
+
+  if (options.signal?.aborted) throw tasteAbortReason(options.signal);
 
   if (!client) {
     return neutralScore('No frontier client configured — returning neutral taste score.');
@@ -235,8 +259,9 @@ export async function scoreTaste(
 
   let raw: string;
   try {
-    raw = await client.complete(TASTE_SYSTEM_PROMPT, userPrompt);
+    raw = await client.complete(TASTE_SYSTEM_PROMPT, userPrompt, options.signal);
   } catch (err) {
+    if (options.signal?.aborted) throw tasteAbortReason(options.signal);
     return neutralScore(
       `Frontier call failed: ${err instanceof Error ? err.message : String(err)}`,
     );

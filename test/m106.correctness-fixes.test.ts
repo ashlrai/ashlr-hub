@@ -79,14 +79,25 @@ vi.mock('../src/core/config.js', async () => {
   };
 });
 
+const mockExportToPulse = vi.fn();
+vi.mock('../src/core/fleet/pulse-export.js', () => ({
+  exportToPulse: (...args: unknown[]) => mockExportToPulse(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — after mocks
 // ---------------------------------------------------------------------------
 
-import { tick } from '../src/core/daemon/loop.js';
+import { saveResidentDaemonState, tick } from '../src/core/daemon/loop.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
-import { loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
+import {
+  acquireDaemonLock,
+  daemonLockPath,
+  loadDaemonState,
+  releaseDaemonLock,
+  saveDaemonState,
+} from '../src/core/daemon/state.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,6 +161,7 @@ beforeEach(() => {
   mockRunAutoMergePass.mockReset();
   mockBuildBacklog.mockReset();
   mockLoadConfig.mockReset();
+  mockExportToPulse.mockReset();
 
   routeResult = { backend: 'builtin', tier: 'local', reason: 'test' };
   backlogItems = [];
@@ -169,6 +181,7 @@ beforeEach(() => {
     usage: { estCostUsd: 0, totalTokens: 0, steps: 1 },
   }));
   mockLoadConfig.mockImplementation(() => makeCfg());
+  mockExportToPulse.mockResolvedValue(true);
 
   delete process.env.ASHLR_IN_DAEMON;
   delete process.env.ASHLR_IN_SWARM;
@@ -199,52 +212,94 @@ afterEach(() => {
 
 describe('M106 BUG1 — pulse watermark narrow write does not clobber tick state', () => {
   it('synchronous tick accounting survives a concurrent async watermark write', async () => {
-    // The bug: the fire-and-forget async export called loadDaemonState() AFTER
-    // the tick saved state, set ONLY lastPulseExportAt, then saveDaemonState() —
-    // overwriting the concurrent tick's todaySpentUsd / itemsProcessed / ticks.
-    //
-    // The fix: sinceTs is captured synchronously from the already-saved state;
-    // the async path does a narrow read-modify-write touching ONLY lastPulseExportAt
-    // on the freshest state at write time.
-    //
-    // We verify the fix by confirming the source-level pattern: the sinceTs
-    // capture is before the async import, and the async path re-loads state
-    // immediately before writing rather than holding a stale reference.
-    const loopSrc = fs.readFileSync(
-      path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../src/core/daemon/loop.ts'),
-      'utf8',
-    );
-    // sinceTs must be captured synchronously from the state already persisted.
-    expect(loopSrc).toMatch(/const sinceTs = state\.lastPulseExportAt/);
-    // The async path must re-load the freshest state immediately before writing.
-    expect(loopSrc).toMatch(/const fresh = loadDaemonState\(\)/);
-    // The async path must touch ONLY lastPulseExportAt on the fresh state.
-    expect(loopSrc).toMatch(/fresh\.lastPulseExportAt = tickRecord\.ts/);
-    // There must be no top-level loadDaemonState() call inside the async callback
-    // that then calls saveDaemonState on a potentially stale snapshot of the
-    // full state (the old bug pattern).
-    // The old pattern was: loadDaemonState → stateToUpdate.lastPulseExportAt = ... → saveDaemonState
-    // Now it must be: fresh = loadDaemonState → fresh.lastPulseExportAt = ... → saveDaemonState
-    expect(loopSrc).not.toMatch(/stateToUpdate\.lastPulseExportAt/);
+    enroll(tmpRepo);
+    backlogItems = [makeItem('pulse-watermark', tmpRepo)];
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    const startedAt = new Date().toISOString();
+    saveDaemonState({
+      running: true,
+      pid: process.pid,
+      startedAt,
+      lastTickAt: null,
+      todayDate: startedAt.slice(0, 10),
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      ticks: [],
+    });
+    let resolveExport!: (ok: boolean) => void;
+    let exportResolved = false;
+    mockExportToPulse.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolveExport = (ok) => {
+        exportResolved = true;
+        resolve(ok);
+      };
+    }));
+
+    try {
+      const tickRecord = await tick(makeCfg({ pulse: { enabled: true } }), {
+        dryRun: false,
+        ownerLock: acquired.lock,
+      });
+      await vi.waitFor(() => expect(mockExportToPulse).toHaveBeenCalledTimes(1));
+
+      const concurrentState = {
+        ...loadDaemonState(),
+        todaySpentUsd: 4.25,
+        itemsProcessed: 17,
+      };
+      expect(saveResidentDaemonState(acquired.lock, concurrentState).ok).toBe(true);
+
+      resolveExport(true);
+      await vi.waitFor(() => {
+        expect(loadDaemonState()).toMatchObject({
+          lastPulseExportAt: tickRecord.ts,
+          todaySpentUsd: 4.25,
+          itemsProcessed: 17,
+        });
+      });
+    } finally {
+      if (!exportResolved) resolveExport?.(false);
+      releaseDaemonLock(acquired.lock);
+    }
   });
 
-  it('async watermark write uses fresh state re-load (source audit)', () => {
-    // The fix introduces a narrow read-modify-write pattern in the async export:
-    // it reloads the FRESHEST state immediately before touching lastPulseExportAt,
-    // so it can never overwrite concurrent accounting written between the export
-    // call and the write.  Verify the corrected source shape.
-    const loopSrc = fs.readFileSync(
-      path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../src/core/daemon/loop.ts'),
-      'utf8',
-    );
-    // The async callback must reload state before writing the watermark.
-    expect(loopSrc).toMatch(/const fresh = loadDaemonState\(\)/);
-    // It must write onto that fresh object.
-    expect(loopSrc).toMatch(/fresh\.lastPulseExportAt = tickRecord\.ts/);
-    // Then persist only that narrow update.
-    expect(loopSrc).toMatch(/saveDaemonState\(fresh\)/);
-    // The old stale-named variable must be gone.
-    expect(loopSrc).not.toMatch(/stateToUpdate/);
+  it('a stale token-validated state save cannot overwrite successor daemon state', () => {
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    const successorStartedAt = '2026-07-13T12:00:00.000Z';
+    const successorState = {
+      running: true,
+      pid: process.pid,
+      startedAt: successorStartedAt,
+      lastTickAt: successorStartedAt,
+      todayDate: successorStartedAt.slice(0, 10),
+      todaySpentUsd: 8.5,
+      itemsProcessed: 23,
+      ticks: [],
+    };
+    fs.writeFileSync(daemonLockPath(), JSON.stringify({
+      pid: process.pid,
+      token: 'successor-token',
+      hostname: 'successor-host',
+      acquiredAt: successorStartedAt,
+      heartbeatAt: successorStartedAt,
+    }, null, 2) + '\n', 'utf8');
+    saveDaemonState(successorState);
+    const successorRaw = fs.readFileSync(path.join(tmpHome, '.ashlr', 'daemon.json'), 'utf8');
+
+    const staleSave = saveResidentDaemonState(acquired.lock, {
+      ...successorState,
+      todaySpentUsd: 99,
+      itemsProcessed: 99,
+      lastPulseExportAt: new Date().toISOString(),
+    });
+
+    expect(staleSave.ok).toBe(false);
+    expect(loadDaemonState()).toEqual(successorState);
+    expect(fs.readFileSync(path.join(tmpHome, '.ashlr', 'daemon.json'), 'utf8')).toBe(successorRaw);
   });
 });
 

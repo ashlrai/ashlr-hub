@@ -1753,7 +1753,7 @@ export interface RunTask {
   result?: string;
   /** Token/step usage attributed to this task. */
   usage?: RunUsage;
-  /** Failure reason when status is 'failed', else absent. */
+  /** Failure or cancellation reason, absent for successful/pending work. */
   error?: string;
 }
 
@@ -1847,15 +1847,15 @@ export interface RunState {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   /**
-   * M236: why a stall-terminated run was stopped.
-   * Set only when the run was terminated by the stall monitor (run-monitor.ts).
-   * Undefined for clean exits, normal timeouts, or non-sandboxed runs.
+   * Why an external run was stopped, including explicit caller cancellation.
    */
-  terminationReason?: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'clean-exit' | 'error-exit';
+  terminationReason?: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'cancelled' | 'clean-exit' | 'error-exit';
 }
 
 /** Options accepted by `runGoal` / the `ashlr run` CLI. */
 export interface RunOptions {
+  /** Optional caller-owned cancellation signal for this run. */
+  signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults). */
   budget?: Partial<RunBudget>;
   /** Max independent tasks to execute in parallel. */
@@ -1950,6 +1950,17 @@ export interface ChatResult {
   usage: { tokensIn: number; tokensOut: number };
 }
 
+/**
+ * Callable implementation carried by an agent tool spec.
+ *
+ * The signal is optional so existing one-argument executors remain assignable,
+ * while cancellation-aware tools can own and terminate their in-flight work.
+ */
+export type ToolExecutor<TResult = unknown> = (
+  args: unknown,
+  signal?: AbortSignal,
+) => Promise<TResult>;
+
 /** Thin chat client over the active local provider (Ollama / LM Studio). */
 export interface ProviderClient {
   /** Provider id this client targets. */
@@ -1962,7 +1973,7 @@ export interface ProviderClient {
   /** Whether the underlying model/provider supports tool calls. */
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
-  chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult>;
+  chat(messages: ChatMessage[], tools?: unknown[], signal?: AbortSignal): Promise<ChatResult>;
   /**
    * Streaming chat (M11): invoke `onDelta(textChunk)` for each incremental
    * content token, resolving to the SAME ChatResult shape as `chat()`
@@ -1978,6 +1989,7 @@ export interface ProviderClient {
     messages: ChatMessage[],
     tools: unknown[] | undefined,
     onDelta: (t: string) => void,
+    signal?: AbortSignal,
   ): Promise<ChatResult>;
 }
 
@@ -2559,7 +2571,7 @@ export interface SwarmTaskRun {
   /** Which phase this task belongs to. */
   phase: SwarmPhaseName;
   /** Current lifecycle status. */
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled';
   /** Final task result text, present when done. */
   result?: string;
   /** Token/step usage attributed to this task. */
@@ -2588,6 +2600,8 @@ export interface SwarmPlan {
   goal: string;
   /** All planned tasks across phases (caps tasks per phase <= 6). */
   tasks: SwarmTaskSpec[];
+  /** Exact provider token accounting when the planner returned it. */
+  usage?: Pick<RunUsage, 'tokensIn' | 'tokensOut'>;
 }
 
 /** Full persisted state of a swarm. Lives at ~/.ashlr/swarms/<id>.json. */
@@ -2651,6 +2665,8 @@ export interface SwarmRun {
 
 /** Options accepted by `runSwarm` / the `ashlr swarm` CLI. */
 export interface SwarmOptions {
+  /** Optional owner cancellation shared by planning and every task run. */
+  signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
   budget?: Partial<RunBudget>;
   /** Bounded concurrency for the BUILD phase (default 3, max 8). */

@@ -84,6 +84,7 @@ import type {
 import { getActiveClient } from './provider-client.js';
 import { addUsage, newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
+import type { ModelStepReservation, ReserveModelStep } from './agent-loop.js';
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
@@ -109,6 +110,7 @@ import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { causalMetadata } from '../learning/causal.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
 // NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
@@ -136,6 +138,23 @@ function runsDir(): string {
  * this exact error back to 'pending' so they re-run under the new budget.
  */
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
+const CANCELLED_TASK_ERROR = 'Task cancelled.';
+
+function reportedModelUsage(value: unknown): { tokensIn: number; tokensOut: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const usage = (value as { usage?: { tokensIn?: unknown; tokensOut?: unknown } }).usage;
+  if (
+    typeof usage?.tokensIn !== 'number' ||
+    !Number.isFinite(usage.tokensIn) ||
+    usage.tokensIn < 0 ||
+    typeof usage.tokensOut !== 'number' ||
+    !Number.isFinite(usage.tokensOut) ||
+    usage.tokensOut < 0
+  ) {
+    return undefined;
+  }
+  return { tokensIn: usage.tokensIn, tokensOut: usage.tokensOut };
+}
 
 /**
  * Maximum characters of genome memory injected into the planning prompt.
@@ -329,11 +348,48 @@ function actionCountsForProposalCapture(state: RunState): RunActionCounts | unde
   return counts ? { ...counts } : undefined;
 }
 
+type RunStateWithSandboxRetention = RunState & {
+  sandboxRetention?: SandboxRetentionEvidence;
+};
+
+function sandboxRetentionFrom(
+  result: Pick<SandboxedEngineResult, 'state' | 'sandboxRetention'> | null | undefined,
+): SandboxRetentionEvidence | undefined {
+  return result?.sandboxRetention ?? (result?.state as RunStateWithSandboxRetention | undefined)?.sandboxRetention;
+}
+
+function withSandboxRetention(
+  state: RunState,
+  evidence: SandboxRetentionEvidence | undefined,
+): RunState {
+  return evidence ? ({ ...state, sandboxRetention: evidence } as RunState) : state;
+}
+
+function hasAuthoritativeErrorExit(state: RunState): boolean {
+  return state.status === 'failed' && state.terminationReason === 'error-exit';
+}
+
 function withCapturedProposalMetadata(producerState: RunState, capturedState: RunState): RunState {
-  return {
+  const captureAborted = capturedState.status === 'aborted' && !hasAuthoritativeErrorExit(producerState);
+  const merged = {
     ...producerState,
+    ...(captureAborted
+      ? {
+          status: capturedState.status,
+          result: capturedState.result,
+          updatedAt: capturedState.updatedAt,
+          terminationReason: capturedState.terminationReason,
+        }
+      : {}),
     ...(capturedState.proposalOutcome ? { proposalOutcome: capturedState.proposalOutcome } : {}),
-    ...(capturedState.runEventSummary ? { runEventSummary: capturedState.runEventSummary } : {}),
+    ...(capturedState.runEventSummary
+      ? {
+          runEventSummary: {
+            ...capturedState.runEventSummary,
+            ...(captureAborted ? { status: 'aborted' as const } : {}),
+          },
+        }
+      : {}),
     ...(capturedState.trajectoryId ? { trajectoryId: capturedState.trajectoryId } : {}),
     ...(capturedState.routeSnapshot ? { routeSnapshot: capturedState.routeSnapshot } : {}),
     ...(capturedState.evidenceOutcome ? { evidenceOutcome: capturedState.evidenceOutcome } : {}),
@@ -342,6 +398,11 @@ function withCapturedProposalMetadata(producerState: RunState, capturedState: Ru
     ...(capturedState.routerPolicyVersion ? { routerPolicyVersion: capturedState.routerPolicyVersion } : {}),
     ...(capturedState.learningEpoch ? { learningEpoch: capturedState.learningEpoch } : {}),
   };
+  return withSandboxRetention(
+    merged,
+    (producerState as RunStateWithSandboxRetention).sandboxRetention ??
+      (capturedState as RunStateWithSandboxRetention).sandboxRetention,
+  );
 }
 
 function failedCaptureOutcome(
@@ -456,6 +517,48 @@ function withCumulativeUsage(
       durationMs,
       actionCounts,
     },
+  };
+}
+
+function asCancelledRunState(state: RunState, result = 'Run cancelled.'): RunState {
+  if (hasAuthoritativeErrorExit(state)) return state;
+  return {
+    ...state,
+    status: 'aborted',
+    result,
+    terminationReason: 'cancelled',
+    updatedAt: new Date().toISOString(),
+    ...(state.runEventSummary
+      ? { runEventSummary: { ...state.runEventSummary, status: 'aborted' } }
+      : {}),
+  };
+}
+
+function newCancelledRunState(
+  goal: string,
+  opts: RunOptions,
+  engine = opts.engine ?? 'builtin',
+  provider = 'none',
+): RunState {
+  const now = new Date().toISOString();
+  return {
+    id: opts.runId ?? generateRunId(),
+    goal,
+    engine,
+    provider,
+    createdAt: now,
+    updatedAt: now,
+    budget: {
+      maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+      allowCloud: opts.allowCloud ?? false,
+    },
+    usage: newUsage(),
+    tasks: [],
+    steps: [],
+    status: 'aborted',
+    result: 'Run cancelled before execution.',
+    terminationReason: 'cancelled',
   };
 }
 
@@ -869,6 +972,7 @@ export async function planGoal(
   onUsage?: (usage: { tokensIn: number; tokensOut: number }) => void,
   memoryContext?: string,
   adaptive?: boolean,
+  signal?: AbortSignal,
 ): Promise<RunTask[]> {
   // M41: adaptive path budgets the memory block via the prompt suite; the legacy
   // path keeps the original prepend behavior byte-for-byte.
@@ -890,8 +994,10 @@ export async function planGoal(
 
   let result: import('../types.js').ChatResult;
   try {
-    result = await client.chat(messages);
+    result = await client.chat(messages, undefined, signal);
   } catch (err) {
+    const reportedUsage = reportedModelUsage(err);
+    if (reportedUsage && onUsage) onUsage(reportedUsage);
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[ashlr run] planning call failed: ${msg} — using single-task fallback\n`);
     return [{ id: 't1', goal, deps: [], status: 'pending' }];
@@ -928,7 +1034,12 @@ async function synthesize(
   goal: string,
   tasks: RunTask[],
   client: ProviderClient,
-): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
+  signal?: AbortSignal,
+): Promise<{
+  content: string;
+  usage: { tokensIn: number; tokensOut: number };
+  failed?: boolean;
+}> {
   const doneTasks = tasks.filter((t) => t.status === 'done' && t.result);
   if (doneTasks.length === 0) {
     return {
@@ -950,14 +1061,18 @@ async function synthesize(
   ];
 
   try {
-    const res = await client.chat(messages);
+    const res = await client.chat(messages, undefined, signal);
     return { content: res.content, usage: res.usage };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Best-effort fallback: concatenate task results
     const fallback = doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n');
     process.stderr.write(`[ashlr run] synthesis call failed: ${msg} — using concatenated fallback\n`);
-    return { content: fallback, usage: { tokensIn: 0, tokensOut: 0 } };
+    return {
+      content: fallback,
+      usage: reportedModelUsage(err) ?? { tokensIn: 0, tokensOut: 0 },
+      failed: true,
+    };
   }
 }
 
@@ -1171,15 +1286,25 @@ const TITRR_OUTPUT_CAP = 4_000;
 export async function titrrTestRun(
   worktreePath: string,
   cfg: AshlrConfig,
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string } | null> {
+  const cancelledResult = { ok: false, output: 'TITRR test run cancelled.' };
+  if (signal?.aborted) return cancelledResult;
+
   // Only run the test command — typecheck/lint are out of scope for TITRR.
   const allCmds = detectVerifyCommands(worktreePath);
   const testCmd = allCmds.find((c) => c.kind === 'test');
   if (!testCmd) return null; // no test command → skip gracefully
 
-  const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, {
+  const verifyOptions = {
     timeoutMs: TITRR_TEST_TIMEOUT_MS,
-  });
+    ...(signal ? { signal } : {}),
+  };
+  // The verifier owns subprocess cancellation and resolves only after process
+  // settlement. Await it directly so callers cannot remove the worktree while
+  // the cancelled verifier still has an active cwd or open file handles.
+  const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, verifyOptions);
+  if (signal?.aborted) return cancelledResult;
 
   const trimmed = result.output.length > TITRR_OUTPUT_CAP
     ? result.output.slice(0, TITRR_OUTPUT_CAP) + '\n…[output truncated]'
@@ -1222,6 +1347,15 @@ export async function runGoal(
     const runId = assertSafeExecutionIdentity(opts.runId);
     if (loadRun(runId)) throw new Error(`Run "${runId}" already exists; use resumeId to continue it`);
     opts = { ...opts, runId };
+  }
+  const cancelled = (): boolean => opts.signal?.aborted === true;
+  if (cancelled() && opts.resumeId) {
+    const existing = loadRun(opts.resumeId);
+    if (!existing) throw new Error(`Run "${opts.resumeId}" not found in ${runsDir()}`);
+    return existing;
+  }
+  if (cancelled()) {
+    return newCancelledRunState(goal, opts);
   }
   // Optional CLI progress hook. The CLI (src/cli/run.ts) attaches a non-typed
   // __onStep property to opts to receive live per-step progress. We read it off
@@ -1387,6 +1521,12 @@ export async function runGoal(
             // sandbox creation failed — fall through to builtin
           }
 
+          if (cancelled() && !titrrSandbox) {
+            const cancelledState = newCancelledRunState(goal, opts, engine, 'external');
+            saveRun(cancelledState);
+            return cancelledState;
+          }
+
           if (titrrSandbox) {
             let titrrAttempt = 0;
             let lastApiR: Awaited<ReturnType<typeof runApiModelSandboxed>> | null = null;
@@ -1398,6 +1538,7 @@ export async function runGoal(
 
             try {
               while (titrrAttempt < titrrMax) {
+                if (cancelled()) break;
                 titrrAttempt++;
                 const isLastAttempt = titrrAttempt === titrrMax;
                 const rawApiR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
@@ -1410,6 +1551,7 @@ export async function runGoal(
                   workItemGenerationId: opts.workItemGenerationId,
                   workSource: opts.workSource,
                   delegationScope,
+                  ...(opts.signal ? { signal: opts.signal } : {}),
                   ...(opts.runId ? { runId: opts.runId } : {}),
                 });
                 titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
@@ -1430,6 +1572,12 @@ export async function runGoal(
                 };
                 lastApiR = apiR;
 
+                if (cancelled()) {
+                  lastApiR = { ...apiR, state: asCancelledRunState(apiR.state) };
+                  break;
+                }
+                if (apiR.state.status === 'aborted') break;
+
                 if (apiR.state.status !== 'done') {
                   const propR = await captureSandboxedProposal(engineId, goal, cfg, {
                     sourceRepo: cwd,
@@ -1441,6 +1589,7 @@ export async function runGoal(
                     workItemGenerationId: opts.workItemGenerationId,
                     workSource: opts.workSource,
                     delegationScope,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                     isPartial: true,
                     sourceLabel: 'TITRR api-model failed producer',
                     usage: apiR.state.usage,
@@ -1487,6 +1636,7 @@ export async function runGoal(
                       workItemGenerationId: opts.workItemGenerationId,
                       workSource: opts.workSource,
                       delegationScope,
+                      ...(opts.signal ? { signal: opts.signal } : {}),
                       sourceLabel: 'TITRR api-model required-diff',
                       usage: apiR.state.usage,
                       durationMs: runDurationMs(apiR.state),
@@ -1519,7 +1669,13 @@ export async function runGoal(
                 // and treat as if no test command was found (propose immediately).
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- m140 pins this exact source text
                 const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
-                const titrrResult = realTestLoop ? await titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
+                const titrrResult = realTestLoop
+                  ? await titrrTestRun(titrrSandbox.worktreePath, cfg, opts.signal)
+                  : null;
+                if (cancelled()) {
+                  lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
+                  break;
+                }
                 if (!titrrResult || titrrResult.ok) {
                   const propR = await captureSandboxedProposal(engineId, goal, cfg, {
                     sourceRepo: cwd,
@@ -1531,6 +1687,7 @@ export async function runGoal(
                     workItemGenerationId: opts.workItemGenerationId,
                     workSource: opts.workSource,
                     delegationScope,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                     ...(lastApiR.proposalOutcome?.isPartial === true ? { isPartial: true } : {}),
                     sourceLabel: 'TITRR api-model',
                     usage: lastApiR.state.usage,
@@ -1564,6 +1721,7 @@ export async function runGoal(
                     workItemGenerationId: opts.workItemGenerationId,
                     workSource: opts.workSource,
                     delegationScope,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                     isPartial: true,
                     forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
                     sourceLabel: 'TITRR api-model',
@@ -1598,6 +1756,7 @@ export async function runGoal(
                     workItemGenerationId: opts.workItemGenerationId,
                     workSource: opts.workSource,
                     delegationScope,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                     isPartial: true,
                     forceGateBlockReason,
                     sourceLabel: 'TITRR api-model',
@@ -1626,7 +1785,15 @@ export async function runGoal(
               try { wtMod.removeSandbox(titrrSandbox); } catch { /* best-effort */ }
             }
 
+            if (cancelled() && !lastApiR) {
+              const cancelledState = newCancelledRunState(goal, opts, engine, 'external');
+              saveRun(cancelledState);
+              return cancelledState;
+            }
             if (lastApiR) {
+              if (cancelled()) {
+                lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
+              }
               emit(sink, {
                 kind: 'log',
                 text: lastApiR.proposalId
@@ -1676,6 +1843,12 @@ export async function runGoal(
             // Sandbox creation failed — fall back to the original single-attempt path.
           }
 
+          if (cancelled() && !titrrSandbox) {
+            const cancelledState = newCancelledRunState(goal, opts, engine, 'external');
+            saveRun(cancelledState);
+            return cancelledState;
+          }
+
           if (!titrrSandbox) {
             const fallback = await runEngineSandboxed(engineId, goal, cfg, {
               sourceRepo: cwd,
@@ -1686,10 +1859,18 @@ export async function runGoal(
               workItemGenerationId: opts.workItemGenerationId,
               workSource: opts.workSource,
               delegationScope,
+              ...(opts.signal ? { signal: opts.signal } : {}),
               ...(opts.runId ? { runId: opts.runId } : {}),
             });
-            saveRun(fallback.state);
-            return fallback.state;
+            const fallbackStateWithRetention = withSandboxRetention(
+              fallback.state,
+              sandboxRetentionFrom(fallback),
+            );
+            const fallbackState = cancelled()
+              ? asCancelledRunState(fallbackStateWithRetention)
+              : fallbackStateWithRetention;
+            saveRun(fallbackState);
+            return fallbackState;
           }
 
           let titrrAttempt = 0;
@@ -1702,6 +1883,7 @@ export async function runGoal(
           let titrrActionCounts: RunActionCounts = {};
           let titrrDurationMs = 0;
           const captureTitrrProposal = async (options: { isPartial?: boolean; forceGateBlockReason?: string } = {}) => {
+            if (cancelled()) return;
             const sandbox = titrrSandbox;
             const producer = lastR;
             if (!sandbox || !producer) return;
@@ -1715,6 +1897,7 @@ export async function runGoal(
               workItemGenerationId: opts.workItemGenerationId,
               workSource: opts.workSource,
               delegationScope,
+              ...(opts.signal ? { signal: opts.signal } : {}),
               ...(options.isPartial ? { isPartial: true } : {}),
               ...(options.forceGateBlockReason ? { forceGateBlockReason: options.forceGateBlockReason } : {}),
               sourceLabel: 'TITRR',
@@ -1737,6 +1920,7 @@ export async function runGoal(
 
           try {
             while (titrrAttempt < titrrMax) {
+              if (cancelled()) break;
               titrrAttempt++;
 
               // Run every TITRR model attempt without filing. Once tests pass
@@ -1753,8 +1937,10 @@ export async function runGoal(
                 workItemGenerationId: opts.workItemGenerationId,
                 workSource: opts.workSource,
                 delegationScope,
+                ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
               });
+              const retention = sandboxRetentionFrom(rawR);
               titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage));
               titrrActionCounts = addTitrrActionCounts(
                 titrrActionCounts,
@@ -1763,15 +1949,25 @@ export async function runGoal(
               titrrDurationMs += runDurationMs(rawR.state) ?? 0;
               const r = {
                 ...rawR,
-                state: withCumulativeUsage(
-                  rawR.state,
-                  titrrUsage,
-                  titrrBudget,
-                  titrrActionCounts,
-                  titrrDurationMs,
+                state: withSandboxRetention(
+                  withCumulativeUsage(
+                    rawR.state,
+                    titrrUsage,
+                    titrrBudget,
+                    titrrActionCounts,
+                    titrrDurationMs,
+                  ),
+                  retention,
                 ),
               };
               lastR = r;
+
+              if (retention) break;
+              if (cancelled()) {
+                lastR = { ...r, state: asCancelledRunState(r.state) };
+                break;
+              }
+              if (r.state.status === 'aborted') break;
 
               if (r.state.status !== 'done') {
                 // Preserve useful partial work before the shared sandbox is removed.
@@ -1829,7 +2025,11 @@ export async function runGoal(
                   text: `[TITRR] attempt ${titrrAttempt}/${titrrMax}: running tests in ${testRoot}`,
                 });
               }
-              titrrResult = realTestLoop ? await titrrTestRun(testRoot, cfg) : null;
+              titrrResult = realTestLoop ? await titrrTestRun(testRoot, cfg, opts.signal) : null;
+              if (cancelled()) {
+                lastR = { ...lastR, state: asCancelledRunState(lastR.state) };
+                break;
+              }
 
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.
@@ -1870,14 +2070,22 @@ export async function runGoal(
               });
             }
           } finally {
-            // Always tear down the shared sandbox (idempotent).
-            if (titrrSandbox) {
+            // Unconfirmed process closure quarantines the shared worktree for
+            // orphan recovery; removing it here could race a surviving child.
+            if (titrrSandbox && !sandboxRetentionFrom(lastR)) {
               try { wtMod.removeSandbox(titrrSandbox); } catch { /* idempotent */ }
               titrrSandbox = null;
             }
           }
 
-          const finalR = lastR!;
+          if (!lastR) {
+            const cancelledState = newCancelledRunState(goal, opts, engine, 'external');
+            saveRun(cancelledState);
+            return cancelledState;
+          }
+          const finalR = cancelled()
+            ? { ...lastR, state: asCancelledRunState(lastR.state) }
+            : lastR;
 
           // Annotate the RunState result with the TITRR outcome.
           if (titrrAnnotation) {
@@ -1919,7 +2127,24 @@ export async function runGoal(
 
         // spawnEngine: applies withToolEnv(cfg) + phantom-exec when enabled.
         // M236: now async (streaming spawn + stall monitor).
-        const engineResult = await spawnEngine(cmd, cfg);
+        const engineResult = await spawnEngine(cmd, cfg, {
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        });
+
+        // Preserve any usage parsed from partial engine output even when the
+        // subprocess was cancelled before producing a successful result.
+        if (engineResult.usage) {
+          delegatedState.usage.tokensIn = engineResult.usage.tokensIn;
+          delegatedState.usage.tokensOut = engineResult.usage.tokensOut;
+          delegatedState.usage.steps = 1;
+          delegatedState.usage.estCostUsd = estCostUsd(engine, engineResult.usage.tokensIn, engineResult.usage.tokensOut);
+        }
+
+        if (cancelled() || engineResult.terminationReason === 'cancelled') {
+          const cancelledState = asCancelledRunState(delegatedState);
+          saveRun(cancelledState);
+          return cancelledState;
+        }
 
         if (!engineResult.ok) {
           const errMsg = engineResult.error ?? 'unknown error';
@@ -1930,14 +2155,6 @@ export async function runGoal(
           delegatedState.updatedAt = new Date().toISOString();
           saveRun(delegatedState);
           return delegatedState;
-        }
-
-        // Account for reported usage (e.g. claude --output-format json carries tokens).
-        if (engineResult.usage) {
-          delegatedState.usage.tokensIn = engineResult.usage.tokensIn;
-          delegatedState.usage.tokensOut = engineResult.usage.tokensOut;
-          delegatedState.usage.steps = 1;
-          delegatedState.usage.estCostUsd = estCostUsd(engine, engineResult.usage.tokensIn, engineResult.usage.tokensOut);
         }
 
         delegatedState.status = 'done';
@@ -2035,17 +2252,19 @@ export async function runGoal(
     state = {
       ...existing,
       status: 'running',
+      terminationReason: undefined,
       updatedAt: new Date().toISOString(),
     };
     // Reset tasks that should re-run with the (presumably larger) new budget:
     //  - 'running': were mid-flight when the previous invocation stopped.
-    //  - abort-failures: tasks the budget abort marked 'failed' with the
-    //    sentinel error. Genuine model failures are left as-is so we don't
-    //    loop on a deterministically-failing task.
+    //  - interruption failures: tasks marked by either cancellation or the
+    //    legacy budget-abort sentinel. Genuine model failures are left as-is
+    //    so we don't loop on a deterministically-failing task.
     for (const task of state.tasks) {
       if (
         task.status === 'running' ||
-        (task.status === 'failed' && task.error === ABORT_TASK_ERROR)
+        (task.status === 'failed' &&
+          (task.error === ABORT_TASK_ERROR || task.error === CANCELLED_TASK_ERROR))
       ) {
         task.status = 'pending';
         task.error = undefined;
@@ -2072,6 +2291,80 @@ export async function runGoal(
     };
     saveRun(state);
   }
+
+  const reserveRunModelStep = (
+    taskId: string,
+    kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
+    summary: string,
+    providerForCost: string,
+  ): ModelStepReservation | undefined => {
+    if (
+      cancelled() ||
+      state.usage.steps >= budget.maxSteps ||
+      state.usage.tokensIn + state.usage.tokensOut >= budget.maxTokens
+    ) {
+      return undefined;
+    }
+
+    const step: RunStep = {
+      ts: new Date().toISOString(),
+      taskId,
+      kind,
+      summary,
+      usage: { ...newUsage(), steps: 1 },
+    };
+    state.usage.steps += 1;
+    state.steps.push(step);
+    state.updatedAt = step.ts;
+    saveRun(state);
+
+    let finalized = false;
+    return {
+      finalize(finalSummary, usage) {
+        if (finalized) return;
+        finalized = true;
+        const tokensIn = usage?.tokensIn ?? 0;
+        const tokensOut = usage?.tokensOut ?? 0;
+        state.usage.tokensIn += tokensIn;
+        state.usage.tokensOut += tokensOut;
+        state.usage.estCostUsd += estCostUsd(providerForCost, tokensIn, tokensOut);
+        step.summary = finalSummary;
+        step.usage = { tokensIn, tokensOut, steps: 1, estCostUsd: 0 };
+        state.updatedAt = new Date().toISOString();
+        cliOnStep?.(step, state.tasks);
+        saveRun(state);
+      },
+    };
+  };
+
+  const taskStepAuthority = (taskId: string, providerForCost: string): ReserveModelStep =>
+    () => reserveRunModelStep(taskId, 'model', 'Model call reserved.', providerForCost);
+
+  const verificationClient = (base: ProviderClient, taskId: string): ProviderClient => ({
+    id: base.id,
+    supportsTools: base.supportsTools,
+    ...(base.model ? { model: base.model } : {}),
+    chat: async (messages, chatTools, signal) => {
+      const reservation = reserveRunModelStep(
+        taskId,
+        'model',
+        'Verification model call reserved.',
+        base.id,
+      );
+      if (!reservation) throw new Error('Run step budget exhausted before model verification.');
+      try {
+        const result = await base.chat(messages, chatTools, signal ?? opts.signal);
+        reservation.finalize('Verification model call complete.', result.usage);
+        return result;
+      } catch (err) {
+        reservation.finalize(
+          cancelled() ? 'Verification model call attempted and cancelled.' : 'Verification model call failed.',
+          reportedModelUsage(err),
+        );
+        throw err;
+      }
+    },
+  });
 
   // -- Tool wiring (optional) --------------------------------------------------
   // Default: spec-only gateway tools (exactly today's behavior). With
@@ -2161,6 +2454,9 @@ export async function runGoal(
     const wt = sandboxModule;
     activeSandbox = null;
     try {
+      if (opts.signal?.aborted || state.status === 'aborted' || state.terminationReason === 'cancelled') {
+        return;
+      }
       const diff = wt.sandboxDiff(sb);
       if (diff.files > 0 && diff.patch.trim().length > 0) {
         try {
@@ -2270,59 +2566,55 @@ export async function runGoal(
     }
   }
 
+  let aborted = false;
+  let cancelledAbort = false;
+
   // -- Plan (unless resuming with existing tasks) ------------------------------
   if (state.tasks.length === 0) {
-    const planStep: RunStep = {
-      ts: new Date().toISOString(),
-      taskId: '__plan__',
-      kind: 'plan',
-      summary: `Planning: decomposing goal into tasks`,
-    };
-    state.steps.push(planStep);
-    state.updatedAt = planStep.ts;
-    saveRun(state);
-
-    let planTokensIn = 0;
-    let planTokensOut = 0;
-    const tasks = await planGoal(
-      goal,
-      client,
-      (u) => {
-        planTokensIn = u.tokensIn;
-        planTokensOut = u.tokensOut;
-      },
-      memoryContext || undefined,
-      adaptivePrompts,
+    const planReservation = reserveRunModelStep(
+      '__plan__',
+      'plan',
+      'Planning model call reserved.',
+      client.id,
     );
-    state.tasks = tasks;
-
-    // Charge the planning call to the run budget so usage/cost stay accurate.
-    // (Previously the planning tokens were silently discarded.)
-    // Accumulate incrementally (price ONLY the planning tokens at the planner's
-    // provider) so this is consistent with the per-step accumulation below and
-    // never re-prices later task tokens at the planner's provider.
-    state.usage.tokensIn += planTokensIn;
-    state.usage.tokensOut += planTokensOut;
-    state.usage.steps += 1;
-    state.usage.estCostUsd += estCostUsd(client.id, planTokensIn, planTokensOut);
-    state.updatedAt = new Date().toISOString();
-
-    const planDoneStep: RunStep = {
-      ts: state.updatedAt,
-      taskId: '__plan__',
-      kind: 'plan',
-      summary: `Planned ${tasks.length} task(s): ${tasks.map((t) => t.id).join(', ')}`,
-      usage: { tokensIn: planTokensIn, tokensOut: planTokensOut, steps: 1, estCostUsd: 0 },
-    };
-    state.steps.push(planDoneStep);
-    cliOnStep?.(planDoneStep, state.tasks);
-    saveRun(state);
+    if (!planReservation) {
+      aborted = true;
+      cancelledAbort = cancelled();
+    } else {
+      let planTokensIn = 0;
+      let planTokensOut = 0;
+      const tasks = await planGoal(
+        goal,
+        client,
+        (u) => {
+          planTokensIn = u.tokensIn;
+          planTokensOut = u.tokensOut;
+        },
+        memoryContext || undefined,
+        adaptivePrompts,
+        opts.signal,
+      );
+      state.tasks = tasks;
+      planReservation.finalize(
+        cancelled()
+          ? 'Planning model call attempted and cancelled.'
+          : `Planned ${tasks.length} task(s): ${tasks.map((t) => t.id).join(', ')}`,
+        { tokensIn: planTokensIn, tokensOut: planTokensOut },
+      );
+      if (cancelled()) {
+        aborted = true;
+        cancelledAbort = true;
+      }
+    }
   }
 
   // -- DAG execution loop ------------------------------------------------------
-  let aborted = false;
-
   while (!allTerminal(state.tasks) && !aborted) {
+    if (cancelled()) {
+      aborted = true;
+      cancelledAbort = true;
+      break;
+    }
     // Check global budget before picking next batch
     if (overBudget(state.usage, budget)) {
       aborted = true;
@@ -2354,6 +2646,12 @@ export async function runGoal(
     }
     state.updatedAt = new Date().toISOString();
     saveRun(state);
+
+    if (cancelled()) {
+      aborted = true;
+      cancelledAbort = true;
+      break;
+    }
 
     // Run the batch in parallel; each task must not crash the whole run
     await Promise.all(
@@ -2438,6 +2736,7 @@ export async function runGoal(
           const RETRY_POLICY = { maxAttempts: 2, baseDelayMs: 500 };
 
           const isRetryable = (err: unknown): boolean => {
+            if (cancelled()) return false;
             // Don't retry if budget is already exhausted.
             if (overBudget(state.usage, budget)) return false;
             // Retry on network/transient errors (not on deterministic task failures).
@@ -2498,6 +2797,8 @@ export async function runGoal(
                       sink,
                       adaptivePrompts,
                       onStep: makeTaskOnStep(smallerClient.id),
+                      reserveModelStep: taskStepAuthority(task.id, smallerClient.id),
+                      ...(opts.signal ? { signal: opts.signal } : {}),
                     });
                     return;
                   } catch {
@@ -2512,6 +2813,8 @@ export async function runGoal(
                   sink,
                   adaptivePrompts,
                   onStep: taskOnStep,
+                  reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               };
 
@@ -2523,6 +2826,8 @@ export async function runGoal(
                   sink,
                   adaptivePrompts,
                   onStep: taskOnStep,
+                  reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               } else {
                 const healPolicy = defaultHealPolicy();
@@ -2576,6 +2881,7 @@ export async function runGoal(
           // local route again (key absent, allowCloud false, etc.) we just stay local.
           if (
             task.status === 'failed' &&
+            !cancelled() &&
             allowCloud &&
             (cfg.models.escalate?.onFailure ?? false) &&
             !overBudget(state.usage, budget)
@@ -2618,6 +2924,8 @@ export async function runGoal(
                 sink,
                 adaptivePrompts,
                 onStep: taskOnStep,
+                reserveModelStep: taskStepAuthority(task.id, escalatedClient.id),
+                ...(opts.signal ? { signal: opts.signal } : {}),
               }).catch((err) => {
                 if (task.status !== 'failed') {
                   task.status = 'failed';
@@ -2633,7 +2941,7 @@ export async function runGoal(
           // M11/M43: structured verify + bounded verify→repair loop. Skip once
           // over budget (a budget abort can annotate a 'done' result the
           // heuristic would flag as a false-positive fail).
-          if (task.status === 'done' && !overBudget(state.usage, budget)) {
+          if (task.status === 'done' && !cancelled() && !overBudget(state.usage, budget)) {
             const maxRepairs = Math.max(0, opts.maxRepairs ?? (engCtx?.allowExec ? 2 : 1)); // flag-off parity: plain run = 1 retry; engineer runs get up to 2 bounded repairs
             // Single source for the verify options (avoids drift between the
             // initial verify and the in-loop re-verify).
@@ -2642,13 +2950,20 @@ export async function runGoal(
               workspaceRoot: engCtx?.workspaceRoot,
               allowExec: engCtx?.allowExec ?? false,
               cfg,
+              ...(opts.signal ? { signal: opts.signal } : {}),
             };
             let verifyClient = taskClient;
-            let verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
+            let verdict = await verifyTaskStructured(
+              task,
+              verificationClient(verifyClient, task.id),
+              budget,
+              { ...state.usage },
+              verifyOpts,
+            );
             emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
 
             let repair = 0;
-            while (!verdict.ok && repair < maxRepairs && !overBudget(state.usage, budget)) {
+            while (!verdict.ok && repair < maxRepairs && !cancelled() && !overBudget(state.usage, budget)) {
               repair++;
               // M15: verify-failed escalation — may return a cloud route when
               // allowCloud + escalate.onFailure + key present; otherwise local.
@@ -2688,6 +3003,8 @@ export async function runGoal(
                 sink,
                 adaptivePrompts,
                 onStep: makeTaskOnStep(retryClient.id),
+                reserveModelStep: taskStepAuthority(task.id, retryClient.id),
+                ...(opts.signal ? { signal: opts.signal } : {}),
               });
               // Copy the execution outcome back onto the canonical task.
               task.status = repairTask.status;
@@ -2697,7 +3014,13 @@ export async function runGoal(
 
               if ((task.status as string) !== 'done') break;
 
-              verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
+              verdict = await verifyTaskStructured(
+                task,
+                verificationClient(verifyClient, task.id),
+                budget,
+                { ...state.usage },
+                verifyOpts,
+              );
               emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
             }
 
@@ -2726,10 +3049,16 @@ export async function runGoal(
             //   clean pass → append screenshot + console-error evidence to result
             //                so the judge sees the proof.
             if (
+              !cancelled() &&
               (cfg.foundry as { browserVerify?: boolean } | undefined)?.browserVerify === true &&
               isWebApp(repoRoot)
             ) {
-              const bvResult = await verifyInBrowser(repoRoot, cfg);
+              const bvResult = await verifyInBrowser(
+                repoRoot,
+                cfg,
+                opts.signal ? { signal: opts.signal } : undefined,
+              );
+              if (bvResult.aborted || cancelled()) return;
               const folded = foldBrowserVerify(task.result, bvResult);
 
               if (folded !== null) {
@@ -2793,11 +3122,13 @@ export async function runGoal(
     state.updatedAt = new Date().toISOString();
     saveRun(state);
 
-    // Check budget after batch completes
-    if (overBudget(state.usage, budget)) {
+    if (cancelled()) {
       aborted = true;
-      break;
+      cancelledAbort = true;
+    } else if (overBudget(state.usage, budget)) {
+      aborted = true;
     }
+    if (aborted) break;
   }
 
   // -- Abort: mark remaining pending/running tasks as aborted ------------------
@@ -2805,10 +3136,14 @@ export async function runGoal(
     for (const task of state.tasks) {
       if (task.status === 'pending' || task.status === 'running') {
         task.status = 'failed';
-        task.error = ABORT_TASK_ERROR;
+        task.error = cancelledAbort ? CANCELLED_TASK_ERROR : ABORT_TASK_ERROR;
       }
     }
     state.status = 'aborted';
+    if (cancelledAbort) {
+      state.result = 'Run cancelled.';
+      state.terminationReason = 'cancelled';
+    }
     state.updatedAt = new Date().toISOString();
     saveRun(state);
 
@@ -2818,7 +3153,7 @@ export async function runGoal(
 
     // M16: Auto-capture on abort path (fire-and-forget).
     const noCaptureAbort = (opts as RunOptions & { noCapture?: boolean }).noCapture === true;
-    if (!noCaptureAbort) {
+    if (!noCaptureAbort && !cancelledAbort) {
       void (async () => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2836,56 +3171,55 @@ export async function runGoal(
   }
 
   // -- Synthesize final answer -------------------------------------------------
-  const synthStep: RunStep = {
-    ts: new Date().toISOString(),
-    taskId: '__synthesize__',
-    kind: 'synthesize',
-    summary: 'Synthesizing final answer from task results',
-  };
-  state.steps.push(synthStep);
-  state.updatedAt = synthStep.ts;
-  saveRun(state);
-
-  // Budget guard for synthesis: if the run already hit the ceiling, do NOT
-  // spend another model call. Fall back to concatenating the completed task
-  // results so maxTokens stays a hard ceiling at the synthesis boundary too.
+  const doneTasks = state.tasks.filter((t) => t.status === 'done' && t.result);
   let synthResult: string;
-  let synthUsage: { tokensIn: number; tokensOut: number };
-  if (overBudget(state.usage, budget)) {
-    const doneTasks = state.tasks.filter((t) => t.status === 'done' && t.result);
+  const synthReservation = doneTasks.length > 0
+    ? reserveRunModelStep(
+        '__synthesize__',
+        'synthesize',
+        'Synthesis model call reserved.',
+        client.id,
+      )
+    : undefined;
+  if (!synthReservation) {
     synthResult =
       doneTasks.length > 0
         ? doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n')
         : 'No tasks completed successfully — no result to synthesize.';
-    synthUsage = { tokensIn: 0, tokensOut: 0 };
-    process.stderr.write(
-      `[ashlr run] budget reached — skipping model synthesis, using concatenated task results\n`,
-    );
+    if (doneTasks.length > 0) {
+      process.stderr.write(
+        `[ashlr run] budget reached — skipping model synthesis, using concatenated task results\n`,
+      );
+    }
   } else {
-    const synth = await synthesize(goal, state.tasks, client);
+    const synth = await synthesize(goal, state.tasks, client, opts.signal);
     synthResult = synth.content;
-    synthUsage = synth.usage;
+    synthReservation.finalize(
+      synth.failed
+        ? cancelled()
+          ? 'Synthesis model call attempted and cancelled.'
+          : 'Synthesis model call failed; used concatenated fallback.'
+        : 'Synthesis complete',
+      synth.usage,
+    );
   }
 
-  state.usage.tokensIn += synthUsage.tokensIn;
-  state.usage.tokensOut += synthUsage.tokensOut;
-  state.usage.steps += 1;
-  // Accumulate incrementally (price ONLY the synthesis tokens at the synthesis
-  // provider). Recomputing from cumulative totals at client.id here would CLOBBER
-  // the per-step mixed-provider cost already accumulated by the task loop —
-  // re-pricing earlier cloud-escalation tokens at the local run-level provider
-  // (erasing real spend) or vice-versa.
-  state.usage.estCostUsd += estCostUsd(client.id, synthUsage.tokensIn, synthUsage.tokensOut);
+  if (cancelled()) {
+    for (const task of state.tasks) {
+      if (task.status === 'pending' || task.status === 'running') {
+        task.status = 'failed';
+        task.error = CANCELLED_TASK_ERROR;
+      }
+    }
+    state.status = 'aborted';
+    state.result = 'Run cancelled.';
+    state.terminationReason = 'cancelled';
+    state.updatedAt = new Date().toISOString();
+    saveRun(state);
+    await fireEmitRun(state, cfg);
+    return state;
+  }
 
-  const synthDoneStep: RunStep = {
-    ts: new Date().toISOString(),
-    taskId: '__synthesize__',
-    kind: 'synthesize',
-    summary: 'Synthesis complete',
-    usage: { tokensIn: synthUsage.tokensIn, tokensOut: synthUsage.tokensOut, steps: 1, estCostUsd: 0 },
-  };
-  state.steps.push(synthDoneStep);
-  cliOnStep?.(synthDoneStep, state.tasks);
   state.result = synthResult;
 
   // Determine final status

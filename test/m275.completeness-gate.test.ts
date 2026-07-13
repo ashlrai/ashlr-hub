@@ -107,6 +107,7 @@ async function getMocks() {
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
+    runVerifyCommandAsync: vi.mocked(vc.runVerifyCommandAsync),
     existsSync: vi.mocked(fs.existsSync),
     spawnSync: vi.mocked(cp.spawnSync),
   };
@@ -139,6 +140,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
   it('passes when typecheck + test both pass', async () => {
     const { runCompletenessGate } = await getGate();
     const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const controller = new AbortController();
 
     existsSync.mockReturnValue(false); // no lockfile in repo
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
@@ -157,12 +159,81 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       diff: makeDiff(),
       goal: 'improve performance',
       cfg: makeCfg(),
+      signal: controller.signal,
     });
 
     expect(result.pass).toBe(true);
     expect(result.reason).toBeUndefined();
     // typecheck + baseline-test + after-test = 3 calls
     expect(runVerifyCommand).toHaveBeenCalledTimes(3);
+    for (const call of runVerifyCommand.mock.calls) {
+      expect(call[3]).toMatchObject({ signal: controller.signal });
+    }
+  });
+
+  it('returns a distinct cancelled result for a pre-aborted signal', async () => {
+    const { runCompletenessGate } = await getGate();
+    const { detectVerifyCommands, runVerifyCommand } = await getMocks();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runCompletenessGate({
+      worktreePath: FAKE_WORKTREE,
+      diff: makeDiff(),
+      goal: 'cancel before verification',
+      cfg: makeCfg(),
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({ pass: false, cancelled: true });
+    expect(result.reason).toMatch(/cancelled/);
+    expect(detectVerifyCommands).not.toHaveBeenCalled();
+    expect(runVerifyCommand).not.toHaveBeenCalled();
+  });
+
+  it('waits for a typecheck to settle after a 100ms mid-command abort', async () => {
+    const { runCompletenessGate } = await getGate();
+    const { detectVerifyCommands, runVerifyCommandAsync, existsSync } = await getMocks();
+    const controller = new AbortController();
+    let releaseCommand: (() => void) | undefined;
+    let commandStarted: (() => void) | undefined;
+    let abortObserved = false;
+    const started = new Promise<void>((resolve) => { commandStarted = resolve; });
+
+    existsSync.mockReturnValue(false);
+    detectVerifyCommands.mockReturnValue([TYPECHECK_CMD]);
+    runVerifyCommandAsync.mockImplementationOnce(async (_cmd, _dir, _cfg, options) => {
+      commandStarted?.();
+      options?.signal?.addEventListener('abort', () => { abortObserved = true; }, { once: true });
+      await new Promise<void>((resolve) => { releaseCommand = resolve; });
+      return {
+        ...failResult(TYPECHECK_CMD, 'cancelled after owned process settlement'),
+        cancelled: true,
+        failureCategory: 'cancelled',
+      };
+    });
+
+    let gateSettled = false;
+    const pending = runCompletenessGate({
+      worktreePath: FAKE_WORKTREE,
+      diff: makeDiff(),
+      goal: 'cancel running verification',
+      cfg: makeCfg(),
+      signal: controller.signal,
+    }).finally(() => { gateSettled = true; });
+
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    controller.abort();
+    await Promise.resolve();
+
+    expect(abortObserved).toBe(true);
+    expect(gateSettled).toBe(false);
+    releaseCommand?.();
+
+    const result = await pending;
+    expect(result).toMatchObject({ pass: false, cancelled: true });
+    expect(result.reason).toMatch(/typecheck.*cancelled|cancelled.*typecheck/);
   });
 
   it('blocks when typecheck fails', async () => {

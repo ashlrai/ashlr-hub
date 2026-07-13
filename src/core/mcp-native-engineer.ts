@@ -39,7 +39,6 @@
  * error text the model can read.
  */
 
-import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -51,10 +50,9 @@ import {
   realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { resolve, sep, join, relative, basename, dirname } from 'node:path';
 
-import type { AshlrConfig, NativeToolSafety } from './types.js';
+import type { AshlrConfig, NativeToolSafety, ToolExecutor } from './types.js';
 import { loadConfig } from './config.js';
 import {
   renderToolText,
@@ -65,7 +63,11 @@ import { assertMayMutate, killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
 import { withToolEnv } from './env-bridge.js';
 import { applyEdit } from './run/diff.js';
-import { detectVerifyCommands, runVerifyCommandAsync } from './run/verify-commands.js';
+import {
+  detectVerifyCommands,
+  runVerifyCommandAsync,
+  runVerifySubprocessAsync,
+} from './run/verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants — bounds keep a tool reply from blowing agent context.
@@ -97,8 +99,6 @@ const MAX_GREP_FILES = 2000;
 const MAX_GREP_FILE_BYTES = 512 * 1024;
 /** Max matched lines grep returns. */
 const MAX_GREP_LINES = 1000;
-/** Hard byte cap on combined bash stdout+stderr capture (raw). */
-const MAX_BASH_OUTPUT_BYTES = 256 * 1024;
 /** Default bash timeout (ms) and clamp bounds. */
 const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 const MIN_BASH_TIMEOUT_MS = 1;
@@ -178,17 +178,39 @@ function resolveInside(root: string, p: string): string {
   return realAbs;
 }
 
-/** True when `dir` is (or sits within) a git repo we can `git grep` in. */
-function isGitRepo(dir: string): boolean {
-  try {
-    execFileSync('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'], {
-      stdio: 'ignore',
-      timeout: 5_000,
-    });
-    return true;
-  } catch {
-    return false;
+class EngineerToolCancelledError extends Error {
+  constructor(tool: string, detail = '') {
+    super(`${tool} cancelled by invocation owner${detail ? `\n${detail}` : ''}`);
+    this.name = 'EngineerToolCancelledError';
   }
+}
+
+class EngineerToolReportedOutcomeError extends Error {
+  constructor(
+    message: string,
+    readonly payload: BashResult,
+    readonly outcome: 'cancelled' | 'cleanup-unverified',
+  ) {
+    super(message);
+    this.name = 'EngineerToolReportedOutcomeError';
+  }
+}
+
+/** True when `dir` is (or sits within) a git repo we can `git grep` in. */
+async function isGitRepo(dir: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await runVerifySubprocessAsync(
+    ['git', '-C', dir, 'rev-parse', '--is-inside-work-tree'],
+    {
+      cwd: dir,
+      env: minimalEnv(),
+      timeoutMs: 5_000,
+      ...(signal ? { signal } : {}),
+    },
+  );
+  if (result.cancelled) {
+    throw new EngineerToolCancelledError('grep', `${result.stdout}${result.stderr}`.trim());
+  }
+  return result.error === undefined && result.exitCode === 0;
 }
 
 /**
@@ -387,6 +409,10 @@ interface BashResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  cancellationRequested?: boolean;
+  cancelled?: boolean;
+  cleanupVerified?: boolean;
+  error?: string;
 }
 
 /**
@@ -419,6 +445,7 @@ async function runBash(
   args: Record<string, unknown>,
   cfg: AshlrConfig,
   eng: EngineerContext,
+  signal?: AbortSignal,
 ): Promise<BashResult> {
   const command = typeof args['command'] === 'string' ? args['command'] : '';
   if (command.trim() === '') {
@@ -437,54 +464,61 @@ async function runBash(
   // 3. Spawn with minimal env + ashlr non-secret keys layered on top.
   const env = withToolEnv(cfg, minimalEnv());
 
-  return await new Promise<BashResult>((resolvePromise) => {
-    let stdout = '';
-    let stderr = '';
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-
-    const { shell, shellArgs } = resolveShell(command);
-    const child = spawn(shell, shellArgs, {
+  const { shell, shellArgs } = resolveShell(command);
+  const result = await runVerifySubprocessAsync(
+    [shell, ...shellArgs],
+    {
       cwd: eng.workspaceRoot,
       env,
-      timeout,
-      killSignal: 'SIGKILL',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+      timeoutMs: timeout,
+      ...(signal ? { signal } : {}),
+    },
+  );
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (stdoutBytes < MAX_BASH_OUTPUT_BYTES) {
-        const remaining = MAX_BASH_OUTPUT_BYTES - stdoutBytes;
-        stdout += chunk.toString('utf8', 0, Math.min(chunk.length, remaining));
-        stdoutBytes += chunk.length;
-      }
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      if (stderrBytes < MAX_BASH_OUTPUT_BYTES) {
-        const remaining = MAX_BASH_OUTPUT_BYTES - stderrBytes;
-        stderr += chunk.toString('utf8', 0, Math.min(chunk.length, remaining));
-        stderrBytes += chunk.length;
-      }
-    });
-
-    child.on('error', (err: Error & { code?: string }) => {
-      // ETIMEDOUT surfaces here on some platforms; treat as timeout.
-      if (err.code === 'ETIMEDOUT') timedOut = true;
-      resolvePromise({
-        exitCode: null,
-        stdout,
-        stderr: stderr || String(err),
-        timedOut,
-      });
-    });
-
-    child.on('close', (code, signal) => {
-      // node sets signal 'SIGKILL' when the timeout killed the child.
-      if (signal === 'SIGKILL') timedOut = true;
-      resolvePromise({ exitCode: code, stdout, stderr, timedOut });
-    });
-  });
+  const baseResult: BashResult = {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    timedOut: result.timedOut,
+  };
+  if (result.cancelled) {
+    throw new EngineerToolReportedOutcomeError(
+      'bash cancellation completed',
+      {
+        ...baseResult,
+        cancellationRequested: true,
+        cancelled: true,
+        cleanupVerified: true,
+      },
+      'cancelled',
+    );
+  }
+  if (result.error) {
+    if (
+      signal?.aborted &&
+      /process-group ownership identity lost after leader exit/i.test(result.error)
+    ) {
+      const message =
+        'cancellation requested but process-group cleanup unverified after leader exit';
+      const translatedStderr = result.stderr
+        .replace(/cancelled by invocation owner/gi, 'cancellation requested by invocation owner')
+        .replace(/terminating process group/gi, 'process-group cleanup requested');
+      throw new EngineerToolReportedOutcomeError(
+        message,
+        {
+          ...baseResult,
+          stderr: `${translatedStderr.trim()}\n[ashlr-engineer] ${message}`.trim(),
+          cancellationRequested: true,
+          cancelled: false,
+          cleanupVerified: false,
+          error: message,
+        },
+        'cleanup-unverified',
+      );
+    }
+    throw new Error(`bash subprocess failed: ${result.error}`);
+  }
+  return baseResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +678,7 @@ async function handleGrep(
   args: Record<string, unknown>,
   _cfg: AshlrConfig,
   eng: EngineerContext,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const pattern = typeof args['pattern'] === 'string' ? args['pattern'] : '';
   if (pattern === '') throw new Error('grep: "pattern" is required');
@@ -663,24 +698,28 @@ async function handleGrep(
   const globFilter = typeof args['glob'] === 'string' ? args['glob'] : undefined;
 
   // --- git grep (preferred; arg arrays, NO shell) ---
-  if (isGitRepo(eng.workspaceRoot)) {
-    try {
-      const gitArgs = [
-        '-C', base,
-        'grep', '-n', '-I', '-E',
-        '--no-color',
-        '--untracked', // also search new files not yet committed (still skips .gitignored)
-        '-e', pattern,
-      ];
-      if (globFilter) {
-        gitArgs.push('--', globFilter);
-      }
-      const out = execFileSync('git', gitArgs, {
-        timeout: 30_000,
-        encoding: 'utf8',
-        maxBuffer: 8 * 1024 * 1024,
-      });
-      const lines = out.split('\n').filter(Boolean).slice(0, MAX_GREP_LINES);
+  if (await isGitRepo(eng.workspaceRoot, signal)) {
+    const gitArgs = [
+      'git', '-C', base,
+      'grep', '-n', '-I', '-E',
+      '--no-color',
+      '--untracked', // also search new files not yet committed (still skips .gitignored)
+      '-e', pattern,
+    ];
+    if (globFilter) {
+      gitArgs.push('--', globFilter);
+    }
+    const result = await runVerifySubprocessAsync(gitArgs, {
+      cwd: base,
+      env: minimalEnv(),
+      timeoutMs: 30_000,
+      ...(signal ? { signal } : {}),
+    });
+    if (result.cancelled) {
+      throw new EngineerToolCancelledError('grep', `${result.stdout}${result.stderr}`.trim());
+    }
+    if (result.error === undefined && result.exitCode === 0) {
+      const lines = result.stdout.split('\n').filter(Boolean).slice(0, MAX_GREP_LINES);
       return {
         engine: 'git-grep',
         pattern,
@@ -688,15 +727,15 @@ async function handleGrep(
         truncated: lines.length >= MAX_GREP_LINES,
         matches: lines,
       };
-    } catch (err) {
-      // git grep exits 1 when there are zero matches — that is NOT an error.
-      const code = (err as { status?: number }).status;
-      if (code === 1) {
-        return { engine: 'git-grep', pattern, count: 0, truncated: false, matches: [] };
-      }
-      // Any other failure: fall through to the JS scan.
     }
+    // git grep exits 1 when there are zero matches — that is NOT an error.
+    if (result.error === undefined && result.exitCode === 1) {
+      return { engine: 'git-grep', pattern, count: 0, truncated: false, matches: [] };
+    }
+    // Any other failure: fall through to the JS scan.
   }
+
+  if (signal?.aborted) throw new EngineerToolCancelledError('grep');
 
   // --- bounded JS scan fallback ---
   let re: RegExp;
@@ -796,6 +835,7 @@ async function handleEditFile(
   args: Record<string, unknown>,
   cfg: AshlrConfig,
   eng: EngineerContext,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const p = typeof args['path'] === 'string' ? args['path'] : '';
   if (p === '') throw new Error('edit_file: "path" is required');
@@ -854,10 +894,13 @@ async function handleEditFile(
 
   // M140: lint/typecheck-on-edit — fast syntax check after write.
   // Reject a syntactically broken edit BEFORE spending a test run.
-  const lintResult = await runLintOnEdit(abs, eng.workspaceRoot, cfg);
+  const lintResult = await runLintOnEdit(abs, eng.workspaceRoot, cfg, signal);
   if (lintResult !== null && !lintResult.ok) {
     // Roll back the broken write.
     writeFileSync(abs, original, 'utf8');
+    if (lintResult.cancelled) {
+      throw new EngineerToolCancelledError('edit_file', lintResult.output);
+    }
     throw new Error(
       `edit_file: edit rejected — typecheck failed after applying to "${p}".\n` +
       `Fix the syntax error first:\n${lintResult.output.slice(0, 2000)}`
@@ -881,13 +924,17 @@ async function runLintOnEdit(
   _editedFile: string,
   workspaceRoot: string,
   cfg: AshlrConfig,
-): Promise<{ ok: boolean; output: string } | null> {
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string; cancelled?: boolean } | null> {
   try {
     const cmds = detectVerifyCommands(workspaceRoot);
     const typecheck = cmds.find((c) => c.kind === 'typecheck');
     if (!typecheck) return null;
-    const r = await runVerifyCommandAsync(typecheck, workspaceRoot, cfg, { timeoutMs: 30_000 });
-    return { ok: r.ok, output: r.output };
+    const r = await runVerifyCommandAsync(typecheck, workspaceRoot, cfg, {
+      timeoutMs: 30_000,
+      ...(signal ? { signal } : {}),
+    });
+    return { ok: r.ok, output: r.output, ...(r.cancelled ? { cancelled: true } : {}) };
   } catch {
     return null; // graceful degrade — never fail an edit on a lint tool error
   }
@@ -898,8 +945,9 @@ async function handleBash(
   args: Record<string, unknown>,
   cfg: AshlrConfig,
   eng: EngineerContext,
+  signal?: AbortSignal,
 ): Promise<unknown> {
-  const r = await runBash(args, cfg, eng);
+  const r = await runBash(args, cfg, eng, signal);
   return {
     exitCode: r.exitCode,
     stdout: r.stdout,
@@ -921,6 +969,7 @@ interface EngineerTool {
     args: Record<string, unknown>,
     cfg: AshlrConfig,
     eng: EngineerContext,
+    signal?: AbortSignal,
   ) => Promise<unknown>;
 }
 
@@ -1057,6 +1106,7 @@ export async function callEngineerTool(
   name: string,
   rawArgs: unknown,
   eng: EngineerContext,
+  signal?: AbortSignal,
 ): Promise<string> {
   const args: Record<string, unknown> =
     rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
@@ -1068,6 +1118,11 @@ export async function callEngineerTool(
   if (!tool) {
     auditEngineerCall(eng, `${name} keys=${argKeys} — unknown engineer tool`, 'error');
     return renderToolText(`Unknown engineer tool "${name}".`);
+  }
+
+  if (signal?.aborted) {
+    auditEngineerCall(eng, `${tool.name} keys=${argKeys} — cancelled before execution`, 'error');
+    return renderToolText(`${tool.name} cancelled before execution.`);
   }
 
   // ── Kill-switch gate: refuse all non-read tools when KILL is engaged ──────
@@ -1103,13 +1158,26 @@ export async function callEngineerTool(
 
   // ── Execute ───────────────────────────────────────────────────────────────
   try {
-    const payload = await tool.handler(args, cfg, eng);
+    const payload = await tool.handler(args, cfg, eng, signal);
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — ok`, 'ok');
     return renderToolText(payload);
   } catch (err) {
+    if (err instanceof EngineerToolReportedOutcomeError) {
+      auditEngineerCall(
+        eng,
+        `${tool.name} keys=${argKeys} — ${err.outcome}`,
+        'error',
+      );
+      return renderToolText(err.payload);
+    }
     const msg = err instanceof Error ? err.message : String(err);
-    auditEngineerCall(eng, `${tool.name} keys=${argKeys} — error: ${msg}`, 'error');
-    return renderToolText(`${tool.name} failed: ${msg}`);
+    const cancelled = err instanceof EngineerToolCancelledError;
+    auditEngineerCall(
+      eng,
+      `${tool.name} keys=${argKeys} — ${cancelled ? 'cancelled' : `error: ${msg}`}`,
+      'error',
+    );
+    return renderToolText(cancelled ? msg : `${tool.name} failed: ${msg}`);
   }
 }
 
@@ -1122,7 +1190,7 @@ export interface ExecutableToolSpec {
   type: 'function';
   function: { name: string; description: string; parameters: object };
   name: string;
-  fn: (args: unknown) => Promise<string>;
+  fn: ToolExecutor<string>;
 }
 
 /**
@@ -1140,7 +1208,7 @@ export function buildEngineerToolSpecs(eng: EngineerContext): ExecutableToolSpec
     type: 'function' as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
     name: t.name,
-    fn: (args: unknown) => callEngineerTool(t.name, args, eng),
+    fn: (args: unknown, signal?: AbortSignal) => callEngineerTool(t.name, args, eng, signal),
   }));
 }
 
@@ -1155,7 +1223,8 @@ export function buildNativeToolSpecsWithFn(): ExecutableToolSpec[] {
     type: 'function' as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
     name: t.name,
-    fn: async (args: unknown): Promise<string> => {
+    fn: async (args: unknown, signal?: AbortSignal): Promise<string> => {
+      if (signal?.aborted) return renderToolText(`${t.name} cancelled before execution.`);
       const r = await callNativeTool(t.name, args);
       return r.content[0]?.text ?? '';
     },
