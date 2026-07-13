@@ -18,7 +18,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'update', 'spec', 'swarm', 'swarms', 'tui', 'dash', 'serve', 'models',
   'gh', 'vercel', 'wire', 'notify', 'telemetry', 'sandbox', 'audit',
   'enroll', 'backlog', 'inbox', 'daemon', 'ask', 'knowledge', 'reflect',
-  'health', 'goals', 'fleet', 'digest', 'seams', 'verify-safety', 'preflight',
+  'health', 'goals', 'fleet', 'recovery', 'digest', 'seams', 'verify-safety', 'preflight',
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'help',
 ];
 
@@ -41,6 +41,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   inbox: ['show', 'approve', 'reject'],
   daemon: ['start', 'stop', 'status'],
   fleet: ['status', 'watch', 'direction', 'init', 'pause', 'resume', 'doctor', 'evidence', 'scorecard', 'oversight'],
+  recovery: ['list', 'inspect', 'attest', 'abandon'],
   knowledge: ['build', 'impact', 'graph'],
   reflect: ['playbooks', 'propose'],
   health: ['propose'],

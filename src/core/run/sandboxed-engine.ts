@@ -23,6 +23,7 @@
  * Default builtin-only behavior is unaffected.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -152,6 +153,8 @@ export interface RunEngineSandboxedOptions {
   delegationScope?: DelegationScope;
   /** Cancellation owned by the daemon or direct caller that started this run. */
   signal?: AbortSignal;
+  /** Internal whole-attempt generation for mutating-tool evidence. */
+  effectGeneration?: string;
 }
 
 export interface CaptureSandboxedProposalOptions {
@@ -2451,6 +2454,10 @@ export async function runApiModelSandboxed(
         }
       },
       systemPrefix: m264SystemPrefix,
+      // Direct API runs expose only reversible sandbox write tools. A fresh
+      // generation lets a discarded sandbox be reconstructed; callers under a
+      // durable run lease supply that exact lease generation instead.
+      effectJournal: { scopeId: id, generation: opts.effectGeneration ?? randomUUID() },
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
 

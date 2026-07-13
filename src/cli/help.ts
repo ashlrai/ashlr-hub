@@ -311,6 +311,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'fleet direction [--json]',     desc: 'Read-only autonomous direction report: mode, resource posture, guard blocks, and next actions.', topic: 'autonomy' },
   { cmd: 'fleet pause',                  desc: 'Pause the fleet: engage the global kill switch (idempotent).', topic: 'autonomy' },
   { cmd: 'fleet resume',                 desc: 'Resume the fleet: release the global kill switch (idempotent).', topic: 'autonomy' },
+  { cmd: 'recovery list|inspect',         desc: 'Inspect bounded metadata-only prepared/committed tool-effect evidence.', topic: 'autonomy' },
+  { cmd: 'recovery attest|abandon',       desc: 'Record an exact interactive terminal no-replay disposition for one prepared effect.', topic: 'autonomy' },
   { cmd: 'goals add <objective>',        desc: 'Register a high-level OBJECTIVE (goal); decomposed into ordered milestones (local, no LLM by default).', topic: 'autonomy' },
   { cmd: 'goals plan <id>',              desc: 'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).', topic: 'autonomy' },
   { cmd: 'goals advance <id>',           desc: 'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).', topic: 'autonomy' },

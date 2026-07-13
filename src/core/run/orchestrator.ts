@@ -139,6 +139,7 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import { hasUnresolvedToolEffects } from '../util/effect-journal.js';
 import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
@@ -1870,6 +1871,9 @@ export async function runGoal(
   cfg: AshlrConfig,
   opts: RunOptions,
 ): Promise<RunState> {
+  if (opts.allowBash === true) {
+    throw new Error('Sandboxed bash is unavailable until OS-enforced filesystem confinement is active');
+  }
   if (opts.signal?.aborted === true) return runGoalInternal(goal, cfg, opts);
   if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
 
@@ -1898,8 +1902,9 @@ export async function runGoal(
   }
   let clearAuthority = false;
   try {
-    const state = await runGoalInternal(goal, cfg, opts);
-    clearAuthority = ownsCurrentRunGeneration(state);
+    const state = await runGoalInternal(goal, cfg, opts, acquired.authority.token);
+    clearAuthority = ownsCurrentRunGeneration(state) &&
+      !hasUnresolvedToolEffects(state.id, acquired.authority.token);
     return state;
   } finally {
     if (clearAuthority) finishExecutionAuthority(acquired.authority);
@@ -1911,6 +1916,7 @@ async function runGoalInternal(
   goal: string,
   cfg: AshlrConfig,
   opts: RunOptions,
+  effectGeneration?: string,
 ): Promise<RunState> {
   if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
   if (opts.runId) {
@@ -2121,6 +2127,7 @@ async function runGoalInternal(
                   workItemGenerationId: opts.workItemGenerationId,
                   workSource: opts.workSource,
                   delegationScope,
+                  ...(effectGeneration ? { effectGeneration } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                   ...(opts.runId ? { runId: opts.runId } : {}),
                 });
@@ -2863,6 +2870,10 @@ async function runGoalInternal(
     saveRun(state);
   }
 
+  const effectJournal = effectGeneration
+    ? { scopeId: state.id, generation: effectGeneration }
+    : undefined;
+
   const reserveRunModelStep = (
     taskId: string,
     kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
@@ -3369,6 +3380,7 @@ async function runGoalInternal(
                       adaptivePrompts,
                       onStep: makeTaskOnStep(smallerClient.id),
                       reserveModelStep: taskStepAuthority(task.id, smallerClient.id),
+                      ...(effectJournal ? { effectJournal } : {}),
                       ...(opts.signal ? { signal: opts.signal } : {}),
                     });
                     return;
@@ -3385,6 +3397,7 @@ async function runGoalInternal(
                   adaptivePrompts,
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  ...(effectJournal ? { effectJournal } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               };
@@ -3398,6 +3411,7 @@ async function runGoalInternal(
                   adaptivePrompts,
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  ...(effectJournal ? { effectJournal } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               } else {
@@ -3496,6 +3510,7 @@ async function runGoalInternal(
                 adaptivePrompts,
                 onStep: taskOnStep,
                 reserveModelStep: taskStepAuthority(task.id, escalatedClient.id),
+                ...(effectJournal ? { effectJournal } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               }).catch((err) => {
                 if (task.status !== 'failed') {
@@ -3575,6 +3590,7 @@ async function runGoalInternal(
                 adaptivePrompts,
                 onStep: makeTaskOnStep(retryClient.id),
                 reserveModelStep: taskStepAuthority(task.id, retryClient.id),
+                ...(effectJournal ? { effectJournal } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               });
               // Copy the execution outcome back onto the canonical task.

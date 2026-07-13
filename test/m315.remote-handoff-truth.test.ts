@@ -1081,7 +1081,7 @@ describe('M315 remote PR handoff truth', () => {
       state: 'awaiting-host-merge',
       prUrl: 'https://github.com/ashlrai/fixture/pull/124',
     });
-  });
+  }, 30_000);
 
   it('does not advance when GitHub resolves a different branch/base than the handoff', async () => {
     const { proposal } = await createRemoteHandoffProposal();

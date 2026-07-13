@@ -58,6 +58,7 @@ import {
   renderToolText,
   listNativeTools,
   callNativeTool,
+  nativeToolSafety,
 } from './mcp-native.js';
 import { assertMayMutate, killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
@@ -182,6 +183,13 @@ class EngineerToolCancelledError extends Error {
   constructor(tool: string, detail = '') {
     super(`${tool} cancelled by invocation owner${detail ? `\n${detail}` : ''}`);
     this.name = 'EngineerToolCancelledError';
+  }
+}
+
+class EngineerToolUncertainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EngineerToolUncertainError';
   }
 }
 
@@ -465,15 +473,20 @@ async function runBash(
   const env = withToolEnv(cfg, minimalEnv());
 
   const { shell, shellArgs } = resolveShell(command);
-  const result = await runVerifySubprocessAsync(
-    [shell, ...shellArgs],
-    {
-      cwd: eng.workspaceRoot,
-      env,
-      timeoutMs: timeout,
-      ...(signal ? { signal } : {}),
-    },
-  );
+  let result: Awaited<ReturnType<typeof runVerifySubprocessAsync>>;
+  try {
+    result = await runVerifySubprocessAsync(
+      [shell, ...shellArgs],
+      {
+        cwd: eng.workspaceRoot,
+        env,
+        timeoutMs: timeout,
+        ...(signal ? { signal } : {}),
+      },
+    );
+  } catch (error) {
+    throw new EngineerToolUncertainError(`bash subprocess outcome is uncertain: ${String(error)}`);
+  }
 
   const baseResult: BashResult = {
     exitCode: result.exitCode,
@@ -516,7 +529,7 @@ async function runBash(
         'cleanup-unverified',
       );
     }
-    throw new Error(`bash subprocess failed: ${result.error}`);
+    throw new EngineerToolUncertainError(`bash subprocess failed: ${result.error}`);
   }
   return baseResult;
 }
@@ -820,8 +833,12 @@ async function handleWriteFile(
   assertMayMutate(eng.sourceRepo, { allowAnyRepo: true });
 
   const abs = resolveInside(eng.workspaceRoot, p);
-  mkdirSync(resolve(abs, '..'), { recursive: true });
-  writeFileSync(abs, content, 'utf8');
+  try {
+    mkdirSync(resolve(abs, '..'), { recursive: true });
+    writeFileSync(abs, content, 'utf8');
+  } catch (error) {
+    throw new EngineerToolUncertainError(`write_file outcome is uncertain: ${String(error)}`);
+  }
 
   return {
     written: true,
@@ -861,7 +878,11 @@ async function handleEditFile(
       throw new Error(`edit_file: old_string not found in "${p}" (0 matches)`);
     }
     const updated = original.split(oldString).join(newString);
-    writeFileSync(abs, updated, 'utf8');
+    try {
+      writeFileSync(abs, updated, 'utf8');
+    } catch (error) {
+      throw new EngineerToolUncertainError(`edit_file outcome is uncertain: ${String(error)}`);
+    }
     return { edited: true, path: relative(eng.workspaceRoot, abs) || basename(abs), replacements: count, rung: 'exact' };
   }
 
@@ -890,14 +911,22 @@ async function handleEditFile(
 
   // Ambiguity check for non-exact rungs: if exact count > 1 we would have
   // caught it above; for fuzzy rungs a unique window was found.
-  writeFileSync(abs, result.updated!, 'utf8');
+  try {
+    writeFileSync(abs, result.updated!, 'utf8');
+  } catch (error) {
+    throw new EngineerToolUncertainError(`edit_file outcome is uncertain: ${String(error)}`);
+  }
 
   // M140: lint/typecheck-on-edit — fast syntax check after write.
   // Reject a syntactically broken edit BEFORE spending a test run.
   const lintResult = await runLintOnEdit(abs, eng.workspaceRoot, cfg, signal);
   if (lintResult !== null && !lintResult.ok) {
     // Roll back the broken write.
-    writeFileSync(abs, original, 'utf8');
+    try {
+      writeFileSync(abs, original, 'utf8');
+    } catch (error) {
+      throw new EngineerToolUncertainError(`edit_file rollback is uncertain: ${String(error)}`);
+    }
     if (lintResult.cancelled) {
       throw new EngineerToolCancelledError('edit_file', lintResult.output);
     }
@@ -1096,18 +1125,21 @@ function auditEngineerCall(
   });
 }
 
-/**
- * Execute an engineer tool through the full safety pipeline. NEVER throws:
- * unknown tools, capability/kill-switch refusals, and handler failures all
- * surface as rendered error text. Every outcome is audited. The returned
- * string is always rendered through `renderToolText` (scrub + 32KB cap).
- */
-export async function callEngineerTool(
+interface EngineerToolCallOutcome {
+  text: string;
+  uncertain: boolean;
+}
+
+function definitiveEngineerOutcome(payload: unknown): EngineerToolCallOutcome {
+  return { text: renderToolText(payload), uncertain: false };
+}
+
+async function callEngineerToolOutcome(
   name: string,
   rawArgs: unknown,
   eng: EngineerContext,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<EngineerToolCallOutcome> {
   const args: Record<string, unknown> =
     rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
@@ -1117,18 +1149,18 @@ export async function callEngineerTool(
   const tool = ENGINEER_TOOLS.find((t) => t.name === name);
   if (!tool) {
     auditEngineerCall(eng, `${name} keys=${argKeys} — unknown engineer tool`, 'error');
-    return renderToolText(`Unknown engineer tool "${name}".`);
+    return definitiveEngineerOutcome(`Unknown engineer tool "${name}".`);
   }
 
   if (signal?.aborted) {
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — cancelled before execution`, 'error');
-    return renderToolText(`${tool.name} cancelled before execution.`);
+    return definitiveEngineerOutcome(`${tool.name} cancelled before execution.`);
   }
 
   // ── Kill-switch gate: refuse all non-read tools when KILL is engaged ──────
   if (tool.safety !== 'read' && killSwitchOn()) {
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — refused: kill switch on`, 'refused');
-    return renderToolText(
+    return definitiveEngineerOutcome(
       `${tool.name} refused: the ashlr kill switch is engaged (~/.ashlr/KILL). ` +
       'Read-only tools still work; writes/exec are disabled until `ashlr enroll kill off`.',
     );
@@ -1137,11 +1169,11 @@ export async function callEngineerTool(
   // ── Capability gates ──────────────────────────────────────────────────────
   if (tool.safety === 'write' && !eng.allowWrite) {
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — refused: write not allowed`, 'refused');
-    return renderToolText(`${tool.name} refused: write tools are not enabled for this session.`);
+    return definitiveEngineerOutcome(`${tool.name} refused: write tools are not enabled for this session.`);
   }
   if (tool.safety === 'exec' && !eng.allowExec) {
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — refused: exec not allowed`, 'refused');
-    return renderToolText(`${tool.name} refused: exec (bash) is not enabled for this session.`);
+    return definitiveEngineerOutcome(`${tool.name} refused: exec (bash) is not enabled for this session.`);
   }
 
   // ── Load config ───────────────────────────────────────────────────────────
@@ -1150,7 +1182,7 @@ export async function callEngineerTool(
     cfg = loadConfig();
   } catch (err) {
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — config load failed`, 'error');
-    return renderToolText(
+    return definitiveEngineerOutcome(
       `${tool.name} failed: could not load ~/.ashlr/config.json ` +
       `(${err instanceof Error ? err.message : String(err)})`,
     );
@@ -1160,7 +1192,7 @@ export async function callEngineerTool(
   try {
     const payload = await tool.handler(args, cfg, eng, signal);
     auditEngineerCall(eng, `${tool.name} keys=${argKeys} — ok`, 'ok');
-    return renderToolText(payload);
+    return definitiveEngineerOutcome(payload);
   } catch (err) {
     if (err instanceof EngineerToolReportedOutcomeError) {
       auditEngineerCall(
@@ -1168,7 +1200,10 @@ export async function callEngineerTool(
         `${tool.name} keys=${argKeys} — ${err.outcome}`,
         'error',
       );
-      return renderToolText(err.payload);
+      return {
+        text: renderToolText(err.payload),
+        uncertain: err.outcome === 'cleanup-unverified',
+      };
     }
     const msg = err instanceof Error ? err.message : String(err);
     const cancelled = err instanceof EngineerToolCancelledError;
@@ -1177,8 +1212,25 @@ export async function callEngineerTool(
       `${tool.name} keys=${argKeys} — ${cancelled ? 'cancelled' : `error: ${msg}`}`,
       'error',
     );
-    return renderToolText(cancelled ? msg : `${tool.name} failed: ${msg}`);
+    return {
+      text: renderToolText(cancelled ? msg : `${tool.name} failed: ${msg}`),
+      uncertain: err instanceof EngineerToolUncertainError,
+    };
   }
+}
+
+/**
+ * Execute an engineer tool through the full safety pipeline. NEVER throws:
+ * direct callers receive scrubbed bounded text, while agent specs retain the
+ * internal uncertainty bit needed by the effect journal.
+ */
+export async function callEngineerTool(
+  name: string,
+  rawArgs: unknown,
+  eng: EngineerContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (await callEngineerToolOutcome(name, rawArgs, eng, signal)).text;
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,6 +1242,7 @@ export interface ExecutableToolSpec {
   type: 'function';
   function: { name: string; description: string; parameters: object };
   name: string;
+  safety: NativeToolSafety;
   fn: ToolExecutor<string>;
 }
 
@@ -1208,7 +1261,12 @@ export function buildEngineerToolSpecs(eng: EngineerContext): ExecutableToolSpec
     type: 'function' as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
     name: t.name,
-    fn: (args: unknown, signal?: AbortSignal) => callEngineerTool(t.name, args, eng, signal),
+    safety: t.safety,
+    fn: async (args: unknown, signal?: AbortSignal) => {
+      const outcome = await callEngineerToolOutcome(t.name, args, eng, signal);
+      if (outcome.uncertain) throw new Error(`${t.name} effect outcome is uncertain`);
+      return outcome.text;
+    },
   }));
 }
 
@@ -1219,14 +1277,19 @@ export function buildEngineerToolSpecs(eng: EngineerContext): ExecutableToolSpec
  * toolExecutors map never picked them up.
  */
 export function buildNativeToolSpecsWithFn(): ExecutableToolSpec[] {
-  return listNativeTools().map((t) => ({
-    type: 'function' as const,
-    function: { name: t.name, description: t.description, parameters: t.inputSchema },
-    name: t.name,
-    fn: async (args: unknown, signal?: AbortSignal): Promise<string> => {
-      if (signal?.aborted) return renderToolText(`${t.name} cancelled before execution.`);
-      const r = await callNativeTool(t.name, args);
-      return r.content[0]?.text ?? '';
-    },
-  }));
+  return listNativeTools().map((t) => {
+    // Missing classifications fail closed as opaque execution effects.
+    const safety = nativeToolSafety(t.name) ?? 'exec';
+    return {
+      type: 'function' as const,
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      name: t.name,
+      safety,
+      fn: async (args: unknown, signal?: AbortSignal): Promise<string> => {
+        if (signal?.aborted) return renderToolText(`${t.name} cancelled before execution.`);
+        const result = await callNativeTool(t.name, args);
+        return result.content[0]?.text ?? '';
+      },
+    };
+  });
 }

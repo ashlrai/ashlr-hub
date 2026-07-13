@@ -159,6 +159,12 @@ const loadFleetCmd = lazyCmd(
   'fleet command requires src/cli/fleet.ts (M49 module not yet built).',
 );
 
+const loadRecoveryCmd = lazyCmd(
+  () => import('./recovery.js' as unknown as string),
+  (m) => m.cmdRecovery as Cmd,
+  'recovery command requires src/cli/recovery.ts.',
+);
+
 // ─── M55 the conductor: `ashlr goal` + `ashlr loop` ──────────────────────────
 
 const loadGoalCmd = lazyCmd(
@@ -1863,6 +1869,12 @@ async function main(): Promise<void> {
         // plus `pause`/`resume` (kill-switch only).
         const cmdFleet = await loadFleetCmd();
         process.exitCode = await cmdFleet(rest);
+        break;
+      }
+
+      case 'recovery': {
+        const cmdRecovery = await loadRecoveryCmd();
+        process.exitCode = await cmdRecovery(rest);
         break;
       }
 

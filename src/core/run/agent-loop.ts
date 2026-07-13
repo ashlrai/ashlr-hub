@@ -27,9 +27,15 @@ import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { resolveModelProfile } from './model-profile.js';
 import { assembleSystemPrompt } from './prompts/index.js';
+import {
+  commitToolEffect,
+  prepareToolEffect,
+  releasePreparedToolEffect,
+} from '../util/effect-journal.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
+const TASK_EFFECT_CAP = 64;
 
 /** Completion handle returned after the caller atomically reserves a model step. */
 export interface ModelStepReservation {
@@ -51,6 +57,7 @@ export type ReserveModelStep = () => ModelStepReservation | undefined;
  */
 interface ToolSpec {
   name: string;
+  safety?: 'read' | 'append' | 'proposal' | 'write' | 'exec';
   fn?: ToolExecutor;
   [key: string]: unknown;
 }
@@ -103,6 +110,8 @@ export async function runTask(
      * to pre-M264 behavior. Never affects frontier engines.
      */
     systemPrefix?: string;
+    /** Exact whole-run generation used to bind mutating tool evidence. */
+    effectJournal?: { scopeId: string; generation: string };
   },
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
@@ -197,11 +206,13 @@ export async function runTask(
 
   // Build a tool executor map keyed by name (best-effort; tools may lack fn).
   const toolExecutors = new Map<string, ToolExecutor>();
+  const toolSafety = new Map<string, ToolSpec['safety']>();
   if (useTools && ctx.tools) {
     for (const t of ctx.tools) {
       const spec = t as ToolSpec;
       if (spec.name && typeof spec.fn === 'function') {
         toolExecutors.set(spec.name, spec.fn);
+        toolSafety.set(spec.name, spec.safety);
       }
     }
   }
@@ -257,6 +268,7 @@ export async function runTask(
   ];
 
   task.status = 'running';
+  let effectOrdinal = 0;
 
   try {
     // Main agent loop.
@@ -407,8 +419,43 @@ export async function runTask(
 
           let toolResultContent: string;
           const executor = toolExecutors.get(tc.name);
+          const safety = toolSafety.get(tc.name);
 
           if (executor) {
+            const effectful = safety !== undefined && safety !== 'read';
+            if (effectful && !ctx.effectJournal) {
+              task.status = 'failed';
+              task.error = `Tool effect authority is unavailable for ${tc.name}.`;
+              delete task.result;
+              emitStep('tool', `${tc.name}: effect authority unavailable`);
+              break;
+            }
+            if (effectful && effectOrdinal >= TASK_EFFECT_CAP) {
+              task.status = 'failed';
+              task.error = `Tool effect cap exceeded (${TASK_EFFECT_CAP}) for this task.`;
+              delete task.result;
+              emitStep('tool', `${tc.name}: effect cap exceeded`);
+              break;
+            }
+            const effectInput = effectful && ctx.effectJournal
+              ? {
+                  ...ctx.effectJournal,
+                  taskId: task.id,
+                  ordinal: ++effectOrdinal,
+                  toolName: tc.name,
+                  toolCallId: tc.id,
+                  arguments: tc.arguments,
+                  safety,
+                }
+              : undefined;
+            const prepared = effectInput ? prepareToolEffect(effectInput) : undefined;
+            if (prepared && !prepared.ok) {
+              task.status = 'failed';
+              task.error = `Tool effect authority refused ${tc.name}: ${prepared.reason}`;
+              delete task.result;
+              emitStep('tool', `${tc.name}: effect authority ${prepared.reason}`);
+              break;
+            }
             try {
               const rawResult = await executor(tc.arguments, ctx.signal);
               toolResultContent =
@@ -416,7 +463,22 @@ export async function runTask(
                   ? rawResult
                   : JSON.stringify(rawResult);
             } catch (toolErr) {
+              if (prepared?.ok) {
+                releasePreparedToolEffect(prepared.effect);
+                task.status = 'failed';
+                task.error = `Tool effect outcome is uncertain for ${tc.name}; operator reconciliation is required.`;
+                delete task.result;
+                emitStep('tool', `${tc.name}: effect outcome uncertain`);
+                break;
+              }
               toolResultContent = `Tool execution error: ${String(toolErr)}`;
+            }
+            if (prepared?.ok && !commitToolEffect(prepared.effect, toolResultContent)) {
+              task.status = 'failed';
+              task.error = `Tool effect outcome is uncertain for ${tc.name}; operator reconciliation is required.`;
+              delete task.result;
+              emitStep('tool', `${tc.name}: effect outcome uncertain`);
+              break;
             }
           } else {
             // No executor — report the tool as unavailable.
@@ -436,7 +498,7 @@ export async function runTask(
           if (cancelIfRequested()) break;
         }
 
-        if (cancelIfRequested()) break;
+        if (cancelIfRequested() || task.status === 'failed') break;
 
         // Continue the loop to let the model react to tool results.
         continue;
