@@ -2107,7 +2107,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make background launch a claimed-authority handoff with a persisted worker takeover hint, authenticated IPC acknowledgment, and no timeout for the acknowledged worker.
 - [x] Add independent-process race, dead-owner, background handoff, setup refusal, post-effect checkpoint failure, run/swarm overlap, and Best-of-N regressions.
 - [x] Pass the definitive exhaustive suite and final independent adversarial re-review.
-- [ ] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
+- [x] Commit, push, observe cross-platform CI, and stage exact source without interrupting production.
 
 ## Next P1 - Effect And Migration Authority
 - [ ] Add queue owner token/epoch fencing so an expired shared queue lease cannot authorize duplicate swarms.
