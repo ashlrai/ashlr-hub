@@ -82,6 +82,10 @@ vi.mock('../src/core/providers.js', () => ({
 // Import doctor AFTER mocks are registered.
 import { runDoctor } from '../src/core/doctor.js';
 
+// Doctor probes shell out even with provider and Phantom mocks. Windows CI can
+// spend more than Vitest's 5s default in process startup across a single probe.
+vi.setConfig({ testTimeout: 15_000 });
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
