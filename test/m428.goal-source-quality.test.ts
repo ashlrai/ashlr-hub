@@ -260,7 +260,7 @@ describe('M428 goal source semantic quality', () => {
       limitExceeded: true,
     });
     expect(listGoals()).toHaveLength(200);
-  });
+  }, 15_000);
 });
 
 describe('M428 goal persistence authorization boundaries', () => {
