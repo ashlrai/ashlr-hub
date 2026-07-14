@@ -118,7 +118,7 @@ import {
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
-import { writePrivateFileExclusive } from '../util/private-file-write.js';
+import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { assertMayMutate } from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
@@ -1037,7 +1037,6 @@ export function saveRun(s: RunState): void {
   const lock = acquireLocalStoreLock(path.join(runsDir(), `.write-lock-${foldedId}`));
   if (!lock) throw new Error(`Run persistence lock unavailable for ${s.id}`);
   const legacyTmp = `${dest}.tmp`;
-  let tmp: string | undefined;
   let ownershipClaim: CaseOwnershipClaim | null = null;
   try {
     ownershipClaim = acquireCaseFoldedOwnership({
@@ -1095,25 +1094,15 @@ export function saveRun(s: RunState): void {
       path.dirname(dest),
       `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
     );
-    writePrivateFileExclusive(candidate, payload, {
+    writePrivateFileAtomically(candidate, dest, payload, {
       anchorPath: stateRoot(),
       label: 'Run persistence temporary file',
     });
-    tmp = candidate;
-    fs.renameSync(tmp, dest);
-    tmp = undefined;
     completeCaseFoldedOwnership(ownershipClaim);
     ownershipClaim = null;
     Object.assign(s, normalized);
     bindPersistenceSnapshot(s, payload, revision);
   } finally {
-    if (tmp) {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        // Best-effort cleanup after a failed write or rename.
-      }
-    }
     releaseLocalStoreLock(lock);
   }
 }

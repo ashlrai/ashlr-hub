@@ -6,11 +6,14 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  renameSync,
   unlinkSync,
   writeSync,
-  type Stats,
+  type BigIntStats,
 } from 'node:fs';
+import { dirname } from 'node:path';
 
+import { fsyncDirectory } from './durability.js';
 import { assurePrivateStoragePath } from './private-storage.js';
 
 export interface PrivateFileWriteOptions {
@@ -18,23 +21,23 @@ export interface PrivateFileWriteOptions {
   label: string;
 }
 
-function ownedByCurrentUser(stat: Stats): boolean {
-  return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+function ownedByCurrentUser(stat: BigIntStats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
 }
 
-function safeRegularFile(stat: Stats): boolean {
-  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
-    ownedByCurrentUser(stat) && (process.platform === 'win32' || (stat.mode & 0o022) === 0);
+function safeRegularFile(stat: BigIntStats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
+    ownedByCurrentUser(stat) && (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
 }
 
-function sameIdentity(left: Stats, right: Stats): boolean {
+function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function removeExactPath(path: string, identity: Stats | undefined): void {
+function removeExactPath(path: string, identity: BigIntStats | undefined): void {
   if (!identity) return;
   try {
-    const installed = lstatSync(path);
+    const installed = lstatSync(path, { bigint: true });
     if (safeRegularFile(installed) && sameIdentity(installed, identity)) unlinkSync(path);
   } catch {
     // The exact temporary is already gone or was replaced; never remove a replacement.
@@ -42,35 +45,37 @@ function removeExactPath(path: string, identity: Stats | undefined): void {
 }
 
 /** Create, secure, identity-pin, write, and fsync an exclusive private file. */
-export function writePrivateFileExclusive(
-  path: string,
+export function writePrivateFileAtomically(
+  temporaryPath: string,
+  targetPath: string,
   value: string | Buffer,
   options: PrivateFileWriteOptions,
 ): void {
   let fd: number | undefined;
-  let identity: Stats | undefined;
+  let identity: BigIntStats | undefined;
+  let published = false;
   try {
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
     fd = openSync(
-      path,
+      temporaryPath,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
       0o600,
     );
-    identity = fstatSync(fd);
-    if (!safeRegularFile(identity) || identity.size !== 0) {
+    identity = fstatSync(fd, { bigint: true });
+    if (!safeRegularFile(identity) || identity.size !== 0n) {
       throw new Error(`${options.label} is not a safe empty regular file`);
     }
 
-    const assurance = assurePrivateStoragePath(path, 'file', 'secure-created', {
+    const assurance = assurePrivateStoragePath(temporaryPath, 'file', 'secure-created', {
       anchorPath: options.anchorPath,
     });
     if (!assurance.ok) throw new Error(`${options.label} is unsafe: ${assurance.reason}`);
 
-    const installed = lstatSync(path);
-    const opened = fstatSync(fd);
+    const installed = lstatSync(temporaryPath, { bigint: true });
+    const opened = fstatSync(fd, { bigint: true });
     if (!safeRegularFile(installed) || !safeRegularFile(opened) ||
       !sameIdentity(identity, installed) || !sameIdentity(identity, opened) ||
-      installed.size !== 0 || opened.size !== 0) {
+      installed.size !== 0n || opened.size !== 0n) {
       throw new Error(`${options.label} changed during creation`);
     }
 
@@ -83,6 +88,25 @@ export function writePrivateFileExclusive(
     }
     fchmodSync(fd, 0o600);
     fsyncSync(fd);
+
+    const namedBeforePublish = lstatSync(temporaryPath, { bigint: true });
+    const openedBeforePublish = fstatSync(fd, { bigint: true });
+    if (!safeRegularFile(namedBeforePublish) || !safeRegularFile(openedBeforePublish) ||
+      !sameIdentity(identity, namedBeforePublish) || !sameIdentity(identity, openedBeforePublish) ||
+      namedBeforePublish.size !== BigInt(bytes.length) ||
+      openedBeforePublish.size !== BigInt(bytes.length)) {
+      throw new Error(`${options.label} changed before publication`);
+    }
+
+    renameSync(temporaryPath, targetPath);
+    published = true;
+    const installedTarget = lstatSync(targetPath, { bigint: true });
+    const openedAfterPublish = fstatSync(fd, { bigint: true });
+    if (!safeRegularFile(installedTarget) || !safeRegularFile(openedAfterPublish) ||
+      !sameIdentity(identity, installedTarget) || !sameIdentity(identity, openedAfterPublish)) {
+      throw new Error(`${options.label} changed during publication`);
+    }
+    fsyncDirectory(dirname(targetPath));
     closeSync(fd);
     fd = undefined;
   } catch (error) {
@@ -90,7 +114,7 @@ export function writePrivateFileExclusive(
       try { closeSync(fd); } catch { /* best effort before exact cleanup */ }
       fd = undefined;
     }
-    removeExactPath(path, identity);
+    if (!published) removeExactPath(temporaryPath, identity);
     throw error;
   } finally {
     if (fd !== undefined) {
