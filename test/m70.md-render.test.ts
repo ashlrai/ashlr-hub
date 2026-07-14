@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,7 +29,7 @@ import { join } from 'node:path';
 let tmpHome: string;
 
 beforeEach(() => {
-  tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m70-'));
+  tmpHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m70-')));
   process.env['HOME'] = tmpHome;
   vi.resetModules();
 });
@@ -52,7 +52,7 @@ function makeProposal(overrides: Partial<Record<string, unknown>> = {}): import(
     summary: 'The scheduler drops tasks under load. This patch adds exponential back-off.',
     status: 'pending',
     createdAt: '2026-06-17T12:00:00.000Z',
-    repo: '/home/user/projects/myrepo',
+    repo: join(tmpHome, 'myrepo'),
     diff: [
       'diff --git a/src/scheduler.ts b/src/scheduler.ts',
       'index abc..def 100644',

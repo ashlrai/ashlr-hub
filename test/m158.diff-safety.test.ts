@@ -56,7 +56,8 @@ vi.mock('../src/core/integrations/pulse-sync.js', () => ({
 }));
 
 // Stub sandbox policy
-vi.mock('../src/core/sandbox/policy.js', () => ({
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
   assertMayMutate: vi.fn(),
   killSwitchOn: () => false,
   setKill: vi.fn(),

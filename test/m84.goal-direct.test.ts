@@ -16,6 +16,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -227,6 +230,27 @@ describe('cmdGoal --direct — invokes runGoal once with the verbatim objective'
     ]);
 
     expect(rc).toBe(0);
+  });
+
+  it('correlates a canonical proposal for a symlink project caller', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m84-goal-alias-'));
+    try {
+      const physical = join(root, 'physical-repo');
+      const alias = join(root, 'repo-alias');
+      mkdirSync(physical);
+      symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      mockListProposals
+        .mockReset()
+        .mockReturnValueOnce([])
+        .mockReturnValue([makeProposal('prop-canonical', realpathSync.native(physical))]);
+
+      const rc = await cmdGoal(['ship through alias', '--project', alias, '--direct']);
+
+      expect(rc).toBe(0);
+      expect((mockRunGoal.mock.calls[0]![2] as { cwd: string }).cwd).toBe(alias);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('returns exit 1 when no new PENDING proposal is found (engine produced no diff)', async () => {

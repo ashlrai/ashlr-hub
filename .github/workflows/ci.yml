@@ -29,6 +29,7 @@ jobs:
               test/m395.effect-terminal-retention.test.ts
               test/m403.automerge-mutation-fence.test.ts
               test/m404.policy-result-surfaces.test.ts
+              test/m428.goal-source-quality.test.ts
               test/m409.engine-execution-mutation-fence.test.ts
               test/m410.policy-opposing-race.test.ts
               test/m414.local-store-lock-unknown-owner.test.ts
@@ -58,6 +59,7 @@ jobs:
               test/m220.anticlog-verdict-feedback.test.ts
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts
+              test/m367.daemon-observer-scheduler.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
               test/m385.cutoff-checkpoint-scheduler.test.ts
               test/m407.verification-mutation-fence.test.ts
@@ -72,6 +74,7 @@ jobs:
             test_args: >-
               test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
               test/m395.effect-terminal-retention.test.ts
+              test/m367.daemon-observer-scheduler.test.ts
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -102,6 +105,10 @@ jobs:
         # serially in independent checkouts so they cannot share mutable state.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
         run: npm run test:ci -- ${{ matrix.test_args }}
+
+      - name: Test native alias authority (hermetic)
+        if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'
+        run: npm run test:ci -- test/m426.sandbox-reservation-identity.test.ts test/h7.rollback.test.ts
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.

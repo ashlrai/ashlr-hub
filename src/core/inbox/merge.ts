@@ -1920,6 +1920,30 @@ function currentProposalDiffHash(proposal: Proposal): string {
   return hashDiff(proposal.diff ?? '');
 }
 
+function hasVerificationDiffBinding(
+  proposal: Proposal,
+): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: boolean; baseBranch: string; baseHead: string; diffHash: string } } {
+  const result = proposal.verifyResult;
+  return (
+    typeof result?.passed === 'boolean' &&
+    typeof result.baseBranch === 'string' &&
+    result.baseBranch.length > 0 &&
+    typeof result.baseHead === 'string' &&
+    result.baseHead.length > 0 &&
+    result.diffHash === currentProposalDiffHash(proposal)
+  );
+}
+
+export function hasCurrentVerificationBinding(
+  proposal: Proposal,
+): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: boolean; baseBranch: string; baseHead: string; diffHash: string } } {
+  if (!hasVerificationDiffBinding(proposal) || !proposal.repo) return false;
+
+  const base = defaultBranch(proposal.repo);
+  return proposal.verifyResult.baseBranch === base &&
+    resolveDefaultBranchHead(proposal.repo, base) === proposal.verifyResult.baseHead;
+}
+
 function hasVerifiedDiffBinding(
   proposal: Proposal,
 ): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: true; baseBranch: string; baseHead: string; diffHash: string } } {
@@ -2376,13 +2400,14 @@ export interface AutoMergeResult {
 }
 
 /** Repair the narrow crash window between a proven local merge and its receipt. */
-function reconcileLocalMergeIntent(id: string): AutoMergeResult | null {
+function reconcileLocalMergeIntent(id: string, cfg: AshlrConfig): AutoMergeResult | null {
   const proposal = loadProposal(id);
   const intent = proposal?.localMergeIntent;
   if (!proposal || !intent || !proposal.repo ||
     (proposal.status !== 'pending' && proposal.status !== 'approved')) return null;
+  const repo = proposal.repo;
   const mergeCommitOid = findLocalRealizedMergeDescendant(
-    proposal.repo,
+    repo,
     intent.base,
     intent.baseBeforeOid,
     intent.proposalHeadOid,
@@ -2397,11 +2422,22 @@ function reconcileLocalMergeIntent(id: string): AutoMergeResult | null {
     mergeCommitOid: mergeCommitOid.toLowerCase(),
     observedAt: new Date().toISOString(),
   };
-  if (!recordRealizedMerge(id, evidence)) return null;
+  const outwardFence = cfg.foundry?.autoMerge?.enabled === true
+    ? acquireOutwardMutationFence()
+    : null;
+  try {
+    const stillAuthorized = (): boolean =>
+      cfg.foundry?.autoMerge?.enabled === true &&
+      ownsOutwardMutationFence(outwardFence) &&
+      finalMutationAuthorityFailure(repo) === null;
+    if (!recordRealizedMerge(id, evidence, undefined, stillAuthorized)) return null;
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+  }
   const reason = `reconciled realized local merge at ${mergeCommitOid.slice(0, 8)} from durable intent`;
   audit({
     action: 'inbox:auto-merge-reconcile',
-    repo: proposal.repo,
+    repo,
     sandboxId: id,
     summary: reason,
     result: 'ok',
@@ -2674,7 +2710,7 @@ export async function autoMergeProposal(
     // Reconciliation records an effect that already happened. It must run
     // before current feature/policy gates so a crash cannot strand a proven
     // default-branch merge as an approved proposal.
-    const reconciledLocalMerge = reconcileLocalMergeIntent(id);
+    const reconciledLocalMerge = reconcileLocalMergeIntent(id, cfg);
     if (reconciledLocalMerge) return reconciledLocalMerge;
 
     // ── Gate 1: feature must be enabled (DEFAULT DISABLED) ───────────────────
@@ -2807,11 +2843,31 @@ export async function autoMergeProposal(
       // observational only: proposal provenance does not authenticate that
       // mutable field. Every mutating evidence-mode invocation therefore
       // establishes fresh verification authority in an isolated worktree.
-      // Verification mode retains its judge-attested cached-result behavior.
-      const verifiedForCurrentDiff = trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult);
-      const shouldVerify = trustBasis === 'evidence' || (
-        proposal.verifyResult?.passed !== false && !verifiedForCurrentDiff
-      );
+      // Verification mode may reuse either outcome only while it is bound to
+      // the current default-branch head and exact diff. A stale failure must be
+      // refreshed so it cannot remain a rejection/archive signal for a changed
+      // proposal. Evidence mode still establishes fresh authority every time.
+      if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
+        const verifiedBase = proposal.verifyResult;
+        const liveBase = defaultBranch(repo);
+        if (verifiedBase.baseBranch !== liveBase) {
+          return refuse(
+            `default branch changed since verification (verified '${verifiedBase.baseBranch}', current '${liveBase}') — reverify required`,
+            repo,
+          );
+        }
+        const liveBaseHead = resolveDefaultBranchHead(repo, liveBase);
+        if (liveBaseHead !== verifiedBase.baseHead) {
+          const current = liveBaseHead ? liveBaseHead.slice(0, 8) : 'unresolved';
+          return refuse(
+            `default branch '${liveBase}' moved since verification (verified ${verifiedBase.baseHead.slice(0, 8)}, current ${current}) — reverify required`,
+            repo,
+          );
+        }
+      }
+      const verificationBoundToCurrentProposal = trustBasis === 'verification' &&
+        hasCurrentVerificationBinding(proposal);
+      const shouldVerify = trustBasis === 'evidence' || !verificationBoundToCurrentProposal;
       if (shouldVerify) {
         const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
         const preVerify = transaction.verify;
@@ -2979,7 +3035,7 @@ export async function autoMergeProposal(
     let verify: VerifyProposalResult;
     if ((trustBasis === 'verification' || trustBasis === 'evidence') && verifiedThisInvocation) {
       verify = verifiedThisInvocation;
-    } else if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
+    } else if (trustBasis === 'verification' && hasVerifiedDiffBinding(proposal)) {
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
       const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');

@@ -662,7 +662,8 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
           mergeCommitOid: remoteHandoff.mergeCommitOid!,
           mergedAt: remoteHandoff.mergedAt!,
           reconciliation: remoteHandoff.reconciliation!,
-        }, mutationLock)) {
+        }, mutationLock, () =>
+          outwardAuthorityStillValid(current!, current!.remoteHandoff!, outwardFence))) {
         result.unknown++;
         return result;
       }

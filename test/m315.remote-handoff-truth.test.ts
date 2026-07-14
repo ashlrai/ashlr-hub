@@ -256,9 +256,9 @@ function recordVerificationAuthority(proposalId: string, diff: string): void {
 }
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-'));
-  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-'));
-  bareRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-bare-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-')));
+  tmpRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-')));
+  bareRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-bare-')));
   process.env.HOME = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
@@ -1450,6 +1450,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'merged' && d.verdict === 'merged' &&
       d.labelBasis === 'realized-merge-v1')).toBe(true);
+    expect(loaded?.realizedMergeFanoutVersion).toBe(3);
   }, 30_000);
 
   it('refuses a host merge reported before the awaiting handoff intent existed', async () => {

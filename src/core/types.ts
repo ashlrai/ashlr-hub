@@ -3918,10 +3918,11 @@ export interface Proposal {
   realizedMerge?: RealizedMergeEvidence;
   /**
    * Version 1 is a legacy best-effort fanout marker. Version 2 proves the
-   * authoritative decision ledger contains exactly one realized-merge row;
-   * other idempotent projections remain retryable until that proof exists.
+   * authoritative decision ledger contains exactly one realized-merge row.
+   * Version 3 proves every applicable idempotent projection was durable and
+   * remains revalidated so later projection loss can be repaired.
    */
-  realizedMergeFanoutVersion?: 1 | 2;
+  realizedMergeFanoutVersion?: 1 | 2 | 3;
   /**
    * M119/M307: Result of the verification step run against this proposal's diff.
    * Optional — not all proposals are verified before decision.

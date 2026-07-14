@@ -27,13 +27,14 @@ import {
   openSync,
   readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import {
   currentProcessStartIdentity,
   type ProcessStartIdentitySource,
@@ -67,6 +68,58 @@ function canonicalHome(): string | null {
   } catch {
     return null;
   }
+}
+
+function canonicalWindowsPath(value: string, foldCase: boolean): string | null {
+  let normalized = win32.normalize(value);
+  if (/^\\\\\?\\UNC\\/iu.test(normalized)) {
+    normalized = `\\\\${normalized.slice('\\\\?\\UNC\\'.length)}`;
+  } else if (/^\\\\\?\\[A-Za-z]:\\/u.test(normalized)) {
+    normalized = normalized.slice('\\\\?\\'.length);
+  }
+
+  const driveAbsolute = /^[A-Za-z]:\\/u.test(normalized);
+  const uncAbsolute = /^\\\\[^\\]+\\[^\\]+(?:\\|$)/u.test(normalized);
+  if ((!driveAbsolute && !uncAbsolute) || !win32.isAbsolute(normalized)) return null;
+  const suffix = normalized.slice(win32.parse(normalized).root.length);
+  if (suffix.includes('"') || /(?:^|\\)[A-Za-z]:\\/u.test(suffix)) return null;
+  return foldCase ? normalized.toLowerCase() : normalized;
+}
+
+/** Resolve physical aliases while retaining a deterministic identity for a missing suffix. */
+export function canonicalFilesystemPathIdentity(
+  value: string,
+  options: { foldWindowsCase?: boolean } = {},
+): string | null {
+  let ancestor: string;
+  try {
+    ancestor = resolve(value);
+  } catch {
+    return null;
+  }
+  const missing: string[] = [];
+
+  while (true) {
+    try {
+      const canonicalAncestor = realpathSync.native(ancestor);
+      const canonical = join(canonicalAncestor, ...missing.reverse());
+      return process.platform === 'win32'
+        ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
+        : canonical;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.push(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+/** Persist enrollment authority by full physical target on every platform. */
+export function canonicalEnrollmentPath(value: string): string | null {
+  return canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
 }
 
 function ashlrDir(): string {
@@ -1238,7 +1291,8 @@ export function setKill(on: boolean, opts: { waitMs?: number } = {}): PolicyMuta
  * for autonomous work.
  */
 export function isEnrolled(repo: string): boolean {
-  const abs = resolve(repo);
+  const abs = canonicalEnrollmentPath(repo);
+  if (!abs) return false;
   const reg = readRegistry();
   return reg.repos.includes(abs);
 }
@@ -1253,13 +1307,16 @@ export function enroll(
   repo: string,
   opts: { waitMs?: number; borrowedFence?: OutwardMutationFence } = {},
 ): PolicyMutationResult {
-  const abs = resolve(repo);
+  const lexical = resolve(repo);
+  const abs = canonicalEnrollmentPath(repo);
   const borrowed = Object.prototype.hasOwnProperty.call(opts, 'borrowedFence');
   const fence = borrowed
     ? opts.borrowedFence
     : acquireOutwardMutationFence(opts.waitMs ?? 2_000);
   let result: PolicyMutationResult;
-  if (!ownsOutwardMutationFence(fence)) {
+  if (!abs) {
+    result = { ok: false, changed: false, quiesced: false, reason: 'invalid-enrollment-path' };
+  } else if (!ownsOutwardMutationFence(fence)) {
     result = { ok: false, changed: false, quiesced: false, reason: 'outward mutation fence unavailable' };
   } else {
     const recovery = recoverRegistryTransaction();
@@ -1290,9 +1347,9 @@ export function enroll(
   if (canonicalHome()) {
     audit({
       action: 'enroll:add',
-      repo: abs,
+      repo: abs ?? lexical,
       sandboxId: null,
-      summary: `enrolled ${abs}`,
+      summary: `enrolled ${abs ?? lexical}`,
       result: result.ok ? 'ok' : 'error',
     });
   }
@@ -1304,10 +1361,13 @@ export function enroll(
  * an absent repo is a no-op. Normalizes to absolute path.
  */
 export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMutationResult {
-  const abs = resolve(repo);
+  const lexical = resolve(repo);
+  const abs = canonicalEnrollmentPath(repo);
   const fence = acquireOutwardMutationFence(opts.waitMs ?? 2_000);
   let result: PolicyMutationResult;
-  if (!ownsOutwardMutationFence(fence)) {
+  if (!abs) {
+    result = { ok: false, changed: false, quiesced: false, reason: 'invalid-enrollment-path' };
+  } else if (!ownsOutwardMutationFence(fence)) {
     result = { ok: false, changed: false, quiesced: false, reason: 'outward mutation fence unavailable' };
   } else {
     const recovery = recoverRegistryTransaction();
@@ -1317,7 +1377,7 @@ export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMu
     } else if (!read?.ok) {
       result = { ok: false, changed: false, quiesced: false, reason: read?.reason ?? 'unreadable-registry' };
     } else {
-      const filtered = read.registry.repos.filter(r => r !== abs);
+      const filtered = read.registry.repos.filter(r => r !== abs && r !== lexical);
       if (filtered.length === read.registry.repos.length) {
         result = { ok: true, changed: false, quiesced: true, reason: 'already-unenrolled' };
       } else {
@@ -1338,9 +1398,9 @@ export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMu
   if (canonicalHome()) {
     audit({
       action: 'enroll:remove',
-      repo: abs,
+      repo: abs ?? lexical,
       sandboxId: null,
-      summary: `unenrolled ${abs}`,
+      summary: `unenrolled ${abs ?? lexical}`,
       result: result.ok ? 'ok' : 'error',
     });
   }
@@ -1392,6 +1452,6 @@ export function assertMayMutate(
     opts?.allowAnyRepo === true &&
     process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
   if (!allowAnyRepo && !isEnrolled(repo)) {
-    throw new Error(`repo not enrolled for autonomous work: ${resolve(repo)}`);
+    throw new Error(`repo not enrolled for autonomous work: ${canonicalEnrollmentPath(repo) ?? resolve(repo)}`);
   }
 }

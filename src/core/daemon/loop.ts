@@ -61,7 +61,7 @@ import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import {
   killSwitchOn,
   setKill,
-  listEnrolled,
+  canonicalEnrollmentPath,
   recoverEnrollmentRegistry,
 } from '../sandbox/policy.js';
 import {
@@ -363,9 +363,10 @@ export function scheduleResolutionObserverAfterTick(
   tickResult: DaemonTick,
   opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
   schedule: typeof scheduleResolutionObserverChild = scheduleResolutionObserverChild,
+  killIsOn: typeof killSwitchOn = killSwitchOn,
 ): ScheduledResolutionObserverChild | null {
   if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
-    !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId) return null;
+    !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId || killIsOn()) return null;
   return schedule({
     completedTickAt: tickResult.ts,
     expectedBacklogGeneratedAt: tickResult.backlogSnapshotAt,
@@ -527,9 +528,32 @@ function reloadLiveConfigForDaemon(fallbackCfg: AshlrConfig): AshlrConfig {
   }
 }
 
+interface CanonicalEnrollmentSelection {
+  repos: string[];
+  missingExact: boolean;
+}
+
+/** Reject aliases while retaining incompleteness when an exact enrolled path is missing. */
+function exactCanonicalEnrolledRepos(repos: readonly string[]): CanonicalEnrollmentSelection {
+  const exact = new Set<string>();
+  let missingExact = false;
+  for (const repo of repos) {
+    if (canonicalEnrollmentPath(repo) !== repo) {
+      missingExact = true;
+      continue;
+    }
+    if (!existsSync(repo)) {
+      missingExact = true;
+      continue;
+    }
+    exact.add(repo);
+  }
+  return { repos: [...exact], missingExact };
+}
+
 function cachedBacklogCountForEnrolledRepos(enrolled: string[]): number {
   try {
-    const enrolledRepos = new Set(enrolled.map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
+    const enrolledRepos = new Set(exactCanonicalEnrolledRepos(enrolled).repos);
     if (enrolledRepos.size === 0) return 0;
     const backlog = loadBacklog();
     const items = [
@@ -2699,7 +2723,7 @@ export async function tick(
     if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['outcomeWatcher'] !== false) {
       try {
         const { scanRealWorldOutcomes } = await import('../fleet/outcome-watcher.js');
-        await scanRealWorldOutcomes(liveCfg, { enrolledRepos: listEnrolled() });
+        await scanRealWorldOutcomes(liveCfg, { enrolledRepos: enrolled });
       } catch (err) {
         console.warn('[ashlr] daemon:tick outcomeWatcher failed:', (err as Error)?.message ?? err);
       }
@@ -2721,8 +2745,8 @@ export async function tick(
         if (retainedAuthority === null || !ownsOutwardMutationFence(retainedAuthority) || stopRequested()) {
           throw new Error('regression sentinel outward mutation authority unavailable');
         }
-        enrollmentRepos = [...new Set(listEnrolled().map((repo) => resolve(repo)))].sort();
-        const availableRepos = enrollmentRepos.filter((repo) => existsSync(repo));
+        enrollmentRepos = [...enrolled].sort();
+        const availableRepos = enrollmentRepos;
         const cursorRead = loadMonitoringCursor(enrollmentRepos);
         if (cursorRead.sourceState === 'degraded') {
           throw new Error('monitoring cursor is degraded');
@@ -2969,7 +2993,14 @@ export async function tick(
       'error',
     );
   }
-  const enrolled = enrollmentReadiness.repos;
+  const canonicalEnrollment = exactCanonicalEnrolledRepos(enrollmentReadiness.repos);
+  if (canonicalEnrollment.missingExact) {
+    return persistenceRefusal(
+      'tick refused: canonical enrolled repository is temporarily unavailable',
+      'error',
+    );
+  }
+  const enrolled = canonicalEnrollment.repos;
   if (enrolled.length === 0) {
     if (!stillOwnsTick()) {
       return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });

@@ -17,8 +17,9 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
+  canonicalDispatchRepoIdentity,
   recordDispatchProduction,
   readDispatchProductionParents,
   sanitizeDispatchProductionEvent,
@@ -206,7 +207,7 @@ function childItemId(kind: RepairHandoffKind, repo: string, parentItemId: string
     : 'dispatch-no-diff-reslice';
   const prefix = kind === 'capture-repair' ? 'proposal-repair-capture' : 'proposal-repair-nodiff';
   const hash = createHash('sha1')
-    .update(`${resolve(repo)}\0${parentItemId}\0${domain}`)
+    .update(`${repo}\0${parentItemId}\0${domain}`)
     .digest('hex')
     .slice(0, 12);
   return `${basename(repo)}:${prefix}:${hash}`;
@@ -246,13 +247,18 @@ function eligibleKind(event: DispatchProductionEvent): RepairHandoffKind | null 
 export function repairHandoffFromDispatchEvent(
   event: DispatchProductionEvent,
 ): RepairHandoffObservation | null {
+  if (canonicalDispatchRepoIdentity(event.repo) === null) return null;
   const kind = eligibleKind(event);
   if (!kind) return null;
-  event = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+  try {
+    event = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+  } catch {
+    return null;
+  }
   const parsedTs = Date.parse(event.ts);
   if (!Number.isFinite(parsedTs)) return null;
-  let repo: string;
-  try { repo = resolve(event.repo); } catch { return null; }
+  const repo = canonicalDispatchRepoIdentity(event.repo);
+  if (repo === null || repo !== event.repo) return null;
   if (!safeItemId(event.itemId)) return null;
   const parentAttemptId = event.trajectoryId ?? event.runId;
   if (!parentAttemptId || !validIdentity(parentAttemptId)) return null;
@@ -319,6 +325,7 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
     typeof row['ts'] !== 'string' || !Number.isFinite(Date.parse(row['ts'])) ||
     (row['kind'] !== 'capture-repair' && row['kind'] !== 'no-diff-reslice') ||
     typeof row['repo'] !== 'string' || row['repo'].length < 1 || row['repo'].length > 1_024 ||
+    canonicalDispatchRepoIdentity(row['repo']) !== row['repo'] ||
     !safeItemId(row['parentItemId']) ||
     (row['parentOutcome'] !== 'proposal-capture-error' && row['parentOutcome'] !== 'gate-blocked' && row['parentOutcome'] !== 'empty-diff') ||
     typeof row['parentAttemptId'] !== 'string' || !validIdentity(row['parentAttemptId'])
@@ -349,7 +356,6 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
     })) return false;
     if (activationPresent && Date.parse(String(row['writerActivatedAt'])) > Date.parse(String(row['ts']))) return false;
     try {
-      if (resolve(String(row['repo'])) !== row['repo']) return false;
       if (new Date(Date.parse(String(row['ts']))).toISOString() !== row['ts']) return false;
     } catch {
       return false;
@@ -520,10 +526,14 @@ export function recordRepairHandoffs(
 ): RepairHandoffWriteResult {
   const result: RepairHandoffWriteResult = { attempted: 0, recorded: 0, failed: 0 };
   for (const event of Array.isArray(events) ? events : [events]) {
-    if (!repairHandoffFromDispatchEvent(event)) continue;
-    const canonicalParent = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
-    const objectiveScoped = repairHandoffFromDispatchEvent(canonicalParent);
+    const objectiveScoped = repairHandoffFromDispatchEvent(event);
     if (!objectiveScoped) continue;
+    let canonicalParent: DispatchProductionEvent;
+    try {
+      canonicalParent = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+    } catch {
+      continue;
+    }
     if (options.schemaVersion === 2 && !validRepairHandoffV2Activation(options.activation)) {
       result.attempted += 1;
       result.failed += 1;

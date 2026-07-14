@@ -718,10 +718,12 @@ describe('M362 durable repair handoff journal', () => {
     }
   });
 
-  it('canonicalizes and scrubs parent identity before either causal ledger persists it', () => {
+  it('canonicalizes a lexical parent repo while scrubbing non-identity metadata', () => {
     const repo = fx.makeRepo();
     const secret = 'github_pat_1234567890abcdefghijklmnop';
-    expect(recordRepairHandoffs(event(relative(process.cwd(), repo.dir), {
+    const nested = join(repo.dir, 'identity-probe');
+    mkdirSync(nested);
+    expect(recordRepairHandoffs(event(join(nested, '..'), {
       itemId: `repo:goal:${secret}`,
     }))).toMatchObject({ recorded: 1, failed: 0 });
 

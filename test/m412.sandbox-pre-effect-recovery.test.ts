@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Sandbox } from '../src/core/types.js';
 import {
+  canonicalPathIdentity,
   createSandbox,
   listSandboxes,
   removeSandbox,
@@ -32,8 +33,13 @@ function git(repo: string, args: string[]): string {
   }).trim();
 }
 
-function withGitSlashes(value: string): string {
-  return value.replaceAll('\\', '/');
+function hasRegisteredWorktree(repo: string, worktreePath: string): boolean {
+  const expected = canonicalPathIdentity(worktreePath);
+  if (expected === null) return false;
+  return git(repo, ['worktree', 'list', '--porcelain'])
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith('worktree '))
+    .some((line) => canonicalPathIdentity(line.slice('worktree '.length).trimEnd()) === expected);
 }
 
 function sourceSnapshot(repo: DisposableRepo): SourceSnapshot {
@@ -112,8 +118,7 @@ describe('M412 sandbox pre-effect recovery', () => {
     try {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(repo.branches()).toContain(sandbox.branch);
-      expect(withGitSlashes(git(repo.dir, ['worktree', 'list', '--porcelain'])))
-        .toContain(withGitSlashes(realpathSync(sandbox.worktreePath)));
+      expect(hasRegisteredWorktree(repo.dir, sandbox.worktreePath)).toBe(true);
       expect(listSandboxes().map((entry) => entry.id)).toEqual([sandbox.id]);
     } finally {
       expect(removeSandbox(sandbox).status).toBe('complete');

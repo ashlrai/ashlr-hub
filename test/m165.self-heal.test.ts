@@ -46,12 +46,16 @@ vi.mock('../src/core/run/verify-commands.js', () => ({
 const mockListEnrolled = vi.fn();
 const mockIsEnrolled = vi.fn(() => true);
 const mockKillSwitchOn = vi.fn(() => false);
-vi.mock('../src/core/sandbox/policy.js', () => ({
-  listEnrolled: () => mockListEnrolled(),
-  isEnrolled: (...args: unknown[]) => mockIsEnrolled(...args),
-  killSwitchOn: () => mockKillSwitchOn(),
-  readRegistry: vi.fn(() => ({ repos: [] })),
-}));
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/policy.js')>();
+  return {
+    ...actual,
+    listEnrolled: () => mockListEnrolled(),
+    isEnrolled: (...args: unknown[]) => mockIsEnrolled(...args),
+    killSwitchOn: () => mockKillSwitchOn(),
+    readRegistry: vi.fn(() => ({ repos: [] })),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Lazy imports (after mocks)
@@ -128,7 +132,7 @@ const TIMEOUT_FAIL_RESULT = {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'm165-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'm165-')));
   process.env.HOME = tmpHome;
   vi.resetAllMocks();
   mockIsEnrolled.mockReturnValue(true);
@@ -765,6 +769,36 @@ describe('runSelfHealCycle', () => {
     expect(result.checked).toBe(1);
     expect(result.broken).toEqual([repoA]);
     expect(result.healItems[0]!.repo).toBe(repoA);
+  });
+
+  it('accepts a current physical alias only for an exactly canonical enrolled path', async () => {
+    const repo = path.join(tmpHome, 'repo-physical');
+    const alias = path.join(tmpHome, 'repo-alias');
+    fs.mkdirSync(repo, { recursive: true });
+    const canonicalRepo = fs.realpathSync.native(repo);
+    fs.symlinkSync(
+      canonicalRepo,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    mockListEnrolled.mockReturnValue([canonicalRepo]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    const currentAlias = await runSelfHealCycleForRepos([alias], makeCfg());
+
+    expect(currentAlias.checked).toBe(1);
+    expect(mockRunVerifyCommand).toHaveBeenCalledTimes(1);
+    expect(mockRunVerifyCommand.mock.calls[0]![1]).toBe(canonicalRepo);
+
+    mockRunVerifyCommand.mockClear();
+    mockListEnrolled.mockReturnValue([alias]);
+
+    const legacyRegistryAlias = await runSelfHealCycleForRepos([canonicalRepo], makeCfg());
+
+    expect(legacyRegistryAlias).toEqual({ checked: 0, broken: [], healItems: [] });
+    expect(mockRunVerifyCommand).not.toHaveBeenCalled();
   });
 
   it('targeted self-heal maintenance replaces stale failure text for the requested repo', async () => {

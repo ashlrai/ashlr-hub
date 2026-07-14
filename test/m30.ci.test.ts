@@ -61,6 +61,7 @@ describe('M30 CI workflow', () => {
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
+    const observerSchedulerTest = 'test/m367.daemon-observer-scheduler.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -72,11 +73,13 @@ describe('M30 CI workflow', () => {
         terminalRetentionTest,
         'test/m403.automerge-mutation-fence.test.ts',
         'test/m404.policy-result-surfaces.test.ts',
+        'test/m428.goal-source-quality.test.ts',
         'test/m409.engine-execution-mutation-fence.test.ts',
         'test/m410.policy-opposing-race.test.ts',
         'test/m414.local-store-lock-unknown-owner.test.ts',
         'test/m415.policy-durability-races.test.ts',
         'test/m422.policy-transaction-recovery.test.ts',
+        'test/m425.policy-startup-recovery.test.ts',
         'test/m416.local-store-lock-handoff.test.ts',
       ],
       [
@@ -92,14 +95,18 @@ describe('M30 CI workflow', () => {
         'test/m413.engineer-run-mutation-fence.test.ts',
         'test/m417.sandbox-cleanup-quiescence.test.ts',
         'test/m424.legacy-swarm-mutation-fence.test.ts',
+        'test/m425.persistence-private-temp.test.ts',
+        'test/m426.sandbox-reservation-identity.test.ts',
         'test/sandbox-reservation-recovery.test.ts',
       ],
       [
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
         'test/m315.remote-handoff-truth.test.ts',
+        observerSchedulerTest,
         'test/m372.test-ci-watchdog.test.ts',
         'test/m379.private-storage.test.ts',
+        'test/m385.cutoff-checkpoint-scheduler.test.ts',
         'test/m385.cutoff-checkpoint-windows.test.ts',
         'test/m407.verification-mutation-fence.test.ts',
         'test/m408.sandbox-creation-mutation-fence.test.ts',
@@ -114,8 +121,17 @@ describe('M30 CI workflow', () => {
       'test/m111.work-queue.test.ts',
       'test/m392.queue-lease-epochs.test.ts',
       terminalRetentionTest,
+      observerSchedulerTest,
     ];
-    const expectedFiles = [...expectedWindowsPartitions.flat(), ...expectedMacosFiles];
+    const nativeAliasFiles = [
+      'test/m426.sandbox-reservation-identity.test.ts',
+      'test/h7.rollback.test.ts',
+    ];
+    const expectedFiles = [
+      ...expectedWindowsPartitions.flat(),
+      ...expectedMacosFiles,
+      ...nativeAliasFiles,
+    ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
     windowsMatrixEntries.forEach((entry, index) => {
@@ -137,15 +153,25 @@ describe('M30 CI workflow', () => {
     const duplicateFiles = declaredFiles.filter(
       (file, index) => declaredFiles.indexOf(file) !== index,
     );
-    expect(duplicateFiles).toEqual([terminalRetentionTest]);
+    expect([...duplicateFiles].sort()).toEqual([
+      terminalRetentionTest,
+      observerSchedulerTest,
+      'test/m426.sandbox-reservation-identity.test.ts',
+    ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,
     );
     expect(macosEntry.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(1);
+    expect(windowsEntries.match(/test\/m367\.daemon-observer-scheduler\.test\.ts/g)).toHaveLength(1);
+    expect(macosEntry.match(/test\/m367\.daemon-observer-scheduler\.test\.ts/g)).toHaveLength(1);
     for (const file of declaredFiles) {
       expect(existsSync(resolve(repoRoot, file)), `missing native CI test: ${file}`).toBe(true);
     }
     expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
+    expect(ciYml).toContain(
+      "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
+    );
+    expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
   });
 
   it('enables npm caching for fast installs', () => {

@@ -25,6 +25,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — before any module resolves homedir()
@@ -42,6 +43,8 @@ let tmpHome: string;
 // result per id via a mutable map (default: merged:false).
 const mockAutoMergeProposal = vi.fn();
 const mockVerifyAndPersistProposal = vi.fn();
+const mockEvaluateAutoMergeReadinessPreflight = vi.fn();
+const mockHasCurrentVerificationBinding = vi.fn();
 const {
   mockEmitMerge,
   mockEventBusEmit,
@@ -59,7 +62,8 @@ let mergeResults: Record<string, AutoMergeResult> = {};
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   verifyAndPersistProposal: (...args: unknown[]) => mockVerifyAndPersistProposal(...args),
-  evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  evaluateAutoMergeReadinessPreflight: (...args: unknown[]) => mockEvaluateAutoMergeReadinessPreflight(...args),
+  hasCurrentVerificationBinding: (...args: unknown[]) => mockHasCurrentVerificationBinding(...args),
   isFrontierJudge: (judgeEngine: string | undefined) => {
     const lc = (judgeEngine ?? '').toLowerCase();
     return lc.startsWith('claude') || lc.includes('claude') || lc.startsWith('gpt-5') || lc.startsWith('codex-') || lc === 'codex';
@@ -191,6 +195,8 @@ function verificationCfg(): AshlrConfig {
   return { version: 1, foundry: { autoMerge: { enabled: true, trustBasis: 'verification' } } } as AshlrConfig;
 }
 
+const CURRENT_BASE_HEAD = 'current-base-head';
+
 function proposalRead(
   proposals: Proposal[],
   over?: Partial<{ sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }>,
@@ -221,6 +227,8 @@ beforeEach(() => {
 
   mockAutoMergeProposal.mockReset();
   mockVerifyAndPersistProposal.mockReset();
+  mockEvaluateAutoMergeReadinessPreflight.mockReset();
+  mockHasCurrentVerificationBinding.mockReset();
   mockListProposalsDetailed.mockReset();
   mockReplayRealizedMergeFanout.mockReset();
   mockSetStatus.mockReset();
@@ -245,6 +253,22 @@ beforeEach(() => {
   mockEmitMerge.mockResolvedValue(undefined);
   mockAutoMergeProposal.mockImplementation(async (id: string) => {
     return mergeResults[id] ?? { ok: false, merged: false, reason: 'default-not-merged' };
+  });
+  mockEvaluateAutoMergeReadinessPreflight.mockImplementation((proposal: Proposal) =>
+    proposal.verifyResult?.passed === false
+      ? {
+          ready: false,
+          permanent: true,
+          advisories: [],
+          reason: 'known verification failure: proposal.verifyResult.passed is false',
+        }
+      : { ready: true, advisories: [] });
+  mockHasCurrentVerificationBinding.mockImplementation((proposal: Proposal) => {
+    const result = proposal.verifyResult;
+    return typeof result?.passed === 'boolean' &&
+      result.baseBranch === 'main' &&
+      result.baseHead === CURRENT_BASE_HEAD &&
+      result.diffHash === hashDiff(proposal.diff ?? '');
   });
   mockVerifyAndPersistProposal.mockResolvedValue({
     verify: {
@@ -325,9 +349,13 @@ describe('M48 runAutoMergePass — DISABLED is a no-op', () => {
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 
-  it('does not even list proposals when disabled (short-circuits first)', async () => {
+  it('lists only to discover repairs when config is absent without progressing pending work', async () => {
+    pendingProposals = [makeProposal('p1', { engineTier: 'frontier' })];
     await runAutoMergePass({ version: 1 } as AshlrConfig);
-    expect(mockListProposalsDetailed).not.toHaveBeenCalled();
+    expect(mockListProposalsDetailed).toHaveBeenCalledOnce();
+    expect(mockReplayRealizedMergeFanout).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 });
 
@@ -383,6 +411,40 @@ describe('M48 runAutoMergePass — proposal source authority', () => {
 });
 
 describe('M48 runAutoMergePass — realized-merge fanout recovery', () => {
+  it.each([
+    ['absent', { version: 1 } as AshlrConfig],
+    ['disabled', { version: 1, foundry: { autoMerge: { enabled: false } } } as AshlrConfig],
+  ])('replays an applied receipt when autoMerge config is %s without progressing merges', async (_label, cfg) => {
+    const applied = appliedProposalMissingFanout(`applied-default-off-${_label}`);
+    pendingProposals = [applied, makeProposal(`pending-default-off-${_label}`, { engineTier: 'frontier' })];
+
+    const out = await runAutoMergePass(cfg);
+
+    expect(mockReplayRealizedMergeFanout).toHaveBeenCalledWith(
+      applied.id,
+      expect.any(Object),
+      expect.any(Function),
+    );
+    expect(out).toMatchObject({ attempted: 0, merged: 0, judged: 0 });
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it('revalidates a current durable marker so projection loss cannot suppress repair', async () => {
+    const applied = appliedProposalMissingFanout('applied-current-marker-validation');
+    (applied as unknown as Record<string, unknown>)['realizedMergeFanoutVersion'] = 3;
+    pendingProposals = [applied];
+
+    await runAutoMergePass({ version: 1 } as AshlrConfig);
+
+    expect(mockReplayRealizedMergeFanout).toHaveBeenCalledWith(
+      applied.id,
+      expect.any(Object),
+      expect.any(Function),
+    );
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
   it('replays an applied receipt without re-entering judge or merge progression', async () => {
     const applied = appliedProposalMissingFanout('applied-restart-replay');
     pendingProposals = [applied];
@@ -404,7 +466,9 @@ describe('M48 runAutoMergePass — realized-merge fanout recovery', () => {
       appliedProposalMissingFanout(`applied-fanout-${String(index).padStart(2, '0')}`));
     mockReplayRealizedMergeFanout.mockImplementation((id: string) => {
       const proposal = pendingProposals.find((candidate) => candidate.id === id);
-      if (proposal) proposal.realizedMergeFanoutVersion = 2;
+      if (proposal) {
+        (proposal as unknown as Record<string, unknown>)['realizedMergeFanoutVersion'] = 3;
+      }
       return true;
     });
 
@@ -415,7 +479,7 @@ describe('M48 runAutoMergePass — realized-merge fanout recovery', () => {
     expect(new Set(mockReplayRealizedMergeFanout.mock.calls.map(([id]) => id))).toEqual(
       new Set(pendingProposals.map((proposal) => proposal.id)),
     );
-    expect(mockReplayRealizedMergeFanout).toHaveBeenCalledTimes(21);
+    expect(mockReplayRealizedMergeFanout).toHaveBeenCalledTimes(32);
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 
@@ -461,7 +525,7 @@ describe('M48 runAutoMergePass — cleanup persistence authority', () => {
       'rejected',
       undefined,
       expect.stringContaining('ephemeral Ashlr temp-worktree'),
-      undefined,
+      expect.anything(),
       {},
       'pending',
     );
@@ -581,6 +645,177 @@ describe('M48 runAutoMergePass — mutation progression', () => {
     }));
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it('re-verifies a stale failure without incrementing permanent stuck or archive state', async () => {
+    const proposal = makeProposal('stale-verification-failure', {
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: false,
+        failed: ['old base failed'],
+        detail: 'old base failed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: 'stale-base-head',
+        diffHash: hashDiff('diff --git a/x.ts b/x.ts\n'),
+      },
+    });
+    (proposal as unknown as Record<string, unknown>)['stuckPassCount'] = 2;
+    pendingProposals = [proposal];
+    const cfg = verificationCfg();
+    (cfg.foundry as unknown as Record<string, unknown>)['autoArchiveAfterRejects'] = 3;
+
+    const out = await runAutoMergePass(cfg);
+
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledWith(
+      proposal,
+      cfg,
+      'auto-merge-preflight',
+    );
+    expect(out).toMatchObject({ verifyBeforeJudgeRan: 1, autoArchived: 0, attempted: 1 });
+    expect(mockUpdateProposalField).not.toHaveBeenCalledWith(
+      proposal.id,
+      expect.objectContaining({ stuckPassCount: expect.any(Number) }),
+      expect.anything(),
+    );
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not let a stale passing result bypass pass-level verification', async () => {
+    const proposal = makeProposal('stale-verification-pass', {
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: true,
+        detail: 'passed for another diff',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: CURRENT_BASE_HEAD,
+        diffHash: hashDiff('diff --git a/other.ts b/other.ts\n'),
+      },
+    });
+    pendingProposals = [proposal];
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
+    expect(out.verifyBeforeJudgeRan).toBe(1);
+    expect(mockJudgeProposal).toHaveBeenCalledTimes(1);
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(proposal.id, expect.any(Object));
+  });
+
+  it('reuses an exactly bound passing result in verification mode', async () => {
+    const diff = 'diff --git a/x.ts b/x.ts\n';
+    const proposal = makeProposal('current-verification-pass', {
+      engineTier: 'frontier',
+      diff,
+      verifyResult: {
+        passed: true,
+        detail: 'current diff passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: CURRENT_BASE_HEAD,
+        diffHash: hashDiff(diff),
+      },
+    });
+    pendingProposals = [proposal];
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(mockVerifyAndPersistProposal).not.toHaveBeenCalled();
+    expect(out.verifyBeforeJudgeRan).toBe(0);
+    expect(mockJudgeProposal).toHaveBeenCalledTimes(1);
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(proposal.id, expect.any(Object));
+  });
+
+  it('keeps an exactly bound verification failure permanent', async () => {
+    const diff = 'diff --git a/x.ts b/x.ts\n';
+    const proposal = makeProposal('current-verification-failure', {
+      engineTier: 'frontier',
+      diff,
+      verifyResult: {
+        passed: false,
+        failed: ['current diff failed'],
+        detail: 'current diff failed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: CURRENT_BASE_HEAD,
+        diffHash: hashDiff(diff),
+      },
+    });
+    pendingProposals = [proposal];
+    const cfg = verificationCfg();
+    (cfg.foundry as unknown as Record<string, unknown>)['autoArchiveAfterRejects'] = 1;
+
+    const out = await runAutoMergePass(cfg);
+
+    expect(out).toMatchObject({ verifyBeforeJudgeRan: 0, autoArchived: 1, attempted: 0 });
+    expect(mockVerifyAndPersistProposal).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      proposal.id,
+      { stuckPassCount: 1 },
+      expect.anything(),
+    );
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      proposal.id,
+      'rejected',
+      undefined,
+      expect.stringContaining('permanent readiness blocker'),
+      expect.anything(),
+      {},
+      'pending',
+    );
+  });
+
+  it('always runs fresh fail-closed verification in evidence mode', async () => {
+    const diff = 'diff --git a/x.ts b/x.ts\n';
+    const proposal = makeProposal('evidence-fresh-verification', {
+      engineTier: 'local',
+      diff,
+      verifyResult: {
+        passed: true,
+        detail: 'currently bound pass',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: CURRENT_BASE_HEAD,
+        diffHash: hashDiff(diff),
+      },
+    });
+    pendingProposals = [proposal];
+
+    const out = await runAutoMergePass(evidenceCfg());
+
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
+    expect(out.verifyBeforeJudgeRan).toBe(1);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(proposal.id, expect.any(Object));
+  });
+
+  it('does not archive stale verification failures in default tier mode', async () => {
+    const proposal = makeProposal('tier-stale-verification-failure', {
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: false,
+        failed: ['obsolete diff failed'],
+        baseBranch: 'main',
+        baseHead: 'stale-base-head',
+        diffHash: hashDiff('diff --git a/obsolete.ts b/obsolete.ts\n'),
+      },
+      stuckPassCount: 2,
+    });
+    pendingProposals = [proposal];
+    const cfg = enabledCfg();
+    (cfg.foundry as unknown as Record<string, unknown>)['autoArchiveAfterRejects'] = 3;
+
+    const out = await runAutoMergePass(cfg);
+
+    expect(out).toMatchObject({ attempted: 1, autoArchived: 0 });
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(proposal.id, cfg);
+    expect(mockUpdateProposalField).not.toHaveBeenCalledWith(
+      proposal.id,
+      expect.objectContaining({ stuckPassCount: expect.any(Number) }),
+      expect.anything(),
+    );
+    expect(mockSetStatus).not.toHaveBeenCalled();
   });
 });
 

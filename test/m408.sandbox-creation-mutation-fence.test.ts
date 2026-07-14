@@ -1,11 +1,12 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { makeFixture, type DisposableRepo, type H1Fixture } from './helpers/h1-fixture.js';
 import {
+  canonicalPathIdentity,
   createSandbox,
   listSandboxes,
   removeSandbox,
@@ -70,8 +71,13 @@ function git(repo: string, args: string[]): string {
   }).trim();
 }
 
-function withGitSlashes(value: string): string {
-  return value.replaceAll('\\', '/');
+function hasRegisteredWorktree(repo: string, worktreePath: string): boolean {
+  const expected = canonicalPathIdentity(worktreePath);
+  if (expected === null) return false;
+  return git(repo, ['worktree', 'list', '--porcelain'])
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith('worktree '))
+    .some((line) => canonicalPathIdentity(line.slice('worktree '.length).trimEnd()) === expected);
 }
 
 function sourceSnapshot(repo: DisposableRepo): SourceSnapshot {
@@ -221,8 +227,7 @@ describe('M408 createSandbox outward mutation fence', () => {
     const sandbox = createSandbox(repo.dir);
     try {
       expect(repo.branches()).toContain(sandbox.branch);
-      expect(withGitSlashes(git(repo.dir, ['worktree', 'list', '--porcelain'])))
-        .toContain(withGitSlashes(realpathSync(sandbox.worktreePath)));
+      expect(hasRegisteredWorktree(repo.dir, sandbox.worktreePath)).toBe(true);
       expect(listSandboxes().map((entry) => entry.id)).toContain(sandbox.id);
     } finally {
       removeSandbox(sandbox);

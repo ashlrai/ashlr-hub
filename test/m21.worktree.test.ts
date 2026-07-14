@@ -398,13 +398,13 @@ describe('M21 worktree — createSandbox returns correct Sandbox shape', () => {
     }
   });
 
-  it('sourceRepo field matches the path passed to createSandbox', async () => {
+  it('sourceRepo field records the canonical physical repository identity', async () => {
     const wt = await worktree();
     const repo = makeTmpRepo('sourcerepo');
     let sb: Sandbox | null = null;
     try {
       sb = wt.createSandbox(repo, { allowAnyRepo: true });
-      expect(sb.sourceRepo).toBe(repo);
+      expect(sb.sourceRepo).toBe(fs.realpathSync.native(repo));
     } finally {
       if (sb) {
         try { wt.removeSandbox(sb); } catch { /* ok */ }

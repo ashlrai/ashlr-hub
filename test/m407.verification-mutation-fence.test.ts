@@ -87,6 +87,13 @@ function config(): AshlrConfig {
   } as AshlrConfig;
 }
 
+function verificationConfig(): AshlrConfig {
+  const cfg = config();
+  cfg.foundry!.autoMerge!.trustBasis = 'verification';
+  cfg.foundry!.autoMerge!.managerGate = false;
+  return cfg;
+}
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ashlr-m407-home-'));
   repo = join(home, 'repo');
@@ -184,5 +191,239 @@ describe('M407 auto-merge verification mutation fence', () => {
     expect(loadProposal(proposal.id)?.status).toBe('approved');
     expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
     expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-verifies a passing cache entry that belongs to a different diff', async () => {
+    const diff = addFileDiff();
+    const diffHash = hashDiff(diff);
+    const baseHead = git(repo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 stale verification binding',
+      summary: 'Passing evidence for diff A must not authorize diff B.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: true,
+        detail: 'stale cached pass',
+        ran: [{
+          id: 'm407-required-typecheck',
+          kind: 'typecheck',
+          cmd: ['mock-verifier'],
+          required: true,
+          profiles: ['merge'],
+        }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash: hashDiff(`${diff}\n# stale diff A`),
+        source: 'auto-merge',
+      },
+    });
+    setStatus(proposal.id, 'approved');
+    verifyMocks.runVerifyCommandAsync.mockResolvedValue({
+      ok: false,
+      command: 'mock-verifier',
+      exitCode: 1,
+      output: 'diff B fails verification',
+      timedOut: false,
+    });
+
+    await expect(autoMergeProposal(proposal.id, verificationConfig())).resolves.toMatchObject({
+      ok: false,
+      merged: false,
+      reason: expect.stringMatching(/verification failed/i),
+    });
+
+    expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
+      passed: false,
+      diffHash,
+      baseBranch: 'main',
+      baseHead,
+    });
+  });
+
+  it('re-verifies a failed cache entry that belongs to a different diff', async () => {
+    const diff = addFileDiff();
+    const diffHash = hashDiff(diff);
+    const baseHead = git(repo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 stale failed diff binding',
+      summary: 'Failure evidence for diff A must not reject diff B.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: false,
+        failed: ['diff A failed verification'],
+        detail: 'stale cached failure',
+        ran: [{
+          id: 'm407-required-typecheck',
+          kind: 'typecheck',
+          cmd: ['mock-verifier'],
+          required: true,
+          profiles: ['merge'],
+        }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash: hashDiff(`${diff}\n# stale diff A`),
+        source: 'auto-merge',
+      },
+    });
+    setStatus(proposal.id, 'approved');
+    verifyMocks.runVerifyCommandAsync.mockResolvedValue({
+      ok: true,
+      command: 'mock-verifier',
+      exitCode: 0,
+      output: '',
+      timedOut: false,
+    });
+
+    await expect(autoMergeProposal(proposal.id, verificationConfig())).resolves.toMatchObject({
+      ok: false,
+      merged: false,
+      reason: expect.stringMatching(/no 'judged' decision/i),
+    });
+
+    expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
+      passed: true,
+      diffHash,
+      baseBranch: 'main',
+      baseHead,
+    });
+  });
+
+  it('re-verifies a failed cache entry bound to an obsolete base head', async () => {
+    const diff = addFileDiff();
+    const diffHash = hashDiff(diff);
+    const staleBaseHead = git(repo, ['rev-parse', 'main']);
+    git(repo, ['checkout', 'main']);
+    writeFileSync(join(repo, 'README.md'), '# m407 fixture\n\nnew base\n', 'utf8');
+    git(repo, ['add', 'README.md']);
+    git(repo, ['commit', '-m', 'advance base']);
+    const currentBaseHead = git(repo, ['rev-parse', 'main']);
+    git(repo, ['checkout', 'work']);
+
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 stale failed base binding',
+      summary: 'Failure evidence for an obsolete base must not reject the current proposal.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: false,
+        failed: ['old base failed verification'],
+        detail: 'stale cached failure',
+        ran: [{
+          id: 'm407-required-typecheck',
+          kind: 'typecheck',
+          cmd: ['mock-verifier'],
+          required: true,
+          profiles: ['merge'],
+        }],
+        baseBranch: 'main',
+        baseHead: staleBaseHead,
+        diffHash,
+        source: 'auto-merge',
+      },
+    });
+    setStatus(proposal.id, 'approved');
+    verifyMocks.runVerifyCommandAsync.mockResolvedValue({
+      ok: true,
+      command: 'mock-verifier',
+      exitCode: 0,
+      output: '',
+      timedOut: false,
+    });
+
+    await expect(autoMergeProposal(proposal.id, verificationConfig())).resolves.toMatchObject({
+      ok: false,
+      merged: false,
+      reason: expect.stringMatching(/no 'judged' decision/i),
+    });
+
+    expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
+      passed: true,
+      diffHash,
+      baseBranch: 'main',
+      baseHead: currentBaseHead,
+    });
+  });
+
+  it('keeps a failed result fail-closed when its base and diff bindings are current', async () => {
+    const diff = addFileDiff();
+    const diffHash = hashDiff(diff);
+    const baseHead = git(repo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 current failed binding',
+      summary: 'Current failure evidence must remain authoritative.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      verifyResult: {
+        passed: false,
+        failed: ['current proposal failed verification'],
+        detail: 'current cached failure',
+        ran: [{
+          id: 'm407-required-typecheck',
+          kind: 'typecheck',
+          cmd: ['mock-verifier'],
+          required: true,
+          profiles: ['merge'],
+        }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash,
+        source: 'auto-merge',
+      },
+    });
+    setStatus(proposal.id, 'approved');
+    verifyMocks.runVerifyCommandAsync.mockResolvedValue({
+      ok: true,
+      command: 'mock-verifier',
+      exitCode: 0,
+      output: '',
+      timedOut: false,
+    });
+
+    await expect(autoMergeProposal(proposal.id, verificationConfig())).resolves.toMatchObject({
+      ok: false,
+      merged: false,
+    });
+
+    expect(verifyMocks.runVerifyCommandAsync).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
+      passed: false,
+      detail: 'current cached failure',
+      diffHash,
+      baseBranch: 'main',
+      baseHead,
+    });
   });
 });

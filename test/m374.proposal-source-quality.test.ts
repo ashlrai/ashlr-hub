@@ -14,6 +14,7 @@ import {
 import type { Proposal } from '../src/core/types.js';
 
 const originalHome = process.env.HOME;
+const REPO = path.join(fs.realpathSync.native(os.tmpdir()), 'ashlr-m374-repo');
 let home: string;
 
 beforeEach(() => {
@@ -31,7 +32,7 @@ afterEach(() => {
 function proposal(id: string, overrides: Partial<Proposal> = {}): Proposal {
   return {
     id,
-    repo: '/tmp/repo',
+    repo: REPO,
     origin: 'manual',
     kind: 'patch',
     title: id,
@@ -209,7 +210,7 @@ describe('M374 bounded detailed proposal enumeration', () => {
   it('uses the same authoritative per-file ceiling for writes and default reads', () => {
     const oversizedSummary = 'x'.repeat(4 * 1024 * 1024);
     const written = createProposal({
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'manual',
       kind: 'patch',
       title: 'oversized writer',

@@ -9,9 +9,9 @@
  *   AND risk class ≤ maxRisk AND full verification passes
  *   AND kill-switch off AND repo enrolled.
  *
- * DEFAULT OFF: a no-op unless cfg.foundry.autoMerge.enabled === true. Only
- * 'frontier'-tier proposals are even considered; the gate re-checks everything.
- * Never throws.
+ * DEFAULT OFF: new judge/merge progression is a no-op unless
+ * cfg.foundry.autoMerge.enabled === true. Absent or disabled configuration may
+ * still repair projections for authenticated merges. Never throws.
  *
  * M172: judge-then-merge loop.
  * Before merging, each PENDING proposal that has no recent frontier 'ship'
@@ -39,6 +39,7 @@ import {
 import {
   autoMergeProposal,
   evaluateAutoMergeReadinessPreflight,
+  hasCurrentVerificationBinding,
   isFrontierJudge,
   verifyAndPersistProposal,
   type AutoMergeResult,
@@ -48,6 +49,7 @@ import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
+  type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
@@ -73,6 +75,7 @@ import { causalMetadataFromProposal } from '../learning/causal.js';
 import { isApprovedRemoteHandoffRetryCandidate } from '../inbox/remote-handoff.js';
 import {
   acquireProposalMutationLock,
+  ownsProposalMutationLock,
   releaseProposalMutationLock,
   type ProposalMutationLock,
 } from '../inbox/proposal-mutation-lock.js';
@@ -244,7 +247,8 @@ function replayAuthorizedRealizedMergeFanout(proposal: Proposal): boolean {
     releaseProposalMutationLock(proposalLock);
     return false;
   }
-  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+  const authorized = (): boolean => ownsProposalMutationLock(proposal.id, proposalLock) &&
+    ownsOutwardMutationFence(fence) &&
     !killSwitchOn() && isEnrolled(repo);
   try {
     if (!authorized()) return false;
@@ -260,6 +264,11 @@ interface AuthorizedPostJudgeResult {
   persisted: boolean;
   authorityLive: boolean;
   archived: boolean;
+}
+
+interface ProposalWriteAuthority {
+  proposalLock: ProposalMutationLock;
+  outwardFence: OutwardMutationFence;
 }
 
 function runAuthorizedPostJudgePersistence(
@@ -308,25 +317,29 @@ function runAuthorizedPostJudgePersistence(
         ? writeProposalStatus(
             proposal,
             `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
-            proposalLock,
+            { proposalLock, outwardFence: fence },
           )
-        : writeProposalField(proposal, { judgeNonShipCount: newCount }, proposalLock);
+        : writeProposalField(
+            proposal,
+            { judgeNonShipCount: newCount },
+            { proposalLock, outwardFence: fence },
+          );
       return { entered: true, persisted, authorityLive: authorized(), archived: persisted && archived };
     }
 
     const existingCount = (proposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
     const persisted = existingCount !== undefined && existingCount > 0
-      ? writeProposalField(proposal, { judgeNonShipCount: 0 }, proposalLock)
+      ? writeProposalField(
+          proposal,
+          { judgeNonShipCount: 0 },
+          { proposalLock, outwardFence: fence },
+        )
       : true;
     return { entered: true, persisted, authorityLive: authorized(), archived: false };
   } finally {
     releaseOutwardMutationFence(fence);
     releaseProposalMutationLock(proposalLock);
   }
-}
-
-function hasVerificationCommandEvidence(result: Proposal['verifyResult']): boolean {
-  return Array.isArray(result?.ran) && result.ran.length > 0;
 }
 
 export interface AutoMergePassResult {
@@ -493,34 +506,79 @@ function recordSafetySkip(
   out.skipped.push({ proposalId, check, reason });
 }
 
+function runAuthorizedProposalWrite(
+  proposal: Proposal,
+  write: (authority: ProposalWriteAuthority, stillAuthorized: () => boolean) => boolean,
+  suppliedAuthority?: ProposalWriteAuthority,
+): boolean {
+  const repo = proposal.repo;
+  if (!repo) return false;
+
+  const borrowed = suppliedAuthority !== undefined;
+  const proposalLock = suppliedAuthority?.proposalLock ?? acquireProposalMutationLock(proposal.id);
+  if (!ownsProposalMutationLock(proposal.id, proposalLock)) {
+    if (!borrowed) releaseProposalMutationLock(proposalLock);
+    return false;
+  }
+
+  const outwardFence = suppliedAuthority?.outwardFence ?? acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(outwardFence)) {
+    if (!borrowed) {
+      releaseOutwardMutationFence(outwardFence);
+      releaseProposalMutationLock(proposalLock);
+    }
+    return false;
+  }
+
+  const authority: ProposalWriteAuthority = {
+    proposalLock: proposalLock!,
+    outwardFence: outwardFence!,
+  };
+  const stillAuthorized = (): boolean =>
+    ownsProposalMutationLock(proposal.id, proposalLock) &&
+    ownsOutwardMutationFence(outwardFence) &&
+    !killSwitchOn() &&
+    isEnrolled(repo);
+
+  try {
+    // Recheck at entry and again at the write boundary. The second check closes
+    // a revocation that lands during enrollment validation while the held fence
+    // keeps pause/unenrollment from reporting quiescence prematurely.
+    if (!stillAuthorized() || !stillAuthorized()) return false;
+    return write(authority, stillAuthorized);
+  } catch {
+    return false;
+  } finally {
+    if (!borrowed) {
+      releaseOutwardMutationFence(outwardFence);
+      releaseProposalMutationLock(proposalLock);
+    }
+  }
+}
+
 function writeProposalField(
   proposal: Proposal,
   patch: Partial<Proposal>,
-  ownerLock?: ProposalMutationLock,
+  authority?: ProposalWriteAuthority,
 ): boolean {
-  if (killSwitchOn()) return false;
-  try {
-    return ownerLock
-      ? updateProposalField(proposal.id, patch, ownerLock)
-      : updateProposalField(proposal.id, patch);
-  } catch {
-    return false;
-  }
+  return runAuthorizedProposalWrite(
+    proposal,
+    ({ proposalLock }) => updateProposalField(proposal.id, patch, proposalLock),
+    authority,
+  );
 }
 
 function writeProposalStatus(
   proposal: Proposal,
   reason: string,
-  ownerLock?: ProposalMutationLock,
+  authority?: ProposalWriteAuthority,
 ): boolean {
-  if (killSwitchOn()) return false;
-  try {
-    return ownerLock
-      ? setStatus(proposal.id, 'rejected', undefined, reason, ownerLock, {}, 'pending')
-      : setStatus(proposal.id, 'rejected', undefined, reason, undefined, {}, 'pending');
-  } catch {
-    return false;
-  }
+  return runAuthorizedProposalWrite(
+    proposal,
+    ({ proposalLock }) =>
+      setStatus(proposal.id, 'rejected', undefined, reason, proposalLock, {}, 'pending'),
+    authority,
+  );
 }
 
 function incrementStuckOrArchive(
@@ -530,13 +588,19 @@ function incrementStuckOrArchive(
 ): { archived: boolean; stuckPassCount: number } | null {
   const current = (proposal as unknown as Record<string, unknown>)['stuckPassCount'];
   const stuckPassCount = (typeof current === 'number' && Number.isFinite(current) ? current : 0) + 1;
-  if (stuckPassCount >= threshold) {
-    if (!writeProposalField(proposal, { stuckPassCount })) return null;
-    if (!writeProposalStatus(proposal, reason)) return null;
-    return { archived: true, stuckPassCount };
-  }
-  if (!writeProposalField(proposal, { stuckPassCount })) return null;
-  return { archived: false, stuckPassCount };
+  let outcome: { archived: boolean; stuckPassCount: number } | null = null;
+  const persisted = runAuthorizedProposalWrite(proposal, ({ proposalLock }, stillAuthorized) => {
+    if (!updateProposalField(proposal.id, { stuckPassCount }, proposalLock)) return false;
+    if (stuckPassCount >= threshold) {
+      if (!stillAuthorized()) return false;
+      if (!setStatus(proposal.id, 'rejected', undefined, reason, proposalLock, {}, 'pending')) return false;
+      outcome = { archived: true, stuckPassCount };
+      return true;
+    }
+    outcome = { archived: false, stuckPassCount };
+    return true;
+  });
+  return persisted ? outcome : null;
 }
 
 function knownFailedVerificationDetail(p: Proposal): string {
@@ -577,8 +641,7 @@ function readHealthyAutoMergeQueues(): AutoMergeQueues | null {
       recovered: read.proposals.filter(isApprovedRemoteHandoffRetryCandidate),
       fanoutRecovery: read.proposals.filter((proposal) =>
         proposal.status === 'applied' &&
-        proposal.realizedMerge !== undefined &&
-        proposal.realizedMergeFanoutVersion !== 2),
+        proposal.realizedMerge !== undefined),
     };
   } catch {
     return null;
@@ -667,7 +730,6 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     ttlRejected: 0,
     invalidRejected: 0,
   };
-  if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
 
   let queues = readHealthyAutoMergeQueues();
@@ -683,6 +745,10 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     if (killSwitchOn()) return out;
     try { replayAuthorizedRealizedMergeFanout(proposal); } catch { /* retry next pass */ }
   }
+
+  // The opt-in controls new judge/merge progression, not repair of projections
+  // for an already-authenticated merge receipt.
+  if (cfg.foundry?.autoMerge?.enabled !== true) return out;
 
   // M259: resolve drain config from foundry (all additive — only add reject paths).
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -833,6 +899,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     const isEvidenceBackedMode = isVerificationMode || isEvidenceMode;
     const managerGateEnabled = trustBasis?.['managerGate'] === true;
     const shouldJudgeBeforeMerge = isVerificationMode || managerGateEnabled;
+    const verificationResultIsCurrent = isVerificationMode && hasCurrentVerificationBinding(p);
 
     if (!isEvidenceBackedMode) {
       // Tier-mode pre-filter (M51 — unchanged).
@@ -844,7 +911,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     // Cheap static readiness gate before spending judge/merge resources.
     // autoMergeProposal remains authoritative; this only avoids judging records
     // that already fail immutable, pure, no-I/O merge prerequisites.
-    const readiness = evaluateAutoMergeReadinessPreflight(p, cfg);
+    // Only an exact verification-mode binding may make a cached failure a
+    // permanent readiness blocker. Evidence and tier modes verify afresh in the
+    // authoritative merge path, while stale verification-mode outcomes must not
+    // accrue stuck/archive state.
+    const readinessProposal = !isVerificationMode || !verificationResultIsCurrent
+      ? { ...p, verifyResult: undefined }
+      : p;
+    const readiness = evaluateAutoMergeReadinessPreflight(readinessProposal, cfg);
     if (!readiness.ready) {
       const advisorySuffix =
         readiness.advisories.length > 0
@@ -856,8 +930,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       if (readiness.permanent === true) {
         const priorStuck = (p as unknown as Record<string, unknown>)['stuckPassCount'];
         const nextStuck = (typeof priorStuck === 'number' && Number.isFinite(priorStuck) ? priorStuck : 0) + 1;
-        const failed = knownFailedVerificationDetail(p);
-        const detail = p.verifyResult?.passed === false && failed
+        const failed = knownFailedVerificationDetail(readinessProposal);
+        const detail = readinessProposal.verifyResult?.passed === false && failed
           ? `${readiness.reason ?? 'permanent readiness blocker'} (${failed})`
           : (readiness.reason ?? 'permanent readiness blocker');
         const drain = incrementStuckOrArchive(
@@ -873,20 +947,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 
     if (isEvidenceBackedMode) {
       const verifyCheck = isEvidenceMode ? 'verify-before-merge' : 'verify-before-judge';
-      const verifyResultIsReusable =
-        p.verifyResult?.passed === true &&
-        (
-          !isEvidenceMode ||
-          (
-            typeof p.verifyResult.baseBranch === 'string' &&
-            p.verifyResult.baseBranch.length > 0 &&
-            typeof p.verifyResult.baseHead === 'string' &&
-            p.verifyResult.baseHead.length > 0 &&
-            p.verifyResult.diffHash === hashDiff(p.diff ?? '') &&
-            hasVerificationCommandEvidence(p.verifyResult)
-          )
-        );
-      if (p.verifyResult?.passed === false) {
+      const verifyResultIsReusable = verificationResultIsCurrent;
+      if (verifyResultIsReusable && p.verifyResult.passed === false) {
         const failed = p.verifyResult.failed?.filter(Boolean).join('; ');
         const reason = `${verifyCheck}: known failed verification${failed ? `: ${failed}` : ''}`;
         out.results.push({ ok: false, merged: false, branched: false, reason });

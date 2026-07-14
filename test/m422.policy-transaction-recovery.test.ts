@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
@@ -17,6 +17,10 @@ function digest(bytes: Buffer): string {
 
 function registryBytes(repos: string[]): Buffer {
   return Buffer.from(`${JSON.stringify({ repos }, null, 2)}\n`, 'utf8');
+}
+
+function physicalIdentity(path: string): string {
+  return join(realpathSync.native(dirname(path)), basename(path));
 }
 
 function markerAuthentication(payload: Record<string, unknown>): string {
@@ -128,7 +132,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
 
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
-      repos: [requested],
+      repos: [physicalIdentity(requested)],
     });
     expect(existsSync(paths.marker)).toBe(false);
     expect(existsSync(paths.temp)).toBe(false);
@@ -204,7 +208,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
 
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
-      repos: [original, requested],
+      repos: [original, physicalIdentity(requested)],
     });
     expect(existsSync(paths.marker)).toBe(false);
     expect(existsSync(paths.temp)).toBe(false);
@@ -221,7 +225,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     expect(existsSync(paths.temp)).toBe(false);
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
-      repos: [original, requested],
+      repos: [original, physicalIdentity(requested)],
     });
     expect(existsSync(paths.marker)).toBe(false);
   });
@@ -235,7 +239,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     expect(existsSync(paths.temp)).toBe(false);
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
-      repos: [requested],
+      repos: [physicalIdentity(requested)],
     });
     expect(existsSync(paths.marker)).toBe(false);
   });
@@ -252,7 +256,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
 
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
-      repos: [original, crashed, requested],
+      repos: [original, crashed, physicalIdentity(requested)],
     });
     expect(existsSync(paths.marker)).toBe(false);
     expect(existsSync(paths.backup)).toBe(false);

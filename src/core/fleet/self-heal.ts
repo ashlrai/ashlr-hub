@@ -27,7 +27,12 @@ import {
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
-import { isEnrolled, killSwitchOn, listEnrolled } from '../sandbox/policy.js';
+import {
+  canonicalEnrollmentPath,
+  isEnrolled,
+  killSwitchOn,
+  listEnrolled,
+} from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -609,20 +614,20 @@ function persistHealItem(item: WorkItem, canPersist: () => boolean): void {
 function uniqueEnrolledTargets(repos: string[], enrolled: string[]): string[] {
   const enrolledByKey = new Map<string, string>();
   for (const repo of enrolled) {
-    try { enrolledByKey.set(resolve(repo), repo); } catch { /* ignore invalid enrollment rows */ }
+    const key = canonicalEnrollmentPath(repo);
+    // Canonicalize only the caller's current target. A legacy registry alias
+    // must not be promoted into enrollment authority by resolving it here.
+    if (key === repo) enrolledByKey.set(key, repo);
   }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const repo of repos) {
-    try {
-      const key = resolve(repo);
-      const enrolledRepo = enrolledByKey.get(key);
-      if (!enrolledRepo || seen.has(key)) continue;
-      seen.add(key);
-      out.push(enrolledRepo);
-    } catch {
-      // Ignore malformed repo paths.
-    }
+    const key = canonicalEnrollmentPath(repo);
+    if (!key) continue;
+    const enrolledRepo = enrolledByKey.get(key);
+    if (!enrolledRepo || seen.has(key)) continue;
+    seen.add(key);
+    out.push(enrolledRepo);
   }
   return out;
 }

@@ -13,6 +13,14 @@ const mocks = vi.hoisted(() => ({
   createProposal: vi.fn(),
   runGoal: vi.fn(),
   planSwarm: vi.fn(),
+  snapshotProject: vi.fn((project: string | null) => ({
+    project,
+    isRepo: false,
+    head: null,
+    dirty: false,
+    stashRef: null,
+    ts: new Date().toISOString(),
+  })),
 }));
 
 vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {
@@ -22,6 +30,10 @@ vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {
 
 vi.mock('../src/core/swarm/planner.js', () => ({
   planSwarm: mocks.planSwarm,
+}));
+
+vi.mock('../src/core/swarm/rollback.js', () => ({
+  snapshotProject: mocks.snapshotProject,
 }));
 
 vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {

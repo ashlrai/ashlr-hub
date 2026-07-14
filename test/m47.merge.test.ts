@@ -871,6 +871,7 @@ describe('M47 autoMergeProposal — local happy path', () => {
         detail: 'verified before base advanced',
         baseBranch: 'main',
         baseHead: verifiedBaseHead,
+        diffHash: staleHash,
       },
     });
     setStatus(p.id, 'pending');
@@ -916,7 +917,15 @@ describe('M47 autoMergeProposal — local happy path', () => {
     expect(r.reason).toMatch(/moved since verification|reverify/i);
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(movedMain);
     expect(listBranches(tmpRepo).some((b) => b.startsWith('ashlr/merge/'))).toBe(false);
-    expect(loadProposal(p.id)!.status).toBe('pending');
+    expect(loadProposal(p.id)).toMatchObject({
+      status: 'pending',
+      verifyResult: {
+        passed: true,
+        baseBranch: 'main',
+        baseHead: verifiedBaseHead,
+        diffHash: staleHash,
+      },
+    });
   });
 });
 

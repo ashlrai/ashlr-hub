@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -601,7 +601,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   let prevAshlrHome: string | undefined;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m49-'));
+    tmpHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m49-')));
     prevHome = process.env.HOME;
     prevUserProfile = process.env.USERPROFILE;
     prevAshlrHome = process.env.ASHLR_HOME;
@@ -875,12 +875,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('withholds auto-merge readiness when proposal enumeration stops at the file bound', async () => {
     const inbox = join(tmpHome, '.ashlr', 'inbox');
+    const proposalRepo = join(tmpHome, 'proposal-file-bound-repo');
     mkdirSync(inbox, { recursive: true });
+    mkdirSync(proposalRepo, { recursive: true });
     for (let index = 0; index < 513; index++) {
       const id = `proposal-partial-source-${String(index).padStart(4, '0')}`;
       const proposal: Proposal = {
         id,
-        repo: '/tmp/repo',
+        repo: proposalRepo,
         origin: 'agent',
         kind: 'patch',
         title: `Partial source proposal ${index}`,

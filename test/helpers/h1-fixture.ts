@@ -49,6 +49,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -266,7 +267,7 @@ export function makeDisposableRepo(opts?: MakeRepoOptions): DisposableRepo {
   const message = opts?.message ?? 'init';
   const files: SeedFiles = opts?.files ?? { 'README.md': '# disposable test repo\n' };
 
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
 
   git(dir, ['init', `--initial-branch=${branch}`, '.']);
   git(dir, ['config', 'user.email', 'h1@ashlr.test']);
@@ -472,7 +473,7 @@ export function makeFixture(): H1Fixture {
   const prevInDaemon = process.env.ASHLR_IN_DAEMON;
   const prevInSwarm = process.env.ASHLR_IN_SWARM;
 
-  const home = mkdtempSync(join(tmpdir(), 'ashlr-h1-home-'));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-h1-home-')));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   delete process.env.ASHLR_IN_DAEMON;

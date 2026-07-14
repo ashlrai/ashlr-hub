@@ -133,12 +133,13 @@ import { setKill } from '../src/core/sandbox/policy.js';
 
 const NOW_ISO = '2026-06-29T12:00:00.000Z';
 const NOW_MS = new Date(NOW_ISO).getTime();
+const REPO = path.join(fs.realpathSync.native(os.tmpdir()), 'ashlr-m259-repo');
 
 /** Make a fresh proposal with fixed timestamp. */
 function makeProposal(id: string, over?: Partial<Proposal>): Proposal {
   return {
     id,
-    repo: '/tmp/repo',
+    repo: REPO,
     origin: 'swarm',
     kind: 'patch',
     title: `Proposal ${id}`,
@@ -475,7 +476,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     // Seed inbox with an existing pending proposal with diffHash 'abc123'.
     const existing: Proposal = {
       id: 'existing-prop',
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Fix #38',
@@ -492,7 +493,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     const { createProposal } = await import('../src/core/inbox/store.js');
 
     const result = createProposal({
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Fix #38 again',
@@ -516,7 +517,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     // Seed with a proposal that has diffHash — incoming has none.
     const existing: Proposal = {
       id: 'existing-nodifhash',
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Some fix',
@@ -532,7 +533,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     const { createProposal } = await import('../src/core/inbox/store.js');
 
     const result = createProposal({
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Different fix',
@@ -549,7 +550,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
   it('dedup does NOT fire when diffHash differs', async () => {
     const existing: Proposal = {
       id: 'existing-diff-hash',
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Fix A',
@@ -565,7 +566,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     const { createProposal } = await import('../src/core/inbox/store.js');
 
     const result = createProposal({
-      repo: '/tmp/repo',
+      repo: REPO,
       origin: 'swarm',
       kind: 'patch',
       title: 'Fix B',
@@ -602,7 +603,7 @@ describe('M259 TTL: stale proposals auto-rejected', () => {
       'rejected',
       undefined,
       expect.stringContaining('TTL'),
-      undefined,
+      expect.anything(),
       {},
       'pending',
     );

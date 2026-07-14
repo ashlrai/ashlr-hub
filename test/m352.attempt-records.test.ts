@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -24,7 +24,7 @@ import type { WorkedLedger } from '../src/core/fleet/worked-ledger.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 
 const TS = '2026-07-09T12:00:00.000Z';
-const REPO = '/tmp/repo';
+const REPO = realpathSync.native(tmpdir());
 const MODEL_SECRET = 'sk-testvalue-verysecret00000000';
 const ROUTE_SECRET = 'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ';
 const REASON_SECRET = 'literal-secret-value-DO-NOT-LOG';
@@ -734,7 +734,7 @@ describe('AttemptRecord coverage', () => {
 
   it('derives read-time labels for legacy run-outcome causal fallbacks without rewriting ledgers', () => {
     const previousAshlrHome = process.env.ASHLR_HOME;
-    const home = mkdtempSync(join(tmpdir(), 'ashlr-m352-legacy-causal-'));
+    const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m352-legacy-causal-')));
     try {
       process.env.ASHLR_HOME = home;
       const dir = dispatchProductionDir();

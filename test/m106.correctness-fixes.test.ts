@@ -147,8 +147,8 @@ function makeItem(id: string, repo: string, over?: Partial<WorkItem>): WorkItem 
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m106-home-'));
-  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m106-repo-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m106-home-')));
+  tmpRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m106-repo-')));
   process.env.HOME = tmpHome;
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
 

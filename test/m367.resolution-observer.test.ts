@@ -16,7 +16,9 @@ import {
   writeResolutionObserverRunSummary,
   type ResolutionObserverCheckpointV1,
 } from '../src/core/fleet/resolution-observer.js';
+import { runResolutionObserverChild } from '../src/core/daemon/resolution-observer-child.js';
 import { readResolutionWitnesses } from '../src/core/fleet/resolution-witness-ledger.js';
+import { setKill } from '../src/core/sandbox/policy.js';
 import { scheduleResolutionObserverAfterTick } from '../src/core/daemon/loop.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
@@ -300,6 +302,33 @@ describe('M367 bounded advisory resolution observer', () => {
       schedule,
     )).toBeNull();
     expect(calls).toBe(1);
+  });
+
+  it('keeps pause non-quiesced until the detached child finishes its final write', () => {
+    let pauseDuringWrite: ReturnType<typeof setKill> | undefined;
+    const exitCode = runResolutionObserverChild([], {
+      runObserver: (options) => {
+        expect(options.deps?.writeCheckpoint?.(checkpoint())).toBe(true);
+        return checkpoint().lastRun;
+      },
+      writeCheckpoint: () => {
+        pauseDuringWrite = setKill(true, { waitMs: 25 });
+        return true;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(pauseDuringWrite).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({
+      ok: true,
+      changed: false,
+      quiesced: true,
+    });
   });
 
   it('stores exact metadata privately and reports missing/degraded state honestly', () => {

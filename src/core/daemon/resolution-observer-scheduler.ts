@@ -8,6 +8,12 @@ import {
   type ResolutionObserverReadResult,
   type ResolutionObserverRunSummary,
 } from '../fleet/resolution-observer.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
+import { killSwitchOn } from '../sandbox/policy.js';
 
 const DEFAULT_PARENT_TIMEOUT_MS = 500;
 const DEFAULT_KILL_CONFIRM_TIMEOUT_MS = 1_000;
@@ -55,6 +61,10 @@ export interface ScheduleResolutionObserverChildOptions {
     now?: () => number;
     readCheckpoint?: () => ResolutionObserverReadResult;
     writeRunSummary?: (summary: ResolutionObserverRunSummary) => boolean;
+    killSwitchOn?: () => boolean;
+    acquireFence?: typeof acquireOutwardMutationFence;
+    ownsFence?: typeof ownsOutwardMutationFence;
+    releaseFence?: typeof releaseOutwardMutationFence;
   };
 }
 
@@ -102,7 +112,14 @@ function recordParentDeadlineExceeded(
   startedAt: string,
   snapshot: { backlogGeneratedAt: string; reposObserved: number; pendingObjectives: number },
 ): boolean {
+  const acquireFence = options.deps?.acquireFence ?? acquireOutwardMutationFence;
+  const ownsFence = options.deps?.ownsFence ?? ownsOutwardMutationFence;
+  const releaseFence = options.deps?.releaseFence ?? releaseOutwardMutationFence;
+  const killIsOn = options.deps?.killSwitchOn ?? killSwitchOn;
+  let fence: ReturnType<typeof acquireOutwardMutationFence> = null;
   try {
+    fence = acquireFence();
+    if (!ownsFence(fence) || killIsOn()) return false;
     const now = options.deps?.now ?? Date.now;
     const completedAt = new Date(now()).toISOString();
     const summary: ResolutionObserverRunSummary = {
@@ -122,9 +139,12 @@ function recordParentDeadlineExceeded(
     };
     const write = options.deps?.writeRunSummary ?? ((value: ResolutionObserverRunSummary) =>
       writeResolutionObserverRunSummary(value, { lockWaitMs: 20 }));
+    if (!ownsFence(fence) || killIsOn()) return false;
     return write(summary);
   } catch {
     return false;
+  } finally {
+    releaseFence(fence);
   }
 }
 
@@ -148,6 +168,14 @@ function childRuntimeArgs(): string[] {
 export function scheduleResolutionObserverChild(
   options: ScheduleResolutionObserverChildOptions,
 ): ScheduledResolutionObserverChild {
+  const killIsOn = options.deps?.killSwitchOn ?? killSwitchOn;
+  if (killIsOn()) {
+    return {
+      disposition: 'not-ready',
+      completion: Promise.resolve({ outcome: 'cancelled', code: null, signal: null }),
+      cancel: () => {},
+    };
+  }
   if (active) {
     return {
       disposition: 'overlap-suppressed',
@@ -203,6 +231,14 @@ export function scheduleResolutionObserverChild(
     if (killConfirmationTimeout !== undefined) cancelTimeout(killConfirmationTimeout);
     settle(result);
   };
+
+  if (killIsOn()) {
+    return {
+      disposition: 'not-ready',
+      completion: Promise.resolve({ outcome: 'cancelled', code: null, signal: null }),
+      cancel: () => {},
+    };
+  }
 
   try {
     const entryName = import.meta.url.endsWith('.ts')

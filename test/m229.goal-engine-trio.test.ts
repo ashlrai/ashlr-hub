@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -188,6 +188,27 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M229 — frontier dispatch when allowCloud=true', () => {
+  it('correlates a canonical proposal for a symlink-bound goal', async () => {
+    const physical = join(tmpDir, 'physical-repo');
+    const alias = join(tmpDir, 'repo-alias');
+    mkdirSync(physical);
+    symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    vi.mocked(mockLoadGoal).mockReturnValue(makeGoal(alias));
+    vi.mocked(runGoal as any).mockResolvedValue(makeRunState());
+    vi.mocked(listProposals)
+      .mockReturnValueOnce([])
+      .mockReturnValue([{
+        id: 'prop-canonical', status: 'pending', origin: 'agent',
+        repo: realpathSync.native(physical), summary: '',
+      } as any]);
+
+    await advanceGoal('g1', makeConfig(['codex']), { allowCloud: true, allowAnyRepo: true });
+
+    expect(updateMilestoneStatus).toHaveBeenLastCalledWith('g1', 'm1', 'proposed', {
+      swarmId: 'run-1',
+      proposalId: 'prop-canonical',
+    });
+  });
   it('calls runGoal with sandboxEngine:true and requireSandbox:true', async () => {
     const repo = tmpDir;
     const goal = makeGoal(repo);
@@ -197,7 +218,7 @@ describe('M229 — frontier dispatch when allowCloud=true', () => {
     vi.mocked(listProposals).mockReturnValueOnce([]); // beforeIds snapshot
     // After run: one new proposal with origin:'agent'
     vi.mocked(listProposals).mockReturnValue([
-      { id: 'prop-1', status: 'pending', origin: 'agent', repo, summary: '' } as any,
+      { id: 'prop-1', status: 'pending', origin: 'agent', repo: realpathSync.native(repo), summary: '' } as any,
     ]);
 
     vi.mocked(runGoal as any).mockResolvedValue(makeRunState('run-frontier-1', 'done'));
@@ -326,7 +347,7 @@ describe('M229 — 429 rate-limit → next engine retry', () => {
     vi.mocked(listProposals)
       .mockReturnValueOnce([]) // beforeIds
       .mockReturnValue([
-        { id: 'prop-rl', status: 'pending', origin: 'agent', repo, summary: '' } as any,
+        { id: 'prop-rl', status: 'pending', origin: 'agent', repo: realpathSync.native(repo), summary: '' } as any,
       ]);
 
     let callCount = 0;
@@ -387,6 +408,26 @@ describe('M229 — 429 rate-limit → next engine retry', () => {
 // ---------------------------------------------------------------------------
 
 describe('M229 — flag-off: allowCloud=false uses builtin swarm', () => {
+  it('correlates a canonical swarm proposal for a lexical project caller', async () => {
+    const physical = join(tmpDir, 'lexical-repo');
+    const nested = join(physical, 'identity-probe');
+    mkdirSync(nested, { recursive: true });
+    const lexical = join(nested, '..');
+    vi.mocked(mockLoadGoal).mockReturnValue(makeGoal(lexical));
+    vi.mocked(runSwarm as any).mockResolvedValue(makeSwarmRun('swarm-lexical', 'done'));
+    vi.mocked(listProposals).mockReturnValue([{
+      id: 'prop-lexical', status: 'pending', origin: 'swarm',
+      repo: realpathSync.native(physical), summary: 'swarm=swarm-lexical',
+    } as any]);
+
+    await advanceGoal('g1', makeConfig(), { allowCloud: false, allowAnyRepo: true });
+
+    expect(updateMilestoneStatus).toHaveBeenLastCalledWith('g1', 'm1', 'proposed', {
+      swarmId: 'swarm-lexical',
+      proposalId: 'prop-lexical',
+    });
+  });
+
   it('allowCloud=false → runSwarm called, runGoal never called', async () => {
     const repo = tmpDir;
     vi.mocked(mockLoadGoal).mockReturnValue(makeGoal(repo));

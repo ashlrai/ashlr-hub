@@ -14,7 +14,24 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { AshlrConfig } from '../src/core/types.js';
+
+const policyTestHooks = vi.hoisted(() => ({
+  afterKillPrecheck: null as null | ((repo: string) => void),
+}));
+
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/policy.js')>();
+  return {
+    ...actual,
+    isEnrolled: (repo: string) => {
+      policyTestHooks.afterKillPrecheck?.(repo);
+      return actual.isEnrolled(repo);
+    },
+  };
+});
 
 import {
   acquireOutwardMutationFence,
@@ -35,6 +52,8 @@ import {
   killSwitchOn,
   setKill,
 } from '../src/core/sandbox/policy.js';
+import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
+import { createProposal, loadProposal } from '../src/core/inbox/store.js';
 
 const CHILD_TIMEOUT_MS = 8_000;
 const tsxImportUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
@@ -192,9 +211,11 @@ beforeEach(() => {
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
+  policyTestHooks.afterKillPrecheck = null;
 });
 
 afterEach(async () => {
+  policyTestHooks.afterKillPrecheck = null;
   const running = [...children];
   for (const child of running) child.kill('SIGKILL');
   await Promise.all(running.map(waitForExit));
@@ -234,6 +255,59 @@ describe('M403 cooperative outward mutation fence', { timeout: 15_000 }, () => {
     expect(readFileSync(join(home, '.ashlr', 'KILL'), 'utf8')).toBe('kill switch active\n');
 
     await releaseHolder(holder);
+  });
+
+  it('keeps pause non-quiesced and suppresses an automerge cleanup write after KILL', async () => {
+    const repo = join(home, 'automerge-cleanup-repo');
+    mkdirSync(repo, { recursive: true });
+    expect(enroll(repo)).toMatchObject({ ok: true, quiesced: true });
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Fix regression in /tmp/.ashlr/tmp/vwt-m403/src.ts',
+      summary: 'Race cleanup persistence against the global kill switch.',
+      diff: 'diff --git a/src.ts b/src.ts\n+mutation fence\n',
+      engineTier: 'local',
+      workSource: 'goal',
+    });
+    expect(proposal.status).toBe('pending');
+
+    let pauseResult: ReturnType<typeof setKill> | null = null;
+    policyTestHooks.afterKillPrecheck = () => {
+      policyTestHooks.afterKillPrecheck = null;
+      const child = spawnSync(
+        process.execPath,
+        ['--import', tsxImportUrl, '--input-type=module', '--eval', `
+          import { setKill } from ${JSON.stringify(policyModuleUrl)};
+          process.stdout.write(JSON.stringify(setKill(true, { waitMs: 25 })));
+        `],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
+          encoding: 'utf8',
+          timeout: 5_000,
+        },
+      );
+      if (child.error) throw child.error;
+      expect(child.status, child.stderr).toBe(0);
+      pauseResult = JSON.parse(child.stdout) as ReturnType<typeof setKill>;
+    };
+
+    const result = await runAutoMergePass({
+      version: 1,
+      foundry: { autoMerge: { enabled: true } },
+    } as AshlrConfig);
+
+    expect(pauseResult).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    expect(killSwitchOn()).toBe(true);
+    expect(result.invalidRejected).toBe(0);
+    expect(loadProposal(proposal.id)?.status).toBe('pending');
   });
 
   it('refuses kill-off while the fence is held and leaves kill armed', async () => {

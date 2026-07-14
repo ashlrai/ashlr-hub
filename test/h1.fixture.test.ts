@@ -16,7 +16,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -32,7 +32,11 @@ import {
   type H1Fixture,
 } from './helpers/h1-fixture.js';
 import { loadBacklog } from '../src/core/portfolio/backlog.js';
-import { enrollmentPath, listEnrolled } from '../src/core/sandbox/policy.js';
+import {
+  canonicalEnrollmentPath,
+  enrollmentPath,
+  listEnrolled,
+} from '../src/core/sandbox/policy.js';
 
 /** Capture the REAL HOME once, before any fixture relocates it, so every test
  *  can assert isolation against a stable baseline. */
@@ -55,7 +59,7 @@ describe('H1 testkit — makeFixture HOME isolation', () => {
     try {
       // The fixture's home is a fresh tmp dir, not the real HOME.
       expect(resolve(fx.home)).not.toBe(resolve(REAL_HOME ?? ''));
-      expect(fx.home.startsWith(resolve(tmpdir()))).toBe(true);
+      expect(fx.home.startsWith(realpathSync.native(tmpdir()))).toBe(true);
       // os.homedir() (the seam the whole chain resolves through) now points at it.
       expect(resolve(homedir())).toBe(resolve(fx.home));
       expect(resolve(process.env.HOME ?? '')).toBe(resolve(fx.home));
@@ -140,7 +144,7 @@ describe('H1 testkit — makeDisposableRepo', () => {
   it('creates a real git repo with a resolvable HEAD', () => {
     const repo = fx.makeRepo();
     // The dir is a real git repo under os.tmpdir().
-    expect(repo.dir.startsWith(resolve(tmpdir()))).toBe(true);
+    expect(repo.dir.startsWith(realpathSync.native(tmpdir()))).toBe(true);
     expect(existsSync(join(repo.dir, '.git'))).toBe(true);
     // HEAD resolves to a real commit (the initial commit).
     const head = git(repo.dir, ['rev-parse', 'HEAD']);
@@ -180,18 +184,20 @@ describe('H1 testkit — makeDisposableRepo', () => {
 
   it('enroll()/unenroll()/isEnrolled() round-trip against the isolated registry', () => {
     const repo = fx.makeRepo();
+    const canonicalRepo = canonicalEnrollmentPath(repo.dir);
+    expect(canonicalRepo).not.toBeNull();
     expect(repo.isEnrolled()).toBe(false);
-    expect(listEnrolled().map((r) => resolve(r))).not.toContain(resolve(repo.dir));
+    expect(listEnrolled()).not.toContain(canonicalRepo);
 
     repo.enroll();
     expect(repo.isEnrolled()).toBe(true);
-    expect(listEnrolled().map((r) => resolve(r))).toContain(resolve(repo.dir));
+    expect(listEnrolled()).toContain(canonicalRepo);
     // The registry that changed lives under the tmp HOME, NOT the real ~/.ashlr.
     expect(enrollmentPath().startsWith(resolve(fx.home))).toBe(true);
 
     // enroll() is idempotent — no duplicate entries.
     repo.enroll();
-    const dupes = listEnrolled().filter((r) => resolve(r) === resolve(repo.dir));
+    const dupes = listEnrolled().filter((r) => r === canonicalRepo);
     expect(dupes.length).toBe(1);
 
     repo.unenroll();

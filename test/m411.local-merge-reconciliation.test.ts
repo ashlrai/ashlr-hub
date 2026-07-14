@@ -13,7 +13,7 @@ import { hashDiff, signLocalMergeIntent } from '../src/core/foundry/provenance.j
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { createProposal, loadProposal, updateProposalField } from '../src/core/inbox/store.js';
-import { setKill } from '../src/core/sandbox/policy.js';
+import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
 import type { AshlrConfig, ProposalLocalMergeIntent } from '../src/core/types.js';
 
 const originalHome = process.env.HOME;
@@ -157,10 +157,12 @@ beforeEach(() => {
   fs.writeFileSync(path.join(repo, 'README.md'), '# fixture\n', 'utf8');
   git(['add', 'README.md']);
   git(['commit', '-m', 'init']);
+  expect(enroll(repo).ok).toBe(true);
 });
 
 afterEach(() => {
   try { setKill(false); } catch { /* best effort */ }
+  try { unenroll(repo); } catch { /* best effort */ }
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(home, { recursive: true, force: true });
   if (originalHome === undefined) delete process.env.HOME;
@@ -206,6 +208,19 @@ describe('M411 local merge reconciliation', () => {
     expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
       .filter((decision) => decision.action === 'merged')).toHaveLength(0);
     expect(git(['rev-parse', 'main'])).toBe(fixture.mergeCommitOid);
+  });
+
+  it('completes realized-merge fanout when reconciliation retains live authority', async () => {
+    const fixture = createInterruptedMerge('exact');
+
+    const result = await autoMergeProposal(fixture.proposalId, config(true));
+
+    expect(result).toMatchObject({ ok: true, merged: true });
+    const applied = loadProposal(fixture.proposalId)!;
+    expect(applied.realizedMergeFanoutVersion).toBe(3);
+    expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
+      .filter((decision) => decision.action === 'merged' && decision.verdict === 'merged'))
+      .toHaveLength(1);
   });
 
   it('finds the exact interrupted merge after the base advances again', async () => {

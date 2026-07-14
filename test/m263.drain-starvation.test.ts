@@ -447,7 +447,7 @@ describe('M263 no-regression: m259 TTL + auto-archive unaffected', () => {
 
     expect(out.ttlRejected).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-stale-regress', 'rejected', undefined, expect.stringContaining('TTL'), undefined, {}, 'pending',
+      'p-stale-regress', 'rejected', undefined, expect.stringContaining('TTL'), expect.anything(), {}, 'pending',
     );
   });
 

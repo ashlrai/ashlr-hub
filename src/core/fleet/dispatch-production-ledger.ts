@@ -24,7 +24,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import type {
   DaemonDispatchProductionOutcome,
   EngineId,
@@ -55,6 +55,7 @@ import {
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import {
   generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
@@ -386,6 +387,15 @@ function boundedNullableText(value: unknown, max: number): string | null | undef
   return boundedOptionalText(value, max);
 }
 
+export function canonicalDispatchRepoIdentity(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 500 || !isAbsolute(value)) return null;
+  if (scrubSecrets(value) !== value) return null;
+  const canonical = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  return canonical !== null && canonical.length <= 500 && scrubSecrets(canonical) === canonical
+    ? canonical
+    : null;
+}
+
 function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
@@ -398,8 +408,8 @@ export function sanitizeDispatchProductionEvent(
   const machineId = boundedOptionalText(event.machineId, 120);
   const itemId = boundedText(event.itemId, 240) || 'unknown';
   const source = boundedText(event.source, 80) as WorkItem['source'];
-  const boundedRepo = boundedText(event.repo, 500) || 'unknown';
-  const repo = boundedRepo === 'unknown' ? boundedRepo : resolve(boundedRepo);
+  const repo = canonicalDispatchRepoIdentity(event.repo);
+  if (repo === null) throw new Error('invalid dispatch production repository identity');
   const title = boundedText(event.title, 160) || 'untitled';
   const backend = boundedNullableText(event.backend, 80) as EngineId | null | undefined;
   const tier = boundedNullableText(event.tier, 40) as EngineTier | null | undefined;
@@ -626,7 +636,7 @@ function isDispatchProductionEvent(value: unknown): value is DispatchProductionE
     typeof obj['ts'] === 'string' &&
     typeof obj['itemId'] === 'string' &&
     typeof obj['source'] === 'string' &&
-    typeof obj['repo'] === 'string' &&
+    typeof obj['repo'] === 'string' && canonicalDispatchRepoIdentity(obj['repo']) === obj['repo'] &&
     typeof obj['title'] === 'string' &&
     typeof obj['assignedBy'] === 'string' &&
     typeof obj['routeReason'] === 'string' &&
@@ -653,6 +663,7 @@ export function recordDispatchProduction(
     for (const event of events) {
       try {
         const record = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+        if (!isDispatchProductionEvent(record)) throw new Error('dispatch production repository identity is not canonical');
         const receiptName = treatmentOutcomeReceiptName(record);
         if (receiptName) persistTreatmentOutcomeReceipt(record, receiptName);
         else appendDispatchProductionLine(
@@ -965,10 +976,12 @@ export function readDispatchProductionParents(
     }
     for (const index of indices) {
       const target = targets[index]!;
+      const targetRepo = canonicalDispatchRepoIdentity(target.repo);
       const found = events.some((event) =>
+        targetRepo !== null &&
         event.ts === target.ts &&
         event.itemId === target.itemId &&
-        event.repo === resolve(target.repo) &&
+        event.repo === targetRepo &&
         event.outcome === target.outcome &&
         (event.trajectoryId ?? event.runId) === target.attemptId &&
         (target.source === undefined || event.source === target.source) &&

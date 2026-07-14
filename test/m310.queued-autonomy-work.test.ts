@@ -5,6 +5,7 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -562,6 +563,51 @@ describe('queued autonomy work scanner', () => {
     const found = await scanQueuedAutonomyWork(repo.dir);
     expect(found).toHaveLength(1);
     expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
+  });
+
+  it('persists physical proposal repo identity and rejects legacy alias authority', () => {
+    const repo = fx.makeRepo();
+    const canonicalRepo = realpathSync.native(repo.dir);
+    const nested = join(repo.dir, 'identity-probe');
+    const lexicalAlias = join(nested, '..');
+    const linkedAlias = join(fx.home, 'proposal-repo-alias');
+    mkdirSync(nested);
+    symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+
+    const createForRepo = (repoPath: string, title: string) => {
+      const candidate = partialProposal(repoPath, { title, diffHash: undefined });
+      const { id: _id, status: _status, createdAt: _createdAt, ...input } = candidate;
+      return createProposal(input);
+    };
+    const lexical = createForRepo(lexicalAlias, 'Lexical repo alias proposal');
+    const linked = createForRepo(linkedAlias, 'Linked repo alias proposal');
+
+    expect(lexical.repo).toBe(canonicalRepo);
+    expect(linked.repo).toBe(canonicalRepo);
+    expect(loadProposal(lexical.id)?.repo).toBe(canonicalRepo);
+    expect(loadProposal(linked.id)?.repo).toBe(canonicalRepo);
+
+    const linkedPath = join(fx.ashlrDir, 'inbox', `${linked.id}.json`);
+    const persisted = JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal;
+    expect(persisted.repo).toBe(canonicalRepo);
+
+    writeFileSync(linkedPath, JSON.stringify({ ...persisted, repo: linkedAlias }, null, 2) + '\n', 'utf8');
+    expect(loadProposal(linked.id)).toBeNull();
+    expect((JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal).repo).toBe(linkedAlias);
+  });
+
+  it('does not derive or journal repair authority from an invalid raw repo identity', () => {
+    const secret = 'github_pat_1234567890abcdefghijklmnop';
+    const invalid = captureFailure(join(fx.home, `token=${secret}`), {
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+    });
+
+    expect(repairHandoffFromDispatchEvent(invalid)).toBeNull();
+    expect(recordRepairHandoffs(invalid, {
+      schemaVersion: 2,
+      activation: { id: '22222222-2222-4222-8222-222222222222', activatedAt: '2020-01-01T00:00:00.000Z' },
+    })).toEqual({ attempted: 0, recorded: 0, failed: 0 });
+    expect(readRepairHandoffs().observations).toEqual([]);
   });
 
   it('revokes queued mismatch recovery before a later human rejection succeeds', async () => {

@@ -36,9 +36,10 @@ const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m141-home-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m141-home-')));
   process.env.HOME = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
+  fs.mkdirSync(path.join(tmpHome, 'repo'), { recursive: true, mode: 0o700 });
 });
 
 afterEach(() => {
@@ -66,7 +67,7 @@ function makeTraceDir(): string {
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
     id: pid(),
-    repo: '/repos/test',
+    repo: path.join(tmpHome, 'repo'),
     origin: 'backlog',
     kind: 'patch',
     title: 'm141 test proposal',

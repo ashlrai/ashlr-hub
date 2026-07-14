@@ -248,7 +248,7 @@ describe('M21 policy — enroll/unenroll persistence', () => {
     const p = await policy();
     const repo = fakeTmpRepo();
     p.enroll(repo);
-    expect(p.listEnrolled()).toContain(repo);
+    expect(p.listEnrolled()).toContain(p.canonicalEnrollmentPath(repo));
   });
 
   it('isEnrolled returns true after enrolling', async () => {
@@ -263,7 +263,7 @@ describe('M21 policy — enroll/unenroll persistence', () => {
     const repo = fakeTmpRepo();
     p.enroll(repo);
     p.unenroll(repo);
-    expect(p.listEnrolled()).not.toContain(repo);
+    expect(p.listEnrolled()).not.toContain(p.canonicalEnrollmentPath(repo));
     expect(p.isEnrolled(repo)).toBe(false);
   });
 
@@ -272,7 +272,8 @@ describe('M21 policy — enroll/unenroll persistence', () => {
     const repo = fakeTmpRepo();
     p.enroll(repo);
     p.enroll(repo);
-    const enrolled = p.listEnrolled().filter(r => r === repo);
+    const canonicalRepo = p.canonicalEnrollmentPath(repo);
+    const enrolled = p.listEnrolled().filter(r => r === canonicalRepo);
     expect(enrolled.length).toBe(1);
   });
 
@@ -281,7 +282,7 @@ describe('M21 policy — enroll/unenroll persistence', () => {
     const repo = fakeTmpRepo();
     // Never enrolled — should not throw
     expect(() => p.unenroll(repo)).not.toThrow();
-    expect(p.listEnrolled()).not.toContain(repo);
+    expect(p.listEnrolled()).not.toContain(p.canonicalEnrollmentPath(repo));
   });
 
   it('multiple repos can be enrolled independently', async () => {

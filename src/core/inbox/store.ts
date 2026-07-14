@@ -37,7 +37,7 @@ import {
 import type { Stats } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import type {
   AshlrConfig,
   LocalDefaultBranchMergeObservation,
@@ -51,18 +51,19 @@ import { emitFleetEvent } from '../integrations/pulse-sync.js';
 import type { FleetEvent } from '../integrations/pulse-exporter.js';
 // M119: decisions ledger hook — additive, never-throws, no behavior change.
 import { readDecisionsDetailed, recordDecision } from '../fleet/decisions-ledger.js';
-import { linkOutcome } from '../fleet/judge-trace.js';
+import { linkOutcome, linkOutcomeResult } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
 // inbox/store.ts (one direction only).
-import { listGoals, updateMilestoneStatus as _updateMilestoneStatus } from '../goals/store.js';
+import * as goalStore from '../goals/store.js';
 import {
   acquireProposalStoreMutationLock,
   acquireProposalMutationLock,
@@ -99,6 +100,7 @@ import {
 
 const MAX_REALIZED_MERGE_FUTURE_SKEW_MS = 60_000;
 const AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const REALIZED_MERGE_FANOUT_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -111,6 +113,20 @@ const AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES = 4 * 1024 * 1024;
  */
 export function inboxDir(): string {
   return join(homedir(), '.ashlr', 'inbox');
+}
+
+function canonicalProposalRepoIdentity(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) return null;
+  if (scrubSecrets(value) !== value) return null;
+  const canonical = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  if (canonical === null || scrubSecrets(canonical) !== canonical) return null;
+  return canonical;
+}
+
+function hasCanonicalProposalRepoIdentity(value: unknown): boolean {
+  return value === null || (
+    typeof value === 'string' && canonicalProposalRepoIdentity(value) === value
+  );
 }
 
 /**
@@ -315,8 +331,10 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
     }
   }
 
-  if (next.realizedMergeFanoutVersion !== undefined &&
-    next.realizedMergeFanoutVersion !== 1 && next.realizedMergeFanoutVersion !== 2) {
+  const realizedMergeFanoutVersion = next.realizedMergeFanoutVersion;
+  if (realizedMergeFanoutVersion !== undefined &&
+    realizedMergeFanoutVersion !== 1 && realizedMergeFanoutVersion !== 2 &&
+    realizedMergeFanoutVersion !== REALIZED_MERGE_FANOUT_VERSION) {
     delete next.realizedMergeFanoutVersion;
     changed = true;
   }
@@ -382,6 +400,9 @@ function persistProposal(
   try {
     const safeProposal = sanitizeProposalForStore(proposal);
     if (safeProposal.id !== expectedId) throw new Error('Proposal persistence identity mismatch');
+    if (!hasCanonicalProposalRepoIdentity(safeProposal.repo)) {
+      throw new Error('Proposal repository identity is not canonical');
+    }
     dir = inboxDir();
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -523,7 +544,8 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
     typeof p['title'] === 'string' &&
     typeof p['summary'] === 'string' &&
     typeof p['status'] === 'string' &&
-    typeof p['createdAt'] === 'string'
+    typeof p['createdAt'] === 'string' &&
+    hasCanonicalProposalRepoIdentity(p['repo'])
   );
 }
 
@@ -834,28 +856,45 @@ function emitProposalSpan(
  * Best-effort: any error is swallowed so a Pulse outage / corrupt goal file
  * NEVER disrupts the proposal lifecycle flow.
  */
-function linkMilestoneOutcome(proposalId: string, outcome: 'applied' | 'rejected'): void {
+function linkMilestoneOutcome(
+  proposalId: string,
+  outcome: 'applied' | 'rejected',
+  stillAuthorized?: () => boolean,
+): boolean {
+  const isStillAuthorized = stillAuthorized ?? (() => true);
   try {
-    const goals = listGoals();
-    for (const goal of goals) {
-      const milestone = goal.milestones.find((m) => m.proposalId === proposalId);
-      if (!milestone) continue;
+    if (!isStillAuthorized()) return false;
+    const source = Object.prototype.hasOwnProperty.call(goalStore, 'listGoalsDetailed')
+      ? goalStore.listGoalsDetailed()
+      : { goals: goalStore.listGoals(), sourceState: 'healthy' as const, complete: true };
+    if (!source.complete || source.sourceState === 'degraded') return false;
+    for (const goal of source.goals) {
+      const linkedMilestones = goal.milestones.filter((milestone) => milestone.proposalId === proposalId);
+      for (const milestone of linkedMilestones) {
+        if (!isStillAuthorized()) return false;
+        const newStatus =
+          outcome === 'applied'
+            ? ('done' as const)
+            : ('pending' as const); // reset to pending for retry on rejection
 
-      const newStatus =
-        outcome === 'applied'
-          ? ('done' as const)
-          : ('pending' as const); // reset to pending for retry on rejection
-
-      try {
-        _updateMilestoneStatus(goal.id, milestone.id, newStatus);
-      } catch {
-        // best-effort — never disrupts the caller
+        if (milestone.status !== newStatus) {
+          const updated = stillAuthorized
+            ? goalStore.updateMilestoneStatus(goal.id, milestone.id, newStatus, { stillAuthorized })
+            : goalStore.updateMilestoneStatus(goal.id, milestone.id, newStatus);
+          if (!updated) return false;
+        }
+        if (!isStillAuthorized()) return false;
+        const persistedMilestone = goalStore.loadGoal(goal.id)?.milestones
+          .find((candidate) => candidate.id === milestone.id);
+        if (persistedMilestone?.proposalId !== proposalId || persistedMilestone.status !== newStatus) {
+          return false;
+        }
       }
-      // Only one goal can own a given proposalId — stop after first match.
-      break;
     }
+    return isStillAuthorized();
   } catch {
     // Never disrupts the proposal flow.
+    return false;
   }
 }
 
@@ -880,7 +919,14 @@ export function createProposal(
   p: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
   cfg?: Pick<AshlrConfig, 'user' | 'foundry'>,
 ): Proposal {
-  const input = sanitizeProposalForStore(p);
+  const canonicalRepo = p.repo === null ? null : canonicalProposalRepoIdentity(p.repo);
+  const repoIdentityValid = p.repo === null || canonicalRepo !== null;
+  const input = sanitizeProposalForStore({
+    ...p,
+    // Invalid raw identity is never scrubbed into a different path or exposed
+    // to persistence/audit. The rejected return is deliberately unscoped.
+    repo: repoIdentityValid ? canonicalRepo : null,
+  });
   // Realized merge evidence is never accepted on proposal creation. The only
   // supported persistence boundary for this field is recordRealizedMerge.
   delete input.realizedMerge;
@@ -944,7 +990,7 @@ export function createProposal(
   }
 
   let persisted = false;
-  const storeLock = acquireProposalStoreMutationLock();
+  const storeLock = repoIdentityValid ? acquireProposalStoreMutationLock() : null;
   if (storeLock) {
     try {
       // Dedup and installation share one namespace transaction so two
@@ -996,17 +1042,21 @@ export function createProposal(
     : {
         ...proposal,
         status: 'rejected',
-        decisionReason: 'proposal persistence failed',
+        decisionReason: repoIdentityValid
+          ? 'proposal persistence failed'
+          : 'invalid proposal repository identity',
         decidedAt: new Date().toISOString(),
       };
 
   audit({
     action: !persisted || initialStatus === 'rejected' ? 'inbox:proposal-rejected' : 'inbox:proposal-created',
-    repo: proposal.repo ?? null,
+    repo: repoIdentityValid ? proposal.repo ?? null : null,
     sandboxId: proposal.sandboxId ?? null,
     summary:
       !persisted
-        ? `proposal persistence failed: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
+        ? repoIdentityValid
+          ? `proposal persistence failed: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
+          : `proposal repository identity refused: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
         : initialStatus === 'rejected'
         ? `proposal auto-rejected (diff-safety): [${proposal.kind}] ${proposal.title} (id=${proposal.id}) — ${diffSafetyRejectionReason}`
         : `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
@@ -1489,18 +1539,24 @@ export function setStatus(
  * Atomically persist the only evidence-backed transition that means "merged".
  * Merge-specific telemetry and credit are emitted only after this write commits.
  */
-function ensureRealizedMergeDecision(updated: Proposal, realizedMerge: RealizedMergeEvidence): boolean {
+function ensureRealizedMergeDecision(
+  updated: Proposal,
+  realizedMerge: RealizedMergeEvidence,
+  stillAuthorized: () => boolean = () => true,
+): boolean {
   const mergedRows = (): ReturnType<typeof readDecisionsDetailed> | null => {
     const result = readDecisionsDetailed({ proposalId: updated.id, requireComplete: true });
     return result.complete && result.sourceState !== 'degraded' ? result : null;
   };
 
   try {
+    if (!stillAuthorized()) return false;
     const before = mergedRows();
     if (!before) return false;
     const existingMerged = before.decisions.filter((entry) => entry.action === 'merged');
     if (existingMerged.length > 0) {
-      return existingMerged.length === 1 && existingMerged[0]?.labelBasis === 'realized-merge-v1';
+      return stillAuthorized() && existingMerged.length === 1 &&
+        existingMerged[0]?.labelBasis === 'realized-merge-v1';
     }
 
     const engineModel = updated.engineModel;
@@ -1508,6 +1564,7 @@ function ensureRealizedMergeDecision(updated: Proposal, realizedMerge: RealizedM
     const ts = realizedMerge.source === 'local-default-branch'
       ? realizedMerge.observedAt
       : realizedMerge.reconciliation.observedAt;
+    if (!stillAuthorized()) return false;
     recordDecision({
       ts,
       proposalId: updated.id,
@@ -1526,6 +1583,7 @@ function ensureRealizedMergeDecision(updated: Proposal, realizedMerge: RealizedM
       reason: `realized merge observed via ${realizedMerge.source}`,
     });
 
+    if (!stillAuthorized()) return false;
     const after = mergedRows();
     if (!after) return false;
     const persistedMerged = after.decisions.filter((entry) => entry.action === 'merged');
@@ -1540,9 +1598,13 @@ function retryIdempotentRealizedMergeProjections(
   stillAuthorized: () => boolean = () => true,
 ): boolean {
   if (!stillAuthorized()) return false;
-  try { linkOutcome(updated.id, 'merged', { basis: 'realized-merge-v1' }); } catch { /* best-effort */ }
+  const outcome = linkOutcomeResult(updated.id, 'merged', { basis: 'realized-merge-v1' });
+  if (outcome.status !== 'linked' && outcome.status !== 'already-linked' && outcome.status !== 'not-found') {
+    return false;
+  }
   if (!stillAuthorized()) return false;
-  if (proposalCompletesGoalMilestone(updated)) linkMilestoneOutcome(updated.id, 'applied');
+  if (proposalCompletesGoalMilestone(updated) &&
+    !linkMilestoneOutcome(updated.id, 'applied', stillAuthorized)) return false;
   return stillAuthorized();
 }
 
@@ -1551,21 +1613,23 @@ function fanoutRealizedMerge(
   realizedMerge: RealizedMergeEvidence,
   stillAuthorized: () => boolean = () => true,
 ): boolean {
-  // Version 2 acknowledges only the authoritative decision projection. The
-  // outcome and milestone projections remain idempotent and replayable.
+  // Version 3 acknowledges every applicable idempotent projection. Versions 1
+  // and 2 retain their historical meaning and are migrated only after replay.
   if (!stillAuthorized()) return false;
-  if (!ensureRealizedMergeDecision(updated, realizedMerge)) return false;
+  if (!ensureRealizedMergeDecision(updated, realizedMerge, stillAuthorized)) return false;
 
   if (!retryIdempotentRealizedMergeProjections(updated, stillAuthorized)) return false;
   if (!stillAuthorized()) return false;
-  try {
-    emitProposalSpan(
-      'merge',
-      updated,
-      'merged',
-      updated.owner ? { user: { id: updated.owner } } : undefined,
-    );
-  } catch { /* deterministic retry may repair another projection */ }
+  if (updated.realizedMergeFanoutVersion !== REALIZED_MERGE_FANOUT_VERSION) {
+    try {
+      emitProposalSpan(
+        'merge',
+        updated,
+        'merged',
+        updated.owner ? { user: { id: updated.owner } } : undefined,
+      );
+    } catch { /* deterministic retry may repair another projection */ }
+  }
   return stillAuthorized();
 }
 
@@ -1619,10 +1683,14 @@ export function recordRealizedMerge(
       }
       if (existing.status !== 'applied' || !matches) return false;
       if (identityOwnedByAnotherProposal(existing)) return false;
-      if (existing.realizedMergeFanoutVersion === 2) return true;
       if (stillAuthorized() &&
         fanoutRealizedMerge(existing, priorEvidence, stillAuthorized) && stillAuthorized()) {
-        persistProposal(id, { ...existing, realizedMergeFanoutVersion: 2 }, false, storeLock);
+        if (existing.realizedMergeFanoutVersion !== REALIZED_MERGE_FANOUT_VERSION) {
+          persistProposal(id, {
+            ...existing,
+            realizedMergeFanoutVersion: REALIZED_MERGE_FANOUT_VERSION,
+          }, false, storeLock);
+        }
       }
       return true;
     }
@@ -1696,7 +1764,10 @@ export function recordRealizedMerge(
     });
 
     if (stillAuthorized() && fanoutRealizedMerge(updated, realizedMerge, stillAuthorized) && stillAuthorized()) {
-      persistProposal(id, { ...updated, realizedMergeFanoutVersion: 2 }, false, storeLock);
+      persistProposal(id, {
+        ...updated,
+        realizedMergeFanoutVersion: REALIZED_MERGE_FANOUT_VERSION,
+      }, false, storeLock);
     }
     return true;
   } catch {
@@ -1715,7 +1786,7 @@ export function replayRealizedMergeFanout(
 ): boolean {
   if (!stillAuthorized()) return false;
   const existing = loadProposal(id);
-  if (!existing || existing.status !== 'applied' || existing.realizedMergeFanoutVersion === 2) {
+  if (!existing || existing.status !== 'applied') {
     return false;
   }
   const realizedMerge = authenticatedRealizedMergeOf(existing);

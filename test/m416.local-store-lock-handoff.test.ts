@@ -372,14 +372,13 @@ describe('local store lock installation handoff', () => {
     ));
     expect(fs.lstatSync(lockPath).nlink).toBe(2);
     expect(guard && fs.lstatSync(guard).ino).toBe(stale.ino);
+    const staleToken = JSON.parse(fs.readFileSync(lockPath, 'utf8')).token as string;
 
     const successor = acquireLocalStoreLock(lockPath, 2_000);
 
     expect(successor).not.toBeNull();
-    expect(successor && { dev: successor.dev, ino: successor.ino }).not.toEqual({
-      dev: stale.dev,
-      ino: stale.ino,
-    });
+    expect(successor?.token).not.toBe(staleToken);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({ token: successor?.token });
     expect(guard && fs.existsSync(guard)).toBe(false);
     releaseLocalStoreLock(successor);
   });

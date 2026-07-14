@@ -120,6 +120,7 @@ vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
 import * as fs from 'node:fs';
 import {
   assertMayMutate,
+  canonicalEnrollmentPath,
   enroll,
   isEnrolled,
   listEnrolled,
@@ -174,7 +175,9 @@ describe('M415 policy durability races', () => {
       quiesced: true,
       reason: 'enrolled',
     });
-    expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({ repos: [repo] });
+    expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
+      repos: [canonicalEnrollmentPath(repo)],
+    });
     expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(false);
     expect(fs.readdirSync(join(home, '.ashlr')).filter((name) =>
       name.startsWith('.enrollment.'))).toEqual([]);
@@ -212,7 +215,7 @@ describe('M415 policy durability races', () => {
     expect(faults.postInstallFailed).toBe(true);
     expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(true);
     expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
-      repos: [originalRepo, newlyEnrolledRepo],
+      repos: [originalRepo, canonicalEnrollmentPath(newlyEnrolledRepo)],
     });
     expect(listEnrolled()).toEqual([]);
     expect(isEnrolled(newlyEnrolledRepo)).toBe(false);

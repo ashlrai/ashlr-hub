@@ -125,13 +125,18 @@ function writeValidMergeContract(repo: string): void {
   );
 }
 
+/** Create repo fixtures in the same physical path namespace enrollment persists. */
+function makePhysicalTmpRepo(prefix: string): string {
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
 // ---------------------------------------------------------------------------
 // beforeEach / afterEach
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-backlog-home-'));
-  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-backlog-repo-'));
+  tmpRepo = makePhysicalTmpRepo('ashlr-m22-backlog-repo-');
   process.env.HOME = tmpHome;
 
   // Safe baseline — all execFile calls error so no real subprocesses run
@@ -612,7 +617,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
   });
 
   it('keeps identical merge-contract rollout titles for different enrolled repos', async () => {
-    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-contract-second-'));
+    const secondRepo = makePhysicalTmpRepo('ashlr-m22-contract-second-');
     try {
       initBareGitDir(secondRepo);
       fs.writeFileSync(
@@ -729,7 +734,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
   });
 
   it('merges disjoint scanner observations from concurrent persisted scans', async () => {
-    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-observation-second-'));
+    const secondRepo = makePhysicalTmpRepo('ashlr-m22-observation-second-');
     try {
       initBareGitDir(secondRepo);
       fs.writeFileSync(
@@ -752,7 +757,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
   });
 
   it('replaces stale observation scope on a newer full enrolled refresh', async () => {
-    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-observation-stale-'));
+    const secondRepo = makePhysicalTmpRepo('ashlr-m22-observation-stale-');
     try {
       initBareGitDir(secondRepo);
       fs.writeFileSync(
@@ -813,10 +818,82 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
 // ===========================================================================
 
 describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', () => {
+  it('keeps the healthy full snapshot when an exact canonical enrollment is temporarily missing', async () => {
+    enroll(tmpRepo);
+    const observedAt = new Date().toISOString();
+    const healthySnapshot = {
+      generatedAt: observedAt,
+      snapshotId: 'a'.repeat(32),
+      repos: [tmpRepo],
+      items: [],
+      observations: [{
+        schemaVersion: 1 as const,
+        observedAt,
+        repo: tmpRepo,
+        scannerId: 'queued-autonomy',
+        domain: 'local-queue',
+        source: 'self' as const,
+        status: 'absent' as const,
+        reason: 'source-confirmed-empty' as const,
+      }],
+      observationSourceState: 'healthy' as const,
+    };
+    fs.mkdirSync(path.dirname(backlogPath()), { recursive: true });
+    fs.writeFileSync(backlogPath(), JSON.stringify(healthySnapshot), 'utf8');
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    const scanner = vi.fn();
+    _execFileImpl = scanner;
+
+    const incomplete = await buildBacklog();
+
+    expect(incomplete).toMatchObject({
+      repos: [],
+      items: [],
+      observations: [],
+      observationSourceState: 'degraded',
+    });
+    expect(scanner).not.toHaveBeenCalled();
+    expect(loadBacklog()).toEqual(healthySnapshot);
+  });
+
+  it('fails closed on a legacy lexical enrollment row after its alias is retargeted', async () => {
+    const firstTarget = makePhysicalTmpRepo('ashlr-m22-legacy-first-');
+    const secondTarget = makePhysicalTmpRepo('ashlr-m22-legacy-second-');
+    const alias = path.join(fs.realpathSync.native(tmpHome), 'legacy-enrolled-repo');
+    try {
+      initBareGitDir(firstTarget);
+      initBareGitDir(secondTarget);
+      fs.symlinkSync(firstTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      fs.mkdirSync(path.join(tmpHome, '.ashlr'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpHome, '.ashlr', 'enrollment.json'),
+        JSON.stringify({ repos: [alias] }),
+        'utf8',
+      );
+
+      fs.unlinkSync(alias);
+      fs.symlinkSync(secondTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      const scanner = vi.fn();
+      _execFileImpl = scanner;
+
+      expect(listEnrolled()).toEqual([alias]);
+      const backlog = await buildBacklog();
+
+      expect(backlog.repos).toEqual([]);
+      expect(backlog.items).toEqual([]);
+      expect(backlog.observationSourceState).toBe('degraded');
+      expect(scanner).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(alias, { recursive: true, force: true });
+      fs.rmSync(firstTarget, { recursive: true, force: true });
+      fs.rmSync(secondTarget, { recursive: true, force: true });
+    }
+  });
+
   it('does not include an unenrolled repo in results', async () => {
     // Enroll only tmpRepo; create a second tmp repo but do not enroll it
     enroll(tmpRepo);
-    const otherRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-other-'));
+    const otherRepo = makePhysicalTmpRepo('ashlr-m22-other-');
     try {
       initBareGitDir(otherRepo);
       fs.writeFileSync(path.join(otherRepo, 'file.ts'), '// TODO: not enrolled\n', 'utf8');
@@ -835,7 +912,7 @@ describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', ()
   });
 
   it('enrolling a second repo causes it to appear in backlog.repos', async () => {
-    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-second-'));
+    const secondRepo = makePhysicalTmpRepo('ashlr-m22-second-');
     try {
       initBareGitDir(secondRepo);
       fs.writeFileSync(

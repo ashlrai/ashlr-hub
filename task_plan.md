@@ -2187,9 +2187,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add durable policy transactions, sandbox reservations, fixed-point daemon drain, token-bound local locks, and authenticated abandoned-guard recovery.
 - [x] Make live PID ownership conservative under clock drift, suspend, DST ambiguity, PID reuse, and unknown liveness; reclaim only after the OS proves `ESRCH`.
 - [x] Add M403-M424 plus sandbox reservation coverage and native Windows CI partitions.
-- [x] Pass 530 test files with 11,103 assertions green and 9 intentional skips, typecheck/build, zero-error lint, zero-vulnerability audit, and diff checks.
+- [x] Re-prove the expanded physical-identity tree with a final exhaustive suite after closing all legacy fixture and mock-contract fallout.
+- [x] Re-run typecheck, build, lint, dependency audit, and diff checks on the exact commit candidate.
 - [ ] Commit, push, open the protected PR, and observe exact-SHA cross-platform CI.
 - [ ] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+
+### Final Verification Recovery
+- The first serial exhaustive pass after physical identity hardening found 95 failures across 18 files; focused repairs reduced the fast discovery pass to 73 failures across 14 files.
+- Four disjoint workers repaired the compatibility fixtures and mocks for the stricter canonical enrollment/proposal/goal-source contracts; the timing-sensitive deadline assertion now uses an injected clock without relaxing production budgets.
+- Final adversarial review found and closed source/common-directory and post-create sandbox path races, healthy-empty alias enrollment projections, missing remote and local realized-merge fanout authority, and two native CI coverage gaps.
+- The exact candidate passes 534 files with 11,215 tests green and 9 intentional skips in 591.86 seconds, plus typecheck, build, zero-error lint with the unchanged 104-warning baseline, zero-vulnerability audit, and diff checks.
+- Authority reads remain fail closed for lexical or missing physical enrollments. Tests that represent healthy state must create and use physical canonical paths; malformed and legacy-state tests must remain explicitly degraded.
 
 ### Authority Limits
 - Manual human-confirmed apply and desktop actions do not yet share universal durable pre-effect intent and reconciliation.

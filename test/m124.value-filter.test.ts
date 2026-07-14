@@ -71,7 +71,8 @@ vi.mock('node:child_process', async (importOriginal) => {
 // ── Module mocks (mirrors m108 conventions) ────────────────────────────────
 // ============================================================================
 
-vi.mock('../src/core/sandbox/policy.js', () => ({
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
   assertMayMutate: vi.fn(),
   killSwitchOn: () => false,
   setKill: vi.fn(),
@@ -128,7 +129,7 @@ function makeTmpRepo(): string {
   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
   // Minimal package.json so scanner probes don't bail early
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'test', version: '0.0.1' }));
-  return dir;
+  return fs.realpathSync.native(dir);
 }
 
 // ============================================================================

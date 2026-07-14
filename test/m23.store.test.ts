@@ -60,6 +60,7 @@ import {
   verifyProvenance,
 } from '../src/core/foundry/provenance.js';
 import { canonicalizeProposalDiff } from '../src/core/util/scrub.js';
+import { readAudit } from '../src/core/sandbox/audit.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ import type { Proposal } from '../src/core/types.js';
 /** Build a minimal Proposal input (omitting id/status/createdAt). */
 function makeInput(overrides?: Partial<Omit<Proposal, 'id' | 'status' | 'createdAt'>>) {
   return {
-    repo: '/tmp/test-repo',
+    repo: path.join(fs.realpathSync.native(os.tmpdir()), 'test-repo'),
     origin: 'manual' as const,
     kind: 'patch' as const,
     title: 'Test proposal',
@@ -195,6 +196,31 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(p.workItemId).toBe(input.workItemId);
     expect(p.workSource).toBe(input.workSource);
     expect(p.runId).toBe(input.runId);
+  });
+
+  it('refuses invalid repo identities without persisting or auditing raw path values', () => {
+    const secret = 'github_pat_1234567890abcdefghijklmnop';
+    const rawSecretRepo = path.join(tmpHome, `token=${secret}`);
+    const invalidRepos = ['relative/repo', rawSecretRepo];
+
+    for (const repo of invalidRepos) {
+      const first = createProposal(makeInput({ repo, title: 'Invalid repo first attempt' }));
+      const second = createProposal(makeInput({ repo, title: 'Invalid repo retry' }));
+      for (const rejected of [first, second]) {
+        expect(rejected).toMatchObject({
+          repo: null,
+          status: 'rejected',
+          decisionReason: 'invalid proposal repository identity',
+        });
+        expect(fs.existsSync(path.join(inboxDir(), `${rejected.id}.json`))).toBe(false);
+      }
+    }
+
+    const audits = readAudit().filter((entry) => entry.action === 'inbox:proposal-rejected');
+    expect(audits).toHaveLength(4);
+    expect(audits.every((entry) => entry.repo === null)).toBe(true);
+    expect(JSON.stringify(audits)).not.toContain(secret);
+    expect(JSON.stringify(audits)).not.toContain('[REDACTED]');
   });
 
   it('scrubs proposal text and diffs on write while preserving diff review context', () => {
@@ -518,7 +544,7 @@ describe('M23 loadProposal — by id', () => {
 
   it('round-trips all fields correctly', () => {
     const input = makeInput({
-      repo: '/tmp/some-repo',
+      repo: path.join(fs.realpathSync.native(os.tmpdir()), 'some-repo'),
       origin: 'swarm',
       kind: 'deploy',
       title: 'Deploy to prod',

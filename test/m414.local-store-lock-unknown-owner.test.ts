@@ -127,10 +127,8 @@ describe('local store lock unknown-owner recovery', () => {
 
     const successor = acquireLocalStoreLock(lockPath, 2_000);
     expect(successor).not.toBeNull();
-    expect(successor && { dev: successor.dev, ino: successor.ino }).not.toEqual({
-      dev: deadLock.dev,
-      ino: deadLock.ino,
-    });
+    expect(successor?.token).not.toBe(deadLock.token);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({ token: successor?.token });
     releaseLocalStoreLock(successor);
   });
 
@@ -146,10 +144,8 @@ describe('local store lock unknown-owner recovery', () => {
     const successor = acquireLocalStoreLock(lockPath, 2_000);
 
     expect(successor).not.toBeNull();
-    expect(successor && { dev: successor.dev, ino: successor.ino }).not.toEqual({
-      dev: deadLock.dev,
-      ino: deadLock.ino,
-    });
+    expect(successor?.token).not.toBe(deadLock.token);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({ token: successor?.token });
     expect(fs.existsSync(guard)).toBe(false);
     releaseLocalStoreLock(successor);
   });
