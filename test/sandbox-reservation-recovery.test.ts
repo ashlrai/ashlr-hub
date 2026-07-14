@@ -36,6 +36,13 @@ function createReservation(id: string, metadata?: string): string {
   return home;
 }
 
+function ageReservation(home: string): void {
+  const old = new Date(Date.now() - 7 * 60 * 60_000);
+  const metadata = join(home, 'sandbox.json');
+  if (existsSync(metadata)) utimesSync(metadata, old, old);
+  utimesSync(home, old, old);
+}
+
 beforeEach(() => {
   fx = makeFixture();
   delete process.env.ASHLR_MAX_SANDBOXES;
@@ -77,6 +84,7 @@ describe('sandbox reservation recovery', () => {
       branch: `ashlr/sandbox/${id}`,
       createdAt: new Date(Date.now() - 60_000).toISOString(),
     })}\n`);
+    ageReservation(home);
 
     expect(listSandboxes()).toEqual([]);
     expect(sweepOrphanSandboxesDetailed()).toMatchObject({
@@ -93,6 +101,7 @@ describe('sandbox reservation recovery', () => {
   it('does not reclaim a reservation without cleanup authority', () => {
     const id = 'authority-held-reservation';
     const home = createReservation(id);
+    ageReservation(home);
     fx.setKill(true);
 
     expect(sweepOrphanSandboxesDetailed()).toMatchObject({ completed: [], refused: [], unavailable: [] });
@@ -156,7 +165,7 @@ describe('sandbox reservation recovery', () => {
 
   it('bounds reservation cleanup to sixteen homes per sweep', () => {
     const ids = Array.from({ length: 17 }, (_, index) => `bounded-${String(index).padStart(2, '0')}`);
-    for (const id of ids) createReservation(id);
+    for (const id of ids) ageReservation(createReservation(id));
 
     const first = sweepOrphanSandboxesDetailed();
     expect(first.inventory).toMatchObject({ totalHomes: 17, validHomes: 0, malformedHomes: 17 });

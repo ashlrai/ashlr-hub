@@ -35,6 +35,7 @@ import {
   readSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -45,7 +46,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type {
   Sandbox,
@@ -76,6 +77,7 @@ const BRANCH_PREFIX = 'ashlr/sandbox/';
 const META_FILE = 'sandbox.json';
 const CLEANUP_LOCK_WAIT_MS = 2_000;
 const CLEANUP_LOCK_INIT_MS = 1_000;
+const RESERVATION_RECOVERY_MIN_AGE_MS = 60_000;
 const MAX_RESERVATION_RECOVERIES_PER_SWEEP = 16;
 const SANDBOX_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const META_TEMP_RE = /^\.sandbox\.json\.\d+\.[a-f0-9]{12}\.tmp$/;
@@ -681,10 +683,11 @@ function createSandboxWhileFenced(
   let branch: string;
   let worktreePath: string;
   let home: string;
+  let sb: Sandbox;
   try {
     const cap = maxSandboxes();
     if (sandboxInventory().totalHomes >= cap) {
-      sweepOrphanSandboxes({
+      sweepOrphanSandboxesWhileCreationLocked({
         staleMs: ORPHAN_STALE_MS,
         borrowedAuthority: cleanupAuthority,
       });
@@ -704,28 +707,29 @@ function createSandboxWhileFenced(
     worktreePath = worktreePathFor(id);
     home = sandboxHome(id);
     mkdirSync(home, { recursive: false, mode: 0o700 });
+
+    sb = {
+      id,
+      sourceRepo,
+      worktreePath,
+      branch,
+      baseHead,
+      createdAt: new Date().toISOString(),
+      ownerPid: process.pid,
+    };
+
+    // Publish durable owner-bearing recovery authority before another creator
+    // or reservation sweep can observe this home outside creation serialization.
+    // A crash after this point is handled by normal dead-owner recovery; a crash
+    // during the atomic write leaves only a metadata-free pre-effect home.
+    try {
+      writeMeta(sb);
+    } catch (err) {
+      try { rmSync(home, { recursive: true, force: true }); } catch { /* private pre-effect reservation */ }
+      throw err;
+    }
   } finally {
     releaseCleanupLock(creationLock);
-  }
-
-  const sb: Sandbox = {
-    id,
-    sourceRepo,
-    worktreePath,
-    branch,
-    baseHead,
-    createdAt: new Date().toISOString(),
-    ownerPid: process.pid,
-  };
-
-  // Persist recovery authority before the Git effect. If the process dies
-  // after worktree creation, restart GC can still identify the exact branch,
-  // registration, source repo, and private home to reclaim.
-  try {
-    writeMeta(sb);
-  } catch (err) {
-    try { rmSync(home, { recursive: true, force: true }); } catch { /* private reservation only */ }
-    throw err;
   }
 
   // Add the isolated worktree on a NEW scratch branch off baseHead, run IN the
@@ -896,13 +900,40 @@ function sandboxHomeState(home: string): SandboxCleanupPostcondition {
   }
 }
 
+/**
+ * Resolve aliases for the longest existing prefix, then append the normalized
+ * missing suffix. This keeps cleanup identity stable after a worktree vanishes
+ * and across Windows long/8.3 path spellings. Windows path identity is
+ * case-insensitive; other platforms retain their native case semantics.
+ */
+export function canonicalPathIdentity(value: string): string | null {
+  let ancestor = resolve(value);
+  const missing: string[] = [];
+
+  while (true) {
+    try {
+      const canonicalAncestor = realpathSync.native(ancestor);
+      const canonical = resolve(canonicalAncestor, ...missing.reverse());
+      return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.push(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
 function registrationState(repo: string, worktreePath: string): SandboxCleanupPostcondition {
   const raw = gitTry(repo, ['worktree', 'list', '--porcelain']);
   if (raw === null) return 'unknown';
+  const target = canonicalPathIdentity(worktreePath);
+  if (target === null) return 'unknown';
   const registered = raw.split('\n')
     .filter((line) => line.startsWith('worktree '))
-    .map((line) => resolve(line.slice('worktree '.length)))
-    .includes(resolve(worktreePath));
+    .some((line) => canonicalPathIdentity(line.slice('worktree '.length).trimEnd()) === target);
   return registered ? 'present' : 'absent';
 }
 
@@ -919,7 +950,10 @@ function worktreeBelongsToRepo(repo: string, worktreePath: string): boolean {
   if (!existsSync(worktreePath)) return false;
   const worktreeCommon = gitTry(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const repoCommon = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return worktreeCommon !== null && repoCommon !== null && resolve(worktreeCommon) === resolve(repoCommon);
+  if (worktreeCommon === null || repoCommon === null) return false;
+  const worktreeIdentity = canonicalPathIdentity(worktreeCommon);
+  const repoIdentity = canonicalPathIdentity(repoCommon);
+  return worktreeIdentity !== null && repoIdentity !== null && worktreeIdentity === repoIdentity;
 }
 
 function processStartRef(pid: number): string | undefined {
@@ -1427,7 +1461,8 @@ function recoverReservationHome(id: string, staleMs: number | undefined, now: nu
       files.push(file);
     }
 
-    if (staleMs !== undefined && now - freshestMs < staleMs) return 'skipped';
+    const recoveryAgeMs = Math.max(staleMs ?? 0, RESERVATION_RECOVERY_MIN_AGE_MS);
+    if (now - freshestMs < recoveryAgeMs) return 'skipped';
     if (!samePathIdentity(root, rootIdentity, true) || !samePathIdentity(home, homeIdentity, true) || readMeta(id)) {
       return 'refused';
     }
@@ -1456,9 +1491,12 @@ function recoverReservationHomes(
   staleMs: number | undefined,
   now: number,
   result: SandboxSweepResult,
+  creationLockHeld: boolean,
 ): void {
   const root = sandboxesDir();
   if (!ownedDirectoryIdentity(root)) return;
+  const creationLock = creationLockHeld ? undefined : acquireCleanupLock('creation');
+  if (!creationLockHeld && !creationLock) return;
   let ids: string[];
   try {
     ids = readdirSync(root, { withFileTypes: true })
@@ -1467,14 +1505,19 @@ function recoverReservationHomes(
       .sort()
       .slice(0, MAX_RESERVATION_RECOVERIES_PER_SWEEP);
   } catch {
+    releaseCleanupLock(creationLock);
     return;
   }
-  for (const id of ids) {
-    const status = recoverReservationHome(id, staleMs, now);
-    if (status === 'complete') result.completed.push(id);
-    else if (status === 'refused') result.refused.push(id);
-    else if (status === 'unavailable') result.unavailable.push(id);
-    else if (status === 'error') result.unexpectedErrors.push(id);
+  try {
+    for (const id of ids) {
+      const status = recoverReservationHome(id, staleMs, now);
+      if (status === 'complete') result.completed.push(id);
+      else if (status === 'refused') result.refused.push(id);
+      else if (status === 'unavailable') result.unavailable.push(id);
+      else if (status === 'error') result.unexpectedErrors.push(id);
+    }
+  } finally {
+    releaseCleanupLock(creationLock);
   }
 }
 
@@ -1567,8 +1610,9 @@ export function listSandboxes(): Sandbox[] {
  *   is younger than this — a conservative liveness proxy so a concurrently-live
  *   sandbox is never force-removed. Omit to sweep all listed sandboxes.
  */
-export function sweepOrphanSandboxesDetailed(
+function sweepOrphanSandboxesDetailedInternal(
   opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+  creationLockHeld = false,
 ): SandboxSweepResult {
   const staleMs = opts?.staleMs;
   const now = Date.now();
@@ -1578,7 +1622,7 @@ export function sweepOrphanSandboxesDetailed(
   };
   const authority = acquireSandboxCleanupAuthority(opts);
   try {
-    if (authority.allowed) recoverReservationHomes(staleMs, now, result);
+    if (authority.allowed) recoverReservationHomes(staleMs, now, result, creationLockHeld);
     for (const sb of listSandboxes()) {
     // GUARD 1 — POSITIVE liveness (age-independent): never reclaim a worktree
     // whose owning process is still alive, even if it is older than staleMs.
@@ -1617,6 +1661,18 @@ export function sweepOrphanSandboxesDetailed(
     releaseSandboxCleanupAuthority(authority);
   }
   return result;
+}
+
+export function sweepOrphanSandboxesDetailed(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): SandboxSweepResult {
+  return sweepOrphanSandboxesDetailedInternal(opts);
+}
+
+function sweepOrphanSandboxesWhileCreationLocked(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): string[] {
+  return sweepOrphanSandboxesDetailedInternal(opts, true).completed;
 }
 
 export function sweepOrphanSandboxes(
