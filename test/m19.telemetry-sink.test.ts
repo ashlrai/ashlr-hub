@@ -514,7 +514,7 @@ describe('OtlpHttpSink.emit — mocked fetch', () => {
 // Integration: tiny local HTTP server captures the POST
 // ---------------------------------------------------------------------------
 
-describe('OtlpHttpSink — real HTTP delivery to local capture server', () => {
+describe('OtlpHttpSink — real HTTP delivery to local capture server', { timeout: 10_000 }, () => {
   it('delivers a valid OTLP POST with Authorization: Bearer + no secret in body', async () => {
     const { server, captured, port } = await startCaptureServer();
     process.env['ASHLR_PULSE_TOKEN'] = PAT_VALUE;
@@ -628,4 +628,4 @@ describe('OtlpHttpSink — real HTTP delivery to local capture server', () => {
       delete process.env['ASHLR_PULSE_TOKEN'];
     }
   });
-}, { timeout: 10_000 });
+});
