@@ -101,11 +101,7 @@ export function canonicalFilesystemPathIdentity(
 
   while (true) {
     try {
-      const canonicalAncestor = realpathSync.native(ancestor);
-      const canonical = join(canonicalAncestor, ...missing.reverse());
-      return process.platform === 'win32'
-        ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
-        : canonical;
+      lstatSync(ancestor);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
@@ -113,6 +109,19 @@ export function canonicalFilesystemPathIdentity(
       if (parent === ancestor) return null;
       missing.push(basename(ancestor));
       ancestor = parent;
+      continue;
+    }
+
+    try {
+      const canonicalAncestor = realpathSync.native(ancestor);
+      const canonical = join(canonicalAncestor, ...missing.reverse());
+      return process.platform === 'win32'
+        ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
+        : canonical;
+    } catch {
+      // The prefix was observable but could not be resolved physically. Do not
+      // reinterpret permission, replacement, or platform errors as absence.
+      return null;
     }
   }
 }

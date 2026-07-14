@@ -59,6 +59,9 @@ interface ToolSpec {
 
 const LOCATOR_TIMEOUT_MS = 3_000;
 const VERSION_TIMEOUT_MS = 3_000;
+// A synchronous timeout still waits when a child handles SIGTERM. Use the
+// uncatchable termination signal so PATH-controlled probes cannot hang callers.
+const PROBE_KILL_SIGNAL = 'SIGKILL';
 
 /**
  * Resolve the absolute path of a binary using the platform PATH locator.
@@ -79,6 +82,7 @@ function findBinary(binary: string): string | null {
     const result = execFileSync(locator, [query], {
       encoding: 'utf8',
       timeout: LOCATOR_TIMEOUT_MS,
+      killSignal: PROBE_KILL_SIGNAL,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     return result.split(/\r?\n/u).map(line => line.trim()).find(Boolean) ?? null;
@@ -99,6 +103,7 @@ function runVersionCmd(args: string[]): string | null {
     const stdout = execFileSync(cmd, rest, {
       encoding: 'utf8',
       timeout: VERSION_TIMEOUT_MS,
+      killSignal: PROBE_KILL_SIGNAL,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return stdout.trim() || null;

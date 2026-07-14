@@ -28,6 +28,7 @@ let _mockResponses: Map<string, MockResponse> = new Map();
 // Default fallback (ENOENT = not found).
 let _defaultResponse: MockResponse;
 let _execFileCalls: string[] = [];
+let _execFileOptions: Array<{ key: string; options: unknown }> = [];
 const origSystemRoot = process.env.SystemRoot;
 
 // ---------------------------------------------------------------------------
@@ -81,9 +82,10 @@ vi.mock('node:child_process', () => ({
     if (_mockResponses.has(cmd)) return _mockResponses.get(cmd)!;
     return _defaultResponse ?? enoent(cmd);
   },
-  execFileSync: (cmd: string, args: string[] = [], _opts?: unknown): string => {
+  execFileSync: (cmd: string, args: string[] = [], options?: unknown): string => {
     const key = `${cmd} ${args.join(' ')}`.trim();
     _execFileCalls.push(key);
+    _execFileOptions.push({ key, options });
     const resp = _mockResponses.get(key) ?? _mockResponses.get(cmd) ?? _defaultResponse;
     if (!resp) throw Object.assign(new Error(`${cmd}: not found`), { code: 'ENOENT' });
     if (resp.error) throw resp.error;
@@ -125,6 +127,7 @@ beforeEach(() => {
   _mockResponses = new Map();
   _defaultResponse = enoent('__default__');
   _execFileCalls = [];
+  _execFileOptions = [];
   // Reset app-path presence — no apps present by default.
   _existingPaths = new Set();
 });
@@ -155,6 +158,16 @@ describe('getToolsRegistry — platform PATH lookup', () => {
     expect(_execFileCalls).toContain('C:\\Windows\\System32\\where.exe $PATH:phantom');
     expect(_execFileCalls).not.toContain('which phantom');
     expect(_execFileCalls).not.toContain('phantom --version');
+    expect(_execFileOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'C:\\Windows\\System32\\where.exe $PATH:phantom',
+        options: expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      }),
+      expect.objectContaining({
+        key: 'C:\\Tools\\phantom.exe --version',
+        options: expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      }),
+    ]));
   });
 
   it('fails closed when where.exe cannot resolve a Windows binary', () => {
