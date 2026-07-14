@@ -2168,7 +2168,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add explicit realized-merge witnesses so generic applied actions, branches, and contaminated legacy rows cannot create ship or learning credit.
 - [x] Connect the immutable staged candidate to a bounded shadow observer whose result cannot affect merge behavior.
 - [x] Run focused, cross-process, exhaustive, static, build, dependency, and independent adversarial verification on the expanded truth boundary.
-- [ ] Commit, push, open a protected PR, observe exact-SHA CI, and leave production auto-merge disabled.
+- [x] Commit, push, open protected PR #29, and leave production auto-merge disabled; exact-SHA CI observation is recorded in durable notes.
 
 ### Canary V1 Invariants
 - Configuration alone cannot create an epoch; only explicit activation may create shadow state.
