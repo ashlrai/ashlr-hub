@@ -67,6 +67,7 @@ describe('M30 CI workflow', () => {
         'test/setup/home.test.ts',
         'test/classify.test.ts',
         'test/m2.doctor.test.ts',
+        'test/m3.tools-registry.test.ts',
         'test/m43.verify-commands.test.ts',
         'test/m113.coordinator-wire.test.ts',
         'test/m373.directory-durability.test.ts',
