@@ -17,6 +17,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AshlrConfig } from '../types.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -331,8 +332,27 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
   };
 
   try {
-    const { readDecisions } = await import('../fleet/decisions-ledger.js');
-    const decisions = readDecisions({ sinceMs });
+    const { readDecisionsDetailed } = await import('../fleet/decisions-ledger.js');
+    const { listProposalsDetailed } = await import('../inbox/store.js');
+    const decisionRead = readDecisionsDetailed({ requireComplete: true });
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    if (!decisionRead.complete || decisionRead.sourceState === 'degraded' ||
+      !proposalRead.complete || proposalRead.sourceState === 'degraded') {
+      throw new Error('realized outcome sources are incomplete');
+    }
+    const decisions = decisionRead.decisions;
+    const nowMs = Date.now();
+    const realizedAtByProposal = new Map<string, number>();
+    for (const proposal of proposalRead.proposals) {
+      const merge = realizedMergeOf(proposal);
+      const observedAt = merge?.source === 'github-host'
+        ? merge.reconciliation.observedAt
+        : merge?.observedAt;
+      const observedMs = Date.parse(observedAt ?? '');
+      if (Number.isFinite(observedMs) && observedMs >= sinceMs && observedMs <= nowMs) {
+        realizedAtByProposal.set(proposal.id, observedMs);
+      }
+    }
 
     let merged = 0;
     let rejected = 0;
@@ -341,19 +361,31 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
     let cacheTotal = 0;
     const engineShip = new Map<string, number>();
     const engineTotal = new Map<string, number>();
+    const countedMergedProposals = new Set<string>();
 
     for (const d of decisions) {
-      if (d.action === 'merged') merged++;
+      const decisionMs = Date.parse(d.ts);
+      const canonicalMerge = d.action === 'merged' &&
+        d.labelBasis === 'realized-merge-v1' &&
+        realizedAtByProposal.has(d.proposalId) &&
+        !countedMergedProposals.has(d.proposalId);
+      if (d.action === 'merged') {
+        if (!canonicalMerge) continue;
+        countedMergedProposals.add(d.proposalId);
+        merged++;
+      } else if (!Number.isFinite(decisionMs) || decisionMs < sinceMs || decisionMs > nowMs) {
+        continue;
+      }
       if (d.action === 'rejected') rejected++;
       costUsd += d.costUsd ?? 0;
       if (d.cacheHit !== undefined) {
         cacheTotal++;
         if (d.cacheHit) cacheHits++;
       }
-      if (d.engine) {
+      if (d.engine && (canonicalMerge || d.action === 'rejected')) {
         const eng = d.engine;
         engineTotal.set(eng, (engineTotal.get(eng) ?? 0) + 1);
-        if (d.action === 'merged' || (d.action === 'judged' && d.verdict === 'ship')) {
+        if (canonicalMerge) {
           engineShip.set(eng, (engineShip.get(eng) ?? 0) + 1);
         }
       }

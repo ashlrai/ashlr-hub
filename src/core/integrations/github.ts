@@ -30,6 +30,9 @@ const MAX_POLICY_DEPTH = 10;
 const MAX_POLICY_OBJECT_KEYS = 128;
 const MAX_POLICY_ARRAY_ITEMS = 256;
 const MAX_POLICY_STRING_LENGTH = 8_192;
+const MAX_PR_VIEW_JSON_LENGTH = 64 * 1024;
+const MAX_PR_SELECTOR_LENGTH = 2_048;
+const MAX_PR_REF_LENGTH = 1_024;
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -44,6 +47,20 @@ export interface PrSummary {
   author: string;
 }
 
+export type PrAutoMergeMethod = 'MERGE' | 'REBASE' | 'SQUASH';
+
+export interface PrAutoMergeRequest {
+  enabledAt: string;
+  enabledByLogin: string;
+  mergeMethod: PrAutoMergeMethod;
+}
+
+/** Host evidence for auto-merge. Only `absent` proves cancellation. */
+export type PrAutoMergeRequestState =
+  | { kind: 'absent' }
+  | { kind: 'present'; request: PrAutoMergeRequest }
+  | { kind: 'unknown'; reason: 'missing' | 'malformed' };
+
 /** Detailed read-only PR status used to reconcile remote host handoffs. */
 export interface PrView {
   number?: number;
@@ -55,7 +72,9 @@ export interface PrView {
   headRefName?: string;
   headRefOid?: string;
   baseRefName?: string;
+  baseRefOid?: string;
   mergeCommitOid?: string;
+  autoMergeRequest: PrAutoMergeRequestState;
 }
 
 /** A single issue summary (read-only list). */
@@ -438,8 +457,10 @@ export function viewPr(
   selector: string,
   options: { repo?: string } = {},
 ): PrView | null {
-  if (options.repo !== undefined &&
-      !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/.test(options.repo)) {
+  if (selector.length === 0 || selector.length > MAX_PR_SELECTOR_LENGTH ||
+      (options.repo !== undefined &&
+        (options.repo.length > MAX_PR_REF_LENGTH ||
+          !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/.test(options.repo)))) {
     return null;
   }
   const raw = runGh(cwd, [
@@ -448,8 +469,9 @@ export function viewPr(
     selector,
     ...(options.repo ? ['--repo', options.repo] : []),
     '--json',
-    'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,mergeCommit',
+    'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
   ]);
+  if (raw !== null && raw.length > MAX_PR_VIEW_JSON_LENGTH) return null;
   const parsed = safeJson(raw);
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
@@ -459,6 +481,7 @@ export function viewPr(
     const commitObj = mergeCommit as Record<string, unknown>;
     if (typeof commitObj['oid'] === 'string') mergeCommitOid = commitObj['oid'];
   }
+  const autoMergeRequest = parseAutoMergeRequestState(obj);
   return {
     ...(typeof obj['number'] === 'number' ? { number: obj['number'] } : {}),
     ...(typeof obj['url'] === 'string' ? { url: obj['url'] } : {}),
@@ -469,7 +492,35 @@ export function viewPr(
     ...(typeof obj['headRefName'] === 'string' ? { headRefName: obj['headRefName'] } : {}),
     ...(typeof obj['headRefOid'] === 'string' ? { headRefOid: obj['headRefOid'] } : {}),
     ...(typeof obj['baseRefName'] === 'string' ? { baseRefName: obj['baseRefName'] } : {}),
+    ...(typeof obj['baseRefOid'] === 'string' ? { baseRefOid: obj['baseRefOid'] } : {}),
     ...(mergeCommitOid ? { mergeCommitOid } : {}),
+    autoMergeRequest,
+  };
+}
+
+function parseAutoMergeRequestState(obj: Record<string, unknown>): PrAutoMergeRequestState {
+  if (!Object.prototype.hasOwnProperty.call(obj, 'autoMergeRequest')) {
+    return { kind: 'unknown', reason: 'missing' };
+  }
+  const value = obj['autoMergeRequest'];
+  if (value === null) return { kind: 'absent' };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { kind: 'unknown', reason: 'malformed' };
+  }
+  const request = value as Record<string, unknown>;
+  const enabledAt = boundedNonEmptyString(request['enabledAt'], 128);
+  const enabledBy = request['enabledBy'];
+  const enabledByLogin = enabledBy !== null && typeof enabledBy === 'object' && !Array.isArray(enabledBy)
+    ? boundedNonEmptyString((enabledBy as Record<string, unknown>)['login'], 256)
+    : null;
+  const mergeMethod = request['mergeMethod'];
+  if (!enabledAt || !enabledByLogin ||
+      (mergeMethod !== 'MERGE' && mergeMethod !== 'REBASE' && mergeMethod !== 'SQUASH')) {
+    return { kind: 'unknown', reason: 'malformed' };
+  }
+  return {
+    kind: 'present',
+    request: { enabledAt, enabledByLogin, mergeMethod },
   };
 }
 

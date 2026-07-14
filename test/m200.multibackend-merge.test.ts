@@ -32,7 +32,7 @@
  *  - autoMergeProposal MOCKED — no real git operations.
  *  - readDecisions / recordDecision MOCKED — full ledger control.
  *  - resolveFrontierJudgeClient MOCKED — controls judge client availability.
- *  - listProposals MOCKED — controls pending proposal list.
+ *  - listProposalsDetailed MOCKED — controls pending proposal list.
  *  - killSwitchOn MOCKED.
  *  - quota.json written to tmpHome/.ashlr/fleet/ (real file, hermetic via HOME override).
  *
@@ -92,7 +92,14 @@ vi.mock('../src/core/inbox/merge.js', () => ({
 
 const mockListProposals = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: (...args: unknown[]) => mockListProposals(...args),
+  listProposalsDetailed: (...args: unknown[]) => ({
+    proposals: mockListProposals(...args),
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+  }),
+  setStatus: vi.fn(() => true),
+  updateProposalField: vi.fn(() => true),
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);

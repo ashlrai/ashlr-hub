@@ -47,6 +47,9 @@ const {
   mockGetResourceSnapshot,
   mockBuildFleetStatus,
   mockReadDecisions,
+  mockReadDecisionsDetailed,
+  mockListProposals,
+  mockListProposalsDetailed,
   mockListGoals,
   mockPostRequest,
   mockCreateGoal,
@@ -59,6 +62,9 @@ const {
   mockGetResourceSnapshot: vi.fn(),
   mockBuildFleetStatus: vi.fn(),
   mockReadDecisions: vi.fn().mockReturnValue([]),
+  mockReadDecisionsDetailed: vi.fn(),
+  mockListProposals: vi.fn().mockReturnValue([]),
+  mockListProposalsDetailed: vi.fn(),
   mockListGoals: vi.fn().mockReturnValue([]),
   mockPostRequest: vi.fn().mockReturnValue('req-id-123'),
   mockCreateGoal: vi.fn(),
@@ -86,6 +92,7 @@ vi.mock('../src/core/fleet/status.js', () => ({
 // Mock decisions-ledger
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: mockReadDecisions,
+  readDecisionsDetailed: mockReadDecisionsDetailed,
   recordDecision: vi.fn(),
   decisionsDir: () => '',
 }));
@@ -121,7 +128,8 @@ vi.mock('../src/core/run/engines.js', () => ({
 
 // Safety: mock inbox/store to ensure applyProposal is never called
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: vi.fn().mockReturnValue([]),
+  listProposals: mockListProposals,
+  listProposalsDetailed: mockListProposalsDetailed,
   loadProposal: vi.fn().mockReturnValue(null),
   setStatus: mockApplyProposal,
   applyProposal: mockApplyProposal,
@@ -198,6 +206,7 @@ const MOCK_DECISIONS = [
     ts: new Date(FIXED_NOW_MS - 1000).toISOString(),
     proposalId: 'p1',
     action: 'merged',
+    labelBasis: 'realized-merge-v1',
     engine: 'claude',
     costUsd: 0.05,
     cacheHit: true,
@@ -301,6 +310,37 @@ beforeEach(() => {
   mockGetResourceSnapshot.mockResolvedValue(OPEN_SNAPSHOT);
   mockBuildFleetStatus.mockResolvedValue(FLEET_STATUS);
   mockReadDecisions.mockReturnValue(MOCK_DECISIONS);
+  mockListProposals.mockReturnValue([{
+    id: 'p1',
+    status: 'applied',
+    realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt: new Date(FIXED_NOW_MS - 1000).toISOString(),
+    },
+  }]);
+  mockReadDecisionsDetailed.mockImplementation(() => {
+    const decisions = mockReadDecisions();
+    return {
+      decisions,
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesRead: 1, bytesRead: 0, rowsScanned: decisions.length,
+      invalidRows: 0, unreadableFiles: 0,
+    };
+  });
+  mockListProposalsDetailed.mockImplementation(() => {
+    const proposals = mockListProposals();
+    return {
+      proposals,
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesDiscovered: proposals.length, filesRead: proposals.length,
+      bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+    };
+  });
   mockListGoals.mockReturnValue(MOCK_GOALS);
   mockTelegramEnabled.mockReturnValue(true);
   mockSendTelegramMessage.mockResolvedValue({ ok: true });
@@ -374,6 +414,48 @@ describe('M257 — Elon Director', () => {
       expect(ctx.outcomes.costUsdToday).toBe(0);
       // other sections still work
       expect(ctx.goals.active).toHaveLength(1);
+    });
+
+    it('counts one canonical merge and ignores legacy or duplicate rows even with a current witness', async () => {
+      mockReadDecisions.mockReturnValue([
+        { ...MOCK_DECISIONS[0], labelBasis: undefined },
+        MOCK_DECISIONS[0],
+        { ...MOCK_DECISIONS[0], ts: new Date(FIXED_NOW_MS - 500).toISOString() },
+      ]);
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.outcomes.mergedCount).toBe(1);
+      expect(ctx.outcomes.engineShipRates.claude).toBe(100);
+    });
+
+    it('counts a legacy merge row as zero even with a current realized witness', async () => {
+      mockReadDecisions.mockReturnValue([
+        { ...MOCK_DECISIONS[0], labelBasis: undefined },
+      ]);
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.outcomes.mergedCount).toBe(0);
+      expect(ctx.outcomes.engineShipRates).toEqual({});
+    });
+
+    it('fails closed when detailed outcome sources are degraded', async () => {
+      mockReadDecisionsDetailed.mockReturnValue({
+        decisions: MOCK_DECISIONS,
+        sourceState: 'degraded', sourcePresent: true, complete: false, stopReasons: ['row-cap'],
+        filesRead: 1, bytesRead: 1024, rowsScanned: MOCK_DECISIONS.length,
+        invalidRows: 0, unreadableFiles: 0,
+      });
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.outcomes.mergedCount).toBe(0);
+      expect(ctx.outcomes.engineShipRates).toEqual({});
+      expect(ctx.outcomes.costUsdToday).toBe(0);
     });
 
     it('5. degrades gracefully when goals/store throws', async () => {

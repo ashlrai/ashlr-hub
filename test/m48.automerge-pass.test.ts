@@ -6,7 +6,7 @@
  *  - autoMergeProposal (the M47 gate) is MOCKED — the real merge-to-main gate
  *    (worktrees, git, gh, verify commands) NEVER runs here. The mock records
  *    every call and returns a controllable {ok,merged,reason} per proposal id.
- *  - listProposals is MOCKED so the pending set is fully controlled (a mix of
+ *  - listProposalsDetailed is MOCKED so the pending set is fully controlled (a mix of
  *    frontier / local / undefined engineTier).
  *  - Kill switch is cleared in afterEach.
  *
@@ -69,11 +69,15 @@ vi.mock('../src/core/inbox/merge.js', () => ({
   },
 }));
 
-// listProposals — returns a controllable proposal set via a mutable holder.
+// listProposalsDetailed — returns a controllable proposal set + source quality.
 let pendingProposals: Proposal[] = [];
-const mockListProposals = vi.fn();
+const mockListProposalsDetailed = vi.fn();
+const mockSetStatus = vi.fn();
+const mockUpdateProposalField = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: (...args: unknown[]) => mockListProposals(...args),
+  listProposalsDetailed: (...args: unknown[]) => mockListProposalsDetailed(...args),
+  setStatus: (...args: unknown[]) => mockSetStatus(...args),
+  updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
 }));
 
 // M172: mock the judge chain so these pre-M172 tests remain hermetic.
@@ -139,6 +143,29 @@ function evidenceCfg(): AshlrConfig {
   return { version: 1, foundry: { autoMerge: { enabled: true, trustBasis: 'evidence' } } } as AshlrConfig;
 }
 
+function verificationCfg(): AshlrConfig {
+  return { version: 1, foundry: { autoMerge: { enabled: true, trustBasis: 'verification' } } } as AshlrConfig;
+}
+
+function proposalRead(
+  proposals: Proposal[],
+  over?: Partial<{ sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }>,
+) {
+  return {
+    proposals,
+    sourceState: 'healthy' as const,
+    sourcePresent: true,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: proposals.length,
+    filesRead: proposals.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    ...over,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // beforeEach / afterEach
 // ---------------------------------------------------------------------------
@@ -150,7 +177,9 @@ beforeEach(() => {
 
   mockAutoMergeProposal.mockReset();
   mockVerifyProposal.mockReset();
-  mockListProposals.mockReset();
+  mockListProposalsDetailed.mockReset();
+  mockSetStatus.mockReset();
+  mockUpdateProposalField.mockReset();
   mockJudgeProposal.mockReset();
   mockReadDecisions.mockReset();
   mockRecordDecision.mockReset();
@@ -158,7 +187,9 @@ beforeEach(() => {
   pendingProposals = [];
 
   mockReadDecisions.mockReturnValue([]);
-  mockListProposals.mockImplementation(() => pendingProposals);
+  mockListProposalsDetailed.mockImplementation(() => proposalRead(pendingProposals));
+  mockSetStatus.mockReturnValue(true);
+  mockUpdateProposalField.mockReturnValue(true);
   mockAutoMergeProposal.mockImplementation(async (id: string) => {
     return mergeResults[id] ?? { ok: false, merged: false, reason: 'default-not-merged' };
   });
@@ -225,7 +256,160 @@ describe('M48 runAutoMergePass — DISABLED is a no-op', () => {
 
   it('does not even list proposals when disabled (short-circuits first)', async () => {
     await runAutoMergePass({ version: 1 } as AshlrConfig);
-    expect(mockListProposals).not.toHaveBeenCalled();
+    expect(mockListProposalsDetailed).not.toHaveBeenCalled();
+  });
+});
+
+describe('M48 runAutoMergePass — proposal source authority', () => {
+  const assertNoMutationProgression = () => {
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockRecordDecision).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  };
+
+  it.each([
+    ['degraded', { sourceState: 'degraded' as const, complete: true }],
+    ['incomplete', { sourceState: 'healthy' as const, complete: false }],
+  ])('aborts before all mutations when the initial source is %s', async (_label, quality) => {
+    const adversarial = makeProposal('initial-untrusted', {
+      engineTier: 'frontier',
+    });
+    mockListProposalsDetailed.mockReturnValue(proposalRead([adversarial], quality));
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(out).toMatchObject({ attempted: 0, merged: 0, judged: 0, ttlRejected: 0 });
+    expect(mockListProposalsDetailed).toHaveBeenCalledWith({ status: 'pending', requireComplete: true });
+    assertNoMutationProgression();
+  });
+
+  it.each([
+    ['degraded', { sourceState: 'degraded' as const, complete: true }],
+    ['incomplete', { sourceState: 'healthy' as const, complete: false }],
+  ])('aborts before all mutations when the cleanup refresh is %s', async (_label, quality) => {
+    const stale = makeProposal('refresh-untrusted', {
+      engineTier: 'local',
+      createdAt: '2000-01-01T00:00:00.000Z',
+    });
+    const actionable = makeProposal('refresh-actionable', {
+      engineTier: 'frontier',
+    });
+    mockListProposalsDetailed
+      .mockReturnValueOnce(proposalRead([stale, actionable]))
+      .mockReturnValueOnce(proposalRead([stale, actionable], quality));
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(out).toMatchObject({ attempted: 0, merged: 0, judged: 0, ttlRejected: 0 });
+    expect(mockListProposalsDetailed).toHaveBeenCalledTimes(2);
+    expect(mockListProposalsDetailed).toHaveBeenNthCalledWith(1, { status: 'pending', requireComplete: true });
+    expect(mockListProposalsDetailed).toHaveBeenNthCalledWith(2, { status: 'pending', requireComplete: true });
+    assertNoMutationProgression();
+  });
+});
+
+describe('M48 runAutoMergePass — cleanup persistence authority', () => {
+  const invalidProposal = (id: string, createdAt: string): Proposal => makeProposal(id, {
+    engineTier: 'local',
+    workSource: 'goal',
+    title: `Fix regression in /tmp/.ashlr/tmp/vwt-${id}/src.ts`,
+    createdAt,
+  });
+
+  it('counts and filters only durably rejected invalid proposals', async () => {
+    const invalid = invalidProposal('invalid-persisted', '2026-07-14T00:00:00.000Z');
+    const actionable = makeProposal('actionable-after-cleanup', { engineTier: 'frontier' });
+    pendingProposals = [actionable, invalid];
+
+    const out = await runAutoMergePass(enabledCfg());
+
+    expect(out.invalidRejected).toBe(1);
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      invalid.id,
+      'rejected',
+      undefined,
+      expect.stringContaining('ephemeral Ashlr temp-worktree'),
+      undefined,
+      {},
+      'pending',
+    );
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(actionable.id, expect.anything());
+    expect(mockAutoMergeProposal).not.toHaveBeenCalledWith(invalid.id, expect.anything());
+  });
+
+  it('stops before judge or merge when invalid cleanup persistence returns false', async () => {
+    pendingProposals = [
+      invalidProposal('invalid-not-persisted', '2026-07-14T00:00:00.000Z'),
+      makeProposal('actionable-blocked', { engineTier: 'frontier' }),
+    ];
+    mockSetStatus.mockReturnValueOnce(false);
+
+    const out = await runAutoMergePass(enabledCfg());
+
+    expect(out).toMatchObject({ invalidRejected: 0, ttlRejected: 0, judged: 0, attempted: 0 });
+    expect(mockSetStatus).toHaveBeenCalledTimes(1);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it('stops before judge or merge when TTL cleanup persistence returns false', async () => {
+    pendingProposals = [
+      makeProposal('ttl-not-persisted', {
+        engineTier: 'local',
+        createdAt: '2000-01-01T00:00:00.000Z',
+      }),
+      makeProposal('actionable-after-ttl', { engineTier: 'frontier' }),
+    ];
+    mockSetStatus.mockReturnValueOnce(false);
+
+    const out = await runAutoMergePass(enabledCfg());
+
+    expect(out).toMatchObject({ invalidRejected: 0, ttlRejected: 0, judged: 0, attempted: 0 });
+    expect(mockSetStatus).toHaveBeenCalledTimes(1);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it('checks the kill switch again before every cleanup write', async () => {
+    pendingProposals = [
+      invalidProposal('invalid-first', '2026-07-13T00:00:00.000Z'),
+      invalidProposal('invalid-second', '2026-07-14T00:00:00.000Z'),
+    ];
+    mockSetStatus.mockImplementationOnce(() => {
+      setKill(true);
+      return true;
+    });
+
+    const out = await runAutoMergePass(enabledCfg());
+
+    expect(out.invalidRejected).toBe(1);
+    expect(mockSetStatus).toHaveBeenCalledTimes(1);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+});
+
+describe('M48 runAutoMergePass — mutation progression', () => {
+  it('does not judge or merge when verification evidence persistence returns false', async () => {
+    pendingProposals = [makeProposal('verification-not-persisted', { engineTier: 'frontier' })];
+    mockUpdateProposalField.mockReturnValueOnce(false);
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'verification-not-persisted',
+      expect.objectContaining({ verifyResult: expect.any(Object) }),
+    );
+    expect(out.skipped).toContainEqual(expect.objectContaining({
+      proposalId: 'verification-not-persisted',
+      check: 'verify-before-judge-persistence',
+    }));
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 });
 
@@ -288,7 +472,7 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
   it('lists ONLY pending proposals (status filter)', async () => {
     pendingProposals = [makeProposal('frontier-1', { engineTier: 'frontier' })];
     await runAutoMergePass(enabledCfg());
-    expect(mockListProposals).toHaveBeenCalledWith({ status: 'pending' });
+    expect(mockListProposalsDetailed).toHaveBeenCalledWith({ status: 'pending', requireComplete: true });
   });
 
   it('records a signed attestation for GPT-5/Codex frontier judges', async () => {

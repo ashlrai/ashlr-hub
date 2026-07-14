@@ -14,7 +14,7 @@
  *  - autoArchived/ttlRejected counters reflect actual drain.
  *
  * HOME is overridden to a tmp dir so no real ~/.ashlr state is touched.
- * autoMergeProposal, listProposals, setStatus, updateProposalField are MOCKED.
+ * autoMergeProposal, listProposalsDetailed, setStatus, updateProposalField are MOCKED.
  * Fixed timestamps are used so TTL tests are deterministic.
  */
 
@@ -47,7 +47,11 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposals: (...args: unknown[]) => mockListProposals(...args),
+    listProposalsDetailed: (...args: unknown[]) => ({
+      proposals: mockListProposals(...args),
+      sourceState: 'healthy',
+      complete: true,
+    }),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };
@@ -203,6 +207,8 @@ beforeEach(() => {
   mockJudgeProposal.mockReset();
   mockSetStatus.mockReset();
   mockUpdateProposalField.mockReset();
+  mockSetStatus.mockReturnValue(true);
+  mockUpdateProposalField.mockReturnValue(true);
 
   mockListProposals.mockImplementation(() => pendingProposals);
   mockAutoMergeProposal.mockImplementation(async (id: string) => ({
@@ -261,6 +267,9 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
       'rejected',
       undefined,
       expect.stringContaining('auto-archived'),
+      undefined,
+      {},
+      'pending',
     );
     // NEVER forwarded to the merge gate
     expect(mockAutoMergeProposal).not.toHaveBeenCalledWith('p-archive', expect.anything());
@@ -279,6 +288,9 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
       'rejected',
       undefined,
       expect.stringContaining('auto-archived'),
+      undefined,
+      {},
+      'pending',
     );
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
@@ -293,8 +305,8 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
     expect(mockUpdateProposalField).toHaveBeenCalledWith('p-accum', { judgeNonShipCount: 1 });
 
     // Second pass: count 1 → 2
-    mockUpdateProposalField.mockReset();
-    mockSetStatus.mockReset();
+    mockUpdateProposalField.mockClear();
+    mockSetStatus.mockClear();
     const p1 = makeProposal('p-accum', { judgeNonShipCount: 1 });
     pendingProposals = [p1];
     out = await runAutoMergePass(drainCfg());
@@ -302,8 +314,8 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
     expect(mockUpdateProposalField).toHaveBeenCalledWith('p-accum', { judgeNonShipCount: 2 });
 
     // Third pass: count 2 → 3 → archive
-    mockUpdateProposalField.mockReset();
-    mockSetStatus.mockReset();
+    mockUpdateProposalField.mockClear();
+    mockSetStatus.mockClear();
     const p2 = makeProposal('p-accum', { judgeNonShipCount: 2 });
     pendingProposals = [p2];
     out = await runAutoMergePass(drainCfg());
@@ -313,13 +325,16 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
       'rejected',
       undefined,
       expect.stringContaining('auto-archived'),
+      undefined,
+      {},
+      'pending',
     );
   });
 
   it('handles all three non-ship verdict kinds (noise, harmful, review)', async () => {
     for (const v of ['noise', 'harmful', 'review'] as const) {
-      mockSetStatus.mockReset();
-      mockUpdateProposalField.mockReset();
+      mockSetStatus.mockClear();
+      mockUpdateProposalField.mockClear();
       const p = makeProposal(`p-${v}`, { judgeNonShipCount: 2 });
       pendingProposals = [p];
       mockJudgeProposal.mockResolvedValue({
@@ -530,10 +545,10 @@ describe('M259 TTL: stale proposals auto-rejected', () => {
     const staleDate = new Date(NOW_MS - 8 * 24 * 60 * 60 * 1000).toISOString();
     const stale = makeProposal('p-stale', { createdAt: staleDate });
     pendingProposals = [stale];
-    // After TTL rejects it, listProposals re-fetch returns empty (all cleared)
+    // The second read is the complete pre-mutation authority refresh.
     mockListProposals
       .mockReturnValueOnce([stale])  // initial fetch
-      .mockReturnValueOnce([]);       // after TTL cull re-fetch
+      .mockReturnValueOnce([stale]); // authoritative refresh
 
     const out = await runAutoMergePass(drainCfg());
 
@@ -543,6 +558,9 @@ describe('M259 TTL: stale proposals auto-rejected', () => {
       'rejected',
       undefined,
       expect.stringContaining('TTL'),
+      undefined,
+      {},
+      'pending',
     );
     // NEVER forwarded to merge gate
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
@@ -584,7 +602,7 @@ describe('M259 TTL: stale proposals auto-rejected', () => {
     pendingProposals = stales;
     mockListProposals
       .mockReturnValueOnce(stales)
-      .mockReturnValueOnce([]);
+      .mockReturnValueOnce(stales);
 
     const out = await runAutoMergePass(drainCfg());
 
@@ -617,7 +635,7 @@ describe('M259 safety: merge gate NEVER reached for archived/TTL proposals', () 
     pendingProposals = [stale];
     mockListProposals
       .mockReturnValueOnce([stale])
-      .mockReturnValueOnce([]);
+      .mockReturnValueOnce([stale]);
 
     await runAutoMergePass(drainCfg());
 
@@ -630,11 +648,10 @@ describe('M259 safety: merge gate NEVER reached for archived/TTL proposals', () 
     const toArchive = makeProposal('p-mix-archive', { judgeNonShipCount: 2 });
     const shipper = makeProposal('p-mix-ship');
 
-    // First listProposals call (TTL pre-pass) returns all 3
-    // Second call (after TTL cull) returns only the non-stale ones
+    // Both the initial read and pre-mutation refresh include all 3.
     mockListProposals
       .mockReturnValueOnce([stale, toArchive, shipper])
-      .mockReturnValueOnce([toArchive, shipper]);
+      .mockReturnValueOnce([stale, toArchive, shipper]);
 
     mockJudgeProposal.mockImplementation(async (p: Proposal) => {
       if (p.id === 'p-mix-archive') return reviewVerdict(p.id);

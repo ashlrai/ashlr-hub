@@ -61,7 +61,7 @@ export interface RepoContext {
 
 /** Outcome statistics from the decisions ledger over the last 7 days. */
 export interface OutcomeContext {
-  /** Proposals merged (approved + applied) in the 7-day window. */
+  /** Receipt-qualified realized merges in the 7-day window. */
   merged7d: number;
   /**
    * Proposals reverted in the 7-day window.

@@ -16,10 +16,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Helpers to seed daemon state + proposals into a tmp HOME
@@ -65,6 +69,76 @@ function seedProposal(id: string, fields: object): void {
     }),
     'utf8',
   );
+}
+
+function git(repo: string, args: string[]): string {
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  }).trim();
+}
+
+function seedAuthenticatedRealizedProposal(
+  id: string,
+  observedAt: string,
+  createdAt = '2026-06-01T13:00:00.000Z',
+): void {
+  const repo = join(tmpHome, `repo-${id}`);
+  mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['init', '--initial-branch=main', repo], { stdio: 'pipe' });
+  git(repo, ['config', 'user.email', 'pulse-test@ashlr.test']);
+  git(repo, ['config', 'user.name', 'Pulse Test']);
+  writeFileSync(join(repo, 'README.md'), '# base\n', 'utf8');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'base']);
+  const baseBeforeOid = git(repo, ['rev-parse', 'HEAD']);
+  git(repo, ['checkout', '-b', 'proposal']);
+  writeFileSync(join(repo, 'README.md'), '# landed\n', 'utf8');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'proposal']);
+  const proposalHeadOid = git(repo, ['rev-parse', 'HEAD']);
+  git(repo, ['checkout', 'main']);
+  git(repo, ['merge', '--no-ff', 'proposal', '-m', 'merge proposal']);
+  const mergeCommitOid = git(repo, ['rev-parse', 'HEAD']);
+  const diffHash = 'a'.repeat(64);
+  const unsignedIntent = {
+    schemaVersion: 1 as const,
+    branch: 'proposal',
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    diffHash,
+    evidencePackDigest: 'b'.repeat(64),
+    authorizationId: 'c'.repeat(32),
+    authorizedAt: observedAt,
+  };
+  const intentAttestation = signLocalMergeIntent(id, repo, unsignedIntent);
+  const localMergeIntent = { ...unsignedIntent, attestation: intentAttestation };
+  const unsignedRealized = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    mergeCommitOid,
+    observedAt,
+    proposalId: id,
+    diffHash,
+    intentAttestation,
+  };
+  const attestation = signLocalRealizedMergeReceipt(id, repo, unsignedRealized);
+
+  seedProposal(id, {
+    kind: 'patch',
+    status: 'applied',
+    repo,
+    createdAt,
+    decidedAt: observedAt,
+    diffHash,
+    verifyResult: { passed: true, baseHead: baseBeforeOid, diffHash },
+    localMergeIntent,
+    realizedMerge: { ...unsignedRealized, attestation },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +234,7 @@ describe('buildFleetSpans — tick spans', () => {
     expect(attrMap['ashlr.fleet.ref_id']).toBe('2026-06-01T10:00:00.000Z');
   });
 
-  it('emits a fleet.merge span when tick.merged > 0', async () => {
+  it('keeps tick.merged as operational activity without synthesizing landed work', async () => {
     seedDaemonState([
       {
         ts: '2026-06-01T11:00:00.000Z',
@@ -174,15 +248,8 @@ describe('buildFleetSpans — tick spans', () => {
 
     const { buildFleetSpans } = await getPulseExport();
     const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
-    const mergeSpan = spans.find((s) => s.name === 'fleet.merge');
-    expect(mergeSpan).toBeDefined();
-    const attrMap: Record<string, unknown> = {};
-    for (const a of mergeSpan!.attributes) {
-      attrMap[a.key] = 'stringValue' in a.value ? a.value.stringValue : a.value.intValue;
-    }
-    expect(attrMap['ashlr.source']).toBe('ashlr-fleet');
-    expect(attrMap['ashlr.fleet.event']).toBe('merge');
-    expect(attrMap['ashlr.fleet.outcome']).toBe('applied');
+    expect(spans.filter((s) => s.name === 'fleet.tick')).toHaveLength(1);
+    expect(spans.some((s) => s.name === 'fleet.merge')).toBe(false);
   });
 });
 
@@ -191,6 +258,30 @@ describe('buildFleetSpans — tick spans', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildFleetSpans — proposal spans', () => {
+  it('emits an explicit degraded-source diagnostic when proposal evidence is unreadable', async () => {
+    const dir = join(tmpHome, '.ashlr', 'inbox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'corrupt.json'), '{not-json', 'utf8');
+
+    const { buildFleetSpans } = await getPulseExport();
+    const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
+    const diagnostic = spans.find((span) => span.name === 'fleet.diagnostic');
+    expect(diagnostic).toBeDefined();
+    const attrs = Object.fromEntries(diagnostic!.attributes.map((attr) => [
+      attr.key,
+      'stringValue' in attr.value ? attr.value.stringValue : attr.value.intValue,
+    ]));
+    expect(attrs).toMatchObject({
+      'ashlr.fleet.event': 'diagnostic',
+      'ashlr.fleet.outcome': 'degraded-source',
+      'ashlr.fleet.ref_id': 'proposal-source',
+      'ashlr.fleet.diagnostic.source': 'proposals',
+      'ashlr.fleet.diagnostic.source_state': 'degraded',
+      'ashlr.fleet.diagnostic.complete': 'false',
+    });
+    expect(spans.some((span) => span.name === 'fleet.proposal')).toBe(false);
+  });
+
   it('emits a fleet.proposal span with correct attributes', async () => {
     seedProposal('prop-test-000001-abcd', {
       status: 'pending',
@@ -218,11 +309,10 @@ describe('buildFleetSpans — proposal spans', () => {
   });
 
   it('maps applied status to fleet.merge', async () => {
-    seedProposal('prop-applied-000001-abcd', {
-      status: 'applied',
-      createdAt: '2026-06-01T13:00:00.000Z',
-      decidedAt: '2026-06-01T13:05:00.000Z',
-    });
+    seedAuthenticatedRealizedProposal(
+      'prop-applied-000001-abcd',
+      '2026-06-01T13:05:00.000Z',
+    );
 
     const { buildFleetSpans } = await getPulseExport();
     const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
@@ -232,7 +322,37 @@ describe('buildFleetSpans — proposal spans', () => {
     for (const a of mergeSpan!.attributes) {
       attrMap[a.key] = 'stringValue' in a.value ? a.value.stringValue : a.value.intValue;
     }
-    expect(attrMap['ashlr.fleet.outcome']).toBe('applied');
+    expect(attrMap['ashlr.fleet.outcome']).toBe('merged');
+    expect(mergeSpan!.startTimeUnixNano).toBe(String(Date.parse('2026-06-01T13:05:00.000Z') * 1_000_000));
+  });
+
+  it('does not project authenticated evidence with a future observation time as landed', async () => {
+    seedAuthenticatedRealizedProposal(
+      'prop-applied-future-0001',
+      '2099-06-01T13:05:00.000Z',
+    );
+
+    const { buildFleetSpans } = await getPulseExport();
+    const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
+    expect(spans.some((span) => span.name === 'fleet.merge')).toBe(false);
+  });
+
+  it('keeps applied-without-witness visible as proposal lifecycle activity', async () => {
+    seedProposal('prop-applied-legacy-0001', {
+      status: 'applied',
+      createdAt: '2026-06-01T13:00:00.000Z',
+    });
+
+    const { buildFleetSpans } = await getPulseExport();
+    const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
+    const lifecycle = spans.find((span) => span.name === 'fleet.proposal');
+    expect(lifecycle).toBeDefined();
+    const attrs = Object.fromEntries(lifecycle!.attributes.map((attr) => [
+      attr.key,
+      'stringValue' in attr.value ? attr.value.stringValue : attr.value.intValue,
+    ]));
+    expect(attrs['ashlr.fleet.outcome']).toBe('applied');
+    expect(spans.some((span) => span.name === 'fleet.merge')).toBe(false);
   });
 
   it('maps rejected status to fleet.decline', async () => {
@@ -286,7 +406,7 @@ describe('buildFleetSpans — deterministic spanId', () => {
     expect(tick1!.traceId).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('produces different spanIds for different events on the same ref_id', async () => {
+  it('emits one authenticated proposal merge despite duplicate tick merge aggregates', async () => {
     seedDaemonState([
       {
         ts: '2026-06-02T08:00:00.000Z',
@@ -296,15 +416,25 @@ describe('buildFleetSpans — deterministic spanId', () => {
         reason: 'ok',
         merged: 1,
       },
+      {
+        ts: '2026-06-02T08:01:00.000Z',
+        itemsConsidered: 1,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'ok',
+        merged: 1,
+      },
     ]);
+    seedAuthenticatedRealizedProposal(
+      'prop-dedup-merge-0001',
+      '2026-06-02T08:02:00.000Z',
+      '2026-06-01T13:00:00.000Z',
+    );
 
     const { buildFleetSpans } = await getPulseExport();
     const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
-    const tickSpan  = spans.find((s) => s.name === 'fleet.tick');
-    const mergeSpan = spans.find((s) => s.name === 'fleet.merge');
-    expect(tickSpan).toBeDefined();
-    expect(mergeSpan).toBeDefined();
-    expect(tickSpan!.spanId).not.toBe(mergeSpan!.spanId);
+    expect(spans.filter((s) => s.name === 'fleet.tick')).toHaveLength(2);
+    expect(spans.filter((s) => s.name === 'fleet.merge')).toHaveLength(1);
   });
 });
 
@@ -329,6 +459,17 @@ describe('buildFleetSpans — sinceTs filter', () => {
       attrMap[a.key] = 'stringValue' in a.value ? a.value.stringValue : a.value.intValue;
     }
     expect(attrMap['ashlr.fleet.ref_id']).toBe('2026-06-15T00:00:00.000Z');
+  });
+
+  it('drops malformed and future tick timestamps, including merge aggregates', async () => {
+    seedDaemonState([
+      { ts: 'not-a-time', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'ok', merged: 9 },
+      { ts: '2099-01-01T00:00:00.000Z', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'ok', merged: 9 },
+    ]);
+
+    const { buildFleetSpans } = await getPulseExport();
+    const spans = buildFleetSpans().resourceSpans[0]!.scopeSpans[0]!.spans;
+    expect(spans).toEqual([]);
   });
 });
 

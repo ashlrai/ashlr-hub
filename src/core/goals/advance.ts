@@ -645,15 +645,16 @@ export function progressOf(goal: Goal): GoalProgress {
     // the blocked branch when a 'needs-approval' run produced one), not only
     // 'proposed'. We NEVER mutate the proposal or the goal.
     let effective: MilestoneStatus = m.status;
-    if (
-      (m.status === 'proposed' || m.status === 'blocked' || m.status === 'in-progress') &&
-      m.proposalId
-    ) {
+    if (m.proposalId && (
+      m.status === 'proposed' || m.status === 'blocked' ||
+      m.status === 'in-progress' || m.status === 'done'
+    )) {
       try {
         const p = loadProposal(m.proposalId);
         if (proposalCompletesGoalMilestone(p)) effective = 'done';
+        else if (m.status === 'done') effective = 'blocked';
       } catch {
-        /* read-only best-effort */
+        if (m.status === 'done') effective = 'blocked';
       }
     }
     byStatus[effective] = (byStatus[effective] ?? 0) + 1;

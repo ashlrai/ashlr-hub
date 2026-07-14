@@ -83,7 +83,40 @@ vi.mock('../src/core/usage/frontier-usage.js', () => ({
 }));
 vi.mock('../src/core/inbox/store.js', () => ({
   pendingCount: () => 0,
-  listProposals: () => [],
+  listProposals: () => [{
+    id: 'repo:issue:mmm',
+    status: 'applied',
+    realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt: FIXED_2D_AGO,
+    },
+  }],
+  listProposalsDetailed: vi.fn(() => ({
+    proposals: [{
+      id: 'repo:issue:mmm',
+      status: 'applied',
+      realizedMerge: {
+        schemaVersion: 1, source: 'local-default-branch', base: 'main',
+        baseBeforeOid: '1'.repeat(40), proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40), observedAt: FIXED_2D_AGO,
+      },
+    }, {
+      id: 'repo:issue:realized',
+      status: 'applied',
+      realizedMerge: {
+        schemaVersion: 1, source: 'local-default-branch', base: 'main',
+        baseBeforeOid: '4'.repeat(40), proposalHeadOid: '5'.repeat(40),
+        mergeCommitOid: '6'.repeat(40), observedAt: FIXED_12H_AGO,
+      },
+    }],
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesDiscovered: 2, filesRead: 2, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+  })),
 }));
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: () => [],
@@ -102,17 +135,23 @@ vi.mock('../src/core/goals/advance.js', () => ({
 
 /** Fixture decisions for engine-scorecard and event tests */
 const FIXTURE_DECISIONS_24H = [
-  // claude: 2 ship, 1 review  (within 24h)
+  // Judge predictions remain calibration-only, including legacy applied/approved verdicts.
   { ts: FIXED_12H_AGO, proposalId: 'repo:issue:aaa', action: 'judged', engine: 'claude', model: 'opus',   verdict: 'ship',   reason: '' },
   { ts: FIXED_12H_AGO, proposalId: 'repo:issue:bbb', action: 'judged', engine: 'claude', model: 'sonnet', verdict: 'ship',   reason: '' },
+  { ts: FIXED_12H_AGO, proposalId: 'repo:issue:aab', action: 'judged', engine: 'claude', model: 'opus',   verdict: 'applied', reason: '' },
+  { ts: FIXED_12H_AGO, proposalId: 'repo:issue:aac', action: 'judged', engine: 'claude', model: 'opus',   verdict: 'approved', reason: '' },
   { ts: FIXED_12H_AGO, proposalId: 'repo:issue:ccc', action: 'judged', engine: 'claude', model: 'sonnet', verdict: 'review', reason: '' },
-  // codex: 1 ship, 1 noise  (within 24h)
+  // Canonical realized merge creates the sole ship.
+  { ts: FIXED_25H_AGO, proposalId: 'repo:issue:realized', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'sonnet', verdict: 'merged', reason: '' },
+  // codex: one prediction and one noise verdict; prediction is not realized.
   { ts: FIXED_12H_AGO, proposalId: 'repo:lint:ddd',  action: 'judged', engine: 'codex',  model: null,     verdict: 'ship',   reason: '' },
   { ts: FIXED_12H_AGO, proposalId: 'repo:lint:eee',  action: 'judged', engine: 'codex',  model: null,     verdict: 'noise',  reason: '' },
   // Older than 24h → excluded from scorecard
   { ts: FIXED_25H_AGO, proposalId: 'repo:issue:zzz', action: 'judged', engine: 'nim',    model: null,     verdict: 'ship',   reason: '' },
   // merge:shipped event within 72h (action='merged')
-  { ts: FIXED_2D_AGO,  proposalId: 'repo:issue:mmm', action: 'merged',    engine: 'claude', model: 'sonnet', verdict: 'ship', reason: 'Merged fix/lint-cleanup', detail: 'auto-merge' },
+  { ts: FIXED_2D_AGO,  proposalId: 'repo:issue:mmm', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'sonnet', verdict: 'ship', reason: 'Merged fix/lint-cleanup', detail: 'auto-merge' },
+  { ts: FIXED_2D_AGO,  proposalId: 'repo:issue:mmm', action: 'merged', engine: 'claude', model: 'sonnet', verdict: 'ship', reason: 'Legacy duplicate', detail: 'auto-merge' },
+  { ts: FIXED_2D_AGO,  proposalId: 'repo:issue:mmm', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'sonnet', verdict: 'ship', reason: 'Canonical duplicate', detail: 'auto-merge' },
   // Event older than 72h → excluded from recentEvents
   { ts: FIXED_4D_AGO,  proposalId: 'repo:issue:yyy', action: 'merged',    engine: 'claude', model: 'opus',   verdict: 'ship', reason: 'Goal finished',         detail: 'auto-merge' },
 ];
@@ -123,6 +162,18 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
     const filtered = FIXTURE_DECISIONS_24H.filter(d => Date.parse(d.ts) >= since);
     const limit = opts?.limit ?? Infinity;
     return filtered.slice(0, limit);
+  }),
+  readDecisionsDetailed: vi.fn((opts?: { sinceMs?: number; limit?: number }) => {
+    const since = opts?.sinceMs ?? 0;
+    const decisions = FIXTURE_DECISIONS_24H
+      .filter(d => Date.parse(d.ts) >= since)
+      .slice(0, opts?.limit ?? Infinity);
+    return {
+      decisions,
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesRead: 1, bytesRead: 0, rowsScanned: decisions.length,
+      invalidRows: 0, unreadableFiles: 0,
+    };
   }),
   recordDecision: vi.fn(() => {}),
 }));
@@ -263,23 +314,23 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
 
   // ── Per-engine scorecards ───────────────────────────────────────────────
 
-  it('engineScorecards aggregates judge verdicts per engine (24h)', async () => {
+  it('engineScorecards separates judge predictions from canonical realized ships', async () => {
     const intel = (await snapshotWithIntelligence()).intelligence!;
     const claude = intel.engineScorecards.find(s => s.engine === 'claude');
     expect(claude).toBeDefined();
-    expect(claude!.ship).toBe(2);
+    expect(claude!.ship).toBe(1);
     expect(claude!.review).toBe(1);
     expect(claude!.noise).toBe(0);
     expect(claude!.harmful).toBe(0);
-    expect(claude!.total).toBe(3);
-    expect(claude!.shipRate).toBeCloseTo(2 / 3, 5);
+    expect(claude!.total).toBe(2);
+    expect(claude!.shipRate).toBe(0.5);
 
     const codex = intel.engineScorecards.find(s => s.engine === 'codex');
     expect(codex).toBeDefined();
-    expect(codex!.ship).toBe(1);
+    expect(codex!.ship).toBe(0);
     expect(codex!.noise).toBe(1);
-    expect(codex!.total).toBe(2);
-    expect(codex!.shipRate).toBe(0.5);
+    expect(codex!.total).toBe(1);
+    expect(codex!.shipRate).toBe(0);
   });
 
   it('engineScorecards excludes decisions older than 24h', async () => {
@@ -297,6 +348,61 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
     }
   });
 
+  it('fails closed instead of projecting realized ships from degraded detailed sources', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const degradedRead = {
+      decisions: FIXTURE_DECISIONS_24H,
+      sourceState: 'degraded' as const,
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['row-cap'],
+      filesRead: 1,
+      bytesRead: 1024,
+      rowsScanned: FIXTURE_DECISIONS_24H.length,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+    vi.mocked(readDecisionsDetailed)
+      .mockReturnValueOnce(degradedRead)
+      .mockReturnValueOnce(degradedRead);
+
+    const intel = (await snapshotWithIntelligence()).intelligence!;
+
+    expect(intel.engineScorecards).toEqual([]);
+    expect(intel.recentEvents).toEqual([]);
+  });
+
+  it('counts a legacy merge row as zero even when its proposal has a current witness', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const legacyOnly = {
+      decisions: [{
+        ts: FIXED_12H_AGO,
+        proposalId: 'repo:issue:realized',
+        action: 'merged',
+        engine: 'claude',
+        verdict: 'ship',
+        reason: 'Legacy unlabeled merge',
+      }],
+      sourceState: 'healthy' as const,
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 0,
+      rowsScanned: 1,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+    vi.mocked(readDecisionsDetailed)
+      .mockReturnValueOnce(legacyOnly)
+      .mockReturnValueOnce(legacyOnly);
+
+    const intel = (await snapshotWithIntelligence()).intelligence!;
+
+    expect(intel.engineScorecards).toEqual([]);
+    expect(intel.recentEvents).toEqual([]);
+  });
+
   // ── M241: Recent fleet events ────────────────────────────────────────────
 
   it('recentEvents surfaces event-bus decisions within 72h', async () => {
@@ -306,6 +412,8 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
     expect(ev).toBeDefined();
     expect(ev!.kind).toContain('merge');
     expect(ev!.ts).toBe(FIXED_2D_AGO);
+    expect(intel.recentEvents.filter(e => e.detail === 'Merged fix/lint-cleanup')).toHaveLength(1);
+    expect(intel.recentEvents.find(e => e.detail === 'Legacy duplicate')).toBeUndefined();
   });
 
   it('recentEvents excludes event-bus decisions older than 72h', async () => {

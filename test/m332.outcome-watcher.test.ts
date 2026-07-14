@@ -10,8 +10,8 @@
  *
  * Consumers:
  *  - outcomeToIntent maps 'followed-up' → 'review' in BOTH calibration paths;
- *  - buildProducerScores pass 3: a reverted outcome drags the producer's
- *    learned ship-rate down.
+ *  - observation-only legacy trace patches never rewrite signed producer
+ *    routing credit.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -35,6 +35,30 @@ let proposalSourceState: 'healthy' | 'missing' | 'degraded' = 'healthy';
 const recordedObservations: Record<string, unknown>[] = [];
 let skillCards: SkillCard[] = [];
 const recordedSkillCards: SkillCard[] = [];
+
+function realizedFixtures(): Record<string, unknown>[] {
+  return appliedProposals.map((proposal) => {
+    if (proposal['realizedMerge']) return proposal;
+    const handoff = proposal['remoteHandoff'] as Record<string, unknown> | undefined;
+    const mergeCommitOid = handoff?.['mergeCommitOid'];
+    if (typeof mergeCommitOid !== 'string' || !/^[a-f0-9]{40}$/i.test(mergeCommitOid)) {
+      return proposal;
+    }
+    const observedAt = String(proposal['createdAt'] ?? new Date().toISOString());
+    return {
+      ...proposal,
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: mergeCommitOid,
+        mergeCommitOid,
+        observedAt,
+      },
+    };
+  });
+}
 
 const { inspectWindowMock } = vi.hoisted(() => ({ inspectWindowMock: vi.fn() }));
 
@@ -69,11 +93,11 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({
-  loadProposal: vi.fn((id: string) => appliedProposals.find((proposal) => proposal['id'] === id)
+  loadProposal: vi.fn((id: string) => realizedFixtures().find((proposal) => proposal['id'] === id)
     ?? (proposalRepo ? { repo: proposalRepo } : null)),
-  listProposals: vi.fn(() => appliedProposals),
+  listProposals: vi.fn(() => realizedFixtures()),
   listProposalsDetailed: vi.fn(() => ({
-    proposals: proposalSourceState === 'healthy' ? appliedProposals : [],
+    proposals: proposalSourceState === 'healthy' ? realizedFixtures() : [],
     sourceState: proposalSourceState,
     sourcePresent: proposalSourceState !== 'missing',
     complete: proposalSourceState !== 'degraded',
@@ -85,6 +109,24 @@ vi.mock('../src/core/inbox/store.js', () => ({
     unreadableFiles: 0,
   })),
 }));
+
+vi.mock('../src/core/inbox/realized-merge.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/inbox/realized-merge.js')>();
+  return { ...real, authenticatedRealizedMergeOf: real.realizedMergeOf };
+});
+
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProvenance: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+    verifyProducerProvenanceV2: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+  };
+});
 
 vi.mock('../src/core/fleet/post-merge-observations.js', () => ({
   recordPostMergeObservation: vi.fn((input: Record<string, unknown>) => {
@@ -165,6 +207,22 @@ function repoWithMerge(pid: string): string {
   writeFileSync(join(dir, 'file.ts'), 'merged change\n');
   g(dir, ['add', '-A']);
   g(dir, ['commit', '--quiet', '-m', `ashlr: auto-merge proposal ${pid}`]);
+  const mergeCommitOid = g(dir, ['rev-parse', 'HEAD']).trim();
+  appliedProposals.push({
+    id: pid,
+    status: 'applied',
+    createdAt: new Date().toISOString(),
+    repo: dir,
+    realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'master',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: mergeCommitOid,
+      mergeCommitOid,
+      observedAt: new Date().toISOString(),
+    },
+  });
   return dir;
 }
 
@@ -371,7 +429,8 @@ describe('M332 scanRealWorldOutcomes', () => {
 
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
 
-    expect(scan.skipped).toBe(1);
+    expect(scan.scanned).toBe(1);
+    expect(scan.skipped).toBe(0);
     expect(recordedObservations).toEqual([]);
   }, 30_000);
 
@@ -526,10 +585,41 @@ describe('M332 scanRealWorldOutcomes', () => {
   it('missing repo → skipped, never throws', async () => {
     proposalRepo = '';
     traces = [mergedTrace('p-ghost')];
+    appliedProposals = [{
+      id: 'p-ghost',
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: '/definitely/missing/m332-repo',
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: new Date().toISOString(),
+      },
+    }];
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.skipped).toBe(1);
     expect(linked.length).toBe(0);
   });
+
+  it('does not scan an applied proposal without an exact realized witness', async () => {
+    proposalRepo = repoWithMerge('p-no-witness');
+    appliedProposals = [{
+      id: 'p-no-witness',
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: proposalRepo,
+    }];
+    traces = [mergedTrace('p-no-witness')];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.scanned).toBe(0);
+    expect(recordedObservations).toEqual([]);
+  }, 30_000);
 
   it('production enrollment scope excludes an existing but unenrolled proposal repo', async () => {
     proposalRepo = repoWithMerge('p-unenrolled');
@@ -774,6 +864,21 @@ describe('M332 scanRealWorldOutcomes', () => {
 
   it('hard-caps the complete trace-backed candidate population', async () => {
     traces = Array.from({ length: 250 }, (_, index) => mergedTrace(`p-cap-${index}`));
+    appliedProposals = Array.from({ length: 250 }, (_, index) => ({
+      id: `p-cap-${index}`,
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: '/definitely/missing/m332-cap-repo',
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: new Date().toISOString(),
+      },
+    }));
 
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
 
@@ -792,7 +897,7 @@ describe('M332 scanRealWorldOutcomes', () => {
     // record — the scan must treat the proposal as already linked.
     traces = [mergedTrace('p-dup'), { ...mergedTrace('p-dup'), outcome: 'reverted' }];
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
-    expect(scan.scanned).toBe(0);
+    expect(scan.scanned).toBe(1);
     expect(linked.length).toBe(0);
   }, 30_000);
 
@@ -919,7 +1024,38 @@ describe('M332 outcome consumers', () => {
         ts: ts(1 + i), proposalId: pid, action: 'judged',
         engine: 'claude-fable-5', model: 'claude-fable-5', verdict: 'ship',
       });
+      ledger.push({
+        ts: ts(0.75 + i), proposalId: pid, action: 'merged', verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      });
     }
+    appliedProposals = Array.from({ length: 6 }, (_, index) => ({
+      id: `s5-${index}`,
+      repo: '/mock/repo',
+      origin: 'backlog',
+      kind: 'patch',
+      title: `s5-${index}`,
+      summary: 'realized producer score fixture',
+      workItemId: `/mock/repo:issue:s5-${index}`,
+      workSource: 'issue',
+      engineModel: 'claude:claude-sonnet-5',
+      diff: 'diff --git a/a b/a',
+      diffHash: 'd'.repeat(64),
+      provenanceSig: 'test-provenance',
+      producerProvenanceVersion: 2,
+      producerProvenanceSig: 'test-producer-provenance',
+      status: 'applied',
+      createdAt: ts(2 + index),
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: ts(0.75 + index),
+      },
+    }));
     const before = buildProducerScores('issue', NOW).get('claude:sonnet-5')!;
     expect(before.score).toBeCloseTo(1.0, 3);
 

@@ -1,13 +1,14 @@
 import { createHash, createHmac } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
-import type { Proposal } from '../types.js';
+import type { Proposal, RealizedMergeEvidence } from '../types.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { verifyRemoteHandoffReconciliation } from '../inbox/remote-handoff-attestation.js';
+import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
 import { loadExistingProvenanceKey } from '../foundry/provenance.js';
 import type { PostMergeObservationReadResult } from './post-merge-observations.js';
 import type { PostMergeStabilityReadResult } from './post-merge-stability.js';
 
-const SCOPE = 'cutoff-enrolled-local-receipt-qualified-applied-proposals/v1';
+const SCOPE = 'cutoff-enrolled-attested-github-realized-merges/v2';
 const SHA_RE = /^[a-f0-9]{40}$/;
 const MAX_PROPOSALS = 4_096;
 const MAX_ENROLLED = 1_024;
@@ -18,6 +19,9 @@ export type PostMergePopulationExclusionReason =
   | 'not-applied'
   | 'repo-missing'
   | 'repo-not-enrolled'
+  | 'realized-merge-missing-or-invalid'
+  | 'realized-merge-not-github'
+  | 'realized-merge-mismatch'
   | 'handoff-missing'
   | 'handoff-not-merged'
   | 'base-mismatch'
@@ -105,6 +109,7 @@ export type BuildPostMergePopulationV2Result =
 interface PopulationDependencies {
   verifyReceipt: (proposal: Proposal) => boolean;
   identityKey: () => Buffer | null;
+  readRealizedMerge: (proposal: Proposal) => RealizedMergeEvidence | null;
 }
 
 function sha(tuple: unknown[]): string {
@@ -142,6 +147,8 @@ function canonicalBranch(value: unknown): string | null {
 function emptyExclusions(): Record<PostMergePopulationExclusionReason, number> {
   return {
     'not-applied': 0, 'repo-missing': 0, 'repo-not-enrolled': 0,
+    'realized-merge-missing-or-invalid': 0, 'realized-merge-not-github': 0,
+    'realized-merge-mismatch': 0,
     'handoff-missing': 0, 'handoff-not-merged': 0,
     'base-mismatch': 0, 'merge-oid-invalid': 0, 'merge-time-invalid': 0,
     'outside-window': 0, 'receipt-invalid': 0,
@@ -152,9 +159,10 @@ function sourceHealthy(source: { sourceState: string; complete: boolean }): bool
   return source.sourceState !== 'degraded' && source.complete;
 }
 
-function metadataTuple(key: Buffer, proposal: Proposal): unknown[] {
+function metadataTuple(key: Buffer, proposal: Proposal, deps: PopulationDependencies): unknown[] {
   const repo = canonicalRepo(proposal.repo);
   const handoff = proposal.remoteHandoff;
+  const realized = deps.readRealizedMerge(proposal);
   return [
     hmac(key, 'ashlr:post-merge-v2:proposal', proposal.id),
     repo ? hmac(key, 'ashlr:post-merge-v2:repo', repo) : null,
@@ -167,7 +175,37 @@ function metadataTuple(key: Buffer, proposal: Proposal): unknown[] {
     handoff?.reconciliation?.schemaVersion ?? null,
     handoff?.reconciliation?.observedAt ?? null,
     handoff?.reconciliation?.attestation ?? null,
+    realized?.source ?? (proposal.realizedMerge === undefined ? null : 'invalid'),
+    realized?.source === 'github-host' ? realized.provider : null,
+    realized?.source === 'github-host' ? realized.prUrl : null,
+    realized?.source === 'github-host' ? realized.branch : null,
+    realized?.base ?? null,
+    realized?.source === 'github-host' ? realized.expectedHeadOid : null,
+    realized?.mergeCommitOid ? hmac(key, 'ashlr:post-merge-v2:realized-merge', realized.mergeCommitOid) : null,
+    realized?.source === 'github-host' ? realized.mergedAt : realized?.observedAt ?? null,
+    realized?.source === 'github-host' ? realized.reconciliation.schemaVersion : null,
+    realized?.source === 'github-host' ? realized.reconciliation.observedAt : null,
+    realized?.source === 'github-host' ? realized.reconciliation.attestation : null,
   ];
+}
+
+function githubRealizationMatchesHandoff(
+  proposal: Proposal,
+  deps: PopulationDependencies,
+): boolean {
+  const handoff = proposal.remoteHandoff;
+  const realized = deps.readRealizedMerge(proposal);
+  return realized?.source === 'github-host' && handoff?.provider === 'github' &&
+    realized.provider === handoff.provider &&
+    realized.prUrl === handoff.prUrl &&
+    realized.branch === handoff.branch &&
+    realized.base === handoff.base &&
+    realized.expectedHeadOid === handoff.expectedHeadOid &&
+    realized.mergeCommitOid === handoff.mergeCommitOid &&
+    realized.mergedAt === handoff.mergedAt &&
+    realized.reconciliation.schemaVersion === handoff.reconciliation?.schemaVersion &&
+    realized.reconciliation.observedAt === handoff.reconciliation.observedAt &&
+    realized.reconciliation.attestation === handoff.reconciliation.attestation;
 }
 
 function adverseTuple(
@@ -219,9 +257,13 @@ function exclusionReason(
   const repo = canonicalRepo(proposal.repo);
   if (!repo) return { reason: 'repo-missing' };
   if (!enrolled.has(repo)) return { reason: 'repo-not-enrolled' };
+  const realized = deps.readRealizedMerge(proposal);
+  if (!realized) return { reason: 'realized-merge-missing-or-invalid' };
+  if (realized.source !== 'github-host') return { reason: 'realized-merge-not-github' };
   const handoff = proposal.remoteHandoff;
   if (!handoff || handoff.provider !== 'github') return { reason: 'handoff-missing' };
   if (handoff.state !== 'merged') return { reason: 'handoff-not-merged' };
+  if (!githubRealizationMatchesHandoff(proposal, deps)) return { reason: 'realized-merge-mismatch' };
   const branch = defaultBranches.get(repo)!;
   if (handoff.base !== branch) return { reason: 'base-mismatch' };
   if (!SHA_RE.test(handoff.mergeCommitOid ?? '')) return { reason: 'merge-oid-invalid' };
@@ -251,6 +293,7 @@ export function buildPostMergePopulationV2(
     verifyReceipt: (proposal) => Boolean(proposal.repo && proposal.remoteHandoff &&
       verifyRemoteHandoffReconciliation(proposal.id, proposal.repo, proposal.remoteHandoff)),
     identityKey: () => { try { return loadExistingProvenanceKey(); } catch { return null; } },
+    readRealizedMerge: authenticatedRealizedMergeOf,
     ...dependencies,
   };
   const startedAt = canonicalTimestamp(input.cohortStartedAt);
@@ -319,7 +362,7 @@ export function buildPostMergePopulationV2(
     enrollmentCapturedAt, [...enrolled].sort().map((repo) => [
       hmac(key, 'ashlr:post-merge-v2:repo', repo), defaultBranches.get(repo),
     ])]);
-  const proposalTuples = input.proposals.proposals.map((proposal) => metadataTuple(key, proposal))
+  const proposalTuples = input.proposals.proposals.map((proposal) => metadataTuple(key, proposal, deps))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   const proposalSourceDigest = sha(['ashlr:post-merge-v2:proposals', input.proposals.snapshotDigest,
     proposalCapturedAt, proposalTuples]);

@@ -4,8 +4,8 @@
  * Three contracts verified:
  *  1. advanceGoal sets proposalId + 'proposed' status after a successful swarm
  *     (regression-guard: if this breaks, milestones never leave 'blocked').
- *  2. When a proposal is applied with passing verification, the linked goal
- *     milestone advances to 'done'.
+ *  2. Generic applied lifecycle state cannot advance a linked goal milestone;
+ *     only the realized-merge writer owns completion credit.
  *  3. When a proposal is rejected (setStatus → 'rejected'), the linked goal
  *     milestone resets to 'pending' so the conductor can retry.
  *
@@ -222,17 +222,17 @@ describe('M228 Contract 1 — advanceGoal sets proposalId + proposed status', ()
 });
 
 // ---------------------------------------------------------------------------
-// Contract 2 & 3 — setStatus('applied'/'rejected') updates linked milestone
+// Contract 2 & 3 — generic applied is non-merge; rejection releases milestone
 // ---------------------------------------------------------------------------
 
-describe('M228 Contract 2 — verified proposal applied → linked milestone becomes done', () => {
+describe('M228 Contract 2 — generic applied lifecycle state grants no completion credit', () => {
   beforeEach(() => {
     mockListGoals.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
   });
 
-  it('milestone with matching proposalId is updated to "done" when proposal is applied with passing verification', () => {
+  it('does not complete a milestone from applied status plus passing verification alone', () => {
     const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
@@ -241,11 +241,7 @@ describe('M228 Contract 2 — verified proposal applied → linked milestone bec
 
     setStatus('prop-target', 'applied');
 
-    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith(
-      'goal-1',
-      'g1-m0',
-      'done',
-    );
+    expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
   });
 
   it('does not update the milestone to "done" when applied proposal lacks passing verification', () => {
@@ -272,7 +268,7 @@ describe('M228 Contract 2 — verified proposal applied → linked milestone bec
     expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
   });
 
-  it('updates the milestone when passing verification is later recorded on an already applied proposal', () => {
+  it('does not complete an applied proposal when passing verification arrives later', () => {
     const proposal = makeProposal({ status: 'applied' });
     stubExistingProposal(proposal);
 
@@ -281,11 +277,7 @@ describe('M228 Contract 2 — verified proposal applied → linked milestone bec
 
     updateProposalField('prop-target', { verifyResult: { passed: true } });
 
-    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith(
-      'goal-1',
-      'g1-m0',
-      'done',
-    );
+    expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
   });
 
   it('does not update the milestone when failing verification is later recorded on an applied proposal', () => {

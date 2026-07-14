@@ -18,6 +18,7 @@ import {
 } from './post-merge-stability-producer.js';
 import type { RegressionGreenObservation } from './regression-sentinel.js';
 import { verifyRemoteHandoffReconciliation } from '../inbox/remote-handoff-attestation.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 import { outcomeCandidateKey, selectSuccessorsWithWrap, type MonitoringOutcomeCandidateCursor } from './monitoring-cursor.js';
 
 const GIT_SHA_RE = /^[a-f0-9]{40}$/;
@@ -91,6 +92,23 @@ function freshGreenObservation(
     Number.isSafeInteger(green.requiredCommandCount) && green.requiredCommandCount > 0 &&
     green.workspaceClean === true && Number.isFinite(verifiedAt) &&
     verifiedAt <= nowMs + 60_000 && nowMs - verifiedAt <= MAX_GREEN_AGE_MS;
+}
+
+function hasMatchingGithubRealization(proposal: Proposal): boolean {
+  const handoff = proposal.remoteHandoff;
+  const realized = realizedMergeOf(proposal);
+  return realized?.source === 'github-host' &&
+    handoff?.provider === 'github' && handoff.state === 'merged' &&
+    realized.provider === handoff.provider &&
+    realized.prUrl === handoff.prUrl &&
+    realized.branch === handoff.branch &&
+    realized.base === handoff.base &&
+    realized.expectedHeadOid === handoff.expectedHeadOid &&
+    realized.mergeCommitOid === handoff.mergeCommitOid &&
+    realized.mergedAt === handoff.mergedAt &&
+    realized.reconciliation.schemaVersion === handoff.reconciliation?.schemaVersion &&
+    realized.reconciliation.observedAt === handoff.reconciliation.observedAt &&
+    realized.reconciliation.attestation === handoff.reconciliation.attestation;
 }
 
 function sameAdverseMember(
@@ -169,7 +187,7 @@ export function observePostMergeStability(
       const mergedAt = sanitizeGithubMergedAt(handoff?.mergedAt);
       if (proposal.status !== 'applied' || handoff?.provider !== 'github' || handoff.state !== 'merged' ||
         handoff.base !== base || !GIT_SHA_RE.test(handoff.mergeCommitOid ?? '') || !mergedAt ||
-        !deps.verifiedHandoff(proposal)) {
+        !hasMatchingGithubRealization(proposal) || !deps.verifiedHandoff(proposal)) {
         result.inconclusive++;
         continue;
       }

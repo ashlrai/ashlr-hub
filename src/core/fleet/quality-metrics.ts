@@ -7,10 +7,15 @@
  * Never throws — degrades to zeroed metrics on any error.
  */
 
-import type { QualityMetrics, EngineQuality } from '../types.js';
-import { listProposals } from '../inbox/store.js';
+import type { DecisionEntry, QualityMetrics, EngineQuality, Proposal } from '../types.js';
+import { listProposalsDetailed } from '../inbox/store.js';
+import {
+  hasRealizedMergeEvidence,
+  realizedMergeOf,
+} from '../inbox/realized-merge.js';
 import { readDecisions } from './decisions-ledger.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
+import { verifyProducerProvenanceV2 } from '../foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Trivial-patch heuristics
@@ -53,6 +58,64 @@ function windowMs(window: '7d' | '30d' | 'all'): number | undefined {
   return undefined;
 }
 
+function realizedEvidenceMs(proposal: Proposal): number | null {
+  const evidence = realizedMergeOf(proposal);
+  if (!evidence) return null;
+  const timestamp = evidence.source === 'github-host'
+    ? evidence.reconciliation.observedAt
+    : evidence.observedAt;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasCurrentRealizedMerge(proposal: Proposal): boolean {
+  if (!hasRealizedMergeEvidence(proposal)) return false;
+  const evidenceMs = realizedEvidenceMs(proposal);
+  if (evidenceMs === null) return false;
+  if (proposal.status !== 'rejected' && proposal.status !== 'failed') return true;
+  const decidedMs = Date.parse(proposal.decidedAt ?? '');
+  return !Number.isFinite(decidedMs) || evidenceMs >= decidedMs;
+}
+
+function realizedEvidenceSupersedes(
+  proposal: Proposal,
+  terminal: DecisionEntry | undefined,
+): boolean {
+  if (!hasCurrentRealizedMerge(proposal)) return false;
+  if (terminal?.action !== 'rejected') return true;
+  const evidenceMs = realizedEvidenceMs(proposal);
+  const terminalMs = Date.parse(terminal.ts);
+  return evidenceMs !== null && (!Number.isFinite(terminalMs) || evidenceMs >= terminalMs);
+}
+
+function isNewerDecision(candidate: DecisionEntry, existing: DecisionEntry | undefined): boolean {
+  if (existing === undefined) return true;
+  const candidateMs = Date.parse(candidate.ts);
+  const existingMs = Date.parse(existing.ts);
+  if (!Number.isFinite(candidateMs)) return false;
+  if (!Number.isFinite(existingMs)) return true;
+  return candidateMs > existingMs;
+}
+
+function judgePredictionKey(entry: DecisionEntry): string {
+  return `${entry.proposalId}\u0000${entry.engine ?? ''}\u0000${entry.model ?? ''}`;
+}
+
+function isCanonicalMergedDecision(entry: DecisionEntry): boolean {
+  return entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1';
+}
+
+function isInWindow(timestampMs: number, sinceMs: number | undefined): boolean {
+  return Number.isFinite(timestampMs) && timestampMs <= Date.now() &&
+    (sinceMs === undefined || timestampMs >= sinceMs);
+}
+
+function proposalWindowMs(proposal: Proposal): number {
+  return hasCurrentRealizedMerge(proposal)
+    ? (realizedEvidenceMs(proposal) ?? Number.NaN)
+    : Date.parse(proposal.createdAt);
+}
+
 // ---------------------------------------------------------------------------
 // Public: computeQualityMetrics()
 // ---------------------------------------------------------------------------
@@ -73,14 +136,16 @@ export function computeQualityMetrics(
     const sinceMs = deltaMs !== undefined ? nowMs - deltaMs : undefined;
 
     // ── Load proposals ───────────────────────────────────────────────────────
-    let proposals = listProposals();
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    if (!proposalRead.complete || proposalRead.sourceState === 'degraded') {
+      throw new Error('proposal source incomplete');
+    }
+    let proposals = proposalRead.proposals;
 
-    // Filter by time window (use createdAt)
+    // Realized outcomes belong to the window in which the witness was observed.
+    // Non-realized proposals retain their creation-time lifecycle semantics.
     if (sinceMs !== undefined) {
-      proposals = proposals.filter((p) => {
-        const ms = Date.parse(p.createdAt);
-        return !isNaN(ms) && ms >= sinceMs;
-      });
+      proposals = proposals.filter((p) => isInWindow(proposalWindowMs(p), sinceMs));
     }
 
     // Filter by repo
@@ -98,7 +163,7 @@ export function computeQualityMetrics(
     }
 
     // ── Load decisions (same window) ────────────────────────────────────────
-    const decisions = readDecisions({ sinceMs });
+    const decisions = readDecisions({ requireComplete: true });
 
     // ── Aggregate counts ─────────────────────────────────────────────────────
     const created = proposals.length;
@@ -125,7 +190,8 @@ export function computeQualityMetrics(
 
     for (const p of proposals) {
       // Status buckets
-      if (p.status === 'applied' || p.status === 'approved') merged++;
+      const realized = hasCurrentRealizedMerge(p);
+      if (realized) merged++;
       else if (p.status === 'rejected' || p.status === 'failed') rejected++;
       else if (p.status === 'pending') pending++;
 
@@ -157,8 +223,8 @@ export function computeQualityMetrics(
       }
       const eng = byEngine[engineKey]!;
       eng.created++;
-      if (p.status === 'applied' || p.status === 'approved') eng.merged++;
-      if (p.status === 'rejected' || p.status === 'failed') eng.rejected++;
+      if (realized) eng.merged++;
+      if (!realized && (p.status === 'rejected' || p.status === 'failed')) eng.rejected++;
       if (diffLines > 0) { eng.totalDiffLines += diffLines; eng.withDiff++; }
       if (trivial) eng.trivialCount++;
 
@@ -190,7 +256,7 @@ export function computeQualityMetrics(
 
     // ── Trend (per-week buckets from decisions ledger) ────────────────────────
     // Build a simple 4-week trend from decisions when window is 30d/all.
-    const trend = buildTrend(decisions, window);
+    const trend = buildTrend(decisions, proposals, window);
 
     return {
       window,
@@ -221,27 +287,60 @@ export function computeQualityMetrics(
 
 function buildTrend(
   decisions: ReturnType<typeof readDecisions>,
+  proposals: readonly Proposal[],
   window: '7d' | '30d' | 'all',
 ): NonNullable<QualityMetrics['trend']> {
   if (window === '7d') return []; // not enough data for multi-period trend
 
-  // Group decisions by ISO week (YYYY-Www)
+  // Group one created and one realized terminal outcome per proposal. Bare
+  // historical merged rows remain forensic data and cannot create a trend win.
   const weekMap: Record<string, { merged: number; created: number }> = {};
+  const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+  const proposed = new Map<string, DecisionEntry>();
+  const merged = new Map<string, DecisionEntry>();
+  const latestRejection = new Map<string, DecisionEntry>();
+  const deltaMs = windowMs(window);
+  const sinceMs = deltaMs !== undefined ? Date.now() - deltaMs : undefined;
 
   for (const d of decisions) {
-    const ms = Date.parse(d.ts);
-    if (isNaN(ms)) continue;
+    if (d.action === 'proposed' && isInWindow(Date.parse(d.ts), sinceMs)) {
+      const existing = proposed.get(d.proposalId);
+      if (isNewerDecision(d, existing)) proposed.set(d.proposalId, d);
+    }
+    if (isCanonicalMergedDecision(d)) {
+      const existing = merged.get(d.proposalId);
+      if (isNewerDecision(d, existing)) merged.set(d.proposalId, d);
+    }
+    if (d.action === 'rejected') {
+      const existing = latestRejection.get(d.proposalId);
+      if (isNewerDecision(d, existing)) latestRejection.set(d.proposalId, d);
+    }
+  }
+
+  for (const decision of proposed.values()) {
+    const ms = Date.parse(decision.ts);
+    if (!Number.isFinite(ms)) continue;
     const weekKey = isoWeek(new Date(ms));
     if (!weekMap[weekKey]) weekMap[weekKey] = { merged: 0, created: 0 };
-    if (d.action === 'merged') weekMap[weekKey]!.merged++;
-    if (d.action === 'proposed') weekMap[weekKey]!.created++;
+    weekMap[weekKey]!.created++;
+  }
+  for (const decision of merged.values()) {
+    const proposal = proposalById.get(decision.proposalId);
+    const evidenceMs = proposal ? realizedEvidenceMs(proposal) : null;
+    if (!proposal || evidenceMs === null || !isInWindow(evidenceMs, sinceMs) ||
+      !realizedEvidenceSupersedes(proposal, latestRejection.get(decision.proposalId))) {
+      continue;
+    }
+    const weekKey = isoWeek(new Date(evidenceMs));
+    if (!weekMap[weekKey]) weekMap[weekKey] = { merged: 0, created: 0 };
+    weekMap[weekKey]!.merged++;
   }
 
   return Object.entries(weekMap)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([period, v]) => ({
       period,
-      acceptRate: v.created > 0 ? v.merged / v.created : 0,
+      acceptRate: v.created > 0 ? Math.min(1, v.merged / v.created) : 0,
       merged: v.merged,
     }));
 }
@@ -321,9 +420,9 @@ export interface ModelRoi {
 }
 
 /**
- * Compute per-model ROI over the requested window. PURE read of the
- * decisions ledger — no repo or network I/O. Never throws; returns {} on
- * any error or cold start (empty ledger).
+ * Compute per-model ROI over the requested window. PURE read of the decisions
+ * ledger and proposal store — no repo or network I/O. Never throws; returns {}
+ * on any error or cold start (empty ledger).
  *
  * Keys are `${engine}:${canonicalTag}` (e.g. 'claude:sonnet-5') so ledger
  * spelling variants ('claude:claude-sonnet-5', 'sonnet-5', …) land on one
@@ -334,15 +433,20 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
   try {
     const wm = windowMs(window);
     const sinceMs = wm !== undefined ? Date.now() - wm : undefined;
-    const entries = readDecisions(sinceMs !== undefined ? { sinceMs } : undefined);
+    const entries = readDecisions({ requireComplete: true });
     if (entries.length === 0) return {};
 
     const out: Record<string, ModelRoi> = {};
     const latency: Record<string, { total: number; n: number }> = {};
-    /** proposalId → producer roi key, from 'proposed' entries. */
-    const producerOf = new Map<string, string>();
-    /** M337 (review fix): terminal outcomes counted once per proposal. */
-    const outcomeSeen = new Set<string>();
+    /** proposalId → authenticated producer identity, including old dispatches for recent outcomes. */
+    const producerOf = new Map<string, { key: string; engine: string; model?: string }>();
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    if (!proposalRead.complete || proposalRead.sourceState === 'degraded') return {};
+    const realizedById = new Map(
+      proposalRead.proposals
+        .filter(hasCurrentRealizedMerge)
+        .map((proposal) => [proposal.id, proposal] as const),
+    );
 
     const keyFor = (engine: string | undefined, model: string | null | undefined): string | null => {
       if (!engine) return null;
@@ -372,57 +476,92 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
       return out[key];
     };
 
+    for (const proposal of proposalRead.proposals) {
+      if (!verifyProducerProvenanceV2(proposal).ok || !proposal.engineModel) continue;
+      const separator = proposal.engineModel.indexOf(':');
+      if (separator <= 0 || separator === proposal.engineModel.length - 1) continue;
+      const engine = proposal.engineModel.slice(0, separator);
+      const model = canonicalModelTag(engine, proposal.engineModel.slice(separator + 1));
+      const key = keyFor(engine, model);
+      if (!key) continue;
+      producerOf.set(proposal.id, { key, engine, ...(model ? { model } : {}) });
+    }
+
     // Pass 1: producer dispatches ('proposed'). readDecisions returns
     // newest-first, so the producer map MUST be complete before verdicts
     // (which chronologically follow their 'proposed') are attributed.
     for (const e of entries) {
       if (e.action !== 'proposed') continue;
-      const key = keyFor(e.engine, e.model);
-      if (!key || !e.engine) continue;
-      const roi = ensure(key, e.engine, e.model);
+      const producer = producerOf.get(e.proposalId);
+      if (!producer || e.engine !== producer.engine ||
+        keyFor(e.engine, e.model) !== producer.key) continue;
+      if (!isInWindow(Date.parse(e.ts), sinceMs)) continue;
+      const roi = ensure(producer.key, producer.engine, producer.model);
       roi.dispatches++;
       if (typeof e.tokensIn === 'number') roi.tokensIn += e.tokensIn;
       if (typeof e.tokensOut === 'number') roi.tokensOut += e.tokensOut;
       if (typeof e.costUsd === 'number') roi.costUsd += e.costUsd;
       if (typeof e.durationMs === 'number') {
-        const l = (latency[key] ??= { total: 0, n: 0 });
+        const l = (latency[producer.key] ??= { total: 0, n: 0 });
         l.total += e.durationMs;
         l.n++;
       }
-      if (!producerOf.has(e.proposalId)) producerOf.set(e.proposalId, key);
     }
 
-    // Pass 2: verdicts + outcomes joined back to the producer.
+    // Pass 2a: newest prediction from each judge engine/model. Ship remains a
+    // predictive calibration metric and never increments realized ROI.
+    const latestPredictions = new Map<string, DecisionEntry>();
     for (const e of entries) {
-      if (e.action === 'proposed') continue;
-      const key = producerOf.get(e.proposalId);
-      if (!key || !out[key]) continue;
-      const roi = out[key];
-      if (e.action === 'judged') {
-        roi.judged++;
-        if (e.verdict === 'ship') roi.shipVerdicts++;
-        if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
-      } else if (e.action === 'merged' || e.action === 'rejected') {
-        // M337/M338 (review fixes): terminal outcomes count ONCE PER PROPOSAL,
-        // NEWEST action wins. Two failure modes collapse here: (a) a
-        // manager-gated auto-merge writes TWO 'merged' entries (gate-7 +
-        // setStatus); (b) a gate-7 'merged' record can precede a Gate-8
-        // refusal, after which the still-pending proposal is later 'rejected'
-        // — counting both buckets inflated merged and deflated
-        // costPerMergedUsd. Entries are newest-first, so the FIRST terminal
-        // action seen per proposal is the proposal's actual final state.
-        if (!outcomeSeen.has(e.proposalId)) {
-          outcomeSeen.add(e.proposalId);
-          if (e.action === 'merged') roi.merged++;
-          else roi.rejected++;
-        }
+      if (e.action !== 'judged' || !isInWindow(Date.parse(e.ts), sinceMs)) continue;
+      const predictionKey = judgePredictionKey(e);
+      const existing = latestPredictions.get(predictionKey);
+      if (isNewerDecision(e, existing)) latestPredictions.set(predictionKey, e);
+    }
+    for (const e of latestPredictions.values()) {
+      const producer = producerOf.get(e.proposalId);
+      if (!producer) continue;
+      const roi = ensure(producer.key, producer.engine, producer.model);
+      roi.judged++;
+      if (e.verdict === 'ship') roi.shipVerdicts++;
+      if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
+    }
+
+    // Pass 2b: one terminal outcome per proposal. A current realized witness
+    // makes the merge authoritative over stale rejection rows; without it,
+    // bare merged rows are ignored and only the newest rejection can count.
+    const latestMerged = new Map<string, DecisionEntry>();
+    const latestTerminal = new Map<string, DecisionEntry>();
+    for (const e of entries) {
+      if (isCanonicalMergedDecision(e)) {
+        const existing = latestMerged.get(e.proposalId);
+        if (isNewerDecision(e, existing)) latestMerged.set(e.proposalId, e);
+      }
+      if (e.action === 'rejected') {
+        const existing = latestTerminal.get(e.proposalId);
+        if (isNewerDecision(e, existing)) latestTerminal.set(e.proposalId, e);
+      }
+    }
+    for (const proposalId of new Set([...latestMerged.keys(), ...latestTerminal.keys()])) {
+      const producer = producerOf.get(proposalId);
+      if (!producer) continue;
+      const proposal = realizedById.get(proposalId);
+      const evidenceMs = proposal ? realizedEvidenceMs(proposal) : null;
+      if (proposal && evidenceMs !== null && isInWindow(evidenceMs, sinceMs) &&
+        latestMerged.has(proposalId) && realizedEvidenceSupersedes(
+        proposal,
+        latestTerminal.get(proposalId),
+      )) {
+        ensure(producer.key, producer.engine, producer.model).merged++;
+      } else if (latestTerminal.get(proposalId)?.action === 'rejected' &&
+        isInWindow(Date.parse(latestTerminal.get(proposalId)!.ts), sinceMs)) {
+        ensure(producer.key, producer.engine, producer.model).rejected++;
       }
     }
 
     for (const [key, roi] of Object.entries(out)) {
       const l = latency[key];
       roi.avgLatencyMs = l && l.n > 0 ? Math.round(l.total / l.n) : null;
-      roi.shipRate = roi.judged > 0 ? roi.shipVerdicts / roi.judged : 0;
+      roi.shipRate = roi.judged > 0 ? Math.min(1, roi.shipVerdicts / roi.judged) : 0;
       const totalSpend = roi.costUsd + roi.judgeCostUsd;
       roi.costPerMergedUsd = roi.merged > 0 ? totalSpend / roi.merged : null;
     }

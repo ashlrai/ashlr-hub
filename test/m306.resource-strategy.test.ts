@@ -34,6 +34,28 @@ function cfg(overrides: Partial<AshlrConfig> = {}): AshlrConfig {
   } as AshlrConfig;
 }
 
+function proposals(
+  overrides: Partial<Pick<FleetStatus['proposals'], 'pending' | 'frontierPending' | 'applied'>> = {},
+): FleetStatus['proposals'] {
+  return {
+    pending: 0,
+    frontierPending: 0,
+    applied: 0,
+    sourceQuality: {
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesDiscovered: 0,
+      filesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    },
+    authority: { gate: 'ready', detail: 'complete proposal source (0/0 files read)' },
+    ...overrides,
+  };
+}
+
 function fleet(overrides: Partial<FleetStatus> = {}): FleetStatus {
   return {
     generatedAt: '2026-07-01T00:00:00.000Z',
@@ -43,7 +65,7 @@ function fleet(overrides: Partial<FleetStatus> = {}): FleetStatus {
       { backend: 'builtin', dispatchesRecent: 1, quota: 'unlimited' },
     ],
     queue: { backlogItems: 3 },
-    proposals: { pending: 0, frontierPending: 0, applied: 0 },
+    proposals: proposals(),
     merges: { recent: 0 },
     autonomy: {
       evidencePacks: 0,
@@ -247,6 +269,55 @@ describe('buildResourceStrategyReport', () => {
   });
 
   it.each([
+    ['degraded', ['invalid-file']],
+    ['partial', ['file-limit']],
+  ] as const)('withholds proposal authority for a %s proposal source', async (_label, stopReasons) => {
+    const degradedFleet = fleet({
+      proposals: {
+        pending: 3,
+        frontierPending: 2,
+        applied: 4,
+        sourceQuality: {
+          sourceState: 'degraded',
+          sourcePresent: true,
+          complete: false,
+          stopReasons: [...stopReasons],
+          filesDiscovered: 4,
+          filesRead: 3,
+          invalidFiles: stopReasons.includes('invalid-file') ? 1 : 0,
+          unreadableFiles: 0,
+        },
+        authority: {
+          gate: 'unavailable',
+          detail: `auto-merge authority requires a complete healthy proposal source: ${stopReasons[0]}`,
+        },
+      },
+    });
+    const report = await buildResourceStrategyReport(
+      cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
+      {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({
+          buildFleetStatus: async () => degradedFleet,
+          listOutcomeRecords: () => [outcome()],
+        }),
+      },
+    );
+
+    expect(report.mode).not.toBe('auto-merge-ready');
+    expect(report.fleet).toMatchObject({
+      pendingProposals: null,
+      frontierPending: null,
+      appliedProposals: null,
+      proposalSource: { gate: 'unavailable', sourceState: 'degraded', complete: false },
+    });
+    expect(resourceStrategyToDaemonPlan(report)).toMatchObject({
+      runAutoMergeMaintenance: false,
+      reason: expect.stringContaining('complete healthy proposal source'),
+    });
+  });
+
+  it.each([
     ['stale generated timestamp', (record: OutcomeRecord) => {
       record.evidencePacks[0]!.generatedAt = '2026-06-30T20:00:00.000Z';
     }],
@@ -367,7 +438,7 @@ describe('buildResourceStrategyReport', () => {
     });
     const report = await buildResourceStrategyReport(cfg(), {
       deps: deps({
-        buildFleetStatus: async () => fleet({ proposals: { pending: 2, frontierPending: 1, applied: 0 } }),
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2, frontierPending: 1 }) }),
         listOutcomeRecords: () => [failed],
       }),
     });
@@ -406,7 +477,7 @@ describe('buildResourceStrategyReport', () => {
         deps: deps({
           buildFleetStatus: async () => fleet({
             queue: { backlogItems: 4 },
-            proposals: { pending: 2, frontierPending: 0, applied: 0 },
+            proposals: proposals({ pending: 2 }),
           }),
           listOutcomeRecords: () => [staleA, staleB],
         }),
@@ -439,7 +510,7 @@ describe('buildResourceStrategyReport', () => {
         deps: deps({
           buildFleetStatus: async () => fleet({
             queue: { backlogItems: 4 },
-            proposals: { pending: 1, frontierPending: 0, applied: 0 },
+            proposals: proposals({ pending: 1 }),
           }),
           listOutcomeRecords: () => [fresh],
         }),
@@ -523,7 +594,7 @@ describe('resourceStrategyToDaemonPlan', () => {
   it('turns verify-only into merge maintenance without new dispatch', async () => {
     const report = await buildResourceStrategyReport(cfg(), {
       deps: deps({
-        buildFleetStatus: async () => fleet({ proposals: { pending: 1, frontierPending: 1, applied: 0 } }),
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 1, frontierPending: 1 }) }),
       }),
     });
 

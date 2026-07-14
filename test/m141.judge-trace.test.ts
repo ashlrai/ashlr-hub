@@ -22,6 +22,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Proposal } from '../src/core/types.js';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -38,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
   if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
@@ -71,6 +76,63 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     diff: '+const x = 1;\n',
     ...overrides,
   } as Proposal;
+}
+
+function persistAuthenticatedMergedProposal(
+  id: string,
+  observedAt = new Date().toISOString(),
+  overrides: Partial<Proposal> = {},
+): Proposal {
+  const repo = path.join(tmpHome, 'repo');
+  fs.mkdirSync(repo, { recursive: true, mode: 0o700 });
+  const diffHash = 'd'.repeat(64);
+  const baseBeforeOid = 'a'.repeat(40);
+  const proposalHeadOid = 'b'.repeat(40);
+  const mergeCommitOid = 'c'.repeat(40);
+  const unsignedIntent = {
+    schemaVersion: 1 as const,
+    branch: `ashlr/merge/${id}`,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    diffHash,
+    evidencePackDigest: 'e'.repeat(64),
+    authorizationId: '1'.repeat(32),
+    authorizedAt: new Date().toISOString(),
+  };
+  const localMergeIntent = {
+    ...unsignedIntent,
+    attestation: signLocalMergeIntent(id, repo, unsignedIntent),
+  };
+  const unsignedWitness = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    mergeCommitOid,
+    observedAt,
+    proposalId: id,
+    diffHash,
+    intentAttestation: localMergeIntent.attestation,
+  };
+  const proposal = makeProposal({
+    id,
+    repo,
+    status: 'applied',
+    diffHash,
+    verifyResult: { passed: true, baseHead: baseBeforeOid, diffHash },
+    localMergeIntent,
+    realizedMerge: {
+      ...unsignedWitness,
+      attestation: signLocalRealizedMergeReceipt(id, repo, unsignedWitness),
+    },
+    ...overrides,
+  });
+  const inbox = path.join(tmpHome, '.ashlr', 'inbox');
+  fs.mkdirSync(inbox, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(inbox, `${id}.json`), `${JSON.stringify(proposal)}\n`, { mode: 0o600 });
+  return proposal;
 }
 
 /** Build a mock client that returns reasoning block + JSON verdict. */
@@ -202,6 +264,54 @@ describe('m141 judge-trace — round-trip', () => {
     expect(degraded).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
     expect(degraded.traces).toHaveLength(1);
     expect(readJudgeTraces({ requireComplete: true })).toEqual([]);
+  });
+
+  it('deduplicates exact trace rows and degrades on a conflicting trace id', async () => {
+    const { judgeTracesDir, readJudgeTracesDetailed } =
+      await import('../src/core/fleet/judge-trace.js');
+    const dir = judgeTracesDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    const row = {
+      traceId: 'jt-dedup', proposalId: 'p-dedup', judgeEngine: 'judge', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'same', promptContext: 'ctx', ts: `${day}T01:00:00.000Z`,
+    };
+    const file = path.join(dir, `${day}.jsonl`);
+    fs.writeFileSync(file, `${JSON.stringify(row)}\n${JSON.stringify(row)}\n`, 'utf8');
+    expect(readJudgeTracesDetailed()).toMatchObject({ complete: true, traces: [row] });
+
+    fs.appendFileSync(file, `${JSON.stringify({ ...row, verdict: 'harmful' })}\n`, 'utf8');
+    const conflict = readJudgeTracesDetailed();
+    expect(conflict).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['conflicting-row'],
+    });
+  });
+
+  it('rejects future trace and outcome timestamps', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-02T12:00:00.000Z'));
+    const { judgeTracesDir, readJudgeTracesDetailed } =
+      await import('../src/core/fleet/judge-trace.js');
+    const dir = judgeTracesDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const base = {
+      traceId: 'jt-future', proposalId: 'p-future', judgeEngine: 'judge', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'future', promptContext: 'ctx', ts: '2030-01-02T12:05:00.000Z',
+    };
+    fs.writeFileSync(
+      path.join(dir, '2030-01-02.jsonl'),
+      `${JSON.stringify(base)}\n${JSON.stringify({
+        ...base, traceId: 'jt-future-outcome', ts: '2030-01-02T11:00:00.000Z',
+        outcome: 'rejected', outcomeBasis: 'proposal-rejection-v1',
+        outcomeAt: '2030-01-02T12:05:00.000Z',
+      })}\n`,
+      'utf8',
+    );
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, invalidRows: 2, traces: [],
+    });
   });
 
   it('fails closed on byte bounds, symlinks, and hardlinks', async () => {
@@ -435,6 +545,7 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
     const { recordJudgeTrace, readJudgeTraces, linkOutcome } = await import('../src/core/fleet/judge-trace.js');
 
     const id = pid();
+    persistAuthenticatedMergedProposal(id);
     recordJudgeTrace({
       proposalId: id,
       judgeEngine: 'test',
@@ -444,11 +555,153 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
       promptContext: 'ctx',
     });
 
-    linkOutcome(id, 'merged');
+    linkOutcome(id, 'merged', { basis: 'realized-merge-v1' });
 
     const traces = readJudgeTraces({ proposalId: id });
     expect(traces[0]!.outcome).toBe('merged');
+    expect(traces[0]!.outcomeBasis).toBe('realized-merge-v1');
     expect(traces[0]!.outcomeAt).toBeDefined();
+  });
+
+  it('refuses an unqualified merged link at runtime without appending a patch', async () => {
+    const { judgeTracesDir, linkOutcomeResult, readJudgeTraces, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    recordJudgeTrace({
+      proposalId: id,
+      judgeEngine: 'test',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'Ship it.',
+      promptContext: 'ctx',
+    });
+    const day = new Date().toISOString().slice(0, 10);
+    const file = path.join(judgeTracesDir(), `${day}.jsonl`);
+    const before = fs.readFileSync(file, 'utf8');
+    const untypedLink = linkOutcomeResult as unknown as (
+      proposalId: string,
+      outcome: 'merged',
+    ) => { status: string };
+
+    expect(untypedLink(id, 'merged')).toEqual({ status: 'unqualified' });
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(readJudgeTraces({ proposalId: id })[0]!.outcome).toBeUndefined();
+  });
+
+  it('refuses a forged basis when the exact linked proposal has no realized witness', async () => {
+    const { judgeTracesDir, linkOutcomeResult, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    const pending = makeProposal({ id });
+    const inbox = path.join(tmpHome, '.ashlr', 'inbox');
+    fs.mkdirSync(inbox, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(inbox, `${id}.json`), `${JSON.stringify(pending)}\n`, { mode: 0o600 });
+    recordJudgeTrace({
+      proposalId: id, judgeEngine: 'test', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({
+      status: 'unqualified',
+    });
+    const file = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    expect(fs.readFileSync(file, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('refuses merged credit when the proposal source is incomplete', async () => {
+    const { judgeTracesDir, linkOutcomeResult, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(id);
+    const inbox = path.join(tmpHome, '.ashlr', 'inbox');
+    fs.writeFileSync(path.join(inbox, 'corrupt.json'), '{', { mode: 0o600 });
+    recordJudgeTrace({
+      proposalId: id, judgeEngine: 'test', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({
+      status: 'degraded',
+    });
+    const file = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    expect(fs.readFileSync(file, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('refuses a witness bound to a different proposal id', async () => {
+    const { linkOutcomeResult, recordJudgeTrace } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(pid());
+    recordJudgeTrace({
+      proposalId: id, judgeEngine: 'test', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({
+      status: 'unqualified',
+    });
+  });
+
+  it('refuses an exact-looking witness with a forged receipt', async () => {
+    const { linkOutcomeResult, recordJudgeTrace } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    const proposal = persistAuthenticatedMergedProposal(id);
+    proposal.realizedMerge = { ...proposal.realizedMerge!, attestation: '0'.repeat(64) };
+    fs.writeFileSync(
+      path.join(tmpHome, '.ashlr', 'inbox', `${id}.json`),
+      `${JSON.stringify(proposal)}\n`,
+      { mode: 0o600 },
+    );
+    recordJudgeTrace({
+      proposalId: id, judgeEngine: 'test', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({
+      status: 'unqualified',
+    });
+  });
+
+  it('refuses an authenticated witness observed in the future', async () => {
+    const { linkOutcomeResult, recordJudgeTrace } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(id, new Date(Date.now() + 30_000).toISOString());
+    recordJudgeTrace({
+      proposalId: id, judgeEngine: 'test', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({
+      status: 'unqualified',
+    });
+  });
+
+  it('deduplicates an identical qualified merged patch', async () => {
+    const { judgeTracesDir, linkOutcomeResult, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(id);
+    recordJudgeTrace({
+      proposalId: id,
+      judgeEngine: 'test',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'Ship it.',
+      promptContext: 'ctx',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' }).status).toBe('linked');
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' }).status).toBe('already-linked');
+
+    const day = new Date().toISOString().slice(0, 10);
+    const rows = fs.readFileSync(path.join(judgeTracesDir(), `${day}.jsonl`), 'utf8')
+      .trim()
+      .split('\n');
+    expect(rows).toHaveLength(2);
   });
 
   it('linkOutcome attaches reverted outcome', async () => {
@@ -489,15 +742,37 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
     expect(traces[0]!.outcome).toBe('rejected');
   });
 
+  it('persists an explicit bounded rejection basis', async () => {
+    const { linkOutcome, readJudgeTraces, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    recordJudgeTrace({
+      proposalId: id,
+      judgeEngine: 'test',
+      verdict: 'noise',
+      scores: { value: 1, correctness: 1, scope: 1, alignment: 1 },
+      fullReasoning: 'Reject.',
+      promptContext: 'ctx',
+    });
+
+    linkOutcome(id, 'rejected', { basis: 'proposal-rejection-v1' });
+
+    expect(readJudgeTraces({ proposalId: id })[0]).toMatchObject({
+      outcome: 'rejected',
+      outcomeBasis: 'proposal-rejection-v1',
+    });
+  });
+
   it('linkOutcome patches only the correct proposal, leaves others unchanged', async () => {
     const { recordJudgeTrace, readJudgeTraces, linkOutcome } = await import('../src/core/fleet/judge-trace.js');
 
     const id1 = pid();
     const id2 = pid();
+    persistAuthenticatedMergedProposal(id1);
     recordJudgeTrace({ proposalId: id1, judgeEngine: 'e', verdict: 'ship', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 }, fullReasoning: 'a', promptContext: 'a' });
     recordJudgeTrace({ proposalId: id2, judgeEngine: 'e', verdict: 'review', scores: { value: 3, correctness: 3, scope: 3, alignment: 3 }, fullReasoning: 'b', promptContext: 'b' });
 
-    linkOutcome(id1, 'merged');
+    linkOutcome(id1, 'merged', { basis: 'realized-merge-v1' });
 
     const t1 = readJudgeTraces({ proposalId: id1 });
     const t2 = readJudgeTraces({ proposalId: id2 });
@@ -532,6 +807,8 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
   });
 
   it('targets the newest judgment rather than an older trace with a newer outcome', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-02T23:30:00.000Z'));
     const { recordJudgeTrace, readJudgeTraces, linkOutcomeResult } = await import('../src/core/fleet/judge-trace.js');
     const id = pid();
     const day = new Date().toISOString().slice(0, 10);
@@ -556,12 +833,13 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
   it('linkOutcome is a no-op when proposalId not found', async () => {
     const { linkOutcome } = await import('../src/core/fleet/judge-trace.js');
     // Should not throw
-    expect(() => linkOutcome('nonexistent-proposal', 'merged')).not.toThrow();
+    expect(() => linkOutcome('nonexistent-proposal', 'merged', { basis: 'realized-merge-v1' })).not.toThrow();
   });
 
   it('does not append an outcome label when the source is degraded', async () => {
     const { judgeTracesDir, recordJudgeTrace, linkOutcomeResult } = await import('../src/core/fleet/judge-trace.js');
     const id = pid();
+    persistAuthenticatedMergedProposal(id);
     recordJudgeTrace({
       proposalId: id,
       judgeEngine: 'judge',
@@ -575,13 +853,82 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
     fs.appendFileSync(file, '{"torn":', 'utf8');
     const before = fs.readFileSync(file, 'utf8');
 
-    expect(linkOutcomeResult(id, 'merged')).toEqual({ status: 'degraded' });
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toEqual({ status: 'degraded' });
     expect(fs.readFileSync(file, 'utf8')).toBe(before);
   });
 
   it('linkOutcome never throws', async () => {
     const { linkOutcome } = await import('../src/core/fleet/judge-trace.js');
-    expect(() => linkOutcome('any-id', 'merged')).not.toThrow();
+    expect(() => linkOutcome('any-id', 'merged', { basis: 'realized-merge-v1' })).not.toThrow();
+  });
+
+  it('deduplicates a qualified patch and persists metadata only', async () => {
+    const { judgeTracesDir, recordJudgeTrace, readJudgeTraces, linkOutcomeResult } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(id);
+    recordJudgeTrace({
+      traceId: 'jt-qualified-once',
+      proposalId: id,
+      judgeEngine: 'judge',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'PRIVATE_REASONING_SENTINEL',
+      promptContext: 'PRIVATE_CONTEXT_SENTINEL',
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toMatchObject({
+      status: 'linked', traceId: 'jt-qualified-once',
+    });
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toMatchObject({
+      status: 'already-linked', traceId: 'jt-qualified-once',
+    });
+
+    const file = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const rows = fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({
+      _patchForTraceId: 'jt-qualified-once',
+      outcome: 'merged',
+      outcomeBasis: 'realized-merge-v1',
+      fullReasoning: '',
+      promptContext: '',
+    });
+    expect(JSON.stringify(rows[1])).not.toContain('PRIVATE_REASONING_SENTINEL');
+    expect(JSON.stringify(rows[1])).not.toContain('PRIVATE_CONTEXT_SENTINEL');
+    expect(readJudgeTraces({ proposalId: id })).toMatchObject([
+      { outcome: 'merged', outcomeBasis: 'realized-merge-v1' },
+    ]);
+  });
+
+  it('upgrades one legacy merged label with one qualified patch', async () => {
+    const { judgeTracesDir, recordJudgeTrace, readJudgeTraces, linkOutcomeResult } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    persistAuthenticatedMergedProposal(id);
+    recordJudgeTrace({
+      traceId: 'jt-legacy-upgrade',
+      proposalId: id,
+      judgeEngine: 'legacy',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '',
+      promptContext: '',
+      outcome: 'merged',
+      outcomeAt: new Date().toISOString(),
+    });
+
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toMatchObject({
+      status: 'linked', traceId: 'jt-legacy-upgrade',
+    });
+    expect(linkOutcomeResult(id, 'merged', { basis: 'realized-merge-v1' })).toMatchObject({
+      status: 'already-linked', traceId: 'jt-legacy-upgrade',
+    });
+    expect(readJudgeTraces({ proposalId: id })).toMatchObject([
+      { outcome: 'merged', outcomeBasis: 'realized-merge-v1' },
+    ]);
+    const file = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    expect(fs.readFileSync(file, 'utf8').trim().split('\n')).toHaveLength(2);
   });
 });
 
@@ -618,9 +965,10 @@ describe('m141 judge-trace — readJudgeTraces filters', () => {
     const { recordJudgeTrace, readJudgeTraces, linkOutcome } = await import('../src/core/fleet/judge-trace.js');
 
     const idA = pid(), idB = pid();
+    persistAuthenticatedMergedProposal(idA);
     recordJudgeTrace({ proposalId: idA, judgeEngine: 'e', verdict: 'ship', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 }, fullReasoning: '', promptContext: '' });
     recordJudgeTrace({ proposalId: idB, judgeEngine: 'e', verdict: 'review', scores: { value: 3, correctness: 3, scope: 3, alignment: 3 }, fullReasoning: '', promptContext: '' });
-    linkOutcome(idA, 'merged');
+    linkOutcome(idA, 'merged', { basis: 'realized-merge-v1' });
 
     const withOutcome = readJudgeTraces({ outcomeOnly: true });
     expect(withOutcome.every((t) => t.outcome !== undefined)).toBe(true);
@@ -656,11 +1004,12 @@ describe('m141 judge-trace — outcomeStats', () => {
     const { recordJudgeTrace, linkOutcome, outcomeStats } = await import('../src/core/fleet/judge-trace.js');
 
     const id1 = pid(), id2 = pid(), id3 = pid();
+    persistAuthenticatedMergedProposal(id1);
     recordJudgeTrace({ proposalId: id1, judgeEngine: 'e', verdict: 'ship', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 }, fullReasoning: '', promptContext: '' });
     recordJudgeTrace({ proposalId: id2, judgeEngine: 'e', verdict: 'review', scores: { value: 3, correctness: 3, scope: 3, alignment: 3 }, fullReasoning: '', promptContext: '' });
     recordJudgeTrace({ proposalId: id3, judgeEngine: 'e', verdict: 'noise', scores: { value: 1, correctness: 1, scope: 1, alignment: 1 }, fullReasoning: '', promptContext: '' });
 
-    linkOutcome(id1, 'merged');
+    linkOutcome(id1, 'merged', { basis: 'realized-merge-v1' });
     linkOutcome(id3, 'rejected');
 
     const stats = outcomeStats();
@@ -669,6 +1018,74 @@ describe('m141 judge-trace — outcomeStats', () => {
     expect(stats.outcomeRate).toBeGreaterThan(0);
     expect(stats.byOutcome['merged']).toBeGreaterThanOrEqual(1);
     expect(stats.byOutcome['rejected']).toBeGreaterThanOrEqual(1);
+  });
+
+  it('preserves an unqualified historical merge for forensics but grants zero CLI credit', async () => {
+    const {
+      isQualifiedJudgeOutcome,
+      outcomeStats,
+      readJudgeTraces,
+      recordJudgeTrace,
+    } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    recordJudgeTrace({
+      traceId: 'jt-legacy-unqualified',
+      proposalId: id,
+      judgeEngine: 'legacy',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'legacy',
+      promptContext: 'legacy',
+      outcome: 'merged',
+      outcomeAt: new Date().toISOString(),
+    });
+
+    const legacy = readJudgeTraces({ proposalId: id, outcomeOnly: true });
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]).toMatchObject({ outcome: 'merged' });
+    expect(legacy[0]!.outcomeBasis).toBeUndefined();
+    expect(isQualifiedJudgeOutcome(legacy[0]!)).toBe(false);
+    expect(outcomeStats()).toMatchObject({
+      total: 1,
+      withOutcome: 0,
+      outcomeRate: 0,
+      byOutcome: {},
+    });
+  });
+
+  it('fails closed on an unknown or outcome-incompatible basis', async () => {
+    const { isQualifiedJudgeOutcome, outcomeStats, readJudgeTraces, readJudgeTracesDetailed } =
+      await import('../src/core/fleet/judge-trace.js');
+    const dir = makeTraceDir();
+    const day = new Date().toISOString().slice(0, 10);
+    const malformed = {
+      traceId: 'jt-malformed-basis',
+      proposalId: pid(),
+      judgeEngine: 'legacy',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'legacy',
+      promptContext: 'legacy',
+      ts: new Date().toISOString(),
+      outcome: 'merged',
+      outcomeBasis: 'user-asserted-success',
+      outcomeAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(dir, `${day}.jsonl`), `${JSON.stringify(malformed)}\n`, { mode: 0o600 });
+
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      traces: [],
+    });
+    expect(readJudgeTraces({ requireComplete: true })).toEqual([]);
+    expect(outcomeStats()).toMatchObject({ total: 0, withOutcome: 0, byOutcome: {} });
+    expect(isQualifiedJudgeOutcome(malformed as never)).toBe(false);
+    expect(isQualifiedJudgeOutcome({
+      outcome: 'rejected',
+      outcomeBasis: 'realized-merge-v1',
+    })).toBe(false);
   });
 
   it('byVerdict tracks per-verdict totals', async () => {
@@ -681,6 +1098,23 @@ describe('m141 judge-trace — outcomeStats', () => {
     const stats = outcomeStats();
     expect(stats.byVerdict['ship']!.total).toBeGreaterThanOrEqual(2);
     expect(stats.byVerdict['noise']!.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it('rejects malformed outcome bases before writing', async () => {
+    const { recordJudgeTrace, readJudgeTracesDetailed } =
+      await import('../src/core/fleet/judge-trace.js');
+    const invalid = {
+      proposalId: pid(), judgeEngine: 'judge', verdict: 'ship' as const,
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: '', promptContext: '', outcome: 'merged' as const,
+      outcomeBasis: 'operator-said-so',
+    };
+    recordJudgeTrace(invalid as never);
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      traces: [],
+      rowsScanned: 0,
+      invalidRows: 0,
+    });
   });
 });
 
@@ -702,10 +1136,14 @@ describe('m141 runManager — records judge trace per proposal', () => {
     }));
 
     const proposalId = pid();
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal({ id: proposalId })]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      return {
+        ...actual,
+        listProposals: vi.fn().mockReturnValue([makeProposal({ id: proposalId })]),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/run/provider-client.js', () => ({
       getActiveClient: vi.fn().mockResolvedValue(client),
@@ -763,10 +1201,14 @@ describe('m141 runManager — records judge trace per proposal', () => {
     }));
 
     const ids = [pid(), pid(), pid()];
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({ id }))),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      return {
+        ...actual,
+        listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({ id }))),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/run/provider-client.js', () => ({
       getActiveClient: vi.fn().mockResolvedValue(client),
@@ -917,6 +1359,7 @@ describe('m141 judge-trace — linkOutcome prior-day fallback', () => {
     // Write a trace into a "yesterday" file
     const yestDate = '2000-01-01'; // guaranteed past
     const id = pid();
+    persistAuthenticatedMergedProposal(id);
     const trace = {
       proposalId: id,
       judgeEngine: 'past-engine',
@@ -929,7 +1372,7 @@ describe('m141 judge-trace — linkOutcome prior-day fallback', () => {
     fs.appendFileSync(path.join(dir, `${yestDate}.jsonl`), JSON.stringify(trace) + '\n', 'utf8');
 
     // linkOutcome should append a patch to today's file without modifying the past file
-    linkOutcome(id, 'merged');
+    linkOutcome(id, 'merged', { basis: 'realized-merge-v1' });
 
     // The original past file should be unchanged
     const pastRaw = fs.readFileSync(path.join(dir, `${yestDate}.jsonl`), 'utf8');

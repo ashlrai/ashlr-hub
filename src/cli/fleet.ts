@@ -21,8 +21,8 @@
  *   fleet resume
  *       Release the kill switch (setKill(false)). Idempotent.
  *
- * Pause/resume are the ONLY mutations here, and they touch ONLY the kill-switch
- * sentinel (no repo, no spend, no proposals). `fleet status` is fully read-only.
+ * Pause/resume mutate only the kill-switch sentinel. The nested shadow canary
+ * command owns its separate metadata-only controller store; status remains read-only.
  */
 
 import { readFileSync } from 'node:fs';
@@ -819,6 +819,35 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  denied:    ${autonomy.denied}`);
     lines.push(`  latest:    ${autonomy.latestAt ?? '—'}`);
     lines.push(`  tiers:     ${tiers || '—'}`);
+  }
+  lines.push('');
+
+  // Shadow auto-merge canary (observation only; attached after policy derivation).
+  const canary = s.autoMergeCanary;
+  lines.push('Auto-merge canary:');
+  if (!canary) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  state:      ${canary.status} (${canary.sourceState})`);
+    lines.push('  authority:  observation-only; policy eligible: no; enforce supported: no');
+    lines.push(
+      `  records:    ${canary.revisionCount} revision(s), ${canary.terminalEpochCount} terminal epoch(s)`,
+    );
+    if (canary.current) {
+      lines.push(
+        `  epoch:      ${canary.current.epochId} revision ${canary.current.revision} ` +
+          `(${canary.current.state})`,
+      );
+      lines.push(
+        `  budget:     admissions ${canary.current.counters.admissions}/${canary.current.budgets.maxAdmissions}, ` +
+          `merges ${canary.current.counters.merges}/${canary.current.budgets.maxMerges}, ` +
+          `in-flight ${canary.current.counters.inFlight}/${canary.current.budgets.maxInFlight}`,
+      );
+      lines.push(`  blocker:    ${canary.current.blocker?.code ?? 'none'}`);
+    }
+    if (canary.diagnostics.length > 0) {
+      lines.push(`  diagnostics: ${canary.diagnostics.join(', ')}`);
+    }
   }
   lines.push('');
 
@@ -1889,6 +1918,10 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return setKillSwitch(false);
     case 'doctor':
       return cmdFleetDoctor(rest.includes('--json'));
+    case 'automerge-canary': {
+      const { cmdAutoMergeCanary } = await import('./automerge-canary.js');
+      return cmdAutoMergeCanary(rest);
+    }
     case 'evidence':
       return cmdFleetEvidence(rest);
     case 'scorecard':
@@ -1921,6 +1954,8 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
   console.log(`    ashlr fleet doctor [--json]   ${cyan('# engine readiness preflight (M81)')}`);
+  console.log(`    ashlr fleet automerge-canary status|prepare-shadow|activate-shadow|halt|reconcile`);
+  console.log(`                          ${cyan('# bounded observation-only canary controller')}`);
   console.log(`    ashlr fleet evidence doctor <source> [--deep] [--json]`);
   console.log(`                          ${cyan('# bounded read-only ledger diagnosis')}`);
   console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);

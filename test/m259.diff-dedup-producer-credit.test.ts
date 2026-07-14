@@ -7,7 +7,18 @@ const recordDecision = vi.fn();
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   recordDecision,
-  readDecisions: vi.fn(() => []),
+  readDecisions: vi.fn(() => {
+    const rows: unknown[] = [];
+    Object.defineProperty(rows, 'sourceQuality', {
+      value: {
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+        invalidRows: 0, unreadableFiles: 0,
+      },
+      enumerable: false,
+    });
+    return rows;
+  }),
 }));
 
 vi.mock('../src/core/sandbox/worktree.js', () => ({
@@ -27,10 +38,27 @@ vi.mock('../src/core/knowledge/index.js', () => ({
   scrubSecrets: (value: string) => value,
 }));
 
-vi.mock('../src/core/foundry/provenance.js', () => ({
-  hashDiff: () => 'shared-diff-hash',
-  signProvenance: () => 'shared-signature',
-}));
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    hashDiff: () => 'shared-diff-hash',
+    signProvenance: () => 'shared-signature',
+    verifyProvenance: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'shared-signature',
+      reason: 'test legacy provenance',
+    }),
+    signProducerProvenanceV2: () => 'shared-producer-signature',
+    verifyProducerProvenanceV2: (proposal: {
+      producerProvenanceVersion?: number;
+      producerProvenanceSig?: string;
+    }) => ({
+      ok: proposal.producerProvenanceVersion === 2 &&
+        proposal.producerProvenanceSig === 'shared-producer-signature',
+      reason: 'test producer provenance v2',
+    }),
+  };
+});
 
 vi.mock('../src/core/run/engines.js', () => ({
   buildEngineCommand: vi.fn(() => ({ cmd: 'mock-engine', args: [] })),
@@ -67,8 +95,11 @@ describe('M259 diff dedup producer credit', () => {
       diff: 'original diff bytes',
       diffHash: 'shared-diff-hash',
       runId: 'run-original',
+      workItemId: '/tmp/repo:issue:original',
+      workSource: 'issue',
       engineModel: 'claude:claude-sonnet-5',
       engineTier: 'frontier',
+      provenanceSig: 'shared-signature',
     });
 
     const { captureSandboxedProposal } = await import('../src/core/run/sandboxed-engine.js');
@@ -96,6 +127,8 @@ describe('M259 diff dedup producer credit', () => {
       status: 'pending',
       runId: 'run-original',
       engineModel: 'claude:claude-sonnet-5',
+      producerProvenanceVersion: 2,
+      producerProvenanceSig: 'shared-producer-signature',
     });
     expect(readdirSync(join(home, '.ashlr', 'inbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
   });
@@ -111,8 +144,11 @@ describe('M259 diff dedup producer credit', () => {
       diff: 'original diff bytes',
       diffHash: 'shared-diff-hash',
       runId: 'run-first-direct',
+      workItemId: '/tmp/repo:issue:first-direct',
+      workSource: 'issue',
       engineModel: 'claude:claude-sonnet-5',
       engineTier: 'frontier',
+      provenanceSig: 'shared-signature',
     });
 
     const { runEngineSandboxed } = await import('../src/core/run/sandboxed-engine.js');
@@ -140,6 +176,8 @@ describe('M259 diff dedup producer credit', () => {
     expect(loadProposal(existing.id)).toMatchObject({
       runId: 'run-first-direct',
       engineModel: 'claude:claude-sonnet-5',
+      producerProvenanceVersion: 2,
+      producerProvenanceSig: 'shared-producer-signature',
     });
     expect(readdirSync(join(home, '.ashlr', 'inbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
   });

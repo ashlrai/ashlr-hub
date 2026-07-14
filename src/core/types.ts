@@ -539,8 +539,8 @@ export interface AshlrConfig {
     /**
      * M323: model-granular cost-aware learned routing. DEFAULT OFF. When
      * enabled, routeTask prefers the CHEAPEST catalog model whose learned
-     * producer ship-rate (judged verdicts joined to 'proposed' ledger entries
-     * by proposalId) clears minShipRate with enough samples; it falls back to
+     * producer ship-rate (authenticated realized merges joined to signed
+     * proposal provenance) clears minShipRate with enough samples; it falls back to
      * the static policy pick otherwise — cold start / thin samples are
      * byte-identical to flag-off. Learned decisions never auto-apply.
      *
@@ -960,7 +960,7 @@ export interface AshlrConfig {
     pulseEmit?: boolean;
     /**
      * M243: skill-library write-back (positive complement to M235 anti-playbooks).
-     * DEFAULT true (on). When true, successfully applied+merged 'ship' proposals
+     * DEFAULT true (on). When true, receipt-qualified realized merge proposals
      * have their workflow recipe distilled and written to the genome hub as a
      * reusable skill (AWM/Voyager: abstracted workflow, NOT raw diff verbatim).
      * Future agent runs receive positive grounding: proven patterns for proven
@@ -3737,6 +3737,58 @@ export interface ProposalRemoteHandoff {
   detail?: string;
 }
 
+/** Signed authorization minted after every merge gate passes and before local mutation. */
+export interface ProposalLocalMergeIntent {
+  schemaVersion: 1;
+  branch: string;
+  base: string;
+  baseBeforeOid: string;
+  proposalHeadOid: string;
+  diffHash: string;
+  evidencePackDigest: string;
+  authorizationId: string;
+  authorizedAt: string;
+  attestation: string;
+}
+
+/** Exact unsigned observation returned by the local Git mutation boundary. */
+export interface LocalDefaultBranchMergeObservation {
+  schemaVersion: 1;
+  source: 'local-default-branch';
+  base: string;
+  baseBeforeOid: string;
+  proposalHeadOid: string;
+  mergeCommitOid: string;
+  observedAt: string;
+}
+
+/** Proposal-bound authenticated proof that a local merge was realized. */
+export interface LocalDefaultBranchRealizedMerge extends LocalDefaultBranchMergeObservation {
+  proposalId?: string;
+  diffHash?: string;
+  intentAttestation?: string;
+  attestation?: string;
+}
+
+/** Exact, attested GitHub observation proving the host merged a proposal. */
+export interface GithubHostRealizedMerge {
+  schemaVersion: 1;
+  source: 'github-host';
+  provider: 'github';
+  prUrl: string;
+  branch: string;
+  base: string;
+  expectedHeadOid: string;
+  mergeCommitOid: string;
+  mergedAt: string;
+  reconciliation: RemoteHandoffReconciliation;
+}
+
+/** Bounded persisted proof that an `applied` proposal is a realized merge. */
+export type RealizedMergeEvidence =
+  | LocalDefaultBranchRealizedMerge
+  | GithubHostRealizedMerge;
+
 /**
  * M23: a single PROPOSED outward action awaiting Mason's approval. The inbox is
  * the SINGLE human control plane through which EVERY outward mutation (PR, merge,
@@ -3814,6 +3866,15 @@ export interface Proposal {
    * sandboxed producer (not forged on disk) and are bound to THIS diff.
    */
   provenanceSig?: string;
+  /**
+   * Producer attestation version used for causal learning. Version 2 binds the
+   * proposal identity, canonical repo, work item/source, producer, and diff.
+   * Legacy provenance may authorize lifecycle handling but earns no positive
+   * routing or ROI credit.
+   */
+  producerProvenanceVersion?: 2;
+  /** HMAC for the versioned producer attestation described above. */
+  producerProvenanceSig?: string;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */
@@ -3828,6 +3889,16 @@ export interface Proposal {
    * the host merged the PR.
    */
   remoteHandoff?: ProposalRemoteHandoff;
+  /** Signed, one-generation local merge authorization; never itself proves a merge. */
+  localMergeIntent?: ProposalLocalMergeIntent;
+  /** Present only when an exact local or attested host merge was observed. */
+  realizedMerge?: RealizedMergeEvidence;
+  /**
+   * Version 1 is a legacy best-effort fanout marker. Version 2 proves the
+   * authoritative decision ledger contains exactly one realized-merge row;
+   * other idempotent projections remain retryable until that proof exists.
+   */
+  realizedMergeFanoutVersion?: 1 | 2;
   /**
    * M119/M307: Result of the verification step run against this proposal's diff.
    * Optional — not all proposals are verified before decision.
@@ -4739,7 +4810,7 @@ export interface HealthOptions {
  *  - 'skipped'     : the human skipped this milestone permanently.
  *  - 'blocked'     : an advance attempt failed/escalated (swarm 'failed' /
  *                    'aborted' / 'needs-approval'); requires human attention.
- *  - 'done'        : the milestone's proposal was approved+applied out-of-band
+ *  - 'done'        : the milestone's proposal has a verified realized merge, or a human completed it
  *                    (set by a read-only reconcile against inbox state, never
  *                    by M28 mutating the proposal itself).
  */
@@ -5266,6 +5337,8 @@ export interface DecisionEntry {
     | 'proposed'
     | 'verified'
     | 'judged'
+    /** Manager gate passed; no mutation or host merge has been observed. */
+    | 'merge-authorized'
     | 'merged'
     | 'handoff'
     | 'rejected'
@@ -5329,7 +5402,7 @@ export interface QualityMetrics {
   window: string;
   /** Total proposals created in the window. */
   proposalsCreated: number;
-  /** Proposals merged (approved + applied). */
+  /** Proposals with receipt-qualified realized merge evidence. */
   merged: number;
   /** Proposals rejected (rejected + failed). */
   rejected: number;
@@ -5341,7 +5414,7 @@ export interface QualityMetrics {
   emptyRate: number;
   /** Share of proposals that are trivially small (≤6 diff lines or doc-only title). */
   trivialRatio: number;
-  /** (approved + applied) / created */
+  /** receipt-qualified realized merges / created */
   acceptRate: number;
   /** (rejected + failed) / created */
   rejectRate: number;

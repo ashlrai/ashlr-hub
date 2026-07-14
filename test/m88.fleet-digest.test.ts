@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { DigestWindow } from '../src/core/types.js';
+import type { RealizedMergeEvidence } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -51,12 +51,23 @@ interface MockProposal {
   kind: 'patch';
   title: string;
   summary: string;
+  realizedMerge?: RealizedMergeEvidence;
 }
 
 const mockProposals: MockProposal[] = [];
+let mockProposalSourceComplete = true;
 
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: () => [...mockProposals],
+  listProposalsDetailed: () => ({
+    proposals: [...mockProposals],
+    sourceState: mockProposalSourceComplete ? 'healthy' : 'degraded',
+    sourcePresent: true,
+    complete: mockProposalSourceComplete,
+    stopReasons: mockProposalSourceComplete ? [] : ['byte-cap'],
+    filesDiscovered: mockProposals.length, filesRead: mockProposals.length,
+    bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+  }),
 }));
 
 interface MockDaemonState {
@@ -99,7 +110,7 @@ const REF_NOW = new Date('2026-06-23T12:00:00.000Z');
 function makeProposal(
   overrides: Partial<MockProposal> & { repo: string | null; status: ProposalStatus; createdAt: string },
 ): MockProposal {
-  return {
+  const proposal: MockProposal = {
     id: `prop-${Math.random().toString(36).slice(2)}`,
     origin: 'backlog',
     kind: 'patch',
@@ -107,11 +118,24 @@ function makeProposal(
     summary: 'summary',
     ...overrides,
   };
+  if (proposal.status === 'applied' && proposal.realizedMerge === undefined) {
+    proposal.realizedMerge = {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt: proposal.createdAt,
+    };
+  }
+  return proposal;
 }
 
 beforeEach(() => {
   // Reset mutable state before each test.
   mockProposals.length = 0;
+  mockProposalSourceComplete = true;
   mockDaemonState = {
     running: false,
     lastTickAt: null,
@@ -166,6 +190,74 @@ describe('m88 buildFleetDigest — aggregation', () => {
     expect(beta!.proposed).toBe(1); // 1 applied in window
     expect(beta!.autoMerged).toBe(1);
     expect(beta!.pending).toBe(1); // live, not window-filtered
+  });
+
+  it('counts only witness-backed applied proposals as auto-merged', async () => {
+    const witnessBacked = makeProposal({
+      repo: '/repos/alpha', status: 'applied', createdAt: daysAgo(1, REF_NOW),
+    });
+    const appliedWithoutWitness = {
+      ...makeProposal({ repo: '/repos/alpha', status: 'pending', createdAt: daysAgo(1, REF_NOW) }),
+      status: 'applied' as const,
+    };
+    mockProposals.push(witnessBacked, appliedWithoutWitness);
+
+    const result = await buildFleetDigest('7d', { now: REF_NOW });
+
+    expect(result.totalProposed).toBe(2);
+    expect(result.totalAutoMerged).toBe(1);
+  });
+
+  it('fails closed when the detailed proposal source is incomplete', async () => {
+    mockProposals.push(
+      makeProposal({ repo: '/repos/alpha', status: 'applied', createdAt: daysAgo(1, REF_NOW) }),
+    );
+    mockProposalSourceComplete = false;
+
+    const result = await buildFleetDigest('7d', { now: REF_NOW });
+
+    expect(result.totalProposed).toBe(0);
+    expect(result.totalAutoMerged).toBe(0);
+    expect(result.totalPending).toBe(0);
+    expect(result.repos).toEqual([]);
+    expect(result.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['byte-cap'],
+    });
+  });
+
+  it('distinguishes a complete healthy zero from an unknown degraded zero', async () => {
+    const result = await buildFleetDigest('7d', { now: REF_NOW });
+
+    expect(result.totalProposed).toBe(0);
+    expect(result.proposalSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+    });
+  });
+
+  it('windows merge counts by witness observation time, independently of creation time', async () => {
+    const oldProposalObservedNow = makeProposal({
+      repo: '/repos/alpha', status: 'applied', createdAt: daysAgo(20, REF_NOW),
+    });
+    oldProposalObservedNow.realizedMerge = {
+      ...oldProposalObservedNow.realizedMerge!,
+      observedAt: daysAgo(1, REF_NOW),
+    };
+    const recentProposalObservedLongAgo = makeProposal({
+      repo: '/repos/alpha', status: 'applied', createdAt: daysAgo(1, REF_NOW),
+    });
+    recentProposalObservedLongAgo.realizedMerge = {
+      ...recentProposalObservedLongAgo.realizedMerge!,
+      observedAt: daysAgo(20, REF_NOW),
+    };
+    mockProposals.push(oldProposalObservedNow, recentProposalObservedLongAgo);
+
+    const result = await buildFleetDigest('7d', { now: REF_NOW });
+
+    expect(result.totalProposed).toBe(1);
+    expect(result.totalAutoMerged).toBe(1);
   });
 
   it('reflects daemon state (running, lastTickAt, spend, items)', async () => {

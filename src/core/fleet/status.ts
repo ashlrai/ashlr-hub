@@ -31,6 +31,7 @@ import type {
   Proposal,
   WorkItem,
 } from '../types.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -135,6 +136,15 @@ import {
   readFleetCutoffCheckpointStatus,
   type FleetCutoffCheckpointStatus,
 } from './cutoff-observation-status.js';
+import {
+  AUTOMERGE_CANARY_MAX_REVISIONS_PER_EPOCH,
+  type AutoMergeCanaryBlockerV1,
+  type AutoMergeCanaryBudgetsV1,
+  type AutoMergeCanaryCountersV1,
+  type AutoMergeCanaryReadResult,
+  type AutoMergeCanaryShadowCountersV1,
+  type AutoMergeCanaryShadowEvidenceV1,
+} from './automerge-canary-store.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -321,6 +331,42 @@ export interface FleetAutoMergeReadinessStatus {
     reposObserved: number;
     reposRequired: number;
     detail: string;
+  };
+}
+
+export interface FleetProposalSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: string[];
+  filesDiscovered: number;
+  filesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+}
+
+export interface FleetProposalAuthoritySource {
+  gate: 'ready' | 'unavailable';
+  detail: string;
+}
+
+function proposalAuthoritySource(
+  quality: FleetProposalSourceQuality,
+): FleetProposalAuthoritySource {
+  if (quality.sourceState === 'healthy' && quality.sourcePresent && quality.complete) {
+    return {
+      gate: 'ready',
+      detail: `complete proposal source (${quality.filesRead}/${quality.filesDiscovered} files read)`,
+    };
+  }
+  const reasons = quality.stopReasons.length > 0
+    ? `: ${quality.stopReasons.join(', ')}`
+    : '';
+  return {
+    gate: 'unavailable',
+    detail: `auto-merge authority requires a complete healthy proposal source; ` +
+      `${quality.sourceState} source is ${quality.sourcePresent ? 'present' : 'absent'} and ` +
+      `${quality.complete ? 'complete' : 'incomplete'}${reasons}`,
   };
 }
 
@@ -1034,6 +1080,192 @@ export interface FleetQueueRepoCoverage {
   byTier: Array<{ tier: StrategicTier; repos: number; items: number }>;
 }
 
+/** Bounded non-authoritative projection of the shadow canary store. */
+export interface FleetAutoMergeCanaryTelemetry {
+  shadowCounters: AutoMergeCanaryShadowCountersV1 | null;
+  outcomeRates: {
+    eligible: number | null;
+    rejected: number | null;
+    bindingMismatch: number | null;
+    inspectionError: number | null;
+  };
+  casRetries: number | null;
+  revisionCapacity: {
+    maximum: number;
+    used: number | null;
+    remaining: number | null;
+    reservedForTerminal: 1;
+    observationWritesRemaining: number | null;
+  };
+  epochAgeMs: number | null;
+  observationDeadlineRemainingMs: number | null;
+  lastShadowEvidence: {
+    observedAt: string;
+    outcome: AutoMergeCanaryShadowEvidenceV1['outcome'];
+    mismatchFields: AutoMergeCanaryShadowEvidenceV1['mismatchFields'];
+    fileCount: number;
+    lineCount: number;
+  } | null;
+}
+
+export interface FleetAutoMergeCanaryStatus {
+  authority: 'observation-only';
+  policyEligible: false;
+  enforceSupported: false;
+  hostCancellationProven: false;
+  sourceState: AutoMergeCanaryReadResult['sourceState'];
+  severity: AutoMergeCanaryReadResult['severity'];
+  status: AutoMergeCanaryReadResult['status'];
+  active: boolean;
+  current: {
+    epochId: string;
+    revision: number;
+    mode: 'shadow';
+    state: 'shadow' | 'halt-requested' | 'halted';
+    activatedAt: string;
+    updatedAt: string;
+    budgets: AutoMergeCanaryBudgetsV1;
+    counters: AutoMergeCanaryCountersV1;
+    blocker: AutoMergeCanaryBlockerV1 | null;
+  } | null;
+  telemetry: FleetAutoMergeCanaryTelemetry;
+  revisionCount: number | null;
+  terminalEpochCount: number | null;
+  diagnostics: AutoMergeCanaryReadResult['diagnostics'];
+  limitExceeded: boolean;
+}
+
+function unknownAutoMergeCanaryTelemetry(): FleetAutoMergeCanaryTelemetry {
+  return {
+    shadowCounters: null,
+    outcomeRates: {
+      eligible: null,
+      rejected: null,
+      bindingMismatch: null,
+      inspectionError: null,
+    },
+    casRetries: null,
+    revisionCapacity: {
+      maximum: AUTOMERGE_CANARY_MAX_REVISIONS_PER_EPOCH,
+      used: null,
+      remaining: null,
+      reservedForTerminal: 1,
+      observationWritesRemaining: null,
+    },
+    epochAgeMs: null,
+    observationDeadlineRemainingMs: null,
+    lastShadowEvidence: null,
+  };
+}
+
+function fleetAutoMergeCanaryTelemetry(
+  read: AutoMergeCanaryReadResult,
+  now: Date,
+): FleetAutoMergeCanaryTelemetry {
+  if (read.sourceState !== 'healthy' || !read.state) return unknownAutoMergeCanaryTelemetry();
+  const state = read.state;
+  const attempts = state.shadowCounters.attempts;
+  const nowMs = now.getTime();
+  const activatedMs = Date.parse(state.activatedAt);
+  const deadlineMs = state.observation.deadlineAt === null
+    ? null
+    : Date.parse(state.observation.deadlineAt);
+  const rate = (count: number): number | null => attempts === 0
+    ? null
+    : Math.min(1, Math.max(0, count / attempts));
+  const last = state.lastShadowEvidence;
+  return {
+    shadowCounters: { ...state.shadowCounters },
+    outcomeRates: {
+      eligible: rate(state.shadowCounters.eligible),
+      rejected: rate(state.shadowCounters.rejected),
+      bindingMismatch: rate(state.shadowCounters.bindingMismatches),
+      inspectionError: rate(state.shadowCounters.inspectionErrors),
+    },
+    casRetries: state.shadowCounters.casRetries,
+    revisionCapacity: {
+      maximum: AUTOMERGE_CANARY_MAX_REVISIONS_PER_EPOCH,
+      used: state.revision,
+      remaining: AUTOMERGE_CANARY_MAX_REVISIONS_PER_EPOCH - state.revision,
+      reservedForTerminal: 1,
+      observationWritesRemaining: Math.max(
+        0,
+        AUTOMERGE_CANARY_MAX_REVISIONS_PER_EPOCH - state.revision - 1,
+      ),
+    },
+    epochAgeMs: Number.isFinite(nowMs) && activatedMs <= nowMs ? nowMs - activatedMs : null,
+    observationDeadlineRemainingMs: Number.isFinite(nowMs) && deadlineMs !== null &&
+      state.observation.completedAt === null
+      ? Math.max(0, deadlineMs - nowMs)
+      : null,
+    lastShadowEvidence: last === null ? null : {
+      observedAt: last.observedAt,
+      outcome: last.outcome,
+      mismatchFields: [...last.mismatchFields],
+      fileCount: last.fileCount,
+      lineCount: last.lineCount,
+    },
+  };
+}
+
+function conciseAutoMergeCanaryState(
+  state: AutoMergeCanaryReadResult['state'],
+): FleetAutoMergeCanaryStatus['current'] {
+  if (!state) return null;
+  return {
+    epochId: state.epochId,
+    revision: state.revision,
+    mode: state.mode,
+    state: state.state,
+    activatedAt: state.activatedAt,
+    updatedAt: state.updatedAt,
+    budgets: { ...state.budgets },
+    counters: { ...state.counters },
+    blocker: state.blocker === null ? null : { ...state.blocker },
+  };
+}
+
+export function projectAutoMergeCanaryStatus(
+  read: AutoMergeCanaryReadResult,
+  now = new Date(),
+): FleetAutoMergeCanaryStatus {
+  return {
+    authority: 'observation-only',
+    policyEligible: false,
+    enforceSupported: false,
+    hostCancellationProven: false,
+    sourceState: read.sourceState,
+    severity: read.severity,
+    status: read.status,
+    active: read.active,
+    current: read.sourceState === 'healthy' ? conciseAutoMergeCanaryState(read.state) : null,
+    telemetry: fleetAutoMergeCanaryTelemetry(read, now),
+    revisionCount: read.sourceState === 'healthy' ? read.revisions.length : null,
+    terminalEpochCount: read.sourceState === 'healthy' ? read.terminalEpochs.length : null,
+    diagnostics: [...read.diagnostics],
+    limitExceeded: read.limitExceeded,
+  };
+}
+
+function degradedAutoMergeCanaryStatus(): FleetAutoMergeCanaryStatus {
+  return {
+    authority: 'observation-only',
+    policyEligible: false,
+    enforceSupported: false,
+    hostCancellationProven: false,
+    sourceState: 'degraded',
+    severity: 'critical',
+    status: 'critical',
+    active: false,
+    current: null,
+    telemetry: unknownAutoMergeCanaryTelemetry(),
+    revisionCount: null,
+    terminalEpochCount: null,
+    diagnostics: ['storage-unsafe'],
+    limitExceeded: false,
+  };
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -1085,13 +1317,20 @@ export interface FleetStatus {
   };
   repairHandoffRollout?: FleetRepairHandoffRolloutStatus;
   proposals: {
+    /** Observed inventory only; authority consumers must also require `authority.gate === 'ready'`. */
     pending: number;
     frontierPending: number;
     awaitingHostMerge?: number;
     applied: number;
+    sourceQuality?: FleetProposalSourceQuality;
+    authority?: FleetProposalAuthoritySource;
   };
   merges: {
     recent: number;
+    /** Legacy daemon-reported merge activity. Forensics only; never landed-work authority. */
+    reportedByTicks?: number;
+    /** Completeness of the proposal source that backs `recent`. */
+    sourceQuality?: FleetProposalSourceQuality;
   };
   /** Values-free Phantom readiness for fleet secret operations. */
   phantom?: FleetPhantomStatus;
@@ -1100,6 +1339,8 @@ export interface FleetStatus {
   autonomyControlMode: FleetAutonomyControlMode;
   /** Read-only static readiness summary for pending auto-merge candidates. */
   autoMergeReadiness?: FleetAutoMergeReadinessStatus;
+  /** Observation-only shadow canary state; never consumed by fleet policy. */
+  autoMergeCanary?: FleetAutoMergeCanaryStatus;
   /** Read-only resource-aware autonomous operating recommendation. */
   autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
@@ -1808,9 +2049,30 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let applied = 0;
   const allProposals: Proposal[] = [];
   const pendingProposals: Proposal[] = [];
+  let proposalSourceQuality: NonNullable<FleetStatus['merges']['sourceQuality']> = {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['source-not-read'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };
   try {
-    const { listProposals } = await import('../inbox/store.js');
-    const all = listProposals();
+    const { listProposalsDetailed } = await import('../inbox/store.js');
+    const read = listProposalsDetailed();
+    proposalSourceQuality = {
+      sourceState: read.sourceState,
+      sourcePresent: read.sourcePresent,
+      complete: read.complete,
+      stopReasons: [...read.stopReasons],
+      filesDiscovered: read.filesDiscovered,
+      filesRead: read.filesRead,
+      invalidFiles: read.invalidFiles,
+      unreadableFiles: read.unreadableFiles,
+    };
+    const all = read.proposals;
     for (const p of all) {
       allProposals.push(p);
       if (p.status === 'pending') {
@@ -1828,6 +2090,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     frontierPending = 0;
     awaitingHostMerge = 0;
     applied = 0;
+    proposalSourceQuality = {
+      sourceState: 'degraded',
+      sourcePresent: false,
+      complete: false,
+      stopReasons: ['source-read-failed'],
+      filesDiscovered: 0,
+      filesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    };
   }
 
   try {
@@ -1871,19 +2143,37 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     nextEligibleAt = null;
   }
 
-  // ── merges (recent auto-merges across recent ticks) ───────────────────────
+  // ── merges (authenticated realized proposal witnesses only) ───────────────
   let mergesRecent = 0;
+  let mergesReportedByTicks = 0;
   try {
-    const cutoff = Date.now() - RECENT_WINDOW_MS;
+    const now = Date.now();
+    const cutoff = now - RECENT_WINDOW_MS;
+    const counted = new Set<string>();
+    for (const proposal of allProposals) {
+      if (counted.has(proposal.id)) continue;
+      const evidence = realizedMergeOf(proposal);
+      if (!evidence) continue;
+      const observedAt = evidence.source === 'local-default-branch'
+        ? evidence.observedAt
+        : evidence.reconciliation.observedAt;
+      const observedMs = Date.parse(observedAt);
+      if (!Number.isFinite(observedMs) || observedMs < cutoff || observedMs > now) continue;
+      counted.add(proposal.id);
+      mergesRecent++;
+    }
+
+    // Preserve tick aggregates as explicitly non-authoritative forensic data.
     for (const t of recentTicks) {
       if (typeof t.merged !== 'number' || t.merged <= 0) continue;
-      const ts = t.ts ? Date.parse(t.ts) : NaN;
-      // Count when within the recent window, or when the tick has no parseable
-      // timestamp (be inclusive rather than silently drop a real merge).
-      if (Number.isNaN(ts) || ts >= cutoff) mergesRecent += t.merged;
+      mergesReportedByTicks = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        mergesReportedByTicks + Math.floor(t.merged),
+      );
     }
   } catch {
     mergesRecent = 0;
+    mergesReportedByTicks = 0;
   }
 
   // ── kill switch ───────────────────────────────────────────────────────────
@@ -1921,10 +2211,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   let autoMergeReadiness: FleetAutoMergeReadinessStatus | undefined;
-  try {
-    autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals, enrolledExistingRepos);
-  } catch {
-    autoMergeReadiness = undefined;
+  const proposalAuthority = proposalAuthoritySource(proposalSourceQuality);
+  // Preserve configuration/protection diagnostics for a pristine empty store,
+  // while keeping its proposal authority explicitly unavailable. Degraded or
+  // partial stores with observed rows remain fully withheld.
+  if (proposalAuthority.gate === 'ready' || proposalSourceQuality.sourceState === 'missing') {
+    try {
+      autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals, enrolledExistingRepos);
+    } catch {
+      autoMergeReadiness = undefined;
+    }
   }
 
   let goalFocus: FleetGoalFocusStatus | undefined;
@@ -2080,8 +2376,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
     ...(repairHandoffRollout !== undefined ? { repairHandoffRollout } : {}),
-    proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
-    merges: { recent: mergesRecent },
+    proposals: {
+      pending,
+      frontierPending,
+      ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}),
+      applied,
+      sourceQuality: proposalSourceQuality,
+      authority: proposalAuthority,
+    },
+    merges: {
+      recent: mergesRecent,
+      reportedByTicks: mergesReportedByTicks,
+      sourceQuality: proposalSourceQuality,
+    },
     ...(phantom !== undefined ? { phantom } : {}),
     autonomy,
     autonomyControlMode: resolveAutonomyControlMode(cfg),
@@ -2351,6 +2658,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // Construct this forensic projection only after every operational and
   // authority-bearing status has been derived.
   status.cutoffCheckpoints = readFleetCutoffCheckpointStatus(generatedAt);
+  try {
+    const { automergeCanaryStatus } = await import('./automerge-canary-store.js');
+    status.autoMergeCanary = projectAutoMergeCanaryStatus(automergeCanaryStatus());
+  } catch {
+    status.autoMergeCanary = degradedAutoMergeCanaryStatus();
+  }
 
   return status;
 }
@@ -3435,6 +3748,17 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       canAutoMergeNow: false,
       bottleneck: 'control',
       summary: `Autonomy is control-blocked: ${reason}.`,
+      counts,
+    };
+  }
+  if (status.proposals.authority?.gate === 'unavailable' && (
+    counts.pendingProposals > 0 || status.proposals.sourceQuality?.sourceState !== 'missing'
+  )) {
+    return {
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+      summary: `Auto-merge authority is unavailable: ${status.proposals.authority.detail}.`,
       counts,
     };
   }
@@ -4571,7 +4895,7 @@ function shipReadinessSources(
         'unavailable',
         null,
         READINESS_STATUS_STALE_MS,
-        'auto-merge readiness source is unavailable',
+        status.proposals.authority?.detail ?? 'auto-merge readiness source is unavailable',
         { sourcePresent: false },
       );
 
@@ -4743,7 +5067,7 @@ function chooseReadinessBlocker(
     return readinessBlocker(
       'auto-merge-readiness-unavailable',
       'Auto-merge status unavailable',
-      'The auto-merge readiness source could not be read.',
+      status.proposals.authority?.detail ?? 'The auto-merge readiness source could not be read.',
       'high',
       'auto-merge',
     );

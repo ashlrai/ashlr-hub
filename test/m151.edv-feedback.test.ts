@@ -25,13 +25,19 @@ import {
   MIN_SAMPLES,
   MULTIPLIER_FLOOR,
   MULTIPLIER_CEIL,
-  type OutcomePriors,
 } from '../src/core/fleet/feedback.js';
 import {
   edvConfirmationWeight,
   EDV_UNVERIFIED_WEIGHT,
 } from '../src/core/portfolio/edv-verify.js';
-import type { WorkItem, WorkSource, Proposal, ProposalKind, DecisionEntry } from '../src/core/types.js';
+import type {
+  WorkItem,
+  WorkSource,
+  Proposal,
+  ProposalKind,
+  DecisionEntry,
+  RealizedMergeEvidence,
+} from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Mock ledgers (same pattern as m125)
@@ -59,6 +65,33 @@ vi.mock('../src/core/fleet/worked-ledger.js', () => ({
   recentlyDeclined: vi.fn(() => false),
 }));
 
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProducerProvenanceV2: (proposal: {
+      producerProvenanceVersion?: number;
+      producerProvenanceSig?: string;
+    }) => ({
+      ok: proposal.producerProvenanceVersion === 2 &&
+        proposal.producerProvenanceSig === 'm151-producer-provenance-v2',
+      reason: 'M151 producer provenance fixture',
+    }),
+  };
+});
+
+vi.mock('../src/core/inbox/remote-handoff-attestation.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/inbox/remote-handoff-attestation.js')>();
+  return {
+    ...real,
+    verifyRemoteHandoffReconciliation: (
+      _proposalId: string,
+      _repo: string,
+      handoff: { reconciliation?: { attestation?: string } },
+    ) => handoff.reconciliation?.attestation === 'a'.repeat(64),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -69,6 +102,30 @@ function makeProposal(
   over: Partial<Proposal> & { kind: ProposalKind },
 ): Proposal {
   const id = over.id ?? `prop-m151-${String(_seq++).padStart(4, '0')}`;
+  const observedAt = over.createdAt ?? new Date().toISOString();
+  const repo = over.repo ?? '/repo/alpha';
+  const diffHash = 'd'.repeat(64);
+  const branch = `ashlr/merge/${id}`;
+  const prUrl = `https://github.com/ashlrai/m151-fixture/pull/${_seq + 1}`;
+  const expectedHeadOid = '2'.repeat(40);
+  const mergeCommitOid = '3'.repeat(40);
+  const reconciliation = {
+    schemaVersion: 1 as const,
+    observedAt,
+    attestation: 'a'.repeat(64),
+  };
+  const realizedMerge: RealizedMergeEvidence = {
+    schemaVersion: 1,
+    source: 'github-host',
+    provider: 'github',
+    prUrl,
+    branch,
+    base: 'main',
+    expectedHeadOid,
+    mergeCommitOid,
+    mergedAt: observedAt,
+    reconciliation,
+  };
   return {
     id,
     origin: 'backlog',
@@ -76,8 +133,30 @@ function makeProposal(
     title: over.title ?? `test proposal ${id}`,
     summary: 'summary',
     status: over.status ?? 'pending',
-    createdAt: over.createdAt ?? new Date().toISOString(),
-    repo: over.repo ?? '/repo/alpha',
+    createdAt: observedAt,
+    repo,
+    diff: 'diff --git a/source.ts b/source.ts\n+const m151 = true;\n',
+    diffHash,
+    workItemId: `${repo}:todo:${id}`,
+    workSource: over.kind === 'security' ? 'security' : 'todo',
+    engineModel: 'codex:m151-fixture',
+    engineTier: 'frontier',
+    provenanceSig: 'm151-legacy-provenance',
+    producerProvenanceVersion: 2,
+    producerProvenanceSig: 'm151-producer-provenance-v2',
+    remoteHandoff: {
+      provider: 'github',
+      state: 'merged',
+      prUrl,
+      branch,
+      base: 'main',
+      expectedHeadOid,
+      mergeCommitOid,
+      mergedAt: observedAt,
+      reconciliation,
+      createdAt: observedAt,
+    },
+    realizedMerge,
     ...over,
   };
 }
@@ -87,7 +166,13 @@ function makeDecision(
   action: DecisionEntry['action'],
   verdict?: string,
 ): DecisionEntry {
-  return { ts: new Date().toISOString(), proposalId, action, verdict };
+  return {
+    ts: new Date().toISOString(),
+    proposalId,
+    action,
+    verdict,
+    ...(action === 'merged' ? { labelBasis: 'realized-merge-v1' as const } : {}),
+  };
 }
 
 function makeItem(source: WorkSource, repo = '/repo/alpha'): WorkItem {
@@ -105,11 +190,22 @@ function makeItem(source: WorkSource, repo = '/repo/alpha'): WorkItem {
   };
 }
 
-/** Build N merged-decision entries for a proposal, filling MIN_SAMPLES. */
-function fillMergedDecisions(p: Proposal, n = MIN_SAMPLES): void {
-  for (let i = 0; i < n; i++) {
-    _mockDecisions.push(makeDecision(p.id, 'merged', 'approved'));
+/** Build N distinct merged proposals; duplicate lifecycle rows are not samples. */
+function fillMergedDecisions(p: Proposal, n = MIN_SAMPLES): Proposal[] {
+  p.status = 'applied';
+  const proposals = [p];
+  _mockDecisions.push(makeDecision(p.id, 'merged', 'applied'));
+  for (let i = 1; i < n; i++) {
+    const sibling = makeProposal({
+      kind: p.kind,
+      repo: p.repo,
+      status: 'applied',
+      ...(p.verifyResult ? { verifyResult: p.verifyResult } : {}),
+    });
+    proposals.push(sibling);
+    _mockDecisions.push(makeDecision(sibling.id, 'merged', 'applied'));
   }
+  return proposals;
 }
 
 beforeEach(() => {
@@ -262,10 +358,10 @@ describe('M151 §5 — EDV ON: confirmed accept reinforces at full weight', () =
       verifyResult: { passed: true },
     });
     // MIN_SAMPLES merged decisions + created entry from the proposal list
-    fillMergedDecisions(p, MIN_SAMPLES);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
     const priors = await computeOutcomePriors({
-      listProposals: () => [p],
+      listProposals: () => proposals,
       edvVerify: true,
     });
 
@@ -287,10 +383,10 @@ describe('M151 §5 — EDV ON: confirmed accept reinforces at full weight', () =
 describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', () => {
   it('proposal with no verifyResult → mergedWeightedSum < merged (integer)', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind }); // no verifyResult
-    fillMergedDecisions(p, MIN_SAMPLES);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
     const priors = await computeOutcomePriors({
-      listProposals: () => [p],
+      listProposals: () => proposals,
       edvVerify: true,
     });
 
@@ -306,8 +402,12 @@ describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', (
   });
 
   it('two proposals: one confirmed, one not — weighted sum is 1.0 + 0.3', async () => {
-    const p1 = makeProposal({ kind: 'patch' as ProposalKind, verifyResult: { passed: true } });
-    const p2 = makeProposal({ kind: 'patch' as ProposalKind }); // no verifyResult
+    const p1 = makeProposal({
+      kind: 'patch' as ProposalKind,
+      status: 'applied',
+      verifyResult: { passed: true },
+    });
+    const p2 = makeProposal({ kind: 'patch' as ProposalKind, status: 'applied' }); // no verifyResult
 
     _mockDecisions.push(makeDecision(p1.id, 'merged', 'approved'));
     _mockDecisions.push(makeDecision(p2.id, 'merged', 'approved'));
@@ -331,10 +431,10 @@ describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', (
 describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
   it('EDV OFF → mergedWeightedSum is absent, acceptRate identical to flag-off formula', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind }); // no verifyResult
-    fillMergedDecisions(p, MIN_SAMPLES);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
     const priorsOff = await computeOutcomePriors({
-      listProposals: () => [p],
+      listProposals: () => proposals,
       edvVerify: false,
     });
 
@@ -342,8 +442,8 @@ describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
     expect(statsOff).toBeDefined();
     // No mergedWeightedSum field when EDV is off
     expect(statsOff!.mergedWeightedSum).toBeUndefined();
-    // acceptRate = (merged + 0) / created = MIN_SAMPLES / 1
-    expect(statsOff!.acceptRate).toBeCloseTo(MIN_SAMPLES / 1, 5);
+    // Every distinct proposal merged, so merged/created is exactly one.
+    expect(statsOff!.acceptRate).toBeCloseTo(1, 5);
   });
 
   it('EDV OFF and EDV ON (confirmed) produce same integer merged count', async () => {
@@ -351,10 +451,10 @@ describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
       kind: 'patch' as ProposalKind,
       verifyResult: { passed: true },
     });
-    fillMergedDecisions(p, MIN_SAMPLES);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
-    const priorsOff = await computeOutcomePriors({ listProposals: () => [p], edvVerify: false });
-    const priorsOn  = await computeOutcomePriors({ listProposals: () => [p], edvVerify: true  });
+    const priorsOff = await computeOutcomePriors({ listProposals: () => proposals, edvVerify: false });
+    const priorsOn  = await computeOutcomePriors({ listProposals: () => proposals, edvVerify: true  });
 
     // Integer merged count should be the same regardless of EDV flag
     expect(priorsOff.global['todo']!.merged).toBe(priorsOn.global['todo']!.merged);
@@ -362,10 +462,10 @@ describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
 
   it('default (edvVerify absent) behaves identical to edvVerify=false', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind });
-    fillMergedDecisions(p, MIN_SAMPLES);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
-    const priorsDefault = await computeOutcomePriors({ listProposals: () => [p] });
-    const priorsOff     = await computeOutcomePriors({ listProposals: () => [p], edvVerify: false });
+    const priorsDefault = await computeOutcomePriors({ listProposals: () => proposals });
+    const priorsOff     = await computeOutcomePriors({ listProposals: () => proposals, edvVerify: false });
 
     const sD = priorsDefault.global['todo']!;
     const sO = priorsOff.global['todo']!;
@@ -384,11 +484,13 @@ describe('M151 §8 — scoreAdjustment: confirmed > unconfirmed source', () => {
     const pConfirmed   = makeProposal({ kind: 'patch' as ProposalKind, repo: '/repo/a', verifyResult: { passed: true } });
     const pUnconfirmed = makeProposal({ kind: 'security' as ProposalKind, repo: '/repo/a' });
 
-    fillMergedDecisions(pConfirmed, MIN_SAMPLES);
-    fillMergedDecisions(pUnconfirmed, MIN_SAMPLES);
+    const proposals = [
+      ...fillMergedDecisions(pConfirmed, MIN_SAMPLES),
+      ...fillMergedDecisions(pUnconfirmed, MIN_SAMPLES),
+    ];
 
     const priors = await computeOutcomePriors({
-      listProposals: () => [pConfirmed, pUnconfirmed],
+      listProposals: () => proposals,
       edvVerify: true,
     });
 
@@ -411,9 +513,9 @@ describe('M151 §9 — MIN_SAMPLES gate under EDV ON', () => {
   it('below MIN_SAMPLES → scoreAdjustment returns 1.0 even with EDV ON', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind, verifyResult: { passed: true } });
     // Only MIN_SAMPLES - 1 decisions → below threshold
-    fillMergedDecisions(p, MIN_SAMPLES - 1);
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES - 1);
 
-    const priors = await computeOutcomePriors({ listProposals: () => [p], edvVerify: true });
+    const priors = await computeOutcomePriors({ listProposals: () => proposals, edvVerify: true });
     const item = makeItem('todo' as WorkSource);
     expect(scoreAdjustment(item, priors)).toBe(1.0);
   });
@@ -485,8 +587,8 @@ describe('M151 §11 — never throws under EDV ON', () => {
 
   it('scoreAdjustment with EDV-produced priors does not throw', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind, verifyResult: { passed: true } });
-    fillMergedDecisions(p, MIN_SAMPLES);
-    const priors = await computeOutcomePriors({ listProposals: () => [p], edvVerify: true });
+    const proposals = fillMergedDecisions(p, MIN_SAMPLES);
+    const priors = await computeOutcomePriors({ listProposals: () => proposals, edvVerify: true });
     // @ts-expect-error intentionally bad item
     expect(() => scoreAdjustment(null, priors)).not.toThrow();
     expect(() => scoreAdjustment(makeItem('todo' as WorkSource), priors)).not.toThrow();

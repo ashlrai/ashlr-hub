@@ -90,16 +90,31 @@ function makeProposal(overrides: {
   status?: string;
   createdAt?: string;
   title?: string;
+  realized?: boolean;
+  observedAt?: string;
 }) {
+  const { realized = overrides.status === 'applied', observedAt, ...proposalOverrides } = overrides;
+  const createdAt = proposalOverrides.createdAt ?? TWELVE_HOURS_AGO;
   return {
-    id: overrides.id ?? `prop-test-${Math.random().toString(36).slice(2)}`,
+    id: proposalOverrides.id ?? `prop-test-${Math.random().toString(36).slice(2)}`,
     origin: 'daemon',
     kind: 'patch',
-    title: overrides.title ?? 'Test proposal',
+    title: proposalOverrides.title ?? 'Test proposal',
     summary: 'A test proposal',
-    status: overrides.status ?? 'pending',
-    createdAt: overrides.createdAt ?? TWELVE_HOURS_AGO,
+    status: proposalOverrides.status ?? 'pending',
+    createdAt,
     repo: '/repos/test',
+    ...(realized ? {
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: observedAt ?? createdAt,
+      },
+    } : {}),
   };
 }
 
@@ -164,10 +179,19 @@ vi.mock('../src/core/usage/frontier-usage.js', () => ({
 }));
 
 // inbox/store: used both by base snapshot (pendingCount) and production (listProposals)
-vi.mock('../src/core/inbox/store.js', () => ({
-  pendingCount: vi.fn(() => 0),
-  listProposals: vi.fn(() => []),
-}));
+vi.mock('../src/core/inbox/store.js', () => {
+  const listProposals = vi.fn(() => [] as ReturnType<typeof makeProposal>[]);
+  return {
+    pendingCount: vi.fn(() => 0),
+    listProposals,
+    listProposalsDetailed: vi.fn(() => ({
+      proposals: listProposals(),
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesDiscovered: listProposals().length, filesRead: listProposals().length,
+      bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+    })),
+  };
+});
 
 // fleet/judge-trace: production only
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
@@ -332,13 +356,13 @@ describe('M224 proposals24h counting', () => {
 // ---------------------------------------------------------------------------
 
 describe('M224 autoMergesToday', () => {
-  it('counts applied proposals with createdAt today', async () => {
+  it('counts witnessed proposals by observation day rather than creation day', async () => {
     const { listProposals } = await import('../src/core/inbox/store.js');
     vi.mocked(listProposals).mockReturnValue([
-      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Fix auth bug' }),
+      makeProposal({ status: 'applied', createdAt: TWENTY_FIVE_HOURS_AGO, observedAt: NOW_ISO, title: 'Fix auth bug' }),
       makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Add test coverage' }),
       // different day — should NOT count
-      makeProposal({ status: 'applied', createdAt: TWENTY_FIVE_HOURS_AGO, title: 'Old merge' }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, observedAt: TWENTY_FIVE_HOURS_AGO, title: 'Old merge' }),
     ] as ReturnType<typeof makeProposal>[]);
 
     const snap = await buildSnapshot(makeConfig());
@@ -347,6 +371,20 @@ describe('M224 autoMergesToday', () => {
     expect(m.titles).toContain('Fix auth bug');
     expect(m.titles).toContain('Add test coverage');
     expect(m.titles).not.toContain('Old merge');
+  });
+
+  it('keeps applied proposals without realized evidence out of merge projections', async () => {
+    const { listProposals } = await import('../src/core/inbox/store.js');
+    vi.mocked(listProposals).mockReturnValue([
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Lifecycle only', realized: false }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Witness backed' }),
+    ] as ReturnType<typeof makeProposal>[]);
+
+    const production = (await buildSnapshot(makeConfig())).production!;
+
+    expect(production.proposals24h.applied).toBe(2);
+    expect(production.autoMergesToday).toMatchObject({ count: 1, titles: ['Witness backed'] });
+    expect(production.shipsPerDayTrend.find((entry) => entry.date === TODAY_DATE)?.count).toBe(1);
   });
 
   it('titles array is capped at 5', async () => {
@@ -524,6 +562,34 @@ describe('M224 shipsPerDayTrend', () => {
 // ---------------------------------------------------------------------------
 
 describe('M224 graceful degradation', () => {
+  it('fails closed instead of projecting merges from an incomplete proposal source', async () => {
+    const { listProposals, listProposalsDetailed } = await import('../src/core/inbox/store.js');
+    vi.mocked(listProposals).mockReturnValue([
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Partial optimistic merge' }),
+    ] as ReturnType<typeof makeProposal>[]);
+    const degradedRead = {
+      proposals: vi.mocked(listProposals)(),
+      sourceState: 'degraded' as const,
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['byte-cap'],
+      filesDiscovered: 2,
+      filesRead: 1,
+      bytesRead: 1024,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    };
+    vi.mocked(listProposalsDetailed)
+      .mockReturnValueOnce(degradedRead)
+      .mockReturnValueOnce(degradedRead);
+
+    const production = (await buildSnapshot(makeConfig())).production!;
+
+    expect(production.proposals24h).toEqual({ pending: 0, applied: 0, rejected: 0, total: 0 });
+    expect(production.autoMergesToday).toEqual({ count: 0, titles: [] });
+    expect(production.shipsPerDayTrend).toEqual([]);
+  });
+
   it('snapshot still resolves when listProposals throws', async () => {
     const { listProposals } = await import('../src/core/inbox/store.js');
     vi.mocked(listProposals).mockImplementation(() => { throw new Error('io error'); });

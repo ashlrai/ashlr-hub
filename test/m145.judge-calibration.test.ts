@@ -30,6 +30,10 @@ import * as path from 'node:path';
 import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 import type { Proposal } from '../src/core/types.js';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -57,7 +61,7 @@ let _seq = 0;
 function pid(): string { return `p-m145-${_seq++}`; }
 
 function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
-  return {
+  const trace: JudgeTrace = {
     proposalId: pid(),
     judgeEngine: 'test-engine',
     verdict: 'ship',
@@ -67,6 +71,18 @@ function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
     ts: new Date().toISOString(),
     ...overrides,
   };
+  if (trace.outcome === 'merged' && trace.outcomeBasis === undefined) {
+    trace.outcomeBasis = 'realized-merge-v1';
+  } else if (trace.outcome !== 'merged') {
+    delete trace.outcomeBasis;
+  }
+  return trace;
+}
+
+function makeUnqualifiedMergedTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
+  const trace = makeTrace({ ...overrides, outcome: 'merged' });
+  delete trace.outcomeBasis;
+  return trace;
 }
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
@@ -82,6 +98,68 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     diff: '+const x = 1;\n+if (x < 2) { return x; }',
     ...overrides,
   } as Proposal;
+}
+
+function makeAuthenticatedMergedProposal(
+  id: string,
+  observedAt = new Date().toISOString(),
+): Proposal {
+  const repo = path.join(tmpHome, `repo-${id}`);
+  fs.mkdirSync(repo, { recursive: true, mode: 0o700 });
+  const diffHash = 'd'.repeat(64);
+  const baseBeforeOid = 'a'.repeat(40);
+  const proposalHeadOid = 'b'.repeat(40);
+  const mergeCommitOid = 'c'.repeat(40);
+  const unsignedIntent = {
+    schemaVersion: 1 as const,
+    branch: `ashlr/merge/${id}`,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    diffHash,
+    evidencePackDigest: 'e'.repeat(64),
+    authorizationId: '1'.repeat(32),
+    authorizedAt: new Date().toISOString(),
+  };
+  const localMergeIntent = {
+    ...unsignedIntent,
+    attestation: signLocalMergeIntent(id, repo, unsignedIntent),
+  };
+  const unsignedWitness = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    mergeCommitOid,
+    observedAt,
+    proposalId: id,
+    diffHash,
+    intentAttestation: localMergeIntent.attestation,
+  };
+  return makeProposal({
+    id,
+    repo,
+    status: 'applied',
+    diffHash,
+    verifyResult: { passed: true, baseHead: baseBeforeOid, diffHash },
+    localMergeIntent,
+    realizedMerge: {
+      ...unsignedWitness,
+      attestation: signLocalRealizedMergeReceipt(id, repo, unsignedWitness),
+    },
+  });
+}
+
+function healthyProposalSource(proposals: Proposal[]) {
+  return { sourceState: 'healthy' as const, complete: true, proposals };
+}
+
+function authenticatedSourceForTraces(traces: JudgeTrace[]) {
+  const ids = new Set(
+    traces.filter((trace) => trace.outcome === 'merged').map((trace) => trace.proposalId),
+  );
+  return healthyProposalSource([...ids].map((id) => makeAuthenticatedMergedProposal(id)));
 }
 
 /** Build a judge fn that always returns a given verdict/scores. */
@@ -275,6 +353,59 @@ describe('m145 darkCurrent — baseline distribution', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 runDegradationHarness — catching judge', () => {
+  it('suppresses durable trace recording for synthetic corruption judgments', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const ids = [pid(), pid(), pid(), pid(), pid()];
+    const traces = ids.map((id) => makeTrace({ proposalId: id, outcome: 'merged' }));
+    const judgeOptions: unknown[] = [];
+    const judge = async (
+      _proposal: Proposal,
+      _cfg: never,
+      _client: never,
+      options: { recordTrace?: boolean },
+    ): Promise<ManagerVerdict> => {
+      judgeOptions.push(options);
+      return {
+        proposalId: 'mock',
+        verdict: 'harmful',
+        value: 1,
+        correctness: 1,
+        scope: 1,
+        alignment: 1,
+        rationale: 'mock',
+        wouldMerge: false,
+      };
+    };
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => authenticatedSourceForTraces(traces),
+      _judgeProposalFn: judge,
+    });
+
+    expect(result.sampleSize).toBe(5);
+    expect(judgeOptions).toEqual(Array.from({ length: 5 }, () => ({ recordTrace: false })));
+  });
+
+  it('samples a proposal once when it has multiple judge trace retries', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const ids = [pid(), pid(), pid(), pid(), pid()];
+    const traces = ids.map((id) => makeTrace({ proposalId: id, outcome: 'merged' }));
+    traces.push(makeTrace({
+      traceId: 'retry-duplicate', proposalId: ids[0], outcome: 'merged',
+      outcomeAt: new Date(Date.now() + 1_000).toISOString(),
+    }));
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => authenticatedSourceForTraces(traces),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(5);
+    expect(judge).toHaveBeenCalledTimes(5);
+  });
+
   it('produces high recovery rate when judge scores corrupted diff lower', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
@@ -293,11 +424,11 @@ describe('m145 runDegradationHarness — catching judge', () => {
     ];
 
     const proposals: Record<string, Proposal> = {
-      [proposalId1]: makeProposal({ id: proposalId1 }),
-      [proposalId2]: makeProposal({ id: proposalId2 }),
-      [proposalId3]: makeProposal({ id: proposalId3 }),
-      [proposalId4]: makeProposal({ id: proposalId4 }),
-      [proposalId5]: makeProposal({ id: proposalId5 }),
+      [proposalId1]: makeAuthenticatedMergedProposal(proposalId1),
+      [proposalId2]: makeAuthenticatedMergedProposal(proposalId2),
+      [proposalId3]: makeAuthenticatedMergedProposal(proposalId3),
+      [proposalId4]: makeAuthenticatedMergedProposal(proposalId4),
+      [proposalId5]: makeAuthenticatedMergedProposal(proposalId5),
     };
 
     // Catching judge: returns very low scores for any call
@@ -305,7 +436,7 @@ describe('m145 runDegradationHarness — catching judge', () => {
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: (f) => f?.outcomeOnly ? mergedTraces : mergedTraces,
-      _loadProposalFn: (id) => proposals[id] ?? null,
+      _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
       _judgeProposalFn: catchingJudge as never,
     });
 
@@ -322,14 +453,14 @@ describe('m145 runDegradationHarness — catching judge', () => {
     const traces = ids.map((id) =>
       makeTrace({ proposalId: id, verdict: 'ship', outcome: 'merged', scores: { value: 3, correctness: 3, scope: 3, alignment: 3 } }),
     );
-    const proposals = Object.fromEntries(ids.map((id) => [id, makeProposal({ id })]));
+    const proposals = Object.fromEntries(ids.map((id) => [id, makeAuthenticatedMergedProposal(id)]));
 
     // Judge escalates to harmful
     const escalatingJudge = mockJudge('harmful', { value: 2, correctness: 2, scope: 2, alignment: 2 });
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => traces,
-      _loadProposalFn: (id) => proposals[id] ?? null,
+      _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
       _judgeProposalFn: escalatingJudge as never,
     });
 
@@ -350,14 +481,14 @@ describe('m145 runDegradationHarness — missing judge', () => {
     const traces = ids.map((id) =>
       makeTrace({ proposalId: id, verdict: 'ship', outcome: 'merged', scores: { value: 4, correctness: 4, scope: 2, alignment: 4 } }),
     );
-    const proposals = Object.fromEntries(ids.map((id) => [id, makeProposal({ id })]));
+    const proposals = Object.fromEntries(ids.map((id) => [id, makeAuthenticatedMergedProposal(id)]));
 
     // Rubber-stamp judge: always returns ship with the same high scores regardless of corruption
     const missingJudge = mockJudge('ship', { value: 4, correctness: 4, scope: 2, alignment: 4 });
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => traces,
-      _loadProposalFn: (id) => proposals[id] ?? null,
+      _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
       _judgeProposalFn: missingJudge as never,
     });
 
@@ -374,14 +505,14 @@ describe('m145 runDegradationHarness — missing judge', () => {
     const traces = ids.map((id) =>
       makeTrace({ proposalId: id, verdict: 'ship', outcome: 'merged', scores: { value: 4, correctness: 4, scope: 2, alignment: 4 } }),
     );
-    const proposals = Object.fromEntries(ids.map((id) => [id, makeProposal({ id })]));
+    const proposals = Object.fromEntries(ids.map((id) => [id, makeAuthenticatedMergedProposal(id)]));
 
     // No catch at all
     const blindJudge = mockJudge('ship', { value: 4, correctness: 4, scope: 2, alignment: 4 });
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => traces,
-      _loadProposalFn: (id) => proposals[id] ?? null,
+      _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
       _judgeProposalFn: blindJudge as never,
     });
 
@@ -396,6 +527,70 @@ describe('m145 runDegradationHarness — missing judge', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 runDegradationHarness — insufficient traces', () => {
+  it('ignores unqualified historical merged traces', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeUnqualifiedMergedTrace());
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource([]),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('ignores forged merged bases without exact authenticated proposal witnesses', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({ outcome: 'merged' }));
+    const proposals = traces.map((trace) => makeProposal({ id: trace.proposalId, status: 'applied' }));
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource(proposals),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('ignores authenticated witnesses from an incomplete proposal source', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({ outcome: 'merged' }));
+    const proposals = traces.map((trace) => makeAuthenticatedMergedProposal(trace.proposalId));
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => ({ sourceState: 'degraded', complete: false, proposals }),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('ignores authenticated realized witnesses observed in the future', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({ outcome: 'merged' }));
+    const future = new Date(Date.now() + 30_000).toISOString();
+    const proposals = traces.map((trace) => makeAuthenticatedMergedProposal(trace.proposalId, future));
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource(proposals),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+  });
+
   it('returns sampleSize=0 and flag when fewer than 5 merged traces', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
@@ -406,7 +601,7 @@ describe('m145 runDegradationHarness — insufficient traces', () => {
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => traces,
-      _loadProposalFn: () => null,
+      _readProposalsFn: () => healthyProposalSource([]),
       _judgeProposalFn: mockJudge('ship', { value: 4, correctness: 4, scope: 2, alignment: 4 }) as never,
     });
 
@@ -420,7 +615,7 @@ describe('m145 runDegradationHarness — insufficient traces', () => {
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => [],
-      _loadProposalFn: () => null,
+      _readProposalsFn: () => healthyProposalSource([]),
       _judgeProposalFn: mockJudge('ship', { value: 4, correctness: 4, scope: 2, alignment: 4 }) as never,
     });
 
@@ -435,14 +630,14 @@ describe('m145 runDegradationHarness — insufficient traces', () => {
     const traces = ids.map((id) =>
       makeTrace({ proposalId: id, outcome: 'merged' }),
     );
-    const proposals = Object.fromEntries(ids.map((id) => [id, makeProposal({ id })]));
+    const proposals = Object.fromEntries(ids.map((id) => [id, makeAuthenticatedMergedProposal(id)]));
 
     const throwingJudge = vi.fn().mockRejectedValue(new Error('judge exploded'));
 
     await expect(
       runDegradationHarness({} as never, {
         _readTracesFn: () => traces,
-        _loadProposalFn: (id) => proposals[id] ?? null,
+        _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
         _judgeProposalFn: throwingJudge as never,
       }),
     ).resolves.not.toThrow();
@@ -458,7 +653,7 @@ describe('m145 runDegradationHarness — insufficient traces', () => {
 
     const result = await runDegradationHarness({} as never, {
       _readTracesFn: () => traces,
-      _loadProposalFn: () => null,
+      _readProposalsFn: () => healthyProposalSource([]),
       _judgeProposalFn: mockJudge('review', { value: 2, correctness: 2, scope: 2, alignment: 2 }) as never,
     });
 
@@ -472,6 +667,47 @@ describe('m145 runDegradationHarness — insufficient traces', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 judgeHealth — assembles combined report', () => {
+  it('grants no kappa credit to unqualified merged outcomes', async () => {
+    const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeUnqualifiedMergedTrace({ verdict: 'ship' }));
+
+    const report = await judgeHealth({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => authenticatedSourceForTraces(traces),
+    });
+
+    expect(report.sampleSize).toBe(6);
+    expect(report.kappaVsOutcome).toBeNull();
+    expect(report.flags.join(' ')).toContain('insufficient qualified outcome-linked traces');
+  });
+
+  it('grants no kappa credit to forged merged bases without proposal authority', async () => {
+    const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({ verdict: 'ship', outcome: 'merged' }));
+    const proposals = traces.map((trace) => makeProposal({ id: trace.proposalId, status: 'applied' }));
+
+    const report = await judgeHealth({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource(proposals),
+    });
+
+    expect(report.kappaVsOutcome).toBeNull();
+    expect(report.flags.join(' ')).toContain('insufficient qualified outcome-linked traces');
+  });
+
+  it('keeps prediction-only ship traces out of positive outcome calibration', async () => {
+    const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({ verdict: 'ship' }));
+
+    const report = await judgeHealth({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource([]),
+    });
+
+    expect(report.kappaVsOutcome).toBeNull();
+    expect(report.flags.join(' ')).toContain('insufficient qualified outcome-linked traces');
+  });
+
   it('assembles kappa + dark-current + sampleSize with sufficient traces', async () => {
     const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
 
@@ -485,6 +721,7 @@ describe('m145 judgeHealth — assembles combined report', () => {
 
     const report = await judgeHealth({} as never, {
       _readTracesFn: () => traces,
+      _readProposalsFn: () => authenticatedSourceForTraces(traces),
     });
 
     expect(report.sampleSize).toBe(5);
@@ -555,7 +792,7 @@ describe('m145 judgeHealth — assembles combined report', () => {
     const traces = ids.map((id) =>
       makeTrace({ proposalId: id, verdict: 'ship', outcome: 'merged', scores: { value: 4, correctness: 4, scope: 2, alignment: 4 } }),
     );
-    const proposals = Object.fromEntries(ids.map((id) => [id, makeProposal({ id })]));
+    const proposals = Object.fromEntries(ids.map((id) => [id, makeAuthenticatedMergedProposal(id)]));
 
     // Catching judge — score drops a lot
     const catchingJudge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
@@ -563,7 +800,7 @@ describe('m145 judgeHealth — assembles combined report', () => {
     const report = await judgeHealth({} as never, {
       runDegradation: true,
       _readTracesFn: () => traces,
-      _loadProposalFn: (id) => proposals[id] ?? null,
+      _readProposalsFn: () => healthyProposalSource(Object.values(proposals)),
       _judgeProposalFn: catchingJudge as never,
     });
 

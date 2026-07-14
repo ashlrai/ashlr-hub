@@ -14,7 +14,7 @@ import {
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
-import type { SkillUseEvent } from '../src/core/types.js';
+import type { Proposal, SkillUseEvent } from '../src/core/types.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 
 const TS0 = '2026-07-09T12:00:00.000Z';
@@ -231,6 +231,25 @@ function deps(overrides: Partial<TrajectoryRecordReadDeps> = {}): TrajectoryReco
     listOutcomeRecords: () => [outcomeRecord()],
     readAgentActions: () => [action()],
     readSkillUseEvents: () => [],
+    loadProposal: (id) => ({
+      id,
+      repo: REPO,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Verifier proposal',
+      summary: 'summary',
+      status: 'applied',
+      createdAt: TS1,
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: TS3,
+      },
+    } as Proposal),
     ...overrides,
   };
 }
@@ -344,6 +363,26 @@ describe('Trajectory records', () => {
         policyAllowed: true,
       },
     });
+  });
+
+  it('keeps applied status and merged ledger activity nonterminal without a realized witness', () => {
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        listOutcomeRecords: () => [outcomeRecord({
+          proposal: { ...outcomeRecord().proposal, status: 'applied' },
+        })],
+        loadProposal: () => ({
+          id: 'prop-1', repo: REPO, origin: 'agent', kind: 'patch', title: 'Legacy applied',
+          summary: 'summary', status: 'applied', createdAt: TS1,
+        }),
+      }),
+    });
+
+    expect(record?.terminalOutcome).toBe('pending');
+    expect(record?.timeline).toContainEqual(expect.objectContaining({
+      kind: 'decision', action: 'merged',
+    }));
   });
 
   it('attaches realized post-merge truth without rewriting the historical merge outcome', () => {

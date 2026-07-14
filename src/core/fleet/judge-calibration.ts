@@ -17,7 +17,8 @@
  *                    floor so callers can subtract it from thresholds.
  *
  * runDegradationHarness — the BabelJudge move: take judge-traces whose
- *                    outcome === 'merged' (known-good commits), synthetically
+ *                    merged outcome has a realized-merge-v1 basis,
+ *                    synthetically
  *                    corrupt each diff (flip a comparison, delete a return,
  *                    swap an arg, etc.), re-run judgeProposal on the corrupted
  *                    diff, and measure the RECOVERY RATE — did the judge score
@@ -29,8 +30,14 @@
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
-import type { JudgeTrace } from './judge-trace.js';
-import type { ManagerVerdict } from './manager.js';
+import {
+  isQualifiedJudgeOutcome,
+  isQualifiedMergedJudgeOutcome,
+  qualifiedMergedProposal,
+  type JudgeProposalSource,
+  type JudgeTrace,
+} from './judge-trace.js';
+import type { JudgeProposalOptions, ManagerVerdict } from './manager.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,6 +51,58 @@ const SCORE_DROP_THRESHOLD = 1.0;
 
 /** Cap on how many merged traces to run through the harness per call. */
 const MAX_HARNESS_SAMPLES = 30;
+
+const DEGRADED_PROPOSAL_SOURCE: JudgeProposalSource = {
+  sourceState: 'degraded',
+  complete: false,
+  proposals: [],
+};
+
+async function readProposalSource(
+  override?: () => JudgeProposalSource,
+): Promise<JudgeProposalSource> {
+  try {
+    const source = override
+      ? override()
+      : (await import('../inbox/store.js')).listProposalsDetailed({ requireComplete: true });
+    if (!source || !Array.isArray(source.proposals) || typeof source.complete !== 'boolean' ||
+      !['missing', 'healthy', 'degraded'].includes(source.sourceState)) {
+      return DEGRADED_PROPOSAL_SOURCE;
+    }
+    return source;
+  } catch {
+    return DEGRADED_PROPOSAL_SOURCE;
+  }
+}
+
+function qualifiedMergedProposalIndex(
+  traces: readonly JudgeTrace[],
+  source: JudgeProposalSource,
+  qualificationAtMs: number,
+): Map<string, Proposal> {
+  const ids = new Set(
+    traces.filter(isQualifiedMergedJudgeOutcome).map((trace) => trace.proposalId),
+  );
+  const index = new Map<string, Proposal>();
+  for (const proposalId of ids) {
+    const proposal = qualifiedMergedProposal(proposalId, source, qualificationAtMs);
+    if (proposal) index.set(proposalId, proposal);
+  }
+  return index;
+}
+
+function oneTracePerProposal(traces: readonly JudgeTrace[]): JudgeTrace[] {
+  const selected = new Map<string, JudgeTrace>();
+  for (const trace of traces) {
+    const existing = selected.get(trace.proposalId);
+    const traceMs = Date.parse(trace.outcomeAt ?? trace.ts);
+    const existingMs = existing ? Date.parse(existing.outcomeAt ?? existing.ts) : Number.NEGATIVE_INFINITY;
+    if (!existing || traceMs > existingMs) selected.set(trace.proposalId, trace);
+  }
+  return [...selected.values()].sort(
+    (a, b) => Date.parse(b.outcomeAt ?? b.ts) - Date.parse(a.outcomeAt ?? a.ts),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -366,9 +425,10 @@ export async function runDegradationHarness(
       proposal: Proposal,
       cfg: AshlrConfig,
       client: { complete: (system: string, user: string) => Promise<string> },
+      options: JudgeProposalOptions,
     ) => Promise<ManagerVerdict>;
     _readTracesFn?: (filter?: { outcomeOnly?: boolean; limit?: number }) => JudgeTrace[];
-    _loadProposalFn?: (id: string) => Proposal | null;
+    _readProposalsFn?: () => JudgeProposalSource;
   },
 ): Promise<DegradationHarnessResult> {
   const zero: DegradationHarnessResult = {
@@ -381,7 +441,7 @@ export async function runDegradationHarness(
   try {
     const maxSamples = opts?.maxSamples ?? MAX_HARNESS_SAMPLES;
 
-    // Load merged traces
+    // Load evidence-qualified merged traces. Historical bare labels are forensic only.
     let traces: JudgeTrace[];
     if (opts !== undefined && opts._readTracesFn) {
       traces = opts._readTracesFn({ outcomeOnly: true, limit: maxSamples * 3 });
@@ -390,8 +450,10 @@ export async function runDegradationHarness(
       traces = readJudgeTraces({ outcomeOnly: true, limit: maxSamples * 3, requireComplete: true });
     }
 
-    const mergedTraces = traces
-      .filter((t) => t.outcome === 'merged')
+    const proposalSource = await readProposalSource(opts?._readProposalsFn);
+    const qualifiedProposals = qualifiedMergedProposalIndex(traces, proposalSource, Date.now());
+    const mergedTraces = oneTracePerProposal(traces)
+      .filter((trace) => isQualifiedMergedJudgeOutcome(trace) && qualifiedProposals.has(trace.proposalId))
       .slice(0, maxSamples);
 
     if (mergedTraces.length < MIN_TRACES) {
@@ -430,22 +492,13 @@ export async function runDegradationHarness(
       return { ...zero, flags: ['judge client unavailable'] };
     }
 
-    const loadProposalFn = opts?._loadProposalFn ?? (await (async () => {
-      try {
-        const { loadProposal } = await import('../inbox/store.js');
-        return loadProposal;
-      } catch {
-        return () => null;
-      }
-    })());
-
     // Run trials
     const trials: CorruptionTrial[] = [];
     const flags: string[] = [];
 
     for (const trace of mergedTraces) {
       try {
-        const proposal = loadProposalFn(trace.proposalId);
+        const proposal = qualifiedProposals.get(trace.proposalId);
         if (!proposal || !proposal.diff) continue;
 
         const originalDiff = proposal.diff;
@@ -455,7 +508,12 @@ export async function runDegradationHarness(
         const corruptedProposal = { ...proposal, diff: corruptedDiff };
 
         // Re-judge original + corrupted (original verdict from trace; only re-judge corrupted)
-        const corruptedVerdict = await judgeProposalFn(corruptedProposal, cfg, judgeClient);
+        const corruptedVerdict = await judgeProposalFn(
+          corruptedProposal,
+          cfg,
+          judgeClient,
+          { recordTrace: false },
+        );
 
         // Reconstruct original verdict shape from trace
         const originalVerdict: ManagerVerdict = {
@@ -567,9 +625,10 @@ export async function judgeHealth(
       proposal: Proposal,
       cfg: AshlrConfig,
       client: { complete: (system: string, user: string) => Promise<string> },
+      options: JudgeProposalOptions,
     ) => Promise<ManagerVerdict>;
     _readTracesFn?: (filter?: { outcomeOnly?: boolean; limit?: number }) => JudgeTrace[];
-    _loadProposalFn?: (id: string) => Proposal | null;
+    _readProposalsFn?: () => JudgeProposalSource;
   },
 ): Promise<JudgeHealthReport> {
   const insufficientReport = (msg: string): JudgeHealthReport => ({
@@ -605,8 +664,13 @@ export async function judgeHealth(
 
     // --- 2. Cohen's kappa (verdict-intent vs. outcome-intent) ----------------
     let kappaVsOutcome: number | null = null;
-    if (outcomeTraces.length >= MIN_TRACES) {
-      const pairs: RaterPair[] = outcomeTraces.map((t) => ({
+    const proposalSource = await readProposalSource(opts?._readProposalsFn);
+    const qualifiedProposals = qualifiedMergedProposalIndex(outcomeTraces, proposalSource, Date.now());
+    const qualifiedOutcomeTraces = outcomeTraces.filter((trace) =>
+      isQualifiedJudgeOutcome(trace) &&
+      (trace.outcome !== 'merged' || qualifiedProposals.has(trace.proposalId)));
+    if (qualifiedOutcomeTraces.length >= MIN_TRACES) {
+      const pairs: RaterPair[] = qualifiedOutcomeTraces.map((t) => ({
         raterA: verdictToIntent(t.verdict),
         raterB: outcomeToIntent(t.outcome!),
       }));
@@ -625,7 +689,7 @@ export async function judgeHealth(
       }
     } else {
       flags.push(
-        `insufficient outcome-linked traces for kappa (${outcomeTraces.length} < ${MIN_TRACES})`,
+        `insufficient qualified outcome-linked traces for kappa (${qualifiedOutcomeTraces.length} < ${MIN_TRACES})`,
       );
     }
 
@@ -654,7 +718,7 @@ export async function judgeHealth(
       const harnessResult = await runDegradationHarness(cfg, {
         _judgeProposalFn: opts._judgeProposalFn,
         _readTracesFn: opts._readTracesFn,
-        _loadProposalFn: opts._loadProposalFn,
+        _readProposalsFn: () => proposalSource,
       });
       if (harnessResult.sampleSize > 0) {
         degradationRecoveryRate = harnessResult.recoveryRate;

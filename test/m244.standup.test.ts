@@ -43,14 +43,18 @@ const {
   mockSendTelegramMessage,
   mockTelegramEnabled,
   mockListProposals,
+  mockListProposalsDetailed,
   mockReadDecisions,
+  mockReadDecisionsDetailed,
   mockListGoals,
   mockGetFrontierUsage,
 } = vi.hoisted(() => ({
   mockSendTelegramMessage: vi.fn().mockResolvedValue({ ok: true }),
   mockTelegramEnabled: vi.fn().mockReturnValue(true),
   mockListProposals: vi.fn().mockReturnValue([]),
+  mockListProposalsDetailed: vi.fn(),
   mockReadDecisions: vi.fn().mockReturnValue([]),
+  mockReadDecisionsDetailed: vi.fn(),
   mockListGoals: vi.fn().mockReturnValue([]),
   // default resolved value set in beforeEach so WITHIN_24H is accessible
   mockGetFrontierUsage: vi.fn(),
@@ -65,6 +69,7 @@ vi.mock('../src/core/integrations/telegram.js', () => ({
 
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: mockListProposals,
+  listProposalsDetailed: mockListProposalsDetailed,
   listRequests: vi.fn().mockReturnValue([]),
   outstanding: vi.fn().mockReturnValue(undefined),
   loadProposal: vi.fn().mockReturnValue(null),
@@ -75,6 +80,7 @@ vi.mock('../src/core/inbox/store.js', () => ({
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: mockReadDecisions,
+  readDecisionsDetailed: mockReadDecisionsDetailed,
   recordDecision: vi.fn(),
   decisionsDir: () => '',
 }));
@@ -162,6 +168,28 @@ beforeEach(() => {
   mockTelegramEnabled.mockReturnValue(true);
   mockListProposals.mockReturnValue([]);
   mockReadDecisions.mockReturnValue([]);
+  mockListProposalsDetailed.mockImplementation(() => {
+    const proposals = [
+      ...mockListProposals({ status: 'applied' }),
+      ...mockListProposals({ status: 'pending' }),
+      ...mockListProposals({ status: 'rejected' }),
+    ];
+    return {
+      proposals,
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesDiscovered: proposals.length, filesRead: proposals.length,
+      bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+    };
+  });
+  mockReadDecisionsDetailed.mockImplementation(() => {
+    const decisions = mockReadDecisions();
+    return {
+      decisions,
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesRead: 1, bytesRead: 0, rowsScanned: decisions.length,
+      invalidRows: 0, unreadableFiles: 0,
+    };
+  });
   mockListGoals.mockReturnValue([]);
   mockGetFrontierUsage.mockResolvedValue({ generatedAt: WITHIN_24H, engines: [] });
 });
@@ -199,6 +227,18 @@ function makeCfg(proactive = true) {
   };
 }
 
+function realizedMerge(observedAt: string) {
+  return {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -216,8 +256,9 @@ describe('buildDailyStandup — M244', () => {
     mockListProposals.mockImplementation((filter?: { status?: string }) => {
       if (filter?.status === 'applied') {
         return [
-          { id: 'p1', title: 'Fix auth', repo: 'acme/api', status: 'applied', decidedAt: WITHIN_24H },
-          { id: 'p2', title: 'Upgrade deps', repo: 'acme/api', status: 'applied', decidedAt: WITHIN_24H },
+          { id: 'p1', title: 'Fix auth', repo: 'acme/api', status: 'applied', decidedAt: WITHIN_24H, realizedMerge: realizedMerge(WITHIN_24H) },
+          { id: 'p2', title: 'Upgrade deps', repo: 'acme/api', status: 'applied', decidedAt: WITHIN_24H, realizedMerge: realizedMerge(WITHIN_24H) },
+          { id: 'legacy', title: 'Lifecycle only', repo: 'acme/api', status: 'applied', decidedAt: WITHIN_24H },
         ];
       }
       return [];
@@ -230,7 +271,7 @@ describe('buildDailyStandup — M244', () => {
     mockListProposals.mockImplementation((filter?: { status?: string }) => {
       if (filter?.status === 'applied') {
         return [
-          { id: 'p1', title: 'Old fix', repo: 'acme/api', status: 'applied', decidedAt: OUTSIDE_24H },
+          { id: 'p1', title: 'Old fix', repo: 'acme/api', status: 'applied', decidedAt: OUTSIDE_24H, realizedMerge: realizedMerge(OUTSIDE_24H) },
         ];
       }
       return [];
@@ -244,9 +285,9 @@ describe('buildDailyStandup — M244', () => {
     mockListProposals.mockImplementation((filter?: { status?: string }) => {
       if (filter?.status === 'applied') {
         return [
-          { id: 'p1', title: 'A', repo: 'myorg/backend', status: 'applied', decidedAt: WITHIN_24H },
-          { id: 'p2', title: 'B', repo: 'myorg/backend', status: 'applied', decidedAt: WITHIN_24H },
-          { id: 'p3', title: 'C', repo: 'myorg/frontend', status: 'applied', decidedAt: WITHIN_24H },
+          { id: 'p1', title: 'A', repo: 'myorg/backend', status: 'applied', decidedAt: WITHIN_24H, realizedMerge: realizedMerge(WITHIN_24H) },
+          { id: 'p2', title: 'B', repo: 'myorg/backend', status: 'applied', decidedAt: WITHIN_24H, realizedMerge: realizedMerge(WITHIN_24H) },
+          { id: 'p3', title: 'C', repo: 'myorg/frontend', status: 'applied', decidedAt: WITHIN_24H, realizedMerge: realizedMerge(WITHIN_24H) },
         ];
       }
       return [];
@@ -286,7 +327,7 @@ describe('buildDailyStandup — M244', () => {
     expect(text).toContain('harmful: 1');
   });
 
-  it('7. per-engine ship-rates from decisions ledger', async () => {
+  it('7. keeps judge predictions out of realized engine ship-rates', async () => {
     mockReadDecisions.mockReturnValue([
       { ts: WITHIN_24H, proposalId: 'p1', action: 'judged', verdict: 'ship', engine: 'claude' },
       { ts: WITHIN_24H, proposalId: 'p2', action: 'judged', verdict: 'ship', engine: 'claude' },
@@ -295,10 +336,56 @@ describe('buildDailyStandup — M244', () => {
       { ts: WITHIN_24H, proposalId: 'p5', action: 'judged', verdict: 'harmful', engine: 'codex' },
     ]);
     const text = await buildDailyStandup(makeCfg() as never);
-    // claude: 2/3 = 67%
-    expect(text).toContain('claude: 2/3 (67%)');
-    // codex: 1/2 = 50%
-    expect(text).toContain('codex: 1/2 (50%)');
+    expect(text).toContain('Judge verdicts (24h): 5 total');
+    expect(text).not.toContain('Engine ship-rates:');
+    expect(text).not.toContain('claude: 2/3 (67%)');
+    expect(text).not.toContain('codex: 1/2 (50%)');
+  });
+
+  it('qualifies and deduplicates merged rows before engine ship-rate projection', async () => {
+    mockListProposals.mockImplementation((filter?: { status?: string }) => {
+      if (filter?.status === 'applied') {
+        return [{
+          id: 'p-merge', title: 'Witnessed', repo: 'acme/api', status: 'applied',
+          realizedMerge: realizedMerge(WITHIN_24H),
+        }];
+      }
+      return [];
+    });
+    mockReadDecisions.mockReturnValue([
+      { ts: WITHIN_24H, proposalId: 'p-merge', action: 'merged', engine: 'legacy' },
+      { ts: WITHIN_24H, proposalId: 'p-merge', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude' },
+      { ts: WITHIN_24H, proposalId: 'p-merge', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude' },
+    ]);
+
+    const text = await buildDailyStandup(makeCfg() as never);
+
+    expect(text).toContain('claude: 1/1 (100%)');
+    expect(text).not.toContain('legacy:');
+  });
+
+  it('fails closed when detailed proposal or decision sources are degraded', async () => {
+    mockListProposals.mockImplementation((filter?: { status?: string }) => filter?.status === 'applied'
+      ? [{ id: 'p-merge', title: 'Partial optimistic merge', repo: 'acme/api', status: 'applied', realizedMerge: realizedMerge(WITHIN_24H) }]
+      : []);
+    mockReadDecisions.mockReturnValue([
+      { ts: WITHIN_24H, proposalId: 'p-merge', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude' },
+    ]);
+    mockListProposalsDetailed.mockReturnValue({
+      proposals: mockListProposals({ status: 'applied' }),
+      sourceState: 'degraded', sourcePresent: true, complete: false, stopReasons: ['byte-cap'],
+      filesDiscovered: 2, filesRead: 1, bytesRead: 1024, invalidFiles: 0, unreadableFiles: 0,
+    });
+    mockReadDecisionsDetailed.mockReturnValue({
+      decisions: mockReadDecisions(),
+      sourceState: 'degraded', sourcePresent: true, complete: false, stopReasons: ['row-cap'],
+      filesRead: 1, bytesRead: 1024, rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+    });
+
+    const text = await buildDailyStandup(makeCfg() as never);
+
+    expect(text).toContain('Proposals: 0 shipped, 0 pending');
+    expect(text).not.toContain('claude: 1/1');
   });
 
   it('8. active goals with milestone progress are shown', async () => {

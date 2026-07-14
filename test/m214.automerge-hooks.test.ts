@@ -57,7 +57,11 @@ vi.mock('../src/core/inbox/merge.js', () => ({
 
 const mockListProposals = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: (...args: unknown[]) => mockListProposals(...args),
+  listProposalsDetailed: (...args: unknown[]) => ({
+    proposals: mockListProposals(...args),
+    sourceState: 'healthy',
+    complete: true,
+  }),
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);

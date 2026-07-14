@@ -1,12 +1,12 @@
 /**
  * M263: drain starvation fix — oldest-first judge ordering.
  *
- * The bug: listProposals returns most-recent-first. When the judge loop
+ * The bug: proposal reads return most-recent-first. When the judge loop
  * iterates in that order and the pass is interrupted (killed, paused, capped),
  * the OLDEST pending proposal is always last and always the first to be skipped.
  * A proposal pending since day 0 could go unjudged indefinitely.
  *
- * The fix (automerge-pass.ts): after listProposals(), sort pending oldest-first
+ * The fix (automerge-pass.ts): after enumeration, sort pending oldest-first
  * before the judge loop so the stalest entries drain first.
  *
  * Tests assert:
@@ -52,7 +52,11 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposals: (...args: unknown[]) => mockListProposals(...args),
+    listProposalsDetailed: (...args: unknown[]) => ({
+      proposals: mockListProposals(...args),
+      sourceState: 'healthy',
+      complete: true,
+    }),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };
@@ -113,6 +117,7 @@ import { setKill } from '../src/core/sandbox/policy.js';
 
 /** Proposal timestamps spaced 1 hour apart; lower index = older. */
 const BASE_MS = new Date('2026-06-24T00:00:00.000Z').getTime();
+const TEST_NOW_MS = new Date('2026-06-29T12:00:00.000Z').getTime();
 function isoAt(offsetHours: number): string {
   return new Date(BASE_MS + offsetHours * 3_600_000).toISOString();
 }
@@ -169,6 +174,7 @@ function shipVerdict(proposalId: string) {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ now: TEST_NOW_MS, toFake: ['Date'] });
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m263-'));
   process.env.HOME = tmpHome;
 
@@ -180,6 +186,8 @@ beforeEach(() => {
   mockUpdateProposalField.mockReset();
 
   mockListProposals.mockImplementation(() => pendingProposals);
+  mockSetStatus.mockReturnValue(true);
+  mockUpdateProposalField.mockReturnValue(true);
   mockAutoMergeProposal.mockImplementation(async (id: string) => ({
     ok: true, merged: true, reason: `merged ${id}`,
   } as AutoMergeResult));
@@ -192,6 +200,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   try { setKill(false); } catch { /* ignore */ }
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
@@ -297,7 +306,7 @@ describe('M263 judgeNonShipCount increments correctly', () => {
 
     expect(out.autoArchived).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-count2', 'rejected', undefined, expect.stringContaining('auto-archived'),
+      'p-count2', 'rejected', undefined, expect.stringContaining('auto-archived'), undefined, {}, 'pending',
     );
     // updateProposalField must NOT be called for archived (setStatus is used instead)
     expect(mockUpdateProposalField).not.toHaveBeenCalledWith('p-count2', expect.anything());
@@ -378,18 +387,17 @@ describe('M263 ship verdict — merge gate unchanged', () => {
 
 describe('M263 no-regression: m259 TTL + auto-archive unaffected', () => {
   it('TTL rejection still fires for stale proposals regardless of sort order', async () => {
-    const NOW_MS = new Date('2026-06-29T12:00:00.000Z').getTime();
-    vi.setSystemTime(NOW_MS);
+    vi.setSystemTime(TEST_NOW_MS);
 
-    const staleDate = new Date(NOW_MS - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const staleDate = new Date(TEST_NOW_MS - 10 * 24 * 60 * 60 * 1000).toISOString();
     const stale = makeProposal('p-stale-regress', { createdAt: staleDate });
     const fresh = makeProposal('p-fresh-regress', {
-      createdAt: new Date(NOW_MS - 1 * 24 * 60 * 60 * 1000).toISOString(),
+      createdAt: new Date(TEST_NOW_MS - 1 * 24 * 60 * 60 * 1000).toISOString(),
     });
 
     mockListProposals
       .mockReturnValueOnce([fresh, stale]) // initial fetch (newest-first)
-      .mockReturnValueOnce([fresh]);        // after TTL cull
+      .mockReturnValueOnce([fresh, stale]); // authoritative refresh
 
     mockJudgeProposal.mockImplementation(async (p: Proposal) => shipVerdict(p.id));
 
@@ -397,10 +405,8 @@ describe('M263 no-regression: m259 TTL + auto-archive unaffected', () => {
 
     expect(out.ttlRejected).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-stale-regress', 'rejected', undefined, expect.stringContaining('TTL'),
+      'p-stale-regress', 'rejected', undefined, expect.stringContaining('TTL'), undefined, {}, 'pending',
     );
-
-    vi.useRealTimers();
   });
 
   it('auto-archive at K=3 still fires after sort reorder', async () => {
@@ -423,7 +429,7 @@ describe('M263 no-regression: m259 TTL + auto-archive unaffected', () => {
 
     expect(out.autoArchived).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-archive-regress', 'rejected', undefined, expect.stringContaining('auto-archived'),
+      'p-archive-regress', 'rejected', undefined, expect.stringContaining('auto-archived'), undefined, {}, 'pending',
     );
     expect(mockAutoMergeProposal).not.toHaveBeenCalledWith(
       'p-archive-regress', expect.anything(),

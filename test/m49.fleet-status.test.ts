@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
@@ -33,7 +34,13 @@ import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { createProposal, setStatus } from '../src/core/inbox/store.js';
-import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  signJudgeAttestation,
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+  signProvenance,
+} from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
@@ -61,6 +68,84 @@ import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/s
 import { writeDaemonActivity } from '../src/core/daemon/activity.js';
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
+
+function git(repo: string, args: string[]): string {
+  return execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  }).trim();
+}
+
+function seedAuthenticatedRealizedProposal(
+  home: string,
+  id: string,
+  observedAt: string,
+  createdAt = '2026-07-14T08:00:00.000Z',
+): Proposal {
+  const repo = join(home, `repo-${id}`);
+  mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['init', '--initial-branch=main', repo], { stdio: 'pipe' });
+  git(repo, ['config', 'user.email', 'status-test@ashlr.test']);
+  git(repo, ['config', 'user.name', 'Status Test']);
+  writeFileSync(join(repo, 'README.md'), '# base\n', 'utf8');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'base']);
+  const baseBeforeOid = git(repo, ['rev-parse', 'HEAD']);
+  git(repo, ['checkout', '-b', 'proposal']);
+  writeFileSync(join(repo, 'README.md'), '# landed\n', 'utf8');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'proposal']);
+  const proposalHeadOid = git(repo, ['rev-parse', 'HEAD']);
+  git(repo, ['checkout', 'main']);
+  git(repo, ['merge', '--no-ff', 'proposal', '-m', 'merge proposal']);
+  const mergeCommitOid = git(repo, ['rev-parse', 'HEAD']);
+  const diffHash = 'a'.repeat(64);
+  const unsignedIntent = {
+    schemaVersion: 1 as const,
+    branch: 'proposal',
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    diffHash,
+    evidencePackDigest: 'b'.repeat(64),
+    authorizationId: 'c'.repeat(32),
+    authorizedAt: observedAt,
+  };
+  const intentAttestation = signLocalMergeIntent(id, repo, unsignedIntent);
+  const localMergeIntent = { ...unsignedIntent, attestation: intentAttestation };
+  const unsignedRealized = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    mergeCommitOid,
+    observedAt,
+    proposalId: id,
+    diffHash,
+    intentAttestation,
+  };
+  const attestation = signLocalRealizedMergeReceipt(id, repo, unsignedRealized);
+  const inbox = join(home, '.ashlr', 'inbox');
+  mkdirSync(inbox, { recursive: true });
+  const proposal: Proposal = {
+    id,
+    repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Authenticated landed proposal',
+    summary: 'Landed-work projection fixture',
+    status: 'applied',
+    createdAt,
+    decidedAt: observedAt,
+    diffHash,
+    verifyResult: { passed: true, baseHead: baseBeforeOid, diffHash },
+    localMergeIntent,
+    realizedMerge: { ...unsignedRealized, attestation },
+  };
+  writeFileSync(join(inbox, `${id}.json`), JSON.stringify(proposal), 'utf8');
+  return proposal;
+}
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -586,7 +671,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.proposals.pending).toBe(0);
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
+    expect(s.proposals.authority).toMatchObject({
+      gate: 'unavailable',
+      detail: expect.stringContaining('missing source is absent'),
+    });
     expect(s.merges.recent).toBe(0);
+    expect(s.merges).toMatchObject({
+      reportedByTicks: 0,
+      sourceQuality: {
+        sourceState: 'missing',
+        sourcePresent: false,
+        complete: true,
+      },
+    });
     expect(s.judgeTraceSource).toMatchObject({
       sourceState: 'missing',
       sourcePresent: false,
@@ -692,6 +789,127 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('derives recent landed work once from authenticated proposal evidence, never tick aggregates', async () => {
+    await withFakeNow(new Date('2026-07-14T12:00:00.000Z'), async () => {
+      seedAuthenticatedRealizedProposal(
+        tmpHome,
+        'prop-landed-current-0001',
+        '2026-07-14T10:00:00.000Z',
+      );
+      seedAuthenticatedRealizedProposal(
+        tmpHome,
+        'prop-landed-future-0002',
+        '2099-07-14T10:00:00.000Z',
+      );
+      writeRunningDaemon(tmpHome, [
+        { ts: 'not-a-time', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'legacy', merged: 2 },
+        { ts: '2099-07-14T10:00:00.000Z', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'future', merged: 3 },
+        { ts: '2026-07-14T10:05:00.000Z', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'duplicate aggregate', merged: 4 },
+      ], '2026-07-14T10:05:00.000Z');
+
+      const status = await buildFleetStatus(baseConfig());
+      expect(status.merges).toMatchObject({
+        recent: 1,
+        reportedByTicks: 9,
+        sourceQuality: {
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          filesDiscovered: 2,
+          filesRead: 2,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        },
+      });
+    });
+  });
+
+  it('surfaces degraded proposal truth instead of presenting a healthy landed zero', async () => {
+    const inbox = join(tmpHome, '.ashlr', 'inbox');
+    mkdirSync(inbox, { recursive: true });
+    const observed = createProposal({
+      repo: '/tmp/repo',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Observed proposal from degraded source',
+      summary: 'This row is visible but cannot establish complete proposal authority.',
+    });
+    writeFileSync(join(inbox, 'broken.json'), '{not-json', 'utf8');
+    writeRunningDaemon(tmpHome, [
+      { ts: '2026-07-14T10:00:00.000Z', itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'legacy', merged: 5 },
+    ]);
+
+    const status = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true } }));
+    expect(status.proposals).toMatchObject({
+      pending: 1,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        invalidFiles: 1,
+      },
+      authority: { gate: 'unavailable' },
+    });
+    expect(status.proposals.sourceQuality?.stopReasons).toContain('invalid-file');
+    expect(status.autoMergeReadiness).toBeUndefined();
+    expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'auto-merge'))
+      .toMatchObject({ status: 'unavailable' });
+    expect(status.autonomyEffectiveness).toMatchObject({
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+    });
+    expect(status.autonomyEffectiveness?.summary).toContain('complete healthy proposal source');
+    expect(observed.status).toBe('pending');
+    expect(status.merges.recent).toBe(0);
+    expect(status.merges.reportedByTicks).toBe(5);
+    expect(status.merges.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      invalidFiles: 1,
+    });
+    expect(status.merges.sourceQuality?.stopReasons).toContain('invalid-file');
+  });
+
+  it('withholds auto-merge readiness when proposal enumeration stops at the file bound', async () => {
+    const inbox = join(tmpHome, '.ashlr', 'inbox');
+    mkdirSync(inbox, { recursive: true });
+    for (let index = 0; index < 513; index++) {
+      const id = `proposal-partial-source-${String(index).padStart(4, '0')}`;
+      const proposal: Proposal = {
+        id,
+        repo: '/tmp/repo',
+        origin: 'agent',
+        kind: 'patch',
+        title: `Partial source proposal ${index}`,
+        summary: 'Valid bounded proposal enumeration fixture.',
+        status: 'pending',
+        createdAt: '2026-07-14T10:00:00.000Z',
+      };
+      writeFileSync(join(inbox, `${id}.json`), JSON.stringify(proposal), 'utf8');
+    }
+    writeRunningDaemon(tmpHome, []);
+
+    const status = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true } }));
+
+    expect(status.proposals.pending).toBe(512);
+    expect(status.proposals.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      filesDiscovered: 513,
+      filesRead: 512,
+    });
+    expect(status.proposals.sourceQuality?.stopReasons).toContain('file-limit');
+    expect(status.proposals.authority).toMatchObject({
+      gate: 'unavailable',
+      detail: expect.stringContaining('complete healthy proposal source'),
+    });
+    expect(status.autoMergeReadiness).toBeUndefined();
+    expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'auto-merge'))
+      .toMatchObject({ status: 'unavailable' });
   });
 
   it('keeps degraded cutoff observations structurally outside readiness and mission authority', async () => {
@@ -1090,7 +1308,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 
-  it('excludes exactly linked applied and verified milestones from goal focus pressure', async () => {
+  it('keeps applied and verified milestones actionable without a realized witness', async () => {
     const repo = join(tmpHome, 'repo-focus-complete');
     writeBacklogSnapshot(tmpHome, repo, []);
     const proposal = createProposal(
@@ -1114,9 +1332,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     expect(s.goalFocus).toMatchObject({
       activeGoalCount: 1,
-      actionableActiveGoalCount: 0,
-      deferredNewGoalWork: false,
-      reason: 'below-threshold',
+      actionableActiveGoalCount: 1,
+      deferredNewGoalWork: true,
+      reason: 'active-goal-work-in-flight',
     });
   });
 
@@ -6130,36 +6348,45 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
 describe('buildFleetLaneLocks — pure derived lane status', () => {
   it('skips a linked milestone whose applied proposal has passing verification', () => {
-    const repo = '/tmp/repo-lanes';
-    const goal = makeGoalRecord(repo, 'goal-verified', 'active', 'proposed');
-    goal.milestones[0]!.proposalId = 'prop-verified';
+    const home = mkdtempSync(join(tmpdir(), 'ashlr-m49-lane-'));
+    const previousHome = process.env.HOME;
+    const previousAshlrHome = process.env.ASHLR_HOME;
+    try {
+      process.env.HOME = home;
+      process.env.ASHLR_HOME = join(home, '.ashlr');
+      const proposal = seedAuthenticatedRealizedProposal(
+        home,
+        'prop-verified',
+        '2026-07-03T01:00:00.000Z',
+        '2026-07-03T00:00:00.000Z',
+      );
+      const repo = proposal.repo!;
+      const goal = makeGoalRecord(repo, 'goal-verified', 'active', 'proposed');
+      goal.milestones[0]!.proposalId = proposal.id;
 
-    const status = buildFleetLaneLocks({
-      generatedAt: '2026-07-03T12:00:00.000Z',
-      goals: [goal],
-      proposals: [{
-        id: 'prop-verified',
-        repo,
-        origin: 'agent',
-        kind: 'patch',
-        title: 'Verified applied',
-        summary: 'metadata only',
-        status: 'applied',
-        createdAt: '2026-07-03T00:00:00.000Z',
-        verifyResult: { passed: true },
-      }],
-      visibleQueueItems: [
-        makeBacklogItem(repo, `goal:${goal.id}:${goal.milestones[0]!.id}`, 'Advance verified goal', 5, 'goal'),
-      ],
-    });
+      const status = buildFleetLaneLocks({
+        generatedAt: '2026-07-03T12:00:00.000Z',
+        goals: [goal],
+        proposals: [proposal],
+        visibleQueueItems: [
+          makeBacklogItem(repo, `goal:${goal.id}:${goal.milestones[0]!.id}`, 'Advance verified goal', 5, 'goal'),
+        ],
+      });
 
-    expect(status).toMatchObject({
-      active: 0,
-      staleInProgress: 0,
-      unverifiedApplied: 0,
-      lockedVisibleItems: 0,
-      samples: [],
-    });
+      expect(status).toMatchObject({
+        active: 0,
+        staleInProgress: 0,
+        unverifiedApplied: 0,
+        lockedVisibleItems: 0,
+        samples: [],
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+      else process.env.ASHLR_HOME = previousAshlrHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('keeps old unverified applied proposals visible when they are linked from a goal', () => {

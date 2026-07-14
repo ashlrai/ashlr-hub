@@ -269,7 +269,7 @@ describe('M197 observability — control.ts buildFleetActivity', () => {
     expect(digestWarns).toHaveLength(0);
   });
 
-  it('surfaces successful inbox:auto-merge audit events in recentMerges', async () => {
+  it('does not treat successful inbox:auto-merge audit events as landed work', async () => {
     mockBuildFleetDigest.mockResolvedValueOnce({
       running: false,
       lastTickAt: null,
@@ -302,13 +302,7 @@ describe('M197 observability — control.ts buildFleetActivity', () => {
 
     const result = await buildFleetActivity(minimalCfg());
 
-    expect(result.recentMerges).toHaveLength(1);
-    expect(result.recentMerges[0]).toMatchObject({
-      repo: '/tmp/repo',
-      proposalId: 'prop-123',
-      ts: '2026-07-01T00:00:00.000Z',
-      engine: null,
-    });
+    expect(result.recentMerges).toEqual([]);
   });
 });
 

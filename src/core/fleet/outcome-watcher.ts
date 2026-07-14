@@ -20,7 +20,6 @@
  * Never throws.
  */
 
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -28,8 +27,8 @@ import { join, dirname, resolve } from 'node:path';
 
 import type { AshlrConfig, Proposal } from '../types.js';
 import { readJudgeTraces } from './judge-trace.js';
-import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
-import { sanitizeGithubMergedAt } from '../inbox/remote-handoff-time.js';
+import { listProposals, listProposalsDetailed } from '../inbox/store.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 import { recordPostMergeObservation, type PostMergeOutcome } from './post-merge-observations.js';
 import { inspectPostMergeWindow } from './post-merge-window.js';
 import {
@@ -60,7 +59,6 @@ const DEFAULT_LOOKBACK_DAYS = 30;
 const DEFAULT_FOLLOWUP_WINDOW_DAYS = 7;
 const MAX_OUTCOME_PROPOSALS = 200;
 const MAX_OUTCOME_CANDIDATES_PER_PASS = 25;
-const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 function defaultStateFile(): string {
   return join(homedir(), '.ashlr', 'outcome-watcher.json');
@@ -91,15 +89,6 @@ function recordCompletedScan(stateFile: string, now: number, cursor?: Monitoring
   } catch {
     // The durable monitoring cursor supersedes this compatibility throttle.
   }
-}
-
-function git(repo: string, args: string[]): string {
-  return execFileSync('git', ['-C', repo, ...args], {
-    stdio: 'pipe',
-    timeout: 15_000,
-    maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    encoding: 'utf8',
-  });
 }
 
 function recordRealizedOutcome(
@@ -229,8 +218,8 @@ export async function scanRealWorldOutcomes(
     });
     type Candidate = {
       proposalId: string;
-      proposal?: Proposal;
-      cursor?: MonitoringOutcomeCandidateCursor;
+      proposal: Proposal;
+      cursor: MonitoringOutcomeCandidateCursor;
     };
     const candidates = new Map<string, Candidate>();
     const detailed = typeof listProposalsDetailed === 'function'
@@ -247,26 +236,32 @@ export async function scanRealWorldOutcomes(
       ? listProposals({ status: 'applied' })
       : []);
     if (productionCursorMode && proposalSourceIncomplete) return scan;
-    const strictProposals = new Map(appliedProposals.map((proposal) => [proposal.id, proposal]));
+    const strictProposals = new Map(
+      appliedProposals
+        .filter((proposal) => proposal.status === 'applied' && realizedMergeOf(proposal) !== null)
+        .map((proposal) => [proposal.id, proposal]),
+    );
     for (const trace of traces) {
       const proposal = strictProposals.get(trace.proposalId);
-      if (productionCursorMode && !proposal) continue;
+      if (!proposal) continue;
       if (!productionCursorMode && candidates.size >= MAX_OUTCOME_PROPOSALS) {
         scan.candidateLimitReached = true;
         scan.sourceComplete = false;
         break;
       }
-      candidates.set(trace.proposalId, { proposalId: trace.proposalId, ...(proposal ? { proposal } : {}) });
+      const merge = realizedMergeOf(proposal)!;
+      candidates.set(trace.proposalId, {
+        proposalId: trace.proposalId,
+        proposal,
+        cursor: { proposalId: trace.proposalId, mergeCommitOid: merge.mergeCommitOid },
+      });
     }
     for (const proposal of appliedProposals) {
-      const candidateAt = proposal.remoteHandoff?.updatedAt ?? proposal.createdAt;
+      if (proposal.status !== 'applied') continue;
+      const merge = realizedMergeOf(proposal);
+      if (!merge) continue;
+      const candidateAt = merge.source === 'github-host' ? merge.mergedAt : merge.observedAt;
       if (Date.parse(candidateAt) < sinceMs) continue;
-      const mergeCommitOid = proposal.remoteHandoff?.mergeCommitOid;
-      if (productionCursorMode && (typeof mergeCommitOid !== 'string' || !/^[a-f0-9]{40}$/i.test(mergeCommitOid))) {
-        scan.skipped++;
-        scan.sourceComplete = false;
-        continue;
-      }
       if (!productionCursorMode && candidates.size >= MAX_OUTCOME_PROPOSALS && !candidates.has(proposal.id)) {
         scan.candidateLimitReached = true;
         scan.sourceComplete = false;
@@ -275,7 +270,7 @@ export async function scanRealWorldOutcomes(
       candidates.set(proposal.id, {
         proposalId: proposal.id,
         proposal,
-        ...(mergeCommitOid ? { cursor: { proposalId: proposal.id, mergeCommitOid } } : {}),
+        cursor: { proposalId: proposal.id, mergeCommitOid: merge.mergeCommitOid },
       });
     }
     if (candidates.size === 0) {
@@ -331,9 +326,7 @@ export async function scanRealWorldOutcomes(
       monitoringCursor = cursorRead.cursor ?? buildMonitoringCursor(enrollment);
       monitoringCursorExpected = cursorRead.storedCursor;
       if (!monitoringCursor) return scan;
-      const cursorCandidates = [...candidates.values()]
-        .map((candidate) => candidate.cursor)
-        .filter((candidate): candidate is MonitoringOutcomeCandidateCursor => candidate !== undefined);
+      const cursorCandidates = [...candidates.values()].map((candidate) => candidate.cursor);
       const ordered = [...cursorCandidates]
         .sort((left, right) => outcomeCandidateKey(left).localeCompare(outcomeCandidateKey(right)));
       const currentCandidateSetDigest = candidateSetDigest(ordered);
@@ -361,7 +354,6 @@ export async function scanRealWorldOutcomes(
         .filter((candidate) => afterKey === null || outcomeCandidateKey(candidate).localeCompare(afterKey) > 0)
         .slice(0, MAX_OUTCOME_CANDIDATES_PER_PASS);
       const candidateByKey = new Map([...candidates.values()]
-        .filter((candidate): candidate is Candidate & { cursor: MonitoringOutcomeCandidateCursor } => candidate.cursor !== undefined)
         .map((candidate) => [outcomeCandidateKey(candidate.cursor), candidate]));
       selectedCandidates = [];
       for (const selectedCursor of selectedForSweep) {
@@ -396,38 +388,20 @@ export async function scanRealWorldOutcomes(
       const skippedBeforeCandidate = scan.skipped;
       scan.scanned++;
       try {
-        const proposal = candidate.proposal ?? loadProposal(candidate.proposalId);
-        const repo = proposal?.repo;
+        const proposal = candidate.proposal;
+        const repo = proposal.repo;
         if (!repo || !existsSync(repo) || (enrolled !== null && !enrolled.has(resolve(repo)))) {
           scan.skipped++;
           continue;
         }
 
-        // Merge commit via the auto-merge message convention (-F = fixed
-        // string). Take the OLDEST match: a `git revert` of the merge quotes
-        // the original subject (Revert "ashlr: auto-merge proposal <id>"), so
-        // the newest match can be the revert itself — the true merge commit
-        // always predates it.
-        let mergeSha = proposal.remoteHandoff?.mergeCommitOid ?? '';
-        if (!mergeSha) {
-          const expectedSubject = `ashlr: auto-merge proposal ${candidate.proposalId}`;
-          const mergeMatches = git(repo, ['log', '--format=%H%x09%s'])
-            .split('\n')
-            .map((line) => line.split('\t', 2))
-            .filter((parts) => parts[1] === expectedSubject)
-            .map((parts) => parts[0] ?? '')
-            .filter(Boolean);
-          mergeSha = mergeMatches.at(-1) ?? '';
-        }
-        if (!mergeSha) {
+        const merge = realizedMergeOf(proposal);
+        if (!merge) {
           scan.skipped++;
           continue;
         }
-        if (!/^[0-9a-f]{40}$/.test(mergeSha)) {
-          scan.skipped++;
-          continue;
-        }
-        const mergedAt = sanitizeGithubMergedAt(proposal.remoteHandoff?.mergedAt);
+        const mergeSha = merge.mergeCommitOid;
+        const mergedAt = merge.source === 'github-host' ? merge.mergedAt : undefined;
         const inspection = inspectPostMergeWindow({
           repo: resolve(repo),
           mergeCommit: mergeSha,

@@ -223,23 +223,36 @@ vi.mock('../src/core/inbox/remote-handoff.js', () => ({
 }));
 
 const mockBuildResourceStrategyReport = vi.fn();
-vi.mock('../src/core/autonomy/resource-strategy.js', () => ({
-  buildResourceStrategyReport: (...args: unknown[]) => mockBuildResourceStrategyReport(...args),
-  resourceStrategyToDaemonPlan: (report: { mode?: string; reasons?: string[] }) => {
-    const mode = report.mode ?? 'backlog-build';
-    const reason = report.reasons?.[0] ?? `mock ${mode}`;
-    if (mode === 'pause') {
-      return { mode, allowDispatch: false, forceLocalOnly: false, runAutoMergeMaintenance: false, reason };
-    }
-    if (mode === 'verify-only' || mode === 'auto-merge-ready') {
-      return { mode, allowDispatch: false, forceLocalOnly: false, runAutoMergeMaintenance: true, reason };
-    }
-    if (mode === 'local-only') {
-      return { mode, allowDispatch: true, forceLocalOnly: true, runAutoMergeMaintenance: true, reason };
-    }
-    return { mode: 'backlog-build', allowDispatch: true, forceLocalOnly: false, runAutoMergeMaintenance: true, reason };
-  },
-}));
+vi.mock('../src/core/autonomy/resource-strategy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/autonomy/resource-strategy.js')>();
+  return {
+    ...actual,
+    buildResourceStrategyReport: (...args: unknown[]) => mockBuildResourceStrategyReport(...args),
+  };
+});
+
+type StrategyMode = 'pause' | 'local-only' | 'verify-only' | 'backlog-build' | 'auto-merge-ready';
+
+function strategyReport(
+  mode: StrategyMode,
+  reason: string,
+  gate: 'ready' | 'unavailable' = 'ready',
+) {
+  return {
+    mode,
+    reasons: [reason],
+    fleet: {
+      proposalSource: {
+        gate,
+        sourceState: gate === 'ready' ? 'healthy' : 'degraded',
+        complete: gate === 'ready',
+        detail: gate === 'ready'
+          ? 'complete proposal source (0/0 files read)'
+          : 'auto-merge authority requires a complete healthy proposal source; degraded source is incomplete: invalid-file',
+      },
+    },
+  };
+}
 
 const mockRecommendRoute = vi.fn(async () => ({ backend: 'builtin', tier: 'local', reason: 'mock' }));
 const mockRecoverWithinBudget = vi.fn((_r: unknown, _c: unknown) => ({
@@ -301,6 +314,7 @@ import {
 } from '../src/core/daemon/state.js';
 import {
   createProposal,
+  inboxDir,
   pendingCount,
   setStatus,
 } from '../src/core/inbox/store.js';
@@ -447,7 +461,7 @@ beforeEach(() => {
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   mockReconcileRemoteHandoffs.mockReturnValue({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
-  mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
+  mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('backlog-build', 'mock backlog'));
   mockLoadBacklog.mockReturnValue(null);
   mockLoadQueuedAutonomyItems.mockReturnValue([]);
   mockLoadConfig.mockReset();
@@ -1462,7 +1476,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [generic, reslice],
     });
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['frontier budget constrained'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('local-only', 'frontier budget constrained'));
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
 
@@ -2383,6 +2397,38 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1a2d2: withheld direction authority blocks the drain after producer maintenance empties backlog', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [staleBase] = makeItems(repo.dir, 1);
+    const staleSelfHeal = {
+      ...staleBase!,
+      id: `${repo.dir}:self-heal:authority-blocked-green-build`,
+      source: 'self' as const,
+      title: 'Fix broken build in ashlrcode: authority blocked item',
+      detail: 'Stale self-heal item removed before the maintenance scheduling site.',
+      score: 9,
+      tags: ['self-heal', 'build', 'high-priority'],
+    };
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [staleSelfHeal] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] });
+    mockBuildResourceStrategyReport.mockResolvedValue(
+      strategyReport('backlog-build', 'continue dispatch', 'unavailable'),
+    );
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(result.directionMode).toBe('backlog-build');
+    expect(mockRunSelfHealCycleForRepos).toHaveBeenCalledTimes(1);
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('A1a2e: ordinary self-improve backlog does not trigger self-heal maintenance', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -2479,6 +2525,29 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1b2: withheld direction authority blocks maintenance for an initially empty backlog', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+    mockBuildResourceStrategyReport.mockResolvedValue(
+      strategyReport('backlog-build', 'continue dispatch', 'unavailable'),
+    );
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(result.directionMode).toBe('backlog-build');
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('A1c: empty backlog dry-run does not run auto-merge maintenance', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -2534,7 +2603,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A1e: autonomy control pause builds strategy snapshot and skips dispatch', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'mock guard block'));
     mockReconcileRemoteHandoffs.mockReturnValue({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
 
     const result = await tick(
@@ -2566,6 +2635,86 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(0);
   });
 
+  it('A1e1: strategy merge truth ignores tick reports and generic applied lifecycle state', async () => {
+    const { items } = enrollWithItems(1);
+    const proposal = createProposal({
+      repo: items[0]!.repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Applied without a realized merge',
+      summary: 'Lifecycle completion is not landed-work evidence.',
+      diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+    });
+    expect(setStatus(proposal.id, 'applied')).toBe(true);
+    seedTicks([{
+      ts: 'not-a-timestamp',
+      reason: 'ok',
+      itemsConsidered: 1,
+      proposalsCreated: 1,
+      merged: 7,
+      spentUsd: 0,
+    }]);
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'inspect truth'));
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autonomyControlLoop: true } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: {
+        buildFleetStatus?: () => Promise<{
+          merges?: { recent?: number; reportedByTicks?: number };
+          proposals?: {
+            applied?: number;
+            sourceQuality?: { sourceState?: string; complete?: boolean };
+            authority?: { gate?: string };
+          };
+        }>;
+      };
+    };
+    await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
+      proposals: {
+        applied: 1,
+        sourceQuality: { sourceState: 'healthy', complete: true },
+        authority: { gate: 'ready' },
+      },
+      merges: { recent: 0, reportedByTicks: 7 },
+    });
+  });
+
+  it('A1e1b: strategy snapshot bounds degraded proposal source quality and withholds authority', async () => {
+    enrollWithItems(1);
+    fs.mkdirSync(inboxDir(), { recursive: true });
+    fs.writeFileSync(join(inboxDir(), 'invalid-proposal.json'), '{not-json', 'utf8');
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'inspect degraded source'));
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autonomyControlLoop: true } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: { buildFleetStatus?: () => Promise<{ proposals?: Record<string, unknown> }> };
+    };
+    const status = await strategyOpts.deps?.buildFleetStatus?.();
+    expect(status?.proposals).toMatchObject({
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: ['invalid-file'],
+        invalidFiles: 1,
+      },
+      authority: {
+        gate: 'unavailable',
+        detail: expect.stringContaining('complete healthy proposal source'),
+      },
+    });
+    expect((status?.proposals?.sourceQuality as Record<string, unknown>)?.bytesRead).toBeUndefined();
+  });
+
   it('A1e2: production velocity supplies pending outcome records to the daemon strategy', async () => {
     const { items } = enrollWithItems(1);
     const proposal = createProposal({
@@ -2578,7 +2727,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       workItemId: items[0]!.id,
       workSource: items[0]!.source,
     });
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'mock guard block'));
 
     const result = await tick(
       {
@@ -2602,7 +2751,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A1f: autonomy control verify-only builds strategy snapshot and runs merge maintenance only', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'pending proposals need verification'));
 	    mockRunAutoMergePass.mockResolvedValue({
 	      attempted: 3,
 	      judgePerPass: 4,
@@ -2650,9 +2799,28 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1f1: real strategy conversion blocks verify-only maintenance without proposal authority', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue(
+      strategyReport('verify-only', 'pending proposals need verification', 'unavailable'),
+    );
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('verify-only');
+    expect(result.directionMode).toBe('verify-only');
+    expect(result.directionReason).toContain('complete healthy proposal source');
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('A1f2: Foundry defaults to executable verify-only control', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'pending proposals need verification'));
     mockRunAutoMergePass.mockResolvedValue({ attempted: 1, merged: 0 });
     mockReconcileRemoteHandoffs.mockReturnValue({ checked: 2, merged: 1, closed: 1, open: 0, unknown: 0 });
 
@@ -2678,7 +2846,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1f4: executable direction uses persisted enrolled backlog count before scanner refresh', async () => {
     const { repo, items } = enrollWithItems(1);
     mockLoadBacklog.mockReturnValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items });
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['cached count only'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'cached count only'));
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
@@ -2711,7 +2879,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         tags: ['self-heal', 'test'],
       },
     ]);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['cached count only'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('pause', 'cached count only'));
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
@@ -2730,7 +2898,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A1f3: explicit autonomyControlLoop=false keeps Foundry advisory-only', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'pending proposals need verification'));
 
     const result = await tick(
       {
@@ -2746,9 +2914,26 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
   });
 
+  it('A1f6: withheld direction authority blocks post-dispatch maintenance', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue(
+      strategyReport('backlog-build', 'continue dispatch', 'unavailable'),
+    );
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1 }), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.directionMode).toBe('backlog-build');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+  });
+
   it('A1g: autonomy control local-only clamps cloud routing to builtin dispatch', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['cloud resources constrained'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('local-only', 'cloud resources constrained'));
     mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock cloud' });
 
     const result = await tick(
@@ -2771,7 +2956,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A1h: autonomy control local-only preserves local-coder dispatch', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['frontier budget constrained'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('local-only', 'frontier budget constrained'));
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
 
@@ -5732,7 +5917,7 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
 
   it('E1b: runDaemon once=true reloads Foundry policy from disk before ticking', async () => {
     enrollWithItems(1);
-    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['caller cfg would enforce verify-only'] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'caller cfg would enforce verify-only'));
     mockLoadConfig.mockReturnValue({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
       foundry: { autonomyControlLoop: false, autoMerge: { enabled: true } },

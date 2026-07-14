@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  _setProposalReadRaceHookForTest,
+  createProposal,
   inboxDir,
   listProposals,
   listProposalsDetailed,
@@ -20,6 +22,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setProposalReadRaceHookForTest(undefined);
   vi.restoreAllMocks();
   fs.rmSync(home, { recursive: true, force: true });
   process.env.HOME = originalHome;
@@ -201,6 +204,86 @@ describe('M374 bounded detailed proposal enumeration', () => {
       stopReasons: ['per-file-byte-limit'],
     });
     expect(listProposalsDetailed({ maxFiles: 1, requireComplete: true }).proposals).toEqual([]);
+  });
+
+  it('uses the same authoritative per-file ceiling for writes and default reads', () => {
+    const oversizedSummary = 'x'.repeat(4 * 1024 * 1024);
+    const written = createProposal({
+      repo: '/tmp/repo',
+      origin: 'manual',
+      kind: 'patch',
+      title: 'oversized writer',
+      summary: oversizedSummary,
+    });
+    expect(written).toMatchObject({
+      status: 'rejected',
+      decisionReason: 'proposal persistence failed',
+    });
+    expect(fs.existsSync(path.join(inboxDir(), `${written.id}.json`))).toBe(false);
+
+    const external = seed('oversized.json', proposal('oversized', { summary: oversizedSummary }));
+    expect(fs.statSync(external).size).toBeGreaterThan(4 * 1024 * 1024);
+    expect(listProposalsDetailed({ requireComplete: true })).toMatchObject({
+      proposals: [],
+      sourceState: 'degraded',
+      complete: false,
+      filesDiscovered: 1,
+      filesRead: 1,
+      stopReasons: ['per-file-byte-limit'],
+    });
+  });
+
+  it('rejects an opened proposal when its pathname is replaced after the read', () => {
+    const original = seed('target.json', proposal('target'));
+    const displaced = path.join(home, 'target.displaced');
+    let replaced = false;
+    _setProposalReadRaceHookForTest((point, filePath) => {
+      if (!replaced && point === 'after-file-read' && filePath === original) {
+        replaced = true;
+        fs.renameSync(original, displaced);
+        fs.writeFileSync(
+          original,
+          JSON.stringify(proposal('target', { title: 'replacement' })),
+          'utf8',
+        );
+      }
+    });
+
+    const result = listProposalsDetailed();
+    expect(replaced).toBe(true);
+    expect(result).toMatchObject({
+      proposals: [],
+      sourceState: 'degraded',
+      complete: false,
+      filesDiscovered: 1,
+      filesRead: 1,
+      bytesRead: 0,
+      stopReasons: ['io-error'],
+    });
+    expect(result.unreadableFiles).toBeGreaterThan(0);
+  });
+
+  it('withholds authoritative rows when a proposal is added after directory enumeration', () => {
+    seed('a.json', proposal('a'));
+    let added = false;
+    _setProposalReadRaceHookForTest((point) => {
+      if (!added && point === 'after-directory-scan') {
+        added = true;
+        seed('b.json', proposal('b'));
+      }
+    });
+
+    const result = listProposalsDetailed({ requireComplete: true });
+    expect(added).toBe(true);
+    expect(result).toMatchObject({
+      proposals: [],
+      sourceState: 'degraded',
+      complete: false,
+      filesDiscovered: 1,
+      filesRead: 1,
+      stopReasons: ['io-error'],
+    });
+    expect(result.unreadableFiles).toBeGreaterThan(0);
   });
 
   it('detects replacement of the inbox directory during enumeration', () => {

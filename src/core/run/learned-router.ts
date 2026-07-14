@@ -28,10 +28,24 @@
  * avoid importing from merge.ts (daemon-no-primitive invariant).
  */
 
-import type { AshlrConfig, EngineId, EngineTier, RunActionCounts, RunEstimate, WorkItem } from '../types.js';
+import type {
+  AshlrConfig,
+  DecisionEntry,
+  EngineId,
+  EngineTier,
+  Proposal,
+  RunActionCounts,
+  RunEstimate,
+  WorkItem,
+} from '../types.js';
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
+import { listProposalsDetailed } from '../inbox/store.js';
+import {
+  authenticatedRealizedMergeOf,
+} from '../inbox/realized-merge.js';
+import { verifyProducerProvenanceV2 } from '../foundry/provenance.js';
 import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
 import { engineInstalled } from './engines.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
@@ -880,30 +894,6 @@ export interface EngineScore {
  */
 export type EngineScoreMap = Map<string, EngineScore>;
 
-function legacyTaskClassFromProposalId(proposalId?: string): string | null {
-  const parts = (proposalId ?? '').split(':');
-  return parts.length >= 2 && parts[1] ? parts[1] : null;
-}
-
-function taskClassFromWorkItemId(workItemId?: string): string | null {
-  if (!workItemId) return null;
-  const parts = workItemId.split(':');
-  return parts.length >= 3 && parts[1] ? parts[1] : null;
-}
-
-function taskClassFromDecisionEntry(entry: {
-  workSource?: string;
-  workItemId?: string;
-  proposalId?: string;
-}): string {
-  return (
-    entry.workSource ||
-    taskClassFromWorkItemId(entry.workItemId) ||
-    legacyTaskClassFromProposalId(entry.proposalId) ||
-    '*'
-  );
-}
-
 function stableLearnedSampleCount(weightedTotal: number): number {
   const missing = LEARNED_ROUTING_MIN_SAMPLES - weightedTotal;
   return missing > 0 && missing <= LEARNED_ROUTING_SAMPLE_FLOOR_EPSILON
@@ -921,20 +911,123 @@ function scoreFromWeightedCounts(ship: number, reject: number): { samples: numbe
   return { samples, score };
 }
 
+interface RealizedProposalAuthority {
+  proposal: Proposal;
+  observedAtMs: number;
+}
+
+interface ProposalAuthorities {
+  producers: Map<string, Proposal>;
+  realized: Map<string, RealizedProposalAuthority>;
+}
+
+function proposalAuthorities(nowMs: number): ProposalAuthorities | null {
+  const read = listProposalsDetailed({ requireComplete: true });
+  if (!read.complete || read.sourceState !== 'healthy') return null;
+  const producers = new Map<string, Proposal>();
+  const realized = new Map<string, RealizedProposalAuthority>();
+  for (const proposal of read.proposals) {
+    if (!proposal.engineModel || !proposal.workSource ||
+      !verifyProducerProvenanceV2(proposal).ok) continue;
+    producers.set(proposal.id, proposal);
+    const evidence = authenticatedRealizedMergeOf(proposal);
+    if (!evidence) continue;
+    const timestamp = evidence.source === 'github-host'
+      ? evidence.reconciliation.observedAt
+      : evidence.observedAt;
+    const parsed = Date.parse(timestamp);
+    if (Number.isFinite(parsed) && parsed <= nowMs) {
+      realized.set(proposal.id, { proposal, observedAtMs: parsed });
+    }
+  }
+  return { producers, realized };
+}
+
+function authoritativeMergeTimes(
+  entries: readonly DecisionEntry[],
+  realized: ReadonlyMap<string, RealizedProposalAuthority>,
+  sinceMs?: number,
+): Map<string, string> {
+  const mergedAt = new Map<string, string>();
+  const canonicalMerged = new Set<string>();
+  const latestRejection = new Map<string, DecisionEntry>();
+  for (const entry of entries) {
+    if (entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1') {
+      canonicalMerged.add(entry.proposalId);
+    }
+    if (entry.action !== 'rejected') continue;
+    const existing = latestRejection.get(entry.proposalId);
+    if (isNewerDecision(entry, existing)) latestRejection.set(entry.proposalId, entry);
+  }
+  for (const proposalId of canonicalMerged) {
+    const authority = realized.get(proposalId);
+    if (!authority || (sinceMs !== undefined && authority.observedAtMs < sinceMs)) continue;
+    const rejection = latestRejection.get(proposalId);
+    const rejectionMs = rejection ? Date.parse(rejection.ts) : Number.NaN;
+    if (Number.isFinite(rejectionMs) && rejectionMs > authority.observedAtMs) {
+      continue;
+    }
+    mergedAt.set(proposalId, new Date(authority.observedAtMs).toISOString());
+  }
+  return mergedAt;
+}
+
+function proposalProducer(
+  proposal: Proposal,
+  taskClass: string,
+): { engine: EngineId; model: string | null } | null {
+  if (proposal.workSource !== taskClass || !proposal.engineModel) return null;
+  const separator = proposal.engineModel.indexOf(':');
+  if (separator <= 0 || separator === proposal.engineModel.length - 1) return null;
+  const engine = proposal.engineModel.slice(0, separator) as EngineId;
+  const rawModel = proposal.engineModel.slice(separator + 1);
+  const model = canonicalModelTag(engine, rawModel) || null;
+  return { engine, model };
+}
+
+function isNewerDecision(candidate: DecisionEntry, existing: DecisionEntry | undefined): boolean {
+  if (existing === undefined) return true;
+  const candidateMs = Date.parse(candidate.ts);
+  const existingMs = Date.parse(existing.ts);
+  if (!Number.isFinite(candidateMs)) return false;
+  if (!Number.isFinite(existingMs)) return true;
+  return candidateMs > existingMs;
+}
+
+function latestJudgePredictions(entries: readonly DecisionEntry[]): DecisionEntry[] {
+  const latest = new Map<string, DecisionEntry>();
+  for (const entry of entries) {
+    if (entry.action !== 'judged') continue;
+    const verdict = entry.verdict ?? '';
+    if (!SHIP_VERDICTS.has(verdict) && !REJECT_VERDICTS.has(verdict)) continue;
+    const existing = latest.get(entry.proposalId);
+    if (isNewerDecision(entry, existing)) latest.set(entry.proposalId, entry);
+  }
+  return [...latest.values()];
+}
+
+function recencyWeight(ts: string, nowMs: number): number {
+  const parsed = Date.parse(ts);
+  const ageMs = Number.isFinite(parsed) ? nowMs - parsed : 0;
+  return Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+}
+
 /**
  * M240: Build a score map for a given `taskClass` from the decisions ledger.
  *
  * Algorithm:
  *  1. Read recent 'judged' decisions (sinceMs = now - 90 days max).
- *  2. For each entry, extract engine + model + verdict + ts.
- *  3. Derive taskClass from canonical workSource/workItemId, with legacy
- *     proposalId parsing only for old ledgers.
+ *  2. Join each outcome to a complete proposal-store snapshot.
+ *  3. Derive producer, model, and task class only from provenance-v2 proposals.
  *  4. Apply recency weight: w = 2^(-(age_ms / HALF_LIFE_MS)).
- *  5. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
- *  6. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
+ *  5. Count negative judge predictions only when their proposal has signed
+ *     producer provenance. Positive credit additionally requires a canonical
+ *     merged row and authenticated realized-merge witness.
+ *  6. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
+ *  7. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
  *     when stabilized totalWeight < LEARNED_ROUTING_MIN_SAMPLES.
  *
- * PURE: reads ledger files but never mutates them. Never throws.
+ * PURE: reads ledger/proposal files but never mutates them. Never throws.
  * Cold-start (empty ledger or no matching entries) → returns an empty map
  * (all calls to `engineScoreFor` return 0.5).
  *
@@ -952,40 +1045,52 @@ export function buildEngineScores(
     const now = nowMs ?? Date.now();
     const windowMs = sinceMs ?? now - 90 * 24 * 60 * 60 * 1000;
 
-    const entries = readDecisions({ sinceMs: windowMs });
+    const entries = readDecisions({ requireComplete: true });
+    const authorities = proposalAuthorities(now);
+    if (authorities === null) return map;
+    const mergedAt = authoritativeMergeTimes(entries, authorities.realized, windowMs);
 
     // Accumulators: key → { ship: number, reject: number } (recency-weighted)
     const acc = new Map<string, { engine: EngineId; model: string | null; ship: number; reject: number }>();
 
-    for (const entry of entries) {
-      if (entry.action !== 'judged') continue;
-      if (!entry.engine) continue;
+    for (const [proposalId, mergedTs] of mergedAt) {
+      const authority = authorities.realized.get(proposalId);
+      const producer = authority ? proposalProducer(authority.proposal, taskClass) : null;
+      if (!producer) continue;
+      const key = producer.model ? `${producer.engine}:${producer.model}` : producer.engine;
+      const slot = acc.get(key) ?? {
+        engine: producer.engine,
+        model: producer.model,
+        ship: 0,
+        reject: 0,
+      };
+      slot.ship += recencyWeight(mergedTs, now);
+      acc.set(key, slot);
+    }
 
+    // Judge and proposed ledger identities are not attested producer identities.
+    // Even negative evidence is attributed only through the signed proposal.
+    for (const entry of latestJudgePredictions(entries)) {
+      const entryMs = Date.parse(entry.ts);
+      if (!Number.isFinite(entryMs) || entryMs > now) continue;
       const verdict = entry.verdict ?? '';
-      const isShip = SHIP_VERDICTS.has(verdict);
       const isReject = REJECT_VERDICTS.has(verdict);
-      if (!isShip && !isReject) continue;
+      if (!isReject || mergedAt.has(entry.proposalId)) continue;
+      if (isReject && Date.parse(entry.ts) < windowMs) continue;
 
-      const entryTaskClass = taskClassFromDecisionEntry(entry);
+      const proposal = authorities.producers.get(entry.proposalId);
+      const producer = proposal ? proposalProducer(proposal, taskClass) : null;
+      if (!producer) continue;
+      const key = producer.model ? `${producer.engine}:${producer.model}` : producer.engine;
 
-      // Only count entries that match the requested taskClass (or wildcard).
-      if (entryTaskClass !== taskClass && entryTaskClass !== '*') continue;
-
-      const engine = entry.engine as EngineId;
-      const model = entry.model ?? null;
-      const key = model ? `${engine}:${model}` : engine;
-
-      // Recency weight: exponential decay
-      const ageMs = now - Date.parse(entry.ts);
-      const weight = Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+      const weight = recencyWeight(entry.ts, now);
 
       let slot = acc.get(key);
       if (!slot) {
-        slot = { engine, model, ship: 0, reject: 0 };
+        slot = { engine: producer.engine, model: producer.model, ship: 0, reject: 0 };
         acc.set(key, slot);
       }
-      if (isShip) slot.ship += weight;
-      else slot.reject += weight;
+      slot.reject += weight;
     }
 
     // Convert accumulators to EngineScore
@@ -1072,16 +1177,13 @@ export function sortEnginesByScore(
 /**
  * M323: Build a PRODUCER-attributed score map for `taskClass`.
  *
- * M240's buildEngineScores keys on the 'judged' entries' engine/model — which
- * is the JUDGE's identity (all three judged record sites write judgeEngine
- * into both fields), so producer engines never matched a key and the learned
- * bias stayed effectively neutral. This variant joins each judged verdict
- * back to its 'proposed' entry by proposalId and accumulates the
- * recency-weighted ship/reject counts onto the PRODUCER's
+ * Producer identity comes exclusively from the persisted proposal's signed
+ * provenance. The scorer accumulates recency-weighted realized merges plus
+ * negative judge verdicts onto the producer's
  * `${engine}:${canonicalTag}` key — canonicalModelTag collapses ledger
  * spelling variants ('claude:claude-sonnet-5' vs 'sonnet-5') onto one key.
  *
- * PURE read of the ledger; never throws; cold start → empty map.
+ * PURE read of the ledger and proposal store; never throws; cold start → empty map.
  */
 export function buildProducerScores(
   taskClass: string,
@@ -1092,66 +1194,58 @@ export function buildProducerScores(
   try {
     const now = nowMs ?? Date.now();
     const windowStart = sinceMs ?? now - 90 * 24 * 60 * 60 * 1000;
-    const entries = readDecisions({ sinceMs: windowStart });
+    const entries = readDecisions({ requireComplete: true });
     if (entries.length === 0) return map;
 
-    // Pass 1: producer identity per proposal (from 'proposed' entries).
-    // Conflicting identities make the proposal ambiguous regardless of source
-    // labels, so neither producer can inherit its verdict or later outcome.
-    const producerCandidates = new Map<
-      string,
-      { engine: EngineId; tag: string; eligible: boolean }
-    >();
-    const ambiguousProducerIds = new Set<string>();
-    for (const e of entries) {
-      if (e.action !== 'proposed' || !e.engine) continue;
-      const entryTaskClass = taskClassFromDecisionEntry(e);
-      const tag = canonicalModelTag(e.engine, e.model ?? '');
-      const producer = {
-        engine: e.engine as EngineId,
-        tag,
-        eligible: entryTaskClass === taskClass || entryTaskClass === '*',
-      };
-      const existing = producerCandidates.get(e.proposalId);
-      if (existing && (existing.engine !== producer.engine || existing.tag !== producer.tag)) {
-        producerCandidates.delete(e.proposalId);
-        ambiguousProducerIds.add(e.proposalId);
-        continue;
-      }
-      if (!ambiguousProducerIds.has(e.proposalId) && !existing) {
-        producerCandidates.set(e.proposalId, producer);
-      } else if (existing && producer.eligible && !existing.eligible) {
-        producerCandidates.set(e.proposalId, { ...existing, eligible: true });
-      }
-    }
-    const producerOf = new Map<string, { engine: EngineId; tag: string }>();
-    for (const [proposalId, producer] of producerCandidates) {
-      if (producer.eligible) producerOf.set(proposalId, producer);
-    }
-
-    // Pass 2: judged verdicts joined back to the producer.
+    // Authoritative merges and negative judgments join back to the signed
+    // proposal. A Gate 7 ship is prediction evidence only; it cannot create a
+    // producer success sample until Gate 8/application records `merged`.
     const acc = new Map<
       string,
       { engine: EngineId; model: string | null; ship: number; reject: number }
     >();
-    for (const e of entries) {
-      if (e.action !== 'judged') continue;
-      const producer = producerOf.get(e.proposalId);
-      if (!producer) continue;
-      const verdict = e.verdict ?? '';
-      const isShip = SHIP_VERDICTS.has(verdict);
-      const isReject = REJECT_VERDICTS.has(verdict);
-      if (!isShip && !isReject) continue;
-      const key = producer.tag ? `${producer.engine}:${producer.tag}` : String(producer.engine);
-      const ageMs = now - Date.parse(e.ts);
-      const weight = Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+    const authorities = proposalAuthorities(now);
+    if (authorities === null) return map;
+    const mergedAt = authoritativeMergeTimes(entries, authorities.realized, windowStart);
+
+    const addOutcome = (
+      proposalId: string,
+      outcomeTs: string,
+      outcome: 'ship' | 'reject',
+    ): void => {
+      const proposal = authorities.producers.get(proposalId);
+      const producer = proposal ? proposalProducer(proposal, taskClass) : null;
+      if (!producer) return;
+      const model = producer.model;
+      const key = model ? `${producer.engine}:${model}` : String(producer.engine);
+      const weight = recencyWeight(outcomeTs, now);
       let slot = acc.get(key);
       if (!slot) {
-        slot = { engine: producer.engine, model: producer.tag || null, ship: 0, reject: 0 };
+        slot = { engine: producer.engine, model, ship: 0, reject: 0 };
         acc.set(key, slot);
       }
-      if (isShip) slot.ship += weight;
+      if (outcome === 'ship') slot.ship += weight;
       else slot.reject += weight;
+    };
+
+    for (const [proposalId, mergedTs] of mergedAt) {
+      addOutcome(proposalId, mergedTs, 'ship');
+    }
+
+    // Use at most one negative prediction per unmerged proposal. Decisions are
+    // normally newest-first, but select by timestamp so injected/test readers
+    // cannot accidentally make ordering authoritative.
+    const rejectedAt = new Map<string, DecisionEntry>();
+    for (const e of latestJudgePredictions(entries)) {
+      if (mergedAt.has(e.proposalId)) continue;
+      if (!REJECT_VERDICTS.has(e.verdict ?? '')) continue;
+      const decisionMs = Date.parse(e.ts);
+      if (!Number.isFinite(decisionMs) || decisionMs < windowStart || decisionMs > now) continue;
+      const existing = rejectedAt.get(e.proposalId);
+      if (isNewerDecision(e, existing)) rejectedAt.set(e.proposalId, e);
+    }
+    for (const [proposalId, rejected] of rejectedAt) {
+      addOutcome(proposalId, rejected.ts, 'reject');
     }
 
     // Legacy post-merge trace patches carry no causal basis or complete cohort

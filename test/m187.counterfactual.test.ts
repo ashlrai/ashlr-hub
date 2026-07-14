@@ -20,9 +20,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Proposal, DecisionEntry } from '../src/core/types.js';
-import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
+import type { JudgeProposalSource, JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 import type { CounterfactualOpts } from '../src/core/fleet/counterfactual.js';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -50,7 +54,7 @@ let _seq = 0;
 function pid(): string { return `p-m187-${_seq++}`; }
 
 function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
-  return {
+  const trace: JudgeTrace = {
     proposalId: pid(),
     judgeEngine: 'historical-judge',
     verdict: 'ship',
@@ -59,8 +63,11 @@ function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
     promptContext: '',
     ts: new Date().toISOString(),
     outcome: 'merged',
+    outcomeBasis: 'realized-merge-v1',
     ...overrides,
   };
+  if (trace.outcome !== 'merged') delete trace.outcomeBasis;
+  return trace;
 }
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
@@ -76,6 +83,63 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     diff: '+const x = 1;\n',
     ...overrides,
   } as Proposal;
+}
+
+function makeAuthenticatedMergedProposal(
+  id: string,
+  overrides: Partial<Proposal> = {},
+  observedAt = new Date().toISOString(),
+): Proposal {
+  const repo = path.join(tmpHome, `repo-${id}`);
+  fs.mkdirSync(repo, { recursive: true, mode: 0o700 });
+  const diffHash = 'd'.repeat(64);
+  const baseBeforeOid = 'a'.repeat(40);
+  const proposalHeadOid = 'b'.repeat(40);
+  const mergeCommitOid = 'c'.repeat(40);
+  const unsignedIntent = {
+    schemaVersion: 1 as const,
+    branch: `ashlr/merge/${id}`,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    diffHash,
+    evidencePackDigest: 'e'.repeat(64),
+    authorizationId: '1'.repeat(32),
+    authorizedAt: new Date().toISOString(),
+  };
+  const localMergeIntent = {
+    ...unsignedIntent,
+    attestation: signLocalMergeIntent(id, repo, unsignedIntent),
+  };
+  const unsignedWitness = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid,
+    proposalHeadOid,
+    mergeCommitOid,
+    observedAt,
+    proposalId: id,
+    diffHash,
+    intentAttestation: localMergeIntent.attestation,
+  };
+  return makeProposal({
+    id,
+    repo,
+    status: 'applied',
+    diffHash,
+    verifyResult: { passed: true, baseHead: baseBeforeOid, diffHash },
+    localMergeIntent,
+    realizedMerge: {
+      ...unsignedWitness,
+      attestation: signLocalRealizedMergeReceipt(id, repo, unsignedWitness),
+    },
+    ...overrides,
+  });
+}
+
+function healthyProposalSource(proposals: Proposal[]): JudgeProposalSource {
+  return { sourceState: 'healthy', complete: true, proposals };
 }
 
 function makeVerdict(verdict: ManagerVerdict['verdict']): ManagerVerdict {
@@ -106,10 +170,18 @@ function buildOpts(args: {
   decisions?: Record<string, DecisionEntry[]>;
   maxSamples?: number;
   judgeCalls?: { n: number };
+  proposalSource?: JudgeProposalSource;
+  proposalReads?: { n: number };
+  persistFn?: CounterfactualOpts['_persistFn'];
 }): CounterfactualOpts {
   const proposals =
     args.proposals ??
-    Object.fromEntries(args.traces.map((t) => [t.proposalId, makeProposal({ id: t.proposalId })]));
+    Object.fromEntries(args.traces.map((t) => [
+      t.proposalId,
+      t.outcome === 'merged'
+        ? makeAuthenticatedMergedProposal(t.proposalId)
+        : makeProposal({ id: t.proposalId }),
+    ]));
 
   const judgeClient =
     args.judgeClient === undefined
@@ -134,9 +206,15 @@ function buildOpts(args: {
     },
     _readDecisionsFn: (opts) =>
       (opts?.proposalId && args.decisions?.[opts.proposalId]) || [],
-    _loadProposalFn: (id) => proposals[id] ?? null,
+    _readProposalsFn: () => {
+      if (args.proposalReads) args.proposalReads.n++;
+      return args.proposalSource ?? healthyProposalSource(
+        Object.values(proposals).filter((proposal): proposal is Proposal => proposal !== null),
+      );
+    },
     _resolveJudgeFn: () => judgeClient,
     _judgeProposalFn: judgeFn,
+    _persistFn: args.persistFn,
   };
 }
 
@@ -196,6 +274,127 @@ describe('m187 — cohenKappa', () => {
 // ---------------------------------------------------------------------------
 
 describe('m187 — samples only outcome-linked proposals', () => {
+  it('ignores an unqualified historical merged outcome', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const trace = makeTrace({ proposalId: 'legacy-unqualified' });
+    delete trace.outcomeBasis;
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [trace],
+      judgeCalls: calls,
+    }));
+
+    expect(report.replayed).toBe(0);
+    expect(report.agreements).toBe(0);
+    expect(calls.n).toBe(0);
+  });
+
+  it('fails closed on a malformed merged basis injected in memory', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const trace = makeTrace({ proposalId: 'malformed-basis' });
+    trace.outcomeBasis = 'operator-said-so' as never;
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [trace],
+      judgeCalls: calls,
+    }));
+
+    expect(report.replayed).toBe(0);
+    expect(calls.n).toBe(0);
+  });
+
+  it('replays only merged traces backed by current authenticated proposal witnesses', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const ids = ['valid-merge', 'forged-merge', 'stale-merge', 'stripped-merge'];
+    const traces = ids.map((proposalId) => makeTrace({ proposalId }));
+    const valid = makeAuthenticatedMergedProposal(ids[0]!);
+    const forged = makeAuthenticatedMergedProposal(ids[1]!);
+    forged.realizedMerge!.attestation = '0'.repeat(64);
+    const stale = makeAuthenticatedMergedProposal(
+      ids[2]!,
+      {},
+      new Date(Date.now() + 30_000).toISOString(),
+    );
+    const stripped = makeAuthenticatedMergedProposal(ids[3]!);
+    delete stripped.realizedMerge;
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces,
+      proposalSource: healthyProposalSource([valid, forged, stale, stripped]),
+      judgeCalls: calls,
+    }));
+
+    expect(report.details.map((detail) => detail.proposalId)).toEqual(['valid-merge']);
+    expect(report.replayed).toBe(1);
+    expect(calls.n).toBe(1);
+  });
+
+  it.each([
+    { sourceState: 'degraded' as const, complete: false },
+    { sourceState: 'healthy' as const, complete: false },
+  ])('withholds calibration and persistence for $sourceState complete=$complete proposal input', async (quality) => {
+    const { runCounterfactualReplay, calibrationReportPath } = await import(
+      '../src/core/fleet/counterfactual.js'
+    );
+    const trace = makeTrace({ proposalId: 'withheld-source' });
+    const persist = vi.fn();
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [trace],
+      proposalSource: {
+        ...quality,
+        proposals: [makeAuthenticatedMergedProposal(trace.proposalId)],
+      },
+      judgeCalls: calls,
+      persistFn: persist,
+    }));
+
+    expect(report).toMatchObject({
+      replayed: 0,
+      agreements: 0,
+      disagreements: 0,
+      kappaByJudge: {},
+      calibrationBySource: {},
+      details: [],
+    });
+    expect(report.notes.join(' ')).toMatch(/calibration withheld.*degraded or incomplete/i);
+    expect(calls.n).toBe(0);
+    expect(persist).not.toHaveBeenCalled();
+    expect(fs.existsSync(calibrationReportPath())).toBe(false);
+  });
+
+  it('takes one proposal snapshot before replay and persistence', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const proposalReads = { n: 0 };
+    const events: string[] = [];
+
+    const opts = buildOpts({
+      traces: [makeTrace({ proposalId: 'single-snapshot' })],
+      proposalReads,
+      persistFn: () => { events.push('persist'); },
+    });
+    const readSnapshot = opts._readProposalsFn!;
+    opts._readProposalsFn = () => {
+      events.push('snapshot');
+      return readSnapshot();
+    };
+    const judgeProposal = opts._judgeProposalFn!;
+    opts._judgeProposalFn = async (...args) => {
+      events.push('replay');
+      return judgeProposal(...args);
+    };
+
+    const report = await runCounterfactualReplay(CFG, opts);
+
+    expect(report.replayed).toBe(1);
+    expect(proposalReads.n).toBe(1);
+    expect(events).toEqual(['snapshot', 'replay', 'persist']);
+  });
+
   it('ignores traces without a recorded outcome', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
@@ -230,6 +429,48 @@ describe('m187 — samples only outcome-linked proposals', () => {
 // ---------------------------------------------------------------------------
 
 describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
+  it('suppresses durable trace recording for synthetic replay judgments', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const judgeOptions: unknown[] = [];
+    const judgeFn: NonNullable<CounterfactualOpts['_judgeProposalFn']> = async (
+      _proposal,
+      _cfg,
+      _client,
+      options,
+    ) => {
+      judgeOptions.push(options);
+      return makeVerdict('ship');
+    };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [makeTrace({ proposalId: 'ephemeral-replay', outcome: 'merged' })],
+      judgeFn,
+    }));
+
+    expect(report.replayed).toBe(1);
+    expect(judgeOptions).toEqual([{ recordTrace: false }]);
+  });
+
+  it('replays a proposal once when retries produced multiple trace ids', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const calls = { n: 0 };
+    const older = makeTrace({
+      traceId: 'trace-retry-old', proposalId: 'retry-once', outcome: 'merged',
+      ts: '2025-01-01T00:00:00.000Z', outcomeAt: '2025-01-02T00:00:00.000Z',
+    });
+    const newer = makeTrace({
+      traceId: 'trace-retry-new', proposalId: 'retry-once', outcome: 'merged',
+      ts: '2025-01-03T00:00:00.000Z', outcomeAt: '2025-01-04T00:00:00.000Z',
+    });
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [older, newer], judgeCalls: calls,
+    }));
+
+    expect(report.replayed).toBe(1);
+    expect(calls.n).toBe(1);
+    expect(report.details).toHaveLength(1);
+  });
+
   it('counts an agreement when fresh verdict intent matches the outcome intent', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
@@ -299,8 +540,8 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
       makeTrace({ proposalId: 's2', outcome: 'merged' }),
     ];
     const proposals: Record<string, Proposal> = {
-      s1: makeProposal({ id: 's1', engineModel: 'codex:gpt-5.5' }),
-      s2: makeProposal({ id: 's2', engineModel: 'claude:opus' }),
+      s1: makeAuthenticatedMergedProposal('s1', { engineModel: 'codex:gpt-5.5' }),
+      s2: makeAuthenticatedMergedProposal('s2', { engineModel: 'claude:opus' }),
     };
     const report = await runCounterfactualReplay(CFG, buildOpts({
       traces,
@@ -320,7 +561,7 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
     // Proposal has no engineModel and origin will be used unless ledger wins.
     // Here proposal has no engineModel/origin sentinel; ledger supplies model.
     const trace = makeTrace({ proposalId: 'led-1', outcome: 'merged' });
-    const proposal = makeProposal({ id: 'led-1' });
+    const proposal = makeAuthenticatedMergedProposal('led-1');
     delete (proposal as Partial<Proposal>).engineModel;
     delete (proposal as Partial<Proposal>).origin;
 
@@ -350,6 +591,7 @@ describe('m187 — persists calibration.json', () => {
       traces: [makeTrace({ proposalId: 'persist-1', outcome: 'merged' })],
       verdictFor: () => 'ship',
     }));
+    expect(report.replayed).toBe(1);
 
     const p = calibrationReportPath();
     expect(p).toContain(path.join('.ashlr', 'fleet', 'calibration.json'));
@@ -371,8 +613,7 @@ describe('m187 — persists calibration.json', () => {
 
     // Smuggle a secret into the work-source string via the proposal engineModel.
     const trace = makeTrace({ proposalId: 'secret-1', outcome: 'merged' });
-    const proposal = makeProposal({
-      id: 'secret-1',
+    const proposal = makeAuthenticatedMergedProposal('secret-1', {
       engineModel: 'engine api_key=sk-abcdefghijklmnopqrstuvwx',
     });
     await runCounterfactualReplay(CFG, buildOpts({
@@ -450,9 +691,9 @@ describe('m187 — skips unrecoverable proposals', () => {
       makeTrace({ proposalId: 'nodiff-1', outcome: 'merged' }),
     ];
     const proposals: Record<string, Proposal | null> = {
-      'ok-1': makeProposal({ id: 'ok-1' }),
+      'ok-1': makeAuthenticatedMergedProposal('ok-1'),
       'gone-1': null, // proposal file gone
-      'nodiff-1': makeProposal({ id: 'nodiff-1', diff: '   ' }), // empty diff
+      'nodiff-1': makeAuthenticatedMergedProposal('nodiff-1', { diff: '   ' }), // empty diff
     };
     const report = await runCounterfactualReplay(CFG, buildOpts({ traces, proposals }));
 

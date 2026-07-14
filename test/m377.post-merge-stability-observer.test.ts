@@ -22,17 +22,31 @@ function green(overrides: Partial<RegressionGreenObservation> = {}): RegressionG
 }
 
 function proposal(overrides: Partial<Proposal> = {}): Proposal {
-  return {
+  const value = {
     id: 'proposal-1', repo: REPO, origin: 'swarm', kind: 'patch', title: 'fixture', summary: 'fixture',
     status: 'applied', createdAt: '2026-07-01T12:00:00.000Z',
     remoteHandoff: {
       provider: 'github', state: 'merged', base: 'main', branch: 'ashlr/fixture',
       prUrl: 'https://github.com/ashlrai/fixture/pull/1',
+      expectedHeadOid: '9'.repeat(40),
       mergeCommitOid: 'a'.repeat(40), mergedAt: '2026-07-01T12:00:00.000Z',
       createdAt: '2026-07-01T11:00:00.000Z',
+      reconciliation: {
+        schemaVersion: 1, observedAt: '2026-07-01T12:01:00.000Z', attestation: '8'.repeat(64),
+      },
     },
     ...overrides,
   } as Proposal;
+  if (!Object.hasOwn(overrides, 'realizedMerge')) {
+    const handoff = value.remoteHandoff!;
+    value.realizedMerge = {
+      schemaVersion: 1, source: 'github-host', provider: 'github',
+      prUrl: handoff.prUrl!, branch: handoff.branch!, base: handoff.base!,
+      expectedHeadOid: handoff.expectedHeadOid!, mergeCommitOid: handoff.mergeCommitOid!,
+      mergedAt: handoff.mergedAt!, reconciliation: handoff.reconciliation!,
+    };
+  }
+  return value;
 }
 
 function dependencies(overrides: Record<string, unknown> = {}) {
@@ -267,6 +281,54 @@ describe('M377 same-run green stable-window observer', () => {
     expect(observePostMergeStability({
       repo: REPO, enrolledRepos: [REPO], greenObservation: green(), nowMs: NOW,
     }, deps as never)).toMatchObject({ stable: 0, inconclusive: 1 });
+    expect(deps.record).not.toHaveBeenCalled();
+  });
+
+  it('rejects legacy applied handoffs without a canonical realized witness', () => {
+    const inspect = vi.fn();
+    const deps = dependencies({
+      inspect,
+      listApplied: () => ({
+        sourceState: 'healthy', complete: true,
+        proposals: [proposal({ realizedMerge: undefined })],
+      }),
+    });
+
+    expect(observePostMergeStability({
+      repo: REPO, enrolledRepos: [REPO], greenObservation: green(), nowMs: NOW,
+    }, deps as never)).toMatchObject({ attempted: 1, stable: 0, inconclusive: 1 });
+    expect(inspect).not.toHaveBeenCalled();
+    expect(deps.record).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed, local, and handoff-mismatched realized witnesses', () => {
+    const malformed = proposal({ realizedMerge: {
+      schemaVersion: 1, source: 'github-host', provider: 'github',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/1', branch: 'ashlr/fixture', base: 'main',
+      expectedHeadOid: '9'.repeat(40), mergeCommitOid: 'not-an-oid',
+      mergedAt: '2026-07-01T12:00:00.000Z',
+      reconciliation: { schemaVersion: 1, observedAt: '2026-07-01T12:01:00.000Z', attestation: '8'.repeat(64) },
+    } as Proposal['realizedMerge'] });
+    const local = proposal({ id: 'local', realizedMerge: {
+      schemaVersion: 1, source: 'local-default-branch', base: 'main',
+      baseBeforeOid: '1'.repeat(40), proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: 'a'.repeat(40), observedAt: '2026-07-01T12:01:00.000Z',
+    } });
+    const mismatch = proposal({ id: 'mismatch', realizedMerge: {
+      ...proposal().realizedMerge!, mergeCommitOid: 'c'.repeat(40),
+    } });
+    const inspect = vi.fn();
+    const deps = dependencies({
+      inspect,
+      listApplied: () => ({
+        sourceState: 'healthy', complete: true, proposals: [malformed, local, mismatch],
+      }),
+    });
+
+    expect(observePostMergeStability({
+      repo: REPO, enrolledRepos: [REPO], greenObservation: green(), nowMs: NOW,
+    }, deps as never)).toMatchObject({ attempted: 3, stable: 0, inconclusive: 3 });
+    expect(inspect).not.toHaveBeenCalled();
     expect(deps.record).not.toHaveBeenCalled();
   });
 });

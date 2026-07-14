@@ -12,7 +12,7 @@
  * no real binaries are required.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,7 @@ import {
   buildFleetActivity,
   resetReadinessCache,
 } from '../src/core/web/control.js';
+import { buildSnapshot } from '../src/core/dashboard.js';
 import { recordAgentAction } from '../src/core/fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
@@ -129,6 +130,34 @@ describe('buildFleetActivity — shape on empty state', () => {
   });
 });
 
+describe('dashboard source quality', () => {
+  it('keeps degraded proposal and decision sources distinguishable from zero', async () => {
+    const inboxDir = join(tmpHome, '.ashlr', 'inbox');
+    const decisionsDir = join(tmpHome, '.ashlr', 'decisions');
+    mkdirSync(inboxDir, { recursive: true });
+    mkdirSync(decisionsDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'corrupt.json'), '{not-json', 'utf8');
+    writeFileSync(join(decisionsDir, '2026-07-14.jsonl'), '{not-json\n', 'utf8');
+
+    const snap = await buildSnapshot(baseConfig());
+
+    expect(snap.production?.proposals24h.total).toBe(0);
+    expect(snap.production?.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+    expect(snap.intelligence?.engineScorecards).toEqual([]);
+    expect(snap.intelligence?.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+    expect(snap.intelligence?.decisionSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Never-throws contract
 // ---------------------------------------------------------------------------
@@ -155,7 +184,7 @@ describe('buildFleetActivity — never throws', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildFleetActivity — per-repo counts from proposals', () => {
-  it('counts proposed + applied + pending correctly', async () => {
+  it('does not count forged on-disk merge evidence as landed work', async () => {
     // Seed inbox proposals via the inbox store
     const ashlrDir = join(tmpHome, '.ashlr');
     const inboxDir = join(ashlrDir, 'inbox');
@@ -164,10 +193,21 @@ describe('buildFleetActivity — per-repo counts from proposals', () => {
     const now = new Date();
     const recent = (offset: number) =>
       new Date(now.getTime() - offset * 60 * 1000).toISOString();
+    const realizedMerge = (observedAt: string) => ({
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt,
+    });
+    const p1At = recent(30);
+    const p2At = recent(60);
 
     const proposals = [
-      { id: 'p1', repo: '/repo/alpha', status: 'applied',  createdAt: recent(30), title: 'Fix A', kind: 'patch', origin: 'backlog', summary: 'fix a' },
-      { id: 'p2', repo: '/repo/alpha', status: 'applied',  createdAt: recent(60), title: 'Fix B', kind: 'patch', origin: 'backlog', summary: 'fix b' },
+      { id: 'p1', repo: '/repo/alpha', status: 'applied',  createdAt: p1At, title: 'Fix A', kind: 'patch', origin: 'backlog', summary: 'fix a', realizedMerge: realizedMerge(p1At) },
+      { id: 'p2', repo: '/repo/alpha', status: 'applied',  createdAt: p2At, title: 'Fix B', kind: 'patch', origin: 'backlog', summary: 'fix b', realizedMerge: realizedMerge(p2At) },
       { id: 'p3', repo: '/repo/alpha', status: 'pending',  createdAt: recent(10), title: 'Fix C', kind: 'patch', origin: 'backlog', summary: 'fix c' },
       { id: 'p4', repo: '/repo/beta',  status: 'rejected', createdAt: recent(20), title: 'Decline D', kind: 'patch', origin: 'backlog', summary: 'decline d' },
     ];
@@ -182,7 +222,7 @@ describe('buildFleetActivity — per-repo counts from proposals', () => {
     const beta  = snap.repos.find((r) => r.repo === '/repo/beta');
 
     expect(alpha).toBeDefined();
-    expect(alpha!.autoMerged).toBe(2);
+    expect(alpha!.autoMerged).toBe(0);
     expect(alpha!.pending).toBe(1);
     expect(alpha!.proposed).toBeGreaterThanOrEqual(2); // applied ones counted
 
@@ -190,7 +230,7 @@ describe('buildFleetActivity — per-repo counts from proposals', () => {
     expect(beta!.declined).toBe(1);
 
     // Totals
-    expect(snap.totalAutoMerged).toBeGreaterThanOrEqual(2);
+    expect(snap.totalAutoMerged).toBe(0);
     expect(snap.totalPending).toBeGreaterThanOrEqual(1);
     expect(snap.totalDeclined).toBeGreaterThanOrEqual(1);
   });
@@ -361,11 +401,11 @@ describe('buildFleetActivity — recent ticks', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Auto-merge events from audit
+// Merge truth ignores audit summaries
 // ---------------------------------------------------------------------------
 
-describe('buildFleetActivity — recent merge events from audit', () => {
-  it('surfaces merge.* audit entries as recentMerges', async () => {
+describe('buildFleetActivity — recent merge truth', () => {
+  it('does not treat merge.* audit entries as realized merges', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const auditDir = join(ashlrDir, 'audit');
     mkdirSync(auditDir, { recursive: true });
@@ -391,12 +431,7 @@ describe('buildFleetActivity — recent merge events from audit', () => {
     appendFileSync(join(auditDir, `${today}.jsonl`), JSON.stringify(otherEntry) + '\n');
 
     const snap = await buildFleetActivity(baseConfig());
-    // Only merge.* entries
-    expect(snap.recentMerges.length).toBeGreaterThanOrEqual(1);
-    const m = snap.recentMerges.find((e) => e.repo === '/repo/alpha');
-    expect(m).toBeDefined();
-    expect(m!.proposalId).toBe('p1');
-    expect(m!.engine).toBe('claude');
+    expect(snap.recentMerges).toEqual([]);
   });
 
   it('recentMerges is [] when audit directory is absent', async () => {

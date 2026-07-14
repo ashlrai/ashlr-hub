@@ -423,6 +423,18 @@ describe('M160 — high-value scanners: unaffected by M160 flags', () => {
 // Suite 5 — scanGoals: emits source:'goal' items from active goals
 // ============================================================================
 
+function realizedMergeEvidence(observedAt = new Date().toISOString()) {
+  return {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+  };
+}
+
 describe('M160 — scanGoals: goal-derived work items', () => {
   it('advances past an exactly linked applied and verified milestone without mutating the goal', async () => {
     const goal = makeActiveGoal('goal-linked', 'Ship linked work', 'Already landed');
@@ -442,6 +454,7 @@ describe('M160 — scanGoals: goal-derived work items', () => {
       id: 'prop-linked',
       status: 'applied',
       verifyResult: { passed: true },
+      realizedMerge: realizedMergeEvidence(),
     }));
 
     const items = await scanGoals(tmpDir);
@@ -492,6 +505,7 @@ describe('M160 — scanGoals: goal-derived work items', () => {
       id: 'prop-complete-only',
       status: 'applied',
       verifyResult: { passed: true },
+      realizedMerge: realizedMergeEvidence(),
     }));
 
     await expect(scanGoals(tmpDir)).resolves.toEqual([]);
@@ -519,7 +533,12 @@ describe('M160 — scanGoals: goal-derived work items', () => {
     goals[3]!.milestones[0]!.proposalId = 'prop-stale-complete';
     _listGoalsImpl = vi.fn(() => goals);
     _loadProposalImpl = vi.fn((proposalId: string) => proposalId === 'prop-stale-complete'
-      ? { id: proposalId, status: 'applied', verifyResult: { passed: true } }
+      ? {
+          id: proposalId,
+          status: 'applied',
+          verifyResult: { passed: true },
+          realizedMerge: realizedMergeEvidence(),
+        }
       : null);
 
     const items = await scanGoals(tmpDir, makeCfg({ goalFocusActiveThreshold: 4 }));

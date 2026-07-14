@@ -81,7 +81,11 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposals: (...args: unknown[]) => mockListProposals(...args),
+    listProposalsDetailed: (...args: unknown[]) => ({
+      proposals: mockListProposals(...args),
+      sourceState: 'healthy',
+      complete: true,
+    }),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };

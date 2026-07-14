@@ -25,8 +25,8 @@ const FIXTURE: Record<string, unknown>[] = [
   // ── outcomes / verdicts (chronologically after the proposals) ──────────
   // M337: a manager-gated auto-merge writes TWO 'merged' entries per proposal
   // (gate-7 record + setStatus record) — the ROI must count it ONCE.
-  { ts: ts(0.9), proposalId: 'p-s5-a', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
-  { ts: ts(1), proposalId: 'p-s5-a', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
+  { ts: ts(0.9), proposalId: 'p-s5-a', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'claude:claude-sonnet-5' },
+  { ts: ts(1), proposalId: 'p-s5-a', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'claude:claude-sonnet-5' },
   {
     ts: ts(2), proposalId: 'p-s5-a', action: 'judged',
     // judge ran on Fable — must be attributed to the PRODUCER (sonnet-5)
@@ -75,6 +75,29 @@ const FIXTURE: Record<string, unknown>[] = [
 ];
 
 let fixture: Record<string, unknown>[] = FIXTURE;
+let proposals: Record<string, unknown>[] = [{
+  id: 'p-s5-a',
+  status: 'applied',
+  realizedMerge: {
+    schemaVersion: 1,
+    source: 'local-default-branch',
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt: ts(0.8),
+  },
+}];
+
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProducerProvenanceV2: (proposal: { producerProvenanceSig?: string }) => ({
+      ok: proposal.producerProvenanceSig === 'test-producer-provenance',
+    }),
+  };
+});
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn((opts?: { sinceMs?: number }) => {
@@ -85,9 +108,49 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
 }));
 
 // quality-metrics also imports the inbox store at module load — keep it inert.
-vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: vi.fn(() => []),
-}));
+vi.mock('../src/core/inbox/store.js', () => {
+  const rows = () => {
+    const byId = new Map(proposals.map((proposal) => [String(proposal['id']), proposal]));
+    for (const entry of fixture) {
+      if (entry['action'] !== 'proposed' || typeof entry['engine'] !== 'string') continue;
+      const id = String(entry['proposalId']);
+      const existing = byId.get(id) ?? {};
+      const engine = String(entry['engine']);
+      const model = String(entry['model'] ?? '');
+      byId.set(id, {
+        ...existing,
+        id,
+        repo: '/mock/repo',
+        workItemId: `/mock/repo:issue:${id}`,
+        workSource: 'issue',
+        engineModel: model.startsWith(`${engine}:`) ? model : `${engine}:${model}`,
+        engineTier: engine === 'local-coder' ? 'mid' : 'frontier',
+        diff: 'diff --git a/a b/a',
+        diffHash: 'd'.repeat(64),
+        provenanceSig: 'test-provenance',
+        producerProvenanceVersion: 2,
+        producerProvenanceSig: 'test-producer-provenance',
+      });
+    }
+    return [...byId.values()];
+  };
+  return {
+  listProposals: vi.fn(() => rows()),
+  listProposalsDetailed: vi.fn(() => {
+    const proposalRows = rows();
+    return {
+    proposals: proposalRows,
+    sourceState: proposalRows.length > 0 ? 'healthy' : 'missing',
+    sourcePresent: proposalRows.length > 0,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: proposalRows.length,
+    filesRead: proposalRows.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };}),
+};});
 
 import { computeModelRoi } from '../src/core/fleet/quality-metrics.js';
 
@@ -180,10 +243,100 @@ describe('M322 computeModelRoi', () => {
     expect(roi7['claude:sonnet-5']!.dispatches).toBe(2);
   });
 
+  it('uses witness time for merge ROI windows', () => {
+    const proposalId = 'p-windowed-witness';
+    fixture = [
+      {
+        ts: ts(24 * 10),
+        proposalId,
+        action: 'merged',
+        labelBasis: 'realized-merge-v1',
+      },
+      {
+        ts: ts(24 * 10 + 1),
+        proposalId,
+        action: 'proposed',
+        engine: 'claude',
+        model: 'claude:claude-sonnet-5',
+      },
+    ];
+    proposals = [{
+      id: proposalId,
+      status: 'applied',
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: '1'.repeat(40),
+        proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40),
+        observedAt: ts(1),
+      },
+    }];
+    try {
+      expect(computeModelRoi('7d')['claude:sonnet-5']).toMatchObject({
+        dispatches: 0,
+        merged: 1,
+      });
+
+      const proposal = proposals[0]!;
+      const evidence = proposal['realizedMerge'] as Record<string, unknown>;
+      evidence['observedAt'] = ts(24 * 10);
+      expect(computeModelRoi('7d')).toEqual({});
+    } finally {
+      fixture = FIXTURE;
+      proposals = [{
+        id: 'p-s5-a',
+        status: 'applied',
+        realizedMerge: {
+          schemaVersion: 1,
+          source: 'local-default-branch',
+          base: 'main',
+          baseBeforeOid: '1'.repeat(40),
+          proposalHeadOid: '2'.repeat(40),
+          mergeCommitOid: '3'.repeat(40),
+          observedAt: ts(0.8),
+        },
+      }];
+    }
+  });
+
   it('cold start (empty ledger) → {}', () => {
     fixture = [];
     try {
       expect(computeModelRoi('all')).toEqual({});
+    } finally {
+      fixture = FIXTURE;
+    }
+  });
+
+  it('ignores a bare historical merged row without a realized witness', () => {
+    proposals = [];
+    try {
+      expect(computeModelRoi('all')['claude:sonnet-5']!.merged).toBe(0);
+    } finally {
+      proposals = [{
+        id: 'p-s5-a',
+        status: 'applied',
+        realizedMerge: {
+          schemaVersion: 1,
+          source: 'local-default-branch',
+          base: 'main',
+          baseBeforeOid: '1'.repeat(40),
+          proposalHeadOid: '2'.repeat(40),
+          mergeCommitOid: '3'.repeat(40),
+          observedAt: ts(0.8),
+        },
+      }];
+    }
+  });
+
+  it('ignores a legacy merged row even when the proposal has a current witness', () => {
+    fixture = FIXTURE.map((entry) => entry['action'] === 'merged'
+      ? Object.fromEntries(Object.entries(entry).filter(([key]) => key !== 'labelBasis'))
+      : entry);
+    try {
+      expect(computeModelRoi('all')['claude:sonnet-5']!.merged).toBe(0);
     } finally {
       fixture = FIXTURE;
     }

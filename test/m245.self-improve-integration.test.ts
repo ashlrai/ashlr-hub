@@ -6,7 +6,7 @@
  * Proves the four modules (M235, M240, M241, M243) are coherently wired
  * together as a recursive self-improvement loop:
  *
- *   [judge outcomes] ──write──▶ decisions ledger
+ *   [producer + judge outcomes] ──write──▶ decisions ledger/proposal store
  *       │
  *       ├─ M235 learnFromRejection  ──▶ anti-playbook genome entries
  *       │                               (tag: m235:anti-playbook)
@@ -15,7 +15,7 @@
  *       │                               (tag: m243:skill)
  *       │
  *       ├─ M240 buildEngineScores   ──▶ learned routing bias
- *       │       (reads ledger → score map)
+ *       │       (negative ledger evidence + signed realized producers)
  *       │
  *       └─ M241 emit(regression:…) ──▶ enqueues fix goal (proposal-only)
  *
@@ -34,7 +34,7 @@
  *
  * SCENARIO (in order):
  *  1. Write synthetic judged decisions to the isolated ledger (ship + reject).
- *  2. Assert M240 buildEngineScores reflects those outcomes:
+ *  2. Assert M240 buildEngineScores reflects authenticated outcomes:
  *       high-ship engine → score > 0.5
  *       high-reject engine → score < 0.5
  *  3. Call M235 learnFromRejection for each failure → anti-playbook in genome.
@@ -50,10 +50,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { AshlrConfig, Proposal } from '../src/core/types.js';
+import type { AshlrConfig, Proposal, ProposalLocalMergeIntent } from '../src/core/types.js';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+  signProducerProvenanceV2,
+  signProvenance,
+} from '../src/core/foundry/provenance.js';
 import { LEARNED_ROUTING_MIN_SAMPLES } from '../src/core/run/learned-router.js';
 
 // ---------------------------------------------------------------------------
@@ -167,7 +173,7 @@ const FIXED_ISO = new Date(FIXED_MS).toISOString();
 // ---------------------------------------------------------------------------
 
 /**
- * Write synthetic judged decisions to the isolated decisions ledger.
+ * Write synthetic judged decisions plus merged evidence for positive outcomes.
  * Mirrors the writeDecisions helper from m240.learned-routing.test.ts.
  * proposalId format: `<engine>:<source>:sha<i>` → taskClass derived from source.
  */
@@ -185,18 +191,68 @@ function writeLedgerEntries(
   const today = new Date(FIXED_MS).toISOString().slice(0, 10);
   const file = path.join(dir, `${today}.jsonl`);
   const lines = entries
-    .map((e) =>
-      JSON.stringify({
+    .flatMap((e) => {
+      const judged = {
         ts: e.ts ?? FIXED_ISO,
         proposalId: e.proposalId,
         action: 'judged',
         engine: e.engine,
         model: e.model,
         verdict: e.verdict,
-      }),
-    )
+        workSource: 'issue',
+      };
+      return [
+        judged,
+        ...(
+          e.verdict === 'ship' || e.verdict === 'approved' || e.verdict === 'applied'
+            ? [{
+                ts: e.ts ?? FIXED_ISO,
+                proposalId: e.proposalId,
+                action: 'merged',
+                verdict: 'applied',
+                labelBasis: 'realized-merge-v1',
+              }]
+            : []
+        ),
+      ];
+    })
+    .map((entry) => JSON.stringify(entry))
     .join('\n');
   fs.writeFileSync(file, lines + '\n', 'utf8');
+
+  const inboxDir = path.join(tmpHome, '.ashlr', 'inbox');
+  fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
+  for (const entry of entries) {
+    const positive = entry.verdict === 'ship' || entry.verdict === 'approved' || entry.verdict === 'applied';
+    const observedAt = entry.ts ?? FIXED_ISO;
+    const proposal = makeProposal(
+      entry.proposalId,
+      entry.proposalId,
+      `${entry.engine}:${entry.model}`,
+    );
+    proposal.createdAt = observedAt;
+    if (!positive) {
+      proposal.status = 'rejected';
+      delete proposal.realizedMerge;
+      delete proposal.realizedMergeFanoutVersion;
+      delete proposal.localMergeIntent;
+    }
+    if (proposal.realizedMerge?.source === 'local-default-branch') {
+      proposal.realizedMerge.observedAt = observedAt;
+      const unsigned = { ...proposal.realizedMerge };
+      delete unsigned.attestation;
+      proposal.realizedMerge.attestation = signLocalRealizedMergeReceipt(
+        proposal.id,
+        proposal.repo!,
+        unsigned,
+      );
+    }
+    fs.writeFileSync(
+      path.join(inboxDir, `${entry.proposalId}.json`),
+      `${JSON.stringify(proposal)}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+  }
 }
 
 /** Read raw hub.jsonl lines and return parsed entries. */
@@ -240,8 +296,9 @@ function makeProposal(
   id: string,
   title: string,
   engineModel: string,
-  repo = '/home/agent/test-repo',
+  repo = path.join(tmpHome, 'test-repo'),
 ): Proposal {
+  fs.mkdirSync(repo, { recursive: true, mode: 0o700 });
   const diff = '--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n+// fix';
   const diffHash = hashDiff(diff);
   const proposal = {
@@ -255,11 +312,14 @@ function makeProposal(
     createdAt: FIXED_ISO,
     engineTier: 'frontier',
     engineModel,
+    workItemId: `${repo}:issue:${id}`,
+    workSource: 'issue',
     diff,
     diffHash,
     verifyResult: {
       passed: true,
       ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      baseHead: '1'.repeat(40),
       diffHash,
       verifiedAt: FIXED_ISO,
       source: 'auto-merge',
@@ -270,6 +330,37 @@ function makeProposal(
     proposal.engineTier ?? '',
     diffHash,
   );
+  proposal.producerProvenanceVersion = 2;
+  proposal.producerProvenanceSig = signProducerProvenanceV2(proposal);
+  const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
+    schemaVersion: 1,
+    branch: `ashlr/merge/${id}`,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    diffHash,
+    evidencePackDigest: '4'.repeat(64),
+    authorizationId: hashDiff(id).slice(0, 32),
+    authorizedAt: FIXED_ISO,
+  };
+  const intentAttestation = signLocalMergeIntent(id, repo, unsignedIntent);
+  proposal.localMergeIntent = { ...unsignedIntent, attestation: intentAttestation };
+  const unsignedRealized = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt: FIXED_ISO,
+    proposalId: id,
+    diffHash,
+    intentAttestation,
+  };
+  proposal.realizedMerge = {
+    ...unsignedRealized,
+    attestation: signLocalRealizedMergeReceipt(id, repo, unsignedRealized),
+  };
   return proposal;
 }
 
@@ -364,6 +455,7 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m245-'));
   process.env['HOME'] = tmpHome;
   process.env['ASHLR_HOME'] = path.join(tmpHome, '.ashlr');
+  fs.mkdirSync(path.join(tmpHome, 'test-repo'), { recursive: true, mode: 0o700 });
 
   vi.useFakeTimers();
   vi.setSystemTime(FIXED_MS);
@@ -407,14 +499,14 @@ describe('INTEGRATION S1: decisions ledger → M240 learned routing bias', () =>
     // codex:gpt-5.5 → all noise/harmful (negative history)
     writeLedgerEntries([
       ...Array.from({ length: N }, (_, i) => ({
-        proposalId: `test-repo:${TASK_CLASS}:claude${i}`,
+        proposalId: `test-repo-${TASK_CLASS}-claude${i}`,
         engine: 'claude',
         model: 'opus',
         verdict: 'ship',
         ts: FIXED_ISO,
       })),
       ...Array.from({ length: N }, (_, i) => ({
-        proposalId: `test-repo:${TASK_CLASS}:codex${i}`,
+        proposalId: `test-repo-${TASK_CLASS}-codex${i}`,
         engine: 'codex',
         model: 'gpt-5.5',
         verdict: 'noise',
@@ -854,14 +946,14 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     // ─── Step 1: Seed decisions ledger ──────────────────────────────────────
     writeLedgerEntries([
       ...Array.from({ length: N }, (_, i) => ({
-        proposalId: `test-repo:${TASK_CLASS}:claudeShip${i}`,
+        proposalId: `test-repo-${TASK_CLASS}-claudeShip${i}`,
         engine: 'claude',
         model: 'opus',
         verdict: 'ship',
         ts: FIXED_ISO,
       })),
       ...Array.from({ length: N }, (_, i) => ({
-        proposalId: `test-repo:${TASK_CLASS}:codexReject${i}`,
+        proposalId: `test-repo-${TASK_CLASS}-codexReject${i}`,
         engine: 'codex',
         model: 'gpt-5.5',
         verdict: 'harmful',

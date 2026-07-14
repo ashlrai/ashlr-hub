@@ -19,12 +19,15 @@ import type { GeneratedRepairRouteReason } from '../fleet/router.js';
 import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
+import { loadProposal } from '../inbox/store.js';
+import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import type {
   EngineId,
   EngineTier,
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
+  Proposal,
   RouteSnapshot,
   RunEventSummary,
   SkillUseEvent,
@@ -220,6 +223,7 @@ export interface TrajectoryRecordReadDeps {
   readAgentActions?: typeof readAgentActions;
   readSkillUseEvents?: typeof readSkillUseEvents;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
+  loadProposal?: (id: string) => Proposal | null;
 }
 
 export interface TrajectoryRecordListOptions {
@@ -280,6 +284,14 @@ function safeArray<T>(read: () => T[] | undefined): T[] {
     return Array.isArray(value) ? value : [];
   } catch {
     return [];
+  }
+}
+
+function safeValue<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
   }
 }
 
@@ -471,8 +483,11 @@ function isActionOnlyPreclaimRoute(record: TrajectoryRecord): boolean {
     record.routeSnapshot?.assignedBy === 'preclaim-route-inspection';
 }
 
-function decisionTerminalOutcome(action: OutcomeRecordDecision['action']): TrajectoryTerminalOutcome | null {
-  if (action === 'merged') return 'merged';
+function decisionTerminalOutcome(
+  action: OutcomeRecordDecision['action'],
+  realizedMerge: boolean,
+): TrajectoryTerminalOutcome | null {
+  if (action === 'merged') return realizedMerge ? 'merged' : null;
   if (action === 'rejected') return 'rejected';
   if (action === 'handoff') return 'handoff';
   if (action === 'escalated') return 'pending';
@@ -501,8 +516,8 @@ function dispatchTerminalOutcome(event: DispatchProductionEvent): TrajectoryTerm
   return 'unknown';
 }
 
-function outcomeProposalTerminal(status: string): TrajectoryTerminalOutcome {
-  if (status === 'applied') return 'merged';
+function outcomeProposalTerminal(status: string, realizedMerge: boolean): TrajectoryTerminalOutcome {
+  if (status === 'applied') return realizedMerge ? 'merged' : 'unknown';
   if (status === 'rejected') return 'rejected';
   if (status === 'pending') return 'pending';
   return 'unknown';
@@ -737,6 +752,9 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
 
   const processOutcome = (outcome: OutcomeRecord): void => {
     const proposal = outcome.proposal;
+    const liveProposal = safeValue(() => (deps.loadProposal ?? loadProposal)(proposal.id));
+    const realizedMerge = liveProposal?.id === proposal.id && liveProposal.status === 'applied' &&
+      hasRealizedMergeEvidence(liveProposal);
     const aliases = aliasesFromIds({
       trajectoryId: proposal.trajectoryId,
       runId: proposal.runId,
@@ -764,7 +782,10 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       learningEpoch: proposal.learningEpoch,
     });
     record.coverage.proposal = true;
-    record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, outcomeProposalTerminal(proposal.status));
+    record.terminalOutcome = betterTerminalOutcome(
+      record.terminalOutcome,
+      outcomeProposalTerminal(proposal.status, realizedMerge),
+    );
     noteTimeline(record, {
       ts: proposal.createdAt,
       kind: 'proposal',
@@ -823,7 +844,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         routerPolicyVersion: decision.routerPolicyVersion,
         learningEpoch: decision.learningEpoch,
       });
-      const terminal = decisionTerminalOutcome(decision.action);
+      const terminal = decisionTerminalOutcome(decision.action, realizedMerge);
       if (terminal) record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, terminal);
       noteTimeline(record, {
         ts: decision.ts,

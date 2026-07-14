@@ -45,6 +45,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  realpathSync,
   readSync,
   unlinkSync,
   writeSync,
@@ -52,6 +53,10 @@ import {
 import type { Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import type {
+  LocalDefaultBranchRealizedMerge,
+  ProposalLocalMergeIntent,
+} from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Key management
@@ -411,6 +416,200 @@ export function signProvenance(
   const key = loadOrCreateKey();
   const payload = `${engineModel}|${engineTier}|${diffHash}`;
   return createHmac('sha256', key).update(payload, 'utf8').digest('hex');
+}
+
+const PRODUCER_PROVENANCE_DOMAIN = 'ashlr.producer-provenance.v2';
+
+export interface ProducerProvenanceV2Fields {
+  id: string;
+  repo: string | null;
+  workItemId?: string;
+  workSource?: string;
+  engineModel?: string;
+  engineTier?: string;
+  diff?: string;
+  diffHash?: string;
+  provenanceSig?: string;
+  producerProvenanceVersion?: number;
+  producerProvenanceSig?: string;
+}
+
+function producerProvenancePayload(p: ProducerProvenanceV2Fields): string | null {
+  try {
+    if (!p.id || p.id.length > 255 || !p.repo || !p.workItemId || !p.workSource ||
+      !p.engineModel || !p.engineTier || !p.diffHash) return null;
+    const canonicalRepo = realpathSync(p.repo);
+    return JSON.stringify([
+      PRODUCER_PROVENANCE_DOMAIN,
+      p.id,
+      canonicalRepo,
+      p.workSource,
+      p.workItemId,
+      p.engineModel,
+      p.engineTier,
+      p.diffHash,
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+/** Sign the complete producer identity used by positive causal learning. */
+export function signProducerProvenanceV2(p: ProducerProvenanceV2Fields): string {
+  try {
+    const payload = producerProvenancePayload(p);
+    return payload
+      ? createHmac('sha256', loadOrCreateKey()).update(payload, 'utf8').digest('hex')
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Verify the complete producer identity. Legacy provenance deliberately does
+ * not satisfy this contract: it remains lifecycle-visible but cannot create a
+ * positive learning label.
+ */
+export function verifyProducerProvenanceV2(p: ProducerProvenanceV2Fields): ProvenanceVerdict {
+  try {
+    if (p.producerProvenanceVersion !== 2) {
+      return { ok: false, reason: 'missing producer provenance v2' };
+    }
+    if (!p.producerProvenanceSig) {
+      return { ok: false, reason: 'missing producer provenance v2 signature' };
+    }
+    const legacy = verifyProvenance(p);
+    if (!legacy.ok) return legacy;
+    const expected = signProducerProvenanceV2(p);
+    if (!expected || !constantTimeEqual(expected, p.producerProvenanceSig)) {
+      return { ok: false, reason: 'producer provenance v2 signature mismatch' };
+    }
+    return { ok: true, reason: 'producer provenance v2 signature valid' };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `producer provenance v2 verify error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+const LOCAL_MERGE_INTENT_DOMAIN = 'ashlr.local-merge-intent.v1';
+const LOCAL_REALIZED_MERGE_DOMAIN = 'ashlr.local-realized-merge.v1';
+const HEX40_RE = /^[0-9a-f]{40}$/;
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const AUTHORIZATION_ID_RE = /^[0-9a-f]{32}$/;
+
+function validIntentFields(intent: Omit<ProposalLocalMergeIntent, 'attestation'>): boolean {
+  return intent.schemaVersion === 1 && intent.branch.length > 0 && intent.branch.length <= 255 &&
+    intent.base.length > 0 && intent.base.length <= 255 &&
+    HEX40_RE.test(intent.baseBeforeOid) && HEX40_RE.test(intent.proposalHeadOid) &&
+    HEX64_RE.test(intent.diffHash) && HEX64_RE.test(intent.evidencePackDigest) &&
+    AUTHORIZATION_ID_RE.test(intent.authorizationId) && Number.isFinite(Date.parse(intent.authorizedAt));
+}
+
+function localMergeIntentPayload(
+  proposalId: string,
+  repo: string,
+  intent: Omit<ProposalLocalMergeIntent, 'attestation'>,
+): string | null {
+  try {
+    if (!proposalId || proposalId.length > 255 || !repo || !validIntentFields(intent)) return null;
+    return JSON.stringify([
+      LOCAL_MERGE_INTENT_DOMAIN, proposalId, realpathSync(repo), intent.schemaVersion,
+      intent.branch, intent.base, intent.baseBeforeOid, intent.proposalHeadOid,
+      intent.diffHash, intent.evidencePackDigest, intent.authorizationId, intent.authorizedAt,
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+export function signLocalMergeIntent(
+  proposalId: string,
+  repo: string,
+  intent: Omit<ProposalLocalMergeIntent, 'attestation'>,
+): string {
+  try {
+    const payload = localMergeIntentPayload(proposalId, repo, intent);
+    return payload ? createHmac('sha256', loadOrCreateKey()).update(payload, 'utf8').digest('hex') : '';
+  } catch {
+    return '';
+  }
+}
+
+export function verifyLocalMergeIntent(
+  proposalId: string,
+  repo: string,
+  intent: ProposalLocalMergeIntent,
+): boolean {
+  try {
+    if (!HEX64_RE.test(intent.attestation)) return false;
+    const { attestation, ...unsigned } = intent;
+    const payload = localMergeIntentPayload(proposalId, repo, unsigned);
+    const key = payload ? loadExistingKey() : null;
+    if (!payload || !key) return false;
+    return constantTimeEqual(
+      createHmac('sha256', key).update(payload, 'utf8').digest('hex'),
+      attestation,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function localRealizedMergePayload(
+  proposalId: string,
+  repo: string,
+  evidence: Omit<LocalDefaultBranchRealizedMerge, 'attestation'>,
+): string | null {
+  try {
+    if (!proposalId || evidence.proposalId !== proposalId || !repo ||
+      typeof evidence.diffHash !== 'string' || typeof evidence.intentAttestation !== 'string' ||
+      !HEX40_RE.test(evidence.baseBeforeOid) || !HEX40_RE.test(evidence.proposalHeadOid) ||
+      !HEX40_RE.test(evidence.mergeCommitOid) || !HEX64_RE.test(evidence.diffHash) ||
+      !HEX64_RE.test(evidence.intentAttestation) || !Number.isFinite(Date.parse(evidence.observedAt))) return null;
+    return JSON.stringify([
+      LOCAL_REALIZED_MERGE_DOMAIN, proposalId, realpathSync(repo), evidence.schemaVersion,
+      evidence.source, evidence.base, evidence.baseBeforeOid, evidence.proposalHeadOid,
+      evidence.mergeCommitOid, evidence.observedAt, evidence.diffHash, evidence.intentAttestation,
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+export function signLocalRealizedMergeReceipt(
+  proposalId: string,
+  repo: string,
+  evidence: Omit<LocalDefaultBranchRealizedMerge, 'attestation'>,
+): string {
+  try {
+    const payload = localRealizedMergePayload(proposalId, repo, evidence);
+    return payload ? createHmac('sha256', loadOrCreateKey()).update(payload, 'utf8').digest('hex') : '';
+  } catch {
+    return '';
+  }
+}
+
+export function verifyLocalRealizedMergeReceipt(
+  proposalId: string,
+  repo: string,
+  evidence: LocalDefaultBranchRealizedMerge,
+): boolean {
+  try {
+    if (typeof evidence.attestation !== 'string' || !HEX64_RE.test(evidence.attestation)) return false;
+    const { attestation, ...unsigned } = evidence;
+    const payload = localRealizedMergePayload(proposalId, repo, unsigned);
+    const key = payload ? loadExistingKey() : null;
+    if (!payload || !key) return false;
+    return constantTimeEqual(
+      createHmac('sha256', key).update(payload, 'utf8').digest('hex'),
+      attestation,
+    );
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

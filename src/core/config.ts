@@ -505,31 +505,7 @@ function deepMerge<T extends object>(base: T, override: Partial<T>): T {
 // loadConfig()
 // ---------------------------------------------------------------------------
 
-/**
- * Load config from CONFIG_PATH.
- * - If CONFIG_DIR does not exist, creates it.
- * - If CONFIG_PATH does not exist, writes the default config and returns it.
- * - Otherwise, reads the file, JSON-parses it, deep-merges over defaultConfig()
- *   (so new keys added in future versions are always present), and returns.
- * - On parse error, logs a warning and falls back to the default config
- *   (we intentionally do NOT overwrite the user's potentially-fixable file).
- */
-export function loadConfig(): AshlrConfig {
-  const configDir = resolveConfigDir();
-  const configPath = resolveConfigPath();
-
-  // Ensure the config directory exists
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
-
-  // If the config file does not exist, bootstrap it with defaults
-  if (!existsSync(configPath)) {
-    const defaults = defaultConfig();
-    saveConfig(defaults);
-    return defaults;
-  }
-
+function readConfigOrDefaults(configPath: string): AshlrConfig {
   // Read and parse the existing config file
   let raw: string;
   try {
@@ -561,6 +537,43 @@ export function loadConfig(): AshlrConfig {
   // Deep-merge the user's persisted config over the defaults so newly-added
   // fields always have a value even on older config files.
   return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
+}
+
+/**
+ * Read config without creating directories, seeding defaults, or repairing
+ * state. A missing config resolves to in-memory defaults only.
+ */
+export function loadConfigReadOnly(): AshlrConfig {
+  const configPath = resolveConfigPath();
+  return existsSync(configPath) ? readConfigOrDefaults(configPath) : defaultConfig();
+}
+
+/**
+ * Load config from CONFIG_PATH.
+ * - If CONFIG_DIR does not exist, creates it.
+ * - If CONFIG_PATH does not exist, writes the default config and returns it.
+ * - Otherwise, reads the file, JSON-parses it, deep-merges over defaultConfig()
+ *   (so new keys added in future versions are always present), and returns.
+ * - On parse error, logs a warning and falls back to the default config
+ *   (we intentionally do NOT overwrite the user's potentially-fixable file).
+ */
+export function loadConfig(): AshlrConfig {
+  const configDir = resolveConfigDir();
+  const configPath = resolveConfigPath();
+
+  // Ensure the config directory exists
+  if (!existsSync(configDir)) {
+    mkdirSync(configDir, { recursive: true });
+  }
+
+  // If the config file does not exist, bootstrap it with defaults
+  if (!existsSync(configPath)) {
+    const defaults = defaultConfig();
+    saveConfig(defaults);
+    return defaults;
+  }
+
+  return readConfigOrDefaults(configPath);
 }
 
 // ---------------------------------------------------------------------------

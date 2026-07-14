@@ -31,12 +31,34 @@ import {
   writeSync,
 } from 'node:fs';
 import { scrubSecrets } from '../util/scrub.js';
+import type { Proposal } from '../types.js';
+import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
+import { listProposalsDetailed } from '../inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type JudgeOutcome = 'merged' | 'reverted' | 'rejected' | 'followed-up';
+export const REALIZED_MERGE_OUTCOME_BASIS = 'realized-merge-v1' as const;
+export const PROPOSAL_REJECTION_OUTCOME_BASIS = 'proposal-rejection-v1' as const;
+export const POST_MERGE_OBSERVATION_OUTCOME_BASIS = 'post-merge-observation-v1' as const;
+export type JudgeOutcomeBasis =
+  | typeof REALIZED_MERGE_OUTCOME_BASIS
+  | typeof PROPOSAL_REJECTION_OUTCOME_BASIS
+  | typeof POST_MERGE_OBSERVATION_OUTCOME_BASIS;
+export interface JudgeOutcomeQualification {
+  basis: JudgeOutcomeBasis;
+}
+export interface RealizedMergeOutcomeQualification {
+  basis: typeof REALIZED_MERGE_OUTCOME_BASIS;
+}
+export interface ProposalRejectionOutcomeQualification {
+  basis: typeof PROPOSAL_REJECTION_OUTCOME_BASIS;
+}
+export interface PostMergeObservationOutcomeQualification {
+  basis: typeof POST_MERGE_OBSERVATION_OUTCOME_BASIS;
+}
 // M332: 'followed-up' — the merge survived but a near-term fix commit touched
 // the same files (detected by outcome-watcher.ts). Weaker negative signal
 // than 'reverted'; maps to intent 'review' in calibration.
@@ -75,6 +97,12 @@ export interface JudgeTrace {
    * undefined until the proposal is merged/reverted/rejected.
    */
   outcome?: JudgeOutcome;
+  /**
+   * Closed provenance label for outcome authority. Legacy rows omit this field
+   * and remain readable for forensics, but an unqualified `merged` outcome is
+   * never eligible for success, calibration, or learning credit.
+   */
+  outcomeBasis?: JudgeOutcomeBasis;
   /** ISO timestamp when linkOutcome() was called. */
   outcomeAt?: string;
   /** Internal append-only patch marker; omitted from materialized reads. */
@@ -91,9 +119,15 @@ const HARD_MAX_BYTES = 256 * 1024 * 1024;
 const HARD_MAX_ROWS = 1_000_000;
 const MAX_DIRECTORY_ENTRIES = 2_048;
 const MAX_ROW_BYTES = 128 * 1024;
+const MAX_FUTURE_SKEW_MS = 60_000;
 const DATE_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const VERDICTS = new Set<JudgeTrace['verdict']>(['ship', 'review', 'noise', 'harmful']);
 const OUTCOMES = new Set<JudgeOutcome>(['merged', 'reverted', 'rejected', 'followed-up']);
+const OUTCOME_BASES = new Set<JudgeOutcomeBasis>([
+  REALIZED_MERGE_OUTCOME_BASIS,
+  PROPOSAL_REJECTION_OUTCOME_BASIS,
+  POST_MERGE_OBSERVATION_OUTCOME_BASIS,
+]);
 
 export interface ReadJudgeTracesOptions {
   proposalId?: string;
@@ -107,7 +141,12 @@ export interface ReadJudgeTracesOptions {
   requireComplete?: boolean;
 }
 
-export type JudgeTraceReadStopReason = 'file-limit' | 'byte-limit' | 'row-limit' | 'io-error';
+export type JudgeTraceReadStopReason =
+  | 'file-limit'
+  | 'byte-limit'
+  | 'row-limit'
+  | 'io-error'
+  | 'conflicting-row';
 
 export interface JudgeTraceSourceQuality {
   sourceState: 'missing' | 'healthy' | 'degraded';
@@ -254,6 +293,10 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
       traceId: trace.traceId ?? `jt-${randomUUID()}`,
     } as JudgeTrace);
     if (!record.ts) return;
+    if (record.outcome !== undefined && !OUTCOMES.has(record.outcome)) return;
+    if (record.outcomeBasis !== undefined &&
+      (!OUTCOME_BASES.has(record.outcomeBasis) || record.outcome === undefined ||
+        !isOutcomeBasisCompatible(record.outcome, record.outcomeBasis))) return;
 
     const line = JSON.stringify(record) + '\n';
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
@@ -363,6 +406,16 @@ function validScores(value: unknown): value is JudgeTrace['scores'] {
     Number(scores[key]) <= 5);
 }
 
+function isOutcomeBasisCompatible(
+  outcome: JudgeOutcome,
+  basis: JudgeOutcomeBasis | undefined,
+): boolean {
+  if (basis === undefined) return outcome !== 'merged';
+  if (outcome === 'merged') return basis === REALIZED_MERGE_OUTCOME_BASIS;
+  if (outcome === 'rejected') return basis === PROPOSAL_REJECTION_OUTCOME_BASIS;
+  return basis === POST_MERGE_OBSERVATION_OUTCOME_BASIS;
+}
+
 function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
@@ -378,9 +431,22 @@ function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
     typeof obj['promptContext'] !== 'string' ||
     (!patch && !validScores(obj['scores']))
   ) return null;
+  const now = Date.now();
+  if (Date.parse(obj['ts'] as string) > now + MAX_FUTURE_SKEW_MS) return null;
   if (obj['outcome'] !== undefined && !OUTCOMES.has(obj['outcome'] as JudgeOutcome)) return null;
+  if (obj['outcomeBasis'] !== undefined &&
+    (typeof obj['outcomeBasis'] !== 'string' ||
+      !OUTCOME_BASES.has(obj['outcomeBasis'] as JudgeOutcomeBasis))) return null;
+  if (obj['outcomeBasis'] !== undefined &&
+    (obj['outcome'] === undefined ||
+      !isOutcomeBasisCompatible(
+        obj['outcome'] as JudgeOutcome,
+        obj['outcomeBasis'] as JudgeOutcomeBasis,
+      ))) return null;
   if (obj['outcomeAt'] !== undefined &&
     (typeof obj['outcomeAt'] !== 'string' || !Number.isFinite(Date.parse(obj['outcomeAt'])))) return null;
+  if (typeof obj['outcomeAt'] === 'string' &&
+    Date.parse(obj['outcomeAt']) > now + MAX_FUTURE_SKEW_MS) return null;
   const physicalDate = patch && typeof obj['outcomeAt'] === 'string'
     ? obj['outcomeAt'].slice(0, 10)
     : obj['ts'].slice(0, 10);
@@ -505,13 +571,35 @@ export function readJudgeTracesDetailed(filter: ReadJudgeTracesOptions = {}): Ju
       result.unreadableFiles++;
     }
 
-    const patches = new Map<string, Pick<JudgeTrace, 'outcome' | 'outcomeAt'>>();
+    const patches = new Map<string, Pick<JudgeTrace, 'outcome' | 'outcomeAt' | 'outcomeBasis'>>();
+    const baseRows = new Map<string, JudgeTrace>();
+    let conflictingRows = false;
     for (const trace of physical) {
       const patchTarget = trace._patchForTraceId ?? (trace._patchFor ? traceKey(trace) : undefined);
       if (patchTarget) {
-        if (!patches.has(patchTarget)) patches.set(patchTarget, { outcome: trace.outcome, outcomeAt: trace.outcomeAt });
+        const candidate = {
+          outcome: trace.outcome,
+          outcomeAt: trace.outcomeAt,
+          outcomeBasis: trace.outcomeBasis,
+        };
+        const existing = patches.get(patchTarget);
+        if (existing === undefined) {
+          patches.set(patchTarget, candidate);
+        } else if (JSON.stringify(existing) !== JSON.stringify(candidate)) {
+          conflictingRows = true;
+        }
         continue;
       }
+      const key = traceKey(trace);
+      const existing = baseRows.get(key);
+      if (existing === undefined) baseRows.set(key, trace);
+      else if (JSON.stringify(existing) !== JSON.stringify(trace)) conflictingRows = true;
+    }
+    if (conflictingRows) {
+      pushStopReason(result.stopReasons, 'conflicting-row');
+      result.complete = false;
+    }
+    for (const trace of baseRows.values()) {
       const patch = patches.get(traceKey(trace));
       const materialized: JudgeTrace = { ...trace, ...(patch ?? {}) };
       delete materialized._patchFor;
@@ -523,6 +611,7 @@ export function readJudgeTracesDetailed(filter: ReadJudgeTracesOptions = {}): Ju
       if (filter.outcomeOnly === true && !materialized.outcome) continue;
       result.traces.push(materialized);
     }
+    if (!result.complete) result.sourceState = 'degraded';
     result.traces.sort((a, b) => Date.parse(b.outcomeAt ?? b.ts) - Date.parse(a.outcomeAt ?? a.ts));
     if (typeof filter.limit === 'number' && Number.isFinite(filter.limit) && filter.limit > 0) {
       result.traces = result.traces.slice(0, Math.floor(filter.limit));
@@ -559,6 +648,61 @@ export function readJudgeTraces(filter: ReadJudgeTracesOptions = {}): JudgeTrace
   return traces;
 }
 
+/** True only when a merged label carries the canonical realized-merge basis. */
+export function isQualifiedMergedJudgeOutcome<
+  T extends Pick<JudgeTrace, 'outcome' | 'outcomeBasis'>,
+>(trace: T): trace is T & {
+  outcome: 'merged';
+  outcomeBasis: typeof REALIZED_MERGE_OUTCOME_BASIS;
+} {
+  return trace.outcome === 'merged' && trace.outcomeBasis === REALIZED_MERGE_OUTCOME_BASIS;
+}
+
+/**
+ * Adverse outcomes retain their historical semantics. A positive merged label
+ * is authoritative only when it is explicitly bound to realized-merge-v1.
+ */
+export function isQualifiedJudgeOutcome<
+  T extends Pick<JudgeTrace, 'outcome' | 'outcomeBasis'>,
+>(trace: T): trace is T & { outcome: JudgeOutcome } {
+  if (trace.outcome === undefined || !OUTCOMES.has(trace.outcome)) return false;
+  if (trace.outcomeBasis !== undefined && !OUTCOME_BASES.has(trace.outcomeBasis)) return false;
+  return isOutcomeBasisCompatible(trace.outcome, trace.outcomeBasis);
+}
+
+export interface JudgeProposalSource {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+  proposals: readonly Proposal[];
+}
+
+/**
+ * Resolve one positive judge label to its persisted proposal authority.
+ * Caller-supplied basis strings are never sufficient: the proposal source must
+ * be complete and the exact linked proposal must carry a current authenticated
+ * realized-merge witness whose observation is not in the future.
+ */
+export function qualifiedMergedProposal(
+  proposalId: string,
+  source: JudgeProposalSource,
+  qualificationAtMs = Date.now(),
+): Proposal | null {
+  if (!proposalId || source.sourceState !== 'healthy' || source.complete !== true ||
+    !Array.isArray(source.proposals) || !Number.isFinite(qualificationAtMs)) return null;
+  const matches = source.proposals.filter((proposal) => proposal.id === proposalId);
+  if (matches.length !== 1) return null;
+  const proposal = matches[0]!;
+  const witness = authenticatedRealizedMergeOf(proposal);
+  if (!witness) return null;
+  const witnessedAt = witness.source === 'local-default-branch'
+    ? witness.observedAt
+    : witness.reconciliation.observedAt;
+  const witnessedAtMs = Date.parse(witnessedAt);
+  return Number.isFinite(witnessedAtMs) && witnessedAtMs <= qualificationAtMs
+    ? proposal
+    : null;
+}
+
 // ---------------------------------------------------------------------------
 // Public: linkOutcome()
 // ---------------------------------------------------------------------------
@@ -573,20 +717,49 @@ export function readJudgeTraces(filter: ReadJudgeTracesOptions = {}): JudgeTrace
  */
 export type LinkJudgeOutcomeResult =
   | { status: 'linked' | 'already-linked'; traceId?: string }
-  | { status: 'not-found' | 'degraded' | 'write-failed' };
+  | { status: 'not-found' | 'degraded' | 'write-failed' | 'unqualified' };
 
 export function linkOutcomeResult(
   proposalId: string,
+  outcome: 'merged',
+  qualification: RealizedMergeOutcomeQualification,
+): LinkJudgeOutcomeResult;
+export function linkOutcomeResult(
+  proposalId: string,
+  outcome: 'rejected',
+  qualification?: ProposalRejectionOutcomeQualification,
+): LinkJudgeOutcomeResult;
+export function linkOutcomeResult(
+  proposalId: string,
+  outcome: 'reverted' | 'followed-up',
+  qualification?: PostMergeObservationOutcomeQualification,
+): LinkJudgeOutcomeResult;
+export function linkOutcomeResult(
+  proposalId: string,
   outcome: JudgeOutcome,
+  qualification?: JudgeOutcomeQualification,
 ): LinkJudgeOutcomeResult {
   try {
+    if (!isOutcomeBasisCompatible(outcome, qualification?.basis)) {
+      return { status: 'unqualified' };
+    }
+    if (outcome === 'merged') {
+      const proposals = listProposalsDetailed({ requireComplete: true });
+      if (proposals.sourceState === 'degraded' || !proposals.complete) {
+        return { status: 'degraded' };
+      }
+      if (!qualifiedMergedProposal(proposalId, proposals)) {
+        return { status: 'unqualified' };
+      }
+    }
     const dir = judgeTracesDir();
     if (!existsSync(dir)) return { status: 'not-found' };
     const read = readJudgeTracesDetailed({ proposalId });
     if (read.sourceState === 'degraded' || !read.complete) return { status: 'degraded' };
     const target = [...read.traces].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts))[0];
     if (!target) return { status: 'not-found' };
-    if (target.outcome === outcome) {
+    const outcomeBasis = qualification?.basis;
+    if (target.outcome === outcome && target.outcomeBasis === outcomeBasis) {
       return { status: 'already-linked', ...(target.traceId ? { traceId: target.traceId } : {}) };
     }
     const outcomeAt = new Date().toISOString();
@@ -600,6 +773,7 @@ export function linkOutcomeResult(
       ts: target.ts,
       outcome,
       outcomeAt,
+      ...(outcomeBasis ? { outcomeBasis } : {}),
       ...(target.traceId
         ? { _patchForTraceId: target.traceId }
         : { _patchFor: `${target.proposalId}|${target.ts}|${target.judgeEngine}` }),
@@ -616,8 +790,39 @@ export function linkOutcomeResult(
   }
 }
 
-export function linkOutcome(proposalId: string, outcome: JudgeOutcome): void {
-  void linkOutcomeResult(proposalId, outcome);
+export function linkOutcome(
+  proposalId: string,
+  outcome: 'merged',
+  qualification: RealizedMergeOutcomeQualification,
+): void;
+export function linkOutcome(
+  proposalId: string,
+  outcome: 'rejected',
+  qualification?: ProposalRejectionOutcomeQualification,
+): void;
+export function linkOutcome(
+  proposalId: string,
+  outcome: 'reverted' | 'followed-up',
+  qualification?: PostMergeObservationOutcomeQualification,
+): void;
+export function linkOutcome(
+  proposalId: string,
+  outcome: JudgeOutcome,
+  qualification?: JudgeOutcomeQualification,
+): void {
+  if (outcome === 'merged') {
+    void linkOutcomeResult(proposalId, outcome, qualification as RealizedMergeOutcomeQualification);
+    return;
+  }
+  if (outcome === 'rejected') {
+    void linkOutcomeResult(proposalId, outcome, qualification as ProposalRejectionOutcomeQualification);
+    return;
+  }
+  void linkOutcomeResult(
+    proposalId,
+    outcome,
+    qualification as PostMergeObservationOutcomeQualification,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -649,14 +854,14 @@ export function outcomeStats(): {
     for (const t of traces) {
       if (!byVerdict[t.verdict]) byVerdict[t.verdict] = zero();
       byVerdict[t.verdict]!.total++;
-      if (t.outcome) {
+      if (isQualifiedJudgeOutcome(t)) {
         byVerdict[t.verdict]!.withOutcome++;
         byOutcome[t.outcome] = (byOutcome[t.outcome] ?? 0) + 1;
       }
     }
 
     const total = traces.length;
-    const withOutcome = traces.filter((t) => t.outcome).length;
+    const withOutcome = traces.filter(isQualifiedJudgeOutcome).length;
     return {
       total,
       withOutcome,

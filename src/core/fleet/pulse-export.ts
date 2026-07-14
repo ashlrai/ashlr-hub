@@ -34,7 +34,9 @@
 
 import { basename } from 'node:path';
 import { loadDaemonState } from '../daemon/state.js';
-import { listProposals } from '../inbox/store.js';
+import { listProposalsDetailed } from '../inbox/store.js';
+import type { ProposalSourceQuality } from '../inbox/store.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 
 // ---------------------------------------------------------------------------
 // OTLP span shape (exact contract)
@@ -135,6 +137,39 @@ function engineSystem(engineModel: string | undefined): string {
   return part;
 }
 
+function proposalSourceDiagnosticSpan(
+  quality: ProposalSourceQuality,
+  observedAt: string,
+  owner?: string,
+): OtlpSpan {
+  const refId = 'proposal-source';
+  const spanId = deriveSpanId(refId, 'fleet.diagnostic');
+  const startNano = toNano(observedAt);
+  return {
+    traceId: deriveTraceId(spanId),
+    spanId,
+    name: 'fleet.diagnostic',
+    startTimeUnixNano: startNano,
+    endTimeUnixNano: startNano,
+    attributes: [
+      str('ashlr.source', 'ashlr-fleet'),
+      str('gen_ai.system', 'builtin'),
+      int('gen_ai.usage.input_tokens', 0),
+      int('gen_ai.usage.output_tokens', 0),
+      str('ashlr.fleet.event', 'diagnostic'),
+      str('ashlr.fleet.repo', '(unscoped)'),
+      str('ashlr.fleet.outcome', 'degraded-source'),
+      str('ashlr.fleet.cost_usd', '0'),
+      str('ashlr.fleet.ref_id', refId),
+      str('ashlr.fleet.diagnostic.source', 'proposals'),
+      str('ashlr.fleet.diagnostic.source_state', quality.sourceState),
+      str('ashlr.fleet.diagnostic.complete', String(quality.complete)),
+      str('ashlr.fleet.diagnostic.stop_reasons', quality.stopReasons.join(',')),
+      ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // buildFleetSpans — pure read + shape; returns OTLP payload
 // ---------------------------------------------------------------------------
@@ -152,6 +187,7 @@ function engineSystem(engineModel: string | undefined): string {
  */
 export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
   const sinceCutoff = sinceTs ? Date.parse(sinceTs) : 0;
+  const now = Date.now();
 
   const spans: OtlpSpan[] = [];
 
@@ -160,7 +196,7 @@ export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
     const state = loadDaemonState();
     for (const tick of state.ticks) {
       const tickMs = Date.parse(tick.ts);
-      if (Number.isNaN(tickMs) || tickMs < sinceCutoff) continue;
+      if (!Number.isFinite(tickMs) || tickMs < sinceCutoff || tickMs > now) continue;
 
       const refId = tick.ts;
       const spanId = deriveSpanId(refId, 'fleet.tick');
@@ -198,32 +234,6 @@ export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
           ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
         ],
       });
-
-      // Emit a separate fleet.merge span for each auto-merged proposal this tick.
-      if (tick.merged && tick.merged > 0) {
-        const mergeSpanId = deriveSpanId(refId, 'fleet.merge');
-        const mergeTraceId = deriveTraceId(mergeSpanId);
-        spans.push({
-          traceId: mergeTraceId,
-          spanId: mergeSpanId,
-          name: 'fleet.merge',
-          startTimeUnixNano: startNano,
-          endTimeUnixNano: startNano,
-          attributes: [
-            str('ashlr.source', 'ashlr-fleet'),
-            str('gen_ai.system', primaryEngine),
-            int('gen_ai.usage.input_tokens', 0),
-            int('gen_ai.usage.output_tokens', 0),
-            str('ashlr.fleet.event', 'merge'),
-            str('ashlr.fleet.repo', backends),
-            str('ashlr.fleet.outcome', 'applied'),
-            str('ashlr.fleet.cost_usd', '0'),
-            str('ashlr.fleet.ref_id', `${refId}:merge`),
-            // M109: fleet owner attribution — present only when configured.
-            ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
-          ],
-        });
-      }
     }
   } catch {
     // Daemon state unavailable — degrade gracefully, no ticks emitted.
@@ -231,52 +241,71 @@ export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
 
   // ── Inbox proposals ───────────────────────────────────────────────────────
   try {
-    const proposals = listProposals();
-    for (const p of proposals) {
-      const createdMs = Date.parse(p.createdAt);
-      if (Number.isNaN(createdMs) || createdMs < sinceCutoff) continue;
+    const read = listProposalsDetailed({ requireComplete: true });
+    if (read.sourceState === 'degraded' || !read.complete) {
+      spans.push(proposalSourceDiagnosticSpan(read, new Date(now).toISOString(), owner));
+    } else {
+      const proposals = read.proposals;
+      const emitted = new Set<string>();
+      for (const p of proposals) {
+        if (emitted.has(p.id)) continue;
+        const evidence = realizedMergeOf(p);
+        const realizedAt = evidence?.source === 'local-default-branch'
+          ? evidence.observedAt
+          : evidence?.reconciliation.observedAt;
+        const realizedMs = realizedAt ? Date.parse(realizedAt) : NaN;
+        const isMerge = evidence !== null && Number.isFinite(realizedMs) && realizedMs <= now;
+        const eventAt = isMerge ? realizedAt! : p.createdAt;
+        const eventMs = Date.parse(eventAt);
+        if (!Number.isFinite(eventMs) || eventMs < sinceCutoff || eventMs > now) continue;
 
-      // Map proposal status → fleet event name
-      const isMerge = p.status === 'applied';
-      const isDecline = p.status === 'rejected';
-      const event = isMerge ? 'fleet.merge' : isDecline ? 'fleet.decline' : 'fleet.proposal';
-      const fleetEvent = isMerge ? 'merge' : isDecline ? 'decline' : 'proposal';
+        // Map proposal status → fleet event name
+        const isDecline = p.status === 'rejected';
+        const event = isMerge ? 'fleet.merge' : isDecline ? 'fleet.decline' : 'fleet.proposal';
+        const fleetEvent = isMerge ? 'merge' : isDecline ? 'decline' : 'proposal';
 
-      const outcome =
-        p.status === 'applied' ? 'applied'
-        : p.status === 'rejected' ? 'rejected'
-        : 'pending';
+        const outcome =
+          isMerge ? 'merged'
+          : p.status === 'rejected' ? 'rejected'
+          : p.status;
 
-      const spanId = deriveSpanId(p.id, event);
-      const traceId = deriveTraceId(spanId);
-      const startNano = toNano(p.createdAt);
-      const endNano = p.decidedAt ? toNano(p.decidedAt) : startNano;
+        const spanId = deriveSpanId(p.id, event);
+        const traceId = deriveTraceId(spanId);
+        const startNano = toNano(eventAt);
+        const endNano = isMerge ? startNano : p.decidedAt ? toNano(p.decidedAt) : startNano;
 
-      // M109: use proposal's own owner stamp first, fall back to configured owner.
-      const propOwner = p.owner ?? owner;
-      spans.push({
-        traceId,
-        spanId,
-        name: event,
-        startTimeUnixNano: startNano,
-        endTimeUnixNano: endNano,
-        attributes: [
-          str('ashlr.source', 'ashlr-fleet'),
-          str('gen_ai.system', engineSystem(p.engineModel)),
-          int('gen_ai.usage.input_tokens', 0),
-          int('gen_ai.usage.output_tokens', 0),
-          str('ashlr.fleet.event', fleetEvent),
-          str('ashlr.fleet.repo', repoBasename(p.repo)),
-          str('ashlr.fleet.outcome', outcome),
-          str('ashlr.fleet.cost_usd', '0'),
-          str('ashlr.fleet.ref_id', p.id),
-          // M109: fleet owner attribution — present only when set.
-          ...(propOwner ? [str('ashlr.fleet.owner', propOwner)] : []),
-        ],
-      });
+        // M109: use proposal's own owner stamp first, fall back to configured owner.
+        const propOwner = p.owner ?? owner;
+        spans.push({
+          traceId,
+          spanId,
+          name: event,
+          startTimeUnixNano: startNano,
+          endTimeUnixNano: endNano,
+          attributes: [
+            str('ashlr.source', 'ashlr-fleet'),
+            str('gen_ai.system', engineSystem(p.engineModel)),
+            int('gen_ai.usage.input_tokens', 0),
+            int('gen_ai.usage.output_tokens', 0),
+            str('ashlr.fleet.event', fleetEvent),
+            str('ashlr.fleet.repo', repoBasename(p.repo)),
+            str('ashlr.fleet.outcome', outcome),
+            str('ashlr.fleet.cost_usd', '0'),
+            str('ashlr.fleet.ref_id', p.id),
+            // M109: fleet owner attribution — present only when set.
+            ...(propOwner ? [str('ashlr.fleet.owner', propOwner)] : []),
+          ],
+        });
+        emitted.add(p.id);
+      }
     }
   } catch {
-    // Inbox unavailable — degrade gracefully, no proposal spans emitted.
+    // Unexpected failures cannot disappear as a healthy zero either.
+    spans.push(proposalSourceDiagnosticSpan({
+      sourceState: 'degraded', sourcePresent: false, complete: false,
+      stopReasons: ['io-error'], filesDiscovered: 0, filesRead: 0,
+      bytesRead: 0, invalidFiles: 0, unreadableFiles: 1,
+    }, new Date(now).toISOString(), owner));
   }
 
   return {
