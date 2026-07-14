@@ -58,6 +58,7 @@ jobs:
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
+              test/m385.cutoff-checkpoint-scheduler.test.ts
               test/m407.verification-mutation-fence.test.ts
               test/m408.sandbox-creation-mutation-fence.test.ts
               test/m418.pulse-quiescence.test.ts

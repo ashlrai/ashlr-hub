@@ -29,6 +29,7 @@ import {
 } from '../src/core/daemon/cutoff-checkpoint-scheduler.js';
 import { runCutoffCheckpointWorker } from '../src/core/daemon/cutoff-checkpoint-worker.js';
 import { runCutoffCheckpointSupervisor } from '../src/core/daemon/cutoff-checkpoint-child.js';
+import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import {
   cancelDaemonPostTickChildren,
   scheduleCutoffCheckpointAfterTick,
@@ -82,9 +83,11 @@ beforeEach(() => {
   home = resolve(mkdtempSync(join(tmpdir(), 'ashlr-m385-')));
   process.env['HOME'] = home;
   process.env['ASHLR_HOME'] = join(home, '.ashlr');
+  expect(setKill(false, { waitMs: 500 }).ok).toBe(true);
 });
 
 afterEach(() => {
+  try { setKill(false, { waitMs: 500 }); } catch { /* best effort */ }
   if (oldHome === undefined) delete process.env['HOME']; else process.env['HOME'] = oldHome;
   if (oldAshlrHome === undefined) delete process.env['ASHLR_HOME']; else process.env['ASHLR_HOME'] = oldAshlrHome;
   try { chmodSync(join(home, '.ashlr', 'fleet'), 0o700); } catch { /* absent */ }
@@ -314,6 +317,35 @@ describe('M385 detached supervisor scheduling', () => {
 });
 
 describe('M385 supervisor and worker commands', () => {
+  it('refuses capture when child authority is unavailable or KILL is armed after acquisition', () => {
+    const capture = vi.fn();
+    const releaseFence = vi.fn();
+    expect(runCutoffCheckpointWorker('ignored', new Date(NOW + 30_000).toISOString(), {
+      acquireFence: () => null,
+      ownsFence: () => false,
+      releaseFence,
+      capture,
+    })).toBe(1);
+    expect(capture).not.toHaveBeenCalled();
+    expect(releaseFence).toHaveBeenCalledWith(null);
+
+    const fence = {} as never;
+    const authorityEvents: string[] = [];
+    const killAfterAcquire = vi.fn(() => { authorityEvents.push('kill'); return true; });
+    releaseFence.mockClear();
+    expect(runCutoffCheckpointWorker('ignored', new Date(NOW + 30_000).toISOString(), {
+      acquireFence: () => { authorityEvents.push('acquire'); return fence; },
+      ownsFence: (candidate) => { authorityEvents.push('owns'); return candidate === fence; },
+      releaseFence: (candidate) => { authorityEvents.push('release'); releaseFence(candidate); },
+      killSwitchOn: killAfterAcquire,
+      capture,
+    })).toBe(1);
+    expect(authorityEvents).toEqual(['acquire', 'owns', 'kill', 'release']);
+    expect(killAfterAcquire).toHaveBeenCalledOnce();
+    expect(capture).not.toHaveBeenCalled();
+    expect(releaseFence).toHaveBeenCalledWith(fence);
+  });
+
   it('worker succeeds only after durable record/replay and rechecks kill state', () => {
     const attemptId = '33333333-3333-4333-8333-333333333333';
     const deadlineAt = new Date(NOW + 30_000).toISOString();
@@ -337,6 +369,43 @@ describe('M385 supervisor and worker commands', () => {
     expect(runCutoffCheckpointWorker(attemptId, deadlineAt, {
       now: () => NOW, killSwitchOn: () => true, readState,
     })).toBe(1);
+  });
+
+  it('keeps pause non-quiesced from beginCommit through the final worker commit', () => {
+    const attemptId = '99999999-9999-4999-8999-999999999999';
+    const deadlineAt = new Date(NOW + 30_000).toISOString();
+    const readState = () => healthy(state({
+      active: { attemptId, startedAt: new Date(NOW).toISOString(), deadlineAt, phase: 'capturing' },
+      lastAttemptAt: new Date(NOW).toISOString(), lastOutcome: 'running',
+    }));
+    let commitClaimed = false;
+    let pauseDuringCommit: ReturnType<typeof setKill> | undefined;
+
+    const exitCode = runCutoffCheckpointWorker(attemptId, deadlineAt, {
+      now: () => NOW,
+      readState,
+      capture: () => ({ ok: true, snapshot: {} as never }),
+      beginCommit: () => { commitClaimed = true; return true; },
+      record: () => {
+        expect(commitClaimed).toBe(true);
+        pauseDuringCommit = setKill(true, { waitMs: 25 });
+        return { attempted: 1, recorded: 1, replayed: 0, recoveredRows: 0, invalid: 0, failed: 0 };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(pauseDuringCommit).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    expect(killSwitchOn()).toBe(true);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({
+      ok: true,
+      changed: false,
+      quiesced: true,
+    });
   });
 
   it('supervisor commits success only for a zero worker exit', async () => {
