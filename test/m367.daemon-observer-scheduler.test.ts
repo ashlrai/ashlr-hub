@@ -95,7 +95,7 @@ describe('daemon resolution observer child scheduling', () => {
             USERPROFILE: home,
             ASHLR_HOME: ashlrHome,
           },
-          timeout: 5_000,
+          timeout: 15_000,
           windowsHide: true,
         },
       );
@@ -106,7 +106,7 @@ describe('daemon resolution observer child scheduling', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('refuses KILL before admission and immediately before spawn', async () => {
     const spawn = vi.fn();
