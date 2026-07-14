@@ -2144,4 +2144,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Implement bounded loose-plus-packed reads and crash-safe POSIX compaction while keeping unsupported Windows source deletion fail closed.
 - [x] Add capacity, crash-window, overlap, tamper, rollback-visible, unknown-format, downgrade, POSIX, and Windows regressions.
 - [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
-- [ ] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
+- [x] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
