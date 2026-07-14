@@ -749,7 +749,7 @@ describe('m119 store.setStatus ledger hook', () => {
 
     const proposal = {
       id: 'prop-hook-test-001',
-      repo: '/repos/alpha',
+      repo: fs.realpathSync.native(tmpHome),
       origin: 'backlog',
       kind: 'patch',
       title: 'hook test',

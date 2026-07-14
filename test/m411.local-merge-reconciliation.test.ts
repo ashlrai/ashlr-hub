@@ -83,6 +83,9 @@ function createInterruptedMerge(ancestry: Ancestry): MergeFixture {
     diff,
     diffHash: hashDiff(diff),
   });
+  const proposalRepo = proposal.repo;
+  expect(proposalRepo).toBe(repo);
+  if (!proposalRepo) throw new Error('proposal fixture lost its canonical repository identity');
   const baseBeforeOid = git(['rev-parse', 'main']);
   const branch = `ashlr/merge/${proposal.id}`;
 
@@ -105,7 +108,7 @@ function createInterruptedMerge(ancestry: Ancestry): MergeFixture {
   };
   const intent: ProposalLocalMergeIntent = {
     ...unsignedIntent,
-    attestation: signLocalMergeIntent(proposal.id, repo, unsignedIntent),
+    attestation: signLocalMergeIntent(proposal.id, proposalRepo, unsignedIntent),
   };
   expect(intent.attestation).toMatch(/^[a-f0-9]{64}$/);
   expect(updateProposalField(proposal.id, {
@@ -143,8 +146,8 @@ function createInterruptedMerge(ancestry: Ancestry): MergeFixture {
 }
 
 beforeEach(() => {
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-home-'));
-  repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-repo-'));
+  home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-home-')));
+  repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-repo-')));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = path.join(home, '.ashlr');

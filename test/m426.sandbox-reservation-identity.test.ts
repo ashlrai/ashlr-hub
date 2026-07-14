@@ -244,7 +244,10 @@ process.exit(result.status ?? 1);
     } catch {
       copyFileSync(process.execPath, launcher);
     }
-    const requireShim = `--require "${script}"`;
+    // NODE_OPTIONS applies shell-like backslash escaping even though it arrives
+    // through the environment. Use Windows' accepted forward-slash spelling so
+    // an absolute path such as C:\\Users\\... is not parsed as C:Users....
+    const requireShim = `--require "${script.replaceAll('\\\\', '/')}"`;
     process.env.NODE_OPTIONS = [originalNodeOptions, requireShim].filter(Boolean).join(' ');
   } else {
     const launcher = join(dir, 'git');

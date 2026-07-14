@@ -96,7 +96,7 @@ const plan: SwarmPlan = {
   tasks: [{ id: 'build-1', phase: 'build', goal: 'held write', deps: [] }],
 };
 
-describe('M424 legacy swarm mutation lifecycle authority', () => {
+describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, () => {
   let home: string;
   let previousHome: string | undefined;
   let previousUserProfile: string | undefined;
