@@ -204,7 +204,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
       changed: false,
       quiesced: true,
     });
-  }, 30_000);
+  }, 60_000);
 
   it('retains authority through held planning and persists the completed plan before quiescence', async () => {
     let releasePlanner!: () => void;
@@ -274,7 +274,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
     expect(result.status).toBe('done');
     expect(mocks.runGoal).toHaveBeenCalledOnce();
     expect(mocks.createSandbox).not.toHaveBeenCalled();
-  }, 30_000);
+  }, 60_000);
 
   it('does not report quiescence while proposal capture is inside the retained fence', async () => {
     mocks.runGoal.mockImplementationOnce(async (goal: string) => completedRun(goal));

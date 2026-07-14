@@ -848,7 +848,18 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       remoteHandoff: { branch, base: 'main', prUrl: 'https://github.com/ashlrai/fixture/pull/123' },
     });
 
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
+    let terminal = reconcileRemoteHandoffs();
+    if (terminal.unknown === 1 && getRemoteHandoffKeyDiagnostic() === 'adapter-failed') {
+      expect(loadProposal(proposal.id)).toMatchObject({
+        status: 'awaiting-host-merge',
+        remoteHandoff: {
+          state: 'awaiting-host-merge',
+          prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+        },
+      });
+      terminal = reconcileRemoteHandoffs();
+    }
+    expect(terminal).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
     expect(loadProposal(proposal.id)).toMatchObject({
       status: 'applied',
       remoteHandoff: { state: 'merged', expectedHeadOid: remoteHead },

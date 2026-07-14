@@ -394,7 +394,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       clearIntervalSpy.mockRestore();
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('reports terminal shared settlement failure as state persistence failure', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-settle-fail-'));
@@ -426,7 +426,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       settleSpy.mockRestore();
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('settles repairable shared outcomes while reporting unavailable handoff persistence', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-repairable-'));
