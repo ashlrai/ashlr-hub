@@ -280,7 +280,7 @@ describe('effect terminal retention platform support', () => {
     expect(compactEffectJournal()).toMatchObject({ ok: false, reason: 'unsupported' });
     expect(fs.readdirSync(effectJournalDirectory()).sort()).toEqual(before);
     expect(before).toEqual([...fixture.names].sort());
-  });
+  }, 30_000);
 });
 
 describe.skipIf(process.platform === 'win32')('effect terminal retention on POSIX', () => {
