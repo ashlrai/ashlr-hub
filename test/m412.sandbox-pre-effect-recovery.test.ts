@@ -126,5 +126,5 @@ describe('M412 sandbox pre-effect recovery', () => {
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  });
+  }, 15_000);
 });

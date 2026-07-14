@@ -200,9 +200,9 @@ if ((mode === 'retarget-sandbox-home' || mode === 'retarget-sandbox-parent') &&
   const home = path.dirname(worktree);
   const target = mode === 'retarget-sandbox-home' ? home : path.dirname(home);
   const backup = target + '.m426-original';
+  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ target, backup }));
   fs.renameSync(target, backup);
   fs.mkdirSync(target);
-  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ target, backup }));
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
 
@@ -223,8 +223,8 @@ if (mode === 'hang-worktree-descendant' && worktreeIndex >= 0 &&
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
 
-if (mode === 'retarget-after-validation' && args[0] === 'rev-parse' &&
-    args.includes('--git-common-dir') && fs.existsSync(path.join(process.cwd(), '.git')) &&
+if (mode === 'retarget-after-validation' && args[0] === 'rev-parse' && args[1] === 'HEAD' &&
+    fs.existsSync(path.join(process.cwd(), '.git')) &&
     fs.lstatSync(path.join(process.cwd(), '.git')).isFile()) {
   const result = cp.spawnSync(process.env.M426_REAL_GIT, args, { encoding: 'utf8' });
   if (result.error) throw result.error;
@@ -232,10 +232,10 @@ if (mode === 'retarget-after-validation' && args[0] === 'rev-parse' &&
   const worktree = process.cwd();
   const home = path.dirname(worktree);
   const backup = home + '.m426-original';
+  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ home, backup }));
   fs.renameSync(home, backup);
   fs.mkdirSync(home);
   fs.mkdirSync(path.join(home, 'worktree'));
-  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ home, backup }));
   process.stdout.write(result.stdout);
   process.exit(0);
 }
