@@ -218,7 +218,10 @@ if (mode === 'hang-worktree-descendant' && worktreeIndex >= 0 &&
   while (!fs.existsSync(process.env.M426_MARKER + '.alive') && Date.now() < deadline) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
-  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ pid: descendant.pid }));
+  fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({
+    shimPid: process.pid,
+    descendantPid: descendant.pid,
+  }));
   fs.writeSync(1, Buffer.alloc(70 * 1024, 120));
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
@@ -309,7 +312,14 @@ afterEach(() => {
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
   fx.cleanup();
-  for (const path of cleanupPaths) rmSync(path, { recursive: true, force: true });
+  for (const path of cleanupPaths) {
+    rmSync(path, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  }
   cleanupPaths.clear();
 });
 
@@ -712,9 +722,13 @@ describe('M426 sandbox reservation and path identity', () => {
 
     expect(() => createSandbox(source.dir, { allowAnyRepo: true }))
       .toThrow(/git worktree add failed/u);
-    const observation = JSON.parse(readFileSync(marker, 'utf8')) as { pid: number };
-    expect(readFileSync(`${marker}.alive`, 'utf8')).toBe(String(observation.pid));
-    expect(() => process.kill(observation.pid, 0)).toThrow();
+    const observation = JSON.parse(readFileSync(marker, 'utf8')) as {
+      shimPid: number;
+      descendantPid: number;
+    };
+    expect(readFileSync(`${marker}.alive`, 'utf8')).toBe(String(observation.descendantPid));
+    expect(() => process.kill(observation.shimPid, 0)).toThrow();
+    expect(() => process.kill(observation.descendantPid, 0)).toThrow();
     expect(observeRepository(source)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
   });
