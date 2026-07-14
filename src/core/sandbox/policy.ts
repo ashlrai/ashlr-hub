@@ -100,6 +100,20 @@ export function canonicalFilesystemPathIdentity(
   const missing: string[] = [];
   let uncertainWindowsSuffix = false;
 
+  const identityFromExistingAncestor = (canonicalAncestor: string, stat: Stats): string | null => {
+    if (missing.length > 0 && !stat.isDirectory()) return null;
+    if (uncertainWindowsSuffix && missing.length > 0) {
+      const firstMissing = missing.at(-1);
+      if (!firstMissing || /~\d/u.test(firstMissing)) return null;
+      const entries = readdirSync(canonicalAncestor);
+      if (entries.some((entry) => entry.toLowerCase() === firstMissing.toLowerCase())) return null;
+    }
+    const canonical = join(canonicalAncestor, ...missing.reverse());
+    return process.platform === 'win32'
+      ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
+      : canonical;
+  };
+
   while (true) {
     try {
       lstatSync(ancestor);
@@ -111,6 +125,27 @@ export function canonicalFilesystemPathIdentity(
         // first unresolved component is absent; every other error fails closed.
         if (process.platform !== 'win32' || code !== 'UNKNOWN') return null;
         uncertainWindowsSuffix = true;
+        // Windows can reject lstat for an existing 8.3 alias while its native
+        // realpath still resolves the alias to a physical long-name ancestor.
+        // Accept only that positively resolved object; otherwise keep walking
+        // until an existing parent can prove the unresolved suffix is absent.
+        let canonicalAncestor: string | null = null;
+        let stat: Stats | null = null;
+        try {
+          canonicalAncestor = realpathSync.native(ancestor);
+          stat = lstatSync(canonicalAncestor);
+        } catch {
+          // Continue to the parent absence proof below.
+        }
+        if (canonicalAncestor !== null && stat !== null) {
+          try {
+            return identityFromExistingAncestor(canonicalAncestor, stat);
+          } catch {
+            // A resolved object whose absence proof cannot be read is not a
+            // missing suffix. Do not reinterpret that failure by climbing.
+            return null;
+          }
+        }
       }
       const parent = dirname(ancestor);
       if (parent === ancestor) return null;
@@ -120,17 +155,9 @@ export function canonicalFilesystemPathIdentity(
     }
 
     try {
-      if (uncertainWindowsSuffix) {
-        const firstMissing = missing.at(-1);
-        if (!firstMissing || /~\d/u.test(firstMissing)) return null;
-        const entries = readdirSync(ancestor);
-        if (entries.some((entry) => entry.toLowerCase() === firstMissing.toLowerCase())) return null;
-      }
       const canonicalAncestor = realpathSync.native(ancestor);
-      const canonical = join(canonicalAncestor, ...missing.reverse());
-      return process.platform === 'win32'
-        ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
-        : canonical;
+      const stat = lstatSync(canonicalAncestor);
+      return identityFromExistingAncestor(canonicalAncestor, stat);
     } catch {
       // The prefix was observable but could not be resolved physically. Do not
       // reinterpret permission, replacement, or platform errors as absence.

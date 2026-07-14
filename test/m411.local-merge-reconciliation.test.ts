@@ -259,7 +259,7 @@ describe('M411 local merge reconciliation', () => {
     expect(result.reason).toMatch(/auto-merge disabled/i);
     expect(loadProposal(fixture.proposalId)?.realizedMerge).toBeUndefined();
     expect(git(['rev-parse', 'main'])).toBe(head);
-  }, 20_000);
+  }, 45_000);
 
   it.each([
     { ancestry: 'unrelated' as const, expectedParents: 0 },

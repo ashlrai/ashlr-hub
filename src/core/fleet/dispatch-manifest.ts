@@ -28,6 +28,7 @@ import type { DaemonDispatchManifestSummary, EngineId, WorkItem } from '../types
 import type { DispatchPlan } from '../fabric/concurrent-dispatch.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -430,16 +431,6 @@ function writeAll(fd: number, bytes: Buffer): void {
     const written = writeSync(fd, bytes, offset, bytes.length - offset);
     if (written <= 0) throw new Error('dispatch manifest append made no progress');
     offset += written;
-  }
-}
-
-function fsyncDirectory(path: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 

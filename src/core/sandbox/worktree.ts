@@ -287,8 +287,13 @@ function worktreePathFor(id: string): string {
  * to tolerate). Always uses an arg array — never a shell string.
  */
 function gitRun(cwd: string, args: string[]): string {
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_COMMON_DIR;
   return execFileSync('git', args, {
     cwd,
+    env,
     timeout: GIT_TIMEOUT,
     stdio: 'pipe',
     encoding: 'utf8',
@@ -308,6 +313,8 @@ interface PinnedWorktreeCreationResult {
   ok: boolean;
   cleanupComplete: boolean;
   error?: string;
+  worktreeDev?: string;
+  worktreeIno?: string;
 }
 
 const PINNED_GIT_SUPERVISOR = String.raw`
@@ -324,6 +331,7 @@ if (gitEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS) {
 delete gitEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS;
 delete gitEnv.GIT_DIR;
 delete gitEnv.GIT_WORK_TREE;
+delete gitEnv.GIT_COMMON_DIR;
 if (repositoryContext === 'pinned') {
   gitEnv.GIT_DIR = '.';
 }
@@ -335,6 +343,14 @@ const destinationPin = gitEnv.ASHLR_PINNED_DESTINATION === '1' ? {
   homePath: gitEnv.ASHLR_PINNED_DESTINATION_HOME_PATH,
   homeDev: gitEnv.ASHLR_PINNED_DESTINATION_HOME_DEV,
   homeIno: gitEnv.ASHLR_PINNED_DESTINATION_HOME_INO,
+  metadataPath: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH,
+  metadataDev: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV,
+  metadataIno: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_INO,
+  worktreePath: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_PATH,
+  worktreeDev: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_DEV,
+  worktreeIno: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_INO,
+  allowWorktreeAbsence: gitEnv.ASHLR_PINNED_DESTINATION_ALLOW_WORKTREE_ABSENCE === '1',
+  requireWorktreeAbsence: gitEnv.ASHLR_PINNED_DESTINATION_REQUIRE_WORKTREE_ABSENCE === '1',
 } : null;
 for (const key of Object.keys(gitEnv)) {
   if (key.startsWith('ASHLR_PINNED_DESTINATION')) delete gitEnv[key];
@@ -360,7 +376,7 @@ function capture(current, chunk) {
 
 function samePinnedDirectory(path, dev, ino) {
   try {
-    const stat = lstatSync(path);
+    const stat = lstatSync(path, { bigint: true });
     return stat.isDirectory() && !stat.isSymbolicLink() &&
       String(stat.dev) === dev && String(stat.ino) === ino;
   } catch {
@@ -368,10 +384,40 @@ function samePinnedDirectory(path, dev, ino) {
   }
 }
 
+function samePinnedFile(path, dev, ino) {
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
+
+function pathAbsent(path) {
+  try {
+    lstatSync(path, { bigint: true });
+    return false;
+  } catch (error) {
+    return Boolean(error && error.code === 'ENOENT');
+  }
+}
+
 function destinationStillPinned() {
-  return destinationPin === null || (
+  if (destinationPin === null) return true;
+  const worktreePinned = !destinationPin.worktreePath ||
+    (destinationPin.requireWorktreeAbsence
+      ? pathAbsent(destinationPin.worktreePath)
+      : samePinnedDirectory(
+          destinationPin.worktreePath,
+          destinationPin.worktreeDev,
+          destinationPin.worktreeIno,
+        ) || (destinationPin.allowWorktreeAbsence && pathAbsent(destinationPin.worktreePath)));
+  return (
     samePinnedDirectory(destinationPin.parentPath, destinationPin.parentDev, destinationPin.parentIno) &&
-    samePinnedDirectory(destinationPin.homePath, destinationPin.homeDev, destinationPin.homeIno)
+    samePinnedDirectory(destinationPin.homePath, destinationPin.homeDev, destinationPin.homeIno) &&
+    samePinnedFile(destinationPin.metadataPath, destinationPin.metadataDev, destinationPin.metadataIno) &&
+    worktreePinned
   );
 }
 
@@ -420,13 +466,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const [sourceDev, sourceIno, sourceRepo, parentDev, parentIno, sandboxParent,
-  homeDev, homeIno, sandboxHome, worktreeDev, worktreeIno, worktreePath,
+  homeDev, homeIno, sandboxHome, metadataDev, metadataIno, metadataPath,
+  worktreeDev, worktreeIno, worktreePath,
   commonDev, commonIno, commonPath] = process.argv.slice(1);
 
 function sameDirectory(value, dev, ino) {
   try {
-    const stat = fs.lstatSync(value);
+    const stat = fs.lstatSync(value, { bigint: true });
     return stat.isDirectory() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
+
+function sameFile(value, dev, ino) {
+  try {
+    const stat = fs.lstatSync(value, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
       String(stat.dev) === dev && String(stat.ino) === ino;
   } catch {
     return false;
@@ -436,6 +493,7 @@ function sameDirectory(value, dev, ino) {
 function destinationStillExact() {
   return sameDirectory(sandboxParent, parentDev, parentIno) &&
     sameDirectory(sandboxHome, homeDev, homeIno) &&
+    sameFile(metadataPath, metadataDev, metadataIno) &&
     sameDirectory(worktreePath, worktreeDev, worktreeIno);
 }
 
@@ -452,8 +510,8 @@ try {
   if (!destinationStillExact() || !sameDirectory('.', worktreeDev, worktreeIno) ||
       !sameDirectory(sourceRepo, sourceDev, sourceIno)) process.exit(0);
   const sourceModules = path.join(sourceRepo, 'node_modules');
-  if (sameDirectory(sourceModules, String(fs.lstatSync(sourceModules).dev),
-      String(fs.lstatSync(sourceModules).ino)) && !fs.existsSync('node_modules') &&
+  if (sameDirectory(sourceModules, String(fs.lstatSync(sourceModules, { bigint: true }).dev),
+      String(fs.lstatSync(sourceModules, { bigint: true }).ino)) && !fs.existsSync('node_modules') &&
       destinationStillExact() && sameDirectory('.', worktreeDev, worktreeIno) &&
       sameDirectory(sourceRepo, sourceDev, sourceIno)) {
     fs.symlinkSync(sourceModules, 'node_modules', 'dir');
@@ -470,7 +528,7 @@ try {
   if (relative === '' || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
     process.exit(0);
   }
-  const gitdirStat = fs.lstatSync(gitdir);
+  const gitdirStat = fs.lstatSync(gitdir, { bigint: true });
   if (!gitdirStat.isDirectory() || gitdirStat.isSymbolicLink() ||
       !sameDirectory(commonPath, commonDev, commonIno)) process.exit(0);
   process.chdir(gitdir);
@@ -480,7 +538,7 @@ try {
     sameDirectory(gitdir, gitdirDev, gitdirIno) && sameDirectory(commonPath, commonDev, commonIno);
   if (!authorityStillExact()) process.exit(0);
   if (!fs.existsSync('info')) fs.mkdirSync('info', { mode: 0o700 });
-  const infoStat = fs.lstatSync('info');
+  const infoStat = fs.lstatSync('info', { bigint: true });
   if (!infoStat.isDirectory() || infoStat.isSymbolicLink() || !authorityStillExact()) process.exit(0);
   process.chdir('info');
   const infoDev = String(infoStat.dev);
@@ -512,8 +570,8 @@ const supervisorSource = ${JSON.stringify(PINNED_GIT_SUPERVISOR)};
 const postCreateWriterSource = ${JSON.stringify(PINNED_POST_CREATE_WRITER)};
 
 const [commonDev, commonIno, expectedCommonPath, sourceDev, sourceIno, sourceRepo,
-  parentDev, parentIno, sandboxParent, homeDev, homeIno, sandboxHome, worktreePath,
-  branch, baseHead] = process.argv.slice(1);
+  parentDev, parentIno, sandboxParent, homeDev, homeIno, sandboxHome,
+  metadataDev, metadataIno, metadataPath, worktreePath, branch, baseHead] = process.argv.slice(1);
 const childEnv = { ...process.env };
 if (childEnv.ASHLR_PINNED_GIT_NODE_OPTIONS) {
   childEnv.NODE_OPTIONS = childEnv.ASHLR_PINNED_GIT_NODE_OPTIONS;
@@ -596,6 +654,20 @@ function run(cwd, args, options = {}) {
       supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_PATH = sandboxHome;
       supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_DEV = homeDev;
       supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_INO = homeIno;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH = metadataPath;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV = metadataDev;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_INO = metadataIno;
+      if (options.worktreePin || options.requireWorktreeAbsence) {
+        supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_PATH = worktreePath;
+        if (options.worktreePin) {
+          supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_DEV = options.worktreePin.dev;
+          supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_INO = options.worktreePin.ino;
+        }
+        supervisorEnv.ASHLR_PINNED_DESTINATION_ALLOW_WORKTREE_ABSENCE =
+          options.allowWorktreeAbsence ? '1' : '0';
+        supervisorEnv.ASHLR_PINNED_DESTINATION_REQUIRE_WORKTREE_ABSENCE =
+          options.requireWorktreeAbsence ? '1' : '0';
+      }
     }
 
     let supervisor;
@@ -649,6 +721,11 @@ function sameDirectoryIdentity(stat, dev, ino) {
     String(stat.dev) === dev && String(stat.ino) === ino;
 }
 
+function sameFileIdentity(stat, dev, ino) {
+  return stat.isFile() && !stat.isSymbolicLink() &&
+    String(stat.dev) === dev && String(stat.ino) === ino;
+}
+
 function sameCanonicalPath(left, right) {
   const fold = process.platform === 'win32' ? (value) => value.toLowerCase() : (value) => value;
   return fold(path.resolve(left)) === fold(path.resolve(right));
@@ -675,17 +752,43 @@ async function branchPresent() {
 
 async function rollback() {
   if (!currentDestinationIsPinned()) return false;
-  await runPinned(['worktree', 'remove', '--force', worktreePath]);
-  await runPinned(['worktree', 'prune']);
-  await runPinned(['branch', '-D', branch]);
-  return await registrationPresent() === false && await branchPresent() === false;
+  let worktreePin = null;
+  try {
+    const stat = lstatSync(worktreePath, { bigint: true });
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      worktreePin = { dev: String(stat.dev), ino: String(stat.ino) };
+    }
+  } catch { /* an incomplete add may not have created the worktree */ }
+
+  const runRollbackMutation = async (args, options = {}) => {
+    if (!currentDestinationIsPinned()) return false;
+    const mutation = await runPinned(args, { monitorDestination: true, ...options });
+    return currentDestinationIsPinned() &&
+      !(mutation.error && mutation.error.includes('sandbox reservation identity changed'));
+  };
+
+  if (!await runRollbackMutation(
+    ['worktree', 'remove', '--force', worktreePath],
+    worktreePin
+      ? { worktreePin, allowWorktreeAbsence: true }
+      : { requireWorktreeAbsence: true },
+  )) return false;
+  if (!await runRollbackMutation(['worktree', 'prune'])) return false;
+  if (!await runRollbackMutation(['branch', '-D', branch])) return false;
+  if (!currentDestinationIsPinned()) return false;
+  const registrationAbsent = await registrationPresent() === false;
+  if (!currentDestinationIsPinned()) return false;
+  const branchAbsent = await branchPresent() === false;
+  return currentDestinationIsPinned() && registrationAbsent && branchAbsent;
 }
 
 function currentDestinationIsPinned() {
   try {
-    return sameDirectoryIdentity(lstatSync(sandboxParent), parentDev, parentIno) &&
-      sameDirectoryIdentity(lstatSync(sandboxHome), homeDev, homeIno) &&
+    return sameDirectoryIdentity(lstatSync(sandboxParent, { bigint: true }), parentDev, parentIno) &&
+      sameDirectoryIdentity(lstatSync(sandboxHome, { bigint: true }), homeDev, homeIno) &&
+      sameFileIdentity(lstatSync(metadataPath, { bigint: true }), metadataDev, metadataIno) &&
       sameCanonicalPath(path.dirname(sandboxHome), sandboxParent) &&
+      sameCanonicalPath(path.dirname(metadataPath), sandboxHome) &&
       path.basename(worktreePath) === 'worktree' &&
       sameCanonicalPath(realpathSync.native(path.dirname(worktreePath)), sandboxHome);
   } catch {
@@ -695,12 +798,12 @@ function currentDestinationIsPinned() {
 
 async function currentSourceIsPinned() {
   try {
-    if (!sameDirectoryIdentity(lstatSync(sourceRepo), sourceDev, sourceIno)) return false;
+    if (!sameDirectoryIdentity(lstatSync(sourceRepo, { bigint: true }), sourceDev, sourceIno)) return false;
     const common = await run(sourceRepo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
     if (common.status !== 0 || typeof common.stdout !== 'string' || !common.stdout.trim()) return false;
     const commonPath = realpathSync.native(common.stdout.trim());
     return sameCanonicalPath(commonPath, expectedCommonPath) &&
-      sameDirectoryIdentity(lstatSync(commonPath), commonDev, commonIno);
+      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno);
   } catch {
     return false;
   }
@@ -708,7 +811,7 @@ async function currentSourceIsPinned() {
 
 async function retainedSourceMatchesDiscovery() {
   try {
-    if (!sameDirectoryIdentity(lstatSync('.'), sourceDev, sourceIno) ||
+    if (!sameDirectoryIdentity(lstatSync('.', { bigint: true }), sourceDev, sourceIno) ||
         !sameCanonicalPath(realpathSync.native('.'), sourceRepo)) return false;
     const common = await run('.', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
     const head = await run('.', ['rev-parse', 'HEAD']);
@@ -716,8 +819,8 @@ async function retainedSourceMatchesDiscovery() {
         head.status !== 0 || head.stdout.trim() !== baseHead) return false;
     const commonPath = realpathSync.native(common.stdout.trim());
     return sameCanonicalPath(commonPath, expectedCommonPath) &&
-      sameDirectoryIdentity(lstatSync(commonPath), commonDev, commonIno) &&
-      sameDirectoryIdentity(lstatSync('.'), sourceDev, sourceIno);
+      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno) &&
+      sameDirectoryIdentity(lstatSync('.', { bigint: true }), sourceDev, sourceIno);
   } catch {
     return false;
   }
@@ -725,13 +828,14 @@ async function retainedSourceMatchesDiscovery() {
 
 function runPinnedPostCreateWriter() {
   try {
-    const worktree = lstatSync(worktreePath);
+    const worktree = lstatSync(worktreePath, { bigint: true });
     if (!worktree.isDirectory() || worktree.isSymbolicLink() || !currentDestinationIsPinned()) return;
     const writerEnv = { ...childEnv };
     delete writerEnv.NODE_OPTIONS;
     const result = spawnSync(process.execPath, [
       '-e', postCreateWriterSource, '--', sourceDev, sourceIno, sourceRepo,
       parentDev, parentIno, sandboxParent, homeDev, homeIno, sandboxHome,
+      metadataDev, metadataIno, metadataPath,
       String(worktree.dev), String(worktree.ino), worktreePath,
       commonDev, commonIno, expectedCommonPath,
     ], {
@@ -755,7 +859,7 @@ async function createdWorktreeIsExact() {
   try {
     const commonPath = realpathSync.native(common.stdout.trim());
     return sameCanonicalPath(commonPath, expectedCommonPath) &&
-      sameDirectoryIdentity(lstatSync(commonPath), commonDev, commonIno);
+      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno);
   } catch {
     return false;
   }
@@ -771,7 +875,7 @@ async function createdWorktreeIsExact() {
     } else {
       process.chdir(expectedCommonPath);
       if (!sameCanonicalPath(realpathSync.native('.'), expectedCommonPath) ||
-          !sameDirectoryIdentity(lstatSync('.'), commonDev, commonIno) ||
+          !sameDirectoryIdentity(lstatSync('.', { bigint: true }), commonDev, commonIno) ||
           !await currentSourceIsPinned()) {
         result = { ok: false, cleanupComplete: true, error: 'repository association changed before worktree creation' };
       } else {
@@ -819,7 +923,27 @@ async function createdWorktreeIsExact() {
                 : 'repository or Git common directory identity changed after worktree creation',
             };
           } else {
-            result = { ok: true, cleanupComplete: false };
+            try {
+              const worktree = lstatSync(worktreePath, { bigint: true });
+              result = worktree.isDirectory() && !worktree.isSymbolicLink()
+                ? {
+                    ok: true,
+                    cleanupComplete: false,
+                    worktreeDev: String(worktree.dev),
+                    worktreeIno: String(worktree.ino),
+                  }
+                : {
+                    ok: false,
+                    cleanupComplete: false,
+                    error: 'worktree identity unavailable after creation',
+                  };
+            } catch {
+              result = {
+                ok: false,
+                cleanupComplete: false,
+                error: 'worktree identity unavailable after creation',
+              };
+            }
           }
         }
       }
@@ -870,6 +994,9 @@ function createPinnedWorktree(
     String(destination.home.dev),
     String(destination.home.ino),
     destination.home.path,
+    String(destination.metadata.dev),
+    String(destination.metadata.ino),
+    destination.metadata.path,
     sb.worktreePath,
     sb.branch,
     sb.baseHead,
@@ -888,10 +1015,16 @@ function createPinnedWorktree(
     if (typeof parsed.ok !== 'boolean' || typeof parsed.cleanupComplete !== 'boolean') {
       throw new Error('invalid pinned worktree result');
     }
+    if (parsed.ok && (
+      typeof parsed.worktreeDev !== 'string' || !/^\d+$/u.test(parsed.worktreeDev) ||
+      typeof parsed.worktreeIno !== 'string' || !/^\d+$/u.test(parsed.worktreeIno)
+    )) throw new Error('invalid pinned worktree identity');
     return {
       ok: parsed.ok,
       cleanupComplete: parsed.cleanupComplete,
       ...(typeof parsed.error === 'string' ? { error: parsed.error } : {}),
+      ...(typeof parsed.worktreeDev === 'string' ? { worktreeDev: parsed.worktreeDev } : {}),
+      ...(typeof parsed.worktreeIno === 'string' ? { worktreeIno: parsed.worktreeIno } : {}),
     };
   } catch {
     return { ok: false, cleanupComplete: false, error: 'invalid pinned worktree result' };
@@ -908,11 +1041,11 @@ function writeMeta(sb: Sandbox): void {
   if (!existsSync(home)) {
     mkdirSync(home, { recursive: true, mode: 0o700 });
   }
-  const expectedDirs = new Map<string, { dev: number; ino: number }>();
+  const expectedDirs = new Map<string, { dev: bigint; ino: bigint }>();
   for (const dir of [root, home]) {
-    const stat = lstatSync(dir);
+    const stat = lstatSync(dir, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isDirectory() ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid()))) {
       throw new Error('unsafe sandbox metadata directory');
     }
     chmodSync(dir, 0o700);
@@ -920,20 +1053,24 @@ function writeMeta(sb: Sandbox): void {
   }
   const target = metaPath(sb.id);
   if (existsSync(target)) {
-    const current = lstatSync(target);
+    const current = lstatSync(target, { bigint: true });
     if (current.isSymbolicLink() || !current.isFile() ||
-      (typeof process.getuid === 'function' && current.uid !== process.getuid())) {
+      (typeof process.getuid === 'function' && current.uid !== BigInt(process.getuid()))) {
       throw new Error('unsafe sandbox metadata file');
     }
   }
   const temp = join(home, `.sandbox.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
   let fd: number | undefined;
+  let tempIdentity: { dev: bigint; ino: bigint } | null = null;
   try {
     fd = openSync(
       temp,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o600,
     );
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile()) throw new Error('invalid sandbox metadata temporary file');
+    tempIdentity = { dev: opened.dev, ino: opened.ino };
     const bytes = Buffer.from(JSON.stringify(sb, null, 2) + '\n', 'utf8');
     if (writeSync(fd, bytes) !== bytes.length) throw new Error('short sandbox metadata write');
     fchmodSync(fd, 0o600);
@@ -942,15 +1079,18 @@ function writeMeta(sb: Sandbox): void {
     fd = undefined;
     for (const dir of [root, home]) {
       const expected = expectedDirs.get(dir)!;
-      const current = lstatSync(dir);
+      const current = lstatSync(dir, { bigint: true });
       if (current.isSymbolicLink() || !current.isDirectory() ||
         current.dev !== expected.dev || current.ino !== expected.ino) {
         throw new Error('sandbox metadata directory changed during write');
       }
     }
     renameSync(temp, target);
-    const persisted = lstatSync(target);
-    if (persisted.isSymbolicLink() || !persisted.isFile()) throw new Error('invalid sandbox metadata replacement');
+    const persisted = lstatSync(target, { bigint: true });
+    if (persisted.isSymbolicLink() || !persisted.isFile() || tempIdentity === null ||
+        persisted.dev !== tempIdentity.dev || persisted.ino !== tempIdentity.ino) {
+      throw new Error('invalid sandbox metadata replacement');
+    }
     chmodSync(target, 0o600);
     let dirFd: number | undefined;
     try {
@@ -1078,8 +1218,8 @@ function readMeta(id: string): Sandbox | null {
 
 interface PinnedDirectoryIdentity {
   path: string;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
 }
 
 interface PinnedRepositoryIdentity {
@@ -1090,13 +1230,20 @@ interface PinnedRepositoryIdentity {
 interface PinnedSandboxDestinationIdentity {
   parent: PinnedDirectoryIdentity;
   home: PinnedDirectoryIdentity;
+  metadata: PinnedFileIdentity;
+}
+
+interface PinnedFileIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
 }
 
 function pinDirectoryIdentity(value: string): PinnedDirectoryIdentity | null {
   const path = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
   if (!path) return null;
   try {
-    const stat = lstatSync(path);
+    const stat = lstatSync(path, { bigint: true });
     return stat.isDirectory() && !stat.isSymbolicLink()
       ? { path, dev: stat.dev, ino: stat.ino }
       : null;
@@ -1107,8 +1254,31 @@ function pinDirectoryIdentity(value: string): PinnedDirectoryIdentity | null {
 
 function directoryIdentityStillPinned(identity: PinnedDirectoryIdentity): boolean {
   try {
-    const stat = lstatSync(identity.path);
+    const stat = lstatSync(identity.path, { bigint: true });
     return stat.isDirectory() && !stat.isSymbolicLink() &&
+      stat.dev === identity.dev && stat.ino === identity.ino;
+  } catch {
+    return false;
+  }
+}
+
+function pinFileIdentity(value: string): PinnedFileIdentity | null {
+  const path = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  if (!path) return null;
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink()
+      ? { path, dev: stat.dev, ino: stat.ino }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function fileIdentityStillPinned(identity: PinnedFileIdentity): boolean {
+  try {
+    const stat = lstatSync(identity.path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
       stat.dev === identity.dev && stat.ino === identity.ino;
   } catch {
     return false;
@@ -1137,7 +1307,56 @@ function repositoryIdentityStillPinned(identity: PinnedRepositoryIdentity): bool
 function sandboxDestinationStillPinned(identity: PinnedSandboxDestinationIdentity): boolean {
   return directoryIdentityStillPinned(identity.parent) &&
     directoryIdentityStillPinned(identity.home) &&
-    dirname(identity.home.path) === identity.parent.path;
+    fileIdentityStillPinned(identity.metadata) &&
+    dirname(identity.home.path) === identity.parent.path &&
+    dirname(identity.metadata.path) === identity.home.path;
+}
+
+function createdWorktreeStillExact(
+  sb: Sandbox,
+  worktree: PinnedDirectoryIdentity,
+  repository: PinnedRepositoryIdentity,
+  destination: PinnedSandboxDestinationIdentity,
+): boolean {
+  const authorityStillExact = (): boolean =>
+    directoryIdentityStillPinned(repository.source) &&
+    directoryIdentityStillPinned(repository.commonDirectory) &&
+    sandboxDestinationStillPinned(destination) &&
+    directoryIdentityStillPinned(worktree) &&
+    canonicalFilesystemPathIdentity(dirname(sb.worktreePath), { foldWindowsCase: false }) ===
+      destination.home.path;
+  if (!authorityStillExact()) return false;
+
+  const head = gitTry(sb.worktreePath, ['rev-parse', 'HEAD']);
+  if (!authorityStillExact()) return false;
+  const branch = gitTry(sb.worktreePath, ['branch', '--show-current']);
+  if (!authorityStillExact()) return false;
+  const commonPath = gitTry(sb.worktreePath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (!authorityStillExact() || !head || !branch || !commonPath) return false;
+  const currentCommon = pinDirectoryIdentity(commonPath);
+  return head === sb.baseHead && branch === sb.branch && currentCommon !== null &&
+    currentCommon.path === repository.commonDirectory.path &&
+    currentCommon.dev === repository.commonDirectory.dev &&
+    currentCommon.ino === repository.commonDirectory.ino &&
+    authorityStillExact();
+}
+
+function removePinnedSandboxHomeReservation(
+  parent: PinnedDirectoryIdentity,
+  home: PinnedDirectoryIdentity,
+): boolean {
+  if (!directoryIdentityStillPinned(parent) || !directoryIdentityStillPinned(home) ||
+      dirname(home.path) !== parent.path) return false;
+  try {
+    rmSync(home.path, { recursive: true, force: true });
+    return !existsSync(home.path);
+  } catch {
+    return false;
+  }
 }
 
 function removePinnedSandboxReservation(identity: PinnedSandboxDestinationIdentity): boolean {
@@ -1322,8 +1541,6 @@ function createSandboxWhileFenced(
     if (!homeIdentity || dirname(homeIdentity.path) !== parentIdentity.path) {
       throw new Error('could not pin sandbox destination home identity');
     }
-    destinationIdentity = { parent: parentIdentity, home: homeIdentity };
-
     sb = {
       id,
       sourceRepo: canonicalSourceRepo,
@@ -1341,9 +1558,19 @@ function createSandboxWhileFenced(
     try {
       writeMeta(sb);
     } catch (err) {
-      removePinnedSandboxReservation(destinationIdentity);
+      removePinnedSandboxHomeReservation(parentIdentity, homeIdentity);
       throw err;
     }
+    const metadataIdentity = pinFileIdentity(metaPath(id));
+    if (!metadataIdentity || dirname(metadataIdentity.path) !== homeIdentity.path) {
+      removePinnedSandboxHomeReservation(parentIdentity, homeIdentity);
+      throw new Error('could not pin sandbox reservation metadata identity');
+    }
+    destinationIdentity = {
+      parent: parentIdentity,
+      home: homeIdentity,
+      metadata: metadataIdentity,
+    };
     if (!repositoryIdentityStillPinned(repositoryIdentity) ||
         !sandboxDestinationStillPinned(destinationIdentity)) {
       removePinnedSandboxReservation(destinationIdentity);
@@ -1374,6 +1601,28 @@ function createSandboxWhileFenced(
       result: 'error',
     });
     throw new Error(creation.error ?? 'pinned worktree creation failed');
+  }
+  const worktreeIdentity = creation.worktreeDev !== undefined && creation.worktreeIno !== undefined
+    ? {
+        path: sb.worktreePath,
+        dev: BigInt(creation.worktreeDev),
+        ino: BigInt(creation.worktreeIno),
+      }
+    : null;
+  if (!worktreeIdentity || !createdWorktreeStillExact(
+    sb,
+    worktreeIdentity,
+    repositoryIdentity,
+    destinationIdentity,
+  )) {
+    audit({
+      action: 'sandbox:create',
+      repo: canonicalSourceRepo,
+      sandboxId: id,
+      summary: 'repository or sandbox identity changed after worktree creation',
+      result: 'error',
+    });
+    throw new Error('repository or sandbox identity changed after worktree creation');
   }
 
   audit({

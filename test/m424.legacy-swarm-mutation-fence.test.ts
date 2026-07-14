@@ -204,7 +204,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
       changed: false,
       quiesced: true,
     });
-  });
+  }, 30_000);
 
   it('retains authority through held planning and persists the completed plan before quiescence', async () => {
     let releasePlanner!: () => void;

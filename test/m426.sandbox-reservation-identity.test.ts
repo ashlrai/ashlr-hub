@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join, resolve, win32 } from 'node:path';
+import { delimiter, dirname, join, resolve, win32 } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -88,7 +88,7 @@ function installGitShim(
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
     'hang-worktree-descendant' | 'retarget-after-validation' |
-    'retarget-source-path-during-discovery',
+    'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove',
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m426-git-'));
   cleanupPaths.add(dir);
@@ -123,6 +123,17 @@ if (mode === 'registration-noop') {
   if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) process.exit(0);
   if (args[0] === 'branch' && args[1] === '-D') process.exit(0);
   if (args[0] === 'show-ref' && args.at(-1)?.startsWith('refs/heads/ashlr/sandbox/')) process.exit(1);
+}
+
+if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
+    args[worktreeIndex + 1] === 'add') process.exit(1);
+
+if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
+    args[worktreeIndex + 1] === 'remove') {
+  const worktree = args[worktreeIndex + 3];
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(process.env.M426_MARKER, worktree);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
 }
 
 if (mode === 'common-dir-alias') {
@@ -363,6 +374,8 @@ describe('M426 sandbox reservation and path identity', () => {
         { encoding: 'utf8', stdio: 'pipe' },
       ).trim().replace(/^"(.*)"$/u, '$1');
       expect(win32.isAbsolute(short)).toBe(true);
+      expect(short).toMatch(/~\d/u);
+      expect(canonicalPathIdentity(short)).toBe(canonicalPathIdentity(physical));
       const shortIdentity = canonicalPathIdentity(join(short, 'future-worktree'));
       expect(shortIdentity).toBe(canonicalPathIdentity(join(physical, 'future-worktree')));
       expect(shortIdentity).not.toMatch(/^[\\/][A-Za-z]:/u);
@@ -388,6 +401,51 @@ describe('M426 sandbox reservation and path identity', () => {
     } finally {
       removeSandbox(sandbox);
     }
+  });
+
+  it('ignores inherited Git repository overrides during parent validation', () => {
+    const source = fx.makeRepo();
+    const replacement = fx.makeRepo();
+    const expectedHead = git(source.dir, ['rev-parse', 'HEAD']);
+    const previousGitDir = process.env.GIT_DIR;
+    const previousGitWorkTree = process.env.GIT_WORK_TREE;
+    const previousGitCommonDir = process.env.GIT_COMMON_DIR;
+    let sandbox: Sandbox;
+    try {
+      process.env.GIT_DIR = join(replacement.dir, '.git');
+      process.env.GIT_WORK_TREE = replacement.dir;
+      process.env.GIT_COMMON_DIR = join(replacement.dir, '.git');
+      sandbox = createSandbox(source.dir, { allowAnyRepo: true });
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+      if (previousGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousGitWorkTree;
+      if (previousGitCommonDir === undefined) delete process.env.GIT_COMMON_DIR;
+      else process.env.GIT_COMMON_DIR = previousGitCommonDir;
+    }
+    try {
+      expect(git(sandbox!.worktreePath, ['rev-parse', 'HEAD'])).toBe(expectedHead);
+    } finally {
+      removeSandbox(sandbox!);
+    }
+  });
+
+  it('retains recovery authority when an absent worktree appears during rollback', () => {
+    const source = fx.makeRepo();
+    const marker = join(fx.home, 'appeared-during-rollback.txt');
+    installGitShim('fail-add-then-appear-on-remove');
+    process.env.M426_MARKER = marker;
+
+    expect(() => createSandbox(source.dir, { allowAnyRepo: true }))
+      .toThrow(/git worktree add failed/u);
+    const worktree = readFileSync(marker, 'utf8');
+    const home = dirname(worktree);
+    expect(existsSync(worktree)).toBe(true);
+    expect(existsSync(join(home, 'sandbox.json'))).toBe(true);
+
+    process.env.PATH = originalPath;
+    rmSync(home, { recursive: true, force: true });
   });
 
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
