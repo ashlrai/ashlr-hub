@@ -2136,3 +2136,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add exact no-replay execution-lease reconciliation after effect disposition without clearing or replaying the run.
 - [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
 - [x] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
+
+## Current Overnight Cycle - Authenticated Terminal Retention
+- [x] Rehydrate exact merged master, immutable release proof, production ownership, Entire state, and the two explicit effect-authority blockers.
+- [x] Audit immutable terminal packing, crash recovery, overlap semantics, downgrade behavior, Windows durability, and execution-lease reconciliation in parallel.
+- [x] Define an authenticated append-only pack and commit-marker contract that never authorizes replay from deletion, age, probabilistic membership, or unauthenticated summaries.
+- [x] Implement bounded loose-plus-packed reads and crash-safe POSIX compaction while keeping unsupported Windows source deletion fail closed.
+- [x] Add capacity, crash-window, overlap, tamper, rollback-visible, unknown-format, downgrade, POSIX, and Windows regressions.
+- [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
+- [ ] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.

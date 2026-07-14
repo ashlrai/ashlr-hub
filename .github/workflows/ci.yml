@@ -26,6 +26,7 @@ jobs:
               test/setup/home.test.ts test/classify.test.ts
               test/m2.doctor.test.ts test/m43.verify-commands.test.ts
               test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
+              test/m395.effect-terminal-retention.test.ts
           - os: windows-latest
             label: windows, portability 2/3
             test_args: >-
@@ -42,6 +43,7 @@ jobs:
             label: macos, shared queue authority
             test_args: >-
               test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
+              test/m395.effect-terminal-retention.test.ts
     runs-on: ${{ matrix.os }}
 
     steps:

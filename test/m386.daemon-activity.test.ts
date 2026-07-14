@@ -48,6 +48,7 @@ describe('daemon activity — observational private state', () => {
 
   it('writes a bounded owner-only schema and preserves the phase start across heartbeats', () => {
     const daemonStartedAt = '2026-07-13T05:00:00.000Z';
+    const activityPath = daemonActivityPath('2026-07-13');
     expect(writeDaemonActivity({
       instanceId,
       daemonStartedAt,
@@ -80,15 +81,15 @@ describe('daemon activity — observational private state', () => {
     if (process.platform !== 'win32') {
       expect(lstatSync(process.env['ASHLR_HOME']!).mode & 0o777).toBe(0o700);
       expect(lstatSync(daemonActivityDirectory()).mode & 0o777).toBe(0o700);
-      expect(lstatSync(daemonActivityPath()).mode & 0o777).toBe(0o600);
+      expect(lstatSync(activityPath).mode & 0o777).toBe(0o600);
     }
-    const rows = readFileSync(daemonActivityPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const rows = readFileSync(activityPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(rows).toHaveLength(2);
     expect(Object.keys(rows[0]).sort()).toEqual([
       'activeChildren', 'authority', 'daemonStartedAt', 'instanceId', 'observedAt', 'phase',
       'pid', 'processStartRef', 'schemaVersion',
     ]);
-    expect(readFileSync(daemonActivityPath(), 'utf8')).not.toMatch(/prompt|objective|command|stdout|stderr|backend|model|repo|diff|env/i);
+    expect(readFileSync(activityPath, 'utf8')).not.toMatch(/prompt|objective|command|stdout|stderr|backend|model|repo|diff|env/i);
   });
 
   it('records only a bounded child count in post-tick phase and resets phase time', () => {
