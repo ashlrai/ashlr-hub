@@ -649,7 +649,7 @@ describe('M426 sandbox reservation and path identity', () => {
     process.env.M426_MARKER = marker;
 
     expect(() => createSandbox(source.dir, { allowAnyRepo: true }))
-      .toThrow(/sandbox reservation identity changed during worktree creation/u);
+      .toThrow(/sandbox reservation(?: or repository\/Git common directory)? identity changed during worktree creation/u);
     const { home, backup } = JSON.parse(readFileSync(marker, 'utf8')) as {
       home: string;
       backup: string;

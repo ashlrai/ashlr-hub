@@ -936,7 +936,7 @@ async function validateCreatedWorktree() {
             cleanupComplete: await rollback(),
             error: reservationChanged
               ? 'sandbox reservation identity changed during worktree creation'
-              : 'repository or Git common directory identity changed during worktree creation',
+              : 'sandbox reservation or repository/Git common directory identity changed during worktree creation',
           };
         } else {
           runPinnedPostCreateWriter();
@@ -955,7 +955,7 @@ async function validateCreatedWorktree() {
               cleanupComplete: await rollback(),
               error: reservationChanged
                 ? 'sandbox reservation identity changed after worktree creation'
-                : 'repository or Git common directory identity changed after worktree creation',
+                : 'sandbox reservation or repository/Git common directory identity changed after worktree creation',
             };
           } else {
             try {
