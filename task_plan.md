@@ -223,7 +223,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make real machine-persisted capture mismatches eligible under exact lineage, timing, and non-human predicates.
 - [x] Bound derived goal display titles and refuse invalid outgoing backlog snapshots without dropping authoritative goal data.
 - [x] Run exhaustive verification and independent review; commit, push, reload production, and prove all eligible mismatch repairs materialize with a complete queue source.
-- [ ] Next lane: design and implement evidence-only objective-saturation quarantine after three unique empty attempts across two same-tier editing backends.
+- [x] Next lane: design and implement evidence-only objective-saturation quarantine after three unique empty attempts across two same-tier editing backends.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
@@ -2190,8 +2190,20 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Re-prove the expanded physical-identity tree with a final exhaustive suite after closing all legacy fixture and mock-contract fallout.
 - [x] Re-run typecheck, build, lint, dependency audit, and diff checks on the exact commit candidate.
 - [x] Commit, push, and open protected PR #30.
-- [ ] Observe the final exact-SHA cross-platform CI matrix.
-- [ ] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+- [x] Observe the final exact-SHA cross-platform CI matrix.
+- [x] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+
+## Current Overnight Cycle - Release Native Authority
+- [x] Rehydrate the exact green mutation-fence SHA, protected PR state, production NO-GO boundary, persistent roadmap, and canonical user edits.
+- [x] Confirm the recorded objective-saturation lane already shipped with three unique attempts across two same-tier editing backends and fail-closed lifecycle proof.
+- [x] Make the canonical Ubuntu, three-part Windows, and macOS CI matrix reusable by tag-triggered releases.
+- [x] Constrain the reusable verification workflow to read-only repository contents and pass no publish secrets into it.
+- [x] Add drift-resistant workflow contract tests and run focused tests, typecheck, lint, build, YAML syntax validation, and dependency audit.
+- [ ] Run exhaustive verification, independent review, commit, push, and observe GitHub's exact workflow parse without publishing or deploying.
+
+## Current Overnight Cycle Errors
+- Parallel explorer deployment was attempted twice but the collaboration service reported `agent thread limit reached`; the critical path continued locally without duplicating unowned edits.
+- The first quiet lint run rejected a counted-space regex in `m33.release-meta`; replacing it with an explicit `{2}` quantifier restored a zero-error lint gate.
 
 ### Final Verification Recovery
 - The first serial exhaustive pass after physical identity hardening found 95 failures across 18 files; focused repairs reduced the fast discovery pass to 73 failures across 14 files.

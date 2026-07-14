@@ -83,13 +83,20 @@ describe('release scripts', () => {
 
 describe('release workflow', () => {
   const workflow = readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8');
+  const ciWorkflow = readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  const verifyJob = workflow.match(/^ {2}verify:\n[\s\S]*?(?=^ {2}publish:)/m)?.[0] ?? '';
 
-  it('is tag-triggered and runs the full verify gate before publish', () => {
+  it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(workflow).toContain('tags: ["v*"]');
     expect(workflow).toContain('needs: verify');
-    for (const step of ['npm run typecheck', 'npm run lint', 'npm run test:ci']) {
-      expect(workflow).toContain(step);
-    }
+    expect(verifyJob).toContain('uses: ./.github/workflows/ci.yml');
+    expect(ciWorkflow).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
+    expect(verifyJob).not.toContain('runs-on:');
+    expect(verifyJob).not.toContain('steps:');
+    expect(verifyJob).not.toContain('secrets:');
+    expect(verifyJob).not.toContain('environment:');
+    expect(ciWorkflow).not.toMatch(/\$\{\{\s*secrets\./);
+    expect(ciWorkflow).not.toMatch(/^\s+environment:/m);
   });
 
   it('publishes with provenance and gates on version+changelog scripts', () => {

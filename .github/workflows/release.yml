@@ -1,7 +1,7 @@
 # release.yml — tag-triggered npm publish + GitHub release (M33).
 #
 # Trigger: pushing a tag `v<X.Y.Z>`. Nothing publishes without that explicit
-# human action, and the verify job re-runs the full CI gate first.
+# human action, and the verify job reuses the exact native CI matrix first.
 #
 # Required repo secret: NPM_TOKEN (npm automation token with publish rights
 # for the @ashlr scope). Provenance requires the id-token permission.
@@ -14,19 +14,8 @@ on:
 
 jobs:
   verify:
-    name: Verify (full CI gate)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm run build
-      - run: npm run test:ci
+    name: Verify (full native CI gate)
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: Publish to npm + GitHub release
