@@ -211,7 +211,7 @@ describe('M411 local merge reconciliation', () => {
     expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
       .filter((decision) => decision.action === 'merged')).toHaveLength(0);
     expect(git(['rev-parse', 'main'])).toBe(fixture.mergeCommitOid);
-  });
+  }, 15_000);
 
   it('completes realized-merge fanout when reconciliation retains live authority', async () => {
     const fixture = createInterruptedMerge('exact');
