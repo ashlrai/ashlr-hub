@@ -34,6 +34,7 @@ jobs:
               test/m414.local-store-lock-unknown-owner.test.ts
               test/m415.policy-durability-races.test.ts
               test/m422.policy-transaction-recovery.test.ts
+              test/m425.policy-startup-recovery.test.ts
               test/m416.local-store-lock-handoff.test.ts
           - os: windows-latest
             label: windows, portability 2/3

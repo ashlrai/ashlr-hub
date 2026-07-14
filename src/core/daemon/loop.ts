@@ -58,7 +58,12 @@ import type {
 } from '../types.js';
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
-import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
+import {
+  killSwitchOn,
+  setKill,
+  listEnrolled,
+  recoverEnrollmentRegistry,
+} from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -2957,7 +2962,14 @@ export async function tick(
   // -------------------------------------------------------------------------
   // 3. Enrollment check — NEVER touch non-enrolled repos.
   // -------------------------------------------------------------------------
-  const enrolled = listEnrolled();
+  const enrollmentReadiness = recoverEnrollmentRegistry();
+  if (enrollmentReadiness.state === 'degraded') {
+    return persistenceRefusal(
+      `tick refused: enrollment registry degraded (${enrollmentReadiness.reason})`,
+      'error',
+    );
+  }
+  const enrolled = enrollmentReadiness.repos;
   if (enrolled.length === 0) {
     if (!stillOwnsTick()) {
       return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });

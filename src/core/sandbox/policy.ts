@@ -139,6 +139,19 @@ export interface PolicyMutationResult {
   reason: string;
 }
 
+export type EnrollmentRegistryReadiness =
+  | {
+      state: 'ready';
+      recovered: boolean;
+      repos: string[];
+      reason: string;
+    }
+  | {
+      state: 'degraded';
+      recovered: false;
+      reason: string;
+    };
+
 function ownedByCurrentUser(stat: Stats): boolean {
   return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
 }
@@ -815,6 +828,44 @@ function readRegistryDetailed(): RegistryReadResult {
 
 function readRegistry(): Enrollment {
   return readRegistryDetailed().registry;
+}
+
+/**
+ * Recover an interrupted enrollment transaction, then return registry readiness.
+ * Callers must branch on `state`; degraded results intentionally omit `repos` so
+ * an unreadable registry cannot be mistaken for the valid empty default.
+ */
+export function recoverEnrollmentRegistry(
+  opts: { waitMs?: number } = {},
+): EnrollmentRegistryReadiness {
+  const fence = acquireOutwardMutationFence(opts.waitMs ?? 2_000);
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return {
+      state: 'degraded',
+      recovered: false,
+      reason: 'outward mutation fence unavailable',
+    };
+  }
+
+  try {
+    const recovery = recoverRegistryTransaction();
+    if (!recovery.ok) {
+      return { state: 'degraded', recovered: false, reason: recovery.reason };
+    }
+    const read = readRegistryDetailed();
+    if (!read.ok) {
+      return { state: 'degraded', recovered: false, reason: read.reason };
+    }
+    return {
+      state: 'ready',
+      recovered: recovery.reason !== 'no-transaction',
+      repos: [...read.registry.repos],
+      reason: recovery.reason === 'no-transaction' ? read.reason : recovery.reason,
+    };
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
 }
 
 /** Persist the enrollment registry with a private unique temp and durable rename. */
