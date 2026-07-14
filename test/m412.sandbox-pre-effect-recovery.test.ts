@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -113,7 +113,7 @@ describe('M412 sandbox pre-effect recovery', () => {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(repo.branches()).toContain(sandbox.branch);
       expect(withGitSlashes(git(repo.dir, ['worktree', 'list', '--porcelain'])))
-        .toContain(withGitSlashes(sandbox.worktreePath));
+        .toContain(withGitSlashes(realpathSync(sandbox.worktreePath)));
       expect(listSandboxes().map((entry) => entry.id)).toEqual([sandbox.id]);
     } finally {
       expect(removeSandbox(sandbox).status).toBe('complete');

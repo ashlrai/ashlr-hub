@@ -48,6 +48,7 @@ jobs:
               test/m413.engineer-run-mutation-fence.test.ts
               test/m417.sandbox-cleanup-quiescence.test.ts
               test/m424.legacy-swarm-mutation-fence.test.ts
+              test/m425.persistence-private-temp.test.ts
               test/sandbox-reservation-recovery.test.ts
           - os: windows-latest
             label: windows, portability 3/3

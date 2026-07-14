@@ -51,6 +51,7 @@ import {
   MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
   type CaseOwnershipClaim,
 } from '../util/case-folded-ownership.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -413,6 +414,10 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
 
     tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const secured = assurePrivateStoragePath(tmp, 'file', 'secure-created', {
+      anchorPath: stateRoot(),
+    });
+    if (!secured.ok) return { ok: false, reason: 'unavailable' };
     renameSync(tmp, target);
     tmp = undefined;
     completeCaseFoldedOwnership(ownershipClaim);

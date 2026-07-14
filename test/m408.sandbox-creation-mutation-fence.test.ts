@@ -1,6 +1,6 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -222,7 +222,7 @@ describe('M408 createSandbox outward mutation fence', () => {
     try {
       expect(repo.branches()).toContain(sandbox.branch);
       expect(withGitSlashes(git(repo.dir, ['worktree', 'list', '--porcelain'])))
-        .toContain(withGitSlashes(sandbox.worktreePath));
+        .toContain(withGitSlashes(realpathSync(sandbox.worktreePath)));
       expect(listSandboxes().map((entry) => entry.id)).toContain(sandbox.id);
     } finally {
       removeSandbox(sandbox);

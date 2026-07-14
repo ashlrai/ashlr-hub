@@ -118,6 +118,7 @@ import {
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { assertMayMutate } from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
@@ -1095,6 +1096,12 @@ export function saveRun(s: RunState): void {
       `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
     );
     fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const secured = assurePrivateStoragePath(tmp, 'file', 'secure-created', {
+      anchorPath: stateRoot(),
+    });
+    if (!secured.ok) {
+      throw new Error(`Run persistence temporary file is unsafe: ${secured.reason}`);
+    }
     fs.renameSync(tmp, dest);
     tmp = undefined;
     completeCaseFoldedOwnership(ownershipClaim);
