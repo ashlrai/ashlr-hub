@@ -102,8 +102,9 @@ describe('M286 worktree — node_modules symlink', () => {
       const stat = fs.lstatSync(wtNm);
       expect(stat.isSymbolicLink()).toBe(true);
       // The symlink target must be the source node_modules
-      const target = fs.realpathSync(wtNm);
-      const srcReal = fs.realpathSync(srcNm);
+      const target = wt.canonicalPathIdentity(wtNm);
+      const srcReal = wt.canonicalPathIdentity(srcNm);
+      expect(target).not.toBeNull();
       expect(target).toBe(srcReal);
     } finally {
       if (sb) {
