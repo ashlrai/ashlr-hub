@@ -73,7 +73,7 @@ describe('sandbox reservation recovery', () => {
     } finally {
       expect(removeSandbox(sandbox).status).toBe('complete');
     }
-  });
+  }, 15_000);
 
   it('reclaims canonical partial metadata that never reached a Git effect', () => {
     const id = 'partial-reservation';

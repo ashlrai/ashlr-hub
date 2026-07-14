@@ -344,6 +344,7 @@ const destinationPin = gitEnv.ASHLR_PINNED_DESTINATION === '1' ? {
   homeDev: gitEnv.ASHLR_PINNED_DESTINATION_HOME_DEV,
   homeIno: gitEnv.ASHLR_PINNED_DESTINATION_HOME_INO,
   metadataPath: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH,
+  homeMetadataPath: gitEnv.ASHLR_PINNED_DESTINATION_HOME_METADATA_PATH,
   metadataDev: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV,
   metadataIno: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_INO,
   worktreePath: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_PATH,
@@ -417,6 +418,7 @@ function destinationStillPinned() {
     samePinnedDirectory(destinationPin.parentPath, destinationPin.parentDev, destinationPin.parentIno) &&
     samePinnedDirectory(destinationPin.homePath, destinationPin.homeDev, destinationPin.homeIno) &&
     samePinnedFile(destinationPin.metadataPath, destinationPin.metadataDev, destinationPin.metadataIno) &&
+    samePinnedFile(destinationPin.homeMetadataPath, destinationPin.metadataDev, destinationPin.metadataIno) &&
     worktreePinned
   );
 }
@@ -494,6 +496,7 @@ function destinationStillExact() {
   return sameDirectory(sandboxParent, parentDev, parentIno) &&
     sameDirectory(sandboxHome, homeDev, homeIno) &&
     sameFile(metadataPath, metadataDev, metadataIno) &&
+    sameFile(path.join(sandboxHome, 'sandbox.json'), metadataDev, metadataIno) &&
     sameDirectory(worktreePath, worktreeDev, worktreeIno);
 }
 
@@ -655,6 +658,8 @@ function run(cwd, args, options = {}) {
       supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_DEV = homeDev;
       supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_INO = homeIno;
       supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH = metadataPath;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_METADATA_PATH =
+        path.join(sandboxHome, 'sandbox.json');
       supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV = metadataDev;
       supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_INO = metadataIno;
       if (options.worktreePin || options.requireWorktreeAbsence) {
@@ -787,6 +792,11 @@ function currentDestinationIsPinned() {
     return sameDirectoryIdentity(lstatSync(sandboxParent, { bigint: true }), parentDev, parentIno) &&
       sameDirectoryIdentity(lstatSync(sandboxHome, { bigint: true }), homeDev, homeIno) &&
       sameFileIdentity(lstatSync(metadataPath, { bigint: true }), metadataDev, metadataIno) &&
+      sameFileIdentity(
+        lstatSync(path.join(sandboxHome, 'sandbox.json'), { bigint: true }),
+        metadataDev,
+        metadataIno,
+      ) &&
       sameCanonicalPath(path.dirname(sandboxHome), sandboxParent) &&
       sameCanonicalPath(path.dirname(metadataPath), sandboxHome) &&
       path.basename(worktreePath) === 'worktree' &&
