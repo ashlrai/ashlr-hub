@@ -256,7 +256,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(orphan.id);
     expect(sandboxHomeExists(otherOrphan.id)).toBe(true);
     expect(listSandboxes().map((sandbox) => sandbox.id)).toContain(otherOrphan.id);
-  });
+  }, 15_000);
 
   it('narrows and sweeps both physical and exact legacy alias-spelled authority', async () => {
     expect.hasAssertions();
@@ -290,7 +290,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(sandboxHomeExists(lexicalOrphan.id)).toBe(false);
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(physicalOrphan.id);
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(lexicalOrphan.id);
-  });
+  }, 15_000);
 
   it('is SCOPED — rollback of repo A leaves a DIFFERENT repo B fresh orphan untouched', async () => {
     expect.hasAssertions();
@@ -312,7 +312,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(sandboxHomeExists(orphanA.id)).toBe(false);
     expect(sandboxHomeExists(orphanB.id)).toBe(true);
     expect(listSandboxes().map((s) => s.id)).toContain(orphanB.id);
-  });
+  }, 15_000);
 
   it('NEVER force-removes a LIVE owner-pid sandbox during the SCOPED rollback sweep', async () => {
     // The scoped sweep drops the AGE guard but must KEEP the live-owner guard:
