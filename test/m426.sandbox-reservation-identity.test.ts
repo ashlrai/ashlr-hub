@@ -87,7 +87,7 @@ function installGitShim(
   mode: 'observe-add' | 'registration-noop' | 'common-dir-alias' |
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
-    'hang-worktree-descendant' | 'retarget-after-validation' |
+    'hang-worktree-descendant' | 'retarget-after-worktree-add' |
     'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove',
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m426-git-'));
@@ -223,13 +223,12 @@ if (mode === 'hang-worktree-descendant' && worktreeIndex >= 0 &&
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
 
-if (mode === 'retarget-after-validation' && args[0] === 'rev-parse' && args[1] === 'HEAD' &&
-    fs.existsSync(path.join(process.cwd(), '.git')) &&
-    fs.lstatSync(path.join(process.cwd(), '.git')).isFile()) {
+if (mode === 'retarget-after-worktree-add' && worktreeIndex >= 0 &&
+    args[worktreeIndex + 1] === 'add') {
   const result = cp.spawnSync(process.env.M426_REAL_GIT, args, { encoding: 'utf8' });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
-  const worktree = process.cwd();
+  const worktree = args[worktreeIndex + 4];
   const home = path.dirname(worktree);
   const backup = home + '.m426-original';
   fs.writeFileSync(process.env.M426_MARKER, JSON.stringify({ home, backup }));
@@ -641,15 +640,15 @@ describe('M426 sandbox reservation and path identity', () => {
     expect(observeRepository(source)).toEqual(sourceBefore);
   });
 
-  it('refuses post-create writes when the validated sandbox home is replaced', () => {
+  it('refuses post-create writes when the created sandbox home is replaced', () => {
     const source = fx.makeRepo();
     mkdirSync(join(source.dir, 'node_modules'));
-    const marker = join(fx.home, 'retargeted-after-validation.json');
-    installGitShim('retarget-after-validation');
+    const marker = join(fx.home, 'retargeted-after-worktree-add.json');
+    installGitShim('retarget-after-worktree-add');
     process.env.M426_MARKER = marker;
 
     expect(() => createSandbox(source.dir, { allowAnyRepo: true }))
-      .toThrow(/sandbox reservation(?: or repository\/Git common directory)? identity changed during worktree creation/u);
+      .toThrow(/sandbox reservation identity changed during git command/u);
     const { home, backup } = JSON.parse(readFileSync(marker, 'utf8')) as {
       home: string;
       backup: string;

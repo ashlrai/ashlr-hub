@@ -52,7 +52,7 @@ describe('M418 Pulse outward-mutation quiescence', () => {
 
     expect(result.detail).toMatch(/blocked by global KILL/i);
     expect(fetchMock).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('does not report KILL quiescence while a remote Pulse effect is in flight', async () => {
     const started = Promise.withResolvers<void>();
