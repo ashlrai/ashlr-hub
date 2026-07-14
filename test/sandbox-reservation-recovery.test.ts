@@ -161,7 +161,7 @@ describe('sandbox reservation recovery', () => {
       writeFileSync(metadataPath, canonicalMetadata, 'utf8');
       expect(removeSandbox(sandbox).status).toBe('complete');
     }
-  });
+  }, 15_000);
 
   it('bounds reservation cleanup to sixteen homes per sweep', () => {
     const ids = Array.from({ length: 17 }, (_, index) => `bounded-${String(index).padStart(2, '0')}`);

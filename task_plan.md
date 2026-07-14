@@ -2204,6 +2204,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Current Overnight Cycle Errors
 - Parallel explorer deployment was attempted twice but the collaboration service reported `agent thread limit reached`; the critical path continued locally without duplicating unowned edits.
 - The first quiet lint run rejected a counted-space regex in `m33.release-meta`; replacing it with an explicit `{2}` quantifier restored a zero-error lint gate.
+- Exact SHA `c304772` passed nine of ten duplicate checks; the push Windows 2/3 runner completed the synchronous sandbox-preservation assertions and cleanup in 7.030 seconds but Vitest applied the default five-second ceiling. Its exact PR twin passed in 3.321 seconds. Only that Git-heavy test now uses the established 15-second integration ceiling.
 
 ### Final Verification Recovery
 - The first serial exhaustive pass after physical identity hardening found 95 failures across 18 files; focused repairs reduced the fast discovery pass to 73 failures across 14 files.
