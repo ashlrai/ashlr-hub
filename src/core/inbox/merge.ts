@@ -2254,26 +2254,110 @@ export async function verifyProposal(
   }
 }
 
+export interface VerifyAndPersistProposalResult {
+  verify: VerifyProposalResult;
+  verifyResult?: ProposalVerifyResult;
+  persisted: boolean;
+  authorityLive: boolean;
+  reason: string;
+}
+
+function verificationProposalConflict(expected: Proposal, current: Proposal | null): string | null {
+  if (!current) return 'proposal no longer exists';
+  if (current.isPartial === true) return 'proposal became partial';
+  if (current.repo !== expected.repo) return 'proposal repository changed';
+  if (current.kind !== expected.kind) return 'proposal kind changed';
+  if (current.status !== expected.status) return `proposal status changed to '${current.status}'`;
+  if (current.diff !== expected.diff || currentProposalDiffHash(current) !== currentProposalDiffHash(expected)) {
+    return 'proposal diff changed';
+  }
+  if (current.status !== 'pending' && current.status !== 'approved') {
+    return `proposal status '${current.status}' is not mergeable`;
+  }
+  return null;
+}
+
 /**
- * Verification creates Git worktrees and runs repo-owned commands. Keep those
- * effects inside the same authority fence as merge mutations so kill/unenroll
- * cannot report quiescence while verification is still active.
+ * Run verification and durably bind its evidence to the exact proposal state.
+ * Lock order is proposal -> outward fence; evidence is persisted before either
+ * capability is released so pause/kill cannot observe a verified-but-unrecorded
+ * transaction or let a stale diff inherit fresh verification.
  */
-async function verifyProposalUnderAuthorityFence(
-  proposal: Proposal,
+export async function verifyAndPersistProposal(
+  expected: Proposal,
   cfg: AshlrConfig,
-): Promise<VerifyProposalResult> {
-  const repo = proposal.repo;
-  if (!repo) return verifyProposal(proposal, cfg);
-  const fenced = await runFencedMutation(repo, 'proposal verification', () =>
-    verifyProposal(proposal, cfg));
-  return fenced.ok
-    ? fenced.value
-    : {
-        ok: false,
-        ran: [],
-        detail: `verification authority refused: ${fenced.reason}`,
+  source: ProposalVerifyResult['source'] = 'auto-merge',
+): Promise<VerifyAndPersistProposalResult> {
+  const refused = (
+    reason: string,
+    verify: VerifyProposalResult = { ok: false, ran: [], detail: `verification authority refused: ${reason}` },
+  ): VerifyAndPersistProposalResult => ({
+    verify,
+    persisted: false,
+    authorityLive: false,
+    reason,
+  });
+  const repo = expected.repo;
+  if (!repo) return refused('proposal has no repository');
+
+  const proposalLock = acquireProposalMutationLock(expected.id);
+  if (!proposalLock) return refused('proposal mutation lock unavailable');
+  let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
+  try {
+    let current = loadProposal(expected.id);
+    const initialConflict = verificationProposalConflict(expected, current);
+    if (initialConflict) return refused(initialConflict);
+
+    outwardFence = acquireOutwardMutationFence();
+    if (!outwardFence || !ownsOutwardMutationFence(outwardFence)) {
+      return refused('outward mutation fence unavailable');
+    }
+    const initialAuthorityFailure = finalMutationAuthorityFailure(repo);
+    if (initialAuthorityFailure) return refused(initialAuthorityFailure);
+
+    const verify = await verifyProposal(current!, cfg);
+
+    current = loadProposal(expected.id);
+    const finalConflict = verificationProposalConflict(expected, current);
+    if (finalConflict) return refused(finalConflict, verify);
+    if (!ownsOutwardMutationFence(outwardFence)) {
+      return refused('outward mutation fence was revoked', verify);
+    }
+    const finalAuthorityFailure = finalMutationAuthorityFailure(repo);
+    if (finalAuthorityFailure) return refused(finalAuthorityFailure, verify);
+
+    const verifyResult = verifyResultFromProposalResult(
+      verify,
+      source,
+      new Date().toISOString(),
+      currentProposalDiffHash(current!),
+    );
+    if (!updateProposalField(expected.id, { verifyResult }, proposalLock)) {
+      return {
+        verify,
+        persisted: false,
+        authorityLive: ownsOutwardMutationFence(outwardFence) && finalMutationAuthorityFailure(repo) === null,
+        reason: 'verification evidence could not be persisted',
       };
+    }
+
+    const authorityLive = ownsOutwardMutationFence(outwardFence) &&
+      finalMutationAuthorityFailure(repo) === null;
+    return {
+      verify,
+      verifyResult,
+      persisted: true,
+      authorityLive,
+      reason: authorityLive
+        ? 'verification evidence persisted under live authority'
+        : 'verification evidence persisted before authority revocation completed',
+    };
+  } catch (err) {
+    return refused(`verification transaction failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+    releaseProposalMutationLock(proposalLock);
+  }
 }
 
 // ===========================================================================
@@ -2729,33 +2813,23 @@ export async function autoMergeProposal(
         proposal.verifyResult?.passed !== false && !verifiedForCurrentDiff
       );
       if (shouldVerify) {
-        const preVerify = await verifyProposalUnderAuthorityFence(proposal, cfg);
-        const preVerifyResult = verifyResultFromProposalResult(
-          preVerify,
-          'auto-merge',
-          new Date().toISOString(),
-          currentProposalDiffHash(proposal),
-        );
-        let persisted = false;
-        try {
-          persisted = updateProposalField(proposal.id, {
-            verifyResult: preVerifyResult,
-          });
-        } catch {
-          persisted = false;
-        }
-        if (!persisted) {
+        const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+        const preVerify = transaction.verify;
+        if (!transaction.persisted || !transaction.verifyResult) {
           return refuse(
             preVerify.ok
-              ? 'verification result could not be persisted — refusing merge authority'
-              : `verification failed: ${preVerify.detail}; result could not be persisted`,
+              ? `${transaction.reason} — refusing merge authority`
+              : `verification failed: ${preVerify.detail}; ${transaction.reason}`,
             repo,
           );
+        }
+        if (!transaction.authorityLive) {
+          return refuse(`verification authority revoked: ${transaction.reason}`, repo);
         }
         if (!preVerify.ok) {
           return refuse(`verification failed: ${preVerify.detail}`, repo);
         }
-        proposal.verifyResult = preVerifyResult;
+        proposal.verifyResult = transaction.verifyResult;
         verifiedThisInvocation = preVerify;
       }
 
@@ -2908,22 +2982,15 @@ export async function autoMergeProposal(
     } else if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
-      verify = await verifyProposalUnderAuthorityFence(proposal, cfg);
-      // Persist the result for the non-verification-mode path (best-effort).
-      // In verification mode this branch only runs if verifyResult was absent
-      // AND the pre-Gate-4 path somehow did not set it — fail-closed by design.
-      try {
-        updateProposalField(proposal.id, {
-	          verifyResult: verifyResultFromProposalResult(
-	            verify,
-	            'auto-merge',
-	            new Date().toISOString(),
-	            currentProposalDiffHash(proposal),
-	          ),
-        });
-      } catch {
-        // Persistence failure — swallow; the verify outcome still drives the gate.
+      const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+      verify = transaction.verify;
+      if (!transaction.persisted || !transaction.verifyResult) {
+        return refuse(`${transaction.reason} — refusing merge authority`, repo);
       }
+      if (!transaction.authorityLive) {
+        return refuse(`verification authority revoked: ${transaction.reason}`, repo);
+      }
+      proposal.verifyResult = transaction.verifyResult;
     }
     if (!verify.ok) {
       return refuse(`verification failed: ${verify.detail}`, repo);
@@ -3831,7 +3898,12 @@ export async function autoMergeProposal(
         // policy-denied receipt gap.
         return {
           local,
-          receiptPersisted: recordRealizedMerge(id, local.evidence, authorityFence),
+          receiptPersisted: recordRealizedMerge(
+            id,
+            local.evidence,
+            authorityFence,
+            () => stillOwnsFence() && finalMutationAuthorityFailure(repo) === null,
+          ),
         };
       });
       if (!localMutation.ok) return refuseStaged(localMutation.reason);

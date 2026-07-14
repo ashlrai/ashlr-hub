@@ -182,6 +182,7 @@ describe('M407 auto-merge verification mutation fence', () => {
 
     expect(git(repo, ['rev-parse', 'main'])).toBe(mainBefore);
     expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
     expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
   });
 });

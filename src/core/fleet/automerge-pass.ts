@@ -40,8 +40,7 @@ import {
   autoMergeProposal,
   evaluateAutoMergeReadinessPreflight,
   isFrontierJudge,
-  verifyProposal,
-  verifyResultFromProposalResult,
+  verifyAndPersistProposal,
   type AutoMergeResult,
 } from '../inbox/merge.js';
 import { isEnrolled, killSwitchOn } from '../sandbox/policy.js';
@@ -911,9 +910,9 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           check: verifyCheck,
           phase: 'start',
         });
-        let verify: Awaited<ReturnType<typeof verifyProposal>>;
+        let transaction: Awaited<ReturnType<typeof verifyAndPersistProposal>>;
         try {
-          verify = await verifyProposal(p, cfg);
+          transaction = await verifyAndPersistProposal(p, cfg, 'auto-merge-preflight');
         } catch (err) {
           recordAutoMergeVerificationAgentAction({
             proposal: p,
@@ -925,6 +924,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           });
           throw err;
         }
+        const verify = transaction.verify;
         recordAutoMergeVerificationAgentAction({
           proposal: p,
           check: verifyCheck,
@@ -934,19 +934,20 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           durationMs: Date.now() - verifyStartedAt,
           ranCount: verify.ran.length,
         });
-        const verifyResult = verifyResultFromProposalResult(
-          verify,
-          'auto-merge-preflight',
-          new Date().toISOString(),
-          hashDiff(p.diff ?? ''),
-        );
-        if (!writeProposalField(p, { verifyResult })) {
-          const reason = `${verifyCheck}: verification evidence could not be persisted`;
+        if (!transaction.persisted || !transaction.verifyResult) {
+          const reason = `${verifyCheck}: ${transaction.reason}`;
           out.results.push({ ok: false, merged: false, branched: false, reason });
           out.skipped.push({ proposalId: p.id, check: `${verifyCheck}-persistence`, reason });
           return out;
         }
-        p.verifyResult = verifyResult;
+        p.verifyResult = transaction.verifyResult;
+
+        if (!transaction.authorityLive) {
+          const reason = `${verifyCheck}: verification authority revoked: ${transaction.reason}`;
+          out.results.push({ ok: false, merged: false, branched: false, reason });
+          out.skipped.push({ proposalId: p.id, check: `${verifyCheck}-authority`, reason });
+          return out;
+        }
 
         if (!verify.ok) {
           const reason = `${verifyCheck}: verification failed: ${verify.detail}`;

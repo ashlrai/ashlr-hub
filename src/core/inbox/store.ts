@@ -1573,7 +1573,7 @@ export function recordRealizedMerge(
   id: string,
   evidence: RealizedMergeEvidence | LocalDefaultBranchMergeObservation,
   ownerLock?: ProposalMutationLock,
-  stillAuthorized: () => boolean = () => true,
+  stillAuthorized: () => boolean = () => false,
 ): boolean {
   const ownsLock = ownsProposalMutationLock(id, ownerLock);
   const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
@@ -1619,12 +1619,10 @@ export function recordRealizedMerge(
       }
       if (existing.status !== 'applied' || !matches) return false;
       if (identityOwnedByAnotherProposal(existing)) return false;
-      if (!stillAuthorized()) return false;
-      if (existing.realizedMergeFanoutVersion !== 2 &&
+      if (existing.realizedMergeFanoutVersion === 2) return true;
+      if (stillAuthorized() &&
         fanoutRealizedMerge(existing, priorEvidence, stillAuthorized) && stillAuthorized()) {
         persistProposal(id, { ...existing, realizedMergeFanoutVersion: 2 }, false, storeLock);
-      } else if (existing.realizedMergeFanoutVersion === 2) {
-        retryIdempotentRealizedMergeProjections(existing, stillAuthorized);
       }
       return true;
     }
@@ -1697,7 +1695,7 @@ export function recordRealizedMerge(
       result: 'ok',
     });
 
-    if (fanoutRealizedMerge(updated, realizedMerge)) {
+    if (stillAuthorized() && fanoutRealizedMerge(updated, realizedMerge, stillAuthorized) && stillAuthorized()) {
       persistProposal(id, { ...updated, realizedMergeFanoutVersion: 2 }, false, storeLock);
     }
     return true;
@@ -1713,7 +1711,7 @@ export function recordRealizedMerge(
 export function replayRealizedMergeFanout(
   id: string,
   ownerLock?: ProposalMutationLock,
-  stillAuthorized: () => boolean = () => true,
+  stillAuthorized: () => boolean = () => false,
 ): boolean {
   if (!stillAuthorized()) return false;
   const existing = loadProposal(id);

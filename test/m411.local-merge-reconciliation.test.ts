@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { hashDiff, signLocalMergeIntent } from '../src/core/foundry/provenance.js';
+import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { createProposal, loadProposal, updateProposalField } from '../src/core/inbox/store.js';
 import { setKill } from '../src/core/sandbox/policy.js';
@@ -201,6 +202,9 @@ describe('M411 local merge reconciliation', () => {
       observedAt: expect.any(String),
       attestation: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(applied.realizedMergeFanoutVersion).toBeUndefined();
+    expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
+      .filter((decision) => decision.action === 'merged')).toHaveLength(0);
     expect(git(['rev-parse', 'main'])).toBe(fixture.mergeCommitOid);
   });
 

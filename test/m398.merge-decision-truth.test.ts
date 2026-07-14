@@ -509,9 +509,11 @@ describe('M398 merge decision truth', () => {
     )).toBe(true);
     expect(authorityChecks).toBeGreaterThan(4);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
-    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
-    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
     expect(replayRealizedMergeFanout(proposal.id)).toBe(false);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(false);
 
     const decisions = readDecisions({ proposalId: proposal.id, requireComplete: true });
     expect(decisions.filter((decision) => decision.action === 'merge-authorized')).toHaveLength(1);
@@ -546,12 +548,12 @@ describe('M398 merge decision truth', () => {
     fs.renameSync(decisionsDirectory, decisionsBackup);
     fs.writeFileSync(decisionsDirectory, 'not a directory\n', { mode: 0o600 });
 
-    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
 
     fs.unlinkSync(decisionsDirectory);
     fs.renameSync(decisionsBackup, decisionsDirectory);
-    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
     expect(readDecisions({ proposalId: proposal.id, requireComplete: true })
       .filter((decision) => decision.action === 'merged')).toHaveLength(1);

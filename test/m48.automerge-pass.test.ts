@@ -41,7 +41,7 @@ let tmpHome: string;
 // autoMergeProposal (the M47 gate). Records (id) calls; returns a controllable
 // result per id via a mutable map (default: merged:false).
 const mockAutoMergeProposal = vi.fn();
-const mockVerifyProposal = vi.fn();
+const mockVerifyAndPersistProposal = vi.fn();
 const {
   mockEmitMerge,
   mockEventBusEmit,
@@ -58,23 +58,7 @@ const {
 let mergeResults: Record<string, AutoMergeResult> = {};
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
-  verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
-  verifyResultFromProposalResult: (
-    result: { ok: boolean; ran: Array<{ kind: 'typecheck' | 'lint' | 'build' | 'test'; cmd: string[] }>; detail: string; baseBranch?: string; baseHead?: string },
-    source = 'auto-merge',
-    verifiedAt = new Date().toISOString(),
-    diffHash?: string,
-  ) => ({
-    passed: result.ok,
-    ...(result.ok ? {} : { failed: [result.detail] }),
-    detail: result.detail,
-    ran: [...result.ran],
-    ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
-    ...(result.baseHead ? { baseHead: result.baseHead } : {}),
-    ...(diffHash ? { diffHash } : {}),
-    verifiedAt,
-    source,
-  }),
+  verifyAndPersistProposal: (...args: unknown[]) => mockVerifyAndPersistProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
   isFrontierJudge: (judgeEngine: string | undefined) => {
     const lc = (judgeEngine ?? '').toLowerCase();
@@ -236,7 +220,7 @@ beforeEach(() => {
   process.env.ASHLR_HOME = tmpHome;
 
   mockAutoMergeProposal.mockReset();
-  mockVerifyProposal.mockReset();
+  mockVerifyAndPersistProposal.mockReset();
   mockListProposalsDetailed.mockReset();
   mockReplayRealizedMergeFanout.mockReset();
   mockSetStatus.mockReset();
@@ -262,12 +246,27 @@ beforeEach(() => {
   mockAutoMergeProposal.mockImplementation(async (id: string) => {
     return mergeResults[id] ?? { ok: false, merged: false, reason: 'default-not-merged' };
   });
-  mockVerifyProposal.mockResolvedValue({
-    ok: true,
-    ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-    detail: 'mock verification passed',
-    baseBranch: 'main',
-    baseHead: '0123456789abcdef',
+  mockVerifyAndPersistProposal.mockResolvedValue({
+    verify: {
+      ok: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'mock verification passed',
+      baseBranch: 'main',
+      baseHead: '0123456789abcdef',
+    },
+    verifyResult: {
+      passed: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'mock verification passed',
+      baseBranch: 'main',
+      baseHead: '0123456789abcdef',
+      diffHash: 'mock-diff-hash',
+      verifiedAt: '2026-07-14T00:00:00.000Z',
+      source: 'auto-merge-preflight',
+    },
+    persisted: true,
+    authorityLive: true,
+    reason: 'verification evidence persisted under live authority',
   });
   // M172: default judge verdict is 'ship' so frontier proposals reach autoMergeProposal.
   mockJudgeProposal.mockResolvedValue({
@@ -336,7 +335,7 @@ describe('M48 runAutoMergePass — proposal source authority', () => {
   const assertNoMutationProgression = () => {
     expect(mockSetStatus).not.toHaveBeenCalled();
     expect(mockUpdateProposalField).not.toHaveBeenCalled();
-    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockVerifyAndPersistProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockRecordDecision).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
@@ -525,18 +524,60 @@ describe('M48 runAutoMergePass — cleanup persistence authority', () => {
 describe('M48 runAutoMergePass — mutation progression', () => {
   it('does not judge or merge when verification evidence persistence returns false', async () => {
     pendingProposals = [makeProposal('verification-not-persisted', { engineTier: 'frontier' })];
-    mockUpdateProposalField.mockReturnValueOnce(false);
+    mockVerifyAndPersistProposal.mockResolvedValueOnce({
+      verify: {
+        ok: true,
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'mock verification passed',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef',
+      },
+      persisted: false,
+      authorityLive: true,
+      reason: 'verification evidence could not be persisted',
+    });
 
     const out = await runAutoMergePass(verificationCfg());
 
-    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
-    expect(mockUpdateProposalField).toHaveBeenCalledWith(
-      'verification-not-persisted',
-      expect.objectContaining({ verifyResult: expect.any(Object) }),
-    );
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
     expect(out.skipped).toContainEqual(expect.objectContaining({
       proposalId: 'verification-not-persisted',
       check: 'verify-before-judge-persistence',
+    }));
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it('does not judge or merge after verification authority is revoked', async () => {
+    pendingProposals = [makeProposal('verification-authority-revoked', { engineTier: 'frontier' })];
+    mockVerifyAndPersistProposal.mockResolvedValueOnce({
+      verify: {
+        ok: true,
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'mock verification passed',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef',
+      },
+      verifyResult: {
+        passed: true,
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'mock verification passed',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef',
+        diffHash: 'mock-diff-hash',
+        verifiedAt: '2026-07-14T00:00:00.000Z',
+        source: 'auto-merge-preflight',
+      },
+      persisted: true,
+      authorityLive: false,
+      reason: 'verification evidence persisted before authority revocation completed',
+    });
+
+    const out = await runAutoMergePass(verificationCfg());
+
+    expect(out.skipped).toContainEqual(expect.objectContaining({
+      proposalId: 'verification-authority-revoked',
+      check: 'verify-before-judge-authority',
     }));
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
@@ -984,7 +1025,7 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
     expect(out.verifyBeforeJudgeRan).toBe(1);
     expect(out.attempted).toBe(1);
     expect(out.merged).toBe(1);
-    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('evidence-verify', cfg);
     const events = readAgentActions().filter((event) => event.action.startsWith('auto-merge:verify-before-merge'));
     expect(events.map((event) => event.action)).toEqual([
@@ -1052,10 +1093,24 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
 
   it('records failed auto-merge verification telemetry before skipping merge', async () => {
     pendingProposals = [makeProposal('evidence-fail', { engineTier: 'local' })];
-    mockVerifyProposal.mockResolvedValueOnce({
-      ok: false,
-      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-      detail: 'mock verification failed',
+    mockVerifyAndPersistProposal.mockResolvedValueOnce({
+      verify: {
+        ok: false,
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'mock verification failed',
+      },
+      verifyResult: {
+        passed: false,
+        failed: ['mock verification failed'],
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'mock verification failed',
+        diffHash: 'mock-diff-hash',
+        verifiedAt: '2026-07-14T00:00:00.000Z',
+        source: 'auto-merge-preflight',
+      },
+      persisted: true,
+      authorityLive: true,
+      reason: 'verification evidence persisted under live authority',
     });
 
     const out = await runAutoMergePass(evidenceCfg());
