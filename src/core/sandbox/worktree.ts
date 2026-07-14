@@ -786,28 +786,41 @@ async function createdWorktreeIsExact() {
             ? added.error
             : 'git worktree add failed',
         };
-      } else if (!currentDestinationIsPinned() || !await createdWorktreeIsExact() ||
-          !currentDestinationIsPinned()) {
-        result = {
-          ok: false,
-          cleanupComplete: await rollback(),
-          error: currentDestinationIsPinned()
-            ? 'repository or Git common directory identity changed during worktree creation'
-            : 'sandbox reservation identity changed during worktree creation',
-        };
       } else {
-        runPinnedPostCreateWriter();
-        if (!currentDestinationIsPinned() || !await createdWorktreeIsExact() ||
-            !currentDestinationIsPinned()) {
+        const destinationPinnedBeforeValidation = currentDestinationIsPinned();
+        const worktreeExact = destinationPinnedBeforeValidation && await createdWorktreeIsExact();
+        const destinationPinnedAfterValidation = currentDestinationIsPinned();
+        if (!destinationPinnedBeforeValidation || !worktreeExact ||
+            !destinationPinnedAfterValidation) {
+          const reservationChanged = !destinationPinnedBeforeValidation ||
+            !destinationPinnedAfterValidation;
           result = {
             ok: false,
             cleanupComplete: await rollback(),
-            error: currentDestinationIsPinned()
-              ? 'repository or Git common directory identity changed after worktree creation'
-              : 'sandbox reservation identity changed after worktree creation',
+            error: reservationChanged
+              ? 'sandbox reservation identity changed during worktree creation'
+              : 'repository or Git common directory identity changed during worktree creation',
           };
         } else {
-          result = { ok: true, cleanupComplete: false };
+          runPinnedPostCreateWriter();
+          const destinationPinnedBeforePostValidation = currentDestinationIsPinned();
+          const postWorktreeExact = destinationPinnedBeforePostValidation &&
+            await createdWorktreeIsExact();
+          const destinationPinnedAfterPostValidation = currentDestinationIsPinned();
+          if (!destinationPinnedBeforePostValidation || !postWorktreeExact ||
+              !destinationPinnedAfterPostValidation) {
+            const reservationChanged = !destinationPinnedBeforePostValidation ||
+              !destinationPinnedAfterPostValidation;
+            result = {
+              ok: false,
+              cleanupComplete: await rollback(),
+              error: reservationChanged
+                ? 'sandbox reservation identity changed after worktree creation'
+                : 'repository or Git common directory identity changed after worktree creation',
+            };
+          } else {
+            result = { ok: true, cleanupComplete: false };
+          }
         }
       }
       }

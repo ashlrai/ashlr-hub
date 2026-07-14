@@ -26,7 +26,6 @@ jobs:
               test/setup/home.test.ts test/classify.test.ts
               test/m2.doctor.test.ts test/m3.tools-registry.test.ts
               test/m43.verify-commands.test.ts
-              test/m84.goal-direct.test.ts test/m201.daemon-loop.test.ts
               test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
               test/m395.effect-terminal-retention.test.ts
               test/m403.automerge-mutation-fence.test.ts
@@ -45,9 +44,6 @@ jobs:
               test/m21.worktree.test.ts test/m23.apply.test.ts
               test/m100.web-open.test.ts test/m119.quality-metrics.test.ts
               test/m332.outcome-watcher.test.ts
-              test/m310.queued-autonomy-work.test.ts
-              test/m342.dispatch-production-ledger.test.ts
-              test/m353.dispatch-manifest.test.ts
               test/m405.apply-mutation-fence.test.ts
               test/m406.daemon-stop-quiescence.test.ts
               test/m411.local-merge-reconciliation.test.ts
@@ -62,8 +58,6 @@ jobs:
             label: windows, portability 3/3
             test_args: >-
               test/m220.anticlog-verdict-feedback.test.ts
-              test/m22.backlog.test.ts test/m165.self-heal.test.ts
-              test/m229.goal-engine-trio.test.ts
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts
               test/m367.daemon-observer-scheduler.test.ts
@@ -116,6 +110,17 @@ jobs:
       - name: Test native alias authority (hermetic)
         if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'
         run: npm run test:ci -- test/m426.sandbox-reservation-identity.test.ts test/h7.rollback.test.ts
+
+      - name: Test native path identity authority (hermetic)
+        if: matrix.label == 'windows, portability 1/3'
+        run: >-
+          npm run test:ci --
+          test/m165.self-heal.test.ts test/m201.daemon-loop.test.ts
+          test/m22.backlog.test.ts test/m229.goal-engine-trio.test.ts
+          test/m310.queued-autonomy-work.test.ts
+          test/m342.dispatch-production-ledger.test.ts
+          test/m353.dispatch-manifest.test.ts test/m84.goal-direct.test.ts
+          -t "physical alias|A0a:|A0b:|healthy full snapshot|legacy lexical enrollment|canonical proposal|canonical swarm proposal|physical proposal repo identity|invalid raw repo identity|physical repo identity|relative and secret-shaped|physical assignment repo identity"
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.

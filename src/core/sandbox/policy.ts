@@ -98,13 +98,20 @@ export function canonicalFilesystemPathIdentity(
     return null;
   }
   const missing: string[] = [];
+  let uncertainWindowsSuffix = false;
 
   while (true) {
     try {
       lstatSync(ancestor);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        // Windows may surface UNKNOWN for a missing child below an 8.3-spelled
+        // ancestor. Defer that one case until an existing parent can prove the
+        // first unresolved component is absent; every other error fails closed.
+        if (process.platform !== 'win32' || code !== 'UNKNOWN') return null;
+        uncertainWindowsSuffix = true;
+      }
       const parent = dirname(ancestor);
       if (parent === ancestor) return null;
       missing.push(basename(ancestor));
@@ -113,6 +120,12 @@ export function canonicalFilesystemPathIdentity(
     }
 
     try {
+      if (uncertainWindowsSuffix) {
+        const firstMissing = missing.at(-1);
+        if (!firstMissing || /~\d/u.test(firstMissing)) return null;
+        const entries = readdirSync(ancestor);
+        if (entries.some((entry) => entry.toLowerCase() === firstMissing.toLowerCase())) return null;
+      }
       const canonicalAncestor = realpathSync.native(ancestor);
       const canonical = join(canonicalAncestor, ...missing.reverse());
       return process.platform === 'win32'

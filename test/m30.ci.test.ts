@@ -69,8 +69,6 @@ describe('M30 CI workflow', () => {
         'test/m2.doctor.test.ts',
         'test/m3.tools-registry.test.ts',
         'test/m43.verify-commands.test.ts',
-        'test/m84.goal-direct.test.ts',
-        'test/m201.daemon-loop.test.ts',
         'test/m113.coordinator-wire.test.ts',
         'test/m373.directory-durability.test.ts',
         terminalRetentionTest,
@@ -91,9 +89,6 @@ describe('M30 CI workflow', () => {
         'test/m100.web-open.test.ts',
         'test/m119.quality-metrics.test.ts',
         'test/m332.outcome-watcher.test.ts',
-        'test/m310.queued-autonomy-work.test.ts',
-        'test/m342.dispatch-production-ledger.test.ts',
-        'test/m353.dispatch-manifest.test.ts',
         'test/m405.apply-mutation-fence.test.ts',
         'test/m406.daemon-stop-quiescence.test.ts',
         'test/m411.local-merge-reconciliation.test.ts',
@@ -107,9 +102,6 @@ describe('M30 CI workflow', () => {
       ],
       [
         'test/m220.anticlog-verdict-feedback.test.ts',
-        'test/m22.backlog.test.ts',
-        'test/m165.self-heal.test.ts',
-        'test/m229.goal-engine-trio.test.ts',
         'test/m286.worktree-verify-env.test.ts',
         'test/m315.remote-handoff-truth.test.ts',
         observerSchedulerTest,
@@ -136,10 +128,21 @@ describe('M30 CI workflow', () => {
       'test/m426.sandbox-reservation-identity.test.ts',
       'test/h7.rollback.test.ts',
     ];
+    const nativePathIdentityFiles = [
+      'test/m165.self-heal.test.ts',
+      'test/m201.daemon-loop.test.ts',
+      'test/m22.backlog.test.ts',
+      'test/m229.goal-engine-trio.test.ts',
+      'test/m310.queued-autonomy-work.test.ts',
+      'test/m342.dispatch-production-ledger.test.ts',
+      'test/m353.dispatch-manifest.test.ts',
+      'test/m84.goal-direct.test.ts',
+    ];
     const expectedFiles = [
       ...expectedWindowsPartitions.flat(),
       ...expectedMacosFiles,
       ...nativeAliasFiles,
+      ...nativePathIdentityFiles,
     ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
@@ -181,6 +184,9 @@ describe('M30 CI workflow', () => {
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
+    expect(ciYml).toContain("if: matrix.label == 'windows, portability 1/3'");
+    for (const file of nativePathIdentityFiles) expect(ciYml).toContain(file);
+    expect(ciYml).toContain('-t "physical alias|A0a:|A0b:');
   });
 
   it('enables npm caching for fast installs', () => {

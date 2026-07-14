@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve, win32 } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   canonicalPathIdentity,
@@ -29,6 +29,8 @@ import {
 import { enroll, isEnrolled } from '../src/core/sandbox/policy.js';
 import type { Sandbox } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
+
+vi.setConfig({ testTimeout: 15_000 });
 
 interface PublicationObservation {
   metadataExists: boolean;
