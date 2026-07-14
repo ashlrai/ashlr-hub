@@ -87,7 +87,9 @@ const PR_VIEW_JSON = JSON.stringify({
   headRefName: 'ashlr/proposal-42',
   headRefOid: '0123456789abcdef0123456789abcdef01234567',
   baseRefName: 'main',
+  baseRefOid: 'fedcba9876543210fedcba9876543210fedcba98',
   mergeCommit: { oid: 'abc123def456' },
+  autoMergeRequest: null,
 });
 const ISSUE_LIST_JSON = JSON.stringify([
   { number: 10, title: 'Bug report', url: 'https://github.com/acme/my-repo/issues/10', state: 'OPEN', author: { login: 'carol' } },
@@ -545,7 +547,7 @@ describe('listPrs — returns [] on any failure', () => {
 // ---------------------------------------------------------------------------
 
 describe('viewPr — read-only PR detail', () => {
-  it('parses PR detail and merge commit metadata', () => {
+  it('parses exact base OID and explicit null auto-merge as proved absent', () => {
     setSpawnAlways(makeSpawn(PR_VIEW_JSON));
 
     const pr = viewPr('/fake/cwd', 'https://github.com/acme/my-repo/pull/42');
@@ -560,7 +562,9 @@ describe('viewPr — read-only PR detail', () => {
       headRefName: 'ashlr/proposal-42',
       headRefOid: '0123456789abcdef0123456789abcdef01234567',
       baseRefName: 'main',
+      baseRefOid: 'fedcba9876543210fedcba9876543210fedcba98',
       mergeCommitOid: 'abc123def456',
+      autoMergeRequest: { kind: 'absent' },
     });
   });
 
@@ -580,7 +584,7 @@ describe('viewPr — read-only PR detail', () => {
       'view',
       'ashlr/proposal-42',
       '--json',
-      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,mergeCommit',
+      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
     ]);
   });
 
@@ -596,10 +600,82 @@ describe('viewPr — read-only PR detail', () => {
     expect(viewPr('/fake/cwd', 'ashlr/proposal-42', { repo: 'acme/my-repo' })).not.toBeNull();
     expect(calls[0]).toEqual([
       'pr', 'view', 'ashlr/proposal-42', '--repo', 'acme/my-repo', '--json',
-      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,mergeCommit',
+      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
     ]);
     expect(observedEnv?.['GH_HOST']).toBe('github.com');
     expect(viewPr('/fake/cwd', '42', { repo: '../other' })).toBeNull();
+  });
+
+  it('preserves a structurally valid auto-merge request as present host truth', () => {
+    setSpawnAlways(makeSpawn(JSON.stringify({
+      number: 42,
+      baseRefOid: 'fedcba9876543210fedcba9876543210fedcba98',
+      autoMergeRequest: {
+        authorEmail: null,
+        commitBody: null,
+        commitHeadline: null,
+        enabledAt: '2026-07-13T22:15:00Z',
+        enabledBy: { login: 'ashlr-bot' },
+        mergeMethod: 'SQUASH',
+      },
+    })));
+
+    expect(viewPr('/fake/cwd', '42')).toMatchObject({
+      baseRefOid: 'fedcba9876543210fedcba9876543210fedcba98',
+      autoMergeRequest: {
+        kind: 'present',
+        request: {
+          enabledAt: '2026-07-13T22:15:00Z',
+          enabledByLogin: 'ashlr-bot',
+          mergeMethod: 'SQUASH',
+        },
+      },
+    });
+  });
+
+  it('treats a missing auto-merge field as unknown, never absent', () => {
+    setSpawnAlways(makeSpawn(JSON.stringify({ number: 42 })));
+
+    expect(viewPr('/fake/cwd', '42')?.autoMergeRequest).toEqual({
+      kind: 'unknown',
+      reason: 'missing',
+    });
+  });
+
+  it.each([
+    ['an array', []],
+    ['an incomplete object', { enabledAt: '2026-07-13T22:15:00Z' }],
+    ['an invalid method', {
+      enabledAt: '2026-07-13T22:15:00Z',
+      enabledBy: { login: 'ashlr-bot' },
+      mergeMethod: 'FAST_FORWARD',
+    }],
+    ['an oversized actor login', {
+      enabledAt: '2026-07-13T22:15:00Z',
+      enabledBy: { login: 'x'.repeat(257) },
+      mergeMethod: 'MERGE',
+    }],
+  ])('treats malformed auto-merge data (%s) as degraded unknown host truth', (_label, value) => {
+    setSpawnAlways(makeSpawn(JSON.stringify({ number: 42, autoMergeRequest: value })));
+
+    expect(viewPr('/fake/cwd', '42')?.autoMergeRequest).toEqual({
+      kind: 'unknown',
+      reason: 'malformed',
+    });
+  });
+
+  it('bounds selectors and host JSON without throwing', () => {
+    const calls: unknown[][] = [];
+    _spawnSyncImpl = (...args: unknown[]) => {
+      calls.push(args);
+      return makeSpawn(JSON.stringify({ padding: 'x'.repeat(64 * 1024) }));
+    };
+
+    expect(() => viewPr('/fake/cwd', 'x'.repeat(2_049))).not.toThrow();
+    expect(viewPr('/fake/cwd', 'x'.repeat(2_049))).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(() => viewPr('/fake/cwd', '42')).not.toThrow();
+    expect(viewPr('/fake/cwd', '42')).toBeNull();
   });
 
   it('returns null when gh exits non-zero', () => {

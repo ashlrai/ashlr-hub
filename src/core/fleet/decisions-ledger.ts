@@ -49,6 +49,7 @@ const DECISION_ACTIONS = new Set<DecisionEntry['action']>([
   'proposed',
   'verified',
   'judged',
+  'merge-authorized',
   'merged',
   'handoff',
   'rejected',

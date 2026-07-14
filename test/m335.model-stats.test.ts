@@ -16,28 +16,85 @@ const NOW = Date.now();
 const HOUR = 3_600_000;
 const ts = (h: number) => new Date(NOW - h * HOUR).toISOString();
 
+function realizedMergeEvidence(observedAt: string) {
+  return {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+  };
+}
+
 let ledger: Record<string, unknown>[] = [];
 let traces: Record<string, unknown>[] = [];
 let bonRecords: Record<string, unknown>[] = [];
 let bonQuality: Record<string, unknown> | undefined;
+let proposals: Record<string, unknown>[] = [];
+
+function completeSource<T>(rows: T[]): T[] {
+  Object.defineProperty(rows, 'sourceQuality', {
+    value: {
+      sourceState: 'healthy', sourcePresent: rows.length > 0, complete: true,
+      stopReasons: [], filesRead: rows.length > 0 ? 1 : 0, bytesRead: 0,
+      rowsScanned: rows.length, invalidRows: 0, unreadableFiles: 0,
+    },
+    configurable: true,
+    enumerable: false,
+  });
+  return rows;
+}
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
-  readDecisions: vi.fn(() => ledger),
+  readDecisions: vi.fn(() => completeSource(ledger)),
   recordDecision: vi.fn(() => {}),
 }));
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
-  readJudgeTraces: vi.fn(() => traces),
+  readJudgeTraces: vi.fn(() => completeSource(traces)),
   linkOutcome: vi.fn(() => {}),
 }));
 vi.mock('../src/core/fleet/best-of-n-ledger.js', () => ({
   readBestOfNRecords: vi.fn(() => {
-    if (bonQuality) Object.defineProperty(bonRecords, 'sourceQuality', { value: bonQuality, configurable: true });
+    completeSource(bonRecords);
+    if (bonQuality) Object.defineProperty(bonRecords, 'sourceQuality', {
+      value: bonQuality,
+      configurable: true,
+      enumerable: false,
+    });
     return bonRecords;
   }),
   recordBestOfN: vi.fn(() => {}),
 }));
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProducerProvenanceV2: (proposal: {
+      producerProvenanceVersion?: number;
+      producerProvenanceSig?: string;
+    }) => ({
+      ok: proposal.producerProvenanceVersion === 2 &&
+        proposal.producerProvenanceSig === 'test-producer-provenance',
+      reason: 'test producer provenance v2',
+    }),
+  };
+});
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: vi.fn(() => []),
+  listProposals: vi.fn(() => proposals),
+  listProposalsDetailed: vi.fn(() => ({
+    proposals,
+    sourceState: proposals.length > 0 ? 'healthy' : 'missing',
+    sourcePresent: proposals.length > 0,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: proposals.length,
+    filesRead: proposals.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  })),
   loadProposal: vi.fn(() => null),
 }));
 
@@ -45,9 +102,33 @@ import { computeModelStats, computeModelStatsDetailed } from '../src/core/fleet/
 
 function seed(): void {
   bonQuality = undefined;
+  proposals = [
+    {
+      id: 'p1', repo: '/r', status: 'applied', createdAt: ts(3),
+      workItemId: '/r:issue:p1', workSource: 'issue',
+      engineModel: 'claude:claude-sonnet-5', engineTier: 'frontier',
+      diffHash: '1'.repeat(64), provenanceSig: 'test-provenance',
+      producerProvenanceVersion: 2, producerProvenanceSig: 'test-producer-provenance',
+      realizedMerge: realizedMergeEvidence(ts(1)),
+    },
+    {
+      id: 'p2', repo: '/r', status: 'pending', createdAt: ts(4),
+      workItemId: '/r:issue:p2', workSource: 'issue',
+      engineModel: 'claude:sonnet-5', engineTier: 'frontier',
+      diffHash: '2'.repeat(64), provenanceSig: 'test-provenance',
+      producerProvenanceVersion: 2, producerProvenanceSig: 'test-producer-provenance',
+    },
+    {
+      id: 'p3', repo: '/r', status: 'pending', createdAt: ts(5),
+      workItemId: '/r:issue:p3', workSource: 'issue',
+      engineModel: 'claude:claude-opus-4-8', engineTier: 'frontier',
+      diffHash: '3'.repeat(64), provenanceSig: 'test-provenance',
+      producerProvenanceVersion: 2, producerProvenanceSig: 'test-producer-provenance',
+    },
+  ];
   ledger = [
     // sonnet-5: 2 dispatches, judged ship + merged on p1
-    { ts: ts(1), proposalId: 'p1', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
+    { ts: ts(1), proposalId: 'p1', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'claude:claude-sonnet-5' },
     { ts: ts(2), proposalId: 'p1', action: 'judged', engine: 'claude-fable-5', model: 'claude-fable-5', verdict: 'ship', costUsd: 0.2 },
     { ts: ts(3), proposalId: 'p1', action: 'proposed', engine: 'claude', model: 'claude:claude-sonnet-5', costUsd: 1.0, tokensIn: 1000, tokensOut: 200, durationMs: 60_000 },
     { ts: ts(4), proposalId: 'p2', action: 'proposed', engine: 'claude', model: 'sonnet-5', costUsd: 0.8 },

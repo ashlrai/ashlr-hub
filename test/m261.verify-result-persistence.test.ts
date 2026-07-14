@@ -94,6 +94,7 @@ vi.mock('../src/core/git.js', () => ({
   defaultBranch: (...a: unknown[]) => mockDefaultBranch(...a),
   getGitStatus: (...a: unknown[]) => mockGetGitStatus(...a),
   getRemoteOrg: (...a: unknown[]) => mockGetRemoteOrg(...a),
+  resolveGitHubOriginAuthorityDetails: () => null,
 }));
 
 vi.mock('node:child_process', () => ({
@@ -389,7 +390,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     const result = await autoMergeProposal(proposal.id, verificationCfg());
 
     expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/proposal status changed during merge evaluation/);
+    expect(result.reason).toMatch(/proposal status 'rejected' has no active merge authority/);
   });
 
   it('refuses when durable verification changes after verification-mode evaluation begins', async () => {

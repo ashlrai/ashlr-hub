@@ -103,6 +103,11 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
       if (_configDir) process.env.HOME = dirname(_configDir);
       try { return real.loadConfig(); } finally { process.env.HOME = savedHome; }
     },
+    loadConfigReadOnly(): ReturnType<typeof real.loadConfigReadOnly> {
+      const savedHome = process.env.HOME;
+      if (_configDir) process.env.HOME = dirname(_configDir);
+      try { return real.loadConfigReadOnly(); } finally { process.env.HOME = savedHome; }
+    },
     saveConfig(c: Parameters<typeof real.saveConfig>[0]): void {
       const savedHome = process.env.HOME;
       if (_configDir) process.env.HOME = dirname(_configDir);
@@ -115,7 +120,7 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
 // After the mock is registered, import the (mocked) module under test.
 // ---------------------------------------------------------------------------
 import {
-  defaultConfig, loadConfig, saveConfig,
+  defaultConfig, loadConfig, loadConfigReadOnly, saveConfig,
 } from '../src/core/config.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -288,6 +293,63 @@ describe('loadConfig — fresh install', () => {
     expect(cfg.version).toBeGreaterThan(0);
     expect(Array.isArray(cfg.roots)).toBe(true);
     expect(['cursor', 'vscode']).toContain(cfg.editor);
+  });
+});
+
+describe('loadConfigReadOnly — observational reads', () => {
+  let tmpHome: string;
+  const origHome = process.env.HOME;
+
+  beforeEach(() => {
+    tmpHome = makeTmpHome();
+    useTmpHome(tmpHome);
+  });
+
+  afterEach(() => {
+    cleanup(tmpHome);
+    process.env.HOME = origHome;
+    _configDir = '';
+    _configPath = '';
+    _indexPath = '';
+  });
+
+  it('returns in-memory defaults without creating a directory or file', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+
+    const cfg = loadConfigReadOnly();
+
+    expect(cfg.version).toBeGreaterThan(0);
+    expect(existsSync(ashlrDir)).toBe(false);
+  });
+
+  it('deep-merges an existing partial config without changing its bytes', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    mkdirSync(ashlrDir, { recursive: true });
+    const bytes = '{"version":1,"editor":"vscode","foundry":{"autoMerge":{"enabled":false}}}\n';
+    writeFileSync(cfgPath, bytes);
+
+    const cfg = loadConfigReadOnly();
+
+    expect(cfg.editor).toBe('vscode');
+    expect(cfg.foundry?.autoMerge?.enabled).toBe(false);
+    expect(cfg.plugins).toEqual({ enabled: [], settings: {}, integrity: {} });
+    expect(readFileSync(cfgPath, 'utf8')).toBe(bytes);
+  });
+
+  it('preserves malformed config while returning defaults', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    mkdirSync(ashlrDir, { recursive: true });
+    const bytes = '{malformed';
+    writeFileSync(cfgPath, bytes);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const cfg = loadConfigReadOnly();
+
+    expect(cfg.version).toBe(defaultConfig().version);
+    expect(readFileSync(cfgPath, 'utf8')).toBe(bytes);
+    expect(warning).toHaveBeenCalledOnce();
   });
 });
 

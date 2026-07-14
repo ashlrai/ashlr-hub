@@ -109,8 +109,10 @@ import type {
   Proposal,
   ProposalBrowserVerifyEvidence,
   ProposalVerifyResult,
+  LocalDefaultBranchMergeObservation,
+  ProposalLocalMergeIntent,
 } from '../types.js';
-import { loadProposal, setStatus, updateProposalField } from './store.js';
+import { loadProposal, recordRealizedMerge, setStatus, updateProposalField } from './store.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -131,7 +133,13 @@ import {
 } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
-import { verifyProvenance, verifyJudgeAttestation, hashDiff } from '../foundry/provenance.js';
+import { observeAutoMergeCanaryShadowAsync } from '../fleet/automerge-canary-observer.js';
+import {
+  hashDiff,
+  signLocalMergeIntent,
+  verifyJudgeAttestation,
+  verifyProvenance,
+} from '../foundry/provenance.js';
 import { judgeProposal } from '../fleet/manager.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
@@ -155,6 +163,29 @@ import {
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
+
+function auditAutoMergeCanaryFailure(repo: string, sandboxId: string): void {
+  try {
+    audit({
+      action: 'inbox:auto-merge-canary-shadow',
+      repo,
+      sandboxId,
+      summary: 'shadow observer completion failed (exception)',
+      result: 'error',
+    });
+  } catch { /* shadow observation and its diagnostics are non-authoritative */ }
+}
+
+async function completeAutoMergeCanaryShadowObservation(
+  input: Parameters<typeof observeAutoMergeCanaryShadowAsync>[0],
+  sandboxId: string,
+): Promise<void> {
+  try {
+    await observeAutoMergeCanaryShadowAsync(input);
+  } catch {
+    auditAutoMergeCanaryFailure(input.repo, sandboxId);
+  }
+}
 
 function decisionReadIsHealthy(decisions: DecisionEntry[]): boolean {
   const quality = (decisions as DecisionEntry[] & {
@@ -231,14 +262,26 @@ function cleanupOwnedMergeBranch(
     currentOrigin.nameWithOwner === options.origin.nameWithOwner &&
     currentOrigin.pushUrl === options.origin.pushUrl
   ) {
-    gitTry(repo, [
-      'push',
-      `--force-with-lease=${remoteRef}:${expectedHead}`,
-      options.origin.pushUrl,
-      `:${remoteRef}`,
-    ]);
+    if (!killSwitchOn()) {
+      gitTry(repo, [
+        'push',
+        `--force-with-lease=${remoteRef}:${expectedHead}`,
+        options.origin.pushUrl,
+        `:${remoteRef}`,
+      ]);
+    }
   }
-  gitTry(repo, ['update-ref', '-d', remoteRef, expectedHead]);
+  if (!killSwitchOn()) gitTry(repo, ['update-ref', '-d', remoteRef, expectedHead]);
+}
+
+function finalMutationAuthorityFailure(repo: string): string | null {
+  if (killSwitchOn()) return 'autonomy kill switch is ON';
+  try {
+    assertMayMutate(repo);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 /** Write `content` to a temp file under ~/.ashlr/tmp; caller cleans it up. */
@@ -2162,6 +2205,7 @@ function buildMergeBranch(
   diff: string,
   base: string,
   expectedBaseHead?: string,
+  finalAuthority?: () => string | null,
 ): { branch: string | null; head: string | null; detail: string } {
   const branch = `${MERGE_BRANCH_PREFIX}${id}`;
   const baseHead = resolveDefaultBranchHead(repo, base);
@@ -2178,12 +2222,16 @@ function buildMergeBranch(
 
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `mwt-${randomBytes(6).toString('hex')}`);
   try {
+    const authorityFailure = finalAuthority?.();
+    if (authorityFailure) return { branch: null, head: null, detail: authorityFailure };
     // Build detached so a crash cannot leave a half-built named branch that
     // permanently blocks reconstruction on the next attempt.
     gitRun(repo, ['worktree', 'add', '--detach', tmpDir, expectedBaseHead ?? baseHead]);
+    const linkAuthorityFailure = finalAuthority?.();
+    if (linkAuthorityFailure) throw new Error(linkAuthorityFailure);
     linkNodeModules(repo, tmpDir);
   } catch (err) {
-    gitTry(repo, ['worktree', 'prune']);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
     return {
       branch: null,
       head: null,
@@ -2196,9 +2244,18 @@ function buildMergeBranch(
   let ok = false;
   let head: string | null = null;
   try {
+    const writeAuthorityFailure = finalAuthority?.();
+    if (writeAuthorityFailure) {
+      detail = writeAuthorityFailure;
+      return { branch: null, head: null, detail };
+    }
     patchFile = writeTmpFile(diff);
     try {
+      const applyAuthorityFailure = finalAuthority?.();
+      if (applyAuthorityFailure) throw new Error(applyAuthorityFailure);
       gitRun(tmpDir, ['apply', '--index', patchFile]);
+      const commitAuthorityFailure = finalAuthority?.();
+      if (commitAuthorityFailure) throw new Error(commitAuthorityFailure);
       // A retry of identical signed evidence must reconstruct the same commit
       // so an ambiguously-created remote PR can be adopted without force.
       gitRun(tmpDir, [
@@ -2220,15 +2277,15 @@ function buildMergeBranch(
       detail = `apply/commit failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   } finally {
-    if (patchFile) {
+    if (patchFile && !killSwitchOn()) {
       try {
         unlinkSync(patchFile);
       } catch {
         /* ignore */
       }
     }
-    gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-    gitTry(repo, ['worktree', 'prune']);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
   }
   if (ok && !head) {
     return { branch: null, head: null, detail: 'staged branch head could not be resolved' };
@@ -2238,6 +2295,10 @@ function buildMergeBranch(
     const existingHead = gitTry(repo, ['rev-parse', '--verify', branchRef]);
     if (existingHead && existingHead !== head) {
       return { branch: null, head: null, detail: `staging branch '${branch}' already exists at a different commit` };
+    }
+    const installAuthorityFailure = finalAuthority?.();
+    if (installAuthorityFailure) {
+      return { branch: null, head: null, detail: installAuthorityFailure };
     }
     if (!existingHead && gitTry(repo, ['update-ref', branchRef, head, '']) === null) {
       const racedHead = gitTry(repo, ['rev-parse', '--verify', branchRef]);
@@ -2256,7 +2317,12 @@ function mergeLocally(
   branch: string,
   base: string,
   expectedBaseHead?: string,
-): { ok: boolean; detail: string } {
+  finalAuthority?: () => string | null,
+): { ok: false; detail: string } | {
+  ok: true;
+  detail: string;
+  evidence: LocalDefaultBranchMergeObservation;
+} {
   // Guard: never operate on the default branch if it is the user's checked-out
   // working tree — a worktree add of an already-checked-out branch would fail,
   // and merging into it would race their index/HEAD.
@@ -2283,20 +2349,27 @@ function mergeLocally(
     }
   }
 
+  const baseBeforeOid = resolveDefaultBranchHead(repo, base);
+  if (!baseBeforeOid) {
+    return {
+      ok: false,
+      detail: `could not resolve head of default branch '${base}' before local merge; branch '${branch}' left for manual merge`,
+    };
+  }
   if (expectedBaseHead) {
-    const baseHead = resolveDefaultBranchHead(repo, base);
-    if (!baseHead) {
+    if (baseBeforeOid !== expectedBaseHead) {
       return {
         ok: false,
-        detail: `could not resolve head of default branch '${base}' before local merge; branch '${branch}' left for manual merge`,
+        detail: `default branch '${base}' moved since verification (verified ${expectedBaseHead.slice(0, 8)}, current ${baseBeforeOid.slice(0, 8)}) — refusing local merge; branch '${branch}' left for manual reverify`,
       };
     }
-    if (baseHead !== expectedBaseHead) {
-      return {
-        ok: false,
-        detail: `default branch '${base}' moved since verification (verified ${expectedBaseHead.slice(0, 8)}, current ${baseHead.slice(0, 8)}) — refusing local merge; branch '${branch}' left for manual reverify`,
-      };
-    }
+  }
+  const proposalHeadOid = gitTry(repo, ['rev-parse', '--verify', branch]);
+  if (!proposalHeadOid || !/^[a-f0-9]{40}$/i.test(proposalHeadOid)) {
+    return {
+      ok: false,
+      detail: `could not resolve proposal head '${branch}' before local merge`,
+    };
   }
 
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `mergewt-${randomBytes(6).toString('hex')}`);
@@ -2304,13 +2377,17 @@ function mergeLocally(
   // user's tree, merge the staging branch, then the worktree's branch ref (base)
   // advances in the shared object store.
   try {
+    const worktreeAuthorityFailure = finalAuthority?.();
+    if (worktreeAuthorityFailure) return { ok: false, detail: worktreeAuthorityFailure };
     gitRun(repo, ['worktree', 'add', tmpDir, base]);
+    const linkAuthorityFailure = finalAuthority?.();
+    if (linkAuthorityFailure) throw new Error(linkAuthorityFailure);
     linkNodeModules(repo, tmpDir);
     if (expectedBaseHead) {
       const checkedOutHead = gitTry(tmpDir, ['rev-parse', 'HEAD']);
       if (checkedOutHead !== expectedBaseHead) {
-        gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-        gitTry(repo, ['worktree', 'prune']);
+        if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+        if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
         return {
           ok: false,
           detail: `default branch '${base}' moved while preparing local merge (verified ${expectedBaseHead.slice(0, 8)}, checked out ${checkedOutHead?.slice(0, 8) ?? 'unknown'}) — branch '${branch}' left for manual reverify`,
@@ -2318,29 +2395,45 @@ function mergeLocally(
       }
     }
   } catch (err) {
-    gitTry(repo, ['worktree', 'prune']);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
     return {
       ok: false,
       detail: `git worktree add for '${base}' failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 
-  let ok = false;
   let detail = '';
   try {
+    const mergeAuthorityFailure = finalAuthority?.();
+    if (mergeAuthorityFailure) throw new Error(mergeAuthorityFailure);
     gitRun(tmpDir, ['merge', '--no-ff', '--no-edit', branch]);
-    const head = gitTry(tmpDir, ['rev-parse', 'HEAD']);
-    ok = true;
-    detail = `merged '${branch}' into '${base}'${head ? ` @ ${head.slice(0, 8)}` : ''} (local, not pushed)`;
+    const mergeCommitOid = gitTry(tmpDir, ['rev-parse', 'HEAD']);
+    if (!mergeCommitOid || !/^[a-f0-9]{40}$/i.test(mergeCommitOid) || mergeCommitOid === baseBeforeOid) {
+      throw new Error('local merge completed without a distinct merge commit identity');
+    }
+    detail = `merged '${branch}' into '${base}' @ ${mergeCommitOid.slice(0, 8)} (local, not pushed)`;
+    return {
+      ok: true,
+      detail,
+      evidence: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base,
+        baseBeforeOid: baseBeforeOid.toLowerCase(),
+        proposalHeadOid: proposalHeadOid.toLowerCase(),
+        mergeCommitOid: mergeCommitOid.toLowerCase(),
+        observedAt: new Date().toISOString(),
+      },
+    };
   } catch (err) {
     detail = `git merge --no-ff failed: ${err instanceof Error ? err.message : String(err)}`;
     // Abort any partial merge so the default branch is left clean.
-    gitTry(tmpDir, ['merge', '--abort']);
+    if (!killSwitchOn()) gitTry(tmpDir, ['merge', '--abort']);
   } finally {
-    gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-    gitTry(repo, ['worktree', 'prune']);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
   }
-  return { ok, detail };
+  return { ok: false, detail };
 }
 
 /**
@@ -2385,6 +2478,9 @@ export async function autoMergeProposal(
     // ── Gate 2: proposal must exist, be a mergeable kind with a diff ─────────
     const proposal = loadProposal(id);
     if (!proposal) return refuse(`proposal not found: ${id}`);
+    if (proposal.status !== 'pending' && proposal.status !== 'approved') {
+      return refuse(`proposal status '${proposal.status}' has no active merge authority`, proposal.repo);
+    }
     if (proposal.kind !== 'patch' && proposal.kind !== 'pr') {
       return refuse(`proposal kind '${proposal.kind}' is not mergeable (need patch|pr)`, proposal.repo);
     }
@@ -2428,6 +2524,9 @@ export async function autoMergeProposal(
     const currentProposalConflict = (): string | null => {
       const current = loadProposal(id);
       if (!current) return 'proposal disappeared during merge evaluation';
+      if (current.status !== 'pending' && current.status !== 'approved') {
+        return `proposal status '${current.status}' has no active merge authority`;
+      }
       if (current.status !== expectedProposalStatus) {
         return `proposal status changed during merge evaluation (${expectedProposalStatus} -> ${current.status})`;
       }
@@ -3024,7 +3123,9 @@ export async function autoMergeProposal(
         }
       }
 
-      // Gate 7 passed — record the merge decision.
+      // Gate 7 passed, but no mutation or host merge has happened yet. Keep
+      // this authorization distinct from the authoritative `merged` outcome
+      // emitted only when the proposal later transitions to `applied`.
       managerGateEvidence = {
         ok: true,
         detail: `manager verdict '${managerVerdict.verdict}' with wouldMerge=true`,
@@ -3038,7 +3139,7 @@ export async function autoMergeProposal(
           learningSource: 'decision-ledger',
           labelBasis: 'merge-gate',
         }),
-        action: 'merged',
+        action: 'merge-authorized',
         reason: `gate 7 passed: verdict=${managerVerdict.verdict}, ${managerVerdict.rationale}`,
       });
     }
@@ -3152,6 +3253,9 @@ export async function autoMergeProposal(
     if (!persistAutonomyEvidencePack(evidencePack)) {
       return refuse('autonomy evidence pack could not be persisted — fail closed', repo);
     }
+    const evidencePackDigest = createHash('sha256')
+      .update(JSON.stringify(evidencePack), 'utf8')
+      .digest('hex');
     if (!policy.allowed) {
       return refuse(`autonomy policy denied ${policy.action}: ${policy.reason}`, repo);
     }
@@ -3164,10 +3268,12 @@ export async function autoMergeProposal(
 
     // Fence proposal authority from the last state check through the outward
     // mutation and terminal proposal update. Store writers share this lock.
+    let shadowObservation: Parameters<typeof observeAutoMergeCanaryShadowAsync>[0] | undefined;
     const authorityFence = acquireProposalMutationLock(id);
     if (!authorityFence) return refuse('proposal mutation lock unavailable — refusing merge authority', repo);
     try {
-      const fencedConflict = currentProposalConflict();
+      const finalAuthorityConflict = (): string | null => finalMutationAuthorityFailure(repo);
+      const fencedConflict = finalAuthorityConflict() ?? currentProposalConflict();
       if (fencedConflict) return refuse(fencedConflict, repo);
 
     // ── ACTION: stage the diff on a branch off the default branch ────────────
@@ -3179,12 +3285,21 @@ export async function autoMergeProposal(
         repo,
       );
     }
-    const staged = buildMergeBranch(repo, id, diff, base, verify.baseHead);
+    const preStageAuthority = finalAuthorityConflict() ?? currentProposalConflict();
+    if (preStageAuthority) return refuse(preStageAuthority, repo);
+    const staged = buildMergeBranch(repo, id, diff, base, verify.baseHead, finalAuthorityConflict);
     if (!staged.branch || !staged.head) {
       return refuse(`could not stage merge branch: ${staged.detail}`, repo);
     }
     const branch = staged.branch;
     const stagedHead = staged.head;
+    shadowObservation = {
+      repo,
+      baseRef: base,
+      baseOid: verify.baseHead,
+      headOid: stagedHead,
+      cfg,
+    };
     let pushedOwnedBranch = false;
     const refuseStaged = (reason: string): AutoMergeResult => {
       cleanupOwnedMergeBranch(repo, branch, stagedHead, {
@@ -3199,6 +3314,7 @@ export async function autoMergeProposal(
     let remoteHandoff = false; // Remote PR created; host gates own the actual merge.
     let remoteHandoffPersisted = false;
     let remoteHandoffCreatedAt: string | undefined;
+    let localRealizedMerge: LocalDefaultBranchMergeObservation | undefined;
     let reason = '';
     let prUrl: string | undefined;
 
@@ -3252,6 +3368,8 @@ export async function autoMergeProposal(
       const priorRemoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
       const reusedExactRemoteHead = priorRemoteStagedHead === stagedHead;
       const originStableBeforePush = githubOriginAuthorityMatches(repo, githubOrigin);
+      const prePushAuthority = finalAuthorityConflict();
+      if (prePushAuthority) return refuseStaged(prePushAuthority);
       const pushed = originStableBeforePush && (reusedExactRemoteHead || (
         priorRemoteStagedHead === null &&
         gitTry(repo, [
@@ -3330,6 +3448,8 @@ export async function autoMergeProposal(
       // mutation. A crash or ambiguous host response can then be reconciled by
       // branch, while a discovered exact PR URL is retained immediately.
       if (toMain) {
+        const preIntentAuthority = finalAuthorityConflict();
+        if (preIntentAuthority) return refuseStaged(preIntentAuthority);
         remoteHandoffCreatedAt = new Date().toISOString();
         const discoveredPrUrl = existingPrIdentityMatches ? existingPr?.url : undefined;
         const intentReason = discoveredPrUrl
@@ -3360,15 +3480,20 @@ export async function autoMergeProposal(
         }
       }
 
-      const rawPr: CreatePrResult = matchingExistingPr
-        ? { ok: true, url: existingPr?.url ?? null, detail: 'existing matching PR adopted' }
-        : await createPr(repo, {
-            title: safeTitle,
-            body: safeBody,
-            base,
-            head: branch,
-            repo: githubOrigin.nameWithOwner,
-          });
+      let rawPr: CreatePrResult;
+      if (matchingExistingPr) {
+        rawPr = { ok: true, url: existingPr?.url ?? null, detail: 'existing matching PR adopted' };
+      } else {
+        const preCreatePrAuthority = finalAuthorityConflict();
+        if (preCreatePrAuthority) return refuseStaged(preCreatePrAuthority);
+        rawPr = await createPr(repo, {
+          title: safeTitle,
+          body: safeBody,
+          base,
+          head: branch,
+          repo: githubOrigin.nameWithOwner,
+        });
+      }
       const pr: CreatePrResult = rawPr.ok &&
         !prUrlMatchesAuthority(rawPr.url ?? undefined, githubOrigin.nameWithOwner)
         ? { ok: false, url: null, detail: 'PR creation returned no canonical URL for the authorized repository' }
@@ -3415,6 +3540,15 @@ export async function autoMergeProposal(
                 : 'PR opened; host auto-merge refused';
           }
           if (remoteHandoff) {
+            const preHandoffAuthority = finalAuthorityConflict();
+            if (preHandoffAuthority) {
+              return {
+                ok: false,
+                merged: false,
+                reason: `remote PR exists but final mutation authority was revoked: ${preHandoffAuthority}`,
+                prUrl,
+              };
+            }
             remoteHandoffCreatedAt = new Date().toISOString();
             const durableReason = remoteHeadMatches
               ? prIdentityConfirmed
@@ -3452,6 +3586,15 @@ export async function autoMergeProposal(
             }
           }
           if (mayEnableHostAutoMerge) {
+            const preHostMergeAuthority = finalAuthorityConflict();
+            if (preHostMergeAuthority) {
+              return {
+                ok: false,
+                merged: false,
+                reason: `remote PR exists but host auto-merge authority was revoked: ${preHostMergeAuthority}`,
+                prUrl,
+              };
+            }
             try {
               execFileSync('gh', [
                 'pr', 'merge', '--auto', '--squash',
@@ -3495,8 +3638,34 @@ export async function autoMergeProposal(
       // LOCAL fallback — conservative; refuses if default branch is checked out.
       const preMergeConflict = currentProposalConflict();
       if (preMergeConflict) return refuse(preMergeConflict, repo);
-      const local = mergeLocally(repo, branch, base, verify.baseHead);
+      if (!verify.baseHead || !proposal.diffHash) {
+        return refuse('local merge intent requires verified base and signed diff identity', repo);
+      }
+      const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
+        schemaVersion: 1,
+        branch,
+        base,
+        baseBeforeOid: verify.baseHead,
+        proposalHeadOid: stagedHead,
+        diffHash: proposal.diffHash,
+        evidencePackDigest,
+        authorizationId: randomBytes(16).toString('hex'),
+        authorizedAt: new Date().toISOString(),
+      };
+      const intentAttestation = signLocalMergeIntent(id, repo, unsignedIntent);
+      const localMergeIntent: ProposalLocalMergeIntent | null = intentAttestation
+        ? { ...unsignedIntent, attestation: intentAttestation }
+        : null;
+      const preIntentAuthority = finalAuthorityConflict();
+      if (preIntentAuthority) return refuse(preIntentAuthority, repo);
+      if (!localMergeIntent || !updateProposalField(id, { localMergeIntent }, authorityFence)) {
+        return refuse('local merge intent could not be authenticated and persisted', repo);
+      }
+      const preLocalMergeAuthority = finalAuthorityConflict();
+      if (preLocalMergeAuthority) return refuse(preLocalMergeAuthority, repo);
+      const local = mergeLocally(repo, branch, base, verify.baseHead, finalAuthorityConflict);
       merged = local.ok;
+      if (local.ok) localRealizedMerge = local.evidence;
       reason = local.detail;
     } else {
       // M56: mid-tier with no PR host — leave the staged branch for review;
@@ -3524,14 +3693,26 @@ export async function autoMergeProposal(
             updatedAt: now,
             detail: reason,
           } as const;
-        const handoffPersisted = remoteHandoffPersisted || setStatus(
-          id,
-          'awaiting-host-merge',
-          reason,
-          reason,
-          authorityFence,
-          { remoteHandoff: remoteHandoffRecord },
-        );
+        let handoffPersisted = remoteHandoffPersisted;
+        if (!handoffPersisted) {
+          const preHandoffPersistenceAuthority = finalAuthorityConflict();
+          if (preHandoffPersistenceAuthority) {
+            return {
+              ok: false,
+              merged: false,
+              reason: `remote PR exists but final mutation authority was revoked: ${preHandoffPersistenceAuthority}`,
+              ...(prUrl ? { prUrl } : {}),
+            };
+          }
+          handoffPersisted = setStatus(
+            id,
+            'awaiting-host-merge',
+            reason,
+            reason,
+            authorityFence,
+            { remoteHandoff: remoteHandoffRecord },
+          );
+        }
         if (!handoffPersisted) {
           cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
           return {
@@ -3542,10 +3723,38 @@ export async function autoMergeProposal(
           };
         }
         if (remoteHandoffPersisted) {
-          updateProposalField(id, { remoteHandoff: remoteHandoffRecord }, authorityFence);
+          const preHandoffUpdateAuthority = finalAuthorityConflict();
+          if (preHandoffUpdateAuthority) {
+            return {
+              ok: false,
+              merged: false,
+              reason: `remote PR exists but final mutation authority was revoked: ${preHandoffUpdateAuthority}`,
+              ...(prUrl ? { prUrl } : {}),
+            };
+          }
+          if (!updateProposalField(id, { remoteHandoff: remoteHandoffRecord }, authorityFence)) {
+            return {
+              ok: false,
+              merged: false,
+              reason: 'remote PR exists but handoff detail persistence failed; retained for reconciliation',
+              ...(prUrl ? { prUrl } : {}),
+            };
+          }
         }
       } else {
-        const appliedPersisted = setStatus(id, 'applied', reason, undefined, authorityFence);
+        const preAppliedPersistenceAuthority = finalAuthorityConflict();
+        if (preAppliedPersistenceAuthority) {
+          return {
+            ok: false,
+            merged: false,
+            ...(branchApplied ? { branched: true } : {}),
+            reason: `${reason}; final mutation authority was revoked: ${preAppliedPersistenceAuthority}`,
+            ...(prUrl ? { prUrl } : {}),
+          };
+        }
+        const appliedPersisted = localRealizedMerge
+          ? recordRealizedMerge(id, localRealizedMerge, authorityFence)
+          : setStatus(id, 'applied', reason, undefined, authorityFence);
         if (!appliedPersisted) {
           audit({
             action: 'inbox:auto-merge',
@@ -3556,7 +3765,9 @@ export async function autoMergeProposal(
           });
           return {
             ok: false,
-            merged,
+            // A Git mutation without a committed realized-merge receipt is not
+            // reportable as shipped. The audit/reason retain the uncertain fact.
+            merged: false,
             ...(branchApplied ? { branched: true } : {}),
             reason: `${reason}; applied status persistence failed`,
             ...(prUrl ? { prUrl } : {}),
@@ -3583,6 +3794,11 @@ export async function autoMergeProposal(
     return result;
     } finally {
       releaseProposalMutationLock(authorityFence);
+      if (shadowObservation) {
+        // The outward result is already fixed and mutation authority released.
+        // Await only to guarantee the shadow evidence is not dropped on CLI exit.
+        await completeAutoMergeCanaryShadowObservation(shadowObservation, id);
+      }
     }
   } catch (err) {
     // Belt-and-suspenders: the orchestrator must never throw out.

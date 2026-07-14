@@ -16,6 +16,7 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 const SHA_RE = /^[a-f0-9]{40}$/;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const MAX_FUTURE_SKEW_MS = 60_000;
+export const MAX_REMOTE_HANDOFF_RECONCILIATION_LAG_MS = 30 * 24 * 60 * 60 * 1_000;
 let reconciliationKeyDiagnostic: string | null = null;
 
 export function getRemoteHandoffKeyDiagnostic(): string | null {
@@ -172,17 +173,23 @@ function payload(
   handoff: ProposalRemoteHandoff,
   observedAt: string,
 ): unknown[] | null {
+  const createdAt = sanitizeGithubMergedAt(handoff.createdAt);
   const mergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
   const observed = sanitizeGithubMergedAt(observedAt);
   if (!proposalId || !repo || handoff.provider !== 'github' || handoff.state !== 'merged' ||
-    !handoff.prUrl || !handoff.branch || !handoff.base || !mergedAt || !observed ||
+    !handoff.prUrl || !handoff.branch || !handoff.base || !createdAt || !mergedAt || !observed ||
     !SHA_RE.test(handoff.mergeCommitOid ?? '') || !SHA_RE.test(handoff.expectedHeadOid ?? '')) return null;
-  if (Date.parse(observed) < Date.parse(mergedAt) || Date.parse(observed) > Date.now() + MAX_FUTURE_SKEW_MS) return null;
+  const createdMs = Date.parse(createdAt);
+  const mergedMs = Date.parse(mergedAt);
+  const observedMs = Date.parse(observed);
+  if (createdMs > mergedMs || mergedMs > observedMs ||
+    observedMs - mergedMs > MAX_REMOTE_HANDOFF_RECONCILIATION_LAG_MS ||
+    observedMs > Date.now() + MAX_FUTURE_SKEW_MS) return null;
   try {
     return [
-      'ashlr:remote-handoff-reconciliation:v1', proposalId, resolve(repo), handoff.prUrl,
-      handoff.branch, handoff.base, handoff.expectedHeadOid, handoff.mergeCommitOid,
-      mergedAt, observed,
+      'ashlr:remote-handoff-reconciliation:v2', proposalId, resolve(repo),
+      'awaiting-host-merge', createdAt, handoff.provider, handoff.prUrl, handoff.branch,
+      handoff.base, handoff.expectedHeadOid, handoff.mergeCommitOid, mergedAt, observed,
     ];
   } catch { return null; }
 }
@@ -231,7 +238,9 @@ export function viewPrWithReconciliation(
   const mergeCommitOid = typeof pr.mergeCommitOid === 'string' && SHA_RE.test(pr.mergeCommitOid.toLowerCase())
     ? pr.mergeCommitOid.toLowerCase()
     : undefined;
-  if (!mergedAt || !mergeCommitOid || !strongIdentity(handoff, pr)) return { pr };
+  if (handoff.state !== 'awaiting-host-merge' || !mergedAt || !mergeCommitOid || !strongIdentity(handoff, pr)) {
+    return { pr };
+  }
   const observedAt = new Date().toISOString();
   const mergedHandoff: ProposalRemoteHandoff = {
     ...handoff,

@@ -26,7 +26,14 @@ import {
   type OutcomePriors,
   type SourceStats,
 } from '../src/core/fleet/feedback.js';
-import type { WorkItem, WorkSource, Proposal, ProposalKind, DecisionEntry } from '../src/core/types.js';
+import type {
+  WorkItem,
+  WorkSource,
+  Proposal,
+  ProposalKind,
+  DecisionEntry,
+  RealizedMergeEvidence,
+} from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // ── Mock decisions-ledger and worked-ledger ──────────────────────────────────
@@ -35,13 +42,21 @@ import type { WorkItem, WorkSource, Proposal, ProposalKind, DecisionEntry } from
 // Hoisted mock state — mutated per-test.
 let _mockDecisions: DecisionEntry[] = [];
 let _mockWorkedEvents: { itemId: string; outcome: 'diff' | 'empty'; ts: string }[] = [];
+let _decisionSourceComplete = true;
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (opts?: { sinceMs?: number }) => {
-    if (opts?.sinceMs !== undefined) {
-      return _mockDecisions.filter((d) => Date.parse(d.ts) >= opts.sinceMs!);
-    }
-    return _mockDecisions;
+    const rows = opts?.sinceMs !== undefined
+      ? _mockDecisions.filter((d) => Date.parse(d.ts) >= opts.sinceMs!)
+      : [..._mockDecisions];
+    Object.defineProperty(rows, 'sourceQuality', {
+      value: {
+        sourceState: _decisionSourceComplete ? 'healthy' : 'degraded',
+        complete: _decisionSourceComplete,
+      },
+      enumerable: false,
+    });
+    return rows;
   },
   recordDecision: vi.fn(),
   decisionsDir: () => '/mock/decisions',
@@ -54,6 +69,16 @@ vi.mock('../src/core/fleet/worked-ledger.js', () => ({
   DEFAULT_COOLDOWN_MS: 6 * 60 * 60 * 1000,
   recentlyDeclined: vi.fn(() => false),
 }));
+
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProducerProvenanceV2: (proposal: { producerProvenanceSig?: string }) => ({
+      ok: proposal.producerProvenanceSig === 'test-producer-provenance',
+    }),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -108,6 +133,26 @@ function makeDecision(
     proposalId,
     action,
     verdict,
+    ...(action === 'merged' ? { labelBasis: 'realized-merge-v1' as const } : {}),
+  };
+}
+
+function withRealizedMerge(proposal: Proposal): Proposal {
+  const realizedMerge: RealizedMergeEvidence = {
+    schemaVersion: 1,
+    source: 'local-default-branch',
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt: new Date().toISOString(),
+  };
+  return {
+    ...proposal,
+    status: 'applied',
+    realizedMerge,
+    producerProvenanceVersion: 2,
+    producerProvenanceSig: 'test-producer-provenance',
   };
 }
 
@@ -127,6 +172,7 @@ function makeWorkedEvent(
 beforeEach(() => {
   _mockDecisions = [];
   _mockWorkedEvents = [];
+  _decisionSourceComplete = true;
   _proposalSeq = 0;
   _itemSeq = 0;
 });
@@ -143,6 +189,17 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     expect(priors.computedAt).toBeTruthy();
   });
 
+  it('returns neutral priors when the decision source is incomplete', async () => {
+    const p = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
+    _mockDecisions = [makeDecision(p.id, 'merged', 'applied')];
+    _decisionSourceComplete = false;
+
+    const priors = await computeOutcomePriors({ listProposals: () => [p] });
+
+    expect(priors.global).toEqual({});
+    expect(priors.byRepo).toEqual({});
+  });
+
   it('counts created proposals per source (via kind mapping)', async () => {
     const proposals = [
       makeProposal({ kind: 'patch' as ProposalKind }),    // → 'todo'
@@ -156,7 +213,7 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
   });
 
   it('counts merged decisions correctly', async () => {
-    const p = makeProposal({ kind: 'patch' as ProposalKind });
+    const p = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
     _mockDecisions = [
       makeDecision(p.id, 'merged', 'approved'),
     ];
@@ -173,25 +230,27 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     expect(priors.global['todo']?.rejected).toBeGreaterThanOrEqual(1);
   });
 
-  it('counts ship verdicts', async () => {
+  it('keeps only the newest ship retry for predictive calibration', async () => {
     const p = makeProposal({ kind: 'security' as ProposalKind });
     _mockDecisions = [
       makeDecision(p.id, 'judged', 'ship'),
       makeDecision(p.id, 'judged', 'ship'),
     ];
     const priors = await computeOutcomePriors({ listProposals: () => [p] });
-    expect(priors.global['security']?.shipCount).toBe(2);
+    expect(priors.global['security']?.shipCount).toBe(1);
+    expect(priors.global['security']?.judged).toBe(1);
     expect(priors.global['security']?.shipRate).toBeGreaterThan(0);
   });
 
-  it('counts noise/harmful verdicts', async () => {
+  it('deduplicates negative judge retries by proposal and judge identity', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind });
     _mockDecisions = [
       makeDecision(p.id, 'judged', 'noise'),
       makeDecision(p.id, 'judged', 'harmful'),
     ];
     const priors = await computeOutcomePriors({ listProposals: () => [p] });
-    expect(priors.global['todo']?.noiseCount).toBe(2);
+    expect(priors.global['todo']?.noiseCount).toBe(1);
+    expect(priors.global['todo']?.judged).toBe(1);
     expect(priors.global['todo']?.noiseRate).toBeGreaterThan(0);
   });
 
@@ -231,20 +290,20 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     expect(priors.global['dep']?.diffCount).toBe(1); // only recent
   });
 
-  it('rates are recomputed correctly: acceptRate = (merged + shipCount) / created', async () => {
-    const p1 = makeProposal({ kind: 'patch' as ProposalKind });
+  it('rates are recomputed correctly: acceptRate = merged / created', async () => {
+    const p1 = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
     const p2 = makeProposal({ kind: 'patch' as ProposalKind });
     const p3 = makeProposal({ kind: 'patch' as ProposalKind });
     _mockDecisions = [
       makeDecision(p1.id, 'merged', 'approved'),
       makeDecision(p2.id, 'judged', 'ship'),
     ];
-    // 3 created, 1 merged + 1 ship = 2 accepted → acceptRate = 2/3
+    // The ship verdict remains predictive; only the merged row is accepted.
     const priors = await computeOutcomePriors({ listProposals: () => [p1, p2, p3] });
     const stats = priors.global['todo']!;
     expect(stats.created).toBe(3);
     expect(stats.merged + stats.shipCount).toBe(2);
-    expect(stats.acceptRate).toBeCloseTo(2 / 3, 5);
+    expect(stats.acceptRate).toBeCloseTo(1 / 3, 5);
   });
 });
 

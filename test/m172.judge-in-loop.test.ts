@@ -42,7 +42,7 @@
  *  - autoMergeProposal MOCKED — no real git operations.
  *  - readDecisions MOCKED — full ledger control.
  *  - resolveFrontierJudgeClient MOCKED (from manager.js) — controls judge client availability (M176).
- *  - listProposals MOCKED — controls pending proposal list.
+ *  - listProposalsDetailed MOCKED — controls pending proposal list.
  *  - killSwitchOn MOCKED.
  */
 
@@ -77,9 +77,14 @@ vi.mock('../src/core/inbox/merge.js', () => ({
 
 const mockListProposals = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: (...args: unknown[]) => mockListProposals(...args),
-  setStatus: vi.fn(),
-  updateProposalField: vi.fn(),
+  listProposalsDetailed: (...args: unknown[]) => ({
+    proposals: mockListProposals(...args),
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+  }),
+  setStatus: vi.fn(() => true),
+  updateProposalField: vi.fn(() => true),
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);

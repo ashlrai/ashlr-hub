@@ -73,6 +73,18 @@ const { runInventCycle } = await import('../src/core/generative/invent-cycle.js'
 // Fixtures
 // ---------------------------------------------------------------------------
 
+function realizedMergeEvidence(observedAt = new Date().toISOString()) {
+  return {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+  };
+}
+
 function makeCfg(overrides?: Record<string, unknown>): AshlrConfig {
   return {
     provider: 'anthropic',
@@ -302,6 +314,7 @@ describe('runInventCycle — invents for active repos and enqueues', () => {
       id: 'proposal-landed',
       status: 'applied',
       verifyResult: { passed: true, source: 'manual' },
+      realizedMerge: realizedMergeEvidence(),
     });
     mockInventWorkItems.mockResolvedValue([makeItem('/tmp/repo-a', 'Next invention')]);
 

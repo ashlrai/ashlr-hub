@@ -16,7 +16,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
-import type { Proposal } from '../src/core/types.js';
+import type { Proposal, RealizedMergeEvidence } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -49,20 +49,37 @@ type MockProposal = Pick<Proposal,
   engineModel?: string;
   diff?: string;
   verifyResult?: { passed: boolean; failed?: string[] };
+  realizedMerge?: RealizedMergeEvidence;
 };
 
 const mockProposals: MockProposal[] = [];
+let mockProposalSourceComplete = true;
 
 vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
     listProposals: () => [...mockProposals] as Proposal[],
+    listProposalsDetailed: () => ({
+      proposals: [...mockProposals] as Proposal[],
+      sourceState: mockProposalSourceComplete
+        ? (mockProposals.length > 0 ? 'healthy' : 'missing')
+        : 'degraded',
+      sourcePresent: mockProposals.length > 0,
+      complete: mockProposalSourceComplete,
+      stopReasons: mockProposalSourceComplete ? [] : ['invalid-file'],
+      filesDiscovered: mockProposals.length,
+      filesRead: mockProposals.length,
+      bytesRead: 0,
+      invalidFiles: mockProposalSourceComplete ? 0 : 1,
+      unreadableFiles: 0,
+    }),
   };
 });
 
 beforeEach(() => {
   mockProposals.length = 0;
+  mockProposalSourceComplete = true;
 });
 
 // ---------------------------------------------------------------------------
@@ -74,7 +91,7 @@ let _idSeq = 0;
 function makeProposal(
   overrides: Partial<MockProposal> & { status: Proposal['status']; createdAt: string },
 ): MockProposal {
-  return {
+  const proposal: MockProposal = {
     id: `prop-m119-${_idSeq++}`,
     repo: '/repos/alpha',
     origin: 'backlog',
@@ -82,6 +99,22 @@ function makeProposal(
     title: 'test proposal',
     summary: 'summary',
     ...overrides,
+  };
+  if (proposal.status === 'applied' && !Object.hasOwn(overrides, 'realizedMerge')) {
+    proposal.realizedMerge = localMergeEvidence(proposal.createdAt);
+  }
+  return proposal;
+}
+
+function localMergeEvidence(observedAt: string): RealizedMergeEvidence {
+  return {
+    schemaVersion: 1,
+    source: 'local-default-branch',
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
   };
 }
 
@@ -138,7 +171,7 @@ describe('m119 computeQualityMetrics', () => {
     expect(m.byRepo).toEqual({});
   });
 
-  it('counts merged/rejected/pending correctly', async () => {
+  it('counts only evidence-qualified applied proposals as merged', async () => {
     mockProposals.push(
       makeProposal({ status: 'applied',  createdAt: daysAgo(1) }),
       makeProposal({ status: 'approved', createdAt: daysAgo(2) }),
@@ -151,11 +184,59 @@ describe('m119 computeQualityMetrics', () => {
     const m = computeQualityMetrics('30d');
 
     expect(m.proposalsCreated).toBe(5);
-    expect(m.merged).toBe(2);   // applied + approved
+    expect(m.merged).toBe(1);   // applied only; approved is authorization
     expect(m.rejected).toBe(2); // rejected + failed
     expect(m.pending).toBe(1);
-    expect(m.acceptRate).toBeCloseTo(2 / 5);
+    expect(m.acceptRate).toBeCloseTo(1 / 5);
     expect(m.rejectRate).toBeCloseTo(2 / 5);
+  });
+
+  it('does not credit branch/manual applied status without an exact witness', async () => {
+    mockProposals.push(
+      makeProposal({
+        status: 'applied',
+        createdAt: daysAgo(1),
+        engineModel: 'codex:gpt-5.5',
+        realizedMerge: undefined,
+      }),
+    );
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const metrics = computeQualityMetrics('7d');
+
+    expect(metrics.merged).toBe(0);
+    expect(metrics.acceptRate).toBe(0);
+    expect(metrics.byEngine['codex:gpt-5.5']?.merged).toBe(0);
+  });
+
+  it('returns neutral metrics instead of learning from a partial proposal source', async () => {
+    mockProposals.push(makeProposal({ status: 'applied', createdAt: daysAgo(1) }));
+    mockProposalSourceComplete = false;
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const metrics = computeQualityMetrics('7d');
+
+    expect(metrics.proposalsCreated).toBe(0);
+    expect(metrics.merged).toBe(0);
+    expect(metrics.byEngine).toEqual({});
+  });
+
+  it('does not give approved proposals aggregate or per-engine merge credit', async () => {
+    mockProposals.push(
+      makeProposal({
+        status: 'approved',
+        createdAt: daysAgo(1),
+        engineModel: 'codex:gpt-5.5',
+      }),
+    );
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const m = computeQualityMetrics('7d');
+
+    expect(m.merged).toBe(0);
+    expect(m.acceptRate).toBe(0);
+    expect(m.byEngine['codex:gpt-5.5']?.merged).toBe(0);
+    expect(m.byEngine['codex:gpt-5.5']?.acceptRate).toBe(0);
   });
 
   it('trivialRatio: detects trivial diff (≤6 changed lines)', async () => {
@@ -250,17 +331,86 @@ describe('m119 computeQualityMetrics', () => {
     expect(m.byRepo['/repos/beta']).toBe(1);
   });
 
-  it('7d window excludes proposals older than 7 days', async () => {
-    mockProposals.push(
-      makeProposal({ status: 'applied', createdAt: daysAgo(6) }),  // in window
-      makeProposal({ status: 'applied', createdAt: daysAgo(8) }),  // outside
-    );
+  it('7d merge window uses witness observation time instead of proposal creation', async () => {
+    const recentlyRealized = makeProposal({ status: 'applied', createdAt: daysAgo(8) });
+    recentlyRealized.realizedMerge = localMergeEvidence(daysAgo(6));
+    const oldRealization = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
+    oldRealization.realizedMerge = localMergeEvidence(daysAgo(8));
+    mockProposals.push(recentlyRealized, oldRealization);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');
 
     expect(m.proposalsCreated).toBe(1);
     expect(m.merged).toBe(1);
+  });
+
+  it('does not credit a future-dated realized witness', async () => {
+    const future = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
+    mockProposals.push(makeProposal({
+      status: 'applied',
+      createdAt: daysAgo(1),
+      realizedMerge: localMergeEvidence(future),
+    }));
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const m = computeQualityMetrics('7d');
+
+    expect(m.proposalsCreated).toBe(0);
+    expect(m.merged).toBe(0);
+    expect(m.acceptRate).toBe(0);
+  });
+
+  it('deduplicates trend terminals and requires a realized witness', async () => {
+    const realized = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
+    const bare = makeProposal({ status: 'pending', createdAt: daysAgo(1) });
+    mockProposals.push(realized, bare);
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = daysAgo(1);
+    for (const proposal of [realized, bare]) {
+      recordDecision({ ts, proposalId: proposal.id, action: 'proposed' });
+      recordDecision({
+        ts,
+        proposalId: proposal.id,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      });
+      recordDecision({
+        ts,
+        proposalId: proposal.id,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      });
+    }
+    recordDecision({
+      ts: new Date(Date.parse(ts) - 1_000).toISOString(),
+      proposalId: realized.id,
+      action: 'rejected',
+      verdict: 'rejected',
+    });
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const metrics = computeQualityMetrics('all');
+
+    expect(metrics.trend).toHaveLength(1);
+    expect(metrics.trend?.[0]).toMatchObject({ merged: 1, acceptRate: 0.5 });
+  });
+
+  it('does not let a legacy merged row borrow a current witness for trend credit', async () => {
+    const realized = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
+    mockProposals.push(realized);
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = daysAgo(1);
+    recordDecision({ ts, proposalId: realized.id, action: 'proposed' });
+    recordDecision({ ts, proposalId: realized.id, action: 'merged', verdict: 'applied' });
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    const metrics = computeQualityMetrics('all');
+
+    expect(metrics.merged).toBe(1);
+    expect(metrics.trend?.[0]).toMatchObject({ merged: 0, acceptRate: 0 });
   });
 
   it('never throws on bad/corrupt state', async () => {

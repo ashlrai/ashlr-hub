@@ -21,9 +21,9 @@
  *   1. Read outcome-linked judge traces (readJudgeTraces, M141) — newest first.
  *      Fall back to / enrich with the decisions ledger (readDecisions, M119) for
  *      the originating engine/model when the proposal file is gone.
- *   2. Keep only traces with a recorded OUTCOME (merged | reverted | rejected),
+ *   2. Keep only traces with a qualified OUTCOME (merged | reverted | rejected),
  *      cap to a bounded sample (cfg.foundry.counterfactualSampleCap, default 10).
- *   3. For each, load the proposal (loadProposal) to recover the actual diff +
+ *   3. Take one complete proposal snapshot for merge authority, diff, and
  *      work-source. Skip when the diff is gone (can't counterfactually re-judge).
  *   4. Re-judge the diff with the CURRENT frontier judge (resolveFrontierJudgeClient
  *      + judgeProposal from manager.js — imported only, never modified).
@@ -41,8 +41,14 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 
 import type { AshlrConfig, Proposal, DecisionEntry } from '../types.js';
-import type { JudgeTrace, JudgeOutcome } from './judge-trace.js';
-import type { ManagerVerdict } from './manager.js';
+import {
+  isQualifiedJudgeOutcome,
+  qualifiedMergedProposal,
+  type JudgeOutcome,
+  type JudgeProposalSource,
+  type JudgeTrace,
+} from './judge-trace.js';
+import type { JudgeProposalOptions, ManagerVerdict } from './manager.js';
 import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
@@ -54,6 +60,25 @@ const DEFAULT_SAMPLE_CAP = 10;
 
 /** Hard ceiling so a misconfigured cap can never trigger an unbounded run. */
 const MAX_SAMPLE_CAP = 100;
+
+const DEGRADED_PROPOSAL_SOURCE: JudgeProposalSource = {
+  sourceState: 'degraded',
+  complete: false,
+  proposals: [],
+};
+
+function oneTracePerProposal(traces: readonly JudgeTrace[]): JudgeTrace[] {
+  const selected = new Map<string, JudgeTrace>();
+  for (const trace of traces) {
+    const existing = selected.get(trace.proposalId);
+    const traceMs = Date.parse(trace.outcomeAt ?? trace.ts);
+    const existingMs = existing ? Date.parse(existing.outcomeAt ?? existing.ts) : Number.NEGATIVE_INFINITY;
+    if (!existing || traceMs > existingMs) selected.set(trace.proposalId, trace);
+  }
+  return [...selected.values()].sort(
+    (a, b) => Date.parse(b.outcomeAt ?? b.ts) - Date.parse(a.outcomeAt ?? a.ts),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -251,8 +276,8 @@ export interface CounterfactualOpts {
   }) => JudgeTrace[];
   /** Test seam: read the decisions ledger. */
   _readDecisionsFn?: (opts?: { proposalId?: string; limit?: number }) => DecisionEntry[];
-  /** Test seam: load a proposal (for diff + work-source). */
-  _loadProposalFn?: (id: string) => Proposal | null;
+  /** Test seam: take the complete proposal snapshot used by the whole replay. */
+  _readProposalsFn?: () => JudgeProposalSource;
   /** Test seam: resolve the current frontier judge client. */
   _resolveJudgeFn?: (
     cfg: AshlrConfig,
@@ -262,9 +287,38 @@ export interface CounterfactualOpts {
     proposal: Proposal,
     cfg: AshlrConfig,
     client: { complete: (system: string, user: string) => Promise<string> },
+    options: JudgeProposalOptions,
   ) => Promise<ManagerVerdict>;
   /** Test seam: persist the report (else writeFileSync to calibrationReportPath). */
   _persistFn?: (report: CounterfactualReport) => void;
+}
+
+async function readProposalSnapshot(
+  override?: () => JudgeProposalSource,
+): Promise<JudgeProposalSource> {
+  try {
+    const source = override
+      ? override()
+      : (await import('../inbox/store.js')).listProposalsDetailed({ requireComplete: true });
+    if (!source || !Array.isArray(source.proposals) || typeof source.complete !== 'boolean' ||
+      !['missing', 'healthy', 'degraded'].includes(source.sourceState)) {
+      return DEGRADED_PROPOSAL_SOURCE;
+    }
+    return source;
+  } catch {
+    return DEGRADED_PROPOSAL_SOURCE;
+  }
+}
+
+function uniqueProposalIndex(source: JudgeProposalSource): Map<string, Proposal> {
+  const index = new Map<string, Proposal>();
+  const duplicates = new Set<string>();
+  for (const proposal of source.proposals) {
+    if (index.has(proposal.id)) duplicates.add(proposal.id);
+    else index.set(proposal.id, proposal);
+  }
+  for (const id of duplicates) index.delete(id);
+  return index;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +367,7 @@ function persistReport(report: CounterfactualReport): void {
  *
  * @param cfg   AshlrConfig — passed through to the frontier judge.
  * @param opts  Optional cap + test seams.
- * @returns     A CounterfactualReport (also persisted to calibration.json).
+ * @returns     A CounterfactualReport. Persisted unless proposal authority is withheld.
  *
  * Never throws. Bounded. Secret-scrubbed before persist.
  */
@@ -345,12 +399,21 @@ export async function runCounterfactualReplay(
     }
     // Clamp to [1, MAX_SAMPLE_CAP]; a non-positive cap means "nothing to do".
     cap = Math.floor(cap);
+    if (cap > MAX_SAMPLE_CAP) cap = MAX_SAMPLE_CAP;
+
+    // Snapshot proposal authority exactly once. Replays and merged-label
+    // qualification below must observe the same complete persistence boundary.
+    const proposalSource = await readProposalSnapshot(opts?._readProposalsFn);
+    if (proposalSource.sourceState === 'degraded' || !proposalSource.complete) {
+      return emptyReport('calibration withheld: proposal source is degraded or incomplete');
+    }
+    const proposalSnapshotAtMs = Date.now();
+    const proposalsById = uniqueProposalIndex(proposalSource);
     if (cap <= 0) {
       const r = emptyReport('sample cap <= 0 — nothing replayed');
       (opts?._persistFn ?? persistReport)(r);
       return r;
     }
-    if (cap > MAX_SAMPLE_CAP) cap = MAX_SAMPLE_CAP;
 
     // --- 1. Read outcome-linked traces (over-fetch a little, then cap) ------
     let readTraces = opts?._readTracesFn;
@@ -366,13 +429,29 @@ export async function runCounterfactualReplay(
       ...(!injectedTraceReader ? { requireComplete: true } : {}),
     });
 
-    const withOutcome = traces.filter(
+    // A historical bare `merged` label remains readable but cannot seed replay.
+    const qualifiedMergedProposals = new Map<string, Proposal>();
+    const qualifiedOutcomes = oneTracePerProposal(traces).filter(
       (t): t is JudgeTrace & { outcome: JudgeOutcome } =>
-        t.outcome === 'merged' || t.outcome === 'reverted' || t.outcome === 'rejected',
+        isQualifiedJudgeOutcome(t) &&
+        (t.outcome === 'merged' || t.outcome === 'reverted' || t.outcome === 'rejected'),
     );
+    const withOutcome = qualifiedOutcomes.filter((trace) => {
+      if (trace.outcome !== 'merged') return true;
+      const proposal = qualifiedMergedProposal(
+        trace.proposalId,
+        proposalSource,
+        proposalSnapshotAtMs,
+      );
+      if (!proposal) return false;
+      qualifiedMergedProposals.set(trace.proposalId, proposal);
+      return true;
+    });
 
     if (withOutcome.length === 0) {
-      const r = emptyReport('no judged proposals with a recorded outcome found');
+      const r = emptyReport(qualifiedOutcomes.length > 0
+        ? 'no replayable proposals (merged proposal authority missing or unrecoverable)'
+        : 'no judged proposals with a recorded outcome found');
       (opts?._persistFn ?? persistReport)(r);
       return r;
     }
@@ -396,16 +475,6 @@ export async function runCounterfactualReplay(
       judgeProposalFn = judgeProposal;
     }
 
-    let loadProposalFn = opts?._loadProposalFn;
-    if (!loadProposalFn) {
-      try {
-        const { loadProposal } = await import('../inbox/store.js');
-        loadProposalFn = loadProposal;
-      } catch {
-        loadProposalFn = () => null;
-      }
-    }
-
     let readDecisionsFn = opts?._readDecisionsFn;
     if (!readDecisionsFn) {
       try {
@@ -426,7 +495,9 @@ export async function runCounterfactualReplay(
       if (details.length >= cap) break;
 
       try {
-        const proposal = loadProposalFn(trace.proposalId);
+        const proposal = trace.outcome === 'merged'
+          ? qualifiedMergedProposals.get(trace.proposalId)
+          : proposalsById.get(trace.proposalId);
         if (!proposal || !proposal.diff || proposal.diff.trim() === '') {
           // No recoverable diff → cannot counterfactually re-judge. Skip.
           continue;
@@ -443,7 +514,7 @@ export async function runCounterfactualReplay(
         const workSource = resolveWorkSource(proposal, ledgerEntry);
 
         // Re-judge with the CURRENT frontier judge (never saw the outcome).
-        const verdict = await judgeProposalFn(proposal, cfg, judgeClient);
+        const verdict = await judgeProposalFn(proposal, cfg, judgeClient, { recordTrace: false });
 
         const replayIntent = verdictToIntent(verdict.verdict);
         const outcomeIntent = outcomeToIntent(trace.outcome);

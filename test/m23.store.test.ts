@@ -52,7 +52,13 @@ import {
   pendingCount,
 } from '../src/core/inbox/store.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
-import { hashDiff, signProvenance, verifyProvenance } from '../src/core/foundry/provenance.js';
+import { readJudgeTraces, recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
+import {
+  hashDiff,
+  signProvenance,
+  verifyProducerProvenanceV2,
+  verifyProvenance,
+} from '../src/core/foundry/provenance.js';
 import { canonicalizeProposalDiff } from '../src/core/util/scrub.js';
 import type { Proposal } from '../src/core/types.js';
 
@@ -249,6 +255,27 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(verifyProvenance(proposal).ok).toBe(true);
   });
 
+  it('upgrades trusted producer metadata to a proposal-bound v2 attestation', () => {
+    const repo = path.join(tmpHome, 'repo');
+    fs.mkdirSync(repo);
+    const diff = 'diff --git a/a.ts b/a.ts\n+export const value = 1;\n';
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal(makeInput({
+      repo,
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      workItemId: `${repo}:issue:42`,
+      workSource: 'issue',
+    }));
+
+    expect(proposal.producerProvenanceVersion).toBe(2);
+    expect(verifyProducerProvenanceV2(proposal).ok).toBe(true);
+    expect(verifyProducerProvenanceV2({ ...proposal, workSource: 'goal' }).ok).toBe(false);
+  });
+
   it.each([
     `sk_${'live'}_1234567890abcdefghijklmnop`,
     'ASIA1234567890ABCDEF',
@@ -298,8 +325,8 @@ describe('M23 createProposal — persistence + initial state', () => {
     setStatus(p.id, 'approved', 'causal approval');
 
     const decisions = readDecisions({ proposalId: p.id, limit: 5 });
-    const merged = decisions.find((d) => d.action === 'merged');
-    expect(merged).toMatchObject({
+    const authorized = decisions.find((d) => d.action === 'merge-authorized');
+    expect(authorized).toMatchObject({
       proposalId: p.id,
       workItemId: 'repo:todo:causal-lifecycle',
       workSource: 'todo',
@@ -307,6 +334,7 @@ describe('M23 createProposal — persistence + initial state', () => {
       model: 'codex:gpt-5.5',
       verdict: 'approved',
     });
+    expect(decisions.some((d) => d.action === 'merged')).toBe(false);
   });
 
   it('partial review evidence cannot gain authority or emit a merged decision', () => {
@@ -515,11 +543,60 @@ describe('M23 loadProposal — by id', () => {
 // ===========================================================================
 
 describe('M23 setStatus — persistence only, no application', () => {
+  it('records authorization on approval but no merge outcome for generic application', () => {
+    const p = createProposal(makeInput());
+    recordJudgeTrace({
+      proposalId: p.id,
+      judgeEngine: 'test-judge',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'focused lifecycle test',
+      promptContext: 'proposal metadata only',
+    });
+
+    setStatus(p.id, 'approved', 'authorized for application');
+
+    const approvedDecisions = readDecisions({ proposalId: p.id });
+    expect(approvedDecisions.filter((d) => d.action === 'merge-authorized')).toHaveLength(1);
+    expect(approvedDecisions.filter((d) => d.action === 'merged')).toHaveLength(0);
+    const approvedTraces = readJudgeTraces({ proposalId: p.id });
+    expect(approvedTraces).toHaveLength(1);
+    expect(approvedTraces[0]?.outcome).toBeUndefined();
+
+    setStatus(p.id, 'applied', 'application completed');
+
+    const appliedDecisions = readDecisions({ proposalId: p.id });
+    expect(appliedDecisions.filter((d) => d.action === 'merge-authorized')).toHaveLength(1);
+    expect(appliedDecisions.filter((d) => d.action === 'merged')).toHaveLength(0);
+    const appliedTraces = readJudgeTraces({ proposalId: p.id });
+    expect(appliedTraces).toHaveLength(1);
+    expect(appliedTraces[0]?.outcome).toBeUndefined();
+  });
+
   it('persists the new status to disk', () => {
     const p = createProposal(makeInput());
     setStatus(p.id, 'approved');
     const loaded = loadProposal(p.id);
     expect(loaded!.status).toBe('approved');
+  });
+
+  it('refuses a stale conditional cleanup after the proposal leaves pending', () => {
+    const p = createProposal(makeInput());
+    expect(setStatus(p.id, 'applied', 'completed elsewhere')).toBe(true);
+
+    expect(setStatus(
+      p.id,
+      'rejected',
+      undefined,
+      'stale cleanup',
+      undefined,
+      {},
+      'pending',
+    )).toBe(false);
+    expect(loadProposal(p.id)).toMatchObject({
+      status: 'applied',
+      result: 'completed elsewhere',
+    });
   });
 
   it('sets decidedAt when moving to approved', () => {

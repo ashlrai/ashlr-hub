@@ -5,7 +5,8 @@
  *
  * GUARDRAILS:
  *  - PURE PERSISTENCE: never applies anything, never mutates a repo, never
- *    auto-advances status. Status changes happen ONLY through setStatus().
+ *    auto-advances status. Status changes happen through setStatus() or the
+ *    evidence-gated recordRealizedMerge() writer.
  *  - Never throws: all exported functions swallow errors and return safe
  *    defaults (null / [] / 0) so callers remain unblocked.
  *  - Atomic write: write to <id>.json.tmp then rename, matching the pattern
@@ -37,12 +38,19 @@ import type { Stats } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import type { AshlrConfig, Proposal, ProposalStatus } from '../types.js';
+import type {
+  AshlrConfig,
+  LocalDefaultBranchMergeObservation,
+  LocalDefaultBranchRealizedMerge,
+  Proposal,
+  ProposalStatus,
+  RealizedMergeEvidence,
+} from '../types.js';
 import { audit } from '../sandbox/audit.js';
 import { emitFleetEvent } from '../integrations/pulse-sync.js';
 import type { FleetEvent } from '../integrations/pulse-exporter.js';
 // M119: decisions ledger hook — additive, never-throws, no behavior change.
-import { recordDecision } from '../fleet/decisions-ledger.js';
+import { readDecisionsDetailed, recordDecision } from '../fleet/decisions-ledger.js';
 import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
@@ -66,13 +74,31 @@ import {
   type ProposalStoreMutationLock,
 } from './proposal-mutation-lock.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
-import { sanitizeRemoteHandoffReconciliation } from './remote-handoff-attestation.js';
+import {
+  sanitizeRemoteHandoffReconciliation,
+  verifyRemoteHandoffReconciliation,
+} from './remote-handoff-attestation.js';
+import {
+  authenticatedRealizedMergeOf,
+  canonicalRealizedMergeIdentity,
+  sanitizeRealizedMergeEvidence,
+  verifyLocalRealizedMergeEvidence,
+} from './realized-merge.js';
+import {
+  signProducerProvenanceV2,
+  signLocalRealizedMergeReceipt,
+  verifyProvenance,
+  verifyLocalMergeIntent,
+} from '../foundry/provenance.js';
 import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
 import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
 import {
   PROPOSAL_PERSISTENCE_MISMATCH_REASON,
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from './persistence-mismatch.js';
+
+const MAX_REALIZED_MERGE_FUTURE_SKEW_MS = 60_000;
+const AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -176,6 +202,8 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
       next.diff = scrubbedDiff;
       delete next.diffHash;
       delete next.provenanceSig;
+      delete next.producerProvenanceVersion;
+      delete next.producerProvenanceSig;
       changed = true;
     }
   }
@@ -280,6 +308,30 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
     }
   }
 
+  if (next.localMergeIntent !== undefined) {
+    if (!next.id || !next.repo || !verifyLocalMergeIntent(next.id, next.repo, next.localMergeIntent)) {
+      delete next.localMergeIntent;
+      changed = true;
+    }
+  }
+
+  if (next.realizedMergeFanoutVersion !== undefined &&
+    next.realizedMergeFanoutVersion !== 1 && next.realizedMergeFanoutVersion !== 2) {
+    delete next.realizedMergeFanoutVersion;
+    changed = true;
+  }
+
+  if (next.realizedMerge !== undefined) {
+    const realizedMerge = authenticatedRealizedMergeOf(next);
+    if (realizedMerge === null) {
+      delete next.realizedMerge;
+      changed = true;
+    } else if (JSON.stringify(realizedMerge) !== JSON.stringify(next.realizedMerge)) {
+      next.realizedMerge = realizedMerge;
+      changed = true;
+    }
+  }
+
   if (next.taste !== undefined) {
     const scrubbedRationale = scrubProposalText(next.taste.rationale);
     if (scrubbedRationale !== next.taste.rationale) {
@@ -372,7 +424,7 @@ function persistProposal(
     }
 
     const bytes = Buffer.from(JSON.stringify(safeProposal, null, 2) + '\n', 'utf8');
-    if (bytes.length > HARD_PROPOSAL_READ_MAX_FILE_BYTES) {
+    if (bytes.length > AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES) {
       throw new Error('Proposal exceeds the readable store limit');
     }
     tmp = join(dir, `.${safeProposal.id}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
@@ -477,11 +529,24 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
 
 const DEFAULT_PROPOSAL_READ_MAX_FILES = 512;
 const DEFAULT_PROPOSAL_READ_MAX_BYTES = 64 * 1024 * 1024;
-const DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES = AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES;
 const HARD_PROPOSAL_READ_MAX_FILES = 4_096;
 const HARD_PROPOSAL_READ_MAX_BYTES = 256 * 1024 * 1024;
 const HARD_PROPOSAL_READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PROPOSAL_DIRECTORY_ENTRIES = 8_192;
+
+type ProposalReadRacePoint = 'after-directory-scan' | 'after-file-read';
+
+let proposalReadRaceHookForTest:
+  | ((point: ProposalReadRacePoint, path: string) => void)
+  | undefined;
+
+/** Deterministic synchronous filesystem-race seam for store-focused tests. */
+export function _setProposalReadRaceHookForTest(
+  hook: ((point: ProposalReadRacePoint, path: string) => void) | undefined,
+): void {
+  proposalReadRaceHookForTest = hook;
+}
 
 export interface ListProposalsDetailedOptions {
   status?: ProposalStatus;
@@ -558,6 +623,62 @@ function safeProposalDirectory(stat: Stats): boolean {
   return stat.isDirectory() && !stat.isSymbolicLink();
 }
 
+function sameProposalFileSnapshot(left: Stats, right: Stats): boolean {
+  return (
+    sameProposalSource(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.mode === right.mode &&
+    Number(left.nlink) === Number(right.nlink)
+  );
+}
+
+function sameProposalDirectorySnapshot(left: Stats, right: Stats): boolean {
+  return (
+    sameProposalSource(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    Number(left.nlink) === Number(right.nlink)
+  );
+}
+
+interface ProposalDirectoryEntries {
+  all: string[];
+  proposals: string[];
+  limitExceeded: boolean;
+}
+
+function readProposalDirectoryEntries(dir: string): ProposalDirectoryEntries {
+  const all: string[] = [];
+  const proposals: string[] = [];
+  const handle = opendirSync(dir);
+  let limitExceeded = false;
+  try {
+    let entry = handle.readSync();
+    while (entry !== null) {
+      if (all.length >= MAX_PROPOSAL_DIRECTORY_ENTRIES) {
+        limitExceeded = true;
+        break;
+      }
+      all.push(entry.name);
+      if (entry.name.endsWith('.json') && !entry.name.endsWith('.tmp')) {
+        proposals.push(entry.name);
+      }
+      entry = handle.readSync();
+    }
+  } finally {
+    handle.closeSync();
+  }
+  all.sort((left, right) => left.localeCompare(right));
+  proposals.sort((left, right) => left.localeCompare(right));
+  return { all, proposals, limitExceeded };
+}
+
 type ProposalFileRead =
   | { ok: true; text: string; bytesRead: number }
   | { ok: false; reason: Exclude<ProposalReadStopReason, 'file-limit'> };
@@ -591,13 +712,13 @@ function readProposalFileBounded(
     }
 
     const after = fstatSync(fd);
+    proposalReadRaceHookForTest?.('after-file-read', filePath);
+    const namedAfter = lstatSync(filePath);
     if (
-      !after.isFile() ||
-      Number(after.nlink) !== 1 ||
-      !sameProposalSource(before, after) ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs
+      !safeProposalFile(after) ||
+      !safeProposalFile(namedAfter) ||
+      !sameProposalFileSnapshot(before, after) ||
+      !sameProposalFileSnapshot(after, namedAfter)
     ) {
       return { ok: false, reason: 'io-error' };
     }
@@ -627,7 +748,8 @@ function readProposalFileBounded(
  * Map a proposal lifecycle transition to the fleet event the cloud ingest
  * understands:
  *   - creation                     → 'proposal'  (a proposal now exists)
- *   - approved / applied (merged)  → 'merge'      (it moved toward landing)
+ *   - approved                     → 'proposal'   (authorized, not landed)
+ *   - applied                      → 'proposal'   (an action completed; merge unproven)
  *   - awaiting-host-merge          → 'proposal'   (remote handoff, not landed)
  *   - rejected (declined)          → 'decline'    (it was turned down)
  * Any other transition (e.g. a 'pending' reset or an apply 'failed' outcome)
@@ -635,7 +757,6 @@ function readProposalFileBounded(
  * Returns the FleetEvent kind; the raw status is carried as the outcome.
  */
 function lifecycleEvent(status: ProposalStatus): FleetEvent {
-  if (status === 'approved' || status === 'applied') return 'merge';
   if (status === 'rejected') return 'decline';
   return 'proposal';
 }
@@ -760,6 +881,11 @@ export function createProposal(
   cfg?: Pick<AshlrConfig, 'user' | 'foundry'>,
 ): Proposal {
   const input = sanitizeProposalForStore(p);
+  // Realized merge evidence is never accepted on proposal creation. The only
+  // supported persistence boundary for this field is recordRealizedMerge.
+  delete input.realizedMerge;
+  delete input.realizedMergeFanoutVersion;
+  delete input.localMergeIntent;
   // M109: stamp owner from cfg.user when not already set by the caller.
   const owner = input.owner ?? cfg?.user?.id ?? cfg?.user?.name;
 
@@ -809,6 +935,13 @@ export function createProposal(
       ts: createdAt,
     }),
   };
+  if (verifyProvenance(proposal).ok) {
+    const producerProvenanceSig = signProducerProvenanceV2(proposal);
+    if (producerProvenanceSig) {
+      proposal.producerProvenanceVersion = 2;
+      proposal.producerProvenanceSig = producerProvenanceSig;
+    }
+  }
 
   let persisted = false;
   const storeLock = acquireProposalStoreMutationLock();
@@ -1026,7 +1159,7 @@ export function listProposalsDetailed(
     let directoryBefore: Stats;
     try {
       directoryBefore = lstatSync(dir);
-      if (!safeProposalDirectory(directoryBefore)) {
+      if (!safeProposalDirectory(directoryBefore) || !ownedByCurrentUser(directoryBefore)) {
         return emptyProposalRead('degraded', {
           complete: false,
           stopReasons: ['io-error'],
@@ -1042,27 +1175,9 @@ export function listProposalsDetailed(
     }
 
     const result = emptyProposalRead('healthy', { sourcePresent: true });
-    const files: string[] = [];
+    let directoryEntries: ProposalDirectoryEntries;
     try {
-      const handle = opendirSync(dir);
-      let entriesSeen = 0;
-      try {
-        let entry = handle.readSync();
-        while (entry !== null) {
-          entriesSeen++;
-          if (entriesSeen > MAX_PROPOSAL_DIRECTORY_ENTRIES) {
-            pushProposalStopReason(result.stopReasons, 'file-limit');
-            result.complete = false;
-            break;
-          }
-          if (entry.name.endsWith('.json') && !entry.name.endsWith('.tmp')) {
-            files.push(entry.name);
-          }
-          entry = handle.readSync();
-        }
-      } finally {
-        handle.closeSync();
-      }
+      directoryEntries = readProposalDirectoryEntries(dir);
     } catch {
       return emptyProposalRead('degraded', {
         sourcePresent: true,
@@ -1072,7 +1187,12 @@ export function listProposalsDetailed(
       });
     }
 
-    files.sort((left, right) => left.localeCompare(right));
+    proposalReadRaceHookForTest?.('after-directory-scan', dir);
+    const files = directoryEntries.proposals;
+    if (directoryEntries.limitExceeded) {
+      pushProposalStopReason(result.stopReasons, 'file-limit');
+      result.complete = false;
+    }
     result.filesDiscovered = files.length;
 
     for (const file of files) {
@@ -1119,8 +1239,19 @@ export function listProposalsDetailed(
     }
 
     try {
+      const finalEntries = readProposalDirectoryEntries(dir);
       const directoryAfter = lstatSync(dir);
-      if (!safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) {
+      const directoryContentChanged = !directoryEntries.limitExceeded && (
+        finalEntries.limitExceeded ||
+        finalEntries.all.length !== directoryEntries.all.length ||
+        finalEntries.all.some((entry, index) => entry !== directoryEntries.all[index])
+      );
+      if (
+        directoryContentChanged ||
+        !safeProposalDirectory(directoryAfter) ||
+        !ownedByCurrentUser(directoryAfter) ||
+        !sameProposalDirectorySnapshot(directoryBefore, directoryAfter)
+      ) {
         pushProposalStopReason(result.stopReasons, 'io-error');
         result.complete = false;
         result.unreadableFiles++;
@@ -1203,6 +1334,7 @@ export function setStatus(
   reason?: string,
   ownerLock?: ProposalMutationLock,
   transitionPatch: Partial<Pick<Proposal, 'remoteHandoff'>> = {},
+  expectedCurrentStatus?: ProposalStatus,
 ): boolean {
   const ownsLock = ownsProposalMutationLock(id, ownerLock);
   const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
@@ -1211,6 +1343,7 @@ export function setStatus(
   try {
     const existing = loadProposal(id);
     if (existing === null) return false;
+    if (expectedCurrentStatus !== undefined && existing.status !== expectedCurrentStatus) return false;
 
     // Partial captures are immutable review evidence. They may be rejected or
     // repaired, but no status transition may grant apply/merge authority.
@@ -1285,17 +1418,18 @@ export function setStatus(
     });
 
     // M119: emit a decisions-ledger entry for every status transition that
-    // represents a decision (merged/rejected) or a lifecycle action.
+    // represents a decision or lifecycle action. Neither authorization nor a
+    // generic applied transition is proof that a default-branch merge occurred.
     // Best-effort: recordDecision never throws; no behavior change when absent.
     try {
       const ledgerAction =
-        status === 'applied' || status === 'approved'
-          ? 'merged'
-          : status === 'rejected'
-            ? 'rejected'
-            : status === 'awaiting-host-merge'
-              ? 'handoff'
-              : 'judged';
+        status === 'approved'
+            ? 'merge-authorized'
+            : status === 'rejected'
+              ? 'rejected'
+              : status === 'awaiting-host-merge'
+                ? 'handoff'
+                : 'judged';
       // Derive the engine id from the model string (segment before ':').
       const engineModel = updated.engineModel;
       const engineId = engineModel ? engineModel.split(':')[0] : undefined;
@@ -1321,23 +1455,22 @@ export function setStatus(
       // Ledger is best-effort — never disrupts the proposal flow.
     }
 
-    // M141: link the proposal's terminal outcome back to its judge trace —
-    // the credit-assignment signal for judge calibration + distillation. Best-effort.
+    // M141: rejected is a real terminal judge outcome. Realized merge outcomes
+    // are linked only by recordRealizedMerge after evidence commits.
     try {
-      if (status === 'applied' || status === 'approved') linkOutcome(id, 'merged');
-      else if (status === 'rejected') linkOutcome(id, 'rejected');
+      if (status === 'rejected') linkOutcome(id, 'rejected');
     } catch { /* never disrupts the proposal flow */ }
 
-    // M228: update any goal milestone linked to this proposal so milestones
-    // progress only when applied work also has passing verification evidence.
-    if (status === 'applied' && proposalCompletesGoalMilestone(updated)) linkMilestoneOutcome(id, 'applied');
-    else if (status === 'rejected') linkMilestoneOutcome(id, 'rejected');
+    // M228: rejection releases a linked milestone for retry. Merge milestone
+    // credit is emitted only by recordRealizedMerge.
+    if (status === 'rejected') linkMilestoneOutcome(id, 'rejected');
 
-    // Pulse Map: mirror the lifecycle transition. approved/applied → 'merge',
-    // rejected → 'decline', any other → 'proposal'. The raw status is the
-    // outcome. This ONLY reports motion — setStatus has already (and only)
-    // changed the persisted status; no apply / merge / kill-switch behavior is
-    // touched here. Owner is carried from the persisted proposal.
+    // Pulse Map: mirror generic lifecycle motion. Rejected → 'decline'; every
+    // other status, including applied, → 'proposal'. Only recordRealizedMerge
+    // emits a merge span. The raw status is the outcome. This ONLY reports motion —
+    // setStatus has already (and only) changed the persisted status; no apply /
+    // merge / kill-switch behavior is touched here. Owner is carried from the
+    // persisted proposal.
     emitProposalSpan(
       lifecycleEvent(status),
       updated,
@@ -1353,6 +1486,215 @@ export function setStatus(
 }
 
 /**
+ * Atomically persist the only evidence-backed transition that means "merged".
+ * Merge-specific telemetry and credit are emitted only after this write commits.
+ */
+function ensureRealizedMergeDecision(updated: Proposal, realizedMerge: RealizedMergeEvidence): boolean {
+  const mergedRows = (): ReturnType<typeof readDecisionsDetailed> | null => {
+    const result = readDecisionsDetailed({ proposalId: updated.id, requireComplete: true });
+    return result.complete && result.sourceState !== 'degraded' ? result : null;
+  };
+
+  try {
+    const before = mergedRows();
+    if (!before) return false;
+    const existingMerged = before.decisions.filter((entry) => entry.action === 'merged');
+    if (existingMerged.length > 0) {
+      return existingMerged.length === 1 && existingMerged[0]?.labelBasis === 'realized-merge-v1';
+    }
+
+    const engineModel = updated.engineModel;
+    const engineId = engineModel?.split(':')[0];
+    const ts = realizedMerge.source === 'local-default-branch'
+      ? realizedMerge.observedAt
+      : realizedMerge.reconciliation.observedAt;
+    recordDecision({
+      ts,
+      proposalId: updated.id,
+      ...(updated.workItemId ? { workItemId: updated.workItemId } : {}),
+      ...(updated.workSource ? { workSource: updated.workSource } : {}),
+      ...(updated.runId ? { runId: updated.runId } : {}),
+      ...causalMetadataFromProposal(updated, {
+        ts,
+        learningSource: 'decision-ledger',
+        labelBasis: 'realized-merge-v1',
+      }),
+      action: 'merged',
+      ...(engineId ? { engine: engineId } : {}),
+      ...(engineModel ? { model: engineModel } : {}),
+      verdict: 'merged',
+      reason: `realized merge observed via ${realizedMerge.source}`,
+    });
+
+    const after = mergedRows();
+    if (!after) return false;
+    const persistedMerged = after.decisions.filter((entry) => entry.action === 'merged');
+    return persistedMerged.length === 1 && persistedMerged[0]?.labelBasis === 'realized-merge-v1';
+  } catch {
+    return false;
+  }
+}
+
+function retryIdempotentRealizedMergeProjections(updated: Proposal): void {
+  try { linkOutcome(updated.id, 'merged', { basis: 'realized-merge-v1' }); } catch { /* best-effort */ }
+  if (proposalCompletesGoalMilestone(updated)) linkMilestoneOutcome(updated.id, 'applied');
+}
+
+function fanoutRealizedMerge(updated: Proposal, realizedMerge: RealizedMergeEvidence): boolean {
+  // Version 2 acknowledges only the authoritative decision projection. The
+  // outcome and milestone projections remain idempotent and replayable.
+  if (!ensureRealizedMergeDecision(updated, realizedMerge)) return false;
+
+  retryIdempotentRealizedMergeProjections(updated);
+  try {
+    emitProposalSpan(
+      'merge',
+      updated,
+      'merged',
+      updated.owner ? { user: { id: updated.owner } } : undefined,
+    );
+  } catch { /* deterministic retry may repair another projection */ }
+  return true;
+}
+
+export function recordRealizedMerge(
+  id: string,
+  evidence: RealizedMergeEvidence | LocalDefaultBranchMergeObservation,
+  ownerLock?: ProposalMutationLock,
+): boolean {
+  const ownsLock = ownsProposalMutationLock(id, ownerLock);
+  const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
+  if (!mutationLock) return false;
+  let storeLock: ProposalStoreMutationLock | null = null;
+  let persisted = false;
+  try {
+    const observedAt = evidence.source === 'local-default-branch'
+      ? evidence.observedAt
+      : evidence.reconciliation.observedAt;
+    const observedMs = Date.parse(observedAt);
+    if (!Number.isFinite(observedMs) || observedMs > Date.now() + MAX_REALIZED_MERGE_FUTURE_SKEW_MS) {
+      return false;
+    }
+    storeLock = acquireProposalStoreMutationLock();
+    if (!storeLock) return false;
+    const snapshot = listProposalsDetailed({
+      requireComplete: true,
+      maxFiles: HARD_PROPOSAL_READ_MAX_FILES,
+      maxBytes: HARD_PROPOSAL_READ_MAX_BYTES,
+      maxFileBytes: HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+    });
+    if (!snapshot.complete || snapshot.sourceState !== 'healthy') return false;
+    const existing = snapshot.proposals.find((proposal) => proposal.id === id);
+    if (!existing || existing.isPartial === true) return false;
+    const identityOwnedByAnotherProposal = (candidate: Proposal): boolean => {
+      const identity = canonicalRealizedMergeIdentity(candidate);
+      if (!identity) return true;
+      return snapshot.proposals.some((proposal) =>
+        proposal.id !== id && canonicalRealizedMergeIdentity(proposal)?.key === identity.key);
+    };
+    const priorEvidence = authenticatedRealizedMergeOf(existing);
+    if (priorEvidence) {
+      let matches = false;
+      if (evidence.source === 'local-default-branch') {
+        matches = priorEvidence.source === 'local-default-branch' &&
+          priorEvidence.base === evidence.base && priorEvidence.baseBeforeOid === evidence.baseBeforeOid &&
+          priorEvidence.proposalHeadOid === evidence.proposalHeadOid &&
+          priorEvidence.mergeCommitOid === evidence.mergeCommitOid && priorEvidence.observedAt === evidence.observedAt;
+      } else {
+        const sanitized = sanitizeRealizedMergeEvidence(evidence);
+        matches = sanitized !== null && JSON.stringify(priorEvidence) === JSON.stringify(sanitized);
+      }
+      if (existing.status !== 'applied' || !matches) return false;
+      if (identityOwnedByAnotherProposal(existing)) return false;
+      if (existing.realizedMergeFanoutVersion !== 2 && fanoutRealizedMerge(existing, priorEvidence)) {
+        persistProposal(id, { ...existing, realizedMergeFanoutVersion: 2 }, false, storeLock);
+      } else if (existing.realizedMergeFanoutVersion === 2) {
+        retryIdempotentRealizedMergeProjections(existing);
+      }
+      return true;
+    }
+
+    let realizedMerge: RealizedMergeEvidence | null = sanitizeRealizedMergeEvidence(evidence);
+    if (evidence.source === 'local-default-branch') {
+      const intent = existing.localMergeIntent;
+      if ((existing.status !== 'pending' && existing.status !== 'approved') ||
+        !existing.repo || !existing.diffHash || !intent ||
+        !verifyLocalMergeIntent(existing.id, existing.repo, intent) ||
+        intent.base !== evidence.base || intent.baseBeforeOid !== evidence.baseBeforeOid ||
+        intent.proposalHeadOid !== evidence.proposalHeadOid || intent.diffHash !== existing.diffHash ||
+        !verifyLocalRealizedMergeEvidence(existing.repo, evidence)) return false;
+      const unsigned: Omit<LocalDefaultBranchRealizedMerge, 'attestation'> = {
+        ...evidence,
+        proposalId: existing.id,
+        diffHash: existing.diffHash,
+        intentAttestation: intent.attestation,
+      };
+      const attestation = signLocalRealizedMergeReceipt(existing.id, existing.repo, unsigned);
+      realizedMerge = attestation ? { ...unsigned, attestation } : null;
+    }
+    if (!realizedMerge) return false;
+
+    let remoteHandoff = existing.remoteHandoff;
+    if (realizedMerge.source === 'github-host') {
+      const current = existing.remoteHandoff;
+      if (existing.status !== 'awaiting-host-merge' || !existing.repo || !current || current.provider !== 'github' ||
+        current.state !== 'awaiting-host-merge' || current.prUrl !== realizedMerge.prUrl ||
+        current.branch !== realizedMerge.branch || current.base !== realizedMerge.base ||
+        current.expectedHeadOid?.toLowerCase() !== realizedMerge.expectedHeadOid) {
+        return false;
+      }
+      remoteHandoff = {
+        ...current,
+        state: 'merged',
+        prUrl: realizedMerge.prUrl,
+        branch: realizedMerge.branch,
+        base: realizedMerge.base,
+        expectedHeadOid: realizedMerge.expectedHeadOid,
+        mergeCommitOid: realizedMerge.mergeCommitOid,
+        mergedAt: realizedMerge.mergedAt,
+        reconciliation: realizedMerge.reconciliation,
+        updatedAt: realizedMerge.reconciliation.observedAt,
+        detail: `remote PR merged at ${realizedMerge.mergedAt}: ${realizedMerge.prUrl}`,
+      };
+      if (!verifyRemoteHandoffReconciliation(id, existing.repo, remoteHandoff)) return false;
+    }
+
+    const result = realizedMerge.source === 'local-default-branch'
+      ? `merged proposal head ${realizedMerge.proposalHeadOid} into '${realizedMerge.base}' at ${realizedMerge.mergeCommitOid} (local, not pushed)`
+      : `remote PR merged at ${realizedMerge.mergedAt}: ${realizedMerge.prUrl}`;
+    const updated = sanitizeProposalForStore({
+      ...existing,
+      status: 'applied',
+      result,
+      realizedMerge,
+      ...(remoteHandoff ? { remoteHandoff } : {}),
+    });
+    if (!authenticatedRealizedMergeOf(updated)) return false;
+    if (identityOwnedByAnotherProposal(updated)) return false;
+    persistProposal(id, updated, false, storeLock);
+    persisted = true;
+
+    audit({
+      action: 'inbox:proposal-applied',
+      repo: updated.repo ?? null,
+      sandboxId: updated.sandboxId ?? null,
+      summary: `proposal realized merge: [${updated.kind}] ${updated.title} (id=${id}) — ${result}`,
+      result: 'ok',
+    });
+
+    if (fanoutRealizedMerge(updated, realizedMerge)) {
+      persistProposal(id, { ...updated, realizedMergeFanoutVersion: 2 }, false, storeLock);
+    }
+    return true;
+  } catch {
+    return persisted;
+  } finally {
+    if (storeLock) releaseProposalStoreMutationLock(storeLock);
+    if (!ownsLock) releaseProposalMutationLock(mutationLock);
+  }
+}
+
+/**
  * M259: Patch a single field on an existing proposal (atomic read-modify-write).
  *
  * Used by runAutoMergePass to increment judgeNonShipCount without touching any
@@ -1361,7 +1703,7 @@ export function setStatus(
  */
 export function updateProposalField(
   id: string,
-  patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult' | 'stuckPassCount' | 'remoteHandoff'>>,
+  patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult' | 'stuckPassCount' | 'remoteHandoff' | 'localMergeIntent'>>,
   ownerLock?: ProposalMutationLock,
 ): boolean {
   const ownsLock = ownsProposalMutationLock(id, ownerLock);
@@ -1373,9 +1715,6 @@ export function updateProposalField(
     const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
     try {
       persistProposal(id, updated);
-      if (patch.verifyResult !== undefined && proposalCompletesGoalMilestone(updated)) {
-        linkMilestoneOutcome(id, 'applied');
-      }
       return true;
     } catch {
       return false;

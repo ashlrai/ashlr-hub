@@ -54,6 +54,7 @@
 
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
 import type { AshlrConfig, Proposal } from '../types.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 
 // ---------------------------------------------------------------------------
 // Dashboard URL constant (M215)
@@ -196,18 +197,26 @@ export async function buildDailyStandup(
   let shippedTotal = 0;
   let pendingTotal = 0;
   const shippedByRepo = new Map<string, number>();
+  const realizedProposalIds = new Set<string>();
 
   try {
-    const { listProposals } = await import('../inbox/store.js');
+    const { listProposalsDetailed } = await import('../inbox/store.js');
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    if (!proposalRead.complete || proposalRead.sourceState === 'degraded') {
+      throw new Error('proposal source is incomplete');
+    }
 
-    // Applied proposals in 24h window
-    const applied = (listProposals as (f?: unknown) => Array<{
-      id: string; title?: string; repo?: string | null;
-      status: string; decidedAt?: string;
-    }>)({ status: 'applied' });
+    const applied = proposalRead.proposals.filter((proposal) => proposal.status === 'applied');
     for (const p of applied) {
-      const decidedAt = p.decidedAt ? Date.parse(p.decidedAt) : 0;
-      if (decidedAt >= sinceMs) {
+      if (p.status !== 'applied') continue;
+      const merge = realizedMergeOf(p);
+      if (!merge) continue;
+      const observedAt = merge.source === 'github-host'
+        ? merge.reconciliation.observedAt
+        : merge.observedAt;
+      const observedMs = Date.parse(observedAt);
+      if (Number.isFinite(observedMs) && observedMs >= sinceMs && observedMs <= now) {
+        realizedProposalIds.add(p.id);
         shippedTotal++;
         const repoKey = p.repo
           ? p.repo.split('/').pop() ?? p.repo
@@ -217,8 +226,7 @@ export async function buildDailyStandup(
     }
 
     // Pending count
-    const pending = (listProposals as (f?: unknown) => unknown[])({ status: 'pending' });
-    pendingTotal = pending.length;
+    pendingTotal = proposalRead.proposals.filter((proposal) => proposal.status === 'pending').length;
   } catch {
     // degrade — leave zeroes
   }
@@ -236,8 +244,12 @@ export async function buildDailyStandup(
 
   // ── 2. Judge verdict breakdown + per-engine ship-rates ────────────────────
   try {
-    const { readDecisions } = await import('../fleet/decisions-ledger.js');
-    const decisions = readDecisions({ sinceMs });
+    const { readDecisionsDetailed } = await import('../fleet/decisions-ledger.js');
+    const decisionRead = readDecisionsDetailed({ requireComplete: true });
+    if (!decisionRead.complete || decisionRead.sourceState === 'degraded') {
+      throw new Error('decision source is incomplete');
+    }
+    const decisions = decisionRead.decisions;
 
     let judgedShip = 0;
     let judgedReview = 0;
@@ -245,8 +257,20 @@ export async function buildDailyStandup(
     let judgedHarmful = 0;
     const engineShip = new Map<string, number>();
     const engineTotal = new Map<string, number>();
+    const countedMergedProposals = new Set<string>();
 
     for (const d of decisions) {
+      const decisionMs = Date.parse(d.ts);
+      const canonicalMerge = d.action === 'merged' &&
+        d.labelBasis === 'realized-merge-v1' &&
+        realizedProposalIds.has(d.proposalId) &&
+        !countedMergedProposals.has(d.proposalId);
+      if (d.action === 'merged') {
+        if (!canonicalMerge) continue;
+        countedMergedProposals.add(d.proposalId);
+      } else if (!Number.isFinite(decisionMs) || decisionMs < sinceMs || decisionMs > now) {
+        continue;
+      }
       if (d.action === 'judged') {
         const v = d.verdict ?? '';
         if (v === 'ship') judgedShip++;
@@ -254,10 +278,10 @@ export async function buildDailyStandup(
         else if (v === 'noise') judgedNoise++;
         else if (v === 'harmful' || v === 'decline') judgedHarmful++;
       }
-      if (d.engine) {
+      if (d.engine && (canonicalMerge || d.action === 'rejected')) {
         const eng = d.engine;
         engineTotal.set(eng, (engineTotal.get(eng) ?? 0) + 1);
-        if (d.action === 'merged' || (d.action === 'judged' && d.verdict === 'ship')) {
+        if (canonicalMerge) {
           engineShip.set(eng, (engineShip.get(eng) ?? 0) + 1);
         }
       }

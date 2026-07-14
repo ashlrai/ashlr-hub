@@ -2,7 +2,8 @@
  * test/proposal-spans.test.ts — proposal-lifecycle fleet spans (Pulse Map).
  *
  * Verifies the ADDITIVE telemetry wired into inbox/store.ts: every proposal
- * lifecycle transition (created / approved|applied → merge / rejected → decline)
+ * lifecycle transition (created / approved / generic applied → proposal,
+ * realized merge → merge, rejected → decline)
  * emits the matching fleet span via emitFleetEvent, with METADATA ONLY payload
  * (proposal id as refId, repo BASENAME, status/origin as outcome) — and that
  * the whole thing is a NO-OP + NON-THROWING when the fleet→pulse round-trip is
@@ -19,8 +20,9 @@
  *
  * Mapping under test (lifecycleEvent in store.ts):
  *   create                       → event 'proposal', outcome = origin
- *   setStatus 'approved'         → event 'merge',    outcome 'approved'
- *   setStatus 'applied'          → event 'merge',    outcome 'applied'
+ *   setStatus 'approved'         → event 'proposal', outcome 'approved'
+ *   setStatus 'applied'          → event 'proposal', outcome 'applied'
+ *   recordRealizedMerge          → event 'merge',    outcome 'merged'
  *   setStatus 'rejected'         → event 'decline',  outcome 'rejected'
  *   setStatus 'pending'/'awaiting-host-merge'/'failed'
  *                                → event 'proposal', outcome = status
@@ -54,6 +56,7 @@ vi.mock('../src/core/sandbox/audit.js', () => ({
 import { emitFleetEvent } from '../src/core/integrations/pulse-sync.js';
 import {
   createProposal,
+  recordRealizedMerge,
   setStatus,
   loadProposal,
 } from '../src/core/inbox/store.js';
@@ -153,7 +156,7 @@ describe('proposal creation emits a fleet span', () => {
 // ---------------------------------------------------------------------------
 
 describe('setStatus emits the matching lifecycle span', () => {
-  it("approved → event 'merge', outcome 'approved'", () => {
+  it("approved → event 'proposal', not 'merge', with outcome 'approved'", () => {
     const p = createProposal(makeInput());
     emitMock.mockClear();
 
@@ -161,19 +164,36 @@ describe('setStatus emits the matching lifecycle span', () => {
 
     expect(emitMock).toHaveBeenCalledTimes(1);
     const span = lastSpan();
-    expect(span.event).toBe('merge');
+    expect(span.event).toBe('proposal');
     expect(span.outcome).toBe('approved');
     expect(span.refId).toBe(p.id);
     expect(span.repo).toBe('acme-widgets');
   });
 
-  it("applied → event 'merge', outcome 'applied'", () => {
+  it("generic applied → event 'proposal', not 'merge'", () => {
     const p = createProposal(makeInput());
     emitMock.mockClear();
     setStatus(p.id, 'applied');
     const span = lastSpan();
-    expect(span.event).toBe('merge');
+    expect(span.event).toBe('proposal');
     expect(span.outcome).toBe('applied');
+  });
+
+  it('refuses an unbound synthetic local merge without emitting a merge span', () => {
+    const p = createProposal(makeInput());
+    emitMock.mockClear();
+    const evidence = {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: 'a'.repeat(40),
+      proposalHeadOid: 'b'.repeat(40),
+      mergeCommitOid: 'c'.repeat(40),
+      observedAt: '2026-07-14T04:00:00.000Z',
+    } as const;
+    expect(recordRealizedMerge(p.id, evidence)).toBe(false);
+    expect(loadProposal(p.id)?.realizedMerge).toBeUndefined();
+    expect(emitMock).not.toHaveBeenCalled();
   });
 
   it("awaiting-host-merge → event 'proposal', not 'merge'", () => {

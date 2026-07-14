@@ -135,7 +135,8 @@ import {
 } from '../fleet/monitoring-cursor.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
-import { pendingCount, listProposals } from '../inbox/store.js';
+import { pendingCount, listProposals, listProposalsDetailed } from '../inbox/store.js';
+import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   recordDispatchProduction,
   readDispatchProductionYieldDetailed,
@@ -627,6 +628,42 @@ function lightweightEcosystemReport(now: Date | undefined, root: string | undefi
   };
 }
 
+function boundedProposalSourceQuality(
+  quality: NonNullable<FleetStatus['proposals']['sourceQuality']>,
+): NonNullable<FleetStatus['proposals']['sourceQuality']> {
+  const count = (value: number): number =>
+    Number.isFinite(value) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(value))) : 0;
+  return {
+    sourceState: quality.sourceState,
+    sourcePresent: quality.sourcePresent === true,
+    complete: quality.complete === true,
+    stopReasons: quality.stopReasons.slice(0, 5),
+    filesDiscovered: count(quality.filesDiscovered),
+    filesRead: count(quality.filesRead),
+    invalidFiles: count(quality.invalidFiles),
+    unreadableFiles: count(quality.unreadableFiles),
+  };
+}
+
+function tickProposalAuthority(
+  quality: NonNullable<FleetStatus['proposals']['sourceQuality']>,
+): NonNullable<FleetStatus['proposals']['authority']> {
+  if (quality.sourceState !== 'degraded' && quality.complete) {
+    return {
+      gate: 'ready',
+      detail: quality.sourceState === 'missing'
+        ? 'complete empty proposal source'
+        : `complete proposal source (${quality.filesRead}/${quality.filesDiscovered} files read)`,
+    };
+  }
+  const reasons = quality.stopReasons.length > 0 ? `: ${quality.stopReasons.join(', ')}` : '';
+  return {
+    gate: 'unavailable',
+    detail: `auto-merge authority requires a complete healthy proposal source; ` +
+      `${quality.sourceState} source is ${quality.complete ? 'complete' : 'incomplete'}${reasons}`,
+  };
+}
+
 function buildTickFleetStatus(
   cfg: AshlrConfig,
   state: DaemonState,
@@ -637,8 +674,33 @@ function buildTickFleetStatus(
   let frontierPending = 0;
   let awaitingHostMerge = 0;
   let applied = 0;
+  let recentMerges = 0;
+  let proposalSourceQuality: NonNullable<FleetStatus['merges']['sourceQuality']> = {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['source-not-read'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };
   try {
-    for (const proposal of listProposals()) {
+    const read = listProposalsDetailed();
+    proposalSourceQuality = boundedProposalSourceQuality({
+      sourceState: read.sourceState,
+      sourcePresent: read.sourcePresent,
+      complete: read.complete,
+      stopReasons: [...read.stopReasons],
+      filesDiscovered: read.filesDiscovered,
+      filesRead: read.filesRead,
+      invalidFiles: read.invalidFiles,
+      unreadableFiles: read.unreadableFiles,
+    });
+    const now = Date.now();
+    const recentCutoff = now - 24 * 60 * 60 * 1000;
+    const counted = new Set<string>();
+    for (const proposal of read.proposals) {
       if (proposal.status === 'pending') {
         pending++;
         if (proposal.engineTier === 'frontier') frontierPending++;
@@ -647,21 +709,42 @@ function buildTickFleetStatus(
       } else if (proposal.status === 'awaiting-host-merge') {
         awaitingHostMerge++;
       }
+      if (!read.complete || counted.has(proposal.id)) continue;
+      const evidence = realizedMergeOf(proposal);
+      if (!evidence) continue;
+      const observedAt = evidence.source === 'local-default-branch'
+        ? evidence.observedAt
+        : evidence.reconciliation.observedAt;
+      const observedMs = Date.parse(observedAt);
+      if (!Number.isFinite(observedMs) || observedMs < recentCutoff || observedMs > now) continue;
+      counted.add(proposal.id);
+      recentMerges++;
     }
   } catch {
     pending = 0;
     frontierPending = 0;
     awaitingHostMerge = 0;
     applied = 0;
+    recentMerges = 0;
+    proposalSourceQuality = {
+      sourceState: 'degraded',
+      sourcePresent: false,
+      complete: false,
+      stopReasons: ['source-read-failed'],
+      filesDiscovered: 0,
+      filesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    };
   }
 
+  const proposalAuthority = tickProposalAuthority(proposalSourceQuality);
+
   const recentTicks = Array.isArray(state.ticks) ? state.ticks : [];
-  const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
-  let recentMerges = 0;
+  let reportedByTicks = 0;
   for (const tickRecord of recentTicks) {
-    if (typeof tickRecord.merged !== 'number' || tickRecord.merged <= 0) continue;
-    const tickMs = Date.parse(tickRecord.ts);
-    if (Number.isNaN(tickMs) || tickMs >= recentCutoff) recentMerges += tickRecord.merged;
+    if (typeof tickRecord.merged !== 'number' || !Number.isFinite(tickRecord.merged) || tickRecord.merged <= 0) continue;
+    reportedByTicks = Math.min(Number.MAX_SAFE_INTEGER, reportedByTicks + Math.floor(tickRecord.merged));
   }
 
   return {
@@ -677,8 +760,15 @@ function buildTickFleetStatus(
       quota: 'unlimited',
     })),
     queue: { backlogItems },
-    proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
-    merges: { recent: recentMerges },
+    proposals: {
+      pending,
+      frontierPending,
+      ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}),
+      applied,
+      sourceQuality: proposalSourceQuality,
+      authority: proposalAuthority,
+    },
+    merges: { recent: recentMerges, reportedByTicks, sourceQuality: proposalSourceQuality },
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed: false,
@@ -2314,7 +2404,7 @@ export async function tick(
   const runAutoMergeMaintenancePass = async (
     ownershipAlreadyFenced = false,
   ): Promise<AutoMergePassResult | null> => {
-    if (opts.dryRun || stopRequested()) return null;
+    if (directionPlan?.runAutoMergeMaintenance === false || opts.dryRun || stopRequested()) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
     try {
@@ -2632,9 +2722,9 @@ export async function tick(
               import('../fleet/post-merge-observations.js'),
             ]);
             const culpritProposal = loadProposal(culpritProposalId);
+            const realizedMerge = authenticatedRealizedMergeOf(culpritProposal);
             const deterministicIdentity = typeof culpritProposal?.repo === 'string' &&
-              culpritProposal.status === 'applied' &&
-              culpritProposal.remoteHandoff?.mergeCommitOid === bisect.culprit &&
+              realizedMerge?.mergeCommitOid === bisect.culprit &&
               typeof bisect.repo === 'string' && resolve(culpritProposal.repo) === bisect.repo;
             if (culpritProposal?.repo) {
               recordPostMergeObservation({
@@ -2861,9 +2951,7 @@ export async function tick(
     }
 
     if (!directionPlan.allowDispatch) {
-      const autoMergePassResult = directionPlan.runAutoMergeMaintenance
-        ? await runAutoMergeMaintenancePass()
-        : null;
+      const autoMergePassResult = await runAutoMergeMaintenancePass();
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;
       if (!stillOwnsTick()) {

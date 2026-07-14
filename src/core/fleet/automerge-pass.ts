@@ -30,7 +30,11 @@
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
-import { listProposals, setStatus, updateProposalField } from '../inbox/store.js';
+import {
+  listProposalsDetailed,
+  setStatus,
+  updateProposalField,
+} from '../inbox/store.js';
 import {
   autoMergeProposal,
   evaluateAutoMergeReadinessPreflight,
@@ -230,19 +234,37 @@ function recordSafetySkip(
   out.skipped.push({ proposalId, check, reason });
 }
 
+function writeProposalField(proposal: Proposal, patch: Partial<Proposal>): boolean {
+  if (killSwitchOn()) return false;
+  try {
+    return updateProposalField(proposal.id, patch);
+  } catch {
+    return false;
+  }
+}
+
+function writeProposalStatus(proposal: Proposal, reason: string): boolean {
+  if (killSwitchOn()) return false;
+  try {
+    return setStatus(proposal.id, 'rejected', undefined, reason, undefined, {}, 'pending');
+  } catch {
+    return false;
+  }
+}
+
 function incrementStuckOrArchive(
   proposal: Proposal,
   threshold: number,
   reason: string,
-): { archived: boolean; stuckPassCount: number } {
+): { archived: boolean; stuckPassCount: number } | null {
   const current = (proposal as unknown as Record<string, unknown>)['stuckPassCount'];
   const stuckPassCount = (typeof current === 'number' && Number.isFinite(current) ? current : 0) + 1;
   if (stuckPassCount >= threshold) {
-    updateProposalField(proposal.id, { stuckPassCount });
-    setStatus(proposal.id, 'rejected', undefined, reason);
+    if (!writeProposalField(proposal, { stuckPassCount })) return null;
+    if (!writeProposalStatus(proposal, reason)) return null;
     return { archived: true, stuckPassCount };
   }
-  updateProposalField(proposal.id, { stuckPassCount });
+  if (!writeProposalField(proposal, { stuckPassCount })) return null;
   return { archived: false, stuckPassCount };
 }
 
@@ -267,6 +289,16 @@ function isEphemeralRegressionGoalProposal(p: Proposal): boolean {
     p.title.includes('Fix regression in') &&
     referencesEphemeralAshlrPath(p.title)
   );
+}
+
+function readHealthyPendingProposals(): Proposal[] | null {
+  try {
+    const read = listProposalsDetailed({ status: 'pending', requireComplete: true });
+    if (read.sourceState !== 'healthy' || read.complete !== true) return null;
+    return read.proposals;
+  } catch {
+    return null;
+  }
 }
 
 function errorDetail(err: unknown): string {
@@ -336,12 +368,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
 
-  let pending: Proposal[];
-  try {
-    pending = listProposals({ status: 'pending' });
-  } catch {
-    return out;
-  }
+  let pending = readHealthyPendingProposals();
+  if (pending === null) return out;
 
   // M259: resolve drain config from foundry (all additive — only add reject paths).
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -374,9 +402,27 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       ? (foundry['proposalTtlDays'] as number)
       : 7;
 
+  const ttlCutoffMs = proposalTtlDays > 0
+    ? Date.now() - proposalTtlDays * 24 * 60 * 60 * 1000
+    : null;
+  const isTtlExpired = (proposal: Proposal): boolean => {
+    if (ttlCutoffMs === null) return false;
+    const createdMs = new Date(proposal.createdAt).getTime();
+    return Number.isFinite(createdMs) && createdMs < ttlCutoffMs;
+  };
+
+  // Status cleanup used to mutate from one snapshot and only then discover
+  // that its refresh was incomplete. Refresh authority before the first write
+  // and recompute the cleanup plan from that complete snapshot instead.
+  if (pending.some((proposal) => isEphemeralRegressionGoalProposal(proposal) || isTtlExpired(proposal))) {
+    const refreshed = readHealthyPendingProposals();
+    if (refreshed === null) return out;
+    pending = refreshed;
+  }
+
   // M263: sort oldest-first before the judge loop so the stalest proposals
   // drain first and are never perpetually starved by a most-recent-first queue.
-  // listProposals returns most-recent-first (for UI); the drain loop needs the
+  // Proposal reads return most-recent-first (for UI); the drain loop needs the
   // inverse so the oldest pending entry is always the first to be judged/counted.
   // SAFETY: sort is in-place on the local array only — no store mutation.
   pending.sort((a, b) => {
@@ -388,57 +434,47 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   // M314: reject stale proposals generated from goals that targeted ephemeral
   // Ashlr execution worktrees. Those goals cannot be acted on after teardown,
   // and letting their proposals remain pending pins the fleet in verify-only.
+  const invalidRejectedIds = new Set<string>();
   for (const p of pending) {
+    if (!isEphemeralRegressionGoalProposal(p)) continue;
+    const reason = 'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal';
+    let persisted = false;
     try {
-      if (!isEphemeralRegressionGoalProposal(p)) continue;
-      const reason = 'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal';
-      setStatus(p.id, 'rejected', undefined, reason);
-      out.invalidRejected++;
-      out.skipped.push({ proposalId: p.id, check: 'ephemeral-regression-goal', reason });
-      out.results.push({ ok: false, merged: false, branched: false, reason });
+      persisted = writeProposalStatus(p, reason);
     } catch {
-      // Best-effort — invalid-goal rejection never disrupts the pass.
+      return out;
     }
+    if (!persisted) return out;
+    invalidRejectedIds.add(p.id);
+    out.invalidRejected++;
+    out.skipped.push({ proposalId: p.id, check: 'ephemeral-regression-goal', reason });
+    out.results.push({ ok: false, merged: false, branched: false, reason });
   }
-  if (out.invalidRejected > 0) {
-    try {
-      pending = listProposals({ status: 'pending' });
-    } catch {
-      pending = pending.filter((p) => !isEphemeralRegressionGoalProposal(p));
-    }
-    pending = pending.filter((p) => !isEphemeralRegressionGoalProposal(p));
+  if (invalidRejectedIds.size > 0) {
+    pending = pending.filter((p) => !invalidRejectedIds.has(p.id));
   }
 
   // M259: TTL pre-pass — reject stale proposals before spending any judge calls.
   // Belt-and-suspenders: runs independently of the judge loop.
   // SAFETY: only adds 'rejected' status — NEVER merges anything.
   if (proposalTtlDays > 0) {
-    const ttlCutoffMs = Date.now() - proposalTtlDays * 24 * 60 * 60 * 1000;
+    const ttlRejectedIds = new Set<string>();
     for (const p of pending) {
+      if (!isTtlExpired(p)) continue;
+      let persisted = false;
       try {
-        const createdMs = new Date(p.createdAt).getTime();
-        if (Number.isFinite(createdMs) && createdMs < ttlCutoffMs) {
-          setStatus(
-            p.id,
-            'rejected',
-            undefined,
-            `auto-rejected: proposal older than ${proposalTtlDays} days (TTL)`,
-          );
-          out.ttlRejected++;
-        }
+        persisted = writeProposalStatus(
+          p,
+          `auto-rejected: proposal older than ${proposalTtlDays} days (TTL)`,
+        );
       } catch {
-        // Best-effort — TTL reject never disrupts the pass.
+        return out;
       }
+      if (!persisted) return out;
+      ttlRejectedIds.add(p.id);
+      out.ttlRejected++;
     }
-    // Re-fetch pending after TTL culling so the judge loop skips stale proposals.
-    if (out.ttlRejected > 0) {
-      try {
-        pending = listProposals({ status: 'pending' });
-      } catch {
-        // If re-fetch fails, continue with the original list. Downstream store
-        // reads and merge gates still enforce the rejected status fail-closed.
-      }
-    }
+    if (ttlRejectedIds.size > 0) pending = pending.filter((p) => !ttlRejectedIds.has(p.id));
   }
 
   // Lazily resolve judge client once per pass (avoid re-calling getActiveClient
@@ -504,7 +540,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           autoArchiveAfterRejects,
           `auto-drained: permanent readiness blocker persisted for ${nextStuck} pass(es): ${detail}`,
         );
-        if (drain.archived) out.autoArchived++;
+        if (drain === null) return out;
+        if (drain?.archived) out.autoArchived++;
       }
       continue;
     }
@@ -577,10 +614,11 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           new Date().toISOString(),
           hashDiff(p.diff ?? ''),
         );
-        try {
-          updateProposalField(p.id, { verifyResult });
-        } catch {
-          // Best-effort evidence write. The merge gate still re-checks/fails closed.
+        if (!writeProposalField(p, { verifyResult })) {
+          const reason = `${verifyCheck}: verification evidence could not be persisted`;
+          out.results.push({ ok: false, merged: false, branched: false, reason });
+          out.skipped.push({ proposalId: p.id, check: `${verifyCheck}-persistence`, reason });
+          return out;
         }
         p.verifyResult = verifyResult;
 
@@ -625,19 +663,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
             const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
             if (newStuck >= autoArchiveAfterRejects) {
-              setStatus(
-                p.id,
-                'rejected',
-                undefined,
+              if (!writeProposalStatus(
+                p,
                 `M271 drained: persistently non-ship/non-mergeable (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
-              );
+              )) return out;
               out.autoArchived++;
             } else {
-              updateProposalField(p.id, { stuckPassCount: newStuck });
+              if (!writeProposalField(p, { stuckPassCount: newStuck })) return out;
             }
           }
         } catch {
-          // Best-effort — drain failure never disrupts the pass.
+          return out;
         }
         continue; // Skip: backlog will be processed in subsequent pass ticks.
       }
@@ -688,19 +724,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
               // Auto-archive: mark as rejected so it is no longer re-judged.
               // Status change only — never hard-deletes. Strictly safer: the
               // merge gate (autoMergeProposal) is never reached for this proposal.
-              setStatus(
-                p.id,
-                'rejected',
-                undefined,
+              if (!writeProposalStatus(
+                p,
                 `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
-              );
+              )) return out;
               out.autoArchived++;
             } else {
               // Below threshold: persist the updated count so next tick picks up.
-              updateProposalField(p.id, { judgeNonShipCount: newCount });
+              if (!writeProposalField(p, { judgeNonShipCount: newCount })) return out;
             }
           } catch {
-            // Auto-archive is best-effort — never disrupts the pass.
+            return out;
           }
           continue;
         }
@@ -708,10 +742,10 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         try {
           const existingCount = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
           if (existingCount !== undefined && existingCount > 0) {
-            updateProposalField(p.id, { judgeNonShipCount: 0 });
+            if (!writeProposalField(p, { judgeNonShipCount: 0 })) return out;
           }
         } catch {
-          // Best-effort — reset failure never blocks the merge path.
+          return out;
         }
 
         // M294: record the attested 'judged'/ship ledger entry that the merge gate
@@ -776,19 +810,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
             const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
             if (newStuck >= autoArchiveAfterRejects) {
-              setStatus(
-                p.id,
-                'rejected',
-                undefined,
+              if (!writeProposalStatus(
+                p,
                 `M273 drained: judge unavailable, persistently non-ship (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
-              );
+              )) return out;
               out.autoArchived++;
             } else {
-              updateProposalField(p.id, { stuckPassCount: newStuck });
+              if (!writeProposalField(p, { stuckPassCount: newStuck })) return out;
             }
           }
         } catch {
-          // Best-effort — drain failure never disrupts the pass.
+          return out;
         }
         continue;
       }

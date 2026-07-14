@@ -45,7 +45,11 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposals: (...args: unknown[]) => mockListProposals(...args),
+    listProposalsDetailed: (...args: unknown[]) => ({
+      proposals: mockListProposals(...args),
+      sourceState: 'healthy',
+      complete: true,
+    }),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
   };
@@ -141,6 +145,8 @@ function proposal(over: Partial<Proposal> = {}): Proposal {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSetStatus.mockReturnValue(true);
+  mockUpdateProposalField.mockReturnValue(true);
   mockListProposals.mockReturnValue([proposal()]);
   mockResolveFrontierJudgeClient.mockReturnValue({
     model: 'claude-opus-4-8',
@@ -343,6 +349,9 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass/),
+      undefined,
+      {},
+      'pending',
     );
     expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
     expect(mockUpdateProposalField.mock.invocationCallOrder[0]!).toBeLessThan(
@@ -387,6 +396,9 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal',
+      undefined,
+      {},
+      'pending',
     );
     expect(r.invalidRejected).toBe(1);
     expect(r.skipped[0]).toMatchObject({
@@ -415,6 +427,9 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass.*risk class 'high'/),
+      undefined,
+      {},
+      'pending',
     );
     expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
     expect(r.autoArchived).toBe(1);

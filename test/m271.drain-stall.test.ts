@@ -15,7 +15,7 @@
  *  - Drain uses setStatus('rejected') only — never hard-deletes.
  *
  * HOME is overridden to a tmp dir so no real ~/.ashlr state is touched.
- * autoMergeProposal, listProposals, setStatus, updateProposalField are MOCKED.
+ * autoMergeProposal, listProposalsDetailed, setStatus, updateProposalField are MOCKED.
  * Fixed timestamps ensure deterministic results.
  */
 
@@ -44,7 +44,11 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposals: (...args: unknown[]) => mockListProposals(...args),
+    listProposalsDetailed: (...args: unknown[]) => ({
+      proposals: mockListProposals(...args),
+      sourceState: 'healthy',
+      complete: true,
+    }),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };
@@ -181,8 +185,10 @@ function reviewVerdict(proposalId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSetStatus.mockReturnValue(true);
+  mockUpdateProposalField.mockReturnValue(true);
   setKill(false);
-  // Default: no TTL rejection (listProposals called twice — once for TTL, once re-fetch)
+  // Default: no TTL rejection.
   mockListProposals.mockImplementation(() => [...pendingProposals]);
   // Default judge client available
   mockResolveFrontierJudgeClient.mockReturnValue({

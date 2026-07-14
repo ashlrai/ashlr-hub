@@ -9,7 +9,9 @@
  * state.ts directly — this module calls them read-only.
  */
 
-import type { DigestWindow } from '../types.js';
+import type { DigestWindow, Proposal } from '../types.js';
+import type { ProposalSourceQuality, ProposalsReadResult } from '../inbox/store.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -21,7 +23,7 @@ export interface FleetRepoRow {
   repo: string;
   /** Proposals filed in window. */
   proposed: number;
-  /** Auto-merged (status 'applied') in window. */
+  /** Realized merges, backed by an exact witness, in window. */
   autoMerged: number;
   /** Awaiting review (status 'pending'). Window-unfiltered — these are live. */
   pending: number;
@@ -49,6 +51,11 @@ export interface FleetDigest {
   totalPending: number;
   /** Total declined in window. */
   totalDeclined: number;
+  /**
+   * Additive read-quality metadata for the proposal-backed counts. Absent on
+   * legacy producers; `degraded` or `complete:false` means zeroes are unknown.
+   */
+  proposalSourceQuality?: ProposalSourceQuality;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,22 +74,37 @@ function windowStart(window: DigestWindow, now: Date): Date {
 // Lazy imports — read-only calls only; degrade on missing modules
 // ---------------------------------------------------------------------------
 
-interface ProposalLike {
-  repo: string | null;
-  status: string;
-  createdAt: string;
-  decidedAt?: string;
+function degradedProposalSource(): ProposalSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+  };
 }
 
-/** Load all proposals. Returns [] on any error or missing module. */
-async function safeListProposals(): Promise<ProposalLike[]> {
+/** Load a complete proposal snapshot without erasing source quality. */
+async function safeListProposals(): Promise<{
+  proposals: Proposal[];
+  sourceQuality: ProposalSourceQuality;
+}> {
   try {
     const mod = await import('../inbox/store.js') as {
-      listProposals: (filter?: { status?: string }) => ProposalLike[];
+      listProposalsDetailed: (opts?: { requireComplete?: boolean }) => ProposalsReadResult;
     };
-    return mod.listProposals();
+    const result = mod.listProposalsDetailed({ requireComplete: true });
+    const { proposals, ...sourceQuality } = result;
+    return {
+      proposals: result.complete && result.sourceState !== 'degraded' ? proposals : [],
+      sourceQuality,
+    };
   } catch {
-    return [];
+    return { proposals: [], sourceQuality: degradedProposalSource() };
   }
 }
 
@@ -116,7 +138,7 @@ async function safeLoadDaemonState(): Promise<DaemonStateLike> {
  *  - worked ledger (best-effort; degrades gracefully if absent)
  *
  * Rules:
- *  - 'applied' = auto-merged (filtered by createdAt in window)
+ *  - realized merge evidence = auto-merged (filtered by witness observation time)
  *  - 'pending' = awaiting review (live count, not window-filtered)
  *  - 'rejected' = declined (filtered by createdAt in window)
  *  - 'proposed' = total filed in window (all statuses with createdAt in window)
@@ -140,6 +162,7 @@ export async function buildFleetDigest(
     totalAutoMerged: 0,
     totalPending: 0,
     totalDeclined: 0,
+    proposalSourceQuality: degradedProposalSource(),
   };
 
   try {
@@ -147,10 +170,11 @@ export async function buildFleetDigest(
     const cutoff = windowStart(window, now);
 
     // Load sources concurrently — both degrade gracefully.
-    const [proposals, daemonState] = await Promise.all([
+    const [proposalRead, daemonState] = await Promise.all([
       safeListProposals(),
       safeLoadDaemonState(),
     ]);
+    const proposals = proposalRead.proposals;
 
     // Per-repo accumulator.
     const repoMap = new Map<string, FleetRepoRow>();
@@ -174,20 +198,21 @@ export async function buildFleetDigest(
         continue;
       }
 
-      // For all other statuses, filter by createdAt within window.
-      let createdMs: number;
-      try {
-        createdMs = Date.parse(p.createdAt);
-      } catch {
-        continue;
+      const createdMs = Date.parse(p.createdAt);
+      if (Number.isFinite(createdMs) && createdMs >= cutoff.getTime() && createdMs <= now.getTime()) {
+        r.proposed += 1;
+        if (p.status === 'rejected') r.declined += 1;
       }
-      if (Number.isNaN(createdMs) || createdMs < cutoff.getTime()) continue;
 
-      r.proposed += 1;
       if (p.status === 'applied') {
-        r.autoMerged += 1;
-      } else if (p.status === 'rejected') {
-        r.declined += 1;
+        const merge = realizedMergeOf(p);
+        const observedAt = merge?.source === 'github-host'
+          ? merge.reconciliation.observedAt
+          : merge?.observedAt;
+        const observedMs = Date.parse(observedAt ?? '');
+        if (Number.isFinite(observedMs) && observedMs >= cutoff.getTime() && observedMs <= now.getTime()) {
+          r.autoMerged += 1;
+        }
       }
     }
 
@@ -218,6 +243,7 @@ export async function buildFleetDigest(
       totalAutoMerged,
       totalPending,
       totalDeclined,
+      proposalSourceQuality: proposalRead.sourceQuality,
     };
   } catch {
     // Never throws — return empty digest.

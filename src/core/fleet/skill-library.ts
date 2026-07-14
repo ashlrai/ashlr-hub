@@ -19,8 +19,9 @@
  *    (default ON). When the flag is explicitly false the function returns
  *    immediately — byte-identical to having no call at all.
  *  - VERIFIED-ONLY: caller state is never authoritative. The live proposal and
- *    autonomy evidence pack must prove applied status, current verification,
- *    passing gates/policy, matching hashes, and a known producer tier.
+ *    realized-merge witness and autonomy evidence pack must prove applied
+ *    status, current verification, passing gates/policy, matching hashes, and
+ *    a known producer tier.
  *  - NO SKILL CHAINS: proposals whose authoritative route/evidence snapshot
  *    contains selectedSkillIds are not distilled into another skill.
  *  - ADDITIVE: the genome entry is informational grounding for future runs.
@@ -40,6 +41,7 @@ import { appendHubEntry } from '../genome/store.js';
 import { readAutonomyEvidencePack, type AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import { hashDiff, verifyProvenance } from '../foundry/provenance.js';
 import { loadProposal } from '../inbox/store.js';
+import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { recordDecision } from './decisions-ledger.js';
 import { attestSkillCard } from './skill-attestation.js';
@@ -161,7 +163,8 @@ function evidenceGatesPassed(evidence: AutonomyEvidencePack): boolean {
 function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
   try {
     const proposal = loadProposal(proposalId);
-    if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied') return null;
+    if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied' ||
+      !hasRealizedMergeEvidence(proposal)) return null;
     if (typeof proposal.diff !== 'string' || proposal.diff.length === 0) return null;
     if (!verifyProvenance(proposal).ok) return null;
 
@@ -279,8 +282,8 @@ function deriveTaskClass(title: string): string {
 /**
  * Fire-and-forget skill write-back.
  *
- * Called AFTER a proposal is successfully merged (in automerge-pass.ts, after
- * res.merged++ in the success branch). Writes:
+ * Called after a proposal merge attempt. Persisted state must include an exact
+ * realized-merge witness before any skill is written. Writes:
  *   1. A genome hub entry (skill workflow) tagged 'm243:skill'.
  *   2. A structured, append-only verified SkillCard.
  *   3. A decisions-ledger entry for telemetry/observability.

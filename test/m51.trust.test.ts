@@ -10,7 +10,13 @@ import { describe, it, expect } from 'vitest';
 import type { AshlrConfig, EngineTier, Proposal } from '../src/core/types.js';
 import { evaluateMergeAuthority, mergeTargetForTier } from '../src/core/inbox/merge.js';
 import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
-import { hashDiff, signProvenance, verifyProvenance } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  signProducerProvenanceV2,
+  signProvenance,
+  verifyProducerProvenanceV2,
+  verifyProvenance,
+} from '../src/core/foundry/provenance.js';
 
 function cfgWithAuthority(): AshlrConfig {
   return {
@@ -118,5 +124,34 @@ describe('M51 — tier is provenance-bound (cannot be forged upward)', () => {
         provenanceSig: sig,
       }).ok,
     ).toBe(false);
+  });
+
+  it('producer provenance v2 binds causal identity and rejects source reassignment', () => {
+    const diff = 'diff --git a/x b/x\n+hello\n';
+    const diffHash = hashDiff(diff);
+    const record = {
+      id: 'proposal-causal-v2',
+      repo: process.cwd(),
+      workItemId: 'repo:issue:42',
+      workSource: 'issue',
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      producerProvenanceVersion: 2,
+    } as const;
+    const signed = { ...record, producerProvenanceSig: signProducerProvenanceV2(record) };
+
+    expect(verifyProducerProvenanceV2(signed).ok).toBe(true);
+    for (const forged of [
+      { ...signed, id: 'another-proposal' },
+      { ...signed, repo: process.cwd() + '-other' },
+      { ...signed, workItemId: 'repo:goal:42' },
+      { ...signed, workSource: 'goal' },
+      { ...signed, engineModel: 'claude:opus-4.8' },
+    ]) {
+      expect(verifyProducerProvenanceV2(forged).ok).toBe(false);
+    }
   });
 });

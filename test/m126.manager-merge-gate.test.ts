@@ -65,7 +65,7 @@
  *  [34] flag-off: listProposals irrelevant (no state change)
  *
  *  Ledger recording
- *  [35] on successful merge, recordDecision called with action='merged'
+ *  [35] Gate 7 records nonterminal merge authorization
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -84,12 +84,18 @@ vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
 }));
 
-// Mock readDecisions / recordDecision from fleet/decisions-ledger.ts
+// Mock decision-ledger reads/writes with an in-memory durable projection.
 const mockReadDecisions = vi.fn();
+const mockReadDecisionsDetailed = vi.fn();
 const mockRecordDecision = vi.fn();
+const recordedDecisions: Array<Record<string, unknown>> = [];
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
-  recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
+  readDecisionsDetailed: (...args: unknown[]) => mockReadDecisionsDetailed(...args),
+  recordDecision: (...args: unknown[]) => {
+    mockRecordDecision(...args);
+    recordedDecisions.push(args[0] as Record<string, unknown>);
+  },
 }));
 
 // Mock getActiveClient — controls whether judge client is available
@@ -216,6 +222,24 @@ beforeEach(() => {
 
   // Default: no cached ledger entries
   mockReadDecisions.mockReturnValue([]);
+  recordedDecisions.length = 0;
+  mockReadDecisionsDetailed.mockImplementation((opts: { proposalId?: string } = {}) => {
+    const decisions = opts.proposalId === undefined
+      ? [...recordedDecisions]
+      : recordedDecisions.filter((entry) => entry['proposalId'] === opts.proposalId);
+    return {
+      decisions,
+      sourceState: 'healthy',
+      sourcePresent: recordedDecisions.length > 0,
+      complete: true,
+      stopReasons: [],
+      filesRead: recordedDecisions.length > 0 ? 1 : 0,
+      bytesRead: 0,
+      rowsScanned: recordedDecisions.length,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+  });
   // Default: judge returns 'review' (safe default — tests override per scenario)
   mockJudgeProposal.mockResolvedValue({
     proposalId: 'default',
@@ -913,6 +937,40 @@ describe('M126 existing gates preserved — Gate 7 never reached', () => {
 // ===========================================================================
 
 describe('M126 status invariants', () => {
+  it('mid-tier branch application stays applied without realized merge evidence or merge fanout', async () => {
+    initRepo(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = docsDiff('docs/branch-only.md');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'branch-only application',
+      summary: 'Stage a mid-tier proposal without claiming a merge.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5-mini', 'mid', diffHash),
+      engineModel: 'codex:gpt-5-mini',
+      engineTier: 'mid',
+    });
+    setStatus(proposal.id, 'approved');
+    mockRecordDecision.mockClear();
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(proposal.id));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+
+    const result = await autoMergeProposal(proposal.id, baseCfg({ midToBranch: true }));
+
+    expect(result).toMatchObject({ ok: true, merged: false, branched: true });
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(proposal.id)).toMatchObject({ status: 'applied' });
+    expect(loadProposal(proposal.id)?.realizedMerge).toBeUndefined();
+    expect(mockRecordDecision.mock.calls.some((call) =>
+      (call[0] as { action?: string }).action === 'merged')).toBe(false);
+  });
+
   it('[27] refused by Gate 7 (review verdict) → status stays approved (not applied, not rejected)', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
@@ -980,13 +1038,30 @@ describe('M126 status invariants', () => {
 
     const diff = docsDiff('docs/status30.md');
     const p = frontierPatch(diff);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
     mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
 
     const r = await autoMergeProposal(p.id, baseCfg());
     expect(r.ok).toBe(true);
     expect(r.merged).toBe(true);
-    expect(loadProposal(p.id)!.status).toBe('applied');
+    expect(loadProposal(p.id)).toMatchObject({
+      status: 'applied',
+      realizedMerge: {
+        schemaVersion: 1,
+        source: 'local-default-branch',
+        base: 'main',
+        baseBeforeOid: mainBefore,
+        proposalHeadOid: git(tmpRepo, ['rev-parse', `ashlr/merge/${p.id}`]),
+        mergeCommitOid: git(tmpRepo, ['rev-parse', 'main']),
+        observedAt: expect.any(String),
+      },
+    });
+    expect(mockRecordDecision.mock.calls.some((call) => {
+      const decision = call[0] as { action?: string; verdict?: string; labelBasis?: string };
+      return decision.action === 'merged' && decision.verdict === 'merged' &&
+        decision.labelBasis === 'realized-merge-v1';
+    })).toBe(true);
   });
 });
 
@@ -1084,11 +1159,11 @@ describe('M126 flag-off parity', () => {
 });
 
 // ===========================================================================
-// [35] Ledger recording on successful merge
+// [35] Ledger recording after Gate 7 authorization
 // ===========================================================================
 
 describe('M126 ledger recording', () => {
-  it('[35] on successful merge, recordDecision called with action=merged', async () => {
+  it('[35] Gate 7 records merge-authorized before the applied transition', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
     git(tmpRepo, ['checkout', '-b', 'work']);
@@ -1103,16 +1178,13 @@ describe('M126 ledger recording', () => {
     expect(r.ok).toBe(true);
     expect(r.merged).toBe(true);
 
-    // Find the Gate-7 'merged' record call — identified by its reason containing
-    // 'gate 7 passed' (store.ts also calls recordDecision with action='merged'
-    // but with verdict='approved', so filter by reason content).
-    const mergedCall = mockRecordDecision.mock.calls.find((call) => {
+    const authorizedCall = mockRecordDecision.mock.calls.find((call) => {
       const e = call[0] as { action?: string; reason?: string };
-      return e.action === 'merged' && typeof e.reason === 'string' && e.reason.includes('gate 7 passed');
+      return e.action === 'merge-authorized' && typeof e.reason === 'string' && e.reason.includes('gate 7 passed');
     });
-    expect(mergedCall).toBeDefined();
-    const entry = mergedCall![0] as { action: string; reason: string };
-    expect(entry.action).toBe('merged');
+    expect(authorizedCall).toBeDefined();
+    const entry = authorizedCall![0] as { action: string; reason: string };
+    expect(entry.action).toBe('merge-authorized');
     expect(entry.reason).toMatch(/gate 7 passed.*verdict=ship/i);
   });
 });

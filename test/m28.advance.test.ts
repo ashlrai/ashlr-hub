@@ -134,6 +134,18 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   };
 }
 
+function realizedMergeEvidence(observedAt = new Date().toISOString()) {
+  return {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+  };
+}
+
 beforeEach(() => {
   mockRunSwarm.mockReset();
   mockAssertMayMutate.mockReset();
@@ -459,7 +471,10 @@ describe('progressOf — READ-ONLY tracking', () => {
     const goal = makeGoal({
       milestones: [makeMilestone({ id: 'm0', status: 'proposed', proposalId: 'p1' })],
     });
-    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied', verifyResult: { passed: true } }));
+    mockLoadProposal.mockReturnValue(makeProposal({
+      id: 'p1', status: 'applied', verifyResult: { passed: true },
+      realizedMerge: realizedMergeEvidence(),
+    }));
 
     const p = progressOf(goal);
     expect(p.done).toBe(1);
@@ -471,7 +486,10 @@ describe('progressOf — READ-ONLY tracking', () => {
     const goal = makeGoal({
       milestones: [makeMilestone({ id: 'm0', status: 'blocked', proposalId: 'p1' })],
     });
-    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied', verifyResult: { passed: true } }));
+    mockLoadProposal.mockReturnValue(makeProposal({
+      id: 'p1', status: 'applied', verifyResult: { passed: true },
+      realizedMerge: realizedMergeEvidence(),
+    }));
 
     const p = progressOf(goal);
     expect(p.done).toBe(1);
@@ -488,6 +506,31 @@ describe('progressOf — READ-ONLY tracking', () => {
     expect(p.done).toBe(0);
     expect(p.proposed).toBe(1);
     expect(p.fractionDone).toBe(0);
+  });
+
+  it('requalifies a persisted done milestone that claims an unwitnessed proposal as blocked', () => {
+    const goal = makeGoal({
+      status: 'done',
+      milestones: [makeMilestone({ id: 'm0', status: 'done', proposalId: 'p1' })],
+    });
+    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied' }));
+
+    const p = progressOf(goal);
+    expect(p.done).toBe(0);
+    expect(p.byStatus.blocked).toBe(1);
+    expect(p.fractionDone).toBe(0);
+  });
+
+  it('preserves an explicit done milestone that does not claim proposal completion', () => {
+    const goal = makeGoal({
+      status: 'done',
+      milestones: [makeMilestone({ id: 'm0', status: 'done', proposalId: null })],
+    });
+
+    const p = progressOf(goal);
+    expect(p.done).toBe(1);
+    expect(p.fractionDone).toBe(1);
+    expect(mockLoadProposal).not.toHaveBeenCalled();
   });
 
   it('returns fractionDone 0 when every milestone is skipped (no denom blowup)', () => {

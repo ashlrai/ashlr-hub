@@ -2156,3 +2156,24 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add capacity, crash-window, overlap, tamper, rollback-visible, unknown-format, downgrade, POSIX, and Windows regressions.
 - [x] Pass focused, adjacent, exhaustive, static, build, dependency, and independent adversarial verification.
 - [x] Commit, push, observe protected cross-platform CI, stage exact source, and update durable notes without interrupting production.
+
+## Current Overnight Cycle - Shadow Auto-Merge Canary Authority
+- [x] Rehydrate exact protected-remote master, production identity, issue #27, canonical dirty-worktree state, CI proof, Entire state, and durable notes.
+- [x] Audit cross-proposal admission, authenticated controller persistence, exact GitHub cancellation truth, docs-only change classification, and positive-learning embargo boundaries in parallel.
+- [x] Add a bounded HMAC-chained shadow controller with pure read-only status, cross-process CAS, monotonic counters/high-water time, and `enforceSupported:false` hard-coded.
+- [x] Inspect staged Git object metadata for the docs-only class; reject binaries, executable modes, symlinks, gitlinks, mode-only changes, renames, malformed paths, and mixed changes.
+- [x] Extend GitHub PR reads with exact base OID and tri-state host auto-merge evidence so explicit `null` is the only cancellation proof.
+- [x] Remove pre-outcome `merged` learning credit from manager-gate success while preserving truthful nonterminal authority evidence.
+- [x] Integrate read-only Fleet/CLI visibility and shadow activation/halt controls without granting merge, routing, readiness, or learning authority.
+- [x] Add explicit realized-merge witnesses so generic applied actions, branches, and contaminated legacy rows cannot create ship or learning credit.
+- [x] Connect the immutable staged candidate to a bounded shadow observer whose result cannot affect merge behavior.
+- [x] Run focused, cross-process, exhaustive, static, build, dependency, and independent adversarial verification on the expanded truth boundary.
+- [x] Commit, push, open protected PR #29, and leave production auto-merge disabled; exact-SHA CI observation is recorded in durable notes.
+
+### Canary V1 Invariants
+- Configuration alone cannot create an epoch; only explicit activation may create shadow state.
+- V1 cannot enter enforce mode. Host cancellation, learning embargo, rollback proof, and an external monotonic anchor remain activation blockers.
+- Read-only status never creates keys, locks, directories, files, repairs, audit rows, or timestamp changes.
+- Missing state is inactive; malformed, unsigned, conflicting, future-dated, rollback-suspect, or over-cap state is critical/degraded.
+- Local HMAC protects visible integrity but cannot prove freshness after coherent state-and-key rollback.
+- Production remains on immutable `f178db34fa6e47eb44df9f3db855943db602ef76` with auto-merge disabled until the complete enforce controller is proven.

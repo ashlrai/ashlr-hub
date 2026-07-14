@@ -115,6 +115,15 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
       verifiedAt: FIXED_TS.toISOString(),
       source: 'auto-merge',
     },
+    realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'master',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt: FIXED_TS.toISOString(),
+    },
     ...overrides,
   } as Proposal;
   if (!Object.prototype.hasOwnProperty.call(overrides, 'provenanceSig')) {
@@ -487,6 +496,14 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
 // ===========================================================================
 
 describe('M243 learnFromApplied — verified distillation gates fail closed', () => {
+  it('does not distill an applied proposal without realized merge evidence', () => {
+    const p = makeProposal({ realizedMerge: undefined });
+    primeAuthoritativeState(p);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
   it('does not write when authoritative proposal provenance is missing', () => {
     const p = makeProposal({ provenanceSig: undefined });
     primeAuthoritativeState(p);

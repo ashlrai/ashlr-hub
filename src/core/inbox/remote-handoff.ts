@@ -6,7 +6,14 @@
  */
 
 import { existsSync } from 'node:fs';
-import { listProposals, loadProposal, setStatus, updateProposalField } from './store.js';
+import {
+  listProposalsDetailed,
+  loadProposal,
+  recordRealizedMerge,
+  setStatus,
+  updateProposalField,
+} from './store.js';
+import type { ProposalSourceQuality } from './store.js';
 import type { Proposal, ProposalRemoteHandoff } from '../types.js';
 import type { PrView } from '../integrations/github.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
@@ -22,6 +29,8 @@ export interface RemoteHandoffReconcileResult {
   closed: number;
   open: number;
   unknown: number;
+  /** Present when reconciliation was refused because inbox truth was not authoritative. */
+  sourceQuality?: ProposalSourceQuality;
 }
 
 function initialResult(): RemoteHandoffReconcileResult {
@@ -211,7 +220,18 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
         result.unknown++;
         return result;
       }
-      if (!setStatus(proposal.id, 'applied', detail, undefined, mutationLock, { remoteHandoff })) {
+      if (!recordRealizedMerge(proposal.id, {
+        schemaVersion: 1,
+        source: 'github-host',
+        provider: 'github',
+        prUrl: remoteHandoff.prUrl!,
+        branch: remoteHandoff.branch!,
+        base: remoteHandoff.base!,
+        expectedHeadOid: remoteHandoff.expectedHeadOid!,
+        mergeCommitOid: remoteHandoff.mergeCommitOid!,
+        mergedAt: remoteHandoff.mergedAt!,
+        reconciliation: remoteHandoff.reconciliation!,
+      }, mutationLock)) {
         result.unknown++;
         return result;
       }
@@ -289,8 +309,16 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
 export function reconcileRemoteHandoffs(): RemoteHandoffReconcileResult {
   const result = initialResult();
   try {
-    const proposals = listProposals({ status: 'awaiting-host-merge' });
-    for (const proposal of proposals) {
+    const snapshot = listProposalsDetailed({
+      status: 'awaiting-host-merge',
+      requireComplete: true,
+    });
+    if (!snapshot.complete || snapshot.sourceState === 'degraded') {
+      const { proposals: _proposals, ...sourceQuality } = snapshot;
+      result.sourceQuality = sourceQuality;
+      return result;
+    }
+    for (const proposal of snapshot.proposals) {
       const one = reconcileOne(proposal);
       result.checked += one.checked;
       result.merged += one.merged;
@@ -300,6 +328,17 @@ export function reconcileRemoteHandoffs(): RemoteHandoffReconcileResult {
     }
   } catch {
     // Never throw from daemon maintenance/readiness paths.
+    result.sourceQuality = {
+      sourceState: 'degraded',
+      sourcePresent: false,
+      complete: false,
+      stopReasons: ['io-error'],
+      filesDiscovered: 0,
+      filesRead: 0,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 1,
+    };
   }
   return result;
 }

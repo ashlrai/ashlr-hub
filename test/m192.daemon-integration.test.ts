@@ -36,7 +36,15 @@
 import { resolve } from 'node:path';
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { AshlrConfig } from '../src/core/types.js';
+import type {
+  AshlrConfig,
+  LocalDefaultBranchRealizedMerge,
+  ProposalLocalMergeIntent,
+} from '../src/core/types.js';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Core dependency mocks — declared BEFORE lazy imports.
@@ -694,15 +702,56 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
       basis: 'bisect-first-bad',
       revertProposal: { culprit, culpritProposalId: 'proposal-causal', proposal: {} },
     });
+    const diffHash = 'd'.repeat(64);
+    const authorizedAt = new Date().toISOString();
+    const unsignedIntent = {
+      schemaVersion: 1 as const,
+      branch: 'ashlr/proposal-causal',
+      base: 'main',
+      baseBeforeOid: baselineHead,
+      proposalHeadOid: 'e'.repeat(40),
+      diffHash,
+      evidencePackDigest: 'f'.repeat(64),
+      authorizationId: '1'.repeat(32),
+      authorizedAt,
+    };
+    const localMergeIntent: ProposalLocalMergeIntent = {
+      ...unsignedIntent,
+      attestation: signLocalMergeIntent('proposal-causal', repo.dir, unsignedIntent),
+    };
+    const unsignedRealizedMerge = {
+      schemaVersion: 1 as const,
+      source: 'local-default-branch' as const,
+      base: 'main',
+      baseBeforeOid: baselineHead,
+      proposalHeadOid: unsignedIntent.proposalHeadOid,
+      mergeCommitOid: culprit,
+      observedAt: authorizedAt,
+      proposalId: 'proposal-causal',
+      diffHash,
+      intentAttestation: localMergeIntent.attestation,
+    };
+    const realizedMerge: LocalDefaultBranchRealizedMerge = {
+      ...unsignedRealizedMerge,
+      attestation: signLocalRealizedMergeReceipt('proposal-causal', repo.dir, unsignedRealizedMerge),
+    };
     mockLoadProposal.mockReturnValue({
       id: 'proposal-causal',
       status: 'applied',
       repo: repo.dir,
-      remoteHandoff: { mergeCommitOid: culprit },
+      kind: 'patch',
+      diffHash,
+      localMergeIntent,
+      realizedMerge,
       runId: 'run-causal',
       trajectoryId: 'trajectory-causal',
       workItemId: 'work-causal',
-      verifyResult: { ran: [{ kind: 'typecheck' }, { kind: 'test' }] },
+      verifyResult: {
+        passed: true,
+        baseHead: baselineHead,
+        diffHash,
+        ran: [{ kind: 'typecheck' }, { kind: 'test' }],
+      },
     });
     const cfg = makeCfg({
       foundry: {
@@ -729,6 +778,36 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
       baselineHead,
       candidateCount: 3,
       commandKinds: ['test', 'typecheck'],
+    }));
+  });
+
+  it('keeps an applied handoff heuristic without authenticated realized-merge evidence', async () => {
+    const repo = enrollBuiltinRepo();
+    const culprit = 'a'.repeat(40);
+    mockDetectRegression.mockResolvedValue({ regressed: true, details: [culprit] });
+    mockBisectAndRevert.mockResolvedValue({
+      repo: resolve(repo.dir),
+      culprit,
+      observedHead: 'b'.repeat(40),
+      parentHead: 'c'.repeat(40),
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'deterministic',
+      basis: 'bisect-first-bad',
+      revertProposal: { culprit, culpritProposalId: 'proposal-unwitnessed', proposal: {} },
+    });
+    mockLoadProposal.mockReturnValue({
+      id: 'proposal-unwitnessed',
+      status: 'applied',
+      repo: repo.dir,
+      remoteHandoff: { mergeCommitOid: culprit },
+    });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    expect(mockRecordPostMergeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: 'proposal-unwitnessed',
+      confidence: 'heuristic',
     }));
   });
 

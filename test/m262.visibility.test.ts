@@ -87,7 +87,32 @@ vi.mock('../src/core/usage/frontier-usage.js', () => ({
 }));
 vi.mock('../src/core/inbox/store.js', () => ({
   pendingCount: () => 0,
-  listProposals: () => [],
+  listProposals: () => [{
+    id: 'merged-fixture',
+    status: 'applied',
+    title: 'Witness-backed merge',
+    realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt: FIXED_12H_AGO,
+    },
+  }],
+  listProposalsDetailed: vi.fn(() => ({
+    proposals: [{
+      id: 'merged-fixture', status: 'applied', title: 'Witness-backed merge',
+      realizedMerge: {
+        schemaVersion: 1, source: 'local-default-branch', base: 'main',
+        baseBeforeOid: '1'.repeat(40), proposalHeadOid: '2'.repeat(40),
+        mergeCommitOid: '3'.repeat(40), observedAt: FIXED_12H_AGO,
+      },
+    }],
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesDiscovered: 1, filesRead: 1, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+  })),
 }));
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: () => [],
@@ -153,7 +178,7 @@ const FIXTURE_DECISIONS = [
   // dispatches within 24h
   { ts: FIXED_12H_AGO, action: 'dispatched', engine: 'claude', tokensIn: 1000, tokensOut: 500, costUsd: 0.02, cacheHit: false },
   { ts: FIXED_12H_AGO, action: 'dispatched', engine: 'local',  tokensIn: 800,  tokensOut: 400, costUsd: 0,    cacheHit: true },
-  { ts: FIXED_12H_AGO, action: 'merged',     engine: 'claude', tokensIn: 500,  tokensOut: 200, costUsd: 0.01, cacheHit: false },
+  { ts: FIXED_12H_AGO, proposalId: 'merged-fixture', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', tokensIn: 500, tokensOut: 200, costUsd: 0.01, cacheHit: false },
   { ts: FIXED_12H_AGO, action: 'rejected',   engine: 'claude', tokensIn: 300,  tokensOut: 100, costUsd: 0.005, cacheHit: false },
   // older than 24h — excluded from 24h window
   { ts: FIXED_25H_AGO, action: 'dispatched', engine: 'codex',  tokensIn: 200,  tokensOut: 100, costUsd: 0.001, cacheHit: false },
@@ -184,6 +209,12 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
     const limit = opts?.limit ?? Infinity;
     return filtered.slice(0, limit);
   }),
+  readDecisionsDetailed: vi.fn(() => ({
+    decisions: FIXTURE_DECISIONS,
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesRead: 1, bytesRead: 0, rowsScanned: FIXTURE_DECISIONS.length,
+    invalidRows: 0, unreadableFiles: 0,
+  })),
   recordDecision: vi.fn(),
 }));
 
@@ -336,6 +367,54 @@ describe('M262 — buildVisibilitySnapshot sections', () => {
     expect(fa.mergedToday).toBe(1);
     // 1 rejected entry within 24h
     expect(fa.rejectedToday).toBe(1);
+  });
+
+  it('ignores legacy merged rows and deduplicates canonical rows against a current witness', async () => {
+    const decisions = [
+      { ts: FIXED_12H_AGO, proposalId: 'merged-fixture', action: 'merged', engine: 'legacy' },
+      { ts: FIXED_12H_AGO, proposalId: 'merged-fixture', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude' },
+      { ts: FIXED_12H_AGO, proposalId: 'merged-fixture', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude' },
+    ];
+
+    const vis = await buildVisibilitySnapshot(
+      makeConfig({ __visibilityDecisions: decisions }),
+      FIXED_NOW_MS,
+    );
+
+    expect(vis.fleetActivity.mergedToday).toBe(1);
+    expect(vis.fleetActivity.totalDispatches).toBe(1);
+    expect(vis.fleetActivity.byBackend).toEqual([{ backend: 'claude', count: 1 }]);
+  });
+
+  it('fails closed when proposal details are degraded despite optimistic merge rows', async () => {
+    const { listProposalsDetailed } = await import('../src/core/inbox/store.js');
+    const degradedRead = {
+      proposals: [{
+        id: 'merged-fixture', status: 'applied', title: 'Partial optimistic merge',
+        realizedMerge: {
+          schemaVersion: 1, source: 'local-default-branch', base: 'main',
+          baseBeforeOid: '1'.repeat(40), proposalHeadOid: '2'.repeat(40),
+          mergeCommitOid: '3'.repeat(40), observedAt: FIXED_12H_AGO,
+        },
+      }],
+      sourceState: 'degraded' as const,
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['byte-cap'],
+      filesDiscovered: 2,
+      filesRead: 1,
+      bytesRead: 1024,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    };
+    vi.mocked(listProposalsDetailed)
+      .mockReturnValueOnce(degradedRead)
+      .mockReturnValueOnce(degradedRead);
+
+    const vis = await makeVisSnap();
+
+    expect(vis.fleetActivity.mergedToday).toBe(0);
+    expect(vis.fleetActivity.recentMergeTitles).toEqual([]);
   });
 
   it('fleetActivity excludes decisions older than 24h', async () => {

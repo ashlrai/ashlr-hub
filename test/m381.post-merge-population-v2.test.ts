@@ -13,6 +13,7 @@ import {
   type ProposalSnapshotV2,
   type StabilitySnapshotV2,
 } from '../src/core/fleet/post-merge-population-v2.js';
+import { realizedMergeOf } from '../src/core/inbox/realized-merge.js';
 
 const repo = resolve('/tmp/ashlr-v2-repo');
 const key = Buffer.alloc(32, 7);
@@ -25,16 +26,28 @@ function legacyRepoDigest(): string {
 }
 
 function proposal(overrides: Partial<Proposal> = {}): Proposal {
-  return {
+  const value = {
     id: 'proposal-1', repo, origin: 'swarm', kind: 'pr', title: 'test', summary: 'test',
     status: 'applied', createdAt: '2026-06-01T00:00:00.000Z',
     remoteHandoff: {
-      provider: 'github', state: 'merged', base: 'main', mergeCommitOid: merge,
+      provider: 'github', state: 'merged', base: 'main', branch: 'ashlr/proposal-1',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/1', expectedHeadOid: 'f'.repeat(40),
+      mergeCommitOid: merge,
       mergedAt: '2026-06-10T00:00:00.000Z', createdAt: '2026-06-09T00:00:00.000Z',
       reconciliation: { schemaVersion: 1, observedAt: '2026-06-10T00:01:00.000Z', attestation: 'b'.repeat(64) },
     },
     ...overrides,
   } as Proposal;
+  if (!Object.hasOwn(overrides, 'realizedMerge')) {
+    const handoff = value.remoteHandoff!;
+    value.realizedMerge = {
+      schemaVersion: 1, source: 'github-host', provider: 'github',
+      prUrl: handoff.prUrl!, branch: handoff.branch!, base: handoff.base!,
+      expectedHeadOid: handoff.expectedHeadOid!, mergeCommitOid: handoff.mergeCommitOid!,
+      mergedAt: handoff.mergedAt!, reconciliation: handoff.reconciliation!,
+    };
+  }
+  return value;
 }
 
 function proposals(rows: Proposal[], complete = true): ProposalSnapshotV2 {
@@ -129,6 +142,7 @@ function build(
   }, {
     identityKey: () => key,
     verifyReceipt: () => true,
+    readRealizedMerge: realizedMergeOf,
   });
 }
 
@@ -144,6 +158,30 @@ describe('M381 denominator-complete post-merge population v2', () => {
     expect(result.population.members[0]).toMatchObject({
       classification: 'inconclusive', reason: 'no-terminal-evidence',
     });
+  });
+
+  it('defaults to authenticated realized evidence for caller-supplied snapshots', () => {
+    const result = buildPostMergePopulationV2({
+      proposals: proposals([proposal()]),
+      enrollment: {
+        repos: [repo], sourceState: 'healthy', complete: true,
+        defaultBranches: [{ repo, branch: 'main' }],
+        snapshotDigest: '9'.repeat(64), capturedAt: '2026-06-20T00:00:00.000Z',
+      },
+      adverse: adverse(),
+      stability: stability(),
+      cohortStartedAt: '2026-06-01T00:00:00.000Z',
+      cutoffAt: '2026-06-20T00:00:00.000Z',
+      windowMs: 7 * 24 * 60 * 60 * 1_000,
+    }, {
+      identityKey: () => key,
+      verifyReceipt: () => true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.population).toMatchObject({ eligible: 0, excluded: 1 });
+    expect(result.population.exclusions['realized-merge-missing-or-invalid']).toBe(1);
   });
 
   it('gives deterministic adverse evidence precedence over stability', () => {
@@ -190,15 +228,60 @@ describe('M381 denominator-complete post-merge population v2', () => {
       .not.toBe(result.population.proposalSourceDigest);
   });
 
+  it('excludes legacy, malformed, local, and handoff-mismatched realized witnesses', () => {
+    const witness = proposal().realizedMerge;
+    if (!witness || witness.source !== 'github-host') throw new Error('invalid GitHub witness fixture');
+    const legacy = proposal({ id: 'legacy', realizedMerge: undefined });
+    const malformed = proposal({ id: 'malformed', realizedMerge: {
+      ...witness, mergeCommitOid: 'not-an-oid',
+    } as Proposal['realizedMerge'] });
+    const local = proposal({ id: 'local', realizedMerge: {
+      schemaVersion: 1, source: 'local-default-branch', base: 'main',
+      baseBeforeOid: '1'.repeat(40), proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: merge, observedAt: '2026-06-10T00:01:00.000Z',
+    } });
+    const mismatches = [
+      proposal({ id: 'mismatch-merge', realizedMerge: {
+        ...witness, mergeCommitOid: 'c'.repeat(40),
+      } }),
+      proposal({ id: 'mismatch-base', realizedMerge: {
+        ...witness, base: 'release',
+      } }),
+      proposal({ id: 'mismatch-head', realizedMerge: {
+        ...witness, expectedHeadOid: '1'.repeat(40),
+      } }),
+      proposal({ id: 'mismatch-reconciliation', realizedMerge: {
+        ...witness, reconciliation: {
+          ...witness.reconciliation, attestation: 'c'.repeat(64),
+        },
+      } }),
+    ];
+    const result = build([legacy, malformed, local, ...mismatches]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.population).toMatchObject({ eligible: 0, excluded: 7 });
+    expect(result.population.exclusions).toMatchObject({
+      'realized-merge-missing-or-invalid': 2,
+      'realized-merge-not-github': 1,
+      'realized-merge-mismatch': 4,
+    });
+  });
+
   it('accepts exact historical window boundaries and excludes outside members', () => {
     const lower = proposal({ id: 'lower', remoteHandoff: {
       ...proposal().remoteHandoff!, mergeCommitOid: '4'.repeat(40), mergedAt: '2026-06-01T00:00:00.000Z',
     } });
     const upper = proposal({ id: 'upper', remoteHandoff: {
       ...proposal().remoteHandoff!, mergeCommitOid: '5'.repeat(40), mergedAt: '2026-06-13T00:00:00.000Z',
+      reconciliation: {
+        ...proposal().remoteHandoff!.reconciliation!, observedAt: '2026-06-13T00:01:00.000Z',
+      },
     } });
     const late = proposal({ id: 'late', remoteHandoff: {
       ...proposal().remoteHandoff!, mergeCommitOid: '6'.repeat(40), mergedAt: '2026-06-13T00:00:00.001Z',
+      reconciliation: {
+        ...proposal().remoteHandoff!.reconciliation!, observedAt: '2026-06-13T00:01:00.000Z',
+      },
     } });
     const result = build([lower, upper, late]);
     expect(result.ok).toBe(true);
@@ -224,7 +307,11 @@ describe('M381 denominator-complete post-merge population v2', () => {
       adverse: adverse(), stability: stability(), cohortStartedAt: '2026-06-01T00:00:00.000Z',
       cutoffAt: '2026-06-20T00:00:00.000Z', windowMs: 604_800_000,
     };
-    const deps = { identityKey: () => key, verifyReceipt: () => true };
+    const deps = {
+      identityKey: () => key,
+      verifyReceipt: () => true,
+      readRealizedMerge: realizedMergeOf,
+    };
     expect(buildPostMergePopulationV2({ ...base, proposals: proposals([proposal()], false) }, deps))
       .toEqual({ ok: false, reason: 'proposal-source-incomplete' });
     expect(buildPostMergePopulationV2({
@@ -241,6 +328,9 @@ describe('M381 denominator-complete post-merge population v2', () => {
   it('is ordering-invariant and emits no raw repo, proposal, or merge identity', () => {
     const second = proposal({ id: 'proposal-2', remoteHandoff: {
       ...proposal().remoteHandoff!, mergeCommitOid: '7'.repeat(40), mergedAt: '2026-06-11T00:00:00.000Z',
+      reconciliation: {
+        ...proposal().remoteHandoff!.reconciliation!, observedAt: '2026-06-11T00:01:00.000Z',
+      },
     } });
     const left = build([proposal(), second]);
     const right = build([second, proposal()]);
@@ -318,15 +408,17 @@ describe('M381 denominator-complete post-merge population v2', () => {
     };
     expect(buildPostMergePopulationV2({
       ...input, enrollment: { ...input.enrollment, defaultBranches: [] },
-    }, { identityKey: () => key, verifyReceipt: () => true }))
+    }, { identityKey: () => key, verifyReceipt: () => true, readRealizedMerge: realizedMergeOf }))
       .toEqual({ ok: false, reason: 'enrollment-source-incomplete' });
     expect(buildPostMergePopulationV2(input, {
       identityKey: () => { throw new Error('key unavailable'); },
       verifyReceipt: () => true,
+      readRealizedMerge: realizedMergeOf,
     })).toEqual({ ok: false, reason: 'identity-key-unavailable' });
     expect(buildPostMergePopulationV2(input, {
       identityKey: () => key,
       verifyReceipt: () => { throw new Error('verifier unavailable'); },
+      readRealizedMerge: realizedMergeOf,
     })).toEqual({ ok: false, reason: 'receipt-verifier-unavailable' });
   });
 
@@ -429,10 +521,10 @@ describe('M381 denominator-complete post-merge population v2', () => {
       cutoffAt: '2026-06-20T00:00:00.000Z', windowMs: 604_800_000,
     };
     const eligible = buildPostMergePopulationV2(baseInput, {
-      identityKey: () => key, verifyReceipt: () => true,
+      identityKey: () => key, verifyReceipt: () => true, readRealizedMerge: realizedMergeOf,
     });
     const invalidReceipt = buildPostMergePopulationV2(baseInput, {
-      identityKey: () => key, verifyReceipt: () => false,
+      identityKey: () => key, verifyReceipt: () => false, readRealizedMerge: realizedMergeOf,
     });
     expect(eligible.ok && invalidReceipt.ok &&
       eligible.population.populationDigest !== invalidReceipt.population.populationDigest).toBe(true);

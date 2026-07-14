@@ -97,12 +97,19 @@ export interface ResourceStrategyReport {
     daemonRunning: boolean;
     lastTickAt: string | null;
     backlogItems: number;
-    pendingProposals: number;
-    frontierPending: number;
-    appliedProposals: number;
+    /** Authority counts are withheld when the proposal source is not complete and healthy. */
+    pendingProposals: number | null;
+    frontierPending: number | null;
+    appliedProposals: number | null;
     recentMerges: number;
     autonomyAllowed: number;
     autonomyDenied: number;
+    proposalSource: {
+      gate: 'ready' | 'unavailable';
+      sourceState: 'missing' | 'healthy' | 'degraded';
+      complete: boolean;
+      detail: string;
+    };
   };
   resources: {
     posture: ResourcePosture;
@@ -437,6 +444,20 @@ function cloudConstrained(backends: ResourceStrategyBackend[]): boolean {
   );
 }
 
+function proposalSourceAuthority(fleet: FleetStatus): ResourceStrategyReport['fleet']['proposalSource'] {
+  const quality = fleet.proposals.sourceQuality;
+  const authority = fleet.proposals.authority;
+  const ready = authority?.gate === 'ready' && quality?.sourceState !== 'degraded' && quality?.complete === true;
+  return {
+    gate: ready ? 'ready' : 'unavailable',
+    sourceState: quality?.sourceState ?? 'missing',
+    complete: quality?.complete === true,
+    detail: ready
+      ? authority.detail
+      : authority?.detail ?? 'auto-merge authority requires a complete healthy proposal source',
+  };
+}
+
 function recommendMode(
   cfg: AshlrConfig,
   guard: GuardHealthDiagnosis,
@@ -446,6 +467,7 @@ function recommendMode(
   ecosystem: ResourceStrategyReport['ecosystem'],
   budgets: ResourceStrategyBudgetSummary,
   productionVelocity: EffectiveProductionVelocityProfile,
+  proposalSource: ResourceStrategyReport['fleet']['proposalSource'],
 ): { mode: AutonomousDirectionMode; confidence: ReportConfidence; reasons: string[]; recommendedActions: string[] } {
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -472,7 +494,12 @@ function recommendMode(
   }
 
   const autoMergeEnabled = cfg.foundry?.autoMerge?.enabled === true;
-  if (autoMergeEnabled && outcomes.readyEvidence > 0 && ecosystem.posture !== 'fail') {
+  if (
+    autoMergeEnabled &&
+    proposalSource.gate === 'ready' &&
+    outcomes.readyEvidence > 0 &&
+    ecosystem.posture !== 'fail'
+  ) {
     reasons.push(`${outcomes.readyEvidence} recent outcome record(s) have verified allowed evidence`);
     actions.push('review ready evidence and allow existing merge gates to decide');
     actions.push('do not widen merge authority from this advisory report');
@@ -480,6 +507,7 @@ function recommendMode(
   }
 
   const stalePendingOnly =
+    proposalSource.gate === 'ready' &&
     productionVelocity.enabled &&
     fleet.queue.backlogItems > 0 &&
     fleet.proposals.pending > 0 &&
@@ -488,11 +516,11 @@ function recommendMode(
     ecosystem.posture !== 'fail';
 
   if (
-    (fleet.proposals.pending > 0 && !stalePendingOnly) ||
+    (proposalSource.gate === 'ready' && fleet.proposals.pending > 0 && !stalePendingOnly) ||
     outcomes.verificationFailures > 0 ||
     ecosystem.posture === 'fail'
   ) {
-    if (fleet.proposals.pending > 0) {
+    if (proposalSource.gate === 'ready' && fleet.proposals.pending > 0) {
       reasons.push(`${fleet.proposals.pending} pending proposal(s) need verification or review`);
     }
     if (outcomes.verificationFailures > 0) reasons.push(`${outcomes.verificationFailures} recent outcome record(s) failed verification`);
@@ -588,6 +616,7 @@ export async function buildResourceStrategyReport(
   const outcomeSummary = summarizeOutcomes(cfg, records, maxOutcomes, now, productionVelocity.stalePendingTtlHours);
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);
+  const proposalSource = proposalSourceAuthority(fleet);
   const recommendation = recommendMode(
     cfg,
     guard,
@@ -597,6 +626,7 @@ export async function buildResourceStrategyReport(
     ecosystemSummary,
     budgetSummary,
     productionVelocity,
+    proposalSource,
   );
 
   return {
@@ -619,12 +649,13 @@ export async function buildResourceStrategyReport(
       daemonRunning: fleet.daemon.running,
       lastTickAt: fleet.daemon.lastTickAt,
       backlogItems: fleet.queue.backlogItems,
-      pendingProposals: fleet.proposals.pending,
-      frontierPending: fleet.proposals.frontierPending,
-      appliedProposals: fleet.proposals.applied,
+      pendingProposals: proposalSource.gate === 'ready' ? fleet.proposals.pending : null,
+      frontierPending: proposalSource.gate === 'ready' ? fleet.proposals.frontierPending : null,
+      appliedProposals: proposalSource.gate === 'ready' ? fleet.proposals.applied : null,
       recentMerges: fleet.merges.recent,
       autonomyAllowed: fleet.autonomy?.allowed ?? 0,
       autonomyDenied: fleet.autonomy?.denied ?? 0,
+      proposalSource,
     },
     resources: resourceSummary,
     outcomes: outcomeSummary,
@@ -639,7 +670,11 @@ export async function buildResourceStrategyReport(
  * opt-in daemon control loop can be tested independently from the readers.
  */
 export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): ResourceStrategyDaemonPlan {
-  const reason = report.reasons[0] ?? `resource strategy recommended ${report.mode}`;
+  const proposalSource = report.fleet.proposalSource;
+  const proposalAuthorityReady = proposalSource?.gate === 'ready';
+  const reason = proposalAuthorityReady
+    ? report.reasons[0] ?? `resource strategy recommended ${report.mode}`
+    : proposalSource?.detail ?? 'auto-merge authority requires a complete healthy proposal source';
   switch (report.mode) {
     case 'pause':
       return {
@@ -655,7 +690,7 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
         mode: report.mode,
         allowDispatch: false,
         forceLocalOnly: false,
-        runAutoMergeMaintenance: true,
+        runAutoMergeMaintenance: proposalAuthorityReady,
         reason,
       };
     case 'local-only':
@@ -663,7 +698,7 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
         mode: report.mode,
         allowDispatch: true,
         forceLocalOnly: true,
-        runAutoMergeMaintenance: true,
+        runAutoMergeMaintenance: proposalAuthorityReady,
         reason,
       };
     case 'backlog-build':
@@ -671,7 +706,7 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
         mode: report.mode,
         allowDispatch: true,
         forceLocalOnly: false,
-        runAutoMergeMaintenance: true,
+        runAutoMergeMaintenance: proposalAuthorityReady,
         reason,
       };
   }

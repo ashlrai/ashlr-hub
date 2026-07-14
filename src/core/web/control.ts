@@ -33,7 +33,8 @@ import { readCodexRateLimits } from '../observability/codex-source.js';
 import { buildFleetDigest, type FleetRepoRow } from '../fleet/digest.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.js';
-import { readAudit } from '../sandbox/audit.js';
+import { listProposalsDetailed } from '../inbox/store.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 import { serviceStatusCached, type ServiceStatusResult } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import {
@@ -682,26 +683,28 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     };
   });
 
-  // Recent auto-merge events from audit.
+  // Recent landed work from complete, store-authenticated proposal evidence.
   let recentMerges: FleetMergeEvent[] = [];
   try {
-    const auditEntries = readAudit(200);
-    recentMerges = auditEntries
-      .filter((e) => e.action.startsWith('merge.') || (e.action === 'inbox:auto-merge' && e.result === 'ok'))
-      .slice(0, 20)
-      .map((e) => {
-        // Supported summary formats:
-        // - "proposalId=<id> engine=<eng> ..."
-        // - "proposal <id> auto-merge MERGED: ..."
-        const propMatch = /proposalId=([^\s]+)/.exec(e.summary) ?? /proposal\s+([^\s]+)\s+auto-merge/.exec(e.summary);
-        const engMatch  = /engine=([^\s]+)/.exec(e.summary);
-        return {
-          repo: e.repo,
-          proposalId: propMatch?.[1] ?? null,
-          ts: e.ts,
-          engine: engMatch?.[1] ?? null,
-        };
-      });
+    const read = listProposalsDetailed();
+    if (read.complete && read.sourceState !== 'degraded') {
+      const now = Date.now();
+      recentMerges = read.proposals.flatMap((proposal): FleetMergeEvent[] => {
+        const evidence = realizedMergeOf(proposal);
+        if (!evidence) return [];
+        const observedAt = evidence.source === 'github-host'
+          ? evidence.reconciliation.observedAt
+          : evidence.observedAt;
+        const observedMs = Date.parse(observedAt);
+        if (!Number.isFinite(observedMs) || observedMs > now) return [];
+        return [{
+          repo: proposal.repo,
+          proposalId: proposal.id,
+          ts: observedAt,
+          engine: proposal.engineModel ?? null,
+        }];
+      }).sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts)).slice(0, 20);
+    }
   } catch {
     // degrade silently
   }

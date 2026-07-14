@@ -39,6 +39,8 @@ import type {
   PortfolioGoalInFlight,
   PortfolioBacklogItem,
   PortfolioEffectiveness,
+  Proposal,
+  DecisionEntry,
 } from './types.js';
 import { pendingCount as inboxPendingCount } from './inbox/store.js';
 // M29: portfolio roll-up sources — all READ-ONLY + enrollment/index-scoped.
@@ -67,6 +69,56 @@ import { loadDaemonState } from './daemon/state.js';
 import { getFrontierUsageSync } from './usage/frontier-usage.js';
 import type { FrontierUsage } from './usage/frontier-usage.js';
 import type { ProductionSummary, IntelligenceSummary } from './types.js';
+import type { ProposalSourceQuality, ProposalsReadResult } from './inbox/store.js';
+import type { DecisionSourceQuality, DecisionsReadResult } from './fleet/decisions-ledger.js';
+import { realizedMergeOf } from './inbox/realized-merge.js';
+
+/** Additive dashboard contracts; legacy DashboardSnapshot producers remain valid. */
+export interface DashboardProductionSummary extends ProductionSummary {
+  /** `degraded`/incomplete means proposal-backed zeroes are unknown. */
+  proposalSourceQuality: ProposalSourceQuality;
+}
+
+export interface DashboardIntelligenceSummary extends IntelligenceSummary {
+  /** Quality of the proposal join used to establish realized ships. */
+  proposalSourceQuality: ProposalSourceQuality;
+  /** Quality of the decisions ledger behind scorecards and recent events. */
+  decisionSourceQuality: DecisionSourceQuality;
+}
+
+export type DashboardSnapshotWithSourceQuality = Omit<
+  DashboardSnapshot,
+  'production' | 'intelligence'
+> & {
+  production?: DashboardProductionSummary;
+  intelligence?: DashboardIntelligenceSummary;
+};
+
+function degradedProposalSource(): ProposalSourceQuality {
+  return {
+    sourceState: 'degraded', sourcePresent: false, complete: false,
+    stopReasons: ['io-error'], filesDiscovered: 0, filesRead: 0,
+    bytesRead: 0, invalidFiles: 0, unreadableFiles: 1,
+  };
+}
+
+function proposalSourceOf(read: ProposalsReadResult): ProposalSourceQuality {
+  const { proposals: _proposals, ...quality } = read;
+  return quality;
+}
+
+function degradedDecisionSource(): DecisionSourceQuality {
+  return {
+    sourceState: 'degraded', sourcePresent: false, complete: false,
+    stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+    invalidRows: 0, unreadableFiles: 1,
+  };
+}
+
+function decisionSourceOf(read: DecisionsReadResult): DecisionSourceQuality {
+  const { decisions: _decisions, ...quality } = read;
+  return quality;
+}
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -276,24 +328,36 @@ const TREND_DAYS = 7;
  * bounded, and lazily-imported (so pre-M224 tests that mock only the base
  * sources never crash). NEVER throws — any failure degrades to zeros/empty.
  */
-async function buildProduction(generatedAt: string): Promise<ProductionSummary> {
+async function buildProduction(generatedAt: string): Promise<DashboardProductionSummary> {
   const now = Date.now();
   const since24h = now - PRODUCTION_WINDOW_MS;
   const todayDate = new Date().toISOString().slice(0, 10);
 
-  const summary: ProductionSummary = {
+  const summary: DashboardProductionSummary = {
     generatedAt,
     proposals24h: { pending: 0, applied: 0, rejected: 0, total: 0 },
     judgeVerdicts24h: { ship: 0, review: 0, noise: 0, harmful: 0, total: 0 },
     autoMergesToday: { count: 0, titles: [] },
     activeGoals: [],
     shipsPerDayTrend: [],
+    proposalSourceQuality: degradedProposalSource(),
   };
 
-  // ── Proposal counts over 24h + auto-merges today ─────────────────────────
+  let productionProposals: Proposal[] | null = null;
   try {
-    const { listProposals } = await import('./inbox/store.js');
-    const all = listProposals();
+    const { listProposalsDetailed } = await import('./inbox/store.js');
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    summary.proposalSourceQuality = proposalSourceOf(proposalRead);
+    if (proposalRead.complete && proposalRead.sourceState !== 'degraded') {
+      productionProposals = proposalRead.proposals;
+    }
+  } catch {
+    // Keep explicit degraded quality and withhold proposal-backed counts.
+  }
+
+  // ── Proposal counts over 24h + auto-merges today ─────────────────────────
+  if (productionProposals) {
+    const all = productionProposals;
     const recent = all.filter((p) => Date.parse(p.createdAt) >= since24h);
     for (const p of recent) {
       summary.proposals24h.total++;
@@ -301,16 +365,22 @@ async function buildProduction(generatedAt: string): Promise<ProductionSummary> 
       else if (p.status === 'applied') summary.proposals24h.applied++;
       else if (p.status === 'rejected') summary.proposals24h.rejected++;
     }
-    // Auto-merges today: proposals whose createdAt is today + status 'applied'
+    // Auto-merges today: proposals with exact realized-merge evidence today.
     const mergedToday = all.filter(
-      (p) => p.status === 'applied' && p.createdAt.slice(0, 10) === todayDate,
+      (p) => {
+        if (p.status !== 'applied') return false;
+        const merge = realizedMergeOf(p);
+        const observedAt = merge?.source === 'github-host'
+          ? merge.reconciliation.observedAt
+          : merge?.observedAt;
+        const observedMs = Date.parse(observedAt ?? '');
+        return Number.isFinite(observedMs) && observedMs <= now && observedAt?.slice(0, 10) === todayDate;
+      },
     );
     summary.autoMergesToday.count = mergedToday.length;
     summary.autoMergesToday.titles = mergedToday
       .slice(0, MAX_MERGE_TITLES)
       .map((p) => p.title);
-  } catch {
-    // Degrade to zeros.
   }
 
   // ── Judge verdict counts over 24h ────────────────────────────────────────
@@ -348,10 +418,9 @@ async function buildProduction(generatedAt: string): Promise<ProductionSummary> 
     // Degrade to empty.
   }
 
-  // ── Ships-per-day trend (7 days, applied proposals by calendar date) ──────
-  try {
-    const { listProposals } = await import('./inbox/store.js');
-    const allProposals = listProposals();
+  // ── Ships-per-day trend (7 days, realized merges by calendar date) ─────────
+  if (productionProposals) {
+    const allProposals = productionProposals;
     const trendMs = TREND_DAYS * 24 * 60 * 60 * 1000;
     const trendSince = now - trendMs;
     const countByDate = new Map<string, number>();
@@ -362,17 +431,19 @@ async function buildProduction(generatedAt: string): Promise<ProductionSummary> 
     }
     for (const p of allProposals) {
       if (p.status !== 'applied') continue;
-      const createdMs = Date.parse(p.createdAt);
-      if (isNaN(createdMs) || createdMs < trendSince) continue;
-      const d = p.createdAt.slice(0, 10);
+      const merge = realizedMergeOf(p);
+      const observedAt = merge?.source === 'github-host'
+        ? merge.reconciliation.observedAt
+        : merge?.observedAt;
+      const observedMs = Date.parse(observedAt ?? '');
+      if (!Number.isFinite(observedMs) || observedMs < trendSince || observedMs > now) continue;
+      const d = observedAt!.slice(0, 10);
       if (countByDate.has(d)) countByDate.set(d, (countByDate.get(d) ?? 0) + 1);
     }
     summary.shipsPerDayTrend = Array.from(countByDate.entries()).map(([date, count]) => ({
       date,
       count,
     }));
-  } catch {
-    // Degrade to empty.
   }
 
   return summary;
@@ -400,14 +471,39 @@ const SCORE_TASK_CLASSES = ['issue', 'todo', 'lint', 'test', 'ci', 'dep', '*'];
  * ALL READ-ONLY. NEVER throws — any failure degrades to empty arrays.
  * Lazily imported so pre-M242 tests that mock only base sources stay valid.
  */
-async function buildIntelligence(generatedAt: string): Promise<IntelligenceSummary> {
-  const summary: IntelligenceSummary = {
+async function buildIntelligence(generatedAt: string): Promise<DashboardIntelligenceSummary> {
+  const summary: DashboardIntelligenceSummary = {
     generatedAt,
     routingScores: [],
     antiPlaybooks: [],
     engineScorecards: [],
     recentEvents: [],
+    proposalSourceQuality: degradedProposalSource(),
+    decisionSourceQuality: degradedDecisionSource(),
   };
+
+  let intelligenceProposals: Proposal[] | null = null;
+  let intelligenceDecisions: DecisionEntry[] | null = null;
+  try {
+    const { listProposalsDetailed } = await import('./inbox/store.js');
+    const proposalRead = listProposalsDetailed({ requireComplete: true });
+    summary.proposalSourceQuality = proposalSourceOf(proposalRead);
+    if (proposalRead.complete && proposalRead.sourceState !== 'degraded') {
+      intelligenceProposals = proposalRead.proposals;
+    }
+  } catch {
+    // Keep explicit degraded quality and withhold proposal-dependent joins.
+  }
+  try {
+    const { readDecisionsDetailed } = await import('./fleet/decisions-ledger.js');
+    const decisionRead = readDecisionsDetailed({ requireComplete: true });
+    summary.decisionSourceQuality = decisionSourceOf(decisionRead);
+    if (decisionRead.complete && decisionRead.sourceState !== 'degraded') {
+      intelligenceDecisions = decisionRead.decisions;
+    }
+  } catch {
+    // Keep explicit degraded quality and withhold decision-backed metrics.
+  }
 
   // ── M240: Learned routing scores ──────────────────────────────────────────
   try {
@@ -460,19 +556,40 @@ async function buildIntelligence(generatedAt: string): Promise<IntelligenceSumma
   }
 
   // ── Per-engine scorecards from decisions ledger (24h) ────────────────────
-  try {
-    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+  if (intelligenceDecisions && intelligenceProposals) {
     const since24h = Date.now() - 24 * 60 * 60 * 1000;
-    const decisions = readDecisions({ sinceMs: since24h });
+    const nowMs = Date.now();
+    const realizedAtByProposal = new Map<string, number>();
+    for (const proposal of intelligenceProposals) {
+      const merge = realizedMergeOf(proposal);
+      const observedAt = merge?.source === 'github-host'
+        ? merge.reconciliation.observedAt
+        : merge?.observedAt;
+      const observedMs = Date.parse(observedAt ?? '');
+      if (Number.isFinite(observedMs) && observedMs >= since24h && observedMs <= nowMs) {
+        realizedAtByProposal.set(proposal.id, observedMs);
+      }
+    }
     const acc = new Map<string, { ship: number; review: number; noise: number; harmful: number }>();
-    for (const d of decisions) {
-      if (d.action !== 'judged') continue;
+    const seenMerged = new Set<string>();
+    for (const d of intelligenceDecisions) {
       const eng = (d.engine as string | undefined) ?? 'unknown';
+      if (d.action === 'merged') {
+        if (d.labelBasis !== 'realized-merge-v1' || !realizedAtByProposal.has(d.proposalId) ||
+          seenMerged.has(d.proposalId)) continue;
+        seenMerged.add(d.proposalId);
+        if (!acc.has(eng)) acc.set(eng, { ship: 0, review: 0, noise: 0, harmful: 0 });
+        acc.get(eng)!.ship++;
+        continue;
+      }
+      if (d.action !== 'judged') continue;
+      const decisionMs = Date.parse(d.ts);
+      if (!Number.isFinite(decisionMs) || decisionMs < since24h || decisionMs > nowMs) continue;
+      const v = (d.verdict ?? '').toLowerCase();
+      if (v === 'ship' || v === 'applied' || v === 'approved') continue;
       if (!acc.has(eng)) acc.set(eng, { ship: 0, review: 0, noise: 0, harmful: 0 });
       const slot = acc.get(eng)!;
-      const v = (d.verdict ?? '').toLowerCase();
-      if (v === 'ship' || v === 'applied' || v === 'approved') slot.ship++;
-      else if (v === 'review') slot.review++;
+      if (v === 'review') slot.review++;
       else if (v === 'noise' || v === 'trivial') slot.noise++;
       else if (v === 'harmful' || v === 'decline' || v === 'rejected') slot.harmful++;
     }
@@ -480,42 +597,67 @@ async function buildIntelligence(generatedAt: string): Promise<IntelligenceSumma
       const total = counts.ship + counts.review + counts.noise + counts.harmful;
       return { engine, ...counts, total, shipRate: total > 0 ? counts.ship / total : 0 };
     }).sort((a, b) => b.shipRate - a.shipRate);
-  } catch {
-    // Degrade to empty.
   }
 
   // ── M241: Recent fleet events inferred from decisions ledger ─────────────
   // The event-bus (M241) fires in-memory handlers; lifecycle milestones are
   // captured as merged/rejected/escalated decisions. We surface those as
   // glanceable events: 'merge:shipped', 'regression:detected', 'goal:done'.
-  try {
-    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+  if (intelligenceDecisions && intelligenceProposals) {
     const since72h = Date.now() - 72 * 60 * 60 * 1000;
-    const decisions = readDecisions({ sinceMs: since72h, limit: 200 });
+    const decisions = intelligenceDecisions.slice(0, 200);
+    const nowMs = Date.now();
+    const realizedAtByProposal = new Map<string, string>();
+    for (const proposal of intelligenceProposals) {
+      const merge = realizedMergeOf(proposal);
+      const observedAt = merge?.source === 'github-host'
+        ? merge.reconciliation.observedAt
+        : merge?.observedAt;
+      const observedMs = Date.parse(observedAt ?? '');
+      if (Number.isFinite(observedMs) && observedMs >= since72h && observedMs <= nowMs) {
+        realizedAtByProposal.set(proposal.id, observedAt!);
+      }
+    }
     // Map lifecycle actions to event-bus kind labels.
     const EVENT_ACTIONS = new Set(['merged', 'rejected', 'escalated']);
     const actionToKind: Record<string, string> = {
-      merged:    'merge:shipped',
       rejected:  'judge:rejected',
       escalated: 'regression:detected',
     };
-    const eventEntries = decisions
-      .filter((d) => EVENT_ACTIONS.has(d.action))
-      .slice(0, MAX_RECENT_EVENTS);
-    summary.recentEvents = eventEntries.map((d) => ({
-      kind: actionToKind[d.action] ?? d.action,
-      detail: d.reason ?? d.detail ?? '',
-      ts: d.ts,
-    }));
-  } catch {
-    // Degrade to empty.
+    const seenMerged = new Set<string>();
+    const eventEntries: IntelligenceSummary['recentEvents'] = [];
+    for (const d of decisions) {
+      if (!EVENT_ACTIONS.has(d.action)) continue;
+      if (d.action === 'merged') {
+        const observedAt = realizedAtByProposal.get(d.proposalId);
+        if (d.labelBasis !== 'realized-merge-v1' || !observedAt || seenMerged.has(d.proposalId)) continue;
+        seenMerged.add(d.proposalId);
+        eventEntries.push({
+          kind: 'merge:shipped',
+          detail: d.reason ?? d.detail ?? '',
+          ts: observedAt,
+        });
+      } else {
+        const decisionMs = Date.parse(d.ts);
+        if (!Number.isFinite(decisionMs) || decisionMs < since72h || decisionMs > nowMs) continue;
+        eventEntries.push({
+          kind: actionToKind[d.action] ?? d.action,
+          detail: d.reason ?? d.detail ?? '',
+          ts: d.ts,
+        });
+      }
+      if (eventEntries.length >= MAX_RECENT_EVENTS) break;
+    }
+    summary.recentEvents = eventEntries;
   }
 
   // ── M246: cacheHitRate + tokensByTier from decisions ledger (24h) ─────────
-  try {
-    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+  if (intelligenceDecisions) {
     const since24h = Date.now() - 24 * 60 * 60 * 1000;
-    const decisions = readDecisions({ sinceMs: since24h });
+    const decisions = intelligenceDecisions.filter((decision) => {
+      const decisionMs = Date.parse(decision.ts);
+      return Number.isFinite(decisionMs) && decisionMs >= since24h && decisionMs <= Date.now();
+    });
 
     let totalCacheRead = 0;
     let totalTokensIn  = 0;
@@ -543,8 +685,6 @@ async function buildIntelligence(generatedAt: string): Promise<IntelligenceSumma
       ? totalCacheRead / (totalTokensIn + totalCacheRead)
       : 0;
     summary.tokensByTier = { ...tierTokens };
-  } catch {
-    // Degrade: leave cacheHitRate and tokensByTier absent.
   }
 
   return summary;
@@ -567,7 +707,7 @@ async function buildIntelligence(generatedAt: string): Promise<IntelligenceSumma
  *    process spawns (MCP probing is skipped; genome embedding probe is
  *    skipped). Sub-1s on typical machines.
  */
-export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot> {
+export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshotWithSourceQuality> {
   const generatedAt = new Date().toISOString();
 
   // ── Repos roll-up (from index) ──────────────────────────────────────────
@@ -782,7 +922,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   // READ-ONLY: inbox proposals + judge traces + goals. All sub-sources are
   // lazily imported and individually try/catch'd inside buildProduction.
   // Absent on pre-M224 producers/tests so they stay valid.
-  let production: ProductionSummary | undefined;
+  let production: DashboardProductionSummary | undefined;
   try {
     production = await buildProduction(generatedAt);
   } catch {
@@ -793,7 +933,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   // READ-ONLY: decisions ledger (M240 routing scores, M241 events, engine
   // scorecards) + genome hub (M235 anti-playbooks). Lazily imported.
   // Absent on pre-M242 producers/tests so they stay valid.
-  let intelligence: IntelligenceSummary | undefined;
+  let intelligence: DashboardIntelligenceSummary | undefined;
   try {
     intelligence = await buildIntelligence(generatedAt);
   } catch {

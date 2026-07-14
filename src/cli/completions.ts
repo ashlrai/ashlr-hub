@@ -40,7 +40,10 @@ const SUBCOMMANDS: Record<string, string[]> = {
   backlog: ['refresh'],
   inbox: ['show', 'approve', 'reject'],
   daemon: ['start', 'stop', 'status'],
-  fleet: ['status', 'watch', 'direction', 'init', 'pause', 'resume', 'doctor', 'evidence', 'scorecard', 'oversight'],
+  fleet: [
+    'status', 'watch', 'direction', 'init', 'pause', 'resume', 'doctor',
+    'automerge-canary', 'evidence', 'scorecard', 'oversight',
+  ],
   recovery: ['list', 'inspect', 'attest', 'abandon'],
   knowledge: ['build', 'impact', 'graph'],
   reflect: ['playbooks', 'propose'],
@@ -50,6 +53,10 @@ const SUBCOMMANDS: Record<string, string[]> = {
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
 };
+
+const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [
+  'status', 'prepare-shadow', 'activate-shadow', 'halt', 'reconcile',
+];
 
 function zshScript(): string {
   const subcases = Object.entries(SUBCOMMANDS)
@@ -67,6 +74,8 @@ _ashlr() {
 ${subcases}
       *) _files ;;
     esac
+  elif (( CURRENT == 4 )) && [[ "\${words[2]}" == fleet && "\${words[3]}" == automerge-canary ]]; then
+    _values 'auto-merge canary command' ${FLEET_AUTOMERGE_CANARY_SUBCOMMANDS.map((s) => `'${s}'`).join(' ')}
   else
     _files
   fi
@@ -93,6 +102,10 @@ _ashlr_completions() {
 ${subcases}
       *) COMPREPLY=() ;;
     esac
+    return 0
+  fi
+  if [ "$COMP_CWORD" -eq 3 ] && [ "\${COMP_WORDS[1]}" = "fleet" ] && [ "\${COMP_WORDS[2]}" = "automerge-canary" ]; then
+    COMPREPLY=( $(compgen -W "${FLEET_AUTOMERGE_CANARY_SUBCOMMANDS.join(' ')}" -- "$cur") )
     return 0
   fi
   COMPREPLY=()

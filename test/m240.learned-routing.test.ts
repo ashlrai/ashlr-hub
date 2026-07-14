@@ -24,6 +24,82 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+const realized = vi.hoisted(() => ({
+  times: new Map<string, string>(),
+  producers: new Map<string, { engineModel: string; workSource: string; provenanceValid?: boolean }>(),
+}));
+
+vi.mock('../src/core/inbox/realized-merge.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/inbox/realized-merge.js')>();
+  return { ...real, authenticatedRealizedMergeOf: real.realizedMergeOf };
+});
+
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProvenance: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+    verifyProducerProvenanceV2: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+  };
+});
+
+vi.mock('../src/core/inbox/store.js', () => {
+  const listProposals = () => {
+    const ids = new Set([...realized.producers.keys(), ...realized.times.keys()]);
+    return [...ids].map((id) => {
+      const producer = realized.producers.get(id);
+      const observedAt = realized.times.get(id);
+      return {
+        ...producer,
+        id,
+        repo: '/tmp/test-repo',
+        origin: 'backlog',
+        kind: 'patch',
+        title: id,
+        summary: 'routing authority fixture',
+        diff: 'diff --git a/a b/a',
+        diffHash: 'd'.repeat(64),
+        provenanceSig: producer?.provenanceValid === false
+          ? 'invalid-provenance'
+          : 'test-provenance',
+        producerProvenanceVersion: 2,
+        producerProvenanceSig: 'test-producer-provenance',
+        workItemId: `test-repo:${producer?.workSource ?? 'unknown'}:${id}`,
+        status: observedAt ? 'applied' : 'pending',
+        createdAt: new Date().toISOString(),
+        ...(observedAt ? { realizedMerge: {
+          schemaVersion: 1,
+          source: 'local-default-branch',
+          base: 'main',
+          baseBeforeOid: '1'.repeat(40),
+          proposalHeadOid: '2'.repeat(40),
+          mergeCommitOid: '3'.repeat(40),
+          observedAt,
+        }} : {}),
+      };
+    });
+  };
+  return {
+    listProposals,
+    listProposalsDetailed: () => ({
+      proposals: listProposals(),
+      sourceState: realized.producers.size > 0 ? 'healthy' : 'missing',
+      sourcePresent: realized.producers.size > 0,
+      complete: true,
+      stopReasons: [],
+      filesDiscovered: realized.producers.size,
+      filesRead: realized.producers.size,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Helpers — isolate HOME so readDecisions() never touches the real ledger
 // ---------------------------------------------------------------------------
@@ -38,6 +114,8 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'm240-test-'));
   process.env['HOME'] = tmpHome;
   process.env['ASHLR_HOME'] = path.join(tmpHome, '.ashlr');
+  realized.times.clear();
+  realized.producers.clear();
 });
 
 afterEach(() => {
@@ -63,9 +141,21 @@ function writeDecisions(
     engine?: string;
     model?: string;
     verdict?: string;
+    labelBasis?: string;
     ts?: string;
   }>,
 ): void {
+  for (const e of entries) {
+    if (!e.engine || (e.action !== 'proposed' && e.action !== 'judged')) continue;
+    const source = e.workSource ?? e.workItemId?.split(':')[1] ??
+      e.proposalId.split(':')[1] ?? '*';
+    if (!realized.producers.has(e.proposalId)) {
+      realized.producers.set(e.proposalId, {
+        engineModel: `${e.engine}:${e.model ?? 'unknown'}`,
+        workSource: source,
+      });
+    }
+  }
   const dir = path.join(tmpHome, '.ashlr', 'decisions');
   fs.mkdirSync(dir, { recursive: true });
   const byDay = new Map<string, string[]>();
@@ -81,9 +171,13 @@ function writeDecisions(
         ...(e.engine !== undefined ? { engine: e.engine } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
         ...(e.verdict !== undefined ? { verdict: e.verdict } : {}),
+        ...(e.labelBasis !== undefined ? { labelBasis: e.labelBasis } : {}),
       });
     const day = ts.slice(0, 10);
     byDay.set(day, [...(byDay.get(day) ?? []), line]);
+    if (e.action === 'merged') {
+      realized.times.set(e.proposalId, ts);
+    }
   }
   for (const [day, lines] of byDay) {
     fs.writeFileSync(path.join(dir, `${day}.jsonl`), lines.join('\n') + '\n', 'utf8');
@@ -139,7 +233,7 @@ function makeCfg(overrides: Partial<NonNullable<AshlrConfig['foundry']>> = {}): 
   } as AshlrConfig;
 }
 
-/** Build N 'judged' entries with the given verdict for a (engine, model, source). */
+/** Build N judged entries plus authoritative merge evidence for positive outcomes. */
 function judgedEntries(
   n: number,
   engine: string,
@@ -147,15 +241,28 @@ function judgedEntries(
   source: string,
   verdict: string,
   tsMs?: number,
-): Array<{ proposalId: string; action: string; engine: string; model: string; verdict: string; ts: string }> {
-  return Array.from({ length: n }, (_, i) => ({
-    proposalId: `test-repo:${source}:sha${i}`,
-    action: 'judged',
-    engine,
-    model,
-    verdict,
-    ts: tsMs ? new Date(tsMs).toISOString() : new Date().toISOString(),
-  }));
+  includeMerged = true,
+  proposalPrefix = 'sha',
+): Array<{
+  proposalId: string;
+  action: string;
+  engine?: string;
+  model?: string;
+  verdict?: string;
+  labelBasis?: string;
+  ts: string;
+}> {
+  const ts = tsMs ? new Date(tsMs).toISOString() : new Date().toISOString();
+  const positive = verdict === 'ship' || verdict === 'approved' || verdict === 'applied';
+  return Array.from({ length: n }, (_, i) => {
+    const proposalId = `test-repo:${source}:${proposalPrefix}${i}`;
+    return [
+      { proposalId, action: 'judged', engine, model, verdict, ts },
+      ...(positive && includeMerged
+        ? [{ proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1', ts }]
+        : []),
+    ];
+  }).flat();
 }
 
 // ---------------------------------------------------------------------------
@@ -239,16 +346,188 @@ describe('buildEngineScores — sample floor', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildEngineScores — ship/reject bias', () => {
+  it('does not promote a Gate 7 ship after Gate 8 refusal without a merged decision', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    const judged = judgedEntries(n, 'claude', 'opus', 'issue', 'ship', undefined, false);
+    const refused = Array.from({ length: n }, (_, i) => {
+      const proposalId = `test-repo:issue:sha${i}`;
+      return [
+        { proposalId, action: 'merge-authorized', ts: new Date().toISOString() },
+        { proposalId, action: 'escalated', ts: new Date().toISOString() },
+      ];
+    }).flat();
+    writeDecisions([...judged, ...refused]);
+
+    const scores = buildEngineScores('issue');
+    expect(scores.size).toBe(0);
+    expect(sortEnginesByScore(['codex', 'claude'] as any, scores, null)).toEqual([
+      'codex',
+      'claude',
+    ]);
+  });
+
+  it('attributes positive credit to signed proposal provenance, not the judge row', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship'));
+    for (const proposalId of realized.times.keys()) {
+      realized.producers.set(proposalId, {
+        engineModel: 'codex:gpt-5.5',
+        workSource: 'issue',
+      });
+    }
+
+    const scores = buildEngineScores('issue');
+    expect(scores.has('claude:opus')).toBe(false);
+    expect(scores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+  });
+
+  it('does not credit a realized proposal whose producer provenance is invalid', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship'));
+    for (const proposalId of realized.times.keys()) {
+      const producer = realized.producers.get(proposalId)!;
+      realized.producers.set(proposalId, { ...producer, provenanceValid: false });
+    }
+
+    expect(buildEngineScores('issue').size).toBe(0);
+  });
+
+  it('attributes forged negative judge labels only to the signed proposal producer', () => {
+    const now = 1_700_000_000_000;
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    writeDecisions(Array.from({ length: count }, (_, index) => {
+      const proposalId = `test-repo:issue:forged-negative-${index}`;
+      return [
+        {
+          proposalId,
+          action: 'judged',
+          engine: 'codex',
+          model: 'gpt-5.5',
+          verdict: 'noise',
+          ts: new Date(now - 1_000).toISOString(),
+        },
+        {
+          proposalId,
+          action: 'judged',
+          engine: 'claude-fable-5',
+          model: 'fable-5',
+          verdict: 'harmful',
+          ts: new Date(now).toISOString(),
+        },
+      ];
+    }).flat());
+    for (const proposalId of realized.producers.keys()) {
+      realized.producers.set(proposalId, {
+        engineModel: 'claude:opus',
+        workSource: 'issue',
+      });
+    }
+
+    const scores = buildEngineScores('issue', now);
+    expect(scores.has('codex:gpt-5.5')).toBe(false);
+    expect(scores.has('claude-fable-5:fable-5')).toBe(false);
+    expect(scores.get('claude:opus')).toMatchObject({ score: 0, samples: count });
+  });
+
+  it('fails closed for negative decisions without valid producer provenance', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    writeDecisions(judgedEntries(count, 'codex', 'gpt-5.5', 'issue', 'harmful'));
+    for (const [proposalId, producer] of realized.producers) {
+      realized.producers.set(proposalId, { ...producer, provenanceValid: false });
+    }
+
+    expect(buildEngineScores('issue').size).toBe(0);
+  });
+
+  it('does not promote bare historical merged rows without proposal evidence', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship'));
+    realized.times.clear();
+
+    expect(buildEngineScores('issue').size).toBe(0);
+  });
+
+  it('does not promote a legacy merged row even when the proposal has a witness', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    const entries = judgedEntries(n, 'claude', 'opus', 'issue', 'ship', undefined, false);
+    writeDecisions(entries.flatMap((entry) => entry.action === 'judged'
+      ? [entry, {
+          proposalId: entry.proposalId,
+          action: 'merged',
+          verdict: 'applied',
+          ts: entry.ts,
+        }]
+      : [entry]));
+
+    expect(realized.times.size).toBe(n);
+    expect(buildEngineScores('issue').size).toBe(0);
+  });
+
+  it('uses witness time for the learned-routing window', () => {
+    const now = 1_800_000_000_000;
+    const old = now - 100 * 24 * 60 * 60 * 1000;
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship', old));
+    for (const proposalId of realized.times.keys()) {
+      realized.times.set(proposalId, new Date(now).toISOString());
+    }
+
+    const score = buildEngineScores('issue', now).get('claude:opus');
+    expect(score?.samples).toBe(n);
+    expect(score?.score).toBeGreaterThan(0.5);
+
+    for (const proposalId of realized.times.keys()) {
+      realized.times.set(proposalId, new Date(old).toISOString());
+    }
+    expect(buildEngineScores('issue', now).size).toBe(0);
+  });
+
+  it('uses the newest retry per proposal and judge engine/model', () => {
+    const now = 1_700_000_000_000;
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    writeDecisions(Array.from({ length: n }, (_, index) => {
+      const proposalId = `test-repo:issue:retry-${index}`;
+      return [
+        {
+          proposalId,
+          action: 'judged',
+          engine: 'codex',
+          model: 'gpt-5.5',
+          verdict: 'noise',
+          ts: new Date(now - 1_000).toISOString(),
+        },
+        {
+          proposalId,
+          action: 'judged',
+          engine: 'codex',
+          model: 'gpt-5.5',
+          verdict: 'harmful',
+          ts: new Date(now).toISOString(),
+        },
+      ];
+    }).flat());
+
+    const score = buildEngineScores('issue', now).get('codex:gpt-5.5');
+    expect(score?.samples).toBe(n);
+    expect(score?.score).toBe(0);
+  });
+
   it('prefers canonical workSource over opaque proposal ids', () => {
     const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
-    writeDecisions(Array.from({ length: n }, (_, i) => ({
-      proposalId: `prop-opaque-${i}`,
-      workSource: 'issue',
-      action: 'judged',
-      engine: 'codex',
-      model: 'gpt-5.5',
-      verdict: 'ship',
-    })));
+    writeDecisions(Array.from({ length: n }, (_, i) => {
+      const proposalId = `prop-opaque-${i}`;
+      return [
+        {
+          proposalId,
+          workSource: 'issue',
+          action: 'judged',
+          engine: 'codex',
+          model: 'gpt-5.5',
+          verdict: 'ship',
+        },
+        { proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
+      ];
+    }).flat());
 
     const issueScores = buildEngineScores('issue');
     expect(issueScores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
@@ -297,7 +576,7 @@ describe('buildEngineScores — ship/reject bias', () => {
     const rejects = n - ships;
     writeDecisions([
       ...judgedEntries(ships, 'claude', 'opus', 'todo', 'ship'),
-      ...judgedEntries(rejects, 'claude', 'opus', 'todo', 'noise'),
+      ...judgedEntries(rejects, 'claude', 'opus', 'todo', 'noise', undefined, true, 'reject'),
     ]);
     const scores = buildEngineScores('todo');
     const s = scores.get('claude:opus');

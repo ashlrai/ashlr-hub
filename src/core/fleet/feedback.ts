@@ -3,7 +3,7 @@
  *
  * Aggregates per-source productivity stats from three ledgers:
  *   - decisions-ledger: Manager verdicts (ship/noise/harmful) + merged/rejected
- *   - inbox/store:      Proposal lifecycle (created, approved, rejected)
+ *   - inbox/store:      Proposal lifecycle (created, authorized, merged, rejected)
  *   - worked-ledger:    Per-item run outcomes (diff / empty)
  *
  * Exports:
@@ -20,20 +20,26 @@
  *
  * M151: EDV (Execute-Distill-Verify) independent-confirmation gate.
  *   - Flag: cfg.foundry.edvVerify (default false = current behavior).
- *   - When ON: merged/accepted outcomes require an independent confirmation
+ *   - When ON: merged outcomes require an independent confirmation
  *     (proposal.verifyResult.passed OR a separate 'verified' decision entry)
  *     before counting at full weight. Unconfirmed accepts contribute
  *     EDV_UNVERIFIED_WEIGHT (0.3) to mergedWeightedSum rather than 1.0.
  *   - SourceStats gains an optional `mergedWeightedSum` field (absent when EDV
  *     is OFF, so flag-off acceptRate is byte-identical to pre-M151).
- *   - acceptRate in EDV mode uses mergedWeightedSum in place of merged:
- *       (mergedWeightedSum + shipCount) / created
+ *   - acceptRate in EDV mode uses mergedWeightedSum in place of merged.
+ *     Judge `ship` verdicts remain predictive metrics and never count as an
+ *     accepted outcome before an authoritative `merged` lifecycle row exists.
  */
 
-import type { Proposal, WorkItem, WorkSource } from '../types.js';
+import type { DecisionEntry, Proposal, WorkItem, WorkSource } from '../types.js';
 import { readDecisions } from './decisions-ledger.js';
 import { loadWorkedLedger } from './worked-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
+import {
+  hasRealizedMergeEvidence,
+  realizedMergeOf,
+} from '../inbox/realized-merge.js';
+import { verifyProducerProvenanceV2 } from '../foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -65,7 +71,7 @@ export interface SourceStats {
   created: number;
   /** Proposals that received a manager verdict (judged count). */
   judged: number;
-  /** Proposals merged (action 'merged' or verdict 'approved'/'applied'). */
+  /** Distinct proposals with a merged row and exact realized-merge evidence. */
   merged: number;
   /** Proposals explicitly rejected. */
   rejected: number;
@@ -79,7 +85,7 @@ export interface SourceStats {
   emptyCount: number;
   /** shipCount / judged  (0 when judged === 0). */
   shipRate: number;
-  /** (merged + shipCount) / created  (0 when created === 0). */
+  /** merged / created (or EDV-weighted merged / created; 0 when created === 0). */
   acceptRate: number;
   /** emptyCount / (diffCount + emptyCount)  (0 when no runs). */
   emptyRate: number;
@@ -166,11 +172,55 @@ function recomputeRates(s: SourceStats): SourceStats {
   const effectiveMerged = s.mergedWeightedSum !== undefined ? s.mergedWeightedSum : s.merged;
   return {
     ...s,
-    shipRate: s.judged > 0 ? s.shipCount / s.judged : 0,
-    acceptRate: s.created > 0 ? (effectiveMerged + s.shipCount) / s.created : 0,
+    shipRate: s.judged > 0 ? Math.min(1, s.shipCount / s.judged) : 0,
+    acceptRate: s.created > 0 ? Math.min(1, effectiveMerged / s.created) : 0,
     emptyRate: runs > 0 ? s.emptyCount / runs : 0,
-    noiseRate: s.judged > 0 ? s.noiseCount / s.judged : 0,
+    noiseRate: s.judged > 0 ? Math.min(1, s.noiseCount / s.judged) : 0,
   };
+}
+
+function isNewerDecision(candidate: DecisionEntry, existing: DecisionEntry | undefined): boolean {
+  if (existing === undefined) return true;
+  const candidateMs = Date.parse(candidate.ts);
+  const existingMs = Date.parse(existing.ts);
+  if (!Number.isFinite(candidateMs)) return false;
+  if (!Number.isFinite(existingMs)) return true;
+  return candidateMs > existingMs;
+}
+
+function judgePredictionKey(entry: DecisionEntry): string {
+  return `${entry.proposalId}\u0000${entry.engine ?? ''}\u0000${entry.model ?? ''}`;
+}
+
+function isCanonicalMergedDecision(entry: DecisionEntry): boolean {
+  return entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1';
+}
+
+function isInWindow(timestampMs: number, sinceMs: number | undefined): boolean {
+  return Number.isFinite(timestampMs) && timestampMs <= Date.now() &&
+    (sinceMs === undefined || timestampMs >= sinceMs);
+}
+
+function realizedEvidenceMs(proposal: Proposal): number | null {
+  const evidence = realizedMergeOf(proposal);
+  if (!evidence) return null;
+  const timestamp = evidence.source === 'github-host'
+    ? evidence.reconciliation.observedAt
+    : evidence.observedAt;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function realizedEvidenceSupersedes(
+  proposal: Proposal,
+  terminal: DecisionEntry | undefined,
+): boolean {
+  if (!hasRealizedMergeEvidence(proposal)) return false;
+  const evidenceMs = realizedEvidenceMs(proposal);
+  if (evidenceMs === null) return false;
+  if (terminal?.action !== 'rejected') return true;
+  const terminalMs = Date.parse(terminal.ts);
+  return !Number.isFinite(terminalMs) || evidenceMs >= terminalMs;
 }
 
 /** Mutable per-scope accumulator keyed by source string. */
@@ -193,9 +243,9 @@ function touch(map: StatsMap, source: string): SourceStats {
  * Compute per-(source × repo) and global productivity priors.
  *
  * Signal sources:
- *   1. decisions-ledger  — manager verdicts + merged/rejected lifecycle events.
+ *   1. decisions-ledger  — manager predictions + merged/rejected lifecycle events.
  *      Each DecisionEntry is linked to a proposal via proposalId. We load
- *      proposals to resolve (proposalId → {source, repo}).
+ *      proposals to resolve source/repo and qualify positive realized evidence.
  *   2. inbox/store proposals — provide `created` counts per (source, repo).
  *      `source` is derived from proposal.kind via a best-effort mapping.
  *   3. worked-ledger — WorkedEvent.itemId encodes `${repo}:${source}:${rest}`.
@@ -215,7 +265,15 @@ export async function computeOutcomePriors(
     const edvVerify = opts?.edvVerify === true;
 
     // ── 1. Load decisions ─────────────────────────────────────────────────────
-    const decisions = readDecisions({ sinceMs });
+    // Merge rows may predate the host observation that makes them authoritative.
+    // Read bounded history, then apply merge windows to the witness timestamp.
+    const decisions = readDecisions({ requireComplete: true });
+    const decisionSource = (decisions as typeof decisions & {
+      sourceQuality?: { sourceState: string; complete: boolean };
+    }).sourceQuality;
+    if (decisionSource && (decisionSource.sourceState === 'degraded' || !decisionSource.complete)) {
+      return { global: {}, byRepo: {}, computedAt: new Date().toISOString() };
+    }
 
     // ── 2. Resolve proposals (proposalId → {source, repo, proposal}) ──────────
     let proposals: Proposal[] = [];
@@ -228,8 +286,12 @@ export async function computeOutcomePriors(
     } else {
       // Production: lazy-import inbox/store (avoids circular dep at module load).
       try {
-        const { listProposals } = await import('../inbox/store.js');
-        proposals = listProposals();
+        const { listProposalsDetailed } = await import('../inbox/store.js');
+        const read = listProposalsDetailed({ requireComplete: true });
+        if (!read.complete || read.sourceState === 'degraded') {
+          return { global: {}, byRepo: {}, computedAt: new Date().toISOString() };
+        }
+        proposals = read.proposals;
       } catch {
         proposals = [];
       }
@@ -289,60 +351,75 @@ export async function computeOutcomePriors(
     }
 
     // ── Process decisions ─────────────────────────────────────────────────────
+    // Decision rows identify when an outcome entered this reporting window,
+    // but only the current proposal's exact realized-merge witness can grant
+    // positive credit. A newer witness overrides stale rejection history.
+    const latestMerged = new Map<string, DecisionEntry>();
+    const latestRejection = new Map<string, DecisionEntry>();
+    const latestJudgePrediction = new Map<string, DecisionEntry>();
     for (const d of decisions) {
+      if (isCanonicalMergedDecision(d)) {
+        const existing = latestMerged.get(d.proposalId);
+        if (isNewerDecision(d, existing)) latestMerged.set(d.proposalId, d);
+      }
+      if (d.action === 'rejected') {
+        const existing = latestRejection.get(d.proposalId);
+        if (isNewerDecision(d, existing)) latestRejection.set(d.proposalId, d);
+      }
+      if (d.action === 'judged' && isInWindow(Date.parse(d.ts), sinceMs)) {
+        const verdict = (d.verdict ?? '').toLowerCase();
+        if (verdict === 'ship' || verdict === 'noise' || verdict === 'harmful' || verdict === 'rejected') {
+          const key = judgePredictionKey(d);
+          const existing = latestJudgePrediction.get(key);
+          if (isNewerDecision(d, existing)) latestJudgePrediction.set(key, d);
+        }
+      }
+    }
+
+    for (const [proposalId] of latestMerged) {
+      const meta = proposalMeta.get(proposalId);
+      const evidenceMs = meta ? realizedEvidenceMs(meta.proposal) : null;
+      if (meta === undefined || evidenceMs === null || !isInWindow(evidenceMs, sinceMs) ||
+        !verifyProducerProvenanceV2(meta.proposal).ok ||
+        !realizedEvidenceSupersedes(meta.proposal, latestRejection.get(proposalId))) continue;
+      const { source, repo } = meta;
+      if (edvVerify && decisionsByProposal !== null) {
+        const decisionsForProposal = decisionsByProposal.get(proposalId) ?? [];
+        const { weight } = edvConfirmationWeight(meta.proposal, decisionsForProposal);
+        gStats(source).merged++;
+        if (repo) rStats(repo, source).merged++;
+        const gs = gStats(source);
+        gs.mergedWeightedSum = (gs.mergedWeightedSum ?? 0) + weight;
+        if (repo) {
+          const rs = rStats(repo, source);
+          rs.mergedWeightedSum = (rs.mergedWeightedSum ?? 0) + weight;
+        }
+      } else {
+        gStats(source).merged++;
+        if (repo) rStats(repo, source).merged++;
+      }
+    }
+
+    for (const [proposalId, terminal] of latestRejection) {
+      if (!isInWindow(Date.parse(terminal.ts), sinceMs)) continue;
+      const meta = proposalMeta.get(proposalId);
+      if (meta !== undefined && realizedEvidenceSupersedes(meta.proposal, terminal)) continue;
+      if (terminal.action !== 'rejected') continue;
+      const source = meta?.source ?? 'unknown';
+      const repo = meta?.repo ?? null;
+      gStats(source).rejected++;
+      if (repo) rStats(repo, source).rejected++;
+    }
+
+    // Judge rows remain predictive calibration only. Retries by the same
+    // judge engine/model collapse to the newest prediction for each proposal.
+    for (const d of latestJudgePrediction.values()) {
       const meta = proposalMeta.get(d.proposalId);
       const source = meta?.source ?? 'unknown';
       const repo = meta?.repo ?? null;
-
-      const action = d.action;
       const verdict = (d.verdict ?? '').toLowerCase();
-
-      // Judged: has a verdict or is explicitly a judged/verified action.
-      const isJudged =
-        verdict === 'ship' ||
-        verdict === 'noise' ||
-        verdict === 'harmful' ||
-        verdict === 'approved' ||
-        verdict === 'rejected' ||
-        verdict === 'applied' ||
-        action === 'judged' ||
-        action === 'verified';
-
-      if (isJudged) {
-        gStats(source).judged++;
-        if (repo) rStats(repo, source).judged++;
-      }
-
-      if (action === 'merged' || verdict === 'approved' || verdict === 'applied') {
-        if (edvVerify && meta !== undefined && decisionsByProposal !== null) {
-          // M151: compute independent-confirmation weight for this accept.
-          // decisionsForProposal is ALL decisions for the proposal (includes
-          // 'verified' entries from a separate verifier, if any).
-          const decisionsForProposal = decisionsByProposal.get(d.proposalId) ?? [];
-          const { weight } = edvConfirmationWeight(meta.proposal, decisionsForProposal);
-
-          // Integer merged count (unchanged — used by raw stats consumers).
-          gStats(source).merged++;
-          if (repo) rStats(repo, source).merged++;
-
-          // Weighted accumulator: initialise to 0 on first EDV hit, then add.
-          const gs = gStats(source);
-          gs.mergedWeightedSum = (gs.mergedWeightedSum ?? 0) + weight;
-          if (repo) {
-            const rs = rStats(repo, source);
-            rs.mergedWeightedSum = (rs.mergedWeightedSum ?? 0) + weight;
-          }
-        } else {
-          // Flag-off: exactly the pre-M151 path.
-          gStats(source).merged++;
-          if (repo) rStats(repo, source).merged++;
-        }
-      }
-
-      if (action === 'rejected' || verdict === 'rejected') {
-        gStats(source).rejected++;
-        if (repo) rStats(repo, source).rejected++;
-      }
+      gStats(source).judged++;
+      if (repo) rStats(repo, source).judged++;
 
       if (verdict === 'ship') {
         gStats(source).shipCount++;
@@ -406,10 +483,12 @@ export async function computeOutcomePriors(
  *
  * Productivity formula (weights sum to 1.0):
  *   productivity =
- *     shipRate   × 0.40   (manager explicitly called it good)
- *     acceptRate × 0.30   (work actually merged)
+ *     acceptRate × 0.70   (work authoritatively merged)
  *     (1 - emptyRate) × 0.20   (runs produce real diffs)
  *     (1 - noiseRate) × 0.10   (not noise/harmful)
+ *
+ * shipRate remains available as a judge-prediction metric, but it cannot
+ * positively adjust source routing before application/merge is observed.
  *
  * Multiplier mapping  [0, 1] → [FLOOR, CEIL]:
  *   multiplier = FLOOR + productivity × (CEIL − FLOOR)
@@ -444,8 +523,7 @@ export function scoreAdjustment(item: WorkItem, priors: OutcomePriors): number {
     if (effectiveSamples < MIN_SAMPLES) return 1.0;
 
     const productivity =
-      stats.shipRate * 0.4 +
-      stats.acceptRate * 0.3 +
+      stats.acceptRate * 0.7 +
       (1 - stats.emptyRate) * 0.2 +
       (1 - stats.noiseRate) * 0.1;
 

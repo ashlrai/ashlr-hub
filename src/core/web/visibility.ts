@@ -22,6 +22,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,7 +108,9 @@ export interface VisibilitySnapshot {
 
 type VisibilityDecision = {
   ts?: string | number;
+  proposalId?: string;
   action?: string;
+  labelBasis?: string;
   engine?: string;
   costUsd?: number;
   tokensIn?: number;
@@ -151,6 +154,16 @@ async function readVisibilityDecisions(
 
   const { readDecisions } = await import('../fleet/decisions-ledger.js');
   return readDecisions(opts) as VisibilityDecision[];
+}
+
+async function readCompleteVisibilityDecisions(cfg: unknown): Promise<VisibilityDecision[] | null> {
+  const injected = (cfg as { __visibilityDecisions?: VisibilityDecision[] } | undefined)?.__visibilityDecisions;
+  if (Array.isArray(injected)) return [...injected];
+  const { readDecisionsDetailed } = await import('../fleet/decisions-ledger.js');
+  const result = readDecisionsDetailed({ requireComplete: true });
+  return result.complete && result.sourceState !== 'degraded'
+    ? result.decisions as VisibilityDecision[]
+    : null;
 }
 
 /** Read and sum all tokensSaved across sessions in ~/.ashlr/stats.json. */
@@ -222,12 +235,40 @@ async function buildFleetActivity24h(_cfg: unknown, nowOverride?: number): Promi
     let rejectedToday = 0;
     const backendCounts: Record<string, number> = {};
     try {
-      const decisions = await readVisibilityDecisions(_cfg, { sinceMs: since24h });
+      const decisions = await readCompleteVisibilityDecisions(_cfg);
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalRead = listProposalsDetailed({ requireComplete: true });
+      if (!decisions || !proposalRead.complete || proposalRead.sourceState === 'degraded') {
+        throw new Error('realized activity sources are incomplete');
+      }
+      const observedAtByProposal = new Map<string, number>();
+      const now = nowMs(nowOverride);
+      for (const proposal of proposalRead.proposals) {
+        const merge = realizedMergeOf(proposal);
+        const observedAt = merge?.source === 'github-host'
+          ? merge.reconciliation.observedAt
+          : merge?.observedAt;
+        const observedMs = Date.parse(observedAt ?? '');
+        if (Number.isFinite(observedMs) && observedMs >= since24h && observedMs <= now) {
+          observedAtByProposal.set(proposal.id, observedMs);
+        }
+      }
+      const countedMergedProposals = new Set<string>();
       for (const d of decisions) {
-        if (!isSince(d, since24h)) continue;
+        const canonicalMerge = d.action === 'merged' &&
+          d.labelBasis === 'realized-merge-v1' &&
+          !!d.proposalId &&
+          observedAtByProposal.has(d.proposalId) &&
+          !countedMergedProposals.has(d.proposalId);
+        if (d.action === 'merged') {
+          if (!canonicalMerge) continue;
+          countedMergedProposals.add(d.proposalId!);
+          mergedToday++;
+        } else if (!isSince(d, since24h)) {
+          continue;
+        }
         const eng = (d.engine as string | undefined) ?? 'unknown';
         backendCounts[eng] = (backendCounts[eng] ?? 0) + 1;
-        if (d.action === 'merged') mergedToday++;
         if (d.action === 'rejected') rejectedToday++;
       }
     } catch { /* degrade */ }
@@ -253,11 +294,26 @@ async function buildFleetActivity24h(_cfg: unknown, nowOverride?: number): Promi
     // Recent merge titles from inbox store
     let recentMergeTitles: string[] = [];
     try {
-      const { listProposals } = await import('../inbox/store.js');
-      const applied = listProposals({ status: 'applied' });
-      recentMergeTitles = (applied as { title?: string; id: string }[])
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalRead = listProposalsDetailed({ requireComplete: true });
+      if (!proposalRead.complete || proposalRead.sourceState === 'degraded') {
+        throw new Error('proposal source is incomplete');
+      }
+      const now = nowMs(nowOverride);
+      const merged = proposalRead.proposals
+        .filter((proposal) => proposal.status === 'applied')
+        .map((proposal) => {
+          const merge = realizedMergeOf(proposal);
+          const observedAt = merge?.source === 'github-host'
+            ? merge.reconciliation.observedAt
+            : merge?.observedAt;
+          return { proposal, observedMs: Date.parse(observedAt ?? '') };
+        })
+        .filter((entry) => Number.isFinite(entry.observedMs) && entry.observedMs <= now)
+        .sort((a, b) => b.observedMs - a.observedMs);
+      recentMergeTitles = merged
         .slice(0, 5)
-        .map((p) => p.title ?? p.id);
+        .map(({ proposal }) => proposal.title ?? proposal.id);
     } catch { /* degrade */ }
 
     return {

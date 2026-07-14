@@ -333,10 +333,25 @@ vi.mock('../src/core/daemon/state.js', () => ({ loadDaemonState: () => FIXTURE_D
 vi.mock('../src/core/usage/frontier-usage.js', () => ({
   getFrontierUsageSync: () => FIXTURE_FRONTIER_USAGE,
 }));
-vi.mock('../src/core/inbox/store.js', () => ({
-  pendingCount: () => 0,
-  listProposals: () => [],
-}));
+vi.mock('../src/core/inbox/store.js', () => {
+  const listProposals = vi.fn(() => []);
+  return {
+    pendingCount: () => 0,
+    listProposals,
+    listProposalsDetailed: vi.fn(() => ({
+      proposals: listProposals(),
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesDiscovered: 0,
+      filesRead: 0,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    })),
+  };
+});
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: () => [],
 }));
@@ -372,13 +387,31 @@ const FIXTURE_DECISIONS_M246 = [
     tokensIn: 500, tokensOut: 200, cacheHit: false },
 ];
 
-vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
-  readDecisions: vi.fn((opts?: { sinceMs?: number; limit?: number }) => {
+vi.mock('../src/core/fleet/decisions-ledger.js', () => {
+  const readDecisions = vi.fn((opts?: { sinceMs?: number; limit?: number }) => {
     const since = opts?.sinceMs ?? 0;
     return FIXTURE_DECISIONS_M246.filter(d => Date.parse(d.ts) >= since);
-  }),
-  recordDecision: vi.fn(() => {}),
-}));
+  });
+  return {
+    readDecisions,
+    readDecisionsDetailed: vi.fn((opts?: { sinceMs?: number; limit?: number }) => {
+      const decisions = readDecisions(opts);
+      return {
+        decisions,
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: decisions.length > 0 ? 1 : 0,
+        bytesRead: 0,
+        rowsScanned: decisions.length,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      };
+    }),
+    recordDecision: vi.fn(() => {}),
+  };
+});
 
 const { buildSnapshot } = await import('../src/core/dashboard.ts');
 

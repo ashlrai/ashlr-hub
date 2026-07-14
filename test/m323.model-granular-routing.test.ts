@@ -45,6 +45,12 @@ vi.mock('../src/core/fleet/subscription-usage.js', () => ({
 
 // Ledger fixture — swapped per test via `fixture`.
 let fixture: Record<string, unknown>[] = [];
+const bareMergedIds = new Set<string>();
+const proposalAuthorities = new Map<string, {
+  engineModel: string;
+  workSource: string;
+  provenanceValid?: boolean;
+}>();
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn((opts?: { sinceMs?: number }) => {
@@ -53,6 +59,90 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   }),
   recordDecision: vi.fn(() => {}),
 }));
+
+vi.mock('../src/core/inbox/realized-merge.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/inbox/realized-merge.js')>();
+  return { ...real, authenticatedRealizedMergeOf: real.realizedMergeOf };
+});
+
+vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/foundry/provenance.js')>();
+  return {
+    ...real,
+    verifyProvenance: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+    verifyProducerProvenanceV2: (proposal: { provenanceSig?: string }) => ({
+      ok: proposal.provenanceSig === 'test-provenance',
+    }),
+  };
+});
+
+vi.mock('../src/core/inbox/store.js', () => {
+  const proposals = () => {
+    const realized = fixture.reduce((times, entry) => {
+    const id = String(entry['proposalId']);
+    if (entry['action'] === 'merged' && !bareMergedIds.has(id)) {
+      times.set(id, String(entry['ts']));
+    }
+    return times;
+    }, new Map<string, string>());
+    const producers = new Map(fixture
+      .filter((entry) => entry['action'] === 'proposed' && typeof entry['engine'] === 'string')
+      .map((entry) => [String(entry['proposalId']), entry] as const));
+    return [...producers].map(([id, producer]) => {
+    const observedAt = realized.get(id);
+    const engine = String(producer?.['engine'] ?? 'unknown');
+    const model = String(producer?.['model'] ?? '');
+    const authority = proposalAuthorities.get(id);
+    return ({
+    id,
+    repo: '/mock/repo',
+    origin: 'backlog',
+    kind: 'patch',
+    title: id,
+    summary: 'realized model routing fixture',
+    diff: 'diff --git a/a b/a',
+    diffHash: 'd'.repeat(64),
+    provenanceSig: authority?.provenanceValid === false ? 'invalid-provenance' : 'test-provenance',
+    producerProvenanceVersion: 2,
+    producerProvenanceSig: 'test-producer-provenance',
+    workItemId: `/mock/repo:${String(authority?.workSource ?? producer?.['workSource'] ?? 'unknown')}:${id}`,
+    workSource: authority?.workSource ?? producer?.['workSource'],
+    engineModel: authority?.engineModel ??
+      (model.startsWith(`${engine}:`) ? model : `${engine}:${model}`),
+    status: observedAt ? 'applied' : 'pending',
+    createdAt: new Date().toISOString(),
+    ...(observedAt ? { realizedMerge: {
+      schemaVersion: 1,
+      source: 'local-default-branch',
+      base: 'main',
+      baseBeforeOid: '1'.repeat(40),
+      proposalHeadOid: '2'.repeat(40),
+      mergeCommitOid: '3'.repeat(40),
+      observedAt,
+    }} : {}),
+  });
+  });};
+  return {
+    listProposals: proposals,
+    listProposalsDetailed: () => {
+      const rows = proposals();
+      return {
+        proposals: rows,
+        sourceState: rows.length > 0 ? 'healthy' : 'missing',
+        sourcePresent: rows.length > 0,
+        complete: true,
+        stopReasons: [],
+        filesDiscovered: rows.length,
+        filesRead: rows.length,
+        bytesRead: 0,
+        invalidFiles: 0,
+        unreadableFiles: 0,
+      };
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Imports under test
@@ -65,6 +155,7 @@ import {
   selectCostAwareModel,
   LEARNED_ROUTING_MIN_SAMPLES,
 } from '../src/core/run/learned-router.js';
+import { computeModelRoi } from '../src/core/fleet/quality-metrics.js';
 import { KNOWN_MODELS } from '../src/core/run/model-catalog.js';
 
 // ---------------------------------------------------------------------------
@@ -75,12 +166,13 @@ const NOW = Date.now();
 const HOUR = 60 * 60 * 1000;
 const ts = (hoursAgo: number) => new Date(NOW - hoursAgo * HOUR).toISOString();
 
-/** N proposed+judged chains for one producer model with the given verdicts. */
+/** N proposed+judged chains, with merged evidence for realized positive outcomes. */
 function chains(
   idPrefix: string,
   model: string,
   verdicts: string[],
   source = 'issue',
+  includeMerged = true,
 ): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   verdicts.forEach((verdict, i) => {
@@ -103,11 +195,20 @@ function chains(
       model,
       workSource: source,
     });
+    if (includeMerged && (verdict === 'ship' || verdict === 'approved' || verdict === 'applied')) {
+      out.push({
+        ts: ts(i),
+        proposalId: pid,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      });
+    }
   });
   return out;
 }
 
-/** N fresh proposed+judged chains for exact sample-floor tests. */
+/** N fresh chains, with merged evidence for realized positive outcomes. */
 function freshChains(
   idPrefix: string,
   model: string,
@@ -135,6 +236,15 @@ function freshChains(
       model,
       workSource: source,
     });
+    if (verdict === 'ship' || verdict === 'approved' || verdict === 'applied') {
+      out.push({
+        ts: stamp,
+        proposalId: pid,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      });
+    }
   });
   return out;
 }
@@ -195,6 +305,8 @@ const CLAUDE_CTX = { availableEngines: ['claude', 'builtin'] } as never;
 beforeEach(() => {
   _seq = 0;
   fixture = [];
+  bareMergedIds.clear();
+  proposalAuthorities.clear();
 });
 
 afterEach(() => {
@@ -206,7 +318,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M323 buildProducerScores', () => {
-  it('attributes verdicts to the PRODUCER with canonical keys', () => {
+  it('attributes realized outcomes to the PRODUCER with canonical keys', () => {
     fixture = SONNET_GOOD;
     const scores = buildProducerScores('issue', NOW);
     expect(scores.has('claude:sonnet-5')).toBe(true);
@@ -227,6 +339,150 @@ describe('M323 buildProducerScores', () => {
 
   it('cold start → empty map', () => {
     fixture = [];
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('ignores future negative judgments', () => {
+    const proposalId = 'future-negative';
+    fixture = [
+      {
+        ts: new Date(NOW + HOUR).toISOString(),
+        proposalId,
+        action: 'judged',
+        engine: 'claude-fable-5',
+        model: 'claude-fable-5',
+        verdict: 'harmful',
+      },
+      {
+        ts: ts(1),
+        proposalId,
+        action: 'proposed',
+        engine: 'claude',
+        model: 'claude:claude-sonnet-5',
+        workSource: 'issue',
+      },
+    ];
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('does not credit a producer when Gate 7 ships but Gate 8 refuses', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    fixture = [
+      ...chains(
+        'gate8-refused',
+        'claude:claude-sonnet-5',
+        Array.from({ length: count }, () => 'ship'),
+        'issue',
+        false,
+      ),
+      ...Array.from({ length: count }, (_, index) => [
+        { ts: ts(0.5), proposalId: `gate8-refused-${index}`, action: 'merge-authorized' },
+        { ts: ts(0.25), proposalId: `gate8-refused-${index}`, action: 'escalated' },
+      ]).flat(),
+    ];
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('does not credit a producer for a bare historical merged row', () => {
+    fixture = chains(
+      'bare-merge',
+      'claude:claude-sonnet-5',
+      Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES + 2 }, () => 'ship'),
+    );
+    for (const entry of fixture) {
+      if (entry['action'] === 'merged') bareMergedIds.add(String(entry['proposalId']));
+    }
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('does not credit a producer for a legacy merged row with a current witness', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    fixture = chains(
+      'legacy-merge',
+      'claude:claude-sonnet-5',
+      Array.from({ length: count }, () => 'ship'),
+    ).map((entry) => entry['action'] === 'merged'
+      ? Object.fromEntries(Object.entries(entry).filter(([key]) => key !== 'labelBasis'))
+      : entry);
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('uses signed proposal identity instead of a forged proposed ledger identity', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    fixture = chains(
+      'forged-producer',
+      'claude:claude-sonnet-5',
+      Array.from({ length: count }, () => 'ship'),
+    );
+    for (let index = 0; index < count; index += 1) {
+      proposalAuthorities.set(`forged-producer-${index}`, {
+        engineModel: 'codex:gpt-5.5',
+        workSource: 'issue',
+      });
+    }
+
+    const scores = buildProducerScores('issue', NOW);
+    expect(scores.has('claude:sonnet-5')).toBe(false);
+    expect(scores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+  });
+
+  it('uses signed proposal identity for negative outcomes despite forged ledger labels', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    fixture = chains(
+      'forged-negative',
+      'claude:claude-sonnet-5',
+      Array.from({ length: count }, () => 'harmful'),
+    );
+    for (let index = 0; index < count; index += 1) {
+      proposalAuthorities.set(`forged-negative-${index}`, {
+        engineModel: 'codex:gpt-5.5',
+        workSource: 'issue',
+      });
+    }
+
+    const scores = buildProducerScores('issue', NOW);
+    expect(scores.has('claude:sonnet-5')).toBe(false);
+    expect(scores.has('claude-fable-5:fable-5')).toBe(false);
+    expect(scores.get('codex:gpt-5.5')?.score).toBe(0);
+  });
+
+  it('fails closed for negative outcomes with invalid producer provenance', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    fixture = chains(
+      'invalid-negative',
+      'claude:claude-sonnet-5',
+      Array.from({ length: count }, () => 'rejected'),
+    );
+    for (let index = 0; index < count; index += 1) {
+      proposalAuthorities.set(`invalid-negative-${index}`, {
+        engineModel: 'claude:claude-sonnet-5',
+        workSource: 'issue',
+        provenanceValid: false,
+      });
+    }
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it('does not credit realized proposals with invalid producer provenance', () => {
+    const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
+    fixture = chains(
+      'invalid-provenance',
+      'claude:claude-sonnet-5',
+      Array.from({ length: count }, () => 'ship'),
+    );
+    for (let index = 0; index < count; index += 1) {
+      proposalAuthorities.set(`invalid-provenance-${index}`, {
+        engineModel: 'claude:claude-sonnet-5',
+        workSource: 'issue',
+        provenanceValid: false,
+      });
+    }
+
     expect(buildProducerScores('issue', NOW).size).toBe(0);
   });
 
@@ -260,6 +516,60 @@ describe('M323 buildProducerScores', () => {
     expect(opus).toBeDefined();
     expect(opus!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
     expect(opus!.score).toBeGreaterThan(0.5);
+  });
+});
+
+describe('M323 realized model ROI', () => {
+  it('deduplicates judge retries and terminal rows while realized evidence wins', () => {
+    const proposalId = 'roi-realized';
+    fixture = [
+      {
+        ts: ts(4), proposalId, action: 'proposed', engine: 'claude',
+        model: 'claude:claude-sonnet-5', costUsd: 2,
+      },
+      {
+        ts: ts(3), proposalId, action: 'judged', engine: 'claude-fable-5',
+        model: 'claude-fable-5', verdict: 'noise', costUsd: 1,
+      },
+      {
+        ts: ts(2), proposalId, action: 'judged', engine: 'claude-fable-5',
+        model: 'claude-fable-5', verdict: 'ship', costUsd: 0.5,
+      },
+      { ts: ts(1.5), proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
+      { ts: ts(1), proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
+      { ts: ts(2.5), proposalId, action: 'rejected', verdict: 'rejected' },
+    ];
+
+    const roi = computeModelRoi('all')['claude:sonnet-5'];
+    expect(roi).toMatchObject({
+      dispatches: 1,
+      judged: 1,
+      shipVerdicts: 1,
+      shipRate: 1,
+      merged: 1,
+      rejected: 0,
+      judgeCostUsd: 0.5,
+      costPerMergedUsd: 2.5,
+    });
+  });
+
+  it('rejects bare merged ROI history and keeps the newest rejection', () => {
+    const proposalId = 'roi-bare-merge';
+    fixture = [
+      {
+        ts: ts(3), proposalId, action: 'proposed', engine: 'codex',
+        model: 'codex:gpt-5.5', costUsd: 2,
+      },
+      { ts: ts(2), proposalId, action: 'merged', verdict: 'applied' },
+      { ts: ts(1), proposalId, action: 'rejected', verdict: 'rejected' },
+    ];
+    bareMergedIds.add(proposalId);
+
+    expect(computeModelRoi('all')['codex:gpt-5.5']).toMatchObject({
+      merged: 0,
+      rejected: 1,
+      costPerMergedUsd: null,
+    });
   });
 });
 
