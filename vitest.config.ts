@@ -25,9 +25,7 @@ export default defineConfig({
     // under load (each passes in isolation; the suite passes serially). A small
     // fixed cap keeps meaningful parallelism without the oversubscription.
     pool: 'forks',
-    poolOptions: {
-      forks: { maxForks: 4, minForks: 1 },
-    },
+    maxWorkers: 4,
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
