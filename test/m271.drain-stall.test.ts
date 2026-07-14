@@ -34,6 +34,11 @@ let tmpHome: string;
 // Mocks
 // ---------------------------------------------------------------------------
 
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
+  isEnrolled: () => true,
+}));
+
 const mockSetStatus = vi.fn();
 const mockUpdateProposalField = vi.fn();
 
@@ -58,6 +63,8 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: (engine: string | undefined) =>
+    typeof engine === 'string' && engine.toLowerCase().includes('claude'),
 }));
 
 const mockJudgeProposal = vi.fn();

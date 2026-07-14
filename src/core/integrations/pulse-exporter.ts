@@ -42,7 +42,16 @@
  *   - Bounded fetch timeouts so a hung server never blocks a tick.
  */
 
+import { lstatSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { DepEdge } from './dep-parser.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Config surface (structural subset of AshlrConfig — keeps this module
@@ -186,6 +195,16 @@ function resolveReadPat(explicit?: string): string | null {
   return pat && pat.length > 0 ? pat : null;
 }
 
+/** Match policy.killSwitchOn(): only a proven ENOENT is permissive. */
+function globalKillSwitchOn(): boolean {
+  try {
+    lstatSync(join(homedir(), '.ashlr', 'KILL'));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
 function strAttr(key: string, value: string): OtlpAttr {
   return { key, value: { stringValue: value } };
 }
@@ -233,22 +252,35 @@ function resolveOwner(cfg: PulseExporterConfig): string | undefined {
  * Best-effort authenticated fetch with a bounded timeout. Returns the Response
  * on completion (any status) or null on network error / timeout. NEVER throws.
  */
-async function safeFetch(
+export async function fencedPulseFetch(
   url: string,
-  init: RequestInit & { pat?: string },
+  init: RequestInit & { pat?: string; authority?: OutwardMutationFence },
 ): Promise<Response | null> {
-  const { pat, headers, ...rest } = init;
+  const { pat, headers, authority: suppliedAuthority, ...rest } = init;
+  let acquiredAuthority: OutwardMutationFence | null = null;
   try {
+    const authority = suppliedAuthority ?? (acquiredAuthority = acquireOutwardMutationFence());
+    if (!authority || !ownsOutwardMutationFence(authority)) return null;
+    // The global control plane is not repo-scoped. KILL is the only policy gate
+    // here and must be re-read after authority acquisition.
+    if (globalKillSwitchOn() || rest.signal?.aborted) return null;
+
+    const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    const signal = rest.signal
+      ? AbortSignal.any([rest.signal, timeoutSignal])
+      : timeoutSignal;
     return await fetch(url, {
       ...rest,
       headers: {
         ...(headers ?? {}),
         ...(pat ? { Authorization: `Bearer ${pat}` } : {}),
       },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal,
     });
   } catch {
     return null;
+  } finally {
+    releaseOutwardMutationFence(acquiredAuthority);
   }
 }
 
@@ -418,7 +450,7 @@ export interface ExportResult {
 async function postOtlp(
   cfg: PulseExporterConfig,
   payload: OtlpPayload,
-  opts?: { pat?: string; dryRun?: boolean },
+  opts?: { pat?: string; dryRun?: boolean; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<ExportResult> {
   const spanCount = payload.resourceSpans[0]?.scopeSpans[0]?.spans.length ?? 0;
 
@@ -439,11 +471,13 @@ async function postOtlp(
   }
 
   const url = `${endpointBase(cfg)}/api/otlp/v1/traces`;
-  const res = await safeFetch(url, {
+  const res = await fencedPulseFetch(url, {
     method: 'POST',
     pat,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: opts?.signal,
+    authority: opts?.authority,
   });
 
   if (!res) {
@@ -462,7 +496,7 @@ async function postOtlp(
 export async function exportFleetEvents(
   cfg: PulseExporterConfig,
   events: FleetSpanInput[],
-  opts?: { pat?: string; dryRun?: boolean },
+  opts?: { pat?: string; dryRun?: boolean; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<ExportResult> {
   try {
     return await postOtlp(cfg, buildFleetPayload(events, cfg), opts);
@@ -480,7 +514,7 @@ export async function shipDepEdges(
   cfg: PulseExporterConfig,
   repoFullName: string,
   edges: DepEdge[],
-  opts?: { pat?: string; dryRun?: boolean },
+  opts?: { pat?: string; dryRun?: boolean; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<ExportResult> {
   try {
     return await postOtlp(cfg, buildDepPayload(repoFullName, edges, cfg), opts);
@@ -499,7 +533,7 @@ export async function shipDepEdges(
  */
 export async function pingPulse(
   cfg: PulseExporterConfig,
-  opts?: { pat?: string },
+  opts?: { pat?: string; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<{ ok: boolean; status: number | null; label: string; exitCode: number }> {
   if (!cfg.pulse?.enabled) {
     return { ok: false, status: null, label: 'not configured (set cfg.pulse.enabled + ' + PAT_ENV + ')', exitCode: 2 };
@@ -517,11 +551,13 @@ export async function pingPulse(
   ]);
 
   const url = `${endpointBase(cfg)}/api/otlp/v1/traces`;
-  const res = await safeFetch(url, {
+  const res = await fencedPulseFetch(url, {
     method: 'POST',
     pat,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(probe),
+    signal: opts?.signal,
+    authority: opts?.authority,
   });
 
   if (!res) return { ok: false, status: null, label: `endpoint unreachable (${url})`, exitCode: 1 };
@@ -587,7 +623,13 @@ function coerceCommand(raw: unknown): FleetCommand | null {
  */
 export async function pollFleetCommands(
   cfg: PulseExporterConfig,
-  opts?: { pat?: string; status?: FleetCommandStatus; limit?: number },
+  opts?: {
+    pat?: string;
+    status?: FleetCommandStatus;
+    limit?: number;
+    signal?: AbortSignal;
+    authority?: OutwardMutationFence;
+  },
 ): Promise<PollResult> {
   if (!cfg.pulse?.enabled) {
     return { ok: false, skipped: true, commands: [], status: null, detail: 'pulse polling disabled (cfg.pulse.enabled is falsy)' };
@@ -603,7 +645,13 @@ export async function pollFleetCommands(
     if (opts?.limit && Number.isFinite(opts.limit)) params.set('limit', String(Math.trunc(opts.limit)));
     const url = `${endpointBase(cfg)}/api/fleet/commands?${params.toString()}`;
 
-    const res = await safeFetch(url, { method: 'GET', pat, headers: { Accept: 'application/json' } });
+    const res = await fencedPulseFetch(url, {
+      method: 'GET',
+      pat,
+      headers: { Accept: 'application/json' },
+      signal: opts?.signal,
+      authority: opts?.authority,
+    });
     if (!res) return { ok: false, skipped: false, commands: [], status: null, detail: `endpoint unreachable: ${url}` };
     if (!res.ok) return { ok: false, skipped: false, commands: [], status: res.status, detail: `poll returned HTTP ${res.status}` };
 
@@ -661,7 +709,7 @@ export async function patchFleetCommand(
     result?: Record<string, unknown>;
     error?: string;
   },
-  opts?: { pat?: string },
+  opts?: { pat?: string; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<CommandPatchResult> {
   if (!cfg.pulse?.enabled) {
     return { ok: false, skipped: true, status: null, detail: 'pulse polling disabled (cfg.pulse.enabled is falsy)' };
@@ -681,11 +729,13 @@ export async function patchFleetCommand(
     if (update.result) body['result'] = update.result;
     if (update.error) body['error'] = update.error;
 
-    const res = await safeFetch(url, {
+    const res = await fencedPulseFetch(url, {
       method: 'PATCH',
       pat,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: opts?.signal,
+      authority: opts?.authority,
     });
 
     if (!res) return { ok: false, skipped: false, status: null, detail: `endpoint unreachable: ${url}` };
@@ -706,7 +756,7 @@ export async function claimFleetCommand(
   cfg: PulseExporterConfig,
   commandId: string,
   claimedBy: string,
-  opts?: { pat?: string },
+  opts?: { pat?: string; signal?: AbortSignal; authority?: OutwardMutationFence },
 ): Promise<CommandPatchResult> {
   return patchFleetCommand(cfg, commandId, { status: 'claimed', claimedBy }, opts);
 }

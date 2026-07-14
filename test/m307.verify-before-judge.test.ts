@@ -64,6 +64,7 @@ vi.mock('../src/core/fleet/manager.js', () => ({
 
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: vi.fn(() => false),
+  isEnrolled: () => true,
 }));
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({

@@ -174,7 +174,7 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
   const abs = resolve(repo);
 
   // 1. Narrow the enrollment gate. Idempotent; H6-audited enroll:remove.
-  unenroll(abs);
+  const unenrollResult = unenroll(abs);
 
   // 2. Reclaim THIS repo's crash-leftover sandboxes (scoped). The scoped sweep
   //    drops the 6h age guard (so a FRESH leftover from the activation being
@@ -194,12 +194,16 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
   }
 
   // 3. Opt-in: pause ALL autonomy in the same step (H6-audited kill:on).
-  if (opts.kill) setKill(true);
+  const killResult = opts.kill ? setKill(true) : null;
 
   console.log('');
   console.log(bold('  ashlr onboard --rollback'));
   console.log('');
-  console.log(`  ${green('✓')} unenrolled ${dim(abs)}`);
+  if (unenrollResult === undefined || (unenrollResult.ok && unenrollResult.quiesced)) {
+    console.log(`  ${green('✓')} unenrolled ${dim(abs)}`);
+  } else {
+    console.log(`  ${red('x')} could not confirm unenrollment of ${dim(abs)}: ${unenrollResult.reason}`);
+  }
   console.log(
     `  ${green('✓')} swept ${swept.length} leftover sandbox(es) for this repo ` +
       dim('(a live in-flight worktree is never reclaimed)'),
@@ -207,13 +211,16 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
   if (incomplete > 0) {
     console.log(`  ${yellow('!')} ${incomplete} sandbox cleanup(s) remain incomplete`);
   }
-  if (opts.kill) {
+  if (killResult?.ok && killResult.quiesced) {
     console.log(`  ${yellow('!')} kill switch ON ${dim('— all autonomy paused')}`);
+  } else if (killResult) {
+    console.log(`  ${red('x')} stop could not be confirmed: ${killResult.reason}`);
   }
   console.log('');
   console.log(`  ${dim('Re-enable any time with')} ${cyan('ashlr onboard')}.`);
   console.log('');
-  return incomplete > 0 ? 1 : 0;
+  return incomplete > 0 || (unenrollResult !== undefined && (!unenrollResult.ok || !unenrollResult.quiesced)) ||
+    (killResult !== null && (!killResult.ok || !killResult.quiesced)) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +407,13 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     console.log('');
     return 0;
   }
-  enroll(candidate); // idempotent; the ONLY mutating call in the whole flow
+  const enrollment = enroll(candidate); // idempotent; the ONLY mutating call in the whole flow
+  if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
+    console.log('');
+    console.log(`  ${red('x')} enrollment failed: ${enrollment.reason}`);
+    console.log('');
+    return 1;
+  }
   const after = listEnrolled();
   console.log('');
   console.log(

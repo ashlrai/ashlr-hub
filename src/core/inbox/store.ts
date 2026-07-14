@@ -1535,17 +1535,29 @@ function ensureRealizedMergeDecision(updated: Proposal, realizedMerge: RealizedM
   }
 }
 
-function retryIdempotentRealizedMergeProjections(updated: Proposal): void {
+function retryIdempotentRealizedMergeProjections(
+  updated: Proposal,
+  stillAuthorized: () => boolean = () => true,
+): boolean {
+  if (!stillAuthorized()) return false;
   try { linkOutcome(updated.id, 'merged', { basis: 'realized-merge-v1' }); } catch { /* best-effort */ }
+  if (!stillAuthorized()) return false;
   if (proposalCompletesGoalMilestone(updated)) linkMilestoneOutcome(updated.id, 'applied');
+  return stillAuthorized();
 }
 
-function fanoutRealizedMerge(updated: Proposal, realizedMerge: RealizedMergeEvidence): boolean {
+function fanoutRealizedMerge(
+  updated: Proposal,
+  realizedMerge: RealizedMergeEvidence,
+  stillAuthorized: () => boolean = () => true,
+): boolean {
   // Version 2 acknowledges only the authoritative decision projection. The
   // outcome and milestone projections remain idempotent and replayable.
+  if (!stillAuthorized()) return false;
   if (!ensureRealizedMergeDecision(updated, realizedMerge)) return false;
 
-  retryIdempotentRealizedMergeProjections(updated);
+  if (!retryIdempotentRealizedMergeProjections(updated, stillAuthorized)) return false;
+  if (!stillAuthorized()) return false;
   try {
     emitProposalSpan(
       'merge',
@@ -1554,13 +1566,14 @@ function fanoutRealizedMerge(updated: Proposal, realizedMerge: RealizedMergeEvid
       updated.owner ? { user: { id: updated.owner } } : undefined,
     );
   } catch { /* deterministic retry may repair another projection */ }
-  return true;
+  return stillAuthorized();
 }
 
 export function recordRealizedMerge(
   id: string,
   evidence: RealizedMergeEvidence | LocalDefaultBranchMergeObservation,
   ownerLock?: ProposalMutationLock,
+  stillAuthorized: () => boolean = () => true,
 ): boolean {
   const ownsLock = ownsProposalMutationLock(id, ownerLock);
   const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
@@ -1606,10 +1619,12 @@ export function recordRealizedMerge(
       }
       if (existing.status !== 'applied' || !matches) return false;
       if (identityOwnedByAnotherProposal(existing)) return false;
-      if (existing.realizedMergeFanoutVersion !== 2 && fanoutRealizedMerge(existing, priorEvidence)) {
+      if (!stillAuthorized()) return false;
+      if (existing.realizedMergeFanoutVersion !== 2 &&
+        fanoutRealizedMerge(existing, priorEvidence, stillAuthorized) && stillAuthorized()) {
         persistProposal(id, { ...existing, realizedMergeFanoutVersion: 2 }, false, storeLock);
       } else if (existing.realizedMergeFanoutVersion === 2) {
-        retryIdempotentRealizedMergeProjections(existing);
+        retryIdempotentRealizedMergeProjections(existing, stillAuthorized);
       }
       return true;
     }
@@ -1692,6 +1707,23 @@ export function recordRealizedMerge(
     if (storeLock) releaseProposalStoreMutationLock(storeLock);
     if (!ownsLock) releaseProposalMutationLock(mutationLock);
   }
+}
+
+/** Replay only the idempotent projections for an already-authenticated merge. */
+export function replayRealizedMergeFanout(
+  id: string,
+  ownerLock?: ProposalMutationLock,
+  stillAuthorized: () => boolean = () => true,
+): boolean {
+  if (!stillAuthorized()) return false;
+  const existing = loadProposal(id);
+  if (!existing || existing.status !== 'applied' || existing.realizedMergeFanoutVersion === 2) {
+    return false;
+  }
+  const realizedMerge = authenticatedRealizedMergeOf(existing);
+  if (!realizedMerge) return false;
+  if (!stillAuthorized()) return false;
+  return recordRealizedMerge(id, realizedMerge, ownerLock, stillAuthorized);
 }
 
 /**

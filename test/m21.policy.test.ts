@@ -71,6 +71,18 @@ function fakeTmpRepo(): string {
   return path.join(os.tmpdir(), `ashlr-policy-repo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 }
 
+function isolatedAshlrDir(): string {
+  return path.join(tmpHome, '.ashlr');
+}
+
+function isolatedEnrollmentPath(): string {
+  return path.join(isolatedAshlrDir(), 'enrollment.json');
+}
+
+function isolatedKillPath(): string {
+  return path.join(isolatedAshlrDir(), 'KILL');
+}
+
 // ---------------------------------------------------------------------------
 // Default enrollment state
 // ---------------------------------------------------------------------------
@@ -308,13 +320,151 @@ describe('M21 policy — enroll/unenroll persistence', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Hardened storage compatibility
+// ---------------------------------------------------------------------------
+
+describe('M21 policy — hardened storage compatibility', () => {
+  it('returns truthful result fields for changed and idempotent enrollment mutations', async () => {
+    const p = await policy();
+    const repo = fakeTmpRepo();
+
+    expect(p.enroll(repo)).toEqual({
+      ok: true,
+      changed: true,
+      quiesced: true,
+      reason: 'enrolled',
+    });
+    expect(p.enroll(repo)).toEqual({
+      ok: true,
+      changed: false,
+      quiesced: true,
+      reason: 'already-enrolled',
+    });
+    expect(p.unenroll(repo)).toEqual({
+      ok: true,
+      changed: true,
+      quiesced: true,
+      reason: 'unenrolled',
+    });
+    expect(p.unenroll(repo)).toEqual({
+      ok: true,
+      changed: false,
+      quiesced: true,
+      reason: 'already-unenrolled',
+    });
+  });
+
+  it('creates the authority directory at 0700 and registry/KILL files at 0600 on POSIX', async () => {
+    const p = await policy();
+
+    expect(p.enroll(fakeTmpRepo()).ok).toBe(true);
+    expect(p.setKill(true).ok).toBe(true);
+
+    if (process.platform !== 'win32') {
+      expect(fs.lstatSync(isolatedAshlrDir()).mode & 0o777).toBe(0o700);
+      expect(fs.lstatSync(isolatedEnrollmentPath()).mode & 0o777).toBe(0o600);
+      expect(fs.lstatSync(isolatedKillPath()).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('does not overwrite a malformed enrollment registry', async () => {
+    const p = await policy();
+    const malformed = '{"repos":["unterminated"';
+    fs.mkdirSync(isolatedAshlrDir(), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(isolatedEnrollmentPath(), malformed, { mode: 0o600 });
+
+    const result = p.enroll(fakeTmpRepo());
+
+    expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
+    expect(result.reason).toMatch(/registry/);
+    expect(fs.readFileSync(isolatedEnrollmentPath(), 'utf8')).toBe(malformed);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a symlinked registry without changing its referent',
+    async () => {
+      const p = await policy();
+      const target = path.join(tmpHome, 'symlink-registry-target.json');
+      const original = `${JSON.stringify({ repos: [] })}\n`;
+      fs.mkdirSync(isolatedAshlrDir(), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, original, { mode: 0o600 });
+      fs.symlinkSync(target, isolatedEnrollmentPath());
+
+      const result = p.enroll(fakeTmpRepo());
+
+      expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
+      expect(fs.lstatSync(isolatedEnrollmentPath()).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a hardlinked registry without changing its referent',
+    async () => {
+      const p = await policy();
+      const target = path.join(tmpHome, 'hardlink-registry-target.json');
+      const original = `${JSON.stringify({ repos: [] })}\n`;
+      fs.mkdirSync(isolatedAshlrDir(), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, original, { mode: 0o600 });
+      fs.linkSync(target, isolatedEnrollmentPath());
+
+      const result = p.enroll(fakeTmpRepo());
+
+      expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
+      expect(fs.lstatSync(isolatedEnrollmentPath()).nlink).toBe(2);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses symlinked and hardlinked kill sentinels without removing their referents',
+    async () => {
+      const p = await policy();
+      const target = path.join(tmpHome, 'kill-target');
+      fs.mkdirSync(isolatedAshlrDir(), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, 'external sentinel\n', { mode: 0o600 });
+      fs.symlinkSync(target, isolatedKillPath());
+
+      expect(p.setKill(true)).toEqual({
+        ok: false,
+        changed: false,
+        quiesced: false,
+        reason: 'unsafe-kill-sentinel',
+      });
+      expect(p.setKill(false)).toEqual({
+        ok: false,
+        changed: false,
+        quiesced: false,
+        reason: 'unsafe-kill-sentinel',
+      });
+      expect(fs.readFileSync(target, 'utf8')).toBe('external sentinel\n');
+
+      fs.unlinkSync(isolatedKillPath());
+      fs.linkSync(target, isolatedKillPath());
+      expect(p.setKill(true)).toMatchObject({
+        ok: false,
+        changed: false,
+        reason: 'unsafe-kill-sentinel',
+      });
+      expect(fs.lstatSync(isolatedKillPath()).nlink).toBe(2);
+      expect(fs.readFileSync(target, 'utf8')).toBe('external sentinel\n');
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // kill switch — setKill / killSwitchOn round-trip
 // ---------------------------------------------------------------------------
 
 describe('M21 policy — kill switch setKill/killSwitchOn', () => {
   it('setKill(true) makes killSwitchOn() return true', async () => {
     const p = await policy();
-    p.setKill(true);
+    expect(p.setKill(true)).toEqual({
+      ok: true,
+      changed: true,
+      quiesced: true,
+      reason: 'kill-armed',
+    });
     expect(p.killSwitchOn()).toBe(true);
   });
 
@@ -351,14 +501,24 @@ describe('M21 policy — kill switch setKill/killSwitchOn', () => {
 
   it('calling setKill(true) twice is idempotent', async () => {
     const p = await policy();
-    p.setKill(true);
-    p.setKill(true);
+    expect(p.setKill(true).changed).toBe(true);
+    expect(p.setKill(true)).toEqual({
+      ok: true,
+      changed: false,
+      quiesced: true,
+      reason: 'already-active',
+    });
     expect(p.killSwitchOn()).toBe(true);
   });
 
   it('calling setKill(false) when not set is idempotent', async () => {
     const p = await policy();
-    expect(() => p.setKill(false)).not.toThrow();
+    expect(p.setKill(false)).toEqual({
+      ok: true,
+      changed: false,
+      quiesced: true,
+      reason: 'already-inactive',
+    });
     expect(p.killSwitchOn()).toBe(false);
   });
 });

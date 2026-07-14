@@ -22,6 +22,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -71,6 +72,7 @@ const { detectRegression, bisectAndRevert } = await import(
 );
 const { verifyProvenance } = await import('../src/core/foundry/provenance.js');
 const { buildRequiredVerificationManifest } = await import('../src/core/run/verification-manifest.js');
+const { killSwitchOn, setKill } = await import('../src/core/sandbox/policy.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -111,6 +113,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setKill(false, { waitMs: 500 });
   process.env.HOME = origHome;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
@@ -337,6 +340,46 @@ describe('detectRegression', () => {
       detectRegression(onCfg(), REPO, { runSuite: () => { throw new Error('spawn fail'); }, git }),
     ).resolves.toEqual({ regressed: false });
   });
+
+  it('holds authority through verification and skips observation writes when pause wins', async () => {
+    let releaseSuite!: () => void;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseSuite = resolve; });
+    const head = 'a'.repeat(40);
+    const git = fakeGit((args) => {
+      if (args.join(' ') === 'status --porcelain --untracked-files=normal') return '';
+      return head;
+    });
+    const running = detectRegression(onCfg(), REPO, {
+      git,
+      runSuite: async () => {
+        markEntered();
+        await release;
+        return PROVEN_GREEN;
+      },
+    });
+    await entered;
+
+    expect(setKill(true, { waitMs: 25 })).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    releaseSuite();
+    await expect(running).resolves.toEqual({ regressed: false });
+
+    const slug = createHash('sha1').update(REPO).digest('hex').slice(0, 12);
+    const foundryDir = path.join(tmpHome, '.ashlr', 'foundry');
+    expect(fs.existsSync(path.join(foundryDir, `green-marker-${slug}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(foundryDir, `regression-streak-${slug}.json`))).toBe(false);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({
+      ok: true,
+      changed: false,
+      quiesced: true,
+    });
+  });
 });
 
 // ===========================================================================
@@ -480,7 +523,7 @@ describe('bisectAndRevert', () => {
     const inconclusiveGit = bisectGit();
     const inconclusive = await bisectAndRevert(onCfg(), REPO, {
       git: inconclusiveGit,
-      runSuite: (repo) => {
+      runSuite: (_repo) => {
         const head = inconclusiveGit(['rev-parse', 'HEAD']);
         return head === 'C0' ? GREEN : RED;
       },
@@ -566,6 +609,44 @@ describe('bisectAndRevert', () => {
     expect(git(['rev-parse', 'HEAD'])).toBe('HEAD_BAD');
   });
 
+  it('holds mutation authority through a blocked suite and restores before pause quiesces', async () => {
+    withGreenMarker('C0');
+    const git = bisectGit();
+    let releaseSuite!: () => void;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseSuite = resolve; });
+    const runSuite = vi.fn(async () => {
+      markEntered();
+      await release;
+      return PROVEN_RED;
+    });
+
+    const running = bisectAndRevert(onCfg(), REPO, { git, runSuite });
+    await entered;
+    expect(git(['rev-parse', 'HEAD'])).toBe('C1');
+
+    expect(setKill(true, { waitMs: 25 })).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    expect(killSwitchOn()).toBe(true);
+
+    releaseSuite();
+    await expect(running).resolves.toEqual({
+      reason: 'autonomy kill switch engaged during regression bisect',
+    });
+    expect(git(['rev-parse', 'HEAD'])).toBe('HEAD_BAD');
+    expect(mockCreateProposal).not.toHaveBeenCalled();
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({
+      ok: true,
+      changed: false,
+      quiesced: true,
+    });
+  });
+
   it('no auto-merge commits → reason, no proposal', async () => {
     const git = fakeGit((args) => {
       const a = args.join(' ');
@@ -603,5 +684,27 @@ describe('bisectAndRevert', () => {
     await expect(
       bisectAndRevert(onCfg(), REPO, { git, runSuite: () => { throw new Error('boom'); } }),
     ).resolves.toBeDefined();
+  });
+
+  it('aborts and resets a staged revert when diff capture throws', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    let aborts = 0;
+    let resets = 0;
+    const git: GitRunner = (args) => {
+      const command = args.join(' ');
+      if (command === 'diff --cached') throw new Error('capture failed');
+      if (command === 'revert --abort') aborts++;
+      if (command === 'reset --hard HEAD_BAD') resets++;
+      return base(args);
+    };
+
+    await expect(
+      bisectAndRevert(onCfg(), REPO, { git, runSuite: bisectRunSuite(base) }),
+    ).resolves.toEqual({ reason: 'bisect error (handled)' });
+    expect(aborts).toBeGreaterThanOrEqual(1);
+    expect(resets).toBeGreaterThanOrEqual(1);
+    expect(base(['rev-parse', 'HEAD'])).toBe('HEAD_BAD');
+    expect(mockCreateProposal).not.toHaveBeenCalled();
   });
 });

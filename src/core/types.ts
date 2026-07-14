@@ -3719,6 +3719,21 @@ export interface RemoteHandoffReconciliation {
   attestation: string;
 }
 
+export interface ProposalRemoteAuthorityBinding {
+  provider: 'github';
+  /** Exact canonical GitHub repository identity authorized for host reads and PR creation. */
+  nameWithOwner: string;
+  /** Stable digest of the effective origin push destinations, with credentials removed. */
+  pushAuthorityDigest: string;
+}
+
+export interface ProposalRemoteHandoffRecovery {
+  schemaVersion: 1;
+  attempt: 1;
+  marker: '[ashlr-remote-handoff-retry:1]';
+  authorizedAt: string;
+}
+
 export interface ProposalRemoteHandoff {
   provider: 'github';
   state: 'awaiting-host-merge' | 'merged' | 'closed' | 'unknown';
@@ -3727,6 +3742,12 @@ export interface ProposalRemoteHandoff {
   base?: string;
   /** Exact verified staging commit expected at the PR head throughout reconciliation. */
   expectedHeadOid?: string;
+  /** Host and push authority authenticated by the linked pre-effect/recovery intent. */
+  authority?: ProposalRemoteAuthorityBinding;
+  /** Exact local intent attestation this handoff record is allowed to reconcile from. */
+  intentAttestation?: string;
+  /** Present only after one proven no-PR recovery; a second recovery is forbidden. */
+  recovery?: ProposalRemoteHandoffRecovery;
   /** Host-reported merge commit identity; persistence must require exactly 40 hex characters. */
   mergeCommitOid?: string;
   /** Authoritative host-reported merge time; never synthesized from local reconciliation time. */
@@ -3748,6 +3769,8 @@ export interface ProposalLocalMergeIntent {
   evidencePackDigest: string;
   authorizationId: string;
   authorizedAt: string;
+  /** Remote-only authority fields bound through authorizationId and this intent's HMAC. */
+  remoteAuthority?: ProposalRemoteAuthorityBinding;
   attestation: string;
 }
 

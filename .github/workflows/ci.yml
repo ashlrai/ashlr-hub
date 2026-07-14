@@ -27,12 +27,28 @@ jobs:
               test/m2.doctor.test.ts test/m43.verify-commands.test.ts
               test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
               test/m395.effect-terminal-retention.test.ts
+              test/m403.automerge-mutation-fence.test.ts
+              test/m404.policy-result-surfaces.test.ts
+              test/m409.engine-execution-mutation-fence.test.ts
+              test/m410.policy-opposing-race.test.ts
+              test/m414.local-store-lock-unknown-owner.test.ts
+              test/m415.policy-durability-races.test.ts
+              test/m422.policy-transaction-recovery.test.ts
+              test/m416.local-store-lock-handoff.test.ts
           - os: windows-latest
             label: windows, portability 2/3
             test_args: >-
               test/m21.worktree.test.ts test/m23.apply.test.ts
               test/m100.web-open.test.ts test/m119.quality-metrics.test.ts
               test/m332.outcome-watcher.test.ts
+              test/m405.apply-mutation-fence.test.ts
+              test/m406.daemon-stop-quiescence.test.ts
+              test/m411.local-merge-reconciliation.test.ts
+              test/m412.sandbox-pre-effect-recovery.test.ts
+              test/m413.engineer-run-mutation-fence.test.ts
+              test/m417.sandbox-cleanup-quiescence.test.ts
+              test/m424.legacy-swarm-mutation-fence.test.ts
+              test/sandbox-reservation-recovery.test.ts
           - os: windows-latest
             label: windows, portability 3/3
             test_args: >-
@@ -40,6 +56,13 @@ jobs:
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
+              test/m407.verification-mutation-fence.test.ts
+              test/m408.sandbox-creation-mutation-fence.test.ts
+              test/m418.pulse-quiescence.test.ts
+              test/m419.remote-handoff-intent.test.ts
+              test/m420.remote-handoff-recovery.test.ts
+              test/m421.legacy-pulse-quiescence.test.ts
+              test/m423.control-plane-lock-order.test.ts
           - os: macos-latest
             label: macos, shared queue authority
             test_args: >-

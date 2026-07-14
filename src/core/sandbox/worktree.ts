@@ -36,6 +36,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   symlinkSync,
   appendFileSync,
@@ -57,8 +58,14 @@ import type {
   SandboxSweepResult,
 } from '../types.js';
 import { isRepo } from '../git.js';
-import { assertMayMutate } from './policy.js';
+import { assertMayMutate, killSwitchOn } from './policy.js';
 import { audit } from './audit.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from './mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -69,7 +76,94 @@ const BRANCH_PREFIX = 'ashlr/sandbox/';
 const META_FILE = 'sandbox.json';
 const CLEANUP_LOCK_WAIT_MS = 2_000;
 const CLEANUP_LOCK_INIT_MS = 1_000;
+const MAX_RESERVATION_RECOVERIES_PER_SWEEP = 16;
+const SANDBOX_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const META_TEMP_RE = /^\.sandbox\.json\.\d+\.[a-f0-9]{12}\.tmp$/;
 const cleanupLockSleep = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Cleanup may borrow authority only from an operation that already crossed the
+ * policy gate while holding this exact fence. Supplying an invalid borrowed
+ * token fails closed; it never falls back to recursively acquiring the lock.
+ */
+const sandboxCleanupAuthorityBrand: unique symbol = Symbol('sandbox-cleanup-authority');
+
+export interface BorrowedSandboxCleanupAuthority {
+  readonly outwardFence: OutwardMutationFence;
+  readonly [sandboxCleanupAuthorityBrand]: true;
+}
+
+export interface SandboxCleanupAuthorityOptions {
+  borrowedAuthority?: BorrowedSandboxCleanupAuthority | null;
+  authorityWaitMs?: number;
+}
+
+interface SandboxCleanupAuthorityLease {
+  fence: OutwardMutationFence | null;
+  token: BorrowedSandboxCleanupAuthority | null;
+  borrowed: boolean;
+  allowed: boolean;
+  reason?: 'authority-unavailable' | 'paused';
+}
+
+function mintSandboxCleanupAuthority(
+  outwardFence: OutwardMutationFence | null | undefined,
+): BorrowedSandboxCleanupAuthority | null {
+  if (!outwardFence || !ownsOutwardMutationFence(outwardFence) || killSwitchOn()) return null;
+  const authority: BorrowedSandboxCleanupAuthority = {
+    outwardFence,
+    [sandboxCleanupAuthorityBrand]: true,
+  };
+  return Object.freeze(authority);
+}
+
+/**
+ * Borrow cleanup authority from an operation that has crossed its policy gate.
+ * Mint immediately after that gate and retain the outward fence until cleanup
+ * returns. KILL may be armed later while pause waits on the retained fence.
+ */
+export function borrowSandboxCleanupAuthority(
+  outwardFence: OutwardMutationFence | null | undefined,
+): BorrowedSandboxCleanupAuthority | null {
+  return mintSandboxCleanupAuthority(outwardFence);
+}
+
+function acquireSandboxCleanupAuthority(
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxCleanupAuthorityLease {
+  const borrowed = opts !== undefined &&
+    Object.prototype.hasOwnProperty.call(opts, 'borrowedAuthority');
+  if (borrowed) {
+    const token = opts?.borrowedAuthority ?? null;
+    const fence = token?.outwardFence ?? null;
+    const valid = token?.[sandboxCleanupAuthorityBrand] === true && ownsOutwardMutationFence(fence);
+    return valid
+      ? { fence, token, borrowed: true, allowed: true }
+      : { fence, token: null, borrowed: true, allowed: false, reason: 'authority-unavailable' };
+  }
+
+  const fence = acquireOutwardMutationFence(opts?.authorityWaitMs);
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'authority-unavailable' };
+  }
+  // KILL is installed before pause waits on the fence. Rechecking only after
+  // acquisition ensures no cleanup can begin after pause reports quiescence.
+  if (killSwitchOn()) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'paused' };
+  }
+  const token = mintSandboxCleanupAuthority(fence);
+  if (!token) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'paused' };
+  }
+  return { fence, token, borrowed: false, allowed: true };
+}
+
+function releaseSandboxCleanupAuthority(lease: SandboxCleanupAuthorityLease): void {
+  if (!lease.borrowed) releaseOutwardMutationFence(lease.fence);
+}
 
 // ---------------------------------------------------------------------------
 // H5 — bounded sandbox lifecycle (LOCAL-ONLY resource guards)
@@ -142,8 +236,7 @@ export const ORPHAN_STALE_MS = 6 * 60 * 60_000;
  * false, falling back to the conservative createdAt-age staleMs guard. NEVER
  * throws and NEVER sends a real signal (signal 0 is error-check-only).
  */
-function ownerAlive(sb: Sandbox): boolean {
-  const pid = sb.ownerPid;
+function pidAlive(pid: unknown): boolean {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
     return false;
   }
@@ -153,6 +246,10 @@ function ownerAlive(sb: Sandbox): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+function ownerAlive(sb: Sandbox): boolean {
+  return pidAlive(sb.ownerPid);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +512,7 @@ function parseCleanupEvidence(value: unknown): SandboxCleanupEvidence | undefine
 
 /** Read + validate one sandbox's metadata. Returns null on missing/malformed. */
 function readMeta(id: string): Sandbox | null {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
+  if (!SANDBOX_ID_RE.test(id)) return null;
   const p = metaPath(id);
   if (!existsSync(p)) return null;
   let fd: number | undefined;
@@ -492,6 +589,30 @@ export function createSandbox(
   sourceRepo: string,
   opts?: { allowAnyRepo?: boolean },
 ): Sandbox {
+  const outwardFence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(outwardFence)) {
+    releaseOutwardMutationFence(outwardFence);
+    audit({
+      action: 'sandbox:create',
+      repo: sourceRepo,
+      sandboxId: null,
+      summary: 'refused: outward mutation fence unavailable',
+      result: 'refused',
+    });
+    throw new Error('outward mutation fence unavailable; sandbox creation did not start');
+  }
+  try {
+    return createSandboxWhileFenced(sourceRepo, outwardFence, opts);
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+  }
+}
+
+function createSandboxWhileFenced(
+  sourceRepo: string,
+  outwardFence: OutwardMutationFence | null,
+  opts?: { allowAnyRepo?: boolean },
+): Sandbox {
   // Gate FIRST — kill switch / enrollment. Audit refusals.
   //
   // H5 CHANGE 3 (env-gate allowAnyRepo) EDIT SITE — integration applies the real
@@ -511,6 +632,10 @@ export function createSandbox(
       result: 'refused',
     });
     throw err;
+  }
+  const cleanupAuthority = borrowSandboxCleanupAuthority(outwardFence);
+  if (!cleanupAuthority) {
+    throw new Error('outward mutation authority became invalid before sandbox creation');
   }
 
   // Must be a real git repo.
@@ -559,7 +684,10 @@ export function createSandbox(
   try {
     const cap = maxSandboxes();
     if (sandboxInventory().totalHomes >= cap) {
-      sweepOrphanSandboxes({ staleMs: ORPHAN_STALE_MS });
+      sweepOrphanSandboxes({
+        staleMs: ORPHAN_STALE_MS,
+        borrowedAuthority: cleanupAuthority,
+      });
       if (sandboxInventory().totalHomes >= cap) {
         audit({
           action: 'sandbox:create', repo: sourceRepo, sandboxId: null,
@@ -580,6 +708,26 @@ export function createSandbox(
     releaseCleanupLock(creationLock);
   }
 
+  const sb: Sandbox = {
+    id,
+    sourceRepo,
+    worktreePath,
+    branch,
+    baseHead,
+    createdAt: new Date().toISOString(),
+    ownerPid: process.pid,
+  };
+
+  // Persist recovery authority before the Git effect. If the process dies
+  // after worktree creation, restart GC can still identify the exact branch,
+  // registration, source repo, and private home to reclaim.
+  try {
+    writeMeta(sb);
+  } catch (err) {
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* private reservation only */ }
+    throw err;
+  }
+
   // Add the isolated worktree on a NEW scratch branch off baseHead, run IN the
   // source repo. This does NOT touch the source working tree, index, HEAD, or
   // any user branch — it only creates a new ref + a separate checkout.
@@ -596,10 +744,7 @@ export function createSandbox(
     // A partial add can leave either registration or branch behind. The same
     // narrowly scoped rollback used for metadata failures verifies all three
     // postconditions and retains a malformed home if operator recovery is needed.
-    rollbackUnpersistedSandbox({
-      id, sourceRepo, worktreePath, branch, baseHead,
-      createdAt: new Date().toISOString(), ownerPid: process.pid,
-    });
+    rollbackUnpersistedSandbox(sb);
     audit({
       action: 'sandbox:create',
       repo: sourceRepo,
@@ -614,26 +759,6 @@ export function createSandbox(
   // (npm run typecheck, npm run test) can resolve the local toolchain without
   // a separate install. Graceful: never throws; never mutates source repo.
   symlinkNodeModules(sourceRepo, worktreePath);
-
-  const sb: Sandbox = {
-    id,
-    sourceRepo,
-    worktreePath,
-    branch,
-    baseHead,
-    createdAt: new Date().toISOString(),
-    // H5 — stamp the OWNING process pid as a positive liveness marker so the
-    // orphan sweep / disk-cap pre-sweep never force-remove this worktree while
-    // this process (or any process holding the same pid) is still alive.
-    ownerPid: process.pid,
-  };
-
-  try {
-    writeMeta(sb);
-  } catch (err) {
-    rollbackUnpersistedSandbox(sb);
-    throw err;
-  }
 
   audit({
     action: 'sandbox:create',
@@ -946,7 +1071,52 @@ function persistCleanupEvidence(sb: Sandbox, evidence: SandboxCleanupEvidence): 
   }
 }
 
-export function removeSandbox(sb: Sandbox): SandboxCleanupResult {
+function cleanupAuthorityUnavailableResult(
+  sb: Sandbox,
+  reason: SandboxCleanupAuthorityLease['reason'],
+): SandboxCleanupResult {
+  const home = sandboxHomeState(sandboxHome(sb.id));
+  const result: SandboxCleanupResult = {
+    status: 'unavailable',
+    postconditions: { registration: 'unknown', branch: 'unknown', home },
+    failureClasses: ['cleanup-locked'],
+    retryable: true,
+    attempt: Math.min(1_000, (sb.cleanup?.attempt ?? 0) + 1),
+    evidencePersisted: false,
+  };
+  audit({
+    action: 'sandbox:remove',
+    repo: sb.sourceRepo,
+    sandboxId: sb.id,
+    summary: reason === 'paused'
+      ? 'cleanup deferred: autonomy kill switch is ON'
+      : 'cleanup deferred: outward mutation authority unavailable',
+    result: 'refused',
+  });
+  return result;
+}
+
+export function removeSandbox(
+  sb: Sandbox,
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxCleanupResult {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  if (!authority.allowed) return cleanupAuthorityUnavailableResult(sb, authority.reason);
+  try {
+    return removeSandboxWhileFenced(sb);
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
+  }
+}
+
+export function removeSandboxWithBorrowedAuthority(
+  sb: Sandbox,
+  borrowedAuthority: BorrowedSandboxCleanupAuthority | null,
+): SandboxCleanupResult {
+  return removeSandbox(sb, { borrowedAuthority });
+}
+
+function removeSandboxWhileFenced(sb: Sandbox): SandboxCleanupResult {
   const home = sandboxHome(sb.id);
   const attempt = Math.min(1_000, (sb.cleanup?.attempt ?? 0) + 1);
 
@@ -989,9 +1159,11 @@ export function removeSandbox(sb: Sandbox): SandboxCleanupResult {
   const repoAuthority = existsSync(safeWorktree)
     ? worktreeBelongsToRepo(sb.sourceRepo, safeWorktree)
     : registrationBefore === 'present';
+  const recoverableReservation = canonicalMatches && sourceRepoAvailable &&
+    !existsSync(safeWorktree) && registrationBefore === 'absent' && branchBefore === 'absent';
   const guardsPass = branchInNamespace && branchMatches && worktreeContained &&
     rootState === 'present' && homeBefore === 'present' && canonicalMatches &&
-    !worktreeSymlink && (!sourceRepoAvailable || repoAuthority);
+    !worktreeSymlink && (!sourceRepoAvailable || repoAuthority || recoverableReservation);
   const lock = guardsPass ? acquireCleanupLock(sb.id) : undefined;
   let result: SandboxCleanupResult;
 
@@ -1120,6 +1292,192 @@ export function sandboxInventory(): SandboxInventory {
   return inventory;
 }
 
+interface OwnedPathIdentity {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+}
+
+interface ReservationFile {
+  path: string;
+  identity: OwnedPathIdentity;
+}
+
+type ReservationRecoveryStatus = 'complete' | 'skipped' | 'refused' | 'unavailable' | 'error';
+
+function ownedDirectoryIdentity(path: string): OwnedPathIdentity | null {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isDirectory() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return null;
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function samePathIdentity(path: string, expected: OwnedPathIdentity, directory: boolean): boolean {
+  try {
+    const stat = lstatSync(path);
+    return !stat.isSymbolicLink() &&
+      (directory ? stat.isDirectory() : stat.isFile()) &&
+      stat.dev === expected.dev && stat.ino === expected.ino &&
+      (typeof process.getuid !== 'function' || stat.uid === process.getuid());
+  } catch {
+    return false;
+  }
+}
+
+function readReservationJson(file: ReservationFile): Record<string, unknown> | null | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== file.identity.dev || opened.ino !== file.identity.ino ||
+      opened.size > 64 * 1024 ||
+      (typeof process.getuid === 'function' && opened.uid !== process.getuid())) return undefined;
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return undefined;
+    try {
+      const value = JSON.parse(bytes.toString('utf8')) as unknown;
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+  }
+}
+
+function partialIdentitySafe(id: string, value: Record<string, unknown>): boolean {
+  const canonicalWorktree = worktreePathFor(id);
+  const canonicalBranch = `${BRANCH_PREFIX}${id}`;
+  if (Object.prototype.hasOwnProperty.call(value, 'id') && value['id'] !== id) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'worktreePath') &&
+    (typeof value['worktreePath'] !== 'string' || resolve(value['worktreePath']) !== resolve(canonicalWorktree))) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'branch') && value['branch'] !== canonicalBranch) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'ownerPid') &&
+    (typeof value['ownerPid'] !== 'number' || !Number.isInteger(value['ownerPid']) || value['ownerPid'] <= 0)) {
+    return false;
+  }
+  return true;
+}
+
+function safelyUnlinkReservationFile(file: ReservationFile): boolean {
+  if (!samePathIdentity(file.path, file.identity, false)) return false;
+  try {
+    unlinkSync(file.path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reclaim one reservation that crashed before any Git effect. This deliberately
+ * refuses homes containing a worktree or any unrecognized entry: incomplete
+ * metadata is never promoted into authority to mutate a repository.
+ */
+function recoverReservationHome(id: string, staleMs: number | undefined, now: number): ReservationRecoveryStatus {
+  if (!SANDBOX_ID_RE.test(id)) return 'refused';
+  const root = sandboxesDir();
+  const home = sandboxHome(id);
+  const rootIdentity = ownedDirectoryIdentity(root);
+  const homeIdentity = ownedDirectoryIdentity(home);
+  if (!rootIdentity || !homeIdentity) return 'refused';
+
+  const lock = acquireCleanupLock(id);
+  if (!lock) return 'unavailable';
+  try {
+    if (!samePathIdentity(root, rootIdentity, true) || !samePathIdentity(home, homeIdentity, true)) {
+      return 'refused';
+    }
+    // A creator may have completed metadata before this candidate acquired its
+    // lock. Valid metadata always wins and is handled by the normal sweep path.
+    if (readMeta(id)) return 'skipped';
+
+    const entries = readdirSync(home, { withFileTypes: true });
+    if (entries.length > 4) return 'refused';
+    const files: ReservationFile[] = [];
+    let freshestMs = homeIdentity.mtimeMs;
+    for (const entry of entries) {
+      if (entry.name === 'worktree') return 'refused';
+      if (entry.name !== META_FILE && !META_TEMP_RE.test(entry.name)) return 'refused';
+      const path = join(home, entry.name);
+      let stat: ReturnType<typeof lstatSync>;
+      try { stat = lstatSync(path); } catch { return 'refused'; }
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024 ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return 'refused';
+      const file = { path, identity: { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs } };
+      const partial = readReservationJson(file);
+      if (partial === undefined) return 'refused';
+      if (partial && !partialIdentitySafe(id, partial)) return 'refused';
+      if (partial && pidAlive(partial['ownerPid'])) return 'skipped';
+      if (partial && typeof partial['createdAt'] === 'string') {
+        const createdMs = Date.parse(partial['createdAt']);
+        if (!Number.isNaN(createdMs)) freshestMs = Math.max(freshestMs, createdMs);
+      }
+      freshestMs = Math.max(freshestMs, stat.mtimeMs);
+      files.push(file);
+    }
+
+    if (staleMs !== undefined && now - freshestMs < staleMs) return 'skipped';
+    if (!samePathIdentity(root, rootIdentity, true) || !samePathIdentity(home, homeIdentity, true) || readMeta(id)) {
+      return 'refused';
+    }
+    for (const file of files) {
+      if (!safelyUnlinkReservationFile(file)) return 'refused';
+    }
+    if (readdirSync(home).length !== 0 || !samePathIdentity(home, homeIdentity, true)) return 'refused';
+    rmdirSync(home);
+    if (existsSync(home)) return 'error';
+    audit({
+      action: 'sandbox:remove',
+      repo: home,
+      sandboxId: id,
+      summary: 'reclaimed incomplete pre-effect sandbox reservation',
+      result: 'ok',
+    });
+    return 'complete';
+  } catch {
+    return 'error';
+  } finally {
+    releaseCleanupLock(lock);
+  }
+}
+
+function recoverReservationHomes(
+  staleMs: number | undefined,
+  now: number,
+  result: SandboxSweepResult,
+): void {
+  const root = sandboxesDir();
+  if (!ownedDirectoryIdentity(root)) return;
+  let ids: string[];
+  try {
+    ids = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && SANDBOX_ID_RE.test(entry.name) && readMeta(entry.name) === null)
+      .map((entry) => entry.name)
+      .sort()
+      .slice(0, MAX_RESERVATION_RECOVERIES_PER_SWEEP);
+  } catch {
+    return;
+  }
+  for (const id of ids) {
+    const status = recoverReservationHome(id, staleMs, now);
+    if (status === 'complete') result.completed.push(id);
+    else if (status === 'refused') result.refused.push(id);
+    else if (status === 'unavailable') result.unavailable.push(id);
+    else if (status === 'error') result.unexpectedErrors.push(id);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // listSandboxes
 // ---------------------------------------------------------------------------
@@ -1209,14 +1567,19 @@ export function listSandboxes(): Sandbox[] {
  *   is younger than this — a conservative liveness proxy so a concurrently-live
  *   sandbox is never force-removed. Omit to sweep all listed sandboxes.
  */
-export function sweepOrphanSandboxesDetailed(opts?: { staleMs?: number }): SandboxSweepResult {
+export function sweepOrphanSandboxesDetailed(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): SandboxSweepResult {
   const staleMs = opts?.staleMs;
   const now = Date.now();
   const result: SandboxSweepResult = {
     completed: [], residual: [], refused: [], unavailable: [],
     inventory: sandboxInventory(), unexpectedErrors: [],
   };
-  for (const sb of listSandboxes()) {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  try {
+    if (authority.allowed) recoverReservationHomes(staleMs, now, result);
+    for (const sb of listSandboxes()) {
     // GUARD 1 — POSITIVE liveness (age-independent): never reclaim a worktree
     // whose owning process is still alive, even if it is older than staleMs.
     // This is what makes the sweep safe despite the absence of a swarm
@@ -1237,19 +1600,28 @@ export function sweepOrphanSandboxesDetailed(opts?: { staleMs?: number }): Sandb
         continue;
       }
     }
-    try {
-      const cleanup = removeSandbox(sb);
-      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
-    } catch {
-      // removeSandbox is already best-effort/idempotent and should not throw;
-      // guard anyway so one bad entry never aborts the whole restart sweep.
-      result.unexpectedErrors.push(sb.id);
+      if (!authority.allowed) {
+        result.unavailable.push(sb.id);
+        continue;
+      }
+      try {
+        const cleanup = removeSandbox(sb, { borrowedAuthority: authority.token });
+        result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
+      } catch {
+        // removeSandbox is already best-effort/idempotent and should not throw;
+        // guard anyway so one bad entry never aborts the whole restart sweep.
+        result.unexpectedErrors.push(sb.id);
+      }
     }
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
   }
   return result;
 }
 
-export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
+export function sweepOrphanSandboxes(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): string[] {
   return sweepOrphanSandboxesDetailed(opts).completed;
 }
 
@@ -1286,13 +1658,18 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
  *
  * @param repo The source repo whose sandboxes to reclaim (resolved internally).
  */
-export function sweepRepoSandboxesDetailed(repo: string): SandboxSweepResult {
+export function sweepRepoSandboxesDetailed(
+  repo: string,
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxSweepResult {
   const target = resolve(repo);
   const result: SandboxSweepResult = {
     completed: [], residual: [], refused: [], unavailable: [],
     inventory: sandboxInventory(), unexpectedErrors: [],
   };
-  for (const sb of listSandboxes()) {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  try {
+    for (const sb of listSandboxes()) {
     // SCOPE: only this repo's sandboxes.
     if (resolve(sb.sourceRepo) !== target) {
       continue;
@@ -1305,18 +1682,25 @@ export function sweepRepoSandboxesDetailed(repo: string): SandboxSweepResult {
     if (ownerAlive(sb)) {
       continue;
     }
-    try {
-      const cleanup = removeSandbox(sb);
-      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
-    } catch {
-      // removeSandbox is best-effort/idempotent; guard so one bad entry never
-      // aborts the whole scoped sweep.
-      result.unexpectedErrors.push(sb.id);
+      if (!authority.allowed) {
+        result.unavailable.push(sb.id);
+        continue;
+      }
+      try {
+        const cleanup = removeSandbox(sb, { borrowedAuthority: authority.token });
+        result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
+      } catch {
+        // removeSandbox is best-effort/idempotent; guard so one bad entry never
+        // aborts the whole scoped sweep.
+        result.unexpectedErrors.push(sb.id);
+      }
     }
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
   }
   return result;
 }
 
-export function sweepRepoSandboxes(repo: string): string[] {
-  return sweepRepoSandboxesDetailed(repo).completed;
+export function sweepRepoSandboxes(repo: string, opts?: SandboxCleanupAuthorityOptions): string[] {
+  return sweepRepoSandboxesDetailed(repo, opts).completed;
 }

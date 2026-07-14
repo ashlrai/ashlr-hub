@@ -29,6 +29,7 @@ import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
 import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
+import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // Lazy loaders — degrade gracefully if a core module is not yet built.
@@ -38,7 +39,7 @@ type RunDaemonFn = (
   cfg: AshlrConfig,
   opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode; drainLimit?: number },
 ) => Promise<DaemonState>;
-type StopDaemonFn = () => void;
+type StopDaemonFn = () => PolicyMutationResult | void;
 type LoadDaemonStateFn = () => DaemonState;
 type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
@@ -335,7 +336,14 @@ async function cmdDaemonStop(): Promise<number> {
     return 1;
   }
 
-  loop.stopDaemon();
+  const stopped = loop.stopDaemon();
+  if (stopped !== undefined && (!stopped.ok || !stopped.quiesced)) {
+    console.error(
+      col.red('error: ') +
+      `daemon stop could not confirm quiescence (${stopped.reason}); inspect kill state and reconcile active work before retrying.`,
+    );
+    return 1;
+  }
 
   console.log('');
   console.log(

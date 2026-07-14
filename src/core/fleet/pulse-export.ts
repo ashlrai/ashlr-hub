@@ -37,6 +37,8 @@ import { loadDaemonState } from '../daemon/state.js';
 import { listProposalsDetailed } from '../inbox/store.js';
 import type { ProposalSourceQuality } from '../inbox/store.js';
 import { realizedMergeOf } from '../inbox/realized-merge.js';
+import { fencedPulseFetch } from '../integrations/pulse-exporter.js';
+import type { OutwardMutationFence } from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // OTLP span shape (exact contract)
@@ -345,7 +347,12 @@ export interface PulseExportCfg {
  */
 export async function exportToPulse(
   cfg: PulseExportCfg,
-  opts?: { sinceTs?: string; dryRun?: boolean },
+  opts?: {
+    sinceTs?: string;
+    dryRun?: boolean;
+    signal?: AbortSignal;
+    authority?: OutwardMutationFence;
+  },
 ): Promise<boolean> {
   try {
     if (!cfg.pulse?.enabled) return false;
@@ -370,17 +377,18 @@ export async function exportToPulse(
     }
 
     // POST — best-effort; never throws
-    const res = await fetch(url, {
+    const res = await fencedPulseFetch(url, {
       method: 'POST',
+      pat,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${pat}`,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10_000),
+      signal: opts?.signal,
+      authority: opts?.authority,
     });
     // 2xx → success; advance watermark in caller
-    return res.ok;
+    return res?.ok === true;
   } catch {
     // Network errors, unreachable endpoint, etc. — swallow silently.
     // The fleet daemon must never crash due to telemetry.

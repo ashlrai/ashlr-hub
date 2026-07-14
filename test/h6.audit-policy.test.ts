@@ -27,7 +27,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
@@ -273,5 +273,43 @@ describe('H6 · PART A · audit emission never disrupts the caller', () => {
     expect(() => unenroll(repo.dir)).not.toThrow();
     expect(() => setKill(true)).not.toThrow();
     expect(() => setKill(false)).not.toThrow();
+  });
+});
+
+// ===========================================================================
+// 7 — refused hardened-policy mutations are audited truthfully as errors
+// ===========================================================================
+
+describe('H6 · PART A · refused policy mutations emit truthful audit results', () => {
+  it('marks refused enroll, unenroll, and kill intents as error rather than ok', () => {
+    expect.hasAssertions();
+    const { fx, repo } = setup();
+    mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
+    const registry = join(fx.ashlrDir, 'enrollment.json');
+    writeFileSync(registry, '{malformed', { mode: 0o600 });
+
+    const addResult = enroll(repo.dir);
+    const removeResult = unenroll(repo.dir);
+    mkdirSync(join(fx.ashlrDir, 'KILL'));
+    const killResult = setKill(true);
+
+    expect(addResult).toMatchObject({ ok: false, changed: false, quiesced: false });
+    expect(removeResult).toMatchObject({ ok: false, changed: false, quiesced: false });
+    expect(killResult).toEqual({
+      ok: false,
+      changed: false,
+      quiesced: false,
+      reason: 'unsafe-kill-sentinel',
+    });
+    expect(readFileSync(registry, 'utf8')).toBe('{malformed');
+    expect(withAction(fx.home, 'enroll:add')).toEqual([
+      expect.objectContaining({ result: 'error', repo: resolve(repo.dir) }),
+    ]);
+    expect(withAction(fx.home, 'enroll:remove')).toEqual([
+      expect.objectContaining({ result: 'error', repo: resolve(repo.dir) }),
+    ]);
+    expect(withAction(fx.home, 'kill:on')).toEqual([
+      expect.objectContaining({ result: 'error', repo: null }),
+    ]);
   });
 });

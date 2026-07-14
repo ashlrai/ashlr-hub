@@ -105,6 +105,7 @@ vi.mock('../src/core/inbox/store.js', () => ({
 const mockKillSwitchOn = vi.fn(() => false);
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
+  isEnrolled: () => true,
 }));
 
 const mockReadDecisions = vi.fn(() => [] as unknown[]);

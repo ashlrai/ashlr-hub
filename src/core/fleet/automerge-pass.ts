@@ -32,6 +32,7 @@
 import type { AshlrConfig, Proposal } from '../types.js';
 import {
   listProposalsDetailed,
+  replayRealizedMergeFanout,
   setStatus,
   updateProposalField,
 } from '../inbox/store.js';
@@ -43,7 +44,12 @@ import {
   verifyResultFromProposalResult,
   type AutoMergeResult,
 } from '../inbox/merge.js';
-import { killSwitchOn } from '../sandbox/policy.js';
+import { isEnrolled, killSwitchOn } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
 // M294: sign + record the attested 'judged'/ship ledger entry that the merge gate
@@ -65,6 +71,260 @@ import { learnFromRejection } from './self-improve.js';
 import { learnFromApplied } from './skill-library.js';
 import { recordAgentAction } from './agent-action-ledger.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
+import { isApprovedRemoteHandoffRetryCandidate } from '../inbox/remote-handoff.js';
+import {
+  acquireProposalMutationLock,
+  releaseProposalMutationLock,
+  type ProposalMutationLock,
+} from '../inbox/proposal-mutation-lock.js';
+
+const MAX_REALIZED_MERGE_FANOUT_REPLAYS_PER_PASS = 16;
+let realizedMergeFanoutReplayCursor: string | null = null;
+
+async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfig): Promise<void> {
+  const repo = proposal.repo;
+  if (!repo) return;
+  const fence = acquireOutwardMutationFence();
+  if (!fence || !ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return;
+  }
+  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+    !killSwitchOn() && isEnrolled(repo);
+  try {
+    if (!authorized()) return;
+    try {
+      await notifyFleetEvent(
+        'merge',
+        { repo, title: proposal.title, engine: proposal.engineTier },
+        cfg,
+      );
+    } catch { /* best-effort observation */ }
+
+    if (!authorized()) return;
+    try {
+      await emitMerge(cfg, proposal.id, repo, proposal.engineTier, { authority: fence });
+    } catch { /* best-effort observation */ }
+
+    if (!authorized()) return;
+    try {
+      const { emit } = await import('./event-bus.js');
+      if (!authorized()) return;
+      await emit('merge:shipped', {
+        proposalId: proposal.id,
+        title: proposal.title,
+        repo,
+        engineTier: proposal.engineTier,
+      }, cfg);
+    } catch { /* best-effort observation */ }
+
+    if (!authorized()) return;
+    try { await Promise.resolve(learnFromApplied(proposal, cfg)); } catch { /* best-effort observation */ }
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
+}
+
+interface AuthorizedJudgeResult {
+  requested: boolean;
+  verdict: ManagerVerdict | null;
+  decisionPersisted: boolean;
+  authorityLive: boolean;
+}
+
+async function runAuthorizedFrontierJudge(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+  judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string },
+): Promise<AuthorizedJudgeResult> {
+  const repo = proposal.repo;
+  const refused = (): AuthorizedJudgeResult => ({
+    requested: false,
+    verdict: null,
+    decisionPersisted: false,
+    authorityLive: false,
+  });
+  if (!repo) return refused();
+  const fence = acquireOutwardMutationFence();
+  if (!fence || !ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return refused();
+  }
+  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+    !killSwitchOn() && isEnrolled(repo);
+  let requested = false;
+  let verdict: ManagerVerdict | null = null;
+  let decisionPersisted = false;
+  try {
+    if (!authorized()) return refused();
+    requested = true;
+    try {
+      verdict = await judgeProposal(proposal, cfg, judgeClient);
+    } catch {
+      verdict = null;
+    }
+
+    // KILL is armed before pause waits for this fence. A judge response that
+    // loses that race must never become fresh durable merge authority.
+    if (!authorized()) {
+      return { requested, verdict, decisionPersisted, authorityLive: false };
+    }
+
+    if (verdict?.verdict === 'ship' && verdict.wouldMerge === true) {
+      try {
+        const judgeEngine = judgeClient.model;
+        let judgeAttestation: string | undefined;
+        const ts = new Date().toISOString();
+        if (isFrontierJudge(judgeEngine)) {
+          try {
+            judgeAttestation = signJudgeAttestation({
+              proposalId: proposal.id,
+              judgeEngine,
+              verdict: 'ship',
+              diffHash: hashDiff(proposal.diff ?? ''),
+              issuedAt: ts,
+              mergeIntent: 'would-merge',
+            });
+          } catch {
+            judgeAttestation = undefined;
+          }
+        }
+        if (authorized()) {
+          recordDecision({
+            ts,
+            proposalId: proposal.id,
+            ...causalMetadataFromProposal(proposal, {
+              ts,
+              learningSource: 'decision-ledger',
+              labelBasis: 'judge-verdict',
+            }),
+            action: 'judged',
+            engine: judgeEngine,
+            model: judgeEngine,
+            verdict: 'ship',
+            reason: verdict.rationale ?? '',
+            detail: 'would-merge',
+            ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
+            ...(judgeAttestation !== undefined
+              ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
+              : {}),
+          });
+          decisionPersisted = true;
+        }
+      } catch {
+        decisionPersisted = false;
+      }
+    }
+
+    if (authorized()) {
+      try {
+        await emitJudgeVerdict(
+          cfg,
+          proposal.id,
+          verdict?.verdict ?? 'null',
+          repo,
+          proposal.engineTier,
+          { authority: fence },
+        );
+      } catch { /* best-effort observation */ }
+    }
+    return { requested, verdict, decisionPersisted, authorityLive: authorized() };
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
+}
+
+function replayAuthorizedRealizedMergeFanout(proposal: Proposal): boolean {
+  const repo = proposal.repo;
+  if (!repo) return false;
+  const proposalLock = acquireProposalMutationLock(proposal.id);
+  if (!proposalLock) return false;
+  const fence = acquireOutwardMutationFence();
+  if (!fence || !ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
+    return false;
+  }
+  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+    !killSwitchOn() && isEnrolled(repo);
+  try {
+    if (!authorized()) return false;
+    return replayRealizedMergeFanout(proposal.id, proposalLock, authorized) && authorized();
+  } finally {
+    releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
+  }
+}
+
+interface AuthorizedPostJudgeResult {
+  entered: boolean;
+  persisted: boolean;
+  authorityLive: boolean;
+  archived: boolean;
+}
+
+function runAuthorizedPostJudgePersistence(
+  proposal: Proposal,
+  verdict: ManagerVerdict | null,
+  cfg: AshlrConfig,
+  autoArchiveAfterRejects: number,
+): AuthorizedPostJudgeResult {
+  const refused = (): AuthorizedPostJudgeResult => ({
+    entered: false,
+    persisted: false,
+    authorityLive: false,
+    archived: false,
+  });
+  const repo = proposal.repo;
+  if (!repo) return refused();
+  const proposalLock = acquireProposalMutationLock(proposal.id);
+  if (!proposalLock) return refused();
+  const fence = acquireOutwardMutationFence();
+  if (!fence || !ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
+    return refused();
+  }
+  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+    !killSwitchOn() && isEnrolled(repo);
+  try {
+    if (!authorized()) return refused();
+    const mergeable = verdict?.verdict === 'ship' && verdict.wouldMerge === true;
+    if (!mergeable) {
+      try {
+        learnFromRejection(
+          proposal.id,
+          proposal.title ?? '',
+          verdict?.verdict ?? 'review',
+          verdict?.rationale ?? '',
+          cfg,
+        );
+      } catch { /* best-effort learning */ }
+      if (!authorized()) {
+        return { entered: true, persisted: false, authorityLive: false, archived: false };
+      }
+      const newCount = ((proposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
+      const archived = newCount >= autoArchiveAfterRejects;
+      const persisted = archived
+        ? writeProposalStatus(
+            proposal,
+            `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
+            proposalLock,
+          )
+        : writeProposalField(proposal, { judgeNonShipCount: newCount }, proposalLock);
+      return { entered: true, persisted, authorityLive: authorized(), archived: persisted && archived };
+    }
+
+    const existingCount = (proposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+    const persisted = existingCount !== undefined && existingCount > 0
+      ? writeProposalField(proposal, { judgeNonShipCount: 0 }, proposalLock)
+      : true;
+    return { entered: true, persisted, authorityLive: authorized(), archived: false };
+  } finally {
+    releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
+  }
+}
 
 function hasVerificationCommandEvidence(result: Proposal['verifyResult']): boolean {
   return Array.isArray(result?.ran) && result.ran.length > 0;
@@ -234,19 +494,31 @@ function recordSafetySkip(
   out.skipped.push({ proposalId, check, reason });
 }
 
-function writeProposalField(proposal: Proposal, patch: Partial<Proposal>): boolean {
+function writeProposalField(
+  proposal: Proposal,
+  patch: Partial<Proposal>,
+  ownerLock?: ProposalMutationLock,
+): boolean {
   if (killSwitchOn()) return false;
   try {
-    return updateProposalField(proposal.id, patch);
+    return ownerLock
+      ? updateProposalField(proposal.id, patch, ownerLock)
+      : updateProposalField(proposal.id, patch);
   } catch {
     return false;
   }
 }
 
-function writeProposalStatus(proposal: Proposal, reason: string): boolean {
+function writeProposalStatus(
+  proposal: Proposal,
+  reason: string,
+  ownerLock?: ProposalMutationLock,
+): boolean {
   if (killSwitchOn()) return false;
   try {
-    return setStatus(proposal.id, 'rejected', undefined, reason, undefined, {}, 'pending');
+    return ownerLock
+      ? setStatus(proposal.id, 'rejected', undefined, reason, ownerLock, {}, 'pending')
+      : setStatus(proposal.id, 'rejected', undefined, reason, undefined, {}, 'pending');
   } catch {
     return false;
   }
@@ -291,14 +563,45 @@ function isEphemeralRegressionGoalProposal(p: Proposal): boolean {
   );
 }
 
-function readHealthyPendingProposals(): Proposal[] | null {
+interface AutoMergeQueues {
+  pending: Proposal[];
+  recovered: Proposal[];
+  fanoutRecovery: Proposal[];
+}
+
+function readHealthyAutoMergeQueues(): AutoMergeQueues | null {
   try {
-    const read = listProposalsDetailed({ status: 'pending', requireComplete: true });
+    const read = listProposalsDetailed({ requireComplete: true });
     if (read.sourceState !== 'healthy' || read.complete !== true) return null;
-    return read.proposals;
+    return {
+      pending: read.proposals.filter((proposal) => proposal.status === 'pending'),
+      recovered: read.proposals.filter(isApprovedRemoteHandoffRetryCandidate),
+      fanoutRecovery: read.proposals.filter((proposal) =>
+        proposal.status === 'applied' &&
+        proposal.realizedMerge !== undefined &&
+        proposal.realizedMergeFanoutVersion !== 2),
+    };
   } catch {
     return null;
   }
+}
+
+function boundedFanoutRecoveryBatch(candidates: Proposal[]): Proposal[] {
+  if (candidates.length === 0) {
+    realizedMergeFanoutReplayCursor = null;
+    return [];
+  }
+  const ordered = [...candidates].sort((left, right) => left.id.localeCompare(right.id));
+  const start = realizedMergeFanoutReplayCursor === null
+    ? 0
+    : Math.max(0, ordered.findIndex((proposal) => proposal.id > realizedMergeFanoutReplayCursor!));
+  const batch: Proposal[] = [];
+  const count = Math.min(MAX_REALIZED_MERGE_FANOUT_REPLAYS_PER_PASS, ordered.length);
+  for (let offset = 0; offset < count; offset++) {
+    batch.push(ordered[(start + offset) % ordered.length]!);
+  }
+  realizedMergeFanoutReplayCursor = batch.at(-1)?.id ?? null;
+  return batch;
 }
 
 function errorDetail(err: unknown): string {
@@ -368,8 +671,19 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
 
-  let pending = readHealthyPendingProposals();
-  if (pending === null) return out;
+  let queues = readHealthyAutoMergeQueues();
+  if (queues === null) return out;
+  let { pending, recovered } = queues;
+  const { fanoutRecovery } = queues;
+
+  // A crash can land after the authenticated applied receipt but before its
+  // idempotent projections are acknowledged. Replay a bounded rotating slice
+  // from the complete source without ever putting applied proposals back into
+  // the judge or merge queue.
+  for (const proposal of boundedFanoutRecoveryBatch(fanoutRecovery)) {
+    if (killSwitchOn()) return out;
+    try { replayAuthorizedRealizedMergeFanout(proposal); } catch { /* retry next pass */ }
+  }
 
   // M259: resolve drain config from foundry (all additive — only add reject paths).
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -415,9 +729,10 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   // that its refresh was incomplete. Refresh authority before the first write
   // and recompute the cleanup plan from that complete snapshot instead.
   if (pending.some((proposal) => isEphemeralRegressionGoalProposal(proposal) || isTtlExpired(proposal))) {
-    const refreshed = readHealthyPendingProposals();
-    if (refreshed === null) return out;
-    pending = refreshed;
+    queues = readHealthyAutoMergeQueues();
+    if (queues === null) return out;
+    pending = queues.pending;
+    recovered = queues.recovered;
   }
 
   // M263: sort oldest-first before the judge loop so the stalest proposals
@@ -476,6 +791,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     }
     if (ttlRejectedIds.size > 0) pending = pending.filter((p) => !ttlRejectedIds.has(p.id));
   }
+
+  // Recovered URL-less handoffs bypass pending-only queue maintenance, then
+  // re-enter the normal readiness/gate pipeline. Ordinary approved proposals
+  // never appear here because the predicate requires the signed one-retry
+  // marker and matching live origin authority.
+  pending.push(...recovered);
+  pending.sort((a, b) => {
+    if (a.createdAt < b.createdAt) return -1;
+    if (a.createdAt > b.createdAt) return 1;
+    return 0;
+  });
 
   // Lazily resolve judge client once per pass (avoid re-calling getActiveClient
   // for every proposal). null = judge unavailable → fail-closed (proposals stay unjudged).
@@ -684,118 +1010,44 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       }
 
       if (judgeClient !== null) {
-        let verdict: ManagerVerdict | null = null;
-        try {
-          verdict = await judgeProposal(p, cfg, judgeClient);
-        } catch {
-          // judgeProposal should never throw, but be defensive.
-          verdict = null;
+        const judgeResult = await runAuthorizedFrontierJudge(p, cfg, judgeClient);
+        if (!judgeResult.requested) continue;
+        const verdict = judgeResult.verdict;
+	      out.judged++;
+	      out.judgeEstimatedSpendUsd += estCostUsd(
+	        judgeClient.model,
+	        JUDGE_ESTIMATE_TOKENS_IN,
+	        JUDGE_ESTIMATE_TOKENS_OUT,
+	      );
+        if (!judgeResult.authorityLive || killSwitchOn() || !p.repo || !isEnrolled(p.repo)) {
+          if (killSwitchOn()) break;
+          continue;
         }
-	        out.judged++;
-	        out.judgeEstimatedSpendUsd += estCostUsd(
-	          judgeClient.model,
-	          JUDGE_ESTIMATE_TOKENS_IN,
-	          JUDGE_ESTIMATE_TOKENS_OUT,
-	        );
-	        // M214: fire-and-forget judge-verdict emit — additive, never throws, no control-flow change.
-        void emitJudgeVerdict(cfg, p.id, verdict?.verdict ?? 'null', p.repo, p.engineTier).catch(() => {});
+
+        const postJudge = runAuthorizedPostJudgePersistence(
+          p,
+          verdict,
+          cfg,
+          autoArchiveAfterRejects,
+        );
+        if (!postJudge.entered) {
+          if (killSwitchOn()) break;
+          continue;
+        }
+        if (!postJudge.persisted) return out;
+        if (postJudge.archived) out.autoArchived++;
+        if (!postJudge.authorityLive || killSwitchOn() || !p.repo || !isEnrolled(p.repo)) {
+          if (killSwitchOn()) break;
+          continue;
+        }
 
         // Only proposals the judge would actually merge proceed to the merge gate.
         // 'ship' with wouldMerge=false is non-mergeable and must not create
         // durable merge authority.
         // SAFETY: this ONLY adds a reject path — it can NEVER cause a merge.
-        if (!verdict || verdict.verdict !== 'ship' || verdict.wouldMerge !== true) {
-          // M235: fire-and-forget self-improvement write-back — additive, never throws, no control-flow change.
-          try {
-            learnFromRejection(
-              p.id,
-              p.title ?? '',
-              verdict?.verdict ?? 'review',
-              (verdict as unknown as Record<string, unknown>)?.['rationale'] as string ?? '',
-              cfg,
-            );
-          } catch { /* learnFromRejection never throws; defensive */ }
+        if (!verdict || verdict.verdict !== 'ship' || verdict.wouldMerge !== true) continue;
+        if (!judgeResult.decisionPersisted) continue;
 
-          // M259: track non-mergeable count + auto-archive when threshold reached.
-          // `ship` + `wouldMerge=false` is intentionally non-mergeable.
-          try {
-            const newCount = ((p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
-            if (newCount >= autoArchiveAfterRejects) {
-              // Auto-archive: mark as rejected so it is no longer re-judged.
-              // Status change only — never hard-deletes. Strictly safer: the
-              // merge gate (autoMergeProposal) is never reached for this proposal.
-              if (!writeProposalStatus(
-                p,
-                `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
-              )) return out;
-              out.autoArchived++;
-            } else {
-              // Below threshold: persist the updated count so next tick picks up.
-              if (!writeProposalField(p, { judgeNonShipCount: newCount })) return out;
-            }
-          } catch {
-            return out;
-          }
-          continue;
-        }
-        // Reset judgeNonShipCount on a ship verdict (belt-and-suspenders).
-        try {
-          const existingCount = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
-          if (existingCount !== undefined && existingCount > 0) {
-            if (!writeProposalField(p, { judgeNonShipCount: 0 })) return out;
-          }
-        } catch {
-          return out;
-        }
-
-        // M294: record the attested 'judged'/ship ledger entry that the merge gate
-        // (hasRecentShipVerdict / evaluateVerificationGate criterion 1) requires.
-        // The automerge-pass previously judged 'ship' but NEVER wrote this entry —
-        // so autoMergeProposal always refused with "no 'judged' decision with
-        // verdict='ship' found", meaning NO proposal could ever auto-merge. Mirrors
-        // runManager's signing/recording (manager.ts). judgeClient is non-null here.
-        try {
-          const judgeEngine = judgeClient.model;
-          let judgeAttestation: string | undefined;
-          const ts = new Date().toISOString();
-          if (isFrontierJudge(judgeEngine)) {
-            try {
-              const diffHash = hashDiff(p.diff ?? '');
-              judgeAttestation = signJudgeAttestation({
-                proposalId: p.id,
-                judgeEngine,
-                verdict: 'ship',
-                diffHash,
-                issuedAt: ts,
-                mergeIntent: 'would-merge',
-              });
-            } catch {
-              // Signing failure → no attestation → gate fails-closed (refuses), never a bad merge.
-              judgeAttestation = undefined;
-            }
-          }
-          recordDecision({
-            ts,
-            proposalId: p.id,
-            ...causalMetadataFromProposal(p, {
-              ts,
-              learningSource: 'decision-ledger',
-              labelBasis: 'judge-verdict',
-            }),
-            action: 'judged',
-            engine: judgeEngine,
-            model: judgeEngine,
-            verdict: 'ship',
-            reason: verdict.rationale ?? '',
-            detail: verdict.wouldMerge ? 'would-merge' : '',
-            ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
-            ...(judgeAttestation !== undefined
-              ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
-              : {}),
-          });
-        } catch {
-          // Best-effort — a record failure means the gate fails-closed (no merge), never a bad merge.
-        }
       } else {
         // No judge available → fail-closed: skip this proposal for merging.
         // M273: when no judge client is available AND the proposal has already
@@ -936,14 +1188,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       out.results.push(res);
       if (res.merged) {
         out.merged++;
-        // M212: fire-and-forget merge notification — additive, never throws, no control-flow change.
-        notifyFleetEvent('merge', { repo: p.repo ?? undefined, title: p.title, engine: p.engineTier }, cfg).catch(() => {});
-        // M214: fire-and-forget merge emit to Pulse OTLP — additive, never throws, no control-flow change.
-        void emitMerge(cfg, p.id, p.repo, p.engineTier).catch(() => {});
-        // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
-        void import('./event-bus.js').then(({ emit }) => emit('merge:shipped', { proposalId: p.id, title: p.title, repo: p.repo ?? undefined, engineTier: p.engineTier }, cfg)).catch(() => {});
-        // M243: fire-and-forget skill-library write-back — additive, never throws, no control-flow change.
-        void learnFromApplied(p, cfg);
+        await runAuthorizedPostMergeEffects(p, cfg);
       }
       if (res.branched) out.branched++;
       if (res.handoff) out.handoffs++;

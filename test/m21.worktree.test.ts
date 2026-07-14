@@ -793,8 +793,6 @@ describe('M21 worktree — removeSandbox cleanup', () => {
       const retained = wt.listSandboxes().find((entry) => entry.id === sb!.id);
       expect(wt.removeSandbox(retained!).status).toBe('refused');
       execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
-      expect(wt.removeSandbox(retained!).status).toBe('refused');
-      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
       expect(wt.removeSandbox(retained!).status).toBe('complete');
       sb = null;
     } finally {
@@ -953,8 +951,6 @@ describe('M21 worktree — removeSandbox refuses tampered metadata', () => {
       expect(wt.removeSandbox(sb).status).toBe('refused');
       expect(listBranches(repo)).toContain(sb.branch);
       execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
-      expect(wt.removeSandbox(sb).status).toBe('refused');
-      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
       expect(wt.removeSandbox(sb).status).toBe('complete');
       sb = null;
     } finally {

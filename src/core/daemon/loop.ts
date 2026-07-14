@@ -59,6 +59,11 @@ import type {
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import { audit as persistAudit } from '../sandbox/audit.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
@@ -299,6 +304,34 @@ const DEFAULTS: DaemonConfig = {
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
 const KILL_SWITCH_POLL_MS = 50;
+const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
+
+/** Register detached work that must settle before this tick can be called quiescent. */
+export function trackDaemonTickEffect(
+  tickResult: DaemonTick,
+  effect: Promise<unknown>,
+): Promise<void> {
+  const tracked = Promise.resolve(effect).then(() => undefined, () => undefined);
+  const pending = pendingDaemonTickEffects.get(tickResult) ?? new Set<Promise<void>>();
+  pending.add(tracked);
+  pendingDaemonTickEffects.set(tickResult, pending);
+  void tracked.then(() => {
+    pending.delete(tracked);
+    if (pending.size === 0 && pendingDaemonTickEffects.get(tickResult) === pending) {
+      pendingDaemonTickEffects.delete(tickResult);
+    }
+  });
+  return tracked;
+}
+
+/** Drain a tick to a fixed point, including effects registered during the wait. */
+export async function drainDaemonTickEffects(tickResult: DaemonTick): Promise<void> {
+  while (true) {
+    const pending = pendingDaemonTickEffects.get(tickResult);
+    if (!pending || pending.size === 0) return;
+    await Promise.all([...pending]);
+  }
+}
 
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
 const DRAIN_MODE_TAG_PREFIX = 'drain:';
@@ -2676,7 +2709,13 @@ export async function tick(
       let attemptedRepo: string | undefined;
       let attemptedStabilityCandidatesAfter: NonNullable<ReturnType<typeof buildMonitoringCursor>>['stabilityCandidatesAfter'];
       let enrollmentRepos: string[] = [];
+      let regressionAuthority: ReturnType<typeof acquireOutwardMutationFence> = null;
       try {
+        const retainedAuthority = acquireOutwardMutationFence();
+        regressionAuthority = retainedAuthority;
+        if (retainedAuthority === null || !ownsOutwardMutationFence(retainedAuthority) || stopRequested()) {
+          throw new Error('regression sentinel outward mutation authority unavailable');
+        }
         enrollmentRepos = [...new Set(listEnrolled().map((repo) => resolve(repo)))].sort();
         const availableRepos = enrollmentRepos.filter((repo) => existsSync(repo));
         const cursorRead = loadMonitoringCursor(enrollmentRepos);
@@ -2692,7 +2731,10 @@ export async function tick(
         attemptedExpectedCursor = cursorRead.storedCursor;
         attemptedRepo = monitoredRepo;
         attemptedStabilityCandidatesAfter = cursor.stabilityCandidatesAfter;
-        const r = await detectRegression(liveCfg, monitoredRepo);
+        const r = await detectRegression(liveCfg, monitoredRepo, { authority: retainedAuthority });
+        if (stopRequested() || !ownsOutwardMutationFence(regressionAuthority)) {
+          throw new Error('regression sentinel stopped after verification');
+        }
         if (r.greenObservation) {
           const repoDigest = monitoringRepoDigest(monitoredRepo);
           const priorCandidate = cursor.stabilityCandidatesAfter?.find((entry) => entry.repoDigest === repoDigest)?.candidateAfter;
@@ -2710,7 +2752,10 @@ export async function tick(
           }
         }
         if (r.regressed && !stopRequested()) {
-          const bisect = await bisectAndRevert(liveCfg, monitoredRepo);
+          const bisect = await bisectAndRevert(liveCfg, monitoredRepo, { authority: retainedAuthority });
+          if (stopRequested() || !ownsOutwardMutationFence(regressionAuthority)) {
+            throw new Error('regression sentinel stopped after bisect');
+          }
           const culpritProposalId = bisect.revertProposal?.culpritProposalId;
           const gitOid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
           if (
@@ -2721,6 +2766,9 @@ export async function tick(
               import('../inbox/store.js'),
               import('../fleet/post-merge-observations.js'),
             ]);
+            if (stopRequested() || !ownsOutwardMutationFence(regressionAuthority)) {
+              throw new Error('regression sentinel stopped before observation persistence');
+            }
             const culpritProposal = loadProposal(culpritProposalId);
             const realizedMerge = authenticatedRealizedMergeOf(culpritProposal);
             const deterministicIdentity = typeof culpritProposal?.repo === 'string' &&
@@ -2759,14 +2807,18 @@ export async function tick(
               });
             }
           }
-          // M212: fire-and-forget anomaly notification — additive, never throws.
-          void notifyFleetEvent('anomaly', {
-            detail: bisect.culprit
-              ? `Regression detected; isolated fleet merge ${bisect.culprit.slice(0, 12)} and proposed a revert`
-              : 'Regression detected; no fleet merge culprit was isolated',
-          }, liveCfg);
-          // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
-          void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: monitoredRepo }, liveCfg)).catch(() => {});
+          await Promise.allSettled([
+            notifyFleetEvent('anomaly', {
+              detail: bisect.culprit
+                ? `Regression detected; isolated fleet merge ${bisect.culprit.slice(0, 12)} and proposed a revert`
+                : 'Regression detected; no fleet merge culprit was isolated',
+            }, liveCfg),
+            import('../fleet/event-bus.js').then(({ emit }) =>
+              emit('regression:detected', { signal: r.signal, repo: monitoredRepo }, liveCfg)),
+          ]);
+          if (stopRequested() || !ownsOutwardMutationFence(regressionAuthority)) {
+            throw new Error('regression sentinel stopped after event handlers drained');
+          }
         }
         const advancedCursor = {
           ...cursor,
@@ -2782,7 +2834,10 @@ export async function tick(
           throw new Error('failed to persist monitoring cursor advancement');
         }
       } catch (err) {
-        if (attemptedCursor && attemptedRepo) {
+        if (
+          !stopRequested() && ownsOutwardMutationFence(regressionAuthority) &&
+          attemptedCursor && attemptedRepo
+        ) {
           saveMonitoringCursor(
             {
               ...attemptedCursor,
@@ -2795,6 +2850,8 @@ export async function tick(
           );
         }
         console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err);
+      } finally {
+        releaseOutwardMutationFence(regressionAuthority);
       }
     }
   };
@@ -5712,37 +5769,31 @@ export async function tick(
   // so it cannot clobber a concurrent tick's todaySpentUsd / itemsProcessed /
   // ticks accounting.
   if (!stopRequested() && cfg.pulse?.enabled) {
-    const sinceTs = state.lastPulseExportAt; // captured from the state we already saved
-    void import('../fleet/pulse-export.js').then(async ({ exportToPulse }) => {
-      try {
-        const ok = await exportToPulse(cfg, { sinceTs });
-        if (ok && opts.ownerLock) {
-          updateResidentDaemonState(opts.ownerLock, (fresh) => {
-            if (
-              fresh.running !== true ||
-              fresh.pid !== opts.ownerLock!.pid ||
-              fresh.startedAt !== state.startedAt ||
-              fresh.lastTickAt !== tickRecord.ts
-            ) return null;
-            return { ...fresh, lastPulseExportAt: tickRecord.ts };
-          });
-        }
-      } catch (err) {
-        // Best-effort — telemetry must never crash the daemon.
-        console.warn('[ashlr] daemon:tick pulse export failed:', (err as Error)?.message ?? err);
-      }
-    }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-export lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
+    trackDaemonTickEffect(
+      tickRecord,
+      runLegacyPulseExport(cfg, tickRecord, {
+        sinceTs: state.lastPulseExportAt,
+        startedAt: state.startedAt,
+        signal: opts.signal,
+        ownerLock: opts.ownerLock,
+      }),
+    );
   }
 
   // M214: fire-and-forget tick-cost emit to Pulse OTLP — additive, never throws, no control-flow change.
   // Lazy-imported (mirrors the pulse-sync pattern) so loop.ts's static grep-guards stay intact.
-  if (!stopRequested()) void import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
-    try {
-      await emitTickCost(cfg, tickRecord.ts, tickRecord.spentUsd, tickRecord.proposalsCreated, merged);
-    } catch {
-      // Best-effort — telemetry must never crash the daemon.
-    }
-  }).catch(() => { /* lazy-import best-effort */ });
+  if (!stopRequested()) {
+    trackDaemonTickEffect(
+      tickRecord,
+      import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
+        try {
+          await emitTickCost(cfg, tickRecord.ts, tickRecord.spentUsd, tickRecord.proposalsCreated, merged);
+        } catch {
+          // Best-effort — telemetry must never crash the daemon.
+        }
+      }).catch(() => { /* lazy-import best-effort */ }),
+    );
+  }
 
   // ── M257 Director cycle — gated, additive, fire-and-forget ─────────────────
   // Runs at most once every 15 minutes (tracked in process memory; dormant when
@@ -5763,13 +5814,16 @@ export async function tick(
       if (now - lastMs < DIRECTOR_INTERVAL_MS) return;
       proc['__ashlrDirectorLastRunMs'] = now;
 
-      void import('../comms/director.js').then(async ({ runDirectorCycle }) => {
-        try {
-          await runDirectorCycle(cfg);
-        } catch {
-          // Fire-and-forget — director must never crash the daemon.
-        }
-      }).catch(() => { /* lazy-import best-effort */ });
+      trackDaemonTickEffect(
+        tickRecord,
+        import('../comms/director.js').then(async ({ runDirectorCycle }) => {
+          try {
+            await runDirectorCycle(cfg, { signal: opts.signal });
+          } catch {
+            // Fire-and-forget — director must never crash the daemon.
+          }
+        }).catch(() => { /* lazy-import best-effort */ }),
+      );
     } catch {
       // Gate check must never crash the daemon.
     }
@@ -5792,6 +5846,46 @@ export async function tick(
   }
 }
 
+export async function runLegacyPulseExport(
+  cfg: AshlrConfig,
+  tickRecord: DaemonTick,
+  opts: {
+    sinceTs?: string;
+    startedAt: string | null;
+    signal?: AbortSignal;
+    ownerLock?: DaemonLock;
+  },
+): Promise<void> {
+  try {
+    const { withPulseAuthority } = await import('../integrations/pulse-sync.js');
+    await withPulseAuthority(
+      opts.signal,
+      () => undefined,
+      async (authority, signal) => {
+        if (signal?.aborted || killSwitchOn()) return;
+        const { exportToPulse } = await import('../fleet/pulse-export.js');
+        const ok = await exportToPulse(cfg, {
+          sinceTs: opts.sinceTs,
+          signal,
+          authority: authority.fence,
+        });
+        if (!ok || signal?.aborted || killSwitchOn() || !opts.ownerLock) return;
+        updateResidentDaemonState(opts.ownerLock, (fresh) => {
+          if (
+            fresh.running !== true ||
+            fresh.pid !== opts.ownerLock!.pid ||
+            fresh.startedAt !== opts.startedAt ||
+            fresh.lastTickAt !== tickRecord.ts
+          ) return null;
+          return { ...fresh, lastPulseExportAt: tickRecord.ts };
+        });
+      },
+    );
+  } catch (err) {
+    console.warn('[ashlr] daemon:tick pulse export failed:', (err as Error)?.message ?? err);
+  }
+}
+
 async function runOwnedPulseSync(
   cfg: AshlrConfig,
   tickResult: DaemonTick,
@@ -5799,6 +5893,7 @@ async function runOwnedPulseSync(
   signal: AbortSignal,
   onOwnershipLost: () => void,
 ): Promise<void> {
+  await drainDaemonTickEffects(tickResult);
   if (signal.aborted || tickResult.dryRun || tickResult.reason !== 'ok') return;
   if (!daemonLockOwned(lock)) {
     onOwnershipLost();
@@ -6060,9 +6155,20 @@ export async function runDaemon(
     } catch {
       // Best-effort: a preview failure must never crash daemon start.
     }
+  } else if (killSwitchOn()) {
+    requestShutdown();
+    audit({
+      action: 'daemon:start',
+      repo: null,
+      sandboxId: null,
+      summary: 'orphan sweep deferred: autonomy kill switch is ON',
+      result: 'refused',
+    });
   } else {
     try {
       const wt = await import('../sandbox/worktree.js');
+      // The sweep acquires the global outward-mutation fence once and rechecks
+      // KILL after acquisition, closing the race with the check above.
       const sweep = wt.sweepOrphanSandboxesDetailed({ staleMs: wt.ORPHAN_STALE_MS });
       const incomplete = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
         sweep.unexpectedErrors.length + sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
@@ -6290,23 +6396,33 @@ export async function cancelDaemonPostTickChildren(
  * resident loop observes the request, aborts in-flight work, and remains the
  * sole authority that clears running/pid after the current tick settles.
  */
-export function stopDaemon(): void {
+export function stopDaemon(): ReturnType<typeof setKill> {
+  let result: ReturnType<typeof setKill>;
   try {
-    setKill(true);
-  } catch {
+    result = setKill(true);
+  } catch (err) {
     // setKill is idempotent + never throws by contract; extra guard
+    result = {
+      ok: false,
+      changed: false,
+      quiesced: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
   }
   try {
     audit({
       action: 'daemon:stop',
       repo: null,
       sandboxId: null,
-      summary: 'stopDaemon() called: stop requested via kill switch',
-      result: 'ok',
+      summary: result.ok && result.quiesced
+        ? 'stopDaemon() called: stop requested via kill switch and outward mutations quiesced'
+        : `stopDaemon() could not confirm stop: ${result.reason}`,
+      result: result.ok && result.quiesced ? 'ok' : 'error',
     });
   } catch {
     // Audit best-effort
   }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

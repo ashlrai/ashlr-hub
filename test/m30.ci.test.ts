@@ -55,35 +55,84 @@ describe('M30 CI workflow', () => {
       ciYml.match(
         /^ {10}- os: (?:ubuntu|windows|macos)-latest[\s\S]*?(?=^ {10}- os: |^ {4}runs-on:)/gm,
       ) ?? [];
-    const windowsEntries = nativeMatrixEntries
-      .filter((entry) => entry.includes('os: windows-latest'))
-      .join('\n');
+    const windowsMatrixEntries = nativeMatrixEntries
+      .filter((entry) => entry.includes('os: windows-latest'));
+    const windowsEntries = windowsMatrixEntries.join('\n');
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
-    const expectedFiles = [
-      'test/setup/home.test.ts',
-      'test/classify.test.ts',
-      'test/m2.doctor.test.ts',
-      'test/m21.worktree.test.ts',
-      'test/m23.apply.test.ts',
-      'test/m43.verify-commands.test.ts',
+    const expectedWindowsPartitions = [
+      [
+        'test/setup/home.test.ts',
+        'test/classify.test.ts',
+        'test/m2.doctor.test.ts',
+        'test/m43.verify-commands.test.ts',
+        'test/m113.coordinator-wire.test.ts',
+        'test/m373.directory-durability.test.ts',
+        terminalRetentionTest,
+        'test/m403.automerge-mutation-fence.test.ts',
+        'test/m404.policy-result-surfaces.test.ts',
+        'test/m409.engine-execution-mutation-fence.test.ts',
+        'test/m410.policy-opposing-race.test.ts',
+        'test/m414.local-store-lock-unknown-owner.test.ts',
+        'test/m415.policy-durability-races.test.ts',
+        'test/m422.policy-transaction-recovery.test.ts',
+        'test/m416.local-store-lock-handoff.test.ts',
+      ],
+      [
+        'test/m21.worktree.test.ts',
+        'test/m23.apply.test.ts',
+        'test/m100.web-open.test.ts',
+        'test/m119.quality-metrics.test.ts',
+        'test/m332.outcome-watcher.test.ts',
+        'test/m405.apply-mutation-fence.test.ts',
+        'test/m406.daemon-stop-quiescence.test.ts',
+        'test/m411.local-merge-reconciliation.test.ts',
+        'test/m412.sandbox-pre-effect-recovery.test.ts',
+        'test/m413.engineer-run-mutation-fence.test.ts',
+        'test/m417.sandbox-cleanup-quiescence.test.ts',
+        'test/m424.legacy-swarm-mutation-fence.test.ts',
+        'test/sandbox-reservation-recovery.test.ts',
+      ],
+      [
+        'test/m220.anticlog-verdict-feedback.test.ts',
+        'test/m286.worktree-verify-env.test.ts',
+        'test/m315.remote-handoff-truth.test.ts',
+        'test/m372.test-ci-watchdog.test.ts',
+        'test/m379.private-storage.test.ts',
+        'test/m385.cutoff-checkpoint-windows.test.ts',
+        'test/m407.verification-mutation-fence.test.ts',
+        'test/m408.sandbox-creation-mutation-fence.test.ts',
+        'test/m418.pulse-quiescence.test.ts',
+        'test/m419.remote-handoff-intent.test.ts',
+        'test/m420.remote-handoff-recovery.test.ts',
+        'test/m421.legacy-pulse-quiescence.test.ts',
+        'test/m423.control-plane-lock-order.test.ts',
+      ],
+    ];
+    const expectedMacosFiles = [
       'test/m111.work-queue.test.ts',
-      'test/m113.coordinator-wire.test.ts',
-      'test/m100.web-open.test.ts',
-      'test/m119.quality-metrics.test.ts',
-      'test/m220.anticlog-verdict-feedback.test.ts',
-      'test/m286.worktree-verify-env.test.ts',
-      'test/m315.remote-handoff-truth.test.ts',
-      'test/m332.outcome-watcher.test.ts',
-      'test/m372.test-ci-watchdog.test.ts',
-      'test/m373.directory-durability.test.ts',
-      'test/m379.private-storage.test.ts',
-      'test/m385.cutoff-checkpoint-windows.test.ts',
       'test/m392.queue-lease-epochs.test.ts',
       terminalRetentionTest,
-      terminalRetentionTest,
     ];
+    const expectedFiles = [...expectedWindowsPartitions.flat(), ...expectedMacosFiles];
+
+    expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
+    windowsMatrixEntries.forEach((entry, index) => {
+      const partitionFiles = entry.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
+      expect([...partitionFiles].sort()).toEqual(
+        [...(expectedWindowsPartitions[index] ?? [])].sort(),
+      );
+    });
+    const windowsDeclaredFiles = windowsEntries.match(
+      /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
+    ) ?? [];
+    expect(new Set(windowsDeclaredFiles).size).toBe(windowsDeclaredFiles.length);
+    const macosDeclaredFiles = macosEntry.match(
+      /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
+    ) ?? [];
+    expect([...macosDeclaredFiles].sort()).toEqual([...expectedMacosFiles].sort());
+
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     const duplicateFiles = declaredFiles.filter(
       (file, index) => declaredFiles.indexOf(file) !== index,

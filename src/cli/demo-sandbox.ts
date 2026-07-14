@@ -47,6 +47,12 @@ import { dirname, join, resolve } from 'node:path';
 import { unenroll } from '../core/sandbox/policy.js';
 import { sweepRepoSandboxes } from '../core/sandbox/worktree.js';
 
+export interface DemoDisposeResult {
+  /** True only when policy removal completed while outward mutations were quiesced. */
+  readonly unenrolled: boolean;
+  readonly reason: string;
+}
+
 /**
  * A live, ISOLATED demo context: a fresh tmp HOME (so `~/.ashlr` is isolated)
  * plus a single DISPOSABLE git repo seeded with a TODO so the backlog finds
@@ -66,7 +72,7 @@ export interface DemoContext {
    * tmp repo + tmp HOME. Idempotent; never throws. When `keep` is set, the tmp
    * dir is preserved (still under os.tmpdir()) for inspection.
    */
-  dispose(): void;
+  dispose(): DemoDisposeResult;
 }
 
 /** Options for {@link makeDemoContext}. */
@@ -162,17 +168,25 @@ export function makeDemoContext(opts?: MakeDemoContextOptions): DemoContext {
   // emits audit() on every enroll/unenroll since H6). This flag enforces genuine
   // idempotence so a double-dispose never leaks state to the real home.
   let disposed = false;
+  let disposeResult: DemoDisposeResult | null = null;
 
-  const dispose = (): void => {
-    if (disposed) return;
+  const dispose = (): DemoDisposeResult => {
+    if (disposed) return disposeResult ?? { unenrolled: false, reason: 'cleanup outcome unavailable' };
     disposed = true;
 
     // a. Unenroll the tmp repo + sweep its sandboxes (the rollback) — STILL
     //    under the isolated HOME, so this writes only into the tmp ~/.ashlr.
     try {
-      unenroll(repoDir);
-    } catch {
-      /* best-effort — never throw from teardown */
+      const result = unenroll(repoDir);
+      disposeResult = {
+        unenrolled: result === undefined || (result.ok && result.quiesced),
+        reason: result?.reason ?? 'legacy cleanup completed',
+      };
+    } catch (err) {
+      disposeResult = {
+        unenrolled: false,
+        reason: err instanceof Error ? err.message : String(err),
+      };
     }
     try {
       sweepRepoSandboxes(repoDir);
@@ -196,6 +210,7 @@ export function makeDemoContext(opts?: MakeDemoContextOptions): DemoContext {
 
     // c. Restore HOME + re-entrancy env LAST, so (a)/(b) ran isolated.
     restoreEnv();
+    return disposeResult;
   };
 
   return {

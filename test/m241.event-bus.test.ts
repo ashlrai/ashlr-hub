@@ -179,13 +179,13 @@ describe('1. emit dispatches to registered handlers', () => {
     off();
   });
 
-  it('calls multiple handlers in registration order', () => {
+  it('calls multiple handlers in registration order', async () => {
     const order: string[] = [];
     const off1 = onFleetEvent('anomaly', () => { order.push('first'); });
     const off2 = onFleetEvent('anomaly', () => { order.push('second'); });
     const off3 = onFleetEvent('anomaly', () => { order.push('third'); });
 
-    emit('anomaly', { detail: 'disk-full', source: 'sentinel' }, cfgOn());
+    await emit('anomaly', { detail: 'disk-full', source: 'sentinel' }, cfgOn());
 
     expect(order).toEqual(['first', 'second', 'third']);
     off1(); off2(); off3();

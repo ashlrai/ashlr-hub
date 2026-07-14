@@ -217,6 +217,7 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
 const mockKillSwitchOn = vi.fn(() => false);
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
+  isEnrolled: () => true,
   assertMayMutate: vi.fn(),
 }));
 

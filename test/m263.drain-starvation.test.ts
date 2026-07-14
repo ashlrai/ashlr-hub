@@ -42,6 +42,11 @@ let tmpHome: string;
 // Mocks
 // ---------------------------------------------------------------------------
 
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
+  isEnrolled: () => true,
+}));
+
 const mockSetStatus = vi.fn();
 const mockUpdateProposalField = vi.fn();
 
@@ -66,6 +71,7 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: (engine: string | undefined) => String(engine ?? '').toLowerCase().includes('claude'),
 }));
 
 const mockJudgeProposal = vi.fn();
@@ -75,9 +81,10 @@ vi.mock('../src/core/fleet/manager.js', () => ({
   resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
+const mockRecordDecision = vi.fn();
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => []),
-  recordDecision: vi.fn(),
+  recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
 }));
 
 vi.mock('../src/core/run/provider-client.js', () => ({
@@ -173,6 +180,25 @@ function shipVerdict(proposalId: string) {
   };
 }
 
+function expectAttestedShipDecision(proposalId: string): void {
+  const call = mockRecordDecision.mock.calls.find(
+    ([entry]) => (entry as Record<string, unknown>)['proposalId'] === proposalId,
+  );
+  expect(call).toBeDefined();
+  const entry = call![0] as Record<string, unknown>;
+  expect(entry).toEqual(expect.objectContaining({
+    proposalId,
+    action: 'judged',
+    engine: 'claude-opus-4-8',
+    verdict: 'ship',
+    detail: 'would-merge',
+    judgeAttestationIssuedAt: expect.any(String),
+    judgeAttestationIntent: 'would-merge',
+  }));
+  expect(entry['judgeAttestation']).toMatch(/^[0-9a-f]{64}$/);
+  expect(entry['judgeAttestationIssuedAt']).toBe(entry['ts']);
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ now: TEST_NOW_MS, toFake: ['Date'] });
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m263-'));
@@ -184,6 +210,7 @@ beforeEach(() => {
   mockJudgeProposal.mockReset();
   mockSetStatus.mockReset();
   mockUpdateProposalField.mockReset();
+  mockRecordDecision.mockReset();
 
   mockListProposals.mockImplementation(() => pendingProposals);
   mockSetStatus.mockReturnValue(true);
@@ -283,7 +310,11 @@ describe('M263 judgeNonShipCount increments correctly', () => {
     const out = await runAutoMergePass(baseCfg());
 
     expect(out.autoArchived).toBe(0);
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('p-unset', { judgeNonShipCount: 1 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'p-unset',
+      { judgeNonShipCount: 1 },
+      expect.anything(),
+    );
   });
 
   it('count=1 incremented to 2 (below K=3 threshold)', async () => {
@@ -294,7 +325,11 @@ describe('M263 judgeNonShipCount increments correctly', () => {
     const out = await runAutoMergePass(baseCfg());
 
     expect(out.autoArchived).toBe(0);
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('p-count1', { judgeNonShipCount: 2 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'p-count1',
+      { judgeNonShipCount: 2 },
+      expect.anything(),
+    );
   });
 
   it('count=2 → non-ship → reaches K=3 → auto-archived', async () => {
@@ -306,7 +341,7 @@ describe('M263 judgeNonShipCount increments correctly', () => {
 
     expect(out.autoArchived).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-count2', 'rejected', undefined, expect.stringContaining('auto-archived'), undefined, {}, 'pending',
+      'p-count2', 'rejected', undefined, expect.stringContaining('auto-archived'), expect.anything(), {}, 'pending',
     );
     // updateProposalField must NOT be called for archived (setStatus is used instead)
     expect(mockUpdateProposalField).not.toHaveBeenCalledWith('p-count2', expect.anything());
@@ -333,7 +368,11 @@ describe('M263 judgeNonShipCount increments correctly', () => {
     expect(firstJudged).toBe('p-oldest');
 
     // oldest gets count bumped from 0→1
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('p-oldest', { judgeNonShipCount: 1 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'p-oldest',
+      { judgeNonShipCount: 1 },
+      expect.anything(),
+    );
     // newer is NOT judged this pass (capped)
     expect(mockJudgeProposal).toHaveBeenCalledTimes(1);
   });
@@ -354,6 +393,8 @@ describe('M263 ship verdict — merge gate unchanged', () => {
     await runAutoMergePass(baseCfg());
 
     // Both should reach the merge gate (both ship)
+    expectAttestedShipDecision('p-ship-old');
+    expectAttestedShipDecision('p-ship-new');
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('p-ship-old', expect.anything());
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('p-ship-new', expect.anything());
   });
@@ -377,6 +418,7 @@ describe('M263 ship verdict — merge gate unchanged', () => {
     );
     expect(updateCalls).toHaveLength(0);
     // Proceeds to merge gate
+    expectAttestedShipDecision('p-ship-nocount');
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('p-ship-nocount', expect.anything());
   });
 });
@@ -429,7 +471,7 @@ describe('M263 no-regression: m259 TTL + auto-archive unaffected', () => {
 
     expect(out.autoArchived).toBe(1);
     expect(mockSetStatus).toHaveBeenCalledWith(
-      'p-archive-regress', 'rejected', undefined, expect.stringContaining('auto-archived'), undefined, {}, 'pending',
+      'p-archive-regress', 'rejected', undefined, expect.stringContaining('auto-archived'), expect.anything(), {}, 'pending',
     );
     expect(mockAutoMergeProposal).not.toHaveBeenCalledWith(
       'p-archive-regress', expect.anything(),

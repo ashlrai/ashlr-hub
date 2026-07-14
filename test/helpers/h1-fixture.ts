@@ -13,9 +13,10 @@
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ABSOLUTE SAFETY RULES (paramount — encoded directly in these helpers):
- *   - HOME is relocated to a FRESH os.tmpdir() dir per fixture so every state
- *     read/write resolves to an ISOLATED ~/.ashlr — NEVER the real one. The real
- *     portfolio (~/.ashlr/enrollment.json = { repos: [] }) is NEVER touched.
+ *   - HOME and USERPROFILE are relocated to a FRESH os.tmpdir() dir per fixture
+ *     so every state read/write resolves to an ISOLATED ~/.ashlr — NEVER the
+ *     real one. The real portfolio (~/.ashlr/enrollment.json = { repos: [] }) is
+ *     NEVER touched.
  *   - Every repo is a DISPOSABLE git repo created under os.tmpdir(). Enrollment
  *     targets ONLY these tmp repos. cleanup() unenrolls + rm -rf everything and
  *     restores the prior HOME / env.
@@ -29,7 +30,8 @@
  *   The core chain — sandbox/policy, sandbox/worktree, sandbox/audit,
  *   inbox/store, inbox/apply, daemon/loop, daemon/state, portfolio/backlog —
  *   resolves paths via os.homedir() AT CALL TIME, so relocating process.env.HOME
- *   before invoking them is sufficient to isolate their state.
+ *   before invoking them is sufficient to isolate their state. USERPROFILE is
+ *   relocated alongside HOME because os.homedir() uses it on Windows.
  *
  *   src/core/config.ts is the ONE exception: it captures CONFIG_DIR /
  *   CONFIG_PATH from homedir() at MODULE-LOAD time. The H1 chain does not depend
@@ -117,7 +119,7 @@ export interface DisposableRepo {
 
 /** The active fixture handle returned by {@link makeFixture}. */
 export interface H1Fixture {
-  /** Absolute path of the isolated tmp HOME (process.env.HOME for this fixture). */
+  /** Absolute path of the isolated tmp home (HOME and USERPROFILE). */
   readonly home: string;
   /** Absolute path of the isolated ~/.ashlr under the tmp HOME. */
   readonly ashlrDir: string;
@@ -453,8 +455,8 @@ export function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
 
 /**
  * Create an isolated H1 fixture:
- *   1. Snapshot + relocate process.env.HOME to a FRESH os.tmpdir() dir so every
- *      ~/.ashlr read/write is isolated.
+ *   1. Snapshot + relocate HOME and USERPROFILE to a FRESH os.tmpdir() dir so
+ *      every ~/.ashlr read/write is isolated on POSIX and Windows.
  *   2. Snapshot the re-entrancy env (ASHLR_IN_DAEMON / ASHLR_IN_SWARM) and clear
  *      it so a tick/daemon run is not refused by the recursion guard.
  *   3. Hand back a handle whose makeRepo() builds disposable repos (auto-tracked)
@@ -466,11 +468,13 @@ export function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
  */
 export function makeFixture(): H1Fixture {
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   const prevInDaemon = process.env.ASHLR_IN_DAEMON;
   const prevInSwarm = process.env.ASHLR_IN_SWARM;
 
   const home = mkdtempSync(join(tmpdir(), 'ashlr-h1-home-'));
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   delete process.env.ASHLR_IN_DAEMON;
   delete process.env.ASHLR_IN_SWARM;
 
@@ -494,6 +498,8 @@ export function makeFixture(): H1Fixture {
     // vars permanently cleared for the rest of the process (an env-cleanup leak).
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
     if (prevInDaemon === undefined) delete process.env.ASHLR_IN_DAEMON;
     else process.env.ASHLR_IN_DAEMON = prevInDaemon;
     if (prevInSwarm === undefined) delete process.env.ASHLR_IN_SWARM;
@@ -541,9 +547,11 @@ export function makeFixture(): H1Fixture {
       } catch {
         /* ignore */
       }
-      // 4. Restore HOME + re-entrancy env.
+      // 4. Restore HOME, USERPROFILE, and re-entrancy env.
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
+      if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevUserProfile;
       if (prevInDaemon === undefined) delete process.env.ASHLR_IN_DAEMON;
       else process.env.ASHLR_IN_DAEMON = prevInDaemon;
       if (prevInSwarm === undefined) delete process.env.ASHLR_IN_SWARM;

@@ -389,8 +389,10 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       base: 'main',
     }));
     const stagedHead = git(tmpRepo, ['rev-parse', `refs/heads/ashlr/merge/${proposal.id}`]);
-    const ghCalls = fs.readFileSync(ghCallsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-    expect(ghCalls).toContainEqual([
+    const ghCalls = (fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').trim().split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(ghCalls).not.toContainEqual([
       'pr', 'merge', '--auto', '--squash', '--match-head-commit', stagedHead,
       '--repo', 'ashlrai/fixture',
       'https://github.com/ashlrai/fixture/pull/123',
@@ -408,6 +410,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       base: 'main',
       expectedHeadOid: stagedHead,
     });
+    expect(loaded?.remoteHandoff?.detail).toMatch(/host auto-merge (?:not enabled|is disabled).*durable revocation/i);
     expect(listProposals({ status: 'pending' }).some((p) => p.id === proposal.id)).toBe(false);
     expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
 
@@ -455,26 +458,28 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(git(tmpRepo, ['rev-parse', '--verify', `refs/heads/${branch}`])).toMatch(/^[a-f0-9]{40}$/);
   }, 60_000);
 
-  it('rechecks authority before PR creation and does not clean refs after kill', async () => {
+  it('does not let pause report quiescence between push and PR creation', async () => {
+    let pauseResult: ReturnType<typeof setKill> | undefined;
     viewPrMock.mockImplementationOnce(() => {
-      setKill(true);
+      pauseResult = setKill(true, { waitMs: 25 });
       return null;
     });
 
     const { proposal, result } = await createRemoteHandoffProposal();
     const branch = `ashlr/merge/${proposal.id}`;
 
-    expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/kill switch/i);
-    expect(createPrMock).not.toHaveBeenCalled();
+    expect(pauseResult).toMatchObject({ ok: false, quiesced: false });
+    expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(createPrMock).toHaveBeenCalledTimes(1);
     expect(git(tmpRepo, ['ls-remote', '--heads', 'origin'])).toContain(branch);
     expect(git(tmpRepo, ['rev-parse', '--verify', `refs/heads/${branch}`])).toMatch(/^[a-f0-9]{40}$/);
   }, 60_000);
 
-  it('rechecks authority before enabling host auto-merge', async () => {
+  it('keeps the fence through the durable receipt when pause races PR observation', async () => {
+    let pauseResult: ReturnType<typeof setKill> | undefined;
     createPrMock.mockImplementationOnce(async (_repo: string, input: { head: string; base?: string }) => {
       viewPrMock.mockImplementationOnce(() => {
-        setKill(true);
+        pauseResult = setKill(true, { waitMs: 25 });
         return {
           url: 'https://github.com/ashlrai/fixture/pull/123',
           state: 'OPEN',
@@ -491,11 +496,14 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
 
     const { proposal, result } = await createRemoteHandoffProposal();
 
-    expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/authority was revoked.*kill switch/i);
+    expect(pauseResult).toMatchObject({ ok: false, quiesced: false });
+    expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
     expect(createPrMock).toHaveBeenCalledTimes(1);
     expect(ghExecMock).not.toHaveBeenCalled();
-    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { prUrl: 'https://github.com/ashlrai/fixture/pull/123' },
+    });
   }, 60_000);
 
   it('rechecks authority immediately before a local default-branch merge', async () => {
@@ -616,15 +624,16 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     const { proposal, result } = await createRemoteHandoffProposal();
 
     expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/live branch protection changed after push; refusing PR creation/);
+    expect(result.reason).toMatch(/live branch protection changed after push; PR creation not started/);
     expect(createPrMock).not.toHaveBeenCalled();
     expect(branchProtectionMock).toHaveBeenCalledTimes(3);
-    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
-    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`])).toBe('');
-
-    branchProtectionMock.mockResolvedValue(protectedEvidence);
-    const retried = await autoMergeProposal(proposal.id, cfg());
-    expect(retried).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toContain(`ashlr/merge/${proposal.id}`);
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`]))
+      .toContain(`ashlr/merge/${proposal.id}`);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { detail: expect.stringContaining('PR creation not started') },
+    });
   }, 30_000);
 
   it('refuses PR creation when merge-critical policy semantics drift with identical checks', async () => {
@@ -662,7 +671,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     const { result } = await createRemoteHandoffProposal();
 
     expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/live branch protection changed after push; refusing PR creation/);
+    expect(result.reason).toMatch(/live branch protection changed after push; PR creation not started/);
     expect(createPrMock).not.toHaveBeenCalled();
   }, 30_000);
 
@@ -780,9 +789,14 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       git(tmpRepo, ['push', 'origin', `${preExistingHead}:refs/heads/${branch}`]);
     });
 
-    expect(result).toMatchObject({ ok: false, merged: false, reason: 'failed to push staging branch' });
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/staging push outcome is unknown.*signed intent retained/i);
     expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`]))
       .toContain(preExistingHead);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      localMergeIntent: { proposalHeadOid: expect.stringMatching(/^[0-9a-f]{40}$/) },
+    });
     expect(createPrMock).not.toHaveBeenCalled();
     expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
   }, 30_000);
@@ -808,7 +822,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ ok: false, merged: false });
     expect(result.reason).toMatch(/PR creation outcome is unknown/);
     expect(remoteHead).toMatch(/^[0-9a-f]{40}$/);
-    expect(git(tmpRepo, ['branch', '--list', branch])).toBe('');
+    expect(git(tmpRepo, ['branch', '--list', branch])).toContain(branch);
     expect(loadProposal(proposal.id)).toMatchObject({
       status: 'awaiting-host-merge',
       remoteHandoff: { branch, base: 'main', expectedHeadOid: remoteHead },
@@ -840,6 +854,63 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       remoteHandoff: { state: 'merged', expectedHeadOid: remoteHead },
     });
   }, 30_000);
+
+  it('retries the same URL-less proposal through full gates when host proves no PR for its exact branch', async () => {
+    createPrMock.mockImplementationOnce(async () => ({ ok: false, detail: 'request timed out' }));
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+    const expectedHead = loadProposal(proposal.id)?.remoteHandoff?.expectedHeadOid;
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(expectedHead).toMatch(/^[0-9a-f]{40}$/);
+    expect(loadProposal(proposal.id)?.remoteHandoff?.prUrl).toBeUndefined();
+
+    ghExecMock.mockImplementation((_file, rawArgs) => {
+      const args = Array.isArray(rawArgs) ? rawArgs.map(String) : [];
+      return args[0] === 'pr' && args[1] === 'list' ? '[]' : '';
+    });
+    viewPrMock.mockReturnValue(null);
+
+    expect(reconcileRemoteHandoffs()).toMatchObject({ checked: 1, recovered: 1, merged: 0 });
+    expect(loadProposal(proposal.id)).toMatchObject({
+      id: proposal.id,
+      status: 'approved',
+      remoteHandoff: {
+        state: 'unknown',
+        branch,
+        expectedHeadOid: expectedHead,
+        detail: expect.stringContaining('[ashlr-remote-handoff-retry:1]'),
+      },
+    });
+
+    createPrMock.mockImplementationOnce(async (_repo: string, input: { head: string; base?: string }) => {
+      viewPrMock.mockReturnValueOnce({
+        url: 'https://github.com/ashlrai/fixture/pull/124',
+        state: 'OPEN',
+        headRefName: input.head,
+        headRefOid: expectedHead,
+        baseRefName: input.base ?? 'main',
+      });
+      return {
+        ok: true,
+        url: 'https://github.com/ashlrai/fixture/pull/124',
+        detail: 'PR created on bounded retry',
+      };
+    });
+    const retried = await autoMergeProposal(proposal.id, cfg());
+
+    expect(retried).toMatchObject({
+      ok: true,
+      merged: false,
+      handoff: true,
+      prUrl: 'https://github.com/ashlrai/fixture/pull/124',
+    });
+    expect(createPrMock).toHaveBeenCalledTimes(2);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { prUrl: 'https://github.com/ashlrai/fixture/pull/124' },
+    });
+  }, 60_000);
 
   it('evidence mode opens a protected remote handoff only with command-bound evidence', async () => {
     const diff = addFileDiff('docs/evidence-handoff.md', 'protected evidence handoff');
@@ -1449,7 +1520,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(loaded?.remoteHandoff?.mergedAt).toBeUndefined();
   }, 30_000);
 
-  it('does not let a stale closed response overwrite a concurrent merged transition', async () => {
+  it('holds the proposal lock while reading a closed host response', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockImplementationOnce(() => {
@@ -1460,7 +1531,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
           mergedAt: '2026-07-03T01:00:00Z',
           mergeCommitOid: 'c'.repeat(40),
         },
-      })).toBe(true);
+      })).toBe(false);
       return {
         state: 'CLOSED',
         closed: true,
@@ -1470,14 +1541,14 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       };
     });
 
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 1, open: 0, unknown: 0 });
     expect(loadProposal(proposal.id)).toMatchObject({
-      status: 'applied',
-      remoteHandoff: { state: 'merged', mergeCommitOid: 'c'.repeat(40) },
+      status: 'rejected',
+      remoteHandoff: { state: 'closed' },
     });
   }, 30_000);
 
-  it('does not let a stale open response replace a concurrent merged transition', async () => {
+  it('holds the proposal lock while reading an open host response', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockImplementationOnce(() => {
@@ -1488,7 +1559,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
           mergedAt: '2026-07-03T01:00:00Z',
           mergeCommitOid: 'd'.repeat(40),
         },
-      })).toBe(true);
+      })).toBe(false);
       return {
         state: 'OPEN',
         url: handoff.prUrl,
@@ -1497,10 +1568,10 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       };
     });
 
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 1, unknown: 0 });
     expect(loadProposal(proposal.id)).toMatchObject({
-      status: 'applied',
-      remoteHandoff: { state: 'merged', mergeCommitOid: 'd'.repeat(40) },
+      status: 'awaiting-host-merge',
+      remoteHandoff: { state: 'awaiting-host-merge' },
     });
   }, 30_000);
 
@@ -1525,7 +1596,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     });
   }, 30_000);
 
-  it('does not attach a sparse stale open response to a replacement handoff', async () => {
+  it('blocks replacement handoff writes while the host read is in flight', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockImplementationOnce(() => {
@@ -1535,19 +1606,19 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
           branch: 'ashlr/replacement-generation',
           prUrl: undefined,
         },
-      })).toBe(true);
+      })).toBe(false);
       return { state: 'OPEN', url: handoff.prUrl };
     });
 
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 1, unknown: 0 });
     expect(loadProposal(proposal.id)?.remoteHandoff).toMatchObject({
-      branch: 'ashlr/replacement-generation',
+      branch: handoff.branch,
       state: 'awaiting-host-merge',
     });
-    expect(loadProposal(proposal.id)?.remoteHandoff?.prUrl).toBeUndefined();
+    expect(loadProposal(proposal.id)?.remoteHandoff?.prUrl).toBe(handoff.prUrl);
   }, 30_000);
 
-  it('does not apply a stale terminal response to a same-selector replacement generation', async () => {
+  it('blocks same-selector generation replacement while the host read is in flight', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockImplementationOnce(() => {
@@ -1557,7 +1628,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
           createdAt: '2026-07-03T00:30:00.000Z',
           updatedAt: '2026-07-03T00:30:00.000Z',
         },
-      })).toBe(true);
+      })).toBe(false);
       return {
         state: 'MERGED',
         mergedAt: '2026-07-03T01:00:00Z',
@@ -1571,7 +1642,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
     expect(loadProposal(proposal.id)).toMatchObject({
       status: 'awaiting-host-merge',
-      remoteHandoff: { createdAt: '2026-07-03T00:30:00.000Z', state: 'awaiting-host-merge' },
+      remoteHandoff: { createdAt: handoff.createdAt, state: 'awaiting-host-merge' },
     });
   }, 30_000);
 

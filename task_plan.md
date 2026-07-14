@@ -2177,3 +2177,22 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Missing state is inactive; malformed, unsigned, conflicting, future-dated, rollback-suspect, or over-cap state is critical/degraded.
 - Local HMAC protects visible integrity but cannot prove freshness after coherent state-and-key rollback.
 - Production remains on immutable `f178db34fa6e47eb44df9f3db855943db602ef76` with auto-merge disabled until the complete enforce controller is proven.
+
+## Current Overnight Cycle - Cross-Process Outward Mutation Authority
+- [x] Rehydrate protected remote source in an isolated worktree while preserving the canonical routing and test edits.
+- [x] Audit every autonomous outward-effect path, deferred task, shutdown boundary, policy transition, sandbox lifecycle, remote handoff, and local merge path with parallel adversarial agents.
+- [x] Add one process-wide unforgeable outward-mutation fence and hold it through autonomous execution, capture, verification, staging, push/PR, local merge, fanout, cleanup, and awaited side effects.
+- [x] Make KILL and unenrollment durable-before-wait, crash-recoverable, and unable to report quiescence while a cooperating outward effect remains active.
+- [x] Add signed exact-remote pre-push intent, bounded retry/reconciliation, local merge receipts, later-base ancestry reconciliation, and realized-merge fanout replay.
+- [x] Add durable policy transactions, sandbox reservations, fixed-point daemon drain, token-bound local locks, and authenticated abandoned-guard recovery.
+- [x] Make live PID ownership conservative under clock drift, suspend, DST ambiguity, PID reuse, and unknown liveness; reclaim only after the OS proves `ESRCH`.
+- [x] Add M403-M424 plus sandbox reservation coverage and native Windows CI partitions.
+- [x] Pass 530 test files with 11,103 assertions green and 9 intentional skips, typecheck/build, zero-error lint, zero-vulnerability audit, and diff checks.
+- [ ] Commit, push, open the protected PR, and observe exact-SHA cross-platform CI.
+- [ ] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+
+### Authority Limits
+- Manual human-confirmed apply and desktop actions do not yet share universal durable pre-effect intent and reconciliation.
+- Older host auto-merge requests are not automatically revoked; this production installation has never enabled auto-merge.
+- Cooperative locks cannot stop an uncooperative same-user process, and external engines remain outside a filesystem jail beyond the cooperative sandbox protocol.
+- Host-local evidence cannot prove freshness after coherent state/key rollback; an external monotonic anchor remains required for enforcement.

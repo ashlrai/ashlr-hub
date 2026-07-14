@@ -314,7 +314,7 @@ describe('runSwarm — owner cancellation', () => {
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
   });
 
-  it('stops a cancelled planner before sandbox, tasks, or proposal capture', async () => {
+  it('stops a cancelled manual planner before tasks or proposal capture', async () => {
     const controller = new AbortController();
     const reason = new Error('planning cancelled');
     reason.name = 'AbortError';
@@ -331,10 +331,6 @@ describe('runSwarm — owner cancellation', () => {
       makeConfig(),
       {
         signal: controller.signal,
-        sandbox: true,
-        requireSandbox: true,
-        propose: true,
-        project: path.join(tmpHome, 'not-a-repository'),
       },
       nullSink,
     );

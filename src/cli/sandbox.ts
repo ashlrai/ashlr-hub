@@ -25,6 +25,7 @@ import type {
   SandboxInventory,
   SandboxSweepResult,
 } from '../core/types.js';
+import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -113,10 +114,10 @@ async function loadWorktree(): Promise<{
 // ---------------------------------------------------------------------------
 
 type ListEnrolledFn = () => string[];
-type EnrollFn       = (repo: string) => void;
-type UnenrollFn     = (repo: string) => void;
+type EnrollFn       = (repo: string) => PolicyMutationResult | void;
+type UnenrollFn     = (repo: string) => PolicyMutationResult | void;
 type KillSwitchOnFn = () => boolean;
-type SetKillFn      = (on: boolean) => void;
+type SetKillFn      = (on: boolean) => PolicyMutationResult | void;
 
 let _listEnrolled: ListEnrolledFn | null | undefined = undefined;
 let _enroll:       EnrollFn       | null | undefined = undefined;
@@ -169,6 +170,21 @@ async function loadPolicy(): Promise<{
 
 function moduleNotBuilt(module: string): void {
   console.error(red('error: ') + `${module} requires src/core/sandbox/ (M21 module not yet built).`);
+}
+
+function policyMutationFailure(
+  result: PolicyMutationResult,
+  action: string,
+): string | null {
+  if (result.ok && result.quiesced) return null;
+  if (/unsafe/i.test(result.reason)) {
+    return `${action} refused: unsafe policy storage (${result.reason}); operator repair is required.`;
+  }
+  if (!result.quiesced && (result.ok ||
+    /fence unavailable|has not quiesced|outward mutation.*active|\bbusy\b/i.test(result.reason))) {
+    return `${action} is busy and has not quiesced (${result.reason}); retry the command.`;
+  }
+  return `${action} refused: policy storage is degraded (${result.reason}); operator repair is required.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +392,13 @@ export async function cmdEnroll(args: string[]): Promise<number> {
     const policy = await loadPolicy();
     if (!policy) { moduleNotBuilt('enroll add'); return 1; }
     try {
-      policy.enroll(repo);
+      const result = policy.enroll(repo);
+      // Older test doubles returned void; real policy mutators return a result.
+      const failure = result === undefined ? null : policyMutationFailure(result, 'Enrollment');
+      if (failure) {
+        console.error(red('error: ') + failure);
+        return 1;
+      }
       console.log(green('✓') + ` Enrolled: ${cyan(repo)}`);
       return 0;
     } catch (err) {
@@ -395,7 +417,12 @@ export async function cmdEnroll(args: string[]): Promise<number> {
     const policy = await loadPolicy();
     if (!policy) { moduleNotBuilt('enroll remove'); return 1; }
     try {
-      policy.unenroll(repo);
+      const result = policy.unenroll(repo);
+      const failure = result === undefined ? null : policyMutationFailure(result, 'Unenrollment');
+      if (failure) {
+        console.error(red('error: ') + failure);
+        return 1;
+      }
       console.log(green('✓') + ` Removed: ${cyan(repo)}`);
       return 0;
     } catch (err) {
@@ -414,7 +441,14 @@ export async function cmdEnroll(args: string[]): Promise<number> {
     const policy = await loadPolicy();
     if (!policy) { moduleNotBuilt('enroll kill'); return 1; }
     try {
-      policy.setKill(val === 'on');
+      const result = policy.setKill(val === 'on');
+      const failure = result === undefined
+        ? null
+        : policyMutationFailure(result, val === 'on' ? 'Kill switch pause' : 'Kill switch resume');
+      if (failure) {
+        console.error(red('error: ') + failure);
+        return 1;
+      }
       if (val === 'on') {
         console.log(yellow('Kill switch ON') + dim(' — all autonomous/sandbox ops refused.'));
       } else {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -61,6 +61,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   fx.cleanup();
 });
 
@@ -497,6 +498,8 @@ describe('queued autonomy work scanner', () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const now = new Date('2026-07-12T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const proposal = partialProposal(repo.dir, {
       status: 'rejected',
       createdAt: '2026-07-12T11:00:00.000Z',
@@ -707,6 +710,9 @@ describe('queued autonomy work scanner', () => {
   it('expires materialized rejected-capture recovery after the bounded window', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    const materializedAt = new Date('2026-07-12T12:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(materializedAt);
     const proposal = partialProposal(repo.dir, {
       status: 'rejected',
       createdAt: '2026-07-12T11:00:00.000Z',
@@ -715,10 +721,12 @@ describe('queued autonomy work scanner', () => {
       decisionReason: 'auto-drained: permanent readiness blocker persisted for 2 pass(es): known verification failure',
     });
     (proposal as unknown as Record<string, unknown>)['stuckPassCount'] = 2;
-    queueProposalRepairWorkForPendingProposals([proposal], new Date('2026-07-12T12:00:00.000Z'));
+    queueProposalRepairWorkForPendingProposals([proposal], materializedAt);
     expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
 
-    const expired = queueProposalRepairWorkForPendingProposals([], new Date('2026-07-14T11:00:00.001Z'));
+    const expiredAt = new Date('2026-07-14T11:00:00.001Z');
+    vi.setSystemTime(expiredAt);
+    const expired = queueProposalRepairWorkForPendingProposals([], expiredAt);
 
     expect(expired.dispatchRepairPruned).toBe(1);
     expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);

@@ -49,6 +49,7 @@ import {
   createProposal,
   loadProposal,
   recordRealizedMerge,
+  replayRealizedMergeFanout,
   setStatus,
   updateProposalField,
 } from '../src/core/inbox/store.js';
@@ -500,8 +501,17 @@ describe('M398 merge decision truth', () => {
     const interrupted = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
     delete interrupted['realizedMergeFanoutVersion'];
     fs.writeFileSync(file, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
+    let authorityChecks = 0;
+    expect(replayRealizedMergeFanout(
+      proposal.id,
+      undefined,
+      () => ++authorityChecks <= 4,
+    )).toBe(true);
+    expect(authorityChecks).toBeGreaterThan(4);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+    expect(replayRealizedMergeFanout(proposal.id)).toBe(false);
 
     const decisions = readDecisions({ proposalId: proposal.id, requireComplete: true });
     expect(decisions.filter((decision) => decision.action === 'merge-authorized')).toHaveLength(1);
@@ -536,12 +546,12 @@ describe('M398 merge decision truth', () => {
     fs.renameSync(decisionsDirectory, decisionsBackup);
     fs.writeFileSync(decisionsDirectory, 'not a directory\n', { mode: 0o600 });
 
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
+    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
 
     fs.unlinkSync(decisionsDirectory);
     fs.renameSync(decisionsBackup, decisionsDirectory);
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
+    expect(replayRealizedMergeFanout(proposal.id)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
     expect(readDecisions({ proposalId: proposal.id, requireComplete: true })
       .filter((decision) => decision.action === 'merged')).toHaveLength(1);
