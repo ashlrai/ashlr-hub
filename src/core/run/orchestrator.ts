@@ -118,7 +118,7 @@ import {
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
-import { assurePrivateStoragePath } from '../util/private-storage.js';
+import { writePrivateFileExclusive } from '../util/private-file-write.js';
 import { assertMayMutate } from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
@@ -1091,17 +1091,15 @@ export function saveRun(s: RunState): void {
     if (Buffer.byteLength(payload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
       throw new Error(`Refusing run record larger than ${MAX_PERSISTED_RUN_BYTES} bytes`);
     }
-    tmp = path.join(
+    const candidate = path.join(
       path.dirname(dest),
       `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
     );
-    fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    const secured = assurePrivateStoragePath(tmp, 'file', 'secure-created', {
+    writePrivateFileExclusive(candidate, payload, {
       anchorPath: stateRoot(),
+      label: 'Run persistence temporary file',
     });
-    if (!secured.ok) {
-      throw new Error(`Run persistence temporary file is unsafe: ${secured.reason}`);
-    }
+    tmp = candidate;
     fs.renameSync(tmp, dest);
     tmp = undefined;
     completeCaseFoldedOwnership(ownershipClaim);

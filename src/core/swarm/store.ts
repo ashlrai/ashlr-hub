@@ -25,7 +25,6 @@ import {
   opendirSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 
 import type { SwarmRun, SwarmTaskRun } from '../types.js';
@@ -51,7 +50,7 @@ import {
   MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
   type CaseOwnershipClaim,
 } from '../util/case-folded-ownership.js';
-import { assurePrivateStoragePath } from '../util/private-storage.js';
+import { writePrivateFileExclusive } from '../util/private-file-write.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -412,12 +411,12 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
       return { ok: false, reason: 'invalid' };
     }
 
-    tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    const secured = assurePrivateStoragePath(tmp, 'file', 'secure-created', {
+    const candidate = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+    writePrivateFileExclusive(candidate, json, {
       anchorPath: stateRoot(),
+      label: 'Swarm persistence temporary file',
     });
-    if (!secured.ok) return { ok: false, reason: 'unavailable' };
+    tmp = candidate;
     renameSync(tmp, target);
     tmp = undefined;
     completeCaseFoldedOwnership(ownershipClaim);

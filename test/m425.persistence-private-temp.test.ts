@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -77,11 +85,14 @@ describe('M425 private persistence temporaries', () => {
 
   it('refuses and cleans a run temporary when private-file assurance fails', () => {
     const id = 'm425-run';
-    mocks.assure.mockImplementation((path: string, kind: string, mode: string) =>
-      path.includes(`${id}.json.`) && path.endsWith('.tmp') &&
-        kind === 'file' && mode === 'secure-created'
-        ? { ok: false, reason: 'adapter-failed' }
-        : { ok: true, reason: 'exact-private-dacl' });
+    mocks.assure.mockImplementation((path: string, kind: string, mode: string) => {
+      if (path.includes(`${id}.json.`) && path.endsWith('.tmp') &&
+        kind === 'file' && mode === 'secure-created') {
+        expect(lstatSync(path).size).toBe(0);
+        return { ok: false, reason: 'adapter-failed' };
+      }
+      return { ok: true, reason: 'exact-private-dacl' };
+    });
 
     expect(() => saveRun(runState(id))).toThrow(/temporary file is unsafe: adapter-failed/i);
 
@@ -92,11 +103,14 @@ describe('M425 private persistence temporaries', () => {
 
   it('refuses and cleans a swarm temporary when private-file assurance fails', () => {
     const id = 'm425-swarm';
-    mocks.assure.mockImplementation((path: string, kind: string, mode: string) =>
-      path.includes(`${id}.json.`) && path.endsWith('.tmp') &&
-        kind === 'file' && mode === 'secure-created'
-        ? { ok: false, reason: 'adapter-failed' }
-        : { ok: true, reason: 'exact-private-dacl' });
+    mocks.assure.mockImplementation((path: string, kind: string, mode: string) => {
+      if (path.includes(`${id}.json.`) && path.endsWith('.tmp') &&
+        kind === 'file' && mode === 'secure-created') {
+        expect(lstatSync(path).size).toBe(0);
+        return { ok: false, reason: 'adapter-failed' };
+      }
+      return { ok: true, reason: 'exact-private-dacl' };
+    });
 
     expect(saveSwarm(swarmState(id))).toEqual({ ok: false, reason: 'unavailable' });
 
@@ -117,5 +131,24 @@ describe('M425 private persistence temporaries', () => {
       expect(options).toEqual({ anchorPath: join(home, '.ashlr') });
       expect(existsSync(String(path))).toBe(false);
     }
+  });
+
+  it('rejects a pathname replacement without deleting the replacement', () => {
+    const id = 'm425-swapped-run';
+    let replacement: string | undefined;
+    mocks.assure.mockImplementation((path: string, kind: string, mode: string) => {
+      if (path.includes(`${id}.json.`) && path.endsWith('.tmp') &&
+        kind === 'file' && mode === 'secure-created') {
+        expect(lstatSync(path).size).toBe(0);
+        renameSync(path, `${path}.original`);
+        writeFileSync(path, 'replacement must survive\n', 'utf8');
+        replacement = path;
+      }
+      return { ok: true, reason: 'exact-private-dacl' };
+    });
+
+    expect(() => saveRun(runState(id))).toThrow(/changed during creation/i);
+    expect(replacement).toBeDefined();
+    expect(existsSync(replacement!)).toBe(true);
   });
 });
