@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createProposal: vi.fn(),
   runGoal: vi.fn(),
   planSwarm: vi.fn(),
+  assurePrivateStorage: vi.fn(() => ({ ok: true, reason: 'exact-private-dacl' })),
   snapshotProject: vi.fn((project: string | null) => ({
     project,
     isRepo: false,
@@ -21,6 +22,10 @@ const mocks = vi.hoisted(() => ({
     stashRef: null,
     ts: new Date().toISOString(),
   })),
+}));
+
+vi.mock('../src/core/util/private-storage.js', () => ({
+  assurePrivateStoragePath: mocks.assurePrivateStorage,
 }));
 
 vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {
@@ -204,7 +209,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
       changed: false,
       quiesced: true,
     });
-  }, 60_000);
+  }, 30_000);
 
   it('retains authority through held planning and persists the completed plan before quiescence', async () => {
     let releasePlanner!: () => void;
@@ -274,7 +279,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
     expect(result.status).toBe('done');
     expect(mocks.runGoal).toHaveBeenCalledOnce();
     expect(mocks.createSandbox).not.toHaveBeenCalled();
-  }, 60_000);
+  }, 30_000);
 
   it('does not report quiescence while proposal capture is inside the retained fence', async () => {
     mocks.runGoal.mockImplementationOnce(async (goal: string) => completedRun(goal));
