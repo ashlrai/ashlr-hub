@@ -1042,15 +1042,15 @@ export interface AshlrConfig {
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
       /**
-       * Evidence-mode remote policy expectation. This configuration is never
+       * Remote-main policy expectation. This configuration is never
        * authority by itself: live GitHub protection must match it immediately
-       * before evidence capture and remote handoff.
+       * before evidence capture, remote handoff, PR creation, and host auto-merge.
        */
       protectedRemote?: {
-        /** Operator expects live branch protection; evidence mode requires true. */
+        /** Operator expects live branch protection; autonomous remote-main delivery requires true. */
         branchProtection: boolean;
         /**
-         * Expected checks in the live GitHub policy. Evidence mode requires
+         * Expected checks in the live GitHub policy. Remote-main delivery requires
          * typed context+App identities; legacy strings remain parseable but
          * are deliberately non-authoritative.
          */
@@ -3725,6 +3725,8 @@ export interface ProposalRemoteHandoff {
   prUrl?: string;
   branch?: string;
   base?: string;
+  /** Exact verified staging commit expected at the PR head throughout reconciliation. */
+  expectedHeadOid?: string;
   /** Host-reported merge commit identity; persistence must require exactly 40 hex characters. */
   mergeCommitOid?: string;
   /** Authoritative host-reported merge time; never synthesized from local reconciliation time. */

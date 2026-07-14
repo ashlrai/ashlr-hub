@@ -60,6 +60,7 @@ import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import { writeDaemonActivity } from '../src/core/daemon/activity.js';
 import type { Proposal } from '../src/core/types.js';
+import * as inboxMerge from '../src/core/inbox/merge.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -5666,6 +5667,373 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       needsVerification: 0,
       blocked: 0,
     });
+  });
+
+  it('blocks zero-proposal ship readiness when an enrolled remote cannot be attested', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+
+    const remoteHeadSpy = vi.spyOn(inboxMerge, 'resolveRemoteBranchHead')
+      .mockReturnValue('0123456789abcdef0123456789abcdef01234567');
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({ authorized: false, reason: 'live branch protection unavailable: fixture' });
+    const status = await buildFleetStatus(cfg);
+    remoteHeadSpy.mockRestore();
+    protectionSpy.mockRestore();
+
+    expect(status.proposals.pending).toBe(0);
+    expect(status.autoMergeReadiness).toMatchObject({
+      enabled: true,
+      pending: 0,
+      remoteProtection: {
+        required: true,
+        configured: 'exact',
+        live: 'unavailable',
+        coverage: 'complete',
+        observedAt: null,
+        reposObserved: 1,
+        reposRequired: 1,
+      },
+    });
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: {
+        id: 'protected-remote-unavailable',
+        source: 'auto-merge',
+      },
+    });
+    const autoMergeSource = status.autonomousShipReadiness?.sources
+      .find((source) => source.id === 'auto-merge');
+    expect(autoMergeSource).toMatchObject({ status: 'blocked' });
+    expect(autoMergeSource?.sourceQuality?.badge).not.toBe('healthy-zero');
+    expect(status.nextActions?.map((action) => action.id)).toContain('inspect-protected-remote');
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
+    expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({
+      id: 'inspect-protected-remote',
+    });
+  });
+
+  it('fails closed on an unknown auto-merge trust basis even with an empty inbox', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'future-unsafe-mode' as never,
+        maxRisk: 'low',
+      },
+    });
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.autoMergeReadiness).toMatchObject({
+      enabled: true,
+      trustBasis: 'tier',
+      configurationBlocker: "invalid auto-merge trustBasis 'future-unsafe-mode'",
+    });
+    expect(status.autonomousShipReadiness?.topBlocker).toMatchObject({
+      id: 'auto-merge-configuration-invalid',
+      source: 'auto-merge',
+    });
+    expect(status.nextActions?.map((action) => action.id)).toContain('inspect-auto-merge-configuration');
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
+    expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+  });
+
+  it('fails closed on an unknown auto-merge maxRisk value', async () => {
+    writeRunningDaemon(tmpHome);
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'extreme' as never,
+      },
+    });
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.autoMergeReadiness?.configurationBlocker).toBe("invalid auto-merge maxRisk 'extreme'");
+    expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('auto-merge-configuration-invalid');
+    expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+  });
+
+  it('withholds drain authority when a ready proposal cannot observe live protection', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const baseHead = '0123456789abcdef0123456789abcdef01234567';
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+    const proposal = createSignedProposal(cfg, {
+      title: 'Ready but remote protection unavailable',
+      diff: docsDiff('remote unavailable'),
+      verifyResult: { passed: true, source: 'manual', baseBranch: 'main', baseHead },
+    });
+    recordFrontierShipDecision(proposal);
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({ authorized: false, reason: 'live branch protection unavailable: fixture' });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+
+      expect(status.autoMergeReadiness).toMatchObject({
+        authorityReady: 0,
+        remoteMainAuthorityReady: 1,
+        authorityBlocked: 1,
+        remoteProtection: {
+          required: true,
+          configured: 'exact',
+          live: 'unavailable',
+          coverage: 'complete',
+          observedAt: null,
+          reposObserved: 1,
+          reposRequired: 1,
+        },
+      });
+      expect(status.autonomousShipReadiness?.topBlocker).toMatchObject({
+        id: 'protected-remote-unavailable',
+        source: 'auto-merge',
+      });
+      expect(status.nextActions?.map((action) => action.id)).toContain('inspect-protected-remote');
+      expect(status.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    } finally {
+      protectionSpy.mockRestore();
+    }
+  });
+
+  it('does not require protected-main authority for a tier branch-only delivery', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'tier',
+        maxRisk: 'low',
+        pushToRemote: true,
+        midToBranch: true,
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Mid-tier branch delivery',
+      diff: docsDiff('branch only'),
+      engineTier: 'mid',
+      engineModel: 'local-coder:qwen2.5-coder',
+    });
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({ authorized: false, reason: 'must not be consulted for branch-only delivery' });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+
+      expect(protectionSpy).not.toHaveBeenCalled();
+      expect(status.autoMergeReadiness).toMatchObject({
+        authorityReady: 1,
+        remoteProtection: { required: false, configured: 'missing' },
+      });
+      expect(status.nextActions?.map((action) => action.id)).toContain('drain-ready-auto-merges');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(true);
+    } finally {
+      protectionSpy.mockRestore();
+    }
+  });
+
+  it('keeps a ready branch lane drainable when an unrelated main lane lacks protection', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const baseHead = '0123456789abcdef0123456789abcdef01234567';
+    const cfg = withFoundry({
+      mergeAuthority: [{ engine: 'codex', model: 'gpt-5.5' }],
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'tier',
+        maxRisk: 'low',
+        pushToRemote: true,
+        midToBranch: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready branch lane',
+      diff: docsDiff('mixed branch'),
+      engineTier: 'mid',
+      engineModel: 'local-coder:qwen2.5-coder',
+    });
+    createSignedProposal(cfg, {
+      title: 'Blocked main lane',
+      diff: docsDiff('mixed main'),
+      verifyResult: { passed: true, source: 'manual', baseBranch: 'main', baseHead },
+    });
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({ authorized: false, reason: 'live branch protection unavailable: fixture' });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+
+      expect(status.autoMergeReadiness).toMatchObject({
+        authorityReady: 1,
+        branchAuthorityReady: 1,
+        remoteMainAuthorityReady: 1,
+        authorityBlocked: 1,
+      });
+      expect(status.nextActions?.map((action) => action.id)).toContain('drain-ready-auto-merges');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(true);
+      expect(status.autonomousShipReadiness?.topBlocker?.id).not.toBe('protected-remote-unavailable');
+    } finally {
+      protectionSpy.mockRestore();
+    }
+  });
+
+  it('projects reachable protected-complete authority for a ready main target', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const baseHead = '0123456789abcdef0123456789abcdef01234567';
+    const observedAt = new Date().toISOString();
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+    const proposal = createSignedProposal(cfg, {
+      title: 'Ready with protected remote',
+      diff: docsDiff('protected complete'),
+      verifyResult: { passed: true, source: 'manual', baseBranch: 'main', baseHead },
+    });
+    recordFrontierShipDecision(proposal);
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({
+        authorized: true,
+        evidence: {
+          ok: true,
+          live: true,
+          detail: 'Live branch protection confirmed',
+          nameWithOwner: 'ashlrai/fixture',
+          repositoryId: 'R_fixture',
+          branch: 'main',
+          baseHead,
+          observedAt,
+          requirements: ['required_status_checks'],
+          requiredChecks: ['ci/test'],
+          requiredCheckBindings: [{ context: 'ci/test', appId: '15368' }],
+          policySources: ['classic'],
+          policyHash: 'a'.repeat(64),
+        },
+      });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+
+      expect(status.autoMergeReadiness).toMatchObject({
+        authorityReady: 1,
+        remoteProtection: {
+          required: true,
+          configured: 'exact',
+          live: 'protected',
+          coverage: 'complete',
+          observedAt,
+          reposObserved: 1,
+          reposRequired: 1,
+        },
+      });
+      expect(status.autonomousShipReadiness).toMatchObject({ verdict: 'ready', topBlocker: null });
+      expect(status.nextActions?.map((action) => action.id)).toContain('drain-ready-auto-merges');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(true);
+    } finally {
+      protectionSpy.mockRestore();
+    }
+  });
+
+  it('expires stale live-protection observations before granting drain authority', async () => {
+    const baseHead = '0123456789abcdef0123456789abcdef01234567';
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+    const proposal = createSignedProposal(cfg, {
+      title: 'Ready with stale protection',
+      diff: docsDiff('stale protection'),
+      verifyResult: { passed: true, source: 'manual', baseBranch: 'main', baseHead },
+    });
+    recordFrontierShipDecision(proposal);
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({
+        authorized: true,
+        evidence: {
+          ok: true,
+          live: true,
+          detail: 'stale fixture',
+          nameWithOwner: 'ashlrai/fixture',
+          repositoryId: 'R_fixture',
+          branch: 'main',
+          baseHead,
+          observedAt: '2026-01-01T00:00:00.000Z',
+          requirements: ['required_status_checks'],
+          requiredChecks: ['ci/test'],
+          requiredCheckBindings: [{ context: 'ci/test', appId: '15368' }],
+          policySources: ['classic'],
+          policyHash: 'a'.repeat(64),
+        },
+      });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(status.autoMergeReadiness).toMatchObject({
+        authorityReady: 0,
+        remoteMainAuthorityReady: 1,
+        authorityBlocked: 1,
+        remoteProtection: { live: 'unavailable', detail: 'live protected-remote observation is missing or stale' },
+      });
+      expect(status.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    } finally {
+      protectionSpy.mockRestore();
+    }
   });
 
   it('withholds evidence-mode drain readiness when the decisions source is degraded', async () => {

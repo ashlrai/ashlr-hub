@@ -93,6 +93,18 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     expect(r.reason).toMatch(/vitest/);
   });
 
+  it('fails closed on an unknown trust basis instead of downgrading to tier authority', () => {
+    const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({ trustBasis: 'future-unsafe-mode' }));
+    expect(r).toMatchObject({ ready: false, permanent: false });
+    expect(r.reason).toMatch(/invalid auto-merge trustBasis/);
+  });
+
+  it('fails closed on an unknown maxRisk instead of treating it as low risk', () => {
+    const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({ maxRisk: 'extreme' }));
+    expect(r).toMatchObject({ ready: false, permanent: false });
+    expect(r.reason).toMatch(/invalid auto-merge maxRisk/);
+  });
+
   it('reuses authority, provenance, and risk basics as blockers', () => {
     expect(
       evaluateAutoMergeReadinessPreflight(

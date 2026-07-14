@@ -12,20 +12,34 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const { createPrMock, viewPrMock, branchProtectionMock } = vi.hoisted(() => ({
+const { createPrMock, viewPrMock, branchProtectionMock, originAuthorityMock, ghExecMock } = vi.hoisted(() => ({
   createPrMock: vi.fn(),
   viewPrMock: vi.fn(),
   branchProtectionMock: vi.fn(),
+  originAuthorityMock: vi.fn(),
+  ghExecMock: vi.fn(),
 }));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => (
+      args[0] === 'gh' ? ghExecMock(...args) : actual.execFileSync(...args)
+    ),
+  };
+});
 
 vi.mock('../src/core/git.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/git.js')>();
   return {
     ...actual,
-    getRemoteOrg: (repoPath: string) => ({
+    getRemoteOrg: (_repoPath: string) => ({
       remote: 'https://github.com/ashlrai/fixture.git',
       org: 'ashlrai',
     }),
+    resolveGitHubOriginAuthority: () => originAuthorityMock()?.nameWithOwner ?? null,
+    resolveGitHubOriginAuthorityDetails: () => originAuthorityMock(),
   };
 });
 
@@ -34,7 +48,20 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
   return {
     ...actual,
     createPr: (...args: unknown[]) => createPrMock(...args),
-    viewPr: (...args: unknown[]) => viewPrMock(...args),
+    viewPr: (...args: unknown[]) => {
+      const result = viewPrMock(...args) as Record<string, unknown> | null | undefined;
+      if (!result || typeof result.headRefName !== 'string' || typeof result.headRefOid === 'string') return result;
+      try {
+        const headRefOid = execFileSync(
+          'git',
+          ['-C', String(args[0]), 'rev-parse', '--verify', `refs/heads/${result.headRefName}`],
+          { stdio: 'pipe', encoding: 'utf8' },
+        ).trim();
+        return { ...result, headRefOid };
+      } catch {
+        return result;
+      }
+    },
     readBranchProtectionAttestation: (...args: unknown[]) => branchProtectionMock(...args),
   };
 });
@@ -48,8 +75,8 @@ import {
 } from '../src/core/inbox/remote-handoff-attestation.js';
 import { createProposal, listProposals, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from '../src/core/inbox/proposal-mutation-lock.js';
-import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { readDecisions, recordDecision } from '../src/core/fleet/decisions-ledger.js';
+import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
 import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -59,6 +86,12 @@ const origAllowAny = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 let tmpHome: string;
 let tmpRepo: string;
 let bareRepo: string;
+let ghCallsFile: string;
+const TEST_POLICY_SNAPSHOT = {
+  schemaVersion: 1,
+  classic: { enforceAdmins: true },
+  rulesets: [],
+} as const;
 
 function git(dir: string, args: string[]): string {
   return execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', encoding: 'utf8' }).trim();
@@ -123,6 +156,10 @@ function cfg(): AshlrConfig {
         maxRisk: 'low',
         allowWithoutVerification: true,
         pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '1' }],
+        },
       },
     },
   } as unknown as AshlrConfig;
@@ -147,6 +184,47 @@ function evidenceCfg(): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
+function verificationCfg(): AshlrConfig {
+  const config = cfg();
+  if (config.foundry?.autoMerge) {
+    config.foundry.autoMerge.trustBasis = 'verification';
+    config.foundry.autoMerge.allowWithoutVerification = false;
+  }
+  return config;
+}
+
+function recordVerificationAuthority(proposalId: string, diff: string): void {
+  const ts = new Date().toISOString();
+  const judgeEngine = 'claude-opus-4-5';
+  recordDecision({
+    ts,
+    proposalId,
+    action: 'judged',
+    engine: judgeEngine,
+    model: judgeEngine,
+    verdict: 'ship',
+    reason: 'frontier judge ship',
+    detail: 'would-merge',
+    judgeAttestationIssuedAt: ts,
+    judgeAttestationIntent: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff(diff),
+      issuedAt: ts,
+      mergeIntent: 'would-merge',
+    }),
+  });
+  recordDecision({
+    ts: new Date(Date.parse(ts) + 1).toISOString(),
+    proposalId,
+    action: 'verified',
+    verdict: 'approved',
+    reason: 'independent verification confirmed',
+  });
+}
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-'));
@@ -154,8 +232,38 @@ beforeEach(() => {
   process.env.HOME = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  ghCallsFile = path.join(tmpHome, 'gh-calls.jsonl');
+  ghExecMock.mockReset();
+  ghExecMock.mockImplementation((_file, rawArgs) => {
+    const args = Array.isArray(rawArgs) ? rawArgs.map(String) : [];
+    if (args[0] === 'pr' && args[1] === 'merge') {
+      const inboxDir = path.join(process.env.ASHLR_HOME ?? '', 'inbox');
+      const ready = fs.existsSync(inboxDir) && fs.readdirSync(inboxDir).some((name) => {
+        try {
+          const proposal = JSON.parse(fs.readFileSync(path.join(inboxDir, name), 'utf8')) as {
+            status?: string;
+            remoteHandoff?: { expectedHeadOid?: string };
+          };
+          return proposal.status === 'awaiting-host-merge' &&
+            /^[0-9a-f]{40}$/.test(proposal.remoteHandoff?.expectedHeadOid ?? '');
+        } catch {
+          return false;
+        }
+      });
+      if (!ready) throw new Error('host auto-merge invoked before durable handoff');
+    }
+    fs.appendFileSync(ghCallsFile, `${JSON.stringify(args)}\n`, 'utf8');
+    return '';
+  });
   setKill(false);
   initRepo(tmpRepo);
+  originAuthorityMock.mockReset();
+  originAuthorityMock.mockImplementation(() => ({
+    nameWithOwner: 'ashlrai/fixture',
+    fetchUrls: [bareRepo],
+    pushUrls: [bareRepo],
+    pushUrl: bareRepo,
+  }));
   branchProtectionMock.mockReset();
   branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
     ok: true,
@@ -172,6 +280,7 @@ beforeEach(() => {
     requiredChecks: ['ci/test'],
     requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
     sources: ['classic'],
+    policySnapshot: TEST_POLICY_SNAPSHOT,
     detail: 'Live branch protection confirmed with required checks',
   }));
   execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
@@ -180,13 +289,21 @@ beforeEach(() => {
   git(tmpRepo, ['fetch', 'origin']);
   git(tmpRepo, ['remote', 'set-head', 'origin', 'main']);
   enroll(tmpRepo);
-  createPrMock.mockReset();
-  createPrMock.mockResolvedValue({
-    ok: true,
-    url: 'https://github.com/ashlrai/fixture/pull/123',
-    detail: 'PR created',
-  });
   viewPrMock.mockReset();
+  createPrMock.mockReset();
+  createPrMock.mockImplementation(async (_repo: string, input: { head: string; base?: string }) => {
+    viewPrMock.mockReturnValueOnce({
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+      state: 'OPEN',
+      headRefName: input.head,
+      baseRefName: input.base ?? 'main',
+    });
+    return {
+      ok: true,
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+      detail: 'PR created',
+    };
+  });
 });
 
 afterEach(() => {
@@ -202,8 +319,8 @@ afterEach(() => {
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAny;
 });
 
-describe('M315 remote PR handoff truth', () => {
-  async function createRemoteHandoffProposal() {
+describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
+  async function createRemoteHandoffProposal(beforeMerge?: (proposal: Proposal) => void) {
     const diff = addFileDiff('docs/handoff.md', 'truthful remote handoff');
     const diffHash = hashDiff(diff);
     const proposal = createProposal({
@@ -219,6 +336,7 @@ describe('M315 remote PR handoff truth', () => {
       engineTier: 'frontier',
     });
     setStatus(proposal.id, 'approved');
+    beforeMerge?.(proposal);
 
     const result = await autoMergeProposal(proposal.id, cfg());
     return { proposal, result };
@@ -238,6 +356,16 @@ describe('M315 remote PR handoff truth', () => {
       repo: 'ashlrai/fixture',
       base: 'main',
     }));
+    const stagedHead = git(tmpRepo, ['rev-parse', `refs/heads/ashlr/merge/${proposal.id}`]);
+    const ghCalls = fs.readFileSync(ghCallsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(ghCalls).toContainEqual([
+      'pr', 'merge', '--auto', '--squash', '--match-head-commit', stagedHead,
+      '--repo', 'ashlrai/fixture',
+      'https://github.com/ashlrai/fixture/pull/123',
+    ]);
+    expect(branchProtectionMock.mock.calls.every((call) => (
+      call[2]?.forceFresh === true && call[2]?.expectedNameWithOwner === 'ashlrai/fixture'
+    ))).toBe(true);
 
     const loaded = loadProposal(proposal.id);
     expect(loaded?.status).toBe('awaiting-host-merge');
@@ -246,6 +374,7 @@ describe('M315 remote PR handoff truth', () => {
       state: 'awaiting-host-merge',
       prUrl: 'https://github.com/ashlrai/fixture/pull/123',
       base: 'main',
+      expectedHeadOid: stagedHead,
     });
     expect(listProposals({ status: 'pending' }).some((p) => p.id === proposal.id)).toBe(false);
     expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
@@ -253,6 +382,317 @@ describe('M315 remote PR handoff truth', () => {
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'handoff')).toBe(true);
   }, 60_000);
+
+  it('tier mode refuses an unprotected remote before any push or PR creation', async () => {
+    branchProtectionMock.mockResolvedValue({
+      ok: false,
+      available: true,
+      protected: false,
+      branchProtection: false,
+      detail: 'No enforceable branch protection requirements were found',
+    });
+
+    const { result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/protected remote handoff denied: live branch protection unavailable/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin'])).not.toContain('refs/heads/ashlr/');
+  }, 30_000);
+
+  it('verification mode refuses an unprotected remote before any push or PR creation', async () => {
+    const diff = addFileDiff('docs/verification-protection.md', 'verification still needs host protection');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'verification remote protection',
+      summary: 'Bind judge-backed delivery to live protection.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+    recordVerificationAuthority(proposal.id, diff);
+    branchProtectionMock.mockResolvedValue({
+      ok: false,
+      available: true,
+      protected: false,
+      branchProtection: false,
+      detail: 'No enforceable branch protection requirements were found',
+    });
+
+    const result = await autoMergeProposal(proposal.id, verificationCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/protected remote handoff denied: live branch protection unavailable/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin'])).not.toContain('refs/heads/ashlr/');
+  }, 30_000);
+
+  it('refuses PR creation when protection changes during the staging-branch push', async () => {
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const protectedEvidence = {
+      ok: true,
+      available: true,
+      protected: true,
+      branchProtection: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch: 'main',
+      baseHead,
+      observedAt: new Date().toISOString(),
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      sources: ['classic'],
+      policySnapshot: TEST_POLICY_SNAPSHOT,
+      detail: 'Live branch protection confirmed with required checks',
+    };
+    branchProtectionMock
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce({
+        ...protectedEvidence,
+        ok: false,
+        protected: false,
+        branchProtection: false,
+        requirements: [],
+        requiredChecks: [],
+        requiredCheckBindings: [],
+        sources: [],
+        detail: 'No enforceable branch protection requirements were found',
+      });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/live branch protection changed after push; refusing PR creation/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`])).toBe('');
+
+    branchProtectionMock.mockResolvedValue(protectedEvidence);
+    const retried = await autoMergeProposal(proposal.id, cfg());
+    expect(retried).toMatchObject({ ok: true, merged: false, handoff: true });
+  }, 30_000);
+
+  it('refuses PR creation when merge-critical policy semantics drift with identical checks', async () => {
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const protectedEvidence = {
+      ok: true,
+      available: true,
+      protected: true,
+      branchProtection: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch: 'main',
+      baseHead,
+      observedAt: new Date().toISOString(),
+      requirements: ['required_status_checks', 'enforce_admins'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      sources: ['classic'] as const,
+      policySnapshot: TEST_POLICY_SNAPSHOT,
+      detail: 'Live branch protection confirmed with required checks',
+    };
+    branchProtectionMock
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce({
+        ...protectedEvidence,
+        requirements: ['required_status_checks'],
+        policySnapshot: {
+          ...TEST_POLICY_SNAPSHOT,
+          classic: { enforceAdmins: false },
+        },
+      });
+
+    const { result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/live branch protection changed after push; refusing PR creation/);
+    expect(createPrMock).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('refuses an ambiguous origin before any protected remote mutation', async () => {
+    originAuthorityMock.mockReturnValue(null);
+
+    const { result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/protected remote handoff requires a canonical GitHub origin/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin'])).not.toContain('refs/heads/ashlr/');
+  }, 30_000);
+
+  it('quarantines an untrusted PR URL instead of recording cross-repository authority', async () => {
+    createPrMock.mockResolvedValueOnce({
+      ok: true,
+      url: 'https://github.com/attacker/fixture/pull/123',
+      detail: 'host returned a different repository',
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/PR creation outcome is unknown: PR creation returned no canonical URL/);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: {
+        state: 'awaiting-host-merge',
+        branch: `ashlr/merge/${proposal.id}`,
+        base: 'main',
+        expectedHeadOid: expect.stringMatching(/^[0-9a-f]{40}$/),
+      },
+    });
+    expect(loadProposal(proposal.id)?.remoteHandoff?.prUrl).toBeUndefined();
+    expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
+  }, 30_000);
+
+  it('refuses host auto-merge when the remote PR head changes during PR creation', async () => {
+    let replacement = '';
+    createPrMock.mockImplementation(async (_repo: string, input: { head: string }) => {
+      replacement = git(tmpRepo, ['commit-tree', git(tmpRepo, ['rev-parse', 'main^{tree}']), '-m', 'replacement']);
+      git(tmpRepo, ['push', '--force', 'origin', `${replacement}:refs/heads/${input.head}`]);
+      return {
+        ok: true,
+        url: 'https://github.com/ashlrai/fixture/pull/123',
+        detail: 'PR created after remote head replacement',
+      };
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(result.reason).toMatch(/host auto-merge refused because the remote PR head changed/);
+    const quarantined = loadProposal(proposal.id);
+    expect(quarantined).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: {
+        state: 'awaiting-host-merge',
+        prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+        expectedHeadOid: expect.stringMatching(/^[0-9a-f]{40}$/),
+        detail: expect.stringContaining('remote PR head mismatch'),
+      },
+    });
+    expect(quarantined?.remoteHandoff?.expectedHeadOid).not.toBe(replacement);
+    expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
+
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      url: quarantined?.remoteHandoff?.prUrl,
+      headRefName: quarantined?.remoteHandoff?.branch,
+      headRefOid: replacement,
+      baseRefName: quarantined?.remoteHandoff?.base,
+    });
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+  }, 30_000);
+
+  it('quarantines a newly created PR whose observed base does not match the intent', async () => {
+    createPrMock.mockImplementationOnce(async (_repo: string, input: { head: string }) => {
+      viewPrMock.mockReturnValueOnce({
+        url: 'https://github.com/ashlrai/fixture/pull/123',
+        state: 'OPEN',
+        headRefName: input.head,
+        baseRefName: 'release',
+      });
+      return {
+        ok: true,
+        url: 'https://github.com/ashlrai/fixture/pull/123',
+        detail: 'PR created on the wrong base',
+      };
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+
+    expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(result.reason).toMatch(/post-create PR identity was not confirmed/);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: {
+        prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+        detail: expect.stringContaining('post-create PR identity was not confirmed'),
+      },
+    });
+    expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
+  }, 30_000);
+
+  it('refuses to overwrite a pre-existing remote staging branch', async () => {
+    let preExistingHead = '';
+    const { proposal, result } = await createRemoteHandoffProposal((created) => {
+      const branch = `ashlr/merge/${created.id}`;
+      preExistingHead = git(tmpRepo, ['rev-parse', 'main']);
+      git(tmpRepo, ['push', 'origin', `${preExistingHead}:refs/heads/${branch}`]);
+    });
+
+    expect(result).toMatchObject({ ok: false, merged: false, reason: 'failed to push staging branch' });
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`]))
+      .toContain(preExistingHead);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
+  }, 30_000);
+
+  it('persists intent before an ambiguous PR failure and binds the exact PR during reconciliation', async () => {
+    createPrMock.mockImplementationOnce(async () => {
+      const intents = listProposals({ status: 'awaiting-host-merge' });
+      expect(intents).toHaveLength(1);
+      expect(intents[0]?.remoteHandoff).toMatchObject({
+        state: 'awaiting-host-merge',
+        branch: expect.stringMatching(/^ashlr\/merge\//),
+        base: 'main',
+        expectedHeadOid: expect.stringMatching(/^[0-9a-f]{40}$/),
+      });
+      expect(intents[0]?.remoteHandoff?.prUrl).toBeUndefined();
+      return { ok: false, detail: 'request timed out' };
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+    const remoteHead = git(tmpRepo, ['ls-remote', '--heads', 'origin', branch]).split(/\s+/)[0];
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/PR creation outcome is unknown/);
+    expect(remoteHead).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(tmpRepo, ['branch', '--list', branch])).toBe('');
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { branch, base: 'main', expectedHeadOid: remoteHead },
+    });
+
+    viewPrMock.mockReturnValue({
+      number: 123,
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      headRefName: branch,
+      headRefOid: remoteHead,
+      baseRefName: 'main',
+    });
+    const bound = reconcileRemoteHandoffs();
+
+    expect(bound).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(createPrMock).toHaveBeenCalledTimes(1);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { branch, base: 'main', prUrl: 'https://github.com/ashlrai/fixture/pull/123' },
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'applied',
+      remoteHandoff: { state: 'merged', expectedHeadOid: remoteHead },
+    });
+  }, 30_000);
 
   it('evidence mode opens a protected remote handoff only with command-bound evidence', async () => {
     const diff = addFileDiff('docs/evidence-handoff.md', 'protected evidence handoff');
@@ -325,7 +765,7 @@ describe('M315 remote PR handoff truth', () => {
       policySources: ['classic'],
       policyHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(4);
   });
 
   it('evidence mode refuses static protection claims when live GitHub is unprotected', async () => {
@@ -384,6 +824,7 @@ describe('M315 remote PR handoff truth', () => {
       requiredChecks: ['ci/test'],
       requiredCheckBindings: [{ context: 'ci/test', appId: null }],
       sources: ['classic'],
+      policySnapshot: TEST_POLICY_SNAPSHOT,
       detail: 'Required status context accepts any producer',
     }));
     const diff = addFileDiff('docs/unbound-check.md', 'must not hand off');
@@ -424,6 +865,7 @@ describe('M315 remote PR handoff truth', () => {
       requiredChecks: ['ci/test'],
       requiredCheckBindings: [{ context: 'ci/test', appId: '999' }],
       sources: ['classic'],
+      policySnapshot: TEST_POLICY_SNAPSHOT,
       detail: 'Required context is produced by an unexpected App',
     }));
     const diff = addFileDiff('docs/wrong-app.md', 'must not hand off');
@@ -466,6 +908,7 @@ describe('M315 remote PR handoff truth', () => {
         requiredChecks: ['ci/test'],
         requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
         sources: ['classic'],
+        policySnapshot: TEST_POLICY_SNAPSHOT,
         detail: 'Live branch protection confirmed with required checks',
       })
       .mockResolvedValueOnce({
@@ -525,9 +968,11 @@ describe('M315 remote PR handoff truth', () => {
       requiredChecks: ['ci/test'],
       requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
       sources: ['classic'],
+      policySnapshot: TEST_POLICY_SNAPSHOT,
       detail: 'Live branch protection confirmed with required checks',
     };
     branchProtectionMock
+      .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce({
@@ -560,7 +1005,7 @@ describe('M315 remote PR handoff truth', () => {
 
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
     expect(result.reason).toMatch(/host auto-merge refused because live protection changed/);
-    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(4);
     expect(createPrMock).toHaveBeenCalledTimes(1);
   });
 
@@ -737,6 +1182,10 @@ describe('M315 remote PR handoff truth', () => {
       detail: expect.stringContaining('remote PR merged'),
     });
     expect(verifyRemoteHandoffReconciliation(proposal.id, tmpRepo, loaded!.remoteHandoff!)).toBe(true);
+    expect(verifyRemoteHandoffReconciliation(proposal.id, tmpRepo, {
+      ...loaded!.remoteHandoff!,
+      branch: 'ashlr/merge/different-generation',
+    })).toBe(false);
     const reconciliationKeyPath = process.platform === 'win32'
       ? path.join(tmpHome, '.ashlr', 'foundry', 'reconciliation', 'key')
       : path.join(tmpHome, '.ashlr', 'foundry', 'remote-handoff-reconciliation.key');
@@ -902,7 +1351,7 @@ describe('M315 remote PR handoff truth', () => {
     });
   }, 30_000);
 
-  it('does not fabricate mergedAt when GitHub reports merged state without a merge time', async () => {
+  it('keeps a sparse merged response awaiting when GitHub omits the merge time', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)?.remoteHandoff;
     viewPrMock.mockReturnValueOnce({
@@ -915,15 +1364,14 @@ describe('M315 remote PR handoff truth', () => {
 
     const r = reconcileRemoteHandoffs();
 
-    expect(r).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
     const loaded = loadProposal(proposal.id);
-    expect(loaded?.status).toBe('applied');
-    expect(loaded?.remoteHandoff?.state).toBe('merged');
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff?.state).toBe('awaiting-host-merge');
     expect(loaded?.remoteHandoff?.mergedAt).toBeUndefined();
-    expect(loaded?.remoteHandoff?.detail).not.toContain(' at ');
   });
 
-  it('preserves an earlier host merge time when a later GitHub read omits it', async () => {
+  it('does not terminally attribute a sparse read even when an earlier merge time was stored', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     updateProposalField(proposal.id, {
@@ -939,9 +1387,61 @@ describe('M315 remote PR handoff truth', () => {
 
     const result = reconcileRemoteHandoffs();
 
-    expect(result.merged).toBe(1);
+    expect(result).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
     expect(loadProposal(proposal.id)?.remoteHandoff?.mergedAt).toBe('2026-07-03T01:00:00Z');
   }, 30_000);
+
+  it('keeps a sparse merged response awaiting when GitHub omits the merge commit OID', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      url: handoff.prUrl,
+      headRefName: handoff.branch,
+      headRefOid: handoff.expectedHeadOid,
+      baseRefName: handoff.base,
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { state: 'awaiting-host-merge' },
+    });
+  });
+
+  it('keeps a merged response awaiting when the observed base is missing', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      url: handoff.prUrl,
+      headRefName: handoff.branch,
+      headRefOid: handoff.expectedHeadOid,
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+  });
+
+  it('keeps a merged response awaiting when the observed branch is missing', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      url: handoff.prUrl,
+      headRefOid: handoff.expectedHeadOid,
+      baseRefName: handoff.base,
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+  });
 
   it('fails closed when GitHub returns a merge time that conflicts with stored evidence', async () => {
     const { proposal } = await createRemoteHandoffProposal();
@@ -1144,12 +1644,56 @@ describe('M315 remote PR handoff truth', () => {
     });
   });
 
-  it('is idempotent after a terminal host merge reconciliation', async () => {
+  it('does not attribute a host merge when the PR head differs from the verified handoff commit', async () => {
     const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockReturnValueOnce({
       state: 'MERGED',
       mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      url: handoff.prUrl,
+      headRefName: handoff.branch,
+      headRefOid: 'b'.repeat(40),
+      baseRefName: handoff.base,
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      remoteHandoff: { state: 'awaiting-host-merge', expectedHeadOid: handoff.expectedHeadOid },
+    });
+  });
+
+  it('quarantines a legacy handoff that has no expected PR head OID', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
+    const { expectedHeadOid: _expectedHeadOid, ...legacyHandoff } = handoff;
+    expect(updateProposalField(proposal.id, { remoteHandoff: legacyHandoff })).toBe(true);
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
+      url: legacyHandoff.prUrl,
+      headRefName: legacyHandoff.branch,
+      headRefOid: 'b'.repeat(40),
+      baseRefName: legacyHandoff.base,
+    });
+
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+  });
+
+  it('is idempotent after a terminal host merge reconciliation', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)!.remoteHandoff!;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'a'.repeat(40),
       url: 'https://github.com/ashlrai/fixture/pull/123',
+      headRefName: handoff.branch,
+      headRefOid: handoff.expectedHeadOid,
+      baseRefName: handoff.base,
     });
 
     const first = reconcileRemoteHandoffs();
@@ -1158,5 +1702,5 @@ describe('M315 remote PR handoff truth', () => {
     expect(first.merged).toBe(1);
     expect(second).toEqual({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
     expect(loadProposal(proposal.id)?.status).toBe('applied');
-  });
+  }, 60_000);
 });

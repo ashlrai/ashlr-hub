@@ -16,12 +16,18 @@ vi.mock('../src/core/integrations/github.js', () => ({
   viewPr: mocks.viewPr,
 }));
 
+vi.mock('../src/core/git.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/git.js')>(),
+  resolveGitHubOriginAuthority: () => 'ashlrai/hub',
+}));
+
 import { viewPrWithReconciliation } from '../src/core/inbox/remote-handoff-attestation.js';
 import type { ProposalRemoteHandoff } from '../src/core/types.js';
 
 const priorHome = process.env.ASHLR_HOME;
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 let home: string;
+const expectedHeadOid = 'b'.repeat(40);
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ashlr-m380-'));
@@ -36,6 +42,7 @@ beforeEach(() => {
     url: 'https://github.com/ashlrai/hub/pull/7',
     headRefName: 'ashlr/change',
     baseRefName: 'main',
+    headRefOid: expectedHeadOid,
   });
 });
 
@@ -51,6 +58,7 @@ function handoff(): ProposalRemoteHandoff {
     provider: 'github', state: 'awaiting-host-merge',
     prUrl: 'https://github.com/ashlrai/hub/pull/7',
     branch: 'ashlr/change', base: 'main', createdAt: '2026-07-12T03:00:00.000Z',
+    expectedHeadOid,
   };
 }
 
