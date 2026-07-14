@@ -13,6 +13,7 @@ import {
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -36,7 +37,7 @@ import {
 } from '../src/core/sandbox/policy.js';
 
 const CHILD_TIMEOUT_MS = 8_000;
-const tsxImportPath = createRequire(import.meta.url).resolve('tsx');
+const tsxImportUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
 const CHILD_SOURCE = String.raw`
@@ -423,7 +424,7 @@ describe('M403 cooperative outward mutation fence', { timeout: 15_000 }, () => {
     for (const cwd of [cwdA, cwdB]) {
       const child = spawnSync(
         process.execPath,
-        ['--import', tsxImportPath, '--input-type=module', '--eval', source],
+        ['--import', tsxImportUrl, '--input-type=module', '--eval', source],
         {
           cwd,
           env: { ...process.env, HOME: 'relative-home', USERPROFILE: 'relative-home', ASHLR_HOME: 'relative-home/.ashlr' },
