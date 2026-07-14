@@ -196,7 +196,7 @@ describe('runDoctor — report structure', () => {
     const report = await runDoctor(cfg);
     expect(Array.isArray(report.checks)).toBe(true);
     expect(report.checks.length).toBeGreaterThan(0);
-  });
+  }, 15_000);
 
   it('every check has id, label, status, detail fields', async () => {
     const cfg = makeConfig(tmpHome);

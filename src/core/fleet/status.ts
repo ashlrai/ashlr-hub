@@ -120,6 +120,7 @@ import {
 } from './context-efficiency.js';
 import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
 import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
+import { defaultBranch } from '../git.js';
 import {
   readResolutionObserverStatus,
   type ResolutionObserverStatus,
@@ -297,6 +298,10 @@ export interface FleetAutoMergeReadinessStatus {
   preflightReady: number;
   /** Candidates whose currently persisted evidence clears the read-only authority gate. */
   authorityReady?: number;
+  /** Authority-ready branch-only candidates, which do not depend on protected-main state. */
+  branchAuthorityReady?: number;
+  /** Main-target candidates before protected-remote status is applied. */
+  remoteMainAuthorityReady?: number;
   /** Cheap candidates withheld because authority evidence is absent or untrustworthy. */
   authorityBlocked?: number;
   authorityByReason?: Record<string, number>;
@@ -306,6 +311,29 @@ export interface FleetAutoMergeReadinessStatus {
   byReason: Record<string, number>;
   recentBlockers: FleetAutoMergeBlockerSummary[];
   verifierContracts?: FleetAutoMergeVerifierContractStatus;
+  configurationBlocker?: string;
+  remoteProtection?: {
+    required: boolean;
+    configured: 'exact' | 'legacy' | 'invalid' | 'missing';
+    live: 'protected' | 'unprotected' | 'unavailable' | 'unobserved';
+    coverage: 'complete' | 'partial' | 'unscoped';
+    observedAt: string | null;
+    reposObserved: number;
+    reposRequired: number;
+    detail: string;
+  };
+}
+
+function remoteProtectionAuthorityReady(readiness: FleetAutoMergeReadinessStatus): boolean {
+  const protection = readiness.remoteProtection;
+  return !protection || !protection.required || (
+    protection.configured === 'exact' &&
+    protection.live === 'protected' &&
+    protection.coverage === 'complete' &&
+    protection.observedAt !== null &&
+    Number.isFinite(Date.parse(protection.observedAt)) &&
+    Date.now() - Date.parse(protection.observedAt) <= READINESS_REMOTE_PROTECTION_STALE_MS
+  );
 }
 
 export type FleetNextActionCommandSafety =
@@ -1894,7 +1922,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   let autoMergeReadiness: FleetAutoMergeReadinessStatus | undefined;
   try {
-    autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals);
+    autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals, enrolledExistingRepos);
   } catch {
     autoMergeReadiness = undefined;
   }
@@ -3419,7 +3447,11 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
-  if (readiness?.enabled && (counts.authorityReady ?? 0) > 0) {
+  if (
+    readiness?.enabled &&
+    readiness.configurationBlocker === undefined &&
+    (counts.authorityReady ?? 0) > 0
+  ) {
     return {
       phase: 'merge-ready',
       canAutoMergeNow: true,
@@ -3616,7 +3648,32 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   const readiness = status.autoMergeReadiness;
   if (readiness?.enabled && !controlBlocked) {
-    if ((readiness.authorityReady ?? 0) > 0) {
+    const configurationReady = readiness.configurationBlocker === undefined;
+    const remoteProtectionReady = remoteProtectionAuthorityReady(readiness);
+    if (!configurationReady) {
+      add({
+        id: 'inspect-auto-merge-configuration',
+        priority: 'high',
+        label: 'Inspect auto-merge configuration',
+        detail: readiness.configurationBlocker!,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        ],
+      });
+    } else if (!remoteProtectionReady && readiness.remoteProtection) {
+      add({
+        id: 'inspect-protected-remote',
+        priority: (readiness.branchAuthorityReady ?? 0) > 0 ? 'medium' : 'high',
+        label: 'Inspect protected remote authority',
+        detail: readiness.remoteProtection.detail,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
+            note: 'Remote-main automation remains blocked until exact live fleet coverage is available.',
+          }),
+        ],
+      });
+    }
+    if (configurationReady && (readiness.authorityReady ?? 0) > 0) {
       add({
         id: 'drain-ready-auto-merges',
         priority: 'high',
@@ -4127,6 +4184,8 @@ interface AutonomousShipReadinessInputs {
 const READINESS_DAEMON_STALE_MS = 30 * 60 * 1000;
 const READINESS_QUEUE_STALE_MS = 24 * 60 * 60 * 1000;
 const READINESS_STATUS_STALE_MS = 30 * 60 * 1000;
+const READINESS_REMOTE_PROTECTION_STALE_MS = 5 * 60 * 1000;
+const MAX_REMOTE_PROTECTION_STATUS_REPOS = 32;
 
 function readinessPriorityRank(priority: FleetNextAction['priority']): number {
   switch (priority) {
@@ -4479,11 +4538,21 @@ function shipReadinessSources(
     ? readinessSource(
         'auto-merge',
         'Auto-Merge Gate',
-        readiness.enabled && (readiness.authorityBlocked ?? 0) === 0 ? 'healthy' : 'blocked',
-        inputs.generatedAt,
-        READINESS_STATUS_STALE_MS,
+        readiness.enabled && readiness.configurationBlocker === undefined
+          ? (readiness.authorityBlocked ?? 0) === 0 && remoteProtectionAuthorityReady(readiness)
+            ? 'healthy'
+            : (readiness.branchAuthorityReady ?? 0) > 0
+              ? 'degraded'
+              : 'blocked'
+          : 'blocked',
+        readiness.remoteProtection?.required
+          ? readiness.remoteProtection.observedAt
+          : inputs.generatedAt,
+        readiness.remoteProtection?.required
+          ? READINESS_REMOTE_PROTECTION_STALE_MS
+          : READINESS_STATUS_STALE_MS,
         readiness.enabled
-          ? `${readiness.authorityReady ?? 0} authority-ready, ${readiness.preflightReady} preflight-ready, ${readiness.needsVerification} need verification, ${readiness.blocked} statically blocked`
+          ? `${readiness.authorityReady ?? 0} authority-ready, ${readiness.preflightReady} preflight-ready, ${readiness.needsVerification} need verification, ${readiness.blocked} statically blocked; ${readiness.remoteProtection?.detail ?? 'remote protection status unavailable'}`
           : 'auto-merge is disabled',
         {
           empty:
@@ -4491,7 +4560,8 @@ function shipReadinessSources(
             readiness.preflightReady === 0 &&
             readiness.needsVerification === 0 &&
             readiness.blocked === 0 &&
-            readiness.knownVerificationFailed === 0,
+            readiness.knownVerificationFailed === 0 &&
+            readiness.remoteProtection?.required !== true,
           sourcePresent: true,
         },
       )
@@ -4683,6 +4753,28 @@ function chooseReadinessBlocker(
       'auto-merge-disabled',
       'Auto-merge disabled',
       'Autonomous shipping cannot drain proposals while auto-merge is disabled.',
+      'high',
+      'auto-merge',
+    );
+  }
+  if (readiness.configurationBlocker) {
+    return readinessBlocker(
+      'auto-merge-configuration-invalid',
+      'Auto-merge configuration invalid',
+      readiness.configurationBlocker,
+      'high',
+      'auto-merge',
+    );
+  }
+  if (
+    readiness.remoteProtection &&
+    !remoteProtectionAuthorityReady(readiness) &&
+    (readiness.branchAuthorityReady ?? 0) === 0
+  ) {
+    return readinessBlocker(
+      'protected-remote-unavailable',
+      'Protected remote authority unavailable',
+      readiness.remoteProtection.detail,
       'high',
       'auto-merge',
     );
@@ -5038,6 +5130,7 @@ function missionWhyNow(
 async function buildAutoMergeReadinessStatus(
   cfg: AshlrConfig,
   pendingProposals: Proposal[],
+  enrolledRepos: string[],
 ): Promise<FleetAutoMergeReadinessStatus> {
   const autoMerge = cfg.foundry?.autoMerge;
   const enabled = autoMerge?.enabled === true;
@@ -5045,12 +5138,27 @@ async function buildAutoMergeReadinessStatus(
     autoMerge?.trustBasis === 'verification' || autoMerge?.trustBasis === 'evidence'
       ? autoMerge.trustBasis
       : 'tier';
-  const maxRisk = autoMerge?.maxRisk ?? 'low';
+  const rawTrustBasis = autoMerge?.trustBasis;
+  const rawMaxRisk = (autoMerge as Record<string, unknown> | undefined)?.['maxRisk'];
+  const trustBasisBlocker =
+    rawTrustBasis !== undefined &&
+    rawTrustBasis !== 'tier' &&
+    rawTrustBasis !== 'verification' &&
+    rawTrustBasis !== 'evidence'
+      ? `invalid auto-merge trustBasis '${String(rawTrustBasis)}'`
+      : undefined;
+  const maxRiskBlocker = rawMaxRisk !== undefined &&
+    rawMaxRisk !== 'low' && rawMaxRisk !== 'medium' && rawMaxRisk !== 'high'
+    ? `invalid auto-merge maxRisk '${String(rawMaxRisk)}'`
+    : undefined;
+  const configurationBlocker = trustBasisBlocker ?? maxRiskBlocker;
+  const maxRisk = rawMaxRisk === 'medium' || rawMaxRisk === 'high' ? rawMaxRisk : 'low';
 
   const byReason: Record<string, number> = {};
   const recentBlockers: FleetAutoMergeBlockerSummary[] = [];
   let preflightReady = 0;
-  let authorityReady = 0;
+  let branchAuthorityReady = 0;
+  let remoteMainAuthorityReady = 0;
   let authorityBlocked = 0;
   const authorityByReason: Record<string, number> = {};
   let needsVerification = 0;
@@ -5068,12 +5176,120 @@ async function buildAutoMergeReadinessStatus(
     classifyRisk,
     evaluateBranchAuthority,
     evaluateAutoMergeReadinessPreflight,
+    evaluateEvidenceRemoteProtectionSignal,
+    evaluateLiveProtectedRemoteAuthority,
     evaluateMergeAuthority,
     explainAutoMergeGate,
     mergeTargetForTier,
+    resolveRemoteBranchHead,
   } = await import('../inbox/merge.js');
   const { hashDiff } = await import('../foundry/provenance.js');
   const riskOrder: Record<string, number> = { low: 0, medium: 1, high: 2 };
+  const remoteProtectionSignal = evaluateEvidenceRemoteProtectionSignal(cfg);
+  const remoteMainProposals = pendingProposals.filter((proposal) =>
+    trustBasis !== 'tier' || mergeTargetForTier(proposal.engineTier) === 'main');
+  const remoteMainRepos = new Set(
+    (pendingProposals.length === 0 ? enrolledRepos : remoteMainProposals.map((proposal) => proposal.repo))
+      .filter((repo): repo is string => typeof repo === 'string' && repo.length > 0)
+      .map((repo) => resolve(repo)),
+  );
+  const remoteDeliveryEnabled = enabled && autoMerge?.pushToRemote === true;
+  const remoteProtectionRequired = remoteDeliveryEnabled && (
+    pendingProposals.length === 0 || remoteMainProposals.length > 0
+  );
+  const remoteProtection: FleetAutoMergeReadinessStatus['remoteProtection'] = {
+    required: remoteProtectionRequired,
+    configured: remoteProtectionSignal.expectationMode,
+    live: 'unobserved',
+    coverage: 'unscoped',
+    observedAt: null,
+    reposObserved: 0,
+    reposRequired: remoteMainRepos.size,
+    detail: remoteProtectionRequired
+      ? remoteProtectionSignal.ok
+        ? 'protected remote configuration is exact, but fleetwide live protection has not been observed'
+        : `protected remote configuration is not authoritative: ${remoteProtectionSignal.detail}`
+      : 'protected remote authority is not required because remote main delivery is disabled',
+  };
+  if (remoteProtectionRequired && remoteProtectionSignal.ok && remoteMainRepos.size > 0) {
+    const targets = new Map<string, {
+      repo: string;
+      bindings: Map<string, { branch: string; baseHead: string | null }>;
+    }>();
+    for (const repo of remoteMainRepos) {
+      targets.set(repo, { repo, bindings: new Map() });
+    }
+    for (const proposal of remoteMainProposals) {
+      const repo = proposal.repo;
+      const branch = proposal.verifyResult?.baseBranch;
+      const baseHead = proposal.verifyResult?.baseHead;
+      if (!repo || !branch || !baseHead) continue;
+      const target = targets.get(resolve(repo));
+      target?.bindings.set(`${branch}\0${baseHead}`, { branch, baseHead });
+    }
+    if (pendingProposals.length === 0) {
+      for (const repo of enrolledRepos) {
+        const branch = defaultBranch(repo);
+        targets.get(resolve(repo))?.bindings.set(branch, {
+          branch,
+          baseHead: resolveRemoteBranchHead(repo, branch),
+        });
+      }
+    }
+    const boundedTargets = [...targets.values()].slice(0, MAX_REMOTE_PROTECTION_STATUS_REPOS);
+    const observations: Array<Awaited<ReturnType<typeof evaluateLiveProtectedRemoteAuthority>>> = [];
+    for (let offset = 0; offset < boundedTargets.length; offset += 4) {
+      const batch = boundedTargets.slice(offset, offset + 4);
+      observations.push(...await Promise.all(batch.map((target) => {
+        const bindings = [...target.bindings.values()];
+        if (bindings.length !== 1) {
+          return Promise.resolve({
+            authorized: false as const,
+            reason: bindings.length === 0
+              ? `protected remote base binding unavailable for ${basename(target.repo)}`
+              : `conflicting protected remote base bindings for ${basename(target.repo)}`,
+          });
+        }
+        const binding = bindings[0]!;
+        return binding.baseHead
+          ? evaluateLiveProtectedRemoteAuthority(target.repo, binding.branch, binding.baseHead, cfg)
+          : Promise.resolve({
+              authorized: false as const,
+              reason: `protected remote base head unavailable for ${basename(target.repo)}:${binding.branch}`,
+            });
+      })));
+    }
+    remoteProtection.reposObserved = observations.length;
+    remoteProtection.coverage =
+      targets.size === remoteMainRepos.size && observations.length === remoteMainRepos.size
+        ? 'complete'
+        : observations.length > 0
+          ? 'partial'
+          : 'unscoped';
+    const failures = observations.filter((observation) => !observation.authorized);
+    if (failures.length > 0) {
+      remoteProtection.live = failures.some((failure) => failure.reason.includes('unavailable'))
+        ? 'unavailable'
+        : 'unprotected';
+      remoteProtection.detail = failures[0]!.reason;
+    } else if (observations.length > 0) {
+      remoteProtection.live = 'protected';
+      remoteProtection.observedAt = observations
+        .map((observation) => observation.authorized ? observation.evidence.observedAt : '')
+        .filter(Boolean)
+        .sort()
+        .at(0) ?? null;
+      const observedMs = remoteProtection.observedAt ? Date.parse(remoteProtection.observedAt) : NaN;
+      if (!Number.isFinite(observedMs) || Date.now() - observedMs > READINESS_REMOTE_PROTECTION_STALE_MS) {
+        remoteProtection.live = 'unavailable';
+        remoteProtection.detail = 'live protected-remote observation is missing or stale';
+      } else {
+        remoteProtection.detail = remoteProtection.coverage === 'complete'
+          ? `live protected-remote authority confirmed for ${observations.length} remote main target(s)`
+          : `live protection confirmed for ${observations.length}/${remoteMainRepos.size} remote main target(s)`;
+      }
+    }
+  }
 
   const noteBlocker = (proposal: Proposal, reason: string, riskClass: string | null): void => {
     blocked++;
@@ -5235,7 +5451,8 @@ async function buildAutoMergeReadinessStatus(
     preflightReady++;
 
     if (trustBasis === 'tier') {
-      authorityReady++;
+      if (mergeTargetForTier(proposal.engineTier) === 'branch') branchAuthorityReady++;
+      else remoteMainAuthorityReady++;
       continue;
     }
 
@@ -5260,8 +5477,27 @@ async function buildAutoMergeReadinessStatus(
       noteAuthorityBlocker(authority.reason);
       continue;
     }
-    authorityReady++;
+    remoteMainAuthorityReady++;
   }
+
+  const remoteMainReady = remoteProtectionAuthorityReady({
+    enabled,
+    trustBasis,
+    pending: pendingProposals.length,
+    preflightReady,
+    needsVerification,
+    knownVerificationFailed,
+    blocked,
+    byReason,
+    recentBlockers,
+    remoteProtection,
+  });
+  if (!remoteMainReady && remoteMainAuthorityReady > 0) {
+    const reason = remoteProtection?.detail ?? 'protected remote authority is unavailable';
+    authorityBlocked += remoteMainAuthorityReady;
+    authorityByReason[reason] = (authorityByReason[reason] ?? 0) + remoteMainAuthorityReady;
+  }
+  const authorityReady = branchAuthorityReady + (remoteMainReady ? remoteMainAuthorityReady : 0);
 
   return {
     enabled,
@@ -5269,6 +5505,8 @@ async function buildAutoMergeReadinessStatus(
     pending: pendingProposals.length,
     preflightReady,
     authorityReady,
+    branchAuthorityReady,
+    remoteMainAuthorityReady,
     authorityBlocked,
     authorityByReason,
     needsVerification,
@@ -5277,6 +5515,8 @@ async function buildAutoMergeReadinessStatus(
     byReason,
     recentBlockers,
     verifierContracts,
+    ...(configurationBlocker ? { configurationBlocker } : {}),
+    remoteProtection,
   };
 }
 

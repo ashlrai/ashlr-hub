@@ -248,16 +248,21 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
     const scrubbedMergeCommitOid = typeof handoff.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(handoff.mergeCommitOid)
       ? handoff.mergeCommitOid.toLowerCase()
       : undefined;
+    const scrubbedExpectedHeadOid = typeof handoff.expectedHeadOid === 'string' && /^[0-9a-f]{40}$/i.test(handoff.expectedHeadOid)
+      ? handoff.expectedHeadOid.toLowerCase()
+      : undefined;
     const sanitizedMergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
     const sanitizedReconciliation = sanitizeRemoteHandoffReconciliation(next.id, next.repo, handoff);
     if (
       scrubbedDetail !== handoff.detail ||
       scrubbedPrUrl !== handoff.prUrl ||
       scrubbedMergeCommitOid !== handoff.mergeCommitOid ||
+      scrubbedExpectedHeadOid !== handoff.expectedHeadOid ||
       sanitizedMergedAt !== handoff.mergedAt || sanitizedReconciliation !== handoff.reconciliation
     ) {
       const {
         mergeCommitOid: _mergeCommitOid,
+        expectedHeadOid: _expectedHeadOid,
         mergedAt: _mergedAt,
         reconciliation: _reconciliation,
         ...safeHandoff
@@ -267,6 +272,7 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
         ...(scrubbedDetail !== undefined ? { detail: scrubbedDetail } : {}),
         ...(scrubbedPrUrl !== undefined ? { prUrl: scrubbedPrUrl } : {}),
         ...(scrubbedMergeCommitOid !== undefined ? { mergeCommitOid: scrubbedMergeCommitOid } : {}),
+        ...(scrubbedExpectedHeadOid !== undefined ? { expectedHeadOid: scrubbedExpectedHeadOid } : {}),
         ...(sanitizedMergedAt !== undefined ? { mergedAt: sanitizedMergedAt } : {}),
         ...(sanitizedReconciliation !== undefined ? { reconciliation: sanitizedReconciliation } : {}),
       };

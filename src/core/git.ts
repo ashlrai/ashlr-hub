@@ -19,6 +19,9 @@ import type { GitStatus } from './types.js';
 
 const GIT_TIMEOUT = 5_000; // ms
 
+const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+$/;
+
 /**
  * Run a git command inside `cwd`. Returns trimmed stdout or null on error.
  */
@@ -34,6 +37,29 @@ function git(cwd: string, args: string[]): string | null {
   } catch {
     return null;
   }
+}
+
+/** Normalize one supported GitHub transport URL to lowercase owner/repo. */
+function canonicalGitHubDestination(remote: string): string | null {
+  const match =
+    remote.match(/^https:\/\/(?:[^/?#@]+@)?github\.com(?::443)?\/([^/?#]+)\/([^/?#]+)$/i) ??
+    remote.match(/^git@github\.com:([^/?#:]+)\/([^/?#]+)$/i) ??
+    remote.match(/^ssh:\/\/git@github\.com(?::22)?\/([^/?#]+)\/([^/?#]+)$/i);
+  if (!match?.[1] || !match[2]) return null;
+
+  const owner = match[1];
+  const repo = match[2].replace(/\.git$/i, '');
+  if (!GITHUB_OWNER_RE.test(owner) || !repo || !GITHUB_REPO_RE.test(repo) ||
+      repo === '.' || repo === '..') {
+    return null;
+  }
+  return `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+}
+
+function gitUrls(output: string | null): string[] | null {
+  if (!output) return null;
+  const urls = output.split(/\r?\n/);
+  return urls.length > 0 && urls.every((url) => url.length > 0) ? urls : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +148,51 @@ export function defaultBranch(repoPath: string): string {
   if (cur && cur !== 'HEAD') return cur;
 
   return 'main';
+}
+
+/**
+ * Resolve the sole GitHub owner/repo authorized by every `origin` fetch and
+ * effective push URL. Git applies fetch URLs as push destinations when no
+ * pushurl is configured, so both views are read through `remote get-url`.
+ *
+ * Returns a lowercase `owner/repo` only when every URL is a supported GitHub
+ * HTTPS or SSH URL and all URLs identify the same repository. Missing,
+ * malformed, unsupported, or divergent destinations fail closed to null.
+ */
+export function resolveGitHubOriginAuthority(repoPath: string): string | null {
+  return resolveGitHubOriginAuthorityDetails(repoPath)?.nameWithOwner ?? null;
+}
+
+export interface GitHubOriginAuthority {
+  nameWithOwner: string;
+  fetchUrls: string[];
+  pushUrls: string[];
+  pushUrl: string;
+}
+
+/** Resolve the canonical identity and one exact effective push transport. */
+export function resolveGitHubOriginAuthorityDetails(repoPath: string): GitHubOriginAuthority | null {
+  // A resolved URL can be rewritten again when fed back to another git command.
+  // Refuse every rewrite rule instead of trying to reason about chained config.
+  const rewriteRules = git(repoPath, [
+    'config', '--get-regexp', '^url\\..*\\.(insteadof|pushinsteadof)$',
+  ]);
+  if (rewriteRules) return null;
+  const fetchUrls = gitUrls(git(repoPath, ['remote', 'get-url', '--all', 'origin']));
+  const pushUrls = gitUrls(git(repoPath, ['remote', 'get-url', '--push', '--all', 'origin']));
+  if (!fetchUrls || !pushUrls) return null;
+
+  const destinations = new Set<string>();
+  for (const remote of [...fetchUrls, ...pushUrls]) {
+    const destination = canonicalGitHubDestination(remote);
+    if (!destination) return null;
+    destinations.add(destination);
+  }
+  const nameWithOwner = destinations.size === 1 ? destinations.values().next().value : undefined;
+  const pushUrl = pushUrls[0];
+  return nameWithOwner && pushUrl
+    ? { nameWithOwner, fetchUrls: [...fetchUrls], pushUrls: [...pushUrls], pushUrl }
+    : null;
 }
 
 /**

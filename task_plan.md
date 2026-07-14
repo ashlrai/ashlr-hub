@@ -80,6 +80,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 6. How can Ashlr continuously choose the highest-value safe work without Mason as the bottleneck?
 7. How can Ashlr spend scarce judge/frontier/model resources only after cheap facts say a candidate is mergeable?
 
+## Current Overnight Cycle - Protected Remote Authority
+- [x] Rehydrate branch protection, production daemon, auto-merge pause, open proposals, GitHub issues, and isolated worktrees.
+- [x] Upgrade Vitest to 4.1.10, restore isolation compatibility, pass the 10,647-test cross-platform matrix, and merge protected PR #26.
+- [x] Require exact configured and force-fresh live protection for every remote-to-main trust basis.
+- [x] Bind staging pushes, PR auto-merge, persisted handoffs, and host reconciliation to one deterministic expected head OID.
+- [x] Make ambiguous PR retries and crash-left local refs reconstructable without overwriting or deleting replacement refs.
+- [x] Project bounded live protection, freshness, configuration quality, and branch/main authority lanes into Fleet Status.
+- [x] Add adversarial coverage for invalid config, stale/unavailable protection, mixed lanes, remote replacement, retry adoption, and reconciliation mismatch.
+- [x] Rebase on merged Vitest 4 master; run definitive full verification and final adversarial review.
+- [ ] Commit, push, open protected PR, observe all required checks, and keep production auto-merge disabled pending post-merge canary evidence.
+
 ## Current Overnight Cycle - Fleetwide Merge Contracts
 - [x] Rehydrate the deployed Hub, daemon, guard, queue, and verifier-coverage state.
 - [x] Audit the five remaining repositories without explicit merge contracts in parallel.

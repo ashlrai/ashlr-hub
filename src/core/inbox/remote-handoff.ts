@@ -11,7 +11,10 @@ import type { Proposal, ProposalRemoteHandoff } from '../types.js';
 import type { PrView } from '../integrations/github.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
-import { viewPrWithReconciliation } from './remote-handoff-attestation.js';
+import {
+  verifyRemoteHandoffReconciliation,
+  viewPrWithReconciliation,
+} from './remote-handoff-attestation.js';
 
 export interface RemoteHandoffReconcileResult {
   checked: number;
@@ -54,24 +57,38 @@ function hasConflictingIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boo
   if (handoff.prUrl && pr.url && handoff.prUrl !== pr.url) return true;
   if (handoff.branch && pr.headRefName && handoff.branch !== pr.headRefName) return true;
   if (handoff.base && pr.baseRefName && handoff.base !== pr.baseRefName) return true;
+  if (
+    handoff.expectedHeadOid && pr.headRefOid &&
+    handoff.expectedHeadOid.toLowerCase() !== pr.headRefOid.toLowerCase()
+  ) return true;
   return false;
 }
 
 function hasStrongIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
-  if (handoff.prUrl && pr.url && handoff.prUrl === pr.url) return true;
   return Boolean(
-    handoff.branch &&
-    handoff.base &&
-    pr.headRefName &&
-    pr.baseRefName &&
-    handoff.branch === pr.headRefName &&
-    handoff.base === pr.baseRefName,
+    handoff.prUrl && pr.url && handoff.prUrl === pr.url &&
+    handoff.branch && pr.headRefName && handoff.branch === pr.headRefName &&
+    handoff.base && pr.baseRefName && handoff.base === pr.baseRefName &&
+    handoff.expectedHeadOid && pr.headRefOid &&
+    handoff.expectedHeadOid.toLowerCase() === pr.headRefOid.toLowerCase()
+  );
+}
+
+/** A URL-less durable intent may bind only a complete observation of its exact PR identity. */
+function canBindPrUrl(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
+  return Boolean(
+    !handoff.prUrl && pr.url &&
+    handoff.branch && pr.headRefName && handoff.branch === pr.headRefName &&
+    handoff.base && pr.baseRefName && handoff.base === pr.baseRefName &&
+    handoff.expectedHeadOid && pr.headRefOid &&
+    handoff.expectedHeadOid.toLowerCase() === pr.headRefOid.toLowerCase()
   );
 }
 
 function sameQueryIdentity(left: ProposalRemoteHandoff, right: ProposalRemoteHandoff): boolean {
   return left.provider === right.provider && left.branch === right.branch &&
-    left.base === right.base && left.prUrl === right.prUrl && left.createdAt === right.createdAt;
+    left.base === right.base && left.prUrl === right.prUrl &&
+    left.expectedHeadOid === right.expectedHeadOid && left.createdAt === right.createdAt;
 }
 
 function awaitingHostMerge(proposal: Proposal | null): proposal is Proposal & {
@@ -100,21 +117,69 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
     return result;
   }
   const { pr, reconciliation } = hostRead;
-  if (hasConflictingIdentity(handoff, pr)) {
-    result.unknown++;
-    return result;
-  }
   const mergedAt = sanitizeGithubMergedAt(pr.mergedAt);
   const mergeCommitOid = typeof pr.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(pr.mergeCommitOid)
     ? pr.mergeCommitOid.toLowerCase()
     : undefined;
   const terminal = Boolean(mergedAt || isMergedState(pr.state) || pr.closed === true || isClosedState(pr.state));
+
+  // A crash may leave a durable pre-create intent without a PR URL. Bind the
+  // discovered URL in its own locked persistence step, then require a second
+  // host read before any terminal transition can be signed or applied.
+  if (!handoff.prUrl) {
+    if (!canBindPrUrl(handoff, pr)) {
+      result.unknown++;
+      return result;
+    }
+    const mutationLock = acquireProposalMutationLock(proposal.id);
+    if (!mutationLock) {
+      result.unknown++;
+      return result;
+    }
+    try {
+      const current = loadProposal(proposal.id);
+      if (!awaitingHostMerge(current) || current.remoteHandoff.provider !== 'github' ||
+        !sameQueryIdentity(handoff, current.remoteHandoff) ||
+        !canBindPrUrl(current.remoteHandoff, pr)) {
+        result.unknown++;
+        return result;
+      }
+      const detail = `remote PR identity bound; awaiting independent host outcome read: ${pr.url}`;
+      if (!updateProposalField(proposal.id, {
+        remoteHandoff: mergeHandoff(current.remoteHandoff, {
+          state: 'awaiting-host-merge',
+          prUrl: pr.url,
+          detail,
+        }),
+      }, mutationLock)) {
+        result.unknown++;
+        return result;
+      }
+      if (terminal) result.unknown++;
+      else result.open++;
+    } finally {
+      releaseProposalMutationLock(mutationLock);
+    }
+    return result;
+  }
+
+  if (hasConflictingIdentity(handoff, pr)) {
+    result.unknown++;
+    return result;
+  }
   if (terminal && !hasStrongIdentity(handoff, pr)) {
     result.unknown++;
     return result;
   }
 
   if (mergedAt || isMergedState(pr.state)) {
+    // A sparse MERGED state is not enough for durable terminal attribution.
+    // Require the complete host tuple and its locally signed reconciliation
+    // receipt; otherwise retain the awaiting handoff for a later complete read.
+    if (!mergedAt || !mergeCommitOid || !reconciliation) {
+      result.unknown++;
+      return result;
+    }
     const detail = `remote PR merged${mergedAt ? ` at ${mergedAt}` : ''}${pr.url ? `: ${pr.url}` : ''}`;
     const mutationLock = acquireProposalMutationLock(proposal.id);
     if (!mutationLock) {
@@ -137,16 +202,14 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
       const remoteHandoff = mergeHandoff(currentHandoff, {
         state: 'merged',
         ...(pr.url ? { prUrl: pr.url } : {}),
-        ...(mergedAt ? { mergedAt } : {}),
-        ...(mergeCommitOid ? { mergeCommitOid } : {}),
+        mergedAt,
+        mergeCommitOid,
+        reconciliation,
         detail,
       });
-      if (current.repo && mergedAt && mergeCommitOid) {
-        if (!reconciliation) {
-          result.unknown++;
-          return result;
-        }
-        remoteHandoff.reconciliation = reconciliation;
+      if (!current.repo || !verifyRemoteHandoffReconciliation(proposal.id, current.repo, remoteHandoff)) {
+        result.unknown++;
+        return result;
       }
       if (!setStatus(proposal.id, 'applied', detail, undefined, mutationLock, { remoteHandoff })) {
         result.unknown++;

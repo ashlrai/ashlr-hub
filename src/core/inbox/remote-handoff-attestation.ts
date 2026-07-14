@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ProposalRemoteHandoff, RemoteHandoffReconciliation } from '../types.js';
 import { viewPr } from '../integrations/github.js';
 import type { PrView } from '../integrations/github.js';
+import { resolveGitHubOriginAuthority } from '../git.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
@@ -174,12 +175,14 @@ function payload(
   const mergedAt = sanitizeGithubMergedAt(handoff.mergedAt);
   const observed = sanitizeGithubMergedAt(observedAt);
   if (!proposalId || !repo || handoff.provider !== 'github' || handoff.state !== 'merged' ||
-    !handoff.prUrl || !handoff.base || !mergedAt || !observed || !SHA_RE.test(handoff.mergeCommitOid ?? '')) return null;
+    !handoff.prUrl || !handoff.branch || !handoff.base || !mergedAt || !observed ||
+    !SHA_RE.test(handoff.mergeCommitOid ?? '') || !SHA_RE.test(handoff.expectedHeadOid ?? '')) return null;
   if (Date.parse(observed) < Date.parse(mergedAt) || Date.parse(observed) > Date.now() + MAX_FUTURE_SKEW_MS) return null;
   try {
     return [
       'ashlr:remote-handoff-reconciliation:v1', proposalId, resolve(repo), handoff.prUrl,
-      handoff.base, handoff.mergeCommitOid, mergedAt, observed,
+      handoff.branch, handoff.base, handoff.expectedHeadOid, handoff.mergeCommitOid,
+      mergedAt, observed,
     ];
   } catch { return null; }
 }
@@ -193,9 +196,19 @@ function signature(values: unknown[], createKey = false): string | null {
 }
 
 function strongIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
-  if (handoff.prUrl && pr.url && handoff.prUrl === pr.url) return true;
-  return Boolean(handoff.branch && handoff.base && pr.headRefName && pr.baseRefName &&
-    handoff.branch === pr.headRefName && handoff.base === pr.baseRefName);
+  return Boolean(
+    handoff.prUrl && pr.url && handoff.prUrl === pr.url &&
+    handoff.branch && pr.headRefName && handoff.branch === pr.headRefName &&
+    handoff.base && pr.baseRefName && handoff.base === pr.baseRefName &&
+    handoff.expectedHeadOid && pr.headRefOid &&
+    handoff.expectedHeadOid.toLowerCase() === pr.headRefOid.toLowerCase()
+  );
+}
+
+function prUrlMatchesRepository(url: string, nameWithOwner: string): boolean {
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9]\d*)$/i);
+  return Boolean(match?.[1] && match[2] &&
+    `${match[1]}/${match[2]}`.toLowerCase() === nameWithOwner.toLowerCase());
 }
 
 export interface ReconciledHostRead {
@@ -210,8 +223,10 @@ export function viewPrWithReconciliation(
   proposalId: string,
   handoff: ProposalRemoteHandoff,
 ): ReconciledHostRead | null {
-  const pr = viewPr(repo, selector);
-  if (!pr) return null;
+  const nameWithOwner = resolveGitHubOriginAuthority(repo);
+  if (!nameWithOwner) return null;
+  const pr = viewPr(repo, selector, { repo: nameWithOwner });
+  if (!pr?.url || !prUrlMatchesRepository(pr.url, nameWithOwner)) return null;
   const mergedAt = sanitizeGithubMergedAt(pr.mergedAt);
   const mergeCommitOid = typeof pr.mergeCommitOid === 'string' && SHA_RE.test(pr.mergeCommitOid.toLowerCase())
     ? pr.mergeCommitOid.toLowerCase()
@@ -221,8 +236,9 @@ export function viewPrWithReconciliation(
   const mergedHandoff: ProposalRemoteHandoff = {
     ...handoff,
     state: 'merged',
-    ...(pr.url ? { prUrl: pr.url } : {}),
-    ...(pr.baseRefName ? { base: pr.baseRefName } : {}),
+    prUrl: pr.url,
+    branch: pr.headRefName,
+    base: pr.baseRefName,
     mergeCommitOid,
     mergedAt,
   };

@@ -114,11 +114,20 @@ import { loadProposal, setStatus, updateProposalField } from './store.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
-import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
+import {
+  isRepo,
+  getGitStatus,
+  defaultBranch,
+  resolveGitHubOriginAuthority,
+  resolveGitHubOriginAuthorityDetails,
+} from '../git.js';
+import type { GitHubOriginAuthority } from '../git.js';
 import {
   createPr,
   readBranchProtectionAttestation,
+  viewPr,
   type BranchProtectionAttestation,
+  type CreatePrResult,
 } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
@@ -169,12 +178,13 @@ const GIT_TIMEOUT = 30_000;
 // ---------------------------------------------------------------------------
 
 /** Run a git command in `cwd`. Throws on failure. */
-function gitRun(cwd: string, args: string[]): string {
+function gitRun(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT,
     stdio: 'pipe',
     encoding: 'utf8',
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   }).trim();
 }
 
@@ -197,13 +207,38 @@ function resolveDefaultBranchHead(repo: string, base: string): string | null {
 }
 
 /** Resolve the protected remote branch head without fetching or mutating refs. */
-function resolveRemoteBranchHead(repo: string, base: string): string | null {
-  const out = gitTry(repo, ['ls-remote', '--heads', 'origin', base]);
+export function resolveRemoteBranchHead(repo: string, base: string, remote = 'origin'): string | null {
+  const out = gitTry(repo, ['ls-remote', '--heads', remote, base]);
   if (!out) return null;
   const first = out.split('\n').find((line) => line.trim().length > 0);
   if (!first) return null;
   const [sha] = first.trim().split(/\s+/);
   return /^[0-9a-f]{40}$/i.test(sha ?? '') ? sha! : null;
+}
+
+/** Remove only staging refs that still point at the commit this attempt created. */
+function cleanupOwnedMergeBranch(
+  repo: string,
+  branch: string,
+  expectedHead: string,
+  options: { remote: boolean; origin?: GitHubOriginAuthority },
+): void {
+  if (!branch.startsWith(MERGE_BRANCH_PREFIX)) return;
+  const remoteRef = `refs/heads/${branch}`;
+  const currentOrigin = options.origin ? resolveGitHubOriginAuthorityDetails(repo) : null;
+  if (
+    options.remote && options.origin && currentOrigin &&
+    currentOrigin.nameWithOwner === options.origin.nameWithOwner &&
+    currentOrigin.pushUrl === options.origin.pushUrl
+  ) {
+    gitTry(repo, [
+      'push',
+      `--force-with-lease=${remoteRef}:${expectedHead}`,
+      options.origin.pushUrl,
+      `:${remoteRef}`,
+    ]);
+  }
+  gitTry(repo, ['update-ref', '-d', remoteRef, expectedHead]);
 }
 
 /** Write `content` to a temp file under ~/.ashlr/tmp; caller cleans it up. */
@@ -692,6 +727,18 @@ export function evaluateAutoMergeReadinessPreflight(
     const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
       ? (((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['trustBasis'] as string | undefined) ?? 'tier'
       : 'tier';
+    if (trustBasis !== 'tier' && trustBasis !== 'verification' && trustBasis !== 'evidence') {
+      return block(`invalid auto-merge trustBasis '${trustBasis}'`, [], false);
+    }
+    const configuredMaxRisk = (cfg.foundry?.autoMerge as Record<string, unknown> | undefined)?.['maxRisk'];
+    if (
+      configuredMaxRisk !== undefined &&
+      configuredMaxRisk !== 'low' &&
+      configuredMaxRisk !== 'medium' &&
+      configuredMaxRisk !== 'high'
+    ) {
+      return block(`invalid auto-merge maxRisk '${String(configuredMaxRisk)}'`, [], false);
+    }
 
     const advisories: string[] = [];
     if ((trustBasis === 'verification' || trustBasis === 'evidence') && proposal.verifyResult === undefined) {
@@ -723,6 +770,14 @@ export function evaluateAutoMergeReadinessPreflight(
 
       if (!authority.authorized) {
         return block(`merge authority denied: ${authority.reason}`, advisories);
+      }
+    }
+
+    const targetsMain = trustBasis !== 'tier' || mergeTargetForTier(proposal.engineTier) === 'main';
+    if (targetsMain && cfg.foundry?.autoMerge?.pushToRemote === true) {
+      const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
+      if (!remoteProtection.ok) {
+        return block(`protected remote preflight: ${remoteProtection.detail}`, advisories, false);
       }
     }
 
@@ -975,17 +1030,27 @@ function liveProtectionPolicyHash(attestation: BranchProtectionAttestation): str
     requiredChecks: attestation.requiredChecks,
     requiredCheckBindings: attestation.requiredCheckBindings,
     sources: attestation.sources,
+    policySnapshot: attestation.policySnapshot,
   })).digest('hex');
 }
 
 function githubNameWithOwnerFromOrigin(repo: string): string | null {
-  const remote = getRemoteOrg(repo).remote;
-  if (!remote) return null;
-  const match = remote.match(/^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:)([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i);
-  return match?.[1] && match[2] ? `${match[1]}/${match[2]}` : null;
+  return resolveGitHubOriginAuthority(repo);
 }
 
-async function evaluateLiveEvidenceRemoteProtection(
+function githubOriginAuthorityMatches(repo: string, expected: GitHubOriginAuthority): boolean {
+  const current = resolveGitHubOriginAuthorityDetails(repo);
+  return current?.nameWithOwner === expected.nameWithOwner && current.pushUrl === expected.pushUrl;
+}
+
+function prUrlMatchesAuthority(url: string | undefined, nameWithOwner: string): boolean {
+  if (!url) return false;
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9]\d*)$/i);
+  return Boolean(match?.[1] && match[2] &&
+    `${match[1]}/${match[2]}`.toLowerCase() === nameWithOwner.toLowerCase());
+}
+
+export async function evaluateLiveProtectedRemoteAuthority(
   repo: string,
   branch: string,
   baseHead: string,
@@ -1001,7 +1066,7 @@ async function evaluateLiveEvidenceRemoteProtection(
     forceFresh: true,
     expectedNameWithOwner,
   });
-  if (!live.available || !live.ok || !live.protected) {
+  if (!live.available || !live.ok || !live.protected || !live.policySnapshot) {
     return { authorized: false, reason: `live branch protection unavailable: ${live.detail}` };
   }
   if (
@@ -2097,27 +2162,31 @@ function buildMergeBranch(
   diff: string,
   base: string,
   expectedBaseHead?: string,
-): { branch: string | null; detail: string } {
+): { branch: string | null; head: string | null; detail: string } {
   const branch = `${MERGE_BRANCH_PREFIX}${id}`;
   const baseHead = resolveDefaultBranchHead(repo, base);
   if (!baseHead) {
-    return { branch: null, detail: `could not resolve head of default branch '${base}'` };
+    return { branch: null, head: null, detail: `could not resolve head of default branch '${base}'` };
   }
   if (expectedBaseHead && baseHead !== expectedBaseHead) {
     return {
       branch: null,
+      head: null,
       detail: `default branch '${base}' moved since verification (verified ${expectedBaseHead.slice(0, 8)}, current ${baseHead.slice(0, 8)}) — reverify required`,
     };
   }
 
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `mwt-${randomBytes(6).toString('hex')}`);
   try {
-    gitRun(repo, ['worktree', 'add', '-b', branch, tmpDir, expectedBaseHead ?? baseHead]);
+    // Build detached so a crash cannot leave a half-built named branch that
+    // permanently blocks reconstruction on the next attempt.
+    gitRun(repo, ['worktree', 'add', '--detach', tmpDir, expectedBaseHead ?? baseHead]);
     linkNodeModules(repo, tmpDir);
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
     return {
       branch: null,
+      head: null,
       detail: `git worktree add failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
@@ -2125,11 +2194,26 @@ function buildMergeBranch(
   let patchFile: string | null = null;
   let detail = '';
   let ok = false;
+  let head: string | null = null;
   try {
     patchFile = writeTmpFile(diff);
     try {
       gitRun(tmpDir, ['apply', '--index', patchFile]);
-      gitRun(tmpDir, ['commit', '--no-verify', '-m', `ashlr: auto-merge proposal ${id}`]);
+      // A retry of identical signed evidence must reconstruct the same commit
+      // so an ambiguously-created remote PR can be adopted without force.
+      gitRun(tmpDir, [
+        '-c', 'commit.gpgSign=false',
+        '-c', 'i18n.commitEncoding=UTF-8',
+        'commit', '--no-verify', '--cleanup=verbatim', '-m', `ashlr: auto-merge proposal ${id}`,
+      ], {
+        GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z',
+        GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z',
+        GIT_AUTHOR_NAME: 'Ashlr Fleet',
+        GIT_AUTHOR_EMAIL: 'fleet@ashlr.local',
+        GIT_COMMITTER_NAME: 'Ashlr Fleet',
+        GIT_COMMITTER_EMAIL: 'fleet@ashlr.local',
+      });
+      head = gitRun(tmpDir, ['rev-parse', '--verify', 'HEAD']);
       ok = true;
       detail = `staged on ${branch}`;
     } catch (err) {
@@ -2145,11 +2229,24 @@ function buildMergeBranch(
     }
     gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
     gitTry(repo, ['worktree', 'prune']);
-    if (!ok && branch.startsWith(MERGE_BRANCH_PREFIX)) {
-      gitTry(repo, ['branch', '-D', branch]);
+  }
+  if (ok && !head) {
+    return { branch: null, head: null, detail: 'staged branch head could not be resolved' };
+  }
+  if (ok && head) {
+    const branchRef = `refs/heads/${branch}`;
+    const existingHead = gitTry(repo, ['rev-parse', '--verify', branchRef]);
+    if (existingHead && existingHead !== head) {
+      return { branch: null, head: null, detail: `staging branch '${branch}' already exists at a different commit` };
+    }
+    if (!existingHead && gitTry(repo, ['update-ref', branchRef, head, '']) === null) {
+      const racedHead = gitTry(repo, ['rev-parse', '--verify', branchRef]);
+      if (racedHead !== head) {
+        return { branch: null, head: null, detail: `could not install staging branch '${branch}' atomically` };
+      }
     }
   }
-  return ok ? { branch, detail } : { branch: null, detail };
+  return ok ? { branch, head, detail } : { branch: null, head: null, detail };
 }
 
 /** Merge `branch` into the default branch locally via a dedicated worktree.
@@ -2271,6 +2368,19 @@ export async function autoMergeProposal(
     if (cfg.foundry?.autoMerge?.enabled !== true) {
       return refuse('auto-merge disabled (cfg.foundry.autoMerge.enabled !== true)');
     }
+    const rawTrustBasis = autoMergeConfigValue(cfg, 'trustBasis');
+    if (
+      rawTrustBasis !== undefined &&
+      rawTrustBasis !== 'tier' &&
+      rawTrustBasis !== 'verification' &&
+      rawTrustBasis !== 'evidence'
+    ) {
+      return refuse(`invalid auto-merge trustBasis '${String(rawTrustBasis)}'`);
+    }
+    const rawMaxRisk = autoMergeConfigValue(cfg, 'maxRisk');
+    if (rawMaxRisk !== undefined && rawMaxRisk !== 'low' && rawMaxRisk !== 'medium' && rawMaxRisk !== 'high') {
+      return refuse(`invalid auto-merge maxRisk '${String(rawMaxRisk)}'`);
+    }
 
     // ── Gate 2: proposal must exist, be a mergeable kind with a diff ─────────
     const proposal = loadProposal(id);
@@ -2343,13 +2453,13 @@ export async function autoMergeProposal(
 
     let toMain: boolean;
     let authority: { authorized: boolean; reason: string };
-    let evidenceRemoteProtection: AutonomyRemoteProtectionEvidence | undefined;
+    let remoteProtectionEvidence: AutonomyRemoteProtectionEvidence | undefined;
     let verifiedThisInvocation: VerifyProposalResult | undefined;
 
     if (trustBasis === 'evidence') {
       const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
         selfTarget: isSelfTargetProposal(proposal, cfg),
-        remoteAvailable: getRemoteOrg(repo).org !== null,
+        remoteAvailable: resolveGitHubOriginAuthority(repo) !== null,
         requireVerificationEvidence: false,
       });
       if (!activation.authorized) {
@@ -2424,24 +2534,11 @@ export async function autoMergeProposal(
       if (trustBasis === 'evidence') {
         const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
           selfTarget: isSelfTargetProposal(proposal, cfg),
-          remoteAvailable: getRemoteOrg(repo).org !== null,
+          remoteAvailable: resolveGitHubOriginAuthority(repo) !== null,
         });
         if (!activation.authorized) {
           return refuse(`merge authority denied: ${activation.reason}`, repo);
         }
-        if (!proposal.verifyResult?.baseBranch || !proposal.verifyResult.baseHead) {
-          return refuse('merge authority denied: live branch protection requires verified base binding', repo);
-        }
-        const remoteProtection = await evaluateLiveEvidenceRemoteProtection(
-          repo,
-          proposal.verifyResult.baseBranch,
-          proposal.verifyResult.baseHead,
-          cfg,
-        );
-        if (!remoteProtection.authorized) {
-          return refuse(`merge authority denied: ${remoteProtection.reason}`, repo);
-        }
-        evidenceRemoteProtection = remoteProtection.evidence;
       }
       authority = trustBasis === 'verification'
         ? evaluateVerificationGate(proposal, cfg, allDecisions)
@@ -2955,13 +3052,17 @@ export async function autoMergeProposal(
     const preEvidenceConflict = currentProposalConflict();
     if (preEvidenceConflict) return refuse(preEvidenceConflict, repo);
     const wantRemote = cfg.foundry?.autoMerge?.pushToRemote === true;
-    const hasGithub = getRemoteOrg(repo).org !== null;
+    const githubOrigin = resolveGitHubOriginAuthorityDetails(repo);
+    const hasGithub = githubOrigin !== null;
     const selfTarget = isSelfTargetProposal(proposal, cfg);
     const allowSelfMerge =
       ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
         'allowSelfMerge'
       ] === true;
-    if (trustBasis === 'evidence' && toMain) {
+    if (toMain && wantRemote) {
+      if (!githubOrigin) {
+        return refuse('protected remote handoff requires a canonical GitHub origin', repo);
+      }
       const base = verify.baseBranch;
       const verifiedBaseHead = verify.baseHead;
       if (!base || !verifiedBaseHead) {
@@ -2981,27 +3082,27 @@ export async function autoMergeProposal(
           repo,
         );
       }
-      if (wantRemote && hasGithub) {
-        const remoteBaseHeadBeforeEvidence = resolveRemoteBranchHead(repo, base);
-        if (!remoteBaseHeadBeforeEvidence) {
-          return refuse(
-            `could not resolve protected remote branch '${base}' before evidence pack — reverify required`,
-            repo,
-          );
-        }
-        if (remoteBaseHeadBeforeEvidence !== verifiedBaseHead) {
-          return refuse(
-            `protected remote branch '${base}' moved since verification (verified ${verifiedBaseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforeEvidence.slice(0, 8)}) — refusing evidence pack; reverify required`,
-            repo,
-          );
-        }
-        if (evidenceRemoteProtection) {
-          evidenceRemoteProtection = {
-            ...evidenceRemoteProtection,
-            detail: `${evidenceRemoteProtection.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
-          };
-        }
+      const remoteBaseHeadBeforeEvidence = resolveRemoteBranchHead(repo, base, githubOrigin.pushUrl);
+      if (!remoteBaseHeadBeforeEvidence) {
+        return refuse(
+          `could not resolve protected remote branch '${base}' before evidence pack — reverify required`,
+          repo,
+        );
       }
+      if (remoteBaseHeadBeforeEvidence !== verifiedBaseHead) {
+        return refuse(
+          `protected remote branch '${base}' moved since verification (verified ${verifiedBaseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforeEvidence.slice(0, 8)}) — refusing evidence pack; reverify required`,
+          repo,
+        );
+      }
+      const capturedProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verifiedBaseHead, cfg);
+      if (!capturedProtection.authorized) {
+        return refuse(`protected remote handoff denied: ${capturedProtection.reason}`, repo);
+      }
+      remoteProtectionEvidence = {
+        ...capturedProtection.evidence,
+        detail: `${capturedProtection.evidence.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
+      };
     }
     const evidencePack = buildAutonomyEvidencePack({
       proposal,
@@ -3028,7 +3129,7 @@ export async function autoMergeProposal(
         detail: `${scopeFilesForEvidence} file(s), ${scopeLinesForEvidence} changed line(s) within caps ${maxFilesForEvidence}/${maxLinesForEvidence}`,
       },
       ...(managerGateEvidence ? { manager: managerGateEvidence } : {}),
-      ...(evidenceRemoteProtection ? { remoteProtection: evidenceRemoteProtection } : {}),
+      ...(remoteProtectionEvidence ? { remoteProtection: remoteProtectionEvidence } : {}),
       ...(selfTarget
         ? {
             selfTarget: {
@@ -3079,78 +3180,129 @@ export async function autoMergeProposal(
       );
     }
     const staged = buildMergeBranch(repo, id, diff, base, verify.baseHead);
-    if (!staged.branch) {
+    if (!staged.branch || !staged.head) {
       return refuse(`could not stage merge branch: ${staged.detail}`, repo);
     }
     const branch = staged.branch;
+    const stagedHead = staged.head;
+    let pushedOwnedBranch = false;
+    const refuseStaged = (reason: string): AutoMergeResult => {
+      cleanupOwnedMergeBranch(repo, branch, stagedHead, {
+        remote: pushedOwnedBranch,
+        ...(githubOrigin ? { origin: githubOrigin } : {}),
+      });
+      return refuse(reason, repo);
+    };
 
     let merged = false;
     let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)
     let remoteHandoff = false; // Remote PR created; host gates own the actual merge.
+    let remoteHandoffPersisted = false;
+    let remoteHandoffCreatedAt: string | undefined;
     let reason = '';
     let prUrl: string | undefined;
 
-    if (wantRemote && hasGithub) {
+    if (wantRemote && githubOrigin) {
+      if (!githubOriginAuthorityMatches(repo, githubOrigin)) {
+        return refuseStaged('canonical GitHub origin changed before remote handoff');
+      }
       const prePushConflict = currentProposalConflict();
-      if (prePushConflict) return refuse(prePushConflict, repo);
+      if (prePushConflict) return refuseStaged(prePushConflict);
       const baseHeadBeforePush = resolveDefaultBranchHead(repo, base);
       if (!baseHeadBeforePush || baseHeadBeforePush !== verify.baseHead) {
-        return refuse(
-          `default branch '${base}' moved since verification — refusing remote handoff; branch '${branch}' left for manual reverify`,
-          repo,
+        return refuseStaged(
+          `default branch '${base}' moved since verification — refusing remote handoff; reverify required`,
         );
       }
-      if (configuredTrustBasis(cfg) === 'evidence') {
-        const remoteBaseHeadBeforePush = resolveRemoteBranchHead(repo, base);
+      if (toMain) {
+        const remoteBaseHeadBeforePush = resolveRemoteBranchHead(repo, base, githubOrigin.pushUrl);
         if (!remoteBaseHeadBeforePush) {
-          return refuse(
-            `could not resolve protected remote branch '${base}' before evidence handoff — branch '${branch}' left for manual reverify`,
-            repo,
+          return refuseStaged(
+            `could not resolve protected remote branch '${base}' before remote handoff — reverify required`,
           );
         }
         if (remoteBaseHeadBeforePush !== verify.baseHead) {
-          return refuse(
-            `protected remote branch '${base}' moved since verification (verified ${verify.baseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforePush.slice(0, 8)}) — refusing evidence handoff; branch '${branch}' left for manual reverify`,
-            repo,
+          return refuseStaged(
+            `protected remote branch '${base}' moved since verification (verified ${verify.baseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforePush.slice(0, 8)}) — refusing remote handoff; reverify required`,
           );
         }
-        const finalProtection = await evaluateLiveEvidenceRemoteProtection(
+        const finalProtection = await evaluateLiveProtectedRemoteAuthority(
           repo,
           base,
           verify.baseHead,
           cfg,
         );
         if (!finalProtection.authorized) {
-          return refuse(
+          return refuseStaged(
             `live branch protection changed before remote handoff: ${finalProtection.reason}`,
-            repo,
           );
         }
         if (
-          !evidenceRemoteProtection ||
-          finalProtection.evidence.policyHash !== evidenceRemoteProtection.policyHash
+          !remoteProtectionEvidence ||
+          finalProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash
         ) {
-          return refuse('live branch protection policy changed after evidence capture — re-evaluate required', repo);
+          return refuseStaged('live branch protection policy changed after evidence capture — re-evaluate required');
         }
       }
       // H4: PUSH the staging branch to origin BEFORE opening the PR. createPr
       // points the PR head at `branch`, which the host cannot see unless we push
       // it first. Wrapped never-throw + audited; if the push fails we DO NOT
       // claim merged — we refuse so no PR is opened against a missing head.
-      const pushed = gitTry(repo, ['push', '-u', 'origin', branch]) !== null;
+      const remoteStagingRef = `refs/heads/${branch}`;
+      const priorRemoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+      const reusedExactRemoteHead = priorRemoteStagedHead === stagedHead;
+      const originStableBeforePush = githubOriginAuthorityMatches(repo, githubOrigin);
+      const pushed = originStableBeforePush && (reusedExactRemoteHead || (
+        priorRemoteStagedHead === null &&
+        gitTry(repo, [
+          'push',
+          '--porcelain',
+          `--force-with-lease=${remoteStagingRef}:`,
+          githubOrigin.pushUrl,
+          `${stagedHead}:${remoteStagingRef}`,
+        ]) !== null
+      ));
+      pushedOwnedBranch = pushed && !reusedExactRemoteHead;
       audit({
         action: 'inbox:auto-merge',
         repo,
         sandboxId: id,
-        summary: `push staging branch '${branch}' to origin: ${pushed ? 'ok' : 'failed'}`,
+        summary: `${reusedExactRemoteHead ? 'reuse' : 'push'} staging branch '${branch}' on origin: ${pushed ? 'ok' : 'failed'}`,
         result: pushed ? 'ok' : 'error',
       });
       if (!pushed) {
+        cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
         return {
           ok: false,
           merged: false,
           reason: 'failed to push staging branch',
         };
+      }
+
+      const remoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+      if (remoteStagedHead !== stagedHead) {
+        return refuseStaged(
+          `remote staging branch '${branch}' does not match verified commit ${stagedHead.slice(0, 8)} — refusing PR creation`,
+        );
+      }
+
+      if (!githubOriginAuthorityMatches(repo, githubOrigin)) {
+        return refuseStaged('canonical GitHub origin changed after push; refusing PR creation');
+      }
+
+      if (toMain) {
+        const postPushProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+        if (
+          !postPushProtection.authorized ||
+          remoteProtectionEvidence === undefined ||
+          postPushProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash
+        ) {
+          return refuseStaged(
+            `live branch protection changed after push; refusing PR creation${
+              postPushProtection.authorized ? '' : `: ${postPushProtection.reason}`
+            }`,
+          );
+        }
       }
 
       // H5: scrub secret-shaped tokens from the PR title/body before they leave
@@ -3165,17 +3317,73 @@ export async function autoMergeProposal(
 
       // PREFERRED path — open a PR to the default branch; branch protection / CI
       // on the host remain the outer safety net.
-      const pr = await createPr(repo, {
-        title: safeTitle,
-        body: safeBody,
-        base,
-        head: branch,
-        ...(githubNameWithOwnerFromOrigin(repo)
-          ? { repo: githubNameWithOwnerFromOrigin(repo) as string }
-          : {}),
-      });
+      const existingPr = viewPr(repo, branch, { repo: githubOrigin.nameWithOwner });
+      const existingPrIdentityMatches = Boolean(existingPr?.url &&
+        prUrlMatchesAuthority(existingPr.url, githubOrigin.nameWithOwner) &&
+        existingPr.headRefName === branch &&
+        existingPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase() &&
+        existingPr.baseRefName === base);
+      const matchingExistingPr = Boolean(existingPrIdentityMatches &&
+        existingPr?.state === 'OPEN');
+
+      // Persist the exact branch/base/head intent before the first outward PR
+      // mutation. A crash or ambiguous host response can then be reconciled by
+      // branch, while a discovered exact PR URL is retained immediately.
+      if (toMain) {
+        remoteHandoffCreatedAt = new Date().toISOString();
+        const discoveredPrUrl = existingPrIdentityMatches ? existingPr?.url : undefined;
+        const intentReason = discoveredPrUrl
+          ? `remote PR intent persisted with discovered exact PR: ${discoveredPrUrl}`
+          : `remote PR creation intent persisted for ${branch}@${stagedHead}`;
+        remoteHandoffPersisted = setStatus(
+          id,
+          'awaiting-host-merge',
+          intentReason,
+          intentReason,
+          authorityFence,
+          {
+            remoteHandoff: {
+              provider: 'github',
+              state: 'awaiting-host-merge',
+              ...(discoveredPrUrl ? { prUrl: discoveredPrUrl } : {}),
+              branch,
+              base,
+              expectedHeadOid: stagedHead,
+              createdAt: remoteHandoffCreatedAt,
+              updatedAt: remoteHandoffCreatedAt,
+              detail: intentReason,
+            },
+          },
+        );
+        if (!remoteHandoffPersisted) {
+          return refuseStaged('remote PR creation intent could not be persisted; PR not created');
+        }
+      }
+
+      const rawPr: CreatePrResult = matchingExistingPr
+        ? { ok: true, url: existingPr?.url ?? null, detail: 'existing matching PR adopted' }
+        : await createPr(repo, {
+            title: safeTitle,
+            body: safeBody,
+            base,
+            head: branch,
+            repo: githubOrigin.nameWithOwner,
+          });
+      const pr: CreatePrResult = rawPr.ok &&
+        !prUrlMatchesAuthority(rawPr.url ?? undefined, githubOrigin.nameWithOwner)
+        ? { ok: false, url: null, detail: 'PR creation returned no canonical URL for the authorized repository' }
+        : rawPr;
+      const observedPr = pr.ok && pr.url
+        ? (matchingExistingPr ? existingPr : viewPr(repo, pr.url, { repo: githubOrigin.nameWithOwner }))
+        : null;
+      const prIdentityConfirmed = Boolean(
+        pr.ok && pr.url && observedPr?.url === pr.url &&
+        observedPr.state === 'OPEN' && observedPr.headRefName === branch &&
+        observedPr.baseRefName === base && observedPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase(),
+      );
       if (!pr.ok) {
-        reason = `staged on ${branch} but PR creation failed: ${pr.detail}`;
+        reason = `staged on ${branch} but PR creation outcome is unknown: ${pr.detail}; remote branch retained for reconciliation`;
+        cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
       } else {
         prUrl = pr.url ?? undefined;
         // Best-effort host auto-merge. Never request privileged bypass:
@@ -3185,24 +3393,83 @@ export async function autoMergeProposal(
         remoteHandoff = true;
         let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
         if (toMain && prUrl) {
-          let mayEnableHostAutoMerge = true;
-          if (configuredTrustBasis(cfg) === 'evidence') {
-            const latestProtection = await evaluateLiveEvidenceRemoteProtection(repo, base, verify.baseHead, cfg);
-            mayEnableHostAutoMerge = latestProtection.authorized &&
-              evidenceRemoteProtection !== undefined &&
-              latestProtection.evidence.policyHash === evidenceRemoteProtection.policyHash;
-            if (!mayEnableHostAutoMerge) {
-              mergeNote = 'PR opened; host auto-merge refused because live protection changed';
+          const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+          const latestRemoteHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+          const remoteHeadMatches = latestRemoteHead === stagedHead;
+          const originStableForAutoMerge = githubOriginAuthorityMatches(repo, githubOrigin);
+          const mayEnableHostAutoMerge = latestProtection.authorized &&
+            remoteProtectionEvidence !== undefined &&
+            latestProtection.evidence.policyHash === remoteProtectionEvidence.policyHash &&
+            remoteHeadMatches &&
+            originStableForAutoMerge &&
+            prIdentityConfirmed;
+          if (!mayEnableHostAutoMerge) {
+            mergeNote = !remoteHeadMatches
+              ? 'PR opened; remote PR head mismatch; host auto-merge refused because the remote PR head changed'
+              : !prIdentityConfirmed
+                ? 'PR opened; host auto-merge refused because post-create PR identity was not confirmed'
+                : remoteHeadMatches && originStableForAutoMerge
+              ? 'PR opened; host auto-merge refused because live protection changed'
+              : !originStableForAutoMerge
+                ? 'PR opened; host auto-merge refused because canonical GitHub origin changed'
+                : 'PR opened; host auto-merge refused';
+          }
+          if (remoteHandoff) {
+            remoteHandoffCreatedAt = new Date().toISOString();
+            const durableReason = remoteHeadMatches
+              ? prIdentityConfirmed
+                ? `PR opened: ${prUrl} (remote handoff; awaiting host merge)`
+                : `PR opened: ${prUrl}; post-create PR identity was not confirmed; quarantined awaiting host reconciliation; host auto-merge not enabled`
+              : `PR opened: ${prUrl}; remote PR head mismatch (expected ${stagedHead}, observed ${latestRemoteHead ?? 'unavailable'}); quarantined awaiting host reconciliation; host auto-merge not enabled`;
+            remoteHandoffPersisted = setStatus(
+              id,
+              'awaiting-host-merge',
+              durableReason,
+              durableReason,
+              authorityFence,
+              {
+                remoteHandoff: {
+                  provider: 'github',
+                  state: 'awaiting-host-merge',
+                  prUrl,
+                  branch,
+                  base,
+                  expectedHeadOid: stagedHead,
+                  createdAt: remoteHandoffCreatedAt,
+                  updatedAt: remoteHandoffCreatedAt,
+                  detail: durableReason,
+                },
+              },
+            );
+            if (!remoteHandoffPersisted) {
+              cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
+              return {
+                ok: false,
+                merged: false,
+                reason: 'remote PR exists but atomic handoff persistence failed; host auto-merge not enabled',
+                prUrl,
+              };
             }
           }
           if (mayEnableHostAutoMerge) {
             try {
-              execFileSync('gh', ['pr', 'merge', '--auto', '--squash', prUrl], {
+              execFileSync('gh', [
+                'pr', 'merge', '--auto', '--squash',
+                '--match-head-commit', stagedHead,
+                '--repo', githubOrigin.nameWithOwner,
+                prUrl,
+              ], {
                 cwd: repo,
                 timeout: GIT_TIMEOUT,
                 stdio: 'pipe',
                 encoding: 'utf8',
-                env: { ...process.env, GH_NO_UPDATE_NOTIFIER: '1', NO_COLOR: '1' },
+                env: {
+                  ...process.env,
+                  GH_HOST: 'github.com',
+                  GH_NO_UPDATE_NOTIFIER: '1',
+                  GH_PROMPT_DISABLED: '1',
+                  NO_COLOR: '1',
+                },
               });
               mergeNote = 'PR opened with host auto-merge enabled';
             } catch {
@@ -3245,22 +3512,56 @@ export async function autoMergeProposal(
     const success = merged || branchApplied || remoteHandoff;
     if (success) {
       if (remoteHandoff) {
-        const now = new Date().toISOString();
-        updateProposalField(id, {
-          remoteHandoff: {
+        const now = remoteHandoffCreatedAt ?? new Date().toISOString();
+        const remoteHandoffRecord = {
             provider: 'github',
             state: 'awaiting-host-merge',
             ...(prUrl ? { prUrl } : {}),
             branch,
             base,
+            expectedHeadOid: stagedHead,
             createdAt: now,
             updatedAt: now,
             detail: reason,
-          },
-        }, authorityFence);
-        setStatus(id, 'awaiting-host-merge', reason, reason, authorityFence);
+          } as const;
+        const handoffPersisted = remoteHandoffPersisted || setStatus(
+          id,
+          'awaiting-host-merge',
+          reason,
+          reason,
+          authorityFence,
+          { remoteHandoff: remoteHandoffRecord },
+        );
+        if (!handoffPersisted) {
+          cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
+          return {
+            ok: false,
+            merged: false,
+            reason: 'remote PR exists but atomic handoff persistence failed; retained for reconciliation',
+            ...(prUrl ? { prUrl } : {}),
+          };
+        }
+        if (remoteHandoffPersisted) {
+          updateProposalField(id, { remoteHandoff: remoteHandoffRecord }, authorityFence);
+        }
       } else {
-        setStatus(id, 'applied', reason, undefined, authorityFence);
+        const appliedPersisted = setStatus(id, 'applied', reason, undefined, authorityFence);
+        if (!appliedPersisted) {
+          audit({
+            action: 'inbox:auto-merge',
+            repo,
+            sandboxId: id,
+            summary: `proposal ${id} mutation completed but applied status persistence failed`,
+            result: 'error',
+          });
+          return {
+            ok: false,
+            merged,
+            ...(branchApplied ? { branched: true } : {}),
+            reason: `${reason}; applied status persistence failed`,
+            ...(prUrl ? { prUrl } : {}),
+          };
+        }
       }
     }
 
