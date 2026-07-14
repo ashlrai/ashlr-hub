@@ -51,6 +51,16 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toContain('--shard=');
 
     const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
+    const nativeMatrixEntries =
+      ciYml.match(
+        /^ {10}- os: (?:ubuntu|windows|macos)-latest[\s\S]*?(?=^ {10}- os: |^ {4}runs-on:)/gm,
+      ) ?? [];
+    const windowsEntries = nativeMatrixEntries
+      .filter((entry) => entry.includes('os: windows-latest'))
+      .join('\n');
+    const macosEntry =
+      nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
+    const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
     const expectedFiles = [
       'test/setup/home.test.ts',
       'test/classify.test.ts',
@@ -71,9 +81,18 @@ describe('M30 CI workflow', () => {
       'test/m379.private-storage.test.ts',
       'test/m385.cutoff-checkpoint-windows.test.ts',
       'test/m392.queue-lease-epochs.test.ts',
+      terminalRetentionTest,
+      terminalRetentionTest,
     ];
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
-    expect(new Set(declaredFiles).size).toBe(declaredFiles.length);
+    const duplicateFiles = declaredFiles.filter(
+      (file, index) => declaredFiles.indexOf(file) !== index,
+    );
+    expect(duplicateFiles).toEqual([terminalRetentionTest]);
+    expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
+      1,
+    );
+    expect(macosEntry.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(1);
     for (const file of declaredFiles) {
       expect(existsSync(resolve(repoRoot, file)), `missing native CI test: ${file}`).toBe(true);
     }
