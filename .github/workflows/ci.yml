@@ -32,12 +32,13 @@ jobs:
             test_args: >-
               test/m21.worktree.test.ts test/m23.apply.test.ts
               test/m100.web-open.test.ts test/m119.quality-metrics.test.ts
+              test/m332.outcome-watcher.test.ts
           - os: windows-latest
             label: windows, portability 3/3
             test_args: >-
               test/m220.anticlog-verdict-feedback.test.ts
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
-              test/m332.outcome-watcher.test.ts test/m372.test-ci-watchdog.test.ts
+              test/m372.test-ci-watchdog.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
           - os: macos-latest
             label: macos, shared queue authority
