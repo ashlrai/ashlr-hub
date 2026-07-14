@@ -368,9 +368,15 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(caseIdentity).not.toMatch(/^[\\/][A-Za-z]:/u);
       expect(caseIdentity).not.toMatch(/^[A-Za-z]::/u);
 
+      const shortPathScript = join(fx.home, 'resolve-short-path.cmd');
+      writeFileSync(
+        shortPathScript,
+        '@echo off\r\nfor %%I in ("%~1") do @echo %%~sI\r\n',
+        'utf8',
+      );
       const short = execFileSync(
         'cmd.exe',
-        ['/d', '/c', `for %I in ("${physical}") do @echo %~sI`],
+        ['/d', '/c', shortPathScript, physical],
         { encoding: 'utf8', stdio: 'pipe' },
       ).trim().replace(/^"(.*)"$/u, '$1');
       expect(win32.isAbsolute(short)).toBe(true);

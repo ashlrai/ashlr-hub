@@ -849,19 +849,39 @@ function runPinnedPostCreateWriter() {
   } catch { /* post-create writes are best effort */ }
 }
 
-async function createdWorktreeIsExact() {
-  const head = await run(worktreePath, ['rev-parse', 'HEAD']);
-  const currentBranch = await run(worktreePath, ['branch', '--show-current']);
-  const common = await run(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+async function validateCreatedWorktree() {
+  let worktreePin;
+  try {
+    const stat = lstatSync(worktreePath, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      return { exact: false, reservationChanged: true };
+    }
+    worktreePin = { dev: String(stat.dev), ino: String(stat.ino) };
+  } catch {
+    return { exact: false, reservationChanged: true };
+  }
+  const monitor = { monitorDestination: true, worktreePin };
+  const head = await run(worktreePath, ['rev-parse', 'HEAD'], monitor);
+  const currentBranch = await run(worktreePath, ['branch', '--show-current'], monitor);
+  const common = await run(
+    worktreePath,
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    monitor,
+  );
+  const reservationChanged = [head, currentBranch, common].some((entry) =>
+    entry.error && entry.error.includes('sandbox reservation identity changed'));
   if (head.status !== 0 || head.stdout.trim() !== baseHead ||
       currentBranch.status !== 0 || currentBranch.stdout.trim() !== branch ||
-      common.status !== 0 || !common.stdout.trim()) return false;
+      common.status !== 0 || !common.stdout.trim()) return { exact: false, reservationChanged };
   try {
     const commonPath = realpathSync.native(common.stdout.trim());
-    return sameCanonicalPath(commonPath, expectedCommonPath) &&
-      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno);
+    return {
+      exact: sameCanonicalPath(commonPath, expectedCommonPath) &&
+        sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno),
+      reservationChanged,
+    };
   } catch {
-    return false;
+    return { exact: false, reservationChanged };
   }
 }
 
@@ -892,12 +912,15 @@ async function createdWorktreeIsExact() {
         };
       } else {
         const destinationPinnedBeforeValidation = currentDestinationIsPinned();
-        const worktreeExact = destinationPinnedBeforeValidation && await createdWorktreeIsExact();
+        const worktreeValidation = destinationPinnedBeforeValidation
+          ? await validateCreatedWorktree()
+          : { exact: false, reservationChanged: true };
+        const worktreeExact = destinationPinnedBeforeValidation && worktreeValidation.exact;
         const destinationPinnedAfterValidation = currentDestinationIsPinned();
         if (!destinationPinnedBeforeValidation || !worktreeExact ||
             !destinationPinnedAfterValidation) {
           const reservationChanged = !destinationPinnedBeforeValidation ||
-            !destinationPinnedAfterValidation;
+            !destinationPinnedAfterValidation || worktreeValidation.reservationChanged;
           result = {
             ok: false,
             cleanupComplete: await rollback(),
@@ -908,13 +931,15 @@ async function createdWorktreeIsExact() {
         } else {
           runPinnedPostCreateWriter();
           const destinationPinnedBeforePostValidation = currentDestinationIsPinned();
-          const postWorktreeExact = destinationPinnedBeforePostValidation &&
-            await createdWorktreeIsExact();
+          const postValidation = destinationPinnedBeforePostValidation
+            ? await validateCreatedWorktree()
+            : { exact: false, reservationChanged: true };
+          const postWorktreeExact = destinationPinnedBeforePostValidation && postValidation.exact;
           const destinationPinnedAfterPostValidation = currentDestinationIsPinned();
           if (!destinationPinnedBeforePostValidation || !postWorktreeExact ||
               !destinationPinnedAfterPostValidation) {
             const reservationChanged = !destinationPinnedBeforePostValidation ||
-              !destinationPinnedAfterPostValidation;
+              !destinationPinnedAfterPostValidation || postValidation.reservationChanged;
             result = {
               ok: false,
               cleanupComplete: await rollback(),
