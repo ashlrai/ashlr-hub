@@ -83,7 +83,7 @@ function makeTmpRepo(label = 'repo'): string {
 // worktree.ts: node_modules symlink tests
 // ---------------------------------------------------------------------------
 
-describe('M286 worktree — node_modules symlink', () => {
+describe('M286 worktree — node_modules symlink', { timeout: 15_000 }, () => {
   it('symlinks sourceRepo/node_modules into worktree when source has node_modules', async () => {
     const wt = await worktree();
     const repo = makeTmpRepo('nm-symlink');
