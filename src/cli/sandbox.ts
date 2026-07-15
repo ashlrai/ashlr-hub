@@ -25,7 +25,10 @@ import type {
   SandboxInventory,
   SandboxSweepResult,
 } from '../core/types.js';
-import type { PolicyMutationResult } from '../core/sandbox/policy.js';
+import type {
+  EnrollmentRegistrySnapshot,
+  PolicyMutationResult,
+} from '../core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -113,54 +116,54 @@ async function loadWorktree(): Promise<{
 // Lazy imports — core/sandbox/policy.ts (M21)
 // ---------------------------------------------------------------------------
 
-type ListEnrolledFn = () => string[];
-type EnrollFn       = (repo: string) => PolicyMutationResult | void;
-type UnenrollFn     = (repo: string) => PolicyMutationResult | void;
-type KillSwitchOnFn = () => boolean;
-type SetKillFn      = (on: boolean) => PolicyMutationResult | void;
+type ReadEnrollmentRegistryFn = () => EnrollmentRegistrySnapshot;
+type EnrollFn                  = (repo: string) => PolicyMutationResult | void;
+type UnenrollFn                = (repo: string) => PolicyMutationResult | void;
+type KillSwitchOnFn            = () => boolean;
+type SetKillFn                 = (on: boolean) => PolicyMutationResult | void;
 
-let _listEnrolled: ListEnrolledFn | null | undefined = undefined;
-let _enroll:       EnrollFn       | null | undefined = undefined;
-let _unenroll:     UnenrollFn     | null | undefined = undefined;
-let _killSwitchOn: KillSwitchOnFn | null | undefined = undefined;
-let _setKill:      SetKillFn      | null | undefined = undefined;
+let _readEnrollmentRegistry: ReadEnrollmentRegistryFn | null | undefined = undefined;
+let _enroll:                 EnrollFn                  | null | undefined = undefined;
+let _unenroll:               UnenrollFn                | null | undefined = undefined;
+let _killSwitchOn:           KillSwitchOnFn            | null | undefined = undefined;
+let _setKill:                SetKillFn                  | null | undefined = undefined;
 
 async function loadPolicy(): Promise<{
-  listEnrolled: ListEnrolledFn;
-  enroll:       EnrollFn;
-  unenroll:     UnenrollFn;
-  killSwitchOn: KillSwitchOnFn;
-  setKill:      SetKillFn;
+  readEnrollmentRegistry: ReadEnrollmentRegistryFn;
+  enroll:                  EnrollFn;
+  unenroll:                UnenrollFn;
+  killSwitchOn:            KillSwitchOnFn;
+  setKill:                 SetKillFn;
 } | null> {
-  if (_listEnrolled === undefined) {
+  if (_readEnrollmentRegistry === undefined) {
     try {
       const mod = await import('../core/sandbox/policy.js' as unknown as string) as {
-        listEnrolled: ListEnrolledFn;
-        enroll:       EnrollFn;
-        unenroll:     UnenrollFn;
-        killSwitchOn: KillSwitchOnFn;
-        setKill:      SetKillFn;
+        readEnrollmentRegistry: ReadEnrollmentRegistryFn;
+        enroll:                  EnrollFn;
+        unenroll:                UnenrollFn;
+        killSwitchOn:            KillSwitchOnFn;
+        setKill:                  SetKillFn;
       };
-      _listEnrolled = mod.listEnrolled;
-      _enroll       = mod.enroll;
-      _unenroll     = mod.unenroll;
-      _killSwitchOn = mod.killSwitchOn;
-      _setKill      = mod.setKill;
+      _readEnrollmentRegistry = mod.readEnrollmentRegistry;
+      _enroll                 = mod.enroll;
+      _unenroll               = mod.unenroll;
+      _killSwitchOn           = mod.killSwitchOn;
+      _setKill                = mod.setKill;
     } catch {
-      _listEnrolled = null;
-      _enroll       = null;
-      _unenroll     = null;
-      _killSwitchOn = null;
-      _setKill      = null;
+      _readEnrollmentRegistry = null;
+      _enroll                 = null;
+      _unenroll               = null;
+      _killSwitchOn           = null;
+      _setKill                = null;
     }
   }
-  if (_listEnrolled === null) return null;
+  if (_readEnrollmentRegistry === null) return null;
   return {
-    listEnrolled: _listEnrolled!,
-    enroll:       _enroll!,
-    unenroll:     _unenroll!,
-    killSwitchOn: _killSwitchOn!,
-    setKill:      _setKill!,
+    readEnrollmentRegistry: _readEnrollmentRegistry!,
+    enroll:                  _enroll!,
+    unenroll:                _unenroll!,
+    killSwitchOn:            _killSwitchOn!,
+    setKill:                 _setKill!,
   };
 }
 
@@ -371,15 +374,40 @@ function printEnrollList(repos: string[], killOn: boolean): void {
   console.log('');
 }
 
+export type EnrollmentListResponse =
+  | {
+      state: 'ready';
+      repos: string[];
+      reason: string;
+      killSwitchOn: boolean;
+    }
+  | {
+      state: 'degraded';
+      reason: string;
+      killSwitchOn: boolean;
+    };
+
 export async function cmdEnroll(args: string[]): Promise<number> {
   const sub = args[0];
 
   if (!sub || sub === 'list') {
     const policy = await loadPolicy();
     if (!policy) { moduleNotBuilt('enroll list'); return 1; }
-    const repos  = policy.listEnrolled();
+    const registry = policy.readEnrollmentRegistry();
     const killOn = policy.killSwitchOn();
-    printEnrollList(repos, killOn);
+    const response: EnrollmentListResponse = registry.state === 'ready'
+      ? { state: 'ready', repos: registry.repos, reason: registry.reason, killSwitchOn: killOn }
+      : { state: 'degraded', reason: registry.reason, killSwitchOn: killOn };
+
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(response, null, 2));
+    } else if (response.state === 'degraded') {
+      console.error(red('error: ') + `Enrollment registry is degraded (${response.reason}).`);
+      console.error(dim('Inspect and repair enrollment authority before autonomous work resumes.'));
+    } else {
+      printEnrollList(response.repos, killOn);
+    }
+    if (response.state === 'degraded') return 1;
     return 0;
   }
 

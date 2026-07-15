@@ -34,8 +34,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
@@ -86,7 +86,11 @@ import {
   saveDaemonStateResult,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
-import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+  type LocalStoreLock,
+} from '../fleet/local-store-lock.js';
 import {
   readDaemonActivity,
   writeDaemonActivity,
@@ -124,6 +128,8 @@ import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import {
   beginRejectedCaptureRecoveryDispatch,
+  generatedRepairRootKey,
+  generatedRepairProposalDispatchAuthority,
   isRejectedCaptureRecoveryAuthorized,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
@@ -148,8 +154,14 @@ import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals, listProposalsDetailed } from '../inbox/store.js';
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
+  dispatchProductionDir,
+  readDispatchProductionFailureAttemptReceipts,
+  readDispatchProductionEventsDetailed,
+  readDispatchProductionAttemptProtocolQuality,
   recordDispatchProduction,
   readDispatchProductionYieldDetailed,
+  resolveDispatchProductionFailureAttemptReceipt,
+  resolveDispatchProductionAttemptReceiptWitnesses,
   type DispatchProductionBasis,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
@@ -190,6 +202,7 @@ import type { QueueClaimCooldownPolicy } from '../fleet/shared-store.js';
 import {
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   latestWorkedEventForKeys,
+  recordOutcome as recordWorkedOutcome,
   sweepJudgedProposals,
   type WorkedEvent,
   type WorkedOutcome,
@@ -222,7 +235,6 @@ import {
   isTrustedGeneratedRepairItem,
 } from '../fleet/self-heal-trust.js';
 import {
-  generatedRepairBackendAllowed,
   generatedRepairDispatchState,
   generatedRepairDispatchLineage,
   generatedRepairGenerationId,
@@ -230,8 +242,9 @@ import {
   generatedRepairCooldownKey,
   generatedRepairCooldownKeys,
   generatedRepairRetryPolicy,
+  readGeneratedRepairLifecycle,
   readGeneratedRepairQueueSnapshot,
-  acknowledgeGeneratedRepairTreatmentOutcome,
+  publishGeneratedRepairTreatmentOutcome,
   readPendingGeneratedRepairTreatmentOutcomes,
   recordGeneratedRepairLifecycle,
 } from '../fleet/generated-repair-lifecycle.js';
@@ -245,30 +258,714 @@ import {
   scheduleCutoffCheckpointCapture,
   type ScheduledCutoffCapture,
 } from './cutoff-checkpoint-scheduler.js';
+import { writePrivateFileAtomically } from '../util/private-file-write.js';
+import { readStableRegularFile } from '../util/stable-file-read.js';
+import { fsyncDirectory } from '../util/durability.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const GENERATED_REPAIR_RESERVATION_SCHEMA_VERSION = 1;
+const GENERATED_REPAIR_RESERVATION_MAX_BYTES = 2_048;
+const GENERATED_REPAIR_RESERVATION_MAX_GENERATIONS = 8;
+const GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES = 3;
+const GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES = 2 * 1024 * 1024;
+const GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS = 4_096;
+const GENERATED_REPAIR_ATTEMPT_READ_LIMIT = 256;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const GENERATED_REPAIR_FAILED_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
+  'engine-failed',
+  'sandbox-failed',
+  'proposal-capture-error',
+  'gate-blocked',
+]);
 
-function flushPendingRepairTreatmentOutcomes(): void {
+interface GeneratedRepairExecutionReservationRecord {
+  schemaVersion: 1;
+  reservationId: string;
+  createdAt: string;
+  generationIds: string[];
+  itemIdHash: string;
+  objectiveHash: string;
+  repairRootId: string;
+  repairDepth: 0 | 1;
+  repairRootAuthorityItemIdHash: string;
+  backend: EngineId;
+  tier: EngineTier;
+  repairAttemptOrdinal: 1 | 2;
+  previousBackend: EngineId | null;
+  attemptHash: string;
+  phase: 'prepared' | 'launched';
+}
+
+interface GeneratedRepairExecutionReservation {
+  markerPath: string;
+  record: GeneratedRepairExecutionReservationRecord;
+  locks: LocalStoreLock[];
+}
+
+interface GeneratedRepairAttemptHistory {
+  available: boolean;
+  failures: DispatchProductionEvent[];
+}
+
+function generatedRepairReceiptFreshAuthority(item: WorkItem): boolean {
+  const generationIds = generatedRepairReservationFamily(item);
+  if (!generationIds) return false;
+  const failures = readDispatchProductionFailureAttemptReceipts(generationIds);
+  if (failures.status !== 'resolved' || !failures.authoritative || failures.receipts.length > 0) {
+    return false;
+  }
+  const terminals = resolveDispatchProductionAttemptReceiptWitnesses(
+    generationIds.flatMap((repairGenerationId) => ([1, 2] as const).map(
+      (repairAttemptOrdinal) => ({ repairGenerationId, repairAttemptOrdinal }),
+    )),
+  );
+  return terminals.status === 'resolved' && terminals.resolutions.every(
+    (resolution) => resolution.status === 'missing',
+  );
+}
+
+function canonicalGeneratedRepairAttemptEvent(item: WorkItem, event: DispatchProductionEvent): boolean {
+  if (
+    event.itemId !== item.id ||
+    event.source !== item.source ||
+    event.objectiveHash !== workItemObjectiveHash(item) ||
+    event.basis !== 'run-proposal-outcome' ||
+    event.backend === null ||
+    event.backend === 'builtin' ||
+    event.tier === null
+  ) return false;
   try {
-    for (const terminal of readPendingGeneratedRepairTreatmentOutcomes()) {
-      const witness: DispatchProductionEvent = {
-        ...terminal.candidate,
-        ts: new Date().toISOString(),
-        basis: 'repair-lifecycle-outcome',
-        repairTreatmentOutcome: terminal.outcome,
-        repairTreatmentAttemptHash: terminal.attemptHash,
-      };
-      const write = recordDispatchProduction(witness);
-      if (
-        write.recorded !== 1 ||
-        !acknowledgeGeneratedRepairTreatmentOutcome(terminal.generationId, terminal.attemptHash)
-      ) {
+    return resolve(event.repo) === resolve(item.repo);
+  } catch {
+    return false;
+  }
+}
+
+function readGeneratedRepairAttemptEvents(
+  item: WorkItem,
+  sinceMs: number,
+): { available: boolean; events: DispatchProductionEvent[] } {
+  try {
+    const read = readDispatchProductionEventsDetailed({
+      sinceMs: Math.max(0, sinceMs),
+      limit: GENERATED_REPAIR_ATTEMPT_READ_LIMIT,
+      maxFiles: GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES,
+      maxBytes: GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES,
+      maxRows: GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS,
+    });
+    if (!read.complete || read.sourceState === 'degraded') return { available: false, events: [] };
+    return {
+      available: true,
+      events: read.events.filter((event) => canonicalGeneratedRepairAttemptEvent(item, event)),
+    };
+  } catch {
+    return { available: false, events: [] };
+  }
+}
+
+function readGeneratedRepairFailedAttempts(item: WorkItem): GeneratedRepairAttemptHistory {
+  const generationIds = generatedRepairReservationFamily(item);
+  if (!generationIds) return { available: false, failures: [] };
+  const durable = readDispatchProductionFailureAttemptReceipts(generationIds);
+  if (durable.status !== 'resolved') return { available: false, failures: [] };
+  const itemMs = Date.parse(item.ts);
+  const sinceMs = Number.isFinite(itemMs)
+    ? Math.max(itemMs, Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS)
+    : Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS;
+  const read = readGeneratedRepairAttemptEvents(item, sinceMs);
+  if (!read.available && !durable.authoritative) return { available: false, failures: [] };
+  const byAttempt = new Map<string, DispatchProductionEvent>();
+  for (const event of [...(read.available ? read.events : []), ...durable.receipts.map((receipt) => receipt.event)]) {
+    if (!GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome) || event.proposalCreated) continue;
+    if (!canonicalGeneratedRepairAttemptEvent(item, event)) continue;
+    const attemptId = event.trajectoryId ?? (event.runId ? `run:${event.runId}` : undefined);
+    if (!attemptId) continue;
+    const current = byAttempt.get(attemptId);
+    if (!current || Date.parse(event.ts) > Date.parse(current.ts)) byAttempt.set(attemptId, event);
+  }
+  return {
+    available: true,
+    failures: [...byAttempt.values()]
+      .sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts))
+      .slice(-2),
+  };
+}
+
+function effectiveGeneratedRepairRetryPolicy(item: WorkItem): ReturnType<typeof generatedRepairRetryPolicy> {
+  const lifecyclePolicy = generatedRepairRetryPolicy(item);
+  if (!lifecyclePolicy.applies) return lifecyclePolicy;
+  if (!lifecyclePolicy.available) return generatedRepairReceiptFreshAuthority(item)
+    ? {
+        applies: true,
+        available: true,
+        requireAlternative: false,
+        excludedBackend: null,
+        requiredTier: item.repairParentTier ?? null,
+      }
+    : lifecyclePolicy;
+  const history = readGeneratedRepairFailedAttempts(item);
+  if (!history.available) return { ...lifecyclePolicy, available: false };
+  const lifecycle = readGeneratedRepairLifecycle(item);
+  if (!lifecycle.available) return { ...lifecyclePolicy, available: false };
+  const attempts = lifecycle.authoritativeEmptyRuns + history.failures.length;
+  if (attempts >= 2) {
+    return {
+      applies: true,
+      available: false,
+      requireAlternative: false,
+      excludedBackend: null,
+      requiredTier: null,
+    };
+  }
+  if (lifecyclePolicy.requireAlternative || history.failures.length === 0) return lifecyclePolicy;
+  const failed = history.failures.at(-1)!;
+  return {
+    applies: true,
+    available: failed.backend !== null && failed.tier !== null,
+    requireAlternative: true,
+    excludedBackend: failed.backend,
+    requiredTier: failed.tier,
+  };
+}
+
+function effectiveGeneratedRepairExecutionBackendAllowed(
+  item: WorkItem,
+  backend: EngineId,
+  cfg: AshlrConfig,
+): boolean {
+  if (!generatedRepairExecutionBackendAllowed(item, backend, cfg)) return false;
+  const policy = effectiveGeneratedRepairRetryPolicy(item);
+  if (!policy.applies) return true;
+  if (!policy.available || backend === 'builtin') return false;
+  if (policy.requireAlternative && backend === policy.excludedBackend) return false;
+  return policy.requiredTier === null || engineTierOf(backend, cfg) === policy.requiredTier;
+}
+
+function effectiveGeneratedRepairCandidateAllowed(
+  item: WorkItem,
+  backend: EngineId,
+  cfg: AshlrConfig,
+): boolean {
+  return generatedRepairCandidateAllowed(item, backend, cfg) &&
+    effectiveGeneratedRepairExecutionBackendAllowed(item, backend, cfg);
+}
+
+function generatedRepairAlternateBackend(
+  item: WorkItem,
+  excluded: EngineId,
+  cfg: AshlrConfig,
+): EngineId | null {
+  const configured = cfg.foundry?.allowedBackends ?? [];
+  for (const candidate of configured) {
+    if (candidate === excluded || candidate === 'builtin') continue;
+    if (!effectiveGeneratedRepairExecutionBackendAllowed(item, candidate, cfg)) continue;
+    if (!withinLimit(candidate, cfg)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function exactFailedAttemptReceiptMatchesReservation(
+  item: WorkItem,
+  event: DispatchProductionEvent,
+  record: GeneratedRepairExecutionReservationRecord,
+): boolean {
+  if (
+    !event.repairGenerationId ||
+    (event.repairAttemptOrdinal !== 1 && event.repairAttemptOrdinal !== 2) ||
+    !record.generationIds.includes(event.repairGenerationId)
+  ) return false;
+  const resolution = resolveDispatchProductionFailureAttemptReceipt({
+    repairGenerationId: event.repairGenerationId,
+    repairAttemptOrdinal: event.repairAttemptOrdinal,
+    attemptHash: record.attemptHash,
+  });
+  if (resolution.status !== 'proven') return false;
+  try {
+    return resolution.proof.repairGenerationId === event.repairGenerationId &&
+      resolution.proof.repairAttemptOrdinal === record.repairAttemptOrdinal &&
+      resolution.proof.attemptHash === record.attemptHash &&
+      resolution.proof.backend === record.backend &&
+      resolution.proof.tier === record.tier &&
+      resolution.proof.previousBackend === record.previousBackend &&
+      resolution.event.itemId === item.id &&
+      resolution.event.trajectoryId === `run:${record.reservationId}` &&
+      resolution.event.objectiveHash === record.objectiveHash &&
+      resolution.event.outcome === event.outcome &&
+      resolution.event.proposalCreated === false &&
+      resolution.event.repairRootId === record.repairRootId &&
+      resolution.event.repairDepth === record.repairDepth &&
+      resolve(resolution.event.repo) === resolve(item.repo);
+  } catch {
+    return false;
+  }
+}
+
+function generatedRepairReservationDir(): string {
+  return join(dirname(dispatchProductionDir()), 'repair-attempt-reservations');
+}
+
+function generatedRepairReservationFamily(item: WorkItem): string[] | null {
+  const generationIds = [...new Set(generatedRepairGenerationIds(item))].sort();
+  return generationIds.length > 0 &&
+    generationIds.length <= GENERATED_REPAIR_RESERVATION_MAX_GENERATIONS &&
+    generationIds.every((generationId) => SHA256_RE.test(generationId))
+    ? generationIds
+    : null;
+}
+
+function generatedRepairReservationRootId(item: WorkItem): string | null {
+  return generatedRepairRootKey(item) !== null && SHA256_RE.test(item.repairRootId ?? '')
+    ? item.repairRootId!
+    : null;
+}
+
+function generatedRepairReservationPath(item: WorkItem): string | null {
+  const rootId = generatedRepairReservationRootId(item);
+  return rootId ? join(generatedRepairReservationDir(), `${rootId}.json`) : null;
+}
+
+function generatedRepairReservationItemIdHash(itemId: string): string {
+  return createHash('sha256').update(JSON.stringify(['ashlr:repair-item:v1', itemId])).digest('hex');
+}
+
+function generatedRepairRootAuthorityId(item: WorkItem): string | null {
+  return typeof item.repairRootAuthorityId === 'string' && item.repairRootAuthorityId
+    ? item.repairRootAuthorityId
+    : null;
+}
+
+function reservationPathState(path: string): 'missing' | 'present' | 'unavailable' {
+  try {
+    lstatSync(path);
+    return 'present';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable';
+  }
+}
+
+function validGeneratedRepairReservationRecord(
+  value: unknown,
+  expectedGenerationIds?: readonly string[],
+): value is GeneratedRepairExecutionReservationRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const keys = Object.keys(row).sort();
+  const expectedKeys = [
+    'attemptHash', 'backend', 'createdAt', 'generationIds', 'itemIdHash', 'objectiveHash',
+    'phase', 'previousBackend', 'repairAttemptOrdinal', 'repairDepth', 'repairRootAuthorityItemIdHash',
+    'repairRootId', 'reservationId', 'schemaVersion', 'tier',
+  ].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return false;
+  const createdAtMs = typeof row['createdAt'] === 'string' ? Date.parse(row['createdAt']) : Number.NaN;
+  const generations = row['generationIds'];
+  return row['schemaVersion'] === GENERATED_REPAIR_RESERVATION_SCHEMA_VERSION &&
+    typeof row['reservationId'] === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(row['reservationId']) &&
+    Number.isFinite(createdAtMs) && new Date(createdAtMs).toISOString() === row['createdAt'] &&
+    Array.isArray(generations) &&
+    generations.length > 0 &&
+    generations.length <= GENERATED_REPAIR_RESERVATION_MAX_GENERATIONS &&
+    generations.every((generationId) => typeof generationId === 'string' && SHA256_RE.test(generationId)) &&
+    new Set(generations).size === generations.length &&
+    generations.every((generationId, index) => index === 0 || generations[index - 1]! < generationId) &&
+    (expectedGenerationIds === undefined || (
+      generations.length === expectedGenerationIds.length &&
+      generations.every((generationId, index) => generationId === expectedGenerationIds[index])
+    )) &&
+    typeof row['itemIdHash'] === 'string' && SHA256_RE.test(row['itemIdHash']) &&
+    typeof row['objectiveHash'] === 'string' && SHA256_RE.test(row['objectiveHash']) &&
+    typeof row['repairRootId'] === 'string' && SHA256_RE.test(row['repairRootId']) &&
+    (row['repairDepth'] === 0 || row['repairDepth'] === 1) &&
+    typeof row['repairRootAuthorityItemIdHash'] === 'string' && SHA256_RE.test(row['repairRootAuthorityItemIdHash']) &&
+    typeof row['backend'] === 'string' && row['backend'].length <= 64 &&
+    typeof row['tier'] === 'string' && ['local', 'mid', 'frontier'].includes(row['tier']) &&
+    (row['repairAttemptOrdinal'] === 1 || row['repairAttemptOrdinal'] === 2) &&
+    (row['repairAttemptOrdinal'] === 1
+      ? row['previousBackend'] === null
+      : typeof row['previousBackend'] === 'string' && row['previousBackend'].length <= 64 &&
+        row['previousBackend'] !== 'builtin' && row['previousBackend'] !== row['backend']) &&
+    typeof row['attemptHash'] === 'string' && SHA256_RE.test(row['attemptHash']) &&
+    (row['phase'] === 'prepared' || row['phase'] === 'launched');
+}
+
+function readGeneratedRepairReservationRecord(
+  markerPath: string,
+  generationIds?: readonly string[],
+): GeneratedRepairExecutionReservationRecord | null {
+  const read = readStableRegularFile(markerPath, {
+    anchorPath: dirname(generatedRepairReservationDir()),
+    maxFileBytes: GENERATED_REPAIR_RESERVATION_MAX_BYTES,
+    remainingBytes: GENERATED_REPAIR_RESERVATION_MAX_BYTES,
+  });
+  if (!read.ok || read.bytesRead < 2) return null;
+  try {
+    const parsed: unknown = JSON.parse(read.text);
+    return validGeneratedRepairReservationRecord(parsed, generationIds) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeGeneratedRepairReservationRecord(
+  markerPath: string,
+  record: GeneratedRepairExecutionReservationRecord,
+): boolean {
+  try {
+    const bytes = `${JSON.stringify(record)}\n`;
+    if (Buffer.byteLength(bytes, 'utf8') > GENERATED_REPAIR_RESERVATION_MAX_BYTES) return false;
+    writePrivateFileAtomically(
+      `${markerPath}.${process.pid}.${randomUUID()}.tmp`,
+      markerPath,
+      bytes,
+      { anchorPath: dirname(generatedRepairReservationDir()), label: 'generated repair execution reservation' },
+    );
+    const durable = readGeneratedRepairReservationRecord(markerPath, record.generationIds);
+    return durable !== null && JSON.stringify(durable) === JSON.stringify(record);
+  } catch {
+    return false;
+  }
+}
+
+function acquireGeneratedRepairReservationLocks(rootId: string): LocalStoreLock[] | null {
+  if (!SHA256_RE.test(rootId)) return null;
+  const lock = acquireLocalStoreLock(join(generatedRepairReservationDir(), `${rootId}.lock`), 0);
+  return lock ? [lock] : null;
+}
+
+function releaseGeneratedRepairReservationLocks(locks: readonly LocalStoreLock[]): void {
+  for (const lock of [...locks].reverse()) releaseLocalStoreLock(lock);
+}
+
+function clearGeneratedRepairReservationMarker(
+  markerPath: string,
+  expected: GeneratedRepairExecutionReservationRecord,
+): boolean {
+  try {
+    const current = readGeneratedRepairReservationRecord(markerPath, expected.generationIds);
+    if (!current || JSON.stringify(current) !== JSON.stringify(expected)) return false;
+    const stat = lstatSync(markerPath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) return false;
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return false;
+    unlinkSync(markerPath);
+    fsyncDirectory(dirname(markerPath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function reconcilePreparedGeneratedRepairReservations(): void {
+  let names: string[];
+  try {
+    names = readdirSync(generatedRepairReservationDir());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('[ashlr] daemon: generated repair reservation startup reconciliation unavailable');
+    }
+    return;
+  }
+  for (const name of names) {
+    const matched = /^([a-f0-9]{64})\.json$/.exec(name);
+    if (!matched) continue;
+    const rootId = matched[1]!;
+    const markerPath = join(generatedRepairReservationDir(), name);
+    const locks = acquireGeneratedRepairReservationLocks(rootId);
+    if (!locks) continue;
+    try {
+      const current = readGeneratedRepairReservationRecord(markerPath);
+      if (current?.phase === 'prepared' && current.repairRootId === rootId) {
+        clearGeneratedRepairReservationMarker(markerPath, current);
+      }
+    } finally {
+      releaseGeneratedRepairReservationLocks(locks);
+    }
+  }
+}
+
+type GeneratedRepairReservationReconciliation =
+  | 'missing'
+  | 'cleared'
+  | 'failure-cleared'
+  | 'blocked';
+
+function reconcileGeneratedRepairReservationForItem(
+  item: WorkItem,
+): GeneratedRepairReservationReconciliation {
+  const markerPath = generatedRepairReservationPath(item);
+  const rootId = generatedRepairReservationRootId(item);
+  if (!markerPath || !rootId) return 'missing';
+  const markerState = reservationPathState(markerPath);
+  if (markerState === 'missing') return 'missing';
+  if (markerState === 'unavailable') return 'blocked';
+  const locks = acquireGeneratedRepairReservationLocks(rootId);
+  if (!locks) return 'blocked';
+  try {
+    const record = readGeneratedRepairReservationRecord(markerPath);
+    const rootAuthorityItemId = generatedRepairRootAuthorityId(item);
+    if (!record ||
+      record.repairRootId !== rootId ||
+      record.itemIdHash !== generatedRepairReservationItemIdHash(item.id) ||
+      record.objectiveHash !== workItemObjectiveHash(item) ||
+      generatedRepairRootKey(item) === null ||
+      !rootAuthorityItemId ||
+      record.repairDepth !== item.repairDepth ||
+      record.repairRootAuthorityItemIdHash !== generatedRepairReservationItemIdHash(rootAuthorityItemId)) return 'blocked';
+    if (record.phase === 'prepared') {
+      return clearGeneratedRepairReservationMarker(markerPath, record) ? 'cleared' : 'blocked';
+    }
+
+    const failureReceipts = record.generationIds.map((repairGenerationId) =>
+      resolveDispatchProductionFailureAttemptReceipt({
+        repairGenerationId,
+        repairAttemptOrdinal: record.repairAttemptOrdinal,
+        attemptHash: record.attemptHash,
+      }));
+    if (failureReceipts.some((resolution) =>
+      resolution.status === 'degraded' || resolution.status === 'unproven')) return 'blocked';
+    const exactFailures = failureReceipts.flatMap((resolution) => {
+      if (resolution.status !== 'proven') return [];
+      return resolution.proof.attemptHash === record.attemptHash &&
+        resolution.proof.backend === record.backend &&
+        resolution.proof.tier === record.tier &&
+        resolution.proof.previousBackend === record.previousBackend &&
+        resolution.proof.repairAttemptOrdinal === record.repairAttemptOrdinal &&
+        record.generationIds.includes(resolution.proof.repairGenerationId) &&
+        resolution.event.itemId === item.id &&
+        resolve(resolution.event.repo) === resolve(item.repo) &&
+        resolution.event.source === item.source &&
+        resolution.event.objectiveHash === record.objectiveHash &&
+        resolution.event.trajectoryId === `run:${record.reservationId}` &&
+        resolution.event.repairRootId === record.repairRootId &&
+        resolution.event.repairDepth === record.repairDepth &&
+        GENERATED_REPAIR_FAILED_OUTCOMES.has(resolution.event.outcome) &&
+        resolution.event.proposalCreated === false
+        ? [resolution]
+        : [];
+    });
+    if (failureReceipts.some((resolution) =>
+      resolution.status === 'proven' && !exactFailures.includes(resolution))) return 'blocked';
+    if (exactFailures.length > 0) {
+      if (!recordWorkedOutcome(generatedRepairCooldownKey(item), 'dispatch-blocked')) return 'blocked';
+      return clearGeneratedRepairReservationMarker(markerPath, record) ? 'failure-cleared' : 'blocked';
+    }
+
+    const receipts = resolveDispatchProductionAttemptReceiptWitnesses(
+      record.generationIds.map((repairGenerationId) => ({
+        repairGenerationId,
+        repairAttemptOrdinal: record.repairAttemptOrdinal,
+      })),
+    );
+    if (receipts.status !== 'resolved') return 'blocked';
+    const exact = receipts.resolutions.flatMap((resolution) => {
+      if (resolution.status !== 'proven') return [];
+      const exactRootBinding = resolution.event.repairRootId === record.repairRootId &&
+        resolution.event.repairDepth === record.repairDepth;
+      const exactDiagnosticBinding = isTrustedDiagnosticResliceItem(item) &&
+        resolution.event.repairRootId === undefined &&
+        resolution.event.repairDepth === undefined &&
+        resolution.event.repairTreatmentUnitId === item.repairTreatmentUnitId &&
+        resolution.event.repairTreatment === item.repairTreatment;
+      return resolution.proof.attemptHash === record.attemptHash &&
+        resolution.proof.backend === record.backend &&
+        resolution.proof.tier === record.tier &&
+        resolution.proof.previousBackend === record.previousBackend &&
+        resolution.proof.repairAttemptOrdinal === record.repairAttemptOrdinal &&
+        record.generationIds.includes(resolution.proof.repairGenerationId) &&
+        resolution.event.itemId === item.id &&
+        resolve(resolution.event.repo) === resolve(item.repo) &&
+        resolution.event.source === item.source &&
+        resolution.event.objectiveHash === record.objectiveHash &&
+        resolution.event.trajectoryId === `run:${record.reservationId}` &&
+        (exactRootBinding || exactDiagnosticBinding)
+        ? [resolution]
+        : [];
+    });
+    if (receipts.resolutions.some((resolution) =>
+      resolution.status === 'proven' && !exact.includes(resolution))) return 'blocked';
+    const exactOutcomeKeys = new Set(exact.map((resolution) => JSON.stringify([
+      resolution.event.ts,
+      resolution.event.outcome,
+      resolution.event.proposalId ?? null,
+      resolution.event.proposalCreated,
+      resolution.event.runId ?? null,
+      resolution.event.trajectoryId ?? null,
+      resolution.event.backend,
+      resolution.event.tier,
+      resolution.event.objectiveHash ?? null,
+      resolution.event.repairRootId ?? null,
+      resolution.event.repairDepth ?? null,
+    ])));
+    if (exactOutcomeKeys.size > 1) return 'blocked';
+    if (exact.length > 0) {
+      const event = exact[0]!.event;
+      if (GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome)) {
+        if (!recordWorkedOutcome(generatedRepairCooldownKey(item), 'dispatch-blocked')) return 'blocked';
+        return clearGeneratedRepairReservationMarker(markerPath, record) ? 'failure-cleared' : 'blocked';
+      }
+      if (event.outcome === 'empty-diff') {
+        const diagnostic = isTrustedDiagnosticResliceItem(item);
+        const treatmentCandidate = diagnostic && event.repairTreatmentUnitId && event.repairTreatment
+          ? {
+              ...event,
+              basis: 'repair-lifecycle-candidate' as const,
+              repairTreatmentAttemptHash: record.attemptHash,
+            } satisfies DispatchProductionEvent
+          : undefined;
+        const transition = diagnostic
+          ? recordGeneratedRepairLifecycle(item, {
+              kind: 'dispatch-proof-empty-diff',
+              eventTs: event.ts,
+              ...(treatmentCandidate ? { treatmentCandidate } : {}),
+            })
+          : recordGeneratedRepairLifecycle(item, {
+              kind: 'empty-diff',
+              attemptId: event.trajectoryId!,
+              backend: record.backend,
+              tier: record.tier,
+              ts: event.ts,
+            });
+        if (!transition.available || transition.authoritativeEmptyRuns < record.repairAttemptOrdinal) {
+          return 'blocked';
+        }
+        if (!recordWorkedOutcome(generatedRepairCooldownKey(item), 'empty')) return 'blocked';
+        return clearGeneratedRepairReservationMarker(markerPath, record) ? 'cleared' : 'blocked';
+      }
+      if (event.outcome === 'proposal-created' && event.proposalId) {
+        const proposalRead = listProposalsDetailed({ requireComplete: true });
+        const proposal = proposalRead.complete && proposalRead.sourceState !== 'degraded'
+          ? proposalRead.proposals.find((candidate) =>
+              candidate.id === event.proposalId &&
+              candidate.workItemId === item.id &&
+              candidate.workItemGenerationId !== undefined &&
+              record.generationIds.includes(candidate.workItemGenerationId) &&
+              candidate.runId === event.runId &&
+              candidate.trajectoryId === `run:${record.reservationId}`)
+          : undefined;
+        if (!proposal) return 'blocked';
+        const transition = recordGeneratedRepairLifecycle(item, {
+          kind: 'proposal-created',
+          attemptId: event.trajectoryId!,
+          proposalId: proposal.id,
+          ts: event.ts,
+        });
+        if (!transition.available || transition.disposition !== 'retired') return 'blocked';
+        return clearGeneratedRepairReservationMarker(markerPath, record) ? 'cleared' : 'blocked';
+      }
+    }
+
+    if (exact.length === 0 || receipts.resolutions.some((resolution) =>
+      resolution.status === 'proven' && !exact.includes(resolution))) return 'blocked';
+
+    const lifecycle = readGeneratedRepairLifecycle(item);
+    if (!lifecycle.available) return 'blocked';
+    const completed = exact.every((resolution) =>
+      resolution.event.outcome === 'empty-diff'
+        ? lifecycle.authoritativeEmptyRuns >= record.repairAttemptOrdinal
+        : resolution.event.outcome === 'proposal-created' && lifecycle.disposition === 'retired');
+    if (!completed) return 'blocked';
+    if (
+      exact.some((resolution) => resolution.event.outcome === 'empty-diff') &&
+      !recordWorkedOutcome(generatedRepairCooldownKey(item), 'empty')
+    ) return 'blocked';
+    return clearGeneratedRepairReservationMarker(markerPath, record) ? 'cleared' : 'blocked';
+  } catch {
+    return 'blocked';
+  } finally {
+    releaseGeneratedRepairReservationLocks(locks);
+  }
+}
+
+function acquireGeneratedRepairExecutionReservation(
+  item: WorkItem,
+  attemptId: string,
+  backend: EngineId,
+  tier: EngineTier | null,
+  repairAttemptOrdinal: 1 | 2,
+  previousBackend: EngineId | null,
+): GeneratedRepairExecutionReservation | null {
+  const generationIds = generatedRepairReservationFamily(item);
+  const objectiveHash = workItemObjectiveHash(item);
+  const rootAuthorityItemId = generatedRepairRootAuthorityId(item);
+  const rootId = generatedRepairReservationRootId(item);
+  if (!generationIds || !objectiveHash || !SHA256_RE.test(objectiveHash) || tier === null ||
+    !rootId || !rootAuthorityItemId || (repairAttemptOrdinal === 1
+      ? previousBackend !== null
+      : previousBackend === null || previousBackend === 'builtin' || previousBackend === backend)) return null;
+  const locks: LocalStoreLock[] = [];
+  let retained = false;
+  try {
+    const acquired = acquireGeneratedRepairReservationLocks(rootId);
+    if (!acquired) return null;
+    locks.push(...acquired);
+    const markerPath = generatedRepairReservationPath(item);
+    if (!markerPath) return null;
+    // Any durable marker, including malformed or unreadable state, represents
+    // ambiguous paid-work authority and must remain operator-blocking.
+    if (reservationPathState(markerPath) !== 'missing') return null;
+    const record: GeneratedRepairExecutionReservationRecord = {
+      schemaVersion: 1,
+      reservationId: attemptId,
+      createdAt: new Date().toISOString(),
+      generationIds,
+      itemIdHash: generatedRepairReservationItemIdHash(item.id),
+      objectiveHash,
+      repairRootId: item.repairRootId!,
+      repairDepth: item.repairDepth!,
+      repairRootAuthorityItemIdHash: generatedRepairReservationItemIdHash(rootAuthorityItemId),
+      backend,
+      tier,
+      repairAttemptOrdinal,
+      previousBackend,
+      attemptHash: generatedRepairLifecycleAttemptHash(`run:${attemptId}`),
+      phase: 'prepared',
+    };
+    if (!writeGeneratedRepairReservationRecord(markerPath, record)) return null;
+    retained = true;
+    return { markerPath, record, locks };
+  } catch {
+    return null;
+  } finally {
+    if (!retained) {
+      for (const lock of locks.reverse()) releaseLocalStoreLock(lock);
+    }
+  }
+}
+
+function clearGeneratedRepairExecutionReservation(
+  reservation: GeneratedRepairExecutionReservation,
+): boolean {
+  return clearGeneratedRepairReservationMarker(reservation.markerPath, reservation.record);
+}
+
+interface RepairTreatmentFlushResult {
+  complete: boolean;
+  publicationFailed: boolean;
+}
+
+function flushPendingRepairTreatmentOutcomes(): RepairTreatmentFlushResult {
+  let complete = true;
+  let publicationFailed = false;
+  try {
+    const pending = readPendingGeneratedRepairTreatmentOutcomes();
+    if (!pending.available) return { complete: false, publicationFailed: false };
+    for (const terminal of pending) {
+      let published = false;
+      try {
+        published = publishGeneratedRepairTreatmentOutcome(terminal.generationId, terminal.attemptHash);
+      } catch {
+        // A thrown publisher is the same durable-outbox failure as a false ack.
+      }
+      if (!published) {
+        complete = false;
+        publicationFailed = true;
         console.warn('[ashlr] daemon: repair treatment witness persistence incomplete');
       }
     }
   } catch (err) {
+    complete = false;
     console.warn('[ashlr] daemon: repair treatment witness reconciliation failed:', (err as Error)?.message ?? err);
   }
+  return { complete, publicationFailed };
 }
 
 function generatedRepairShouldSkip(
@@ -1600,6 +2297,8 @@ function dispatchProductionEventFromOutcome(
   proposal: Proposal | undefined,
   machineId: string,
   ts: string,
+  cfg: AshlrConfig,
+  reservation?: GeneratedRepairExecutionReservationRecord,
 ): DispatchProductionEvent | null {
   if (!value.dispatched) return null;
   const trace = value.dispatch;
@@ -1631,21 +2330,96 @@ function dispatchProductionEventFromOutcome(
     title: value.item.title,
     source: value.item.source,
   });
-  const repairLineage = generatedRepairDispatchLineage(value.item, trace.backend);
-  const repairRetryPolicy = generatedRepairRetryPolicy(value.item);
+  const proofCapableRepairOutcome = outcome === 'empty-diff' || outcome === 'proposal-created';
+  const failedRepairOutcome = GENERATED_REPAIR_FAILED_OUTCOMES.has(outcome) && !proposalCreated;
+  const effectiveRetryPolicy = effectiveGeneratedRepairRetryPolicy(value.item);
+  const failureReservation = reservation;
+  const diagnosticFailureLineage = generatedRepairDispatchLineage(value.item, trace.backend);
+  const genericFailureLineage = isTrustedGeneratedRepairItem(value.item) &&
+    typeof value.item.repairHandoffId === 'string' &&
+    typeof value.item.repairGenerationId === 'string'
+    ? {
+        repairHandoffId: value.item.repairHandoffId,
+        repairGenerationId: value.item.repairGenerationId,
+      }
+    : null;
+  const failureReceiptLineage = failedRepairOutcome && failureReservation
+    ? (diagnosticFailureLineage ?? genericFailureLineage)
+    : null;
+  const exactFailureReceiptLineage = failureReceiptLineage &&
+    failureReservation !== undefined &&
+    failureReservation.generationIds.includes(failureReceiptLineage.repairGenerationId) &&
+    failureReservation.backend === trace.backend && failureReservation.tier === trace.tier &&
+    failureReservation.repairRootId === value.item.repairRootId &&
+    failureReservation.repairDepth === value.item.repairDepth &&
+    (failureReservation.repairAttemptOrdinal === 1 || failureReservation.previousBackend !== null)
+    ? {
+        ...failureReceiptLineage,
+        repairAttemptOrdinal: failureReservation.repairAttemptOrdinal,
+        ...(failureReservation.repairAttemptOrdinal === 2
+          ? { repairPreviousBackend: failureReservation.previousBackend! }
+          : {}),
+        repairRootId: failureReservation.repairRootId,
+        repairDepth: failureReservation.repairDepth,
+      }
+    : null;
+  const successGenerationId = proofCapableRepairOutcome ? generatedRepairGenerationId(value.item) : null;
+  const diagnosticSuccessLineage = proofCapableRepairOutcome
+    ? generatedRepairDispatchLineage(value.item, trace.backend)
+    : null;
+  const exactSuccessReceiptLineage = proofCapableRepairOutcome && failureReservation &&
+    isTrustedGeneratedRepairItem(value.item) &&
+    successGenerationId !== null && failureReservation.generationIds.includes(successGenerationId) &&
+    failureReservation.backend === trace.backend && failureReservation.tier === trace.tier &&
+    trace.trajectoryId === `run:${failureReservation.reservationId}` &&
+    failureReservation.objectiveHash === objectiveHash &&
+    failureReservation.repairRootId === value.item.repairRootId &&
+    failureReservation.repairDepth === value.item.repairDepth &&
+    (failureReservation.repairAttemptOrdinal === 1 || failureReservation.previousBackend !== null) &&
+    (!isTrustedDiagnosticResliceItem(value.item) || (
+      diagnosticSuccessLineage !== null &&
+      diagnosticSuccessLineage.repairGenerationId === successGenerationId
+    ))
+    ? {
+        ...(typeof value.item.repairHandoffId === 'string'
+          ? { repairHandoffId: value.item.repairHandoffId }
+          : {}),
+        repairGenerationId: successGenerationId,
+        ...(diagnosticSuccessLineage
+          ? {
+              repairTreatmentUnitId: diagnosticSuccessLineage.repairTreatmentUnitId,
+              repairTreatment: diagnosticSuccessLineage.repairTreatment,
+            }
+          : {}),
+        repairAttemptOrdinal: failureReservation.repairAttemptOrdinal,
+        ...(failureReservation.repairAttemptOrdinal === 2
+          ? { repairPreviousBackend: failureReservation.previousBackend! }
+          : {}),
+        ...(!diagnosticSuccessLineage
+          ? {
+              repairRootId: failureReservation.repairRootId,
+              repairDepth: failureReservation.repairDepth,
+            }
+          : {}),
+      }
+    : null;
   const repairParentTierBound = isTrustedDiagnosticResliceItem(value.item) || (
     isTrustedCaptureRepairItem(value.item) &&
     (value.item.repairParentSource === 'issue' || value.item.repairParentSource === 'goal')
   );
-  const repairRequiredTier = repairRetryPolicy.requiredTier ?? (
+  const repairRequiredTier = effectiveRetryPolicy.requiredTier ?? (
     repairParentTierBound ? value.item.repairParentTier ?? null : null
   );
-  const repairLineageInvalid = isTrustedGeneratedRepairItem(value.item) && (
-    !repairRetryPolicy.available ||
+  const repairLineageInvalid = (proofCapableRepairOutcome || failedRepairOutcome) &&
+    isTrustedGeneratedRepairItem(value.item) && (
+    !effectiveRetryPolicy.available ||
     trace.backend === null ||
     trace.backend === 'builtin' ||
-    !generatedRepairBackendAllowed(value.item, trace.backend) ||
-    (repairRequiredTier !== null && trace.tier !== repairRequiredTier)
+    !effectiveGeneratedRepairExecutionBackendAllowed(value.item, trace.backend, cfg) ||
+    (repairRequiredTier !== null && trace.tier !== repairRequiredTier) ||
+    (failedRepairOutcome
+      ? exactFailureReceiptLineage === null
+      : exactSuccessReceiptLineage === null)
   );
   return {
     schemaVersion: 1,
@@ -1674,7 +2448,9 @@ function dispatchProductionEventFromOutcome(
     ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
     learningLabel,
     ...(objectiveHash ? { objectiveHash } : {}),
-    ...(repairLineageInvalid ? { repairLineageInvalid: true as const } : (repairLineage ?? {})),
+    ...(repairLineageInvalid
+      ? { repairLineageInvalid: true as const }
+      : (exactFailureReceiptLineage ?? exactSuccessReceiptLineage ?? {})),
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
@@ -2375,6 +3151,10 @@ export async function tick(
     reason: 'shutdown-requested',
     durationMs: t.durationMs ?? Date.now() - _tickStartMs,
   });
+  const nonResidentPersistenceFailureTick = (tick: DaemonTick): DaemonTick => {
+    const { residentSafePersistenceFailure: _residentSafePersistenceFailure, ...failed } = tick;
+    return { ...failed, reason: 'state-persistence-failed' };
+  };
   if (!stillOwnsTick()) {
     return ownershipLostTick({
       ts: now,
@@ -2393,19 +3173,38 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
-  if (!opts.dryRun && !stopRequested()) flushPendingRepairTreatmentOutcomes();
+  const startupTreatmentFlush = !opts.dryRun && !stopRequested()
+    ? flushPendingRepairTreatmentOutcomes()
+    : { complete: true, publicationFailed: false };
+  let repairTreatmentWitnessPersistenceFailed = !startupTreatmentFlush.complete;
+  let repairTreatmentPublicationFailed = startupTreatmentFlush.publicationFailed;
+  let proposalDuplicateAuthorityUnavailable = false;
+  const withRepairTreatmentPublicationFailure = (tick: DaemonTick): DaemonTick => {
+    if (!repairTreatmentPublicationFailed) return tick;
+    if (tick.reason === 'state-persistence-failed') {
+      return nonResidentPersistenceFailureTick(tick);
+    }
+    return {
+      ...tick,
+      reason: 'state-persistence-failed',
+      residentSafePersistenceFailure: 'repair-treatment',
+    };
+  };
   const recordTick = (t: DaemonTick): DaemonTick => {
-    const tick: DaemonTick = {
+    const tick = withRepairTreatmentPublicationFailure({
       ...(opts.dryRun ? { ...t, dryRun: true } : t),
+      ...(proposalDuplicateAuthorityUnavailable
+        ? { reason: 'state-persistence-failed' as const }
+        : {}),
       ...(backlogSnapshotAt ? { backlogSnapshotAt } : {}),
       ...(backlogSnapshotId ? { backlogSnapshotId } : {}),
       durationMs: t.durationMs ?? Date.now() - _tickStartMs,
-    };
+    });
     if (!stillOwnsTick()) return ownershipLostTick(tick);
     try {
       const loaded = loadDaemonStateStrict();
       if (!loaded.ok) {
-        const failedTick = { ...tick, reason: 'state-persistence-failed' };
+        const failedTick = nonResidentPersistenceFailureTick(tick);
         recordTickAgentAction(failedTick);
         return failedTick;
       }
@@ -2416,13 +3215,13 @@ export async function tick(
       const saveResult = saveTickState(s);
       if (!saveResult.ok) {
         console.warn('[ashlr] daemon:recordTick persistence failed:', saveResult.error);
-        const failedTick = { ...tick, reason: 'state-persistence-failed' };
+        const failedTick = nonResidentPersistenceFailureTick(tick);
         recordTickAgentAction(failedTick);
         return failedTick;
       }
     } catch (err) {
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
-      const failedTick = { ...tick, reason: 'state-persistence-failed' };
+      const failedTick = nonResidentPersistenceFailureTick(tick);
       recordTickAgentAction(failedTick);
       return failedTick;
     }
@@ -2520,20 +3319,89 @@ export async function tick(
     (liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
     liveCfg.fleet?.sharedQueue?.mode !== 'filesystem';
   const blockedRepairKeys = new Set<string>();
+  const blockedRepairRootKeys = new Set<string>();
+  const ambiguousRepairReservationKeys = new Set<string>();
+  const rootlessRepairKeys = new Set<string>();
+  const depthRejectedRepairKeys = new Set<string>();
   let repairHandoffControlAvailable = true;
   let diagnosticResliceParentsResolved = 0;
   let diagnosticResliceParentsMissing = 0;
-  const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => items.filter((item) => {
-    if (!item.tags.includes('proposal-repair')) return true;
-    if (!generatedRepairDispatchEnabled) return false;
-    if (!repairHandoffControlAvailable) return false;
-    try {
-      if (!generatedRepairDispatchState(item).dispatchable) return false;
-      return !blockedRepairKeys.has(workItemCoverageKey(item));
-    } catch {
-      return false;
+  const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => {
+    const winnersByRoot = new Map<string, WorkItem>();
+    for (const item of items) {
+      if (!item.tags.includes('proposal-repair')) {
+        continue;
+      }
+      const reservationPath = generatedRepairReservationPath(item);
+      const initialReservationState = reservationPath
+        ? reservationPathState(reservationPath)
+        : 'missing';
+      if (initialReservationState !== 'missing') {
+        const reservation = opts.dryRun
+          ? 'blocked'
+          : reconcileGeneratedRepairReservationForItem(item);
+        if (reservation === 'failure-cleared') {
+          continue;
+        }
+        if (reservation === 'blocked') {
+          const blockedRoot = generatedRepairRootKey(item);
+          if (blockedRoot) {
+            ambiguousRepairReservationKeys.add(blockedRoot);
+            blockedRepairRootKeys.add(blockedRoot);
+          }
+          continue;
+        }
+      }
+      if (repairTreatmentWitnessPersistenceFailed) {
+        continue;
+      }
+      let coverageKey: string;
+      try { coverageKey = workItemCoverageKey(item); } catch { continue; }
+      if (!SHA256_RE.test(item.repairRootId ?? '')) {
+        rootlessRepairKeys.add(coverageKey);
+        continue;
+      }
+      if (item.repairDepth !== 0 && item.repairDepth !== 1) {
+        depthRejectedRepairKeys.add(coverageKey);
+        continue;
+      }
+      const rootKey = generatedRepairRootKey(item);
+      if (!rootKey) {
+        rootlessRepairKeys.add(coverageKey);
+        continue;
+      }
+      try {
+        const markerPath = generatedRepairReservationPath(item);
+        const reservation = opts.dryRun && markerPath && reservationPathState(markerPath) !== 'missing'
+          ? 'blocked'
+          : reconcileGeneratedRepairReservationForItem(item);
+        if (reservation === 'failure-cleared') {
+          continue;
+        }
+        if (reservation === 'blocked') {
+          ambiguousRepairReservationKeys.add(rootKey);
+          blockedRepairRootKeys.add(rootKey);
+          winnersByRoot.delete(rootKey);
+          continue;
+        }
+        if (blockedRepairRootKeys.has(rootKey) || blockedRepairKeys.has(coverageKey)) continue;
+        if (!generatedRepairDispatchEnabled || !repairHandoffControlAvailable) continue;
+        const dispatchState = generatedRepairDispatchState(item);
+        if (!dispatchState.dispatchable && !(
+          dispatchState.state === 'lifecycle-unavailable' && generatedRepairReceiptFreshAuthority(item)
+        )) continue;
+        const current = winnersByRoot.get(rootKey);
+        if (!current || item.repairDepth > current.repairDepth! || (
+          item.repairDepth === current.repairDepth && Date.parse(item.ts) > Date.parse(current.ts)
+        )) winnersByRoot.set(rootKey, item);
+      } catch {
+        blockedRepairRootKeys.add(rootKey);
+        winnersByRoot.delete(rootKey);
+      }
     }
-  });
+    const winners = new Set(winnersByRoot.values());
+    return items.filter((item) => !item.tags.includes('proposal-repair') || winners.has(item));
+  };
   const producerMaintenanceSummary = (): DaemonTick['producerMaintenance'] | undefined => {
     if (
       !selfHealMaintenanceRan &&
@@ -2596,6 +3464,17 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.dispatchRepairLifecycleUnavailable !== undefined
             ? { dispatchRepairLifecycleUnavailable: proposalRepairMaintenanceResult.dispatchRepairLifecycleUnavailable }
             : {}),
+          repairRootAdmissionConsidered: Math.min(10_000, proposalRepairMaintenanceResult.repairRootAdmissionConsidered ?? 0),
+          repairRootAdmissionAdmitted: Math.min(10_000, proposalRepairMaintenanceResult.repairRootAdmissionAdmitted ?? 0),
+          repairRootAdmissionAlreadyActive: Math.min(10_000, proposalRepairMaintenanceResult.repairRootAdmissionAlreadyActive ?? 0),
+          repairRootAdmissionRootless: Math.min(
+            10_000,
+            (proposalRepairMaintenanceResult.repairRootAdmissionRootless ?? 0) + rootlessRepairKeys.size,
+          ),
+          repairRootAdmissionDepthRejected: Math.min(
+            10_000,
+            (proposalRepairMaintenanceResult.repairRootAdmissionDepthRejected ?? 0) + depthRejectedRepairKeys.size,
+          ),
           ...(proposalRepairMaintenanceResult.handoffObservations !== undefined
             ? { repairHandoffObservations: proposalRepairMaintenanceResult.handoffObservations }
             : {}),
@@ -2632,10 +3511,23 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.proposalInboxAvailable !== undefined
             ? { proposalRepairInboxAvailable: proposalRepairMaintenanceResult.proposalInboxAvailable }
             : {}),
+          ...(proposalRepairMaintenanceResult.dispatchSourceState !== undefined
+            ? {
+                dispatchRepairSourceState: proposalRepairMaintenanceResult.dispatchSourceState,
+                dispatchRepairSourceComplete: proposalRepairMaintenanceResult.dispatchSourceComplete,
+                dispatchRepairSourceInvalidRows: proposalRepairMaintenanceResult.dispatchSourceInvalidRows,
+                dispatchRepairSourceUnreadableFiles: proposalRepairMaintenanceResult.dispatchSourceUnreadableFiles,
+                dispatchRepairSourceStopReasons: proposalRepairMaintenanceResult.dispatchSourceStopReasons?.slice(0, 5),
+              }
+            : {}),
         }
         : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
       ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
+      ...(ambiguousRepairReservationKeys.size > 0 ? {
+        repairAttemptReservationState: 'blocked-ambiguous',
+        repairAttemptReservationsBlocked: ambiguousRepairReservationKeys.size,
+      } : {}),
       diagnosticResliceParentsResolved,
       diagnosticResliceParentsMissing,
     };
@@ -2686,7 +3578,19 @@ export async function tick(
       }
       return proposalRepairMaintenanceResult;
     } catch (err) {
-      proposalRepairMaintenanceResult = { scanned: 0, eligible: 0, queued: 0, failed: 1 };
+      proposalRepairMaintenanceResult = {
+        scanned: 0,
+        eligible: 0,
+        queued: 0,
+        failed: 1,
+        proposalInboxAvailable: false,
+        handoffSourceState: 'degraded',
+        dispatchSourceState: 'degraded',
+        dispatchSourceComplete: false,
+        dispatchSourceInvalidRows: 0,
+        dispatchSourceUnreadableFiles: 1,
+        dispatchSourceStopReasons: ['io-error'],
+      };
       console.warn('[ashlr] daemon:tick proposal repair queue failed:', (err as Error)?.message ?? err);
       return proposalRepairMaintenanceResult;
     }
@@ -3098,10 +4002,40 @@ export async function tick(
     backlogItems = await refreshBacklogForTick();
   }
   for (const key of proposalRepairResult?.blockedItemKeys ?? []) blockedRepairKeys.add(key);
+  for (const key of proposalRepairResult?.blockedRootKeys ?? []) blockedRepairRootKeys.add(key);
   if (
     proposalRepairResult?.handoffSourceState === 'degraded' ||
-    proposalRepairResult?.proposalInboxAvailable === false
+    proposalRepairResult?.proposalInboxAvailable === false ||
+    proposalRepairResult?.dispatchSourceState === 'degraded' ||
+    proposalRepairResult?.dispatchSourceComplete === false
   ) repairHandoffControlAvailable = false;
+  if (proposalRepairResult?.handoffSourceState === 'degraded') {
+    proposalDuplicateAuthorityUnavailable = true;
+  }
+  if (
+    proposalRepairResult?.proposalInboxAvailable === false ||
+    proposalRepairResult?.dispatchSourceState === 'degraded' ||
+    proposalRepairResult?.dispatchSourceComplete === false
+  ) {
+    proposalDuplicateAuthorityUnavailable = true;
+  }
+  if (proposalDuplicateAuthorityUnavailable) {
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: 'proposal or dispatch duplicate-suppression authority is degraded; refusing selection',
+      result: 'refused',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'state-persistence-failed',
+      ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
+    });
+  }
   backlogItems = filterGeneratedRepairDispatch(backlogItems);
   if (!stillOwnsTick()) {
     return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
@@ -3317,14 +4251,45 @@ export async function tick(
   // matching. Never throws.
   let pendingItemKeys = new Set<string>();
   try {
+    const proposalRead = listProposalsDetailed({ status: 'pending', requireComplete: true });
+    if (!proposalRead.complete || proposalRead.sourceState === 'degraded') {
+      proposalDuplicateAuthorityUnavailable = true;
+      for (const item of backlogItems) pendingItemKeys.add(workItemCoverageKey(item));
+      console.warn('[ashlr] daemon:tick proposal duplicate authority unavailable');
+    }
     const blockingPendingProposals = blockingPendingProposalsForBacklog(
-      listProposals({ status: 'pending' }),
+      proposalRead.proposals,
       routingCfg,
     );
-    pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, blockingPendingProposals);
+    if (proposalRead.complete && proposalRead.sourceState !== 'degraded') {
+      pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, blockingPendingProposals);
+    }
+    for (const item of backlogItems) {
+      if (!isTrustedDiagnosticResliceItem(item)) continue;
+      const key = workItemCoverageKey(item);
+      const authorities = proposalRead.proposals
+        .map((proposal) => generatedRepairProposalDispatchAuthority(item, proposal))
+        .filter((authority) => authority !== 'not-applicable');
+      if (authorities.some((authority) => authority === 'unavailable')) {
+        pendingItemKeys.add(key);
+        const rootKey = generatedRepairRootKey(item);
+        if (rootKey) blockedRepairRootKeys.add(rootKey);
+      }
+      if (authorities.some((authority) => authority === 'proven')) {
+        pendingItemKeys.add(key);
+      }
+    }
   } catch (err) {
-    // Best-effort — never block selection on inbox read failure.
+    proposalDuplicateAuthorityUnavailable = true;
+    for (const item of backlogItems) {
+      try { pendingItemKeys.add(workItemCoverageKey(item)); } catch { /* invalid items are blocked elsewhere */ }
+    }
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
+  }
+  if (proposalDuplicateAuthorityUnavailable) {
+    return persistenceRefusal(
+      'tick refused before selection: proposal duplicate authority could not be established',
+    );
   }
 
   const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
@@ -3352,7 +4317,7 @@ export async function tick(
     if (!isTrustedGeneratedRepairItem(item)) return true;
     const cached = claimRouteEvaluations.get(item);
     if (cached !== undefined) return cached.feasibility.feasible;
-    const fallbackPolicy = generatedRepairRetryPolicy(item);
+    const fallbackPolicy = effectiveGeneratedRepairRetryPolicy(item);
     let feasibility: GeneratedRepairRouteFeasibility = {
       feasible: false,
       requiredTier: fallbackPolicy.requiredTier ?? null,
@@ -3365,7 +4330,7 @@ export async function tick(
         feasibility = inspectGeneratedRepairRouteFeasibility(
           item,
           routingCfg,
-          claimRepairQueue.retryPolicy(item),
+          effectiveGeneratedRepairRetryPolicy(item),
         );
       }
     } catch {
@@ -3394,14 +4359,18 @@ export async function tick(
   const autoDrainEligibleItems = autoDrainAvailableItems.filter(isClaimEligible);
   const diagnosticRoute = (item: WorkItem): { backend: EngineId; tier: EngineTier | null } => {
     const routed = routeBackend(item, routingCfg);
-    const backend = enforceLocalBackend(routed.backend, directionPlan);
+    let backend = enforceLocalBackend(routed.backend, directionPlan);
+    const retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
+    if (retryPolicy.available && retryPolicy.requireAlternative &&
+      retryPolicy.excludedBackend !== null && backend === retryPolicy.excludedBackend) {
+      backend = generatedRepairAlternateBackend(item, retryPolicy.excludedBackend, routingCfg) ?? backend;
+    }
     return { backend, tier: engineTierOf(backend, routingCfg) };
   };
   const serialDispatchableRepairs = autoDrainEligibleItems.filter((item) => {
     const route = diagnosticRoute(item);
     return route.tier === item.repairParentTier &&
-      generatedRepairCandidateAllowed(item, route.backend, routingCfg) &&
-      generatedRepairBackendAllowed(item, route.backend) &&
+      effectiveGeneratedRepairCandidateAllowed(item, route.backend, routingCfg) &&
       (route.backend === 'builtin' || withinLimit(route.backend, routingCfg));
   });
   const concurrentDispatchEnabled = routingCfg.foundry?.fabric?.concurrentDispatch === true;
@@ -3412,8 +4381,7 @@ export async function tick(
           selectionResourceSnapshot,
           { maxSlotsPerBackend: productionVelocity.maxSlotsPerBackend },
           (item) => diagnosticRoute(item).backend,
-          (item, backend) => generatedRepairCandidateAllowed(item, backend, routingCfg) &&
-            generatedRepairBackendAllowed(item, backend) &&
+          (item, backend) => effectiveGeneratedRepairCandidateAllowed(item, backend, routingCfg) &&
             (backend === 'builtin' || withinLimit(backend, routingCfg)),
           (backend) => engineTierOf(backend, routingCfg),
         ).assignments.map((assignment) => assignment.item)
@@ -3847,6 +4815,58 @@ export async function tick(
       clearInterval(leaseRenewInterval);
       leaseRenewInterval = null;
     }
+  };
+  const generatedRepairReservations = new Map<string, GeneratedRepairExecutionReservation>();
+  const settledGeneratedRepairReservationItemIds = new Set<string>();
+  const releaseGeneratedRepairReservations = (): void => {
+    for (const reservation of generatedRepairReservations.values()) {
+      for (const lock of [...reservation.locks].reverse()) releaseLocalStoreLock(lock);
+    }
+    generatedRepairReservations.clear();
+  };
+  const reserveGeneratedRepairExecution = (
+    item: WorkItem,
+    attemptId: string,
+    backend: EngineId,
+    tier: EngineTier | null,
+  ): boolean => {
+    if (!isTrustedGeneratedRepairItem(item)) return true;
+    if (generatedRepairReservations.has(item.id)) return false;
+    if (readDispatchProductionAttemptProtocolQuality().status !== 'healthy') {
+      return false;
+    }
+    const retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
+    if (!retryPolicy.available || !effectiveGeneratedRepairExecutionBackendAllowed(item, backend, routingCfg)) return false;
+    const reservation = acquireGeneratedRepairExecutionReservation(
+      item,
+      attemptId,
+      backend,
+      tier,
+      retryPolicy.requireAlternative ? 2 : 1,
+      retryPolicy.requireAlternative ? retryPolicy.excludedBackend : null,
+    );
+    if (!reservation) return false;
+    generatedRepairReservations.set(item.id, reservation);
+    return true;
+  };
+  const settleGeneratedRepairExecution = (itemId: string): boolean => {
+    const reservation = generatedRepairReservations.get(itemId);
+    if (!reservation) return false;
+    if (!clearGeneratedRepairExecutionReservation(reservation)) return false;
+    settledGeneratedRepairReservationItemIds.add(itemId);
+    return true;
+  };
+  const markGeneratedRepairExecutionLaunched = (item: WorkItem): boolean => {
+    if (!isTrustedGeneratedRepairItem(item)) return true;
+    const reservation = generatedRepairReservations.get(item.id);
+    if (!reservation || reservation.record.phase !== 'prepared') return false;
+    const launched: GeneratedRepairExecutionReservationRecord = {
+      ...reservation.record,
+      phase: 'launched',
+    };
+    if (!writeGeneratedRepairReservationRecord(reservation.markerPath, launched)) return false;
+    reservation.record = launched;
+    return true;
   };
   try {
   const initiallyRenewed = startLeaseRenewer();
@@ -4429,9 +5449,25 @@ export async function tick(
         selectedModel = null;
       }
       if (isTrustedGeneratedRepairItem(item)) {
-        const retryPolicy = generatedRepairRetryPolicy(item);
+        let retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
+        if (retryPolicy.available && retryPolicy.requireAlternative &&
+          retryPolicy.excludedBackend !== null && backend === retryPolicy.excludedBackend) {
+          const alternate = generatedRepairAlternateBackend(
+            item,
+            retryPolicy.excludedBackend,
+            routingCfg,
+          );
+          if (alternate !== null) {
+            backend = alternate;
+            backendTier = engineTierOf(backend, routingCfg);
+            selectedModel = configuredModelForBackend(backend, routingCfg);
+            assignmentReason = `${assignmentReason}; repair retry routed to ${backend}`;
+            assignedBy = 'repair-retry-router';
+            retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
+          }
+        }
         const requiredTier = retryPolicy.requiredTier ?? item.repairParentTier ?? null;
-        const invalidRetryBackend = !generatedRepairExecutionBackendAllowed(item, backend, routingCfg);
+        const invalidRetryBackend = !effectiveGeneratedRepairExecutionBackendAllowed(item, backend, routingCfg);
         if (invalidRetryBackend) {
           const reason = !retryPolicy.available
             ? 'repair-lifecycle-unavailable: retry authority unavailable'
@@ -4495,6 +5531,25 @@ export async function tick(
           };
         }
       }
+      if (isTrustedGeneratedRepairItem(item) &&
+        !reserveGeneratedRepairExecution(item, attemptId, backend, backendTier)) {
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy: 'repair-attempt-reservation',
+            reason: 'durable repair generation attempt reservation is unavailable or already active',
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: 'repair-attempt-reservation-unavailable',
+          }),
+        };
+      }
       const goal = buildItemGoal(item);
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
@@ -4532,6 +5587,9 @@ export async function tick(
             tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'swarm',
           });
           if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before swarm producer start');
+          if (!markGeneratedRepairExecutionLaunched(item)) {
+            throw new Error('generated repair launch reservation could not be persisted');
+          }
           return runSwarm(
             { goal }, dispatchCfg,
             {
@@ -4666,7 +5724,7 @@ export async function tick(
           (routingCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
           ashlrcodeExecutorAllowed &&
           backend !== 'ashlrcode' &&
-          !(isTrustedDiagnosticResliceItem(item) && item.repairParentTier != null) &&
+          !isTrustedGeneratedRepairItem(item) &&
           poolTierOf(engineTierOf(backend, routingCfg)) === 'local'
         ) {
           const previousBackend = backend;
@@ -4709,13 +5767,12 @@ export async function tick(
               .filter((c) =>
                 ((routingCfg.foundry?.allowedBackends ?? []) as string[]).includes(c.engine))
               .filter((c) =>
-                !isTrustedDiagnosticResliceItem(item) ||
-                item.repairParentTier == null ||
-                generatedRepairCandidateAllowed(item, c.engine as EngineId, routingCfg))
+                !isTrustedGeneratedRepairItem(item) ||
+                effectiveGeneratedRepairCandidateAllowed(item, c.engine as EngineId, routingCfg))
           : undefined;
         const fanOut =
           bestOfN > 1 &&
-          !isTrustedDiagnosticResliceItem(item) &&
+          !isTrustedGeneratedRepairItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
         let bonBillable: number | null = null;
 
@@ -4734,6 +5791,9 @@ export async function tick(
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
             });
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n producer start');
+            if (!markGeneratedRepairExecutionLaunched(item)) {
+              throw new Error('generated repair launch reservation could not be persisted');
+            }
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
@@ -4826,6 +5886,9 @@ export async function tick(
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
             });
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct producer start');
+            if (!markGeneratedRepairExecutionLaunched(item)) {
+              throw new Error('generated repair launch reservation could not be persisted');
+            }
             return runGoal(goal, dispatchCfg, {
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
@@ -5182,7 +6245,7 @@ export async function tick(
       concurrentSnap,
       concurrentCfg,
       routeItem,
-      (item, backend) => generatedRepairCandidateAllowed(item, backend, routingCfg),
+      (item, backend) => effectiveGeneratedRepairCandidateAllowed(item, backend, routingCfg),
       (backend) => engineTierOf(backend, routingCfg),
     );
     const dispatchManifestEvent = buildDispatchManifestEvent({
@@ -5225,7 +6288,7 @@ export async function tick(
             hintedBackend,
             assignedBackend: _backend,
             diagnosticRepair: isTrustedDiagnosticResliceItem(item),
-            candidateAllowed: generatedRepairCandidateAllowed(item, _backend, routingCfg),
+            candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg),
           });
           const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
           return taskEntry.run(_backend, assignedReason, assignedModel);
@@ -5407,18 +6470,33 @@ export async function tick(
       newPendingProposalsByItemId.get(outcome.value.item.id),
       machineId,
       productionCompletedAt,
+      routingCfg,
+      generatedRepairReservations.get(outcome.value.item.id)?.record,
     );
     return event ? [event] : [];
   });
   const handoffFailedItemIds = new Set<string>();
+  const productionWriteFailedItemIds = new Set<string>();
   const workedOutcomeFailedItemIds = new Set<string>();
+  const generatedRepairLifecycleSucceededItemIds = new Set<string>();
+  const generatedRepairCooldownItemIds = new Set<string>();
+  const generatedRepairFailedAttemptWitnessItemIds = new Set<string>();
+  const generatedRepairItemsById = new Map(
+    outcomes.flatMap((outcome) => outcome.status === 'fulfilled' &&
+      isTrustedGeneratedRepairItem(outcome.value.item)
+      ? [[outcome.value.item.id, outcome.value.item] as const]
+      : []),
+  );
   const sharedQueueMode = liveCfg.fleet?.sharedQueue?.mode === 'filesystem';
   const ownershipLostBeforeDispatchWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeDispatchWrites) return ownershipLostBeforeDispatchWrites;
   for (const event of productionEvents) {
     const repairable = repairHandoffFromDispatchEvent(event) !== null;
+    let canonicalProductionRecorded = false;
     if (sharedQueueMode) {
       const parentWrite = recordDispatchProduction(event);
+      canonicalProductionRecorded = parentWrite.recorded === 1;
+      if (parentWrite.recorded !== 1) productionWriteFailedItemIds.add(event.itemId);
       if (parentWrite.recorded !== 1 && repairable) handoffFailedItemIds.add(event.itemId);
       if (repairable) handoffFailedItemIds.add(event.itemId);
     } else if (repairable) {
@@ -5428,7 +6506,8 @@ export async function tick(
       let handoff: { attempted: number; recorded: number; failed: number };
       if (v2Requested) {
         if (!activation) {
-          recordDispatchProduction(event);
+          const parentWrite = recordDispatchProduction(event);
+          if (parentWrite.recorded !== 1) productionWriteFailedItemIds.add(event.itemId);
           handoff = { attempted: 1, recorded: 0, failed: 1 };
         } else {
           handoff = recordRepairHandoffs(event, { schemaVersion: 2, activation });
@@ -5436,10 +6515,42 @@ export async function tick(
       } else {
         handoff = recordRepairHandoffs(event, { schemaVersion: 1 });
       }
+      canonicalProductionRecorded = handoff.recorded === 1 && handoff.failed === 0;
       if (handoff.failed > 0) handoffFailedItemIds.add(event.itemId);
     } else {
-      recordDispatchProduction(event);
+      const productionWrite = recordDispatchProduction(event);
+      canonicalProductionRecorded = productionWrite.recorded === 1;
+      if (productionWrite.recorded !== 1) {
+        productionWriteFailedItemIds.add(event.itemId);
+        console.warn(
+          '[ashlr] daemon:tick canonical dispatch production persistence unavailable',
+          productionWrite.failureReasons,
+        );
+      }
     }
+    if (
+      !sharedQueueMode &&
+      repairable &&
+      generatedRepairItemsById.has(event.itemId) &&
+      !canonicalProductionRecorded
+    ) {
+      const witnessWrite = recordDispatchProduction(event);
+      canonicalProductionRecorded = witnessWrite.recorded === 1;
+      if (!canonicalProductionRecorded) {
+        productionWriteFailedItemIds.add(event.itemId);
+        console.warn('[ashlr] daemon:tick failed-attempt witness persistence unavailable', witnessWrite.failureReasons);
+      }
+    }
+    const failedRepairItem = generatedRepairItemsById.get(event.itemId);
+    const failedRepairReservation = generatedRepairReservations.get(event.itemId)?.record;
+    if (
+      canonicalProductionRecorded &&
+      failedRepairItem !== undefined &&
+      failedRepairReservation !== undefined &&
+      GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome) &&
+      event.proposalCreated === false &&
+      exactFailedAttemptReceiptMatchesReservation(failedRepairItem, event, failedRepairReservation)
+    ) generatedRepairFailedAttemptWitnessItemIds.add(event.itemId);
   }
 
   // M85/M305: record item-accurate outcomes to the worked ledger. New proposals
@@ -5465,13 +6576,17 @@ export async function tick(
       }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          const handoffFailed = handoffFailedItemIds.has(outcome.value.item.id);
-          if (handoffFailed && !sharedQueueMode) continue;
-          if (handoffFailed) {
+          if (productionWriteFailedItemIds.has(outcome.value.item.id)) {
+            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item.id, machineId);
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
+          if (isTrustedGeneratedRepairItem(outcome.value.item)) continue;
+          if (handoffFailedItemIds.has(outcome.value.item.id)) {
             // The parent attempt is terminal, but failed repair projection grants
             // no cooldown authority. Clear only this exact executing generation
             // and keep the parent immediately retryable.
-            coordinator.settleClaim(outcome.value.item.id, machineId);
+            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item.id, machineId);
             workedOutcomeFailedItemIds.add(outcome.value.item.id);
             continue;
           }
@@ -5520,6 +6635,7 @@ export async function tick(
           outcome.status !== 'fulfilled' ||
           !outcome.value.dispatched ||
           handoffFailedItemIds.has(outcome.value.item.id) ||
+          productionWriteFailedItemIds.has(outcome.value.item.id) ||
           workedOutcomeFailedItemIds.has(outcome.value.item.id) ||
           !isTrustedGeneratedRepairItem(outcome.value.item)
         ) continue;
@@ -5528,20 +6644,21 @@ export async function tick(
         const attemptId = trace?.trajectoryId ?? trace?.runId ?? production?.runId;
         if (!production || !attemptId) continue;
         const productionEvent = productionEvents.find((event) =>
-          event.itemId === outcome.value.item.id && event.repairGenerationId !== undefined
+          event.itemId === outcome.value.item.id
         );
-        if (productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
-          const treatmentCandidate: DispatchProductionEvent = {
-            ...productionEvent,
-            basis: 'repair-lifecycle-candidate',
-            repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
-          };
-          const candidateWrite = recordDispatchProduction({
-            ...treatmentCandidate,
-          });
-          if (candidateWrite.recorded !== 1) {
-            console.warn('[ashlr] daemon:tick repair treatment candidate persistence unavailable');
-          }
+        if (!productionEvent) continue;
+        const proofCapableDiagnostic = isTrustedDiagnosticResliceItem(outcome.value.item);
+        const treatmentCandidate = proofCapableDiagnostic &&
+          productionEvent.repairTreatmentUnitId && productionEvent.repairTreatment
+          ? {
+              ...productionEvent,
+              basis: 'repair-lifecycle-candidate' as const,
+              repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
+            } satisfies DispatchProductionEvent
+          : undefined;
+        if (production.outcome !== 'empty-diff' && production.outcome !== 'proposal-created') {
+          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          continue;
         }
         if (
           production.outcome === 'empty-diff' &&
@@ -5550,21 +6667,28 @@ export async function tick(
           trace.tier &&
           generatedRepairExecutionBackendAllowed(outcome.value.item, trace.backend, routingCfg)
         ) {
-          const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
-            kind: 'empty-diff',
-            attemptId,
-            backend: trace.backend,
-            tier: trace.tier,
-            ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
-              ? { treatmentCandidate: {
-                ...productionEvent,
-                basis: 'repair-lifecycle-candidate',
-                repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
-              } satisfies DispatchProductionEvent }
-              : {}),
-          });
+          const transition = proofCapableDiagnostic
+            ? recordGeneratedRepairLifecycle(outcome.value.item, {
+                kind: 'dispatch-proof-empty-diff',
+                eventTs: productionEvent.ts,
+                ...(treatmentCandidate ? { treatmentCandidate } : {}),
+              })
+            : recordGeneratedRepairLifecycle(outcome.value.item, {
+                kind: 'empty-diff',
+                attemptId,
+                backend: trace.backend,
+                tier: trace.tier,
+                ...(treatmentCandidate ? { treatmentCandidate } : {}),
+              });
+          if (
+            transition.available &&
+            transition.authoritativeEmptyRuns >= (productionEvent.repairAttemptOrdinal ?? 1)
+          ) generatedRepairLifecycleSucceededItemIds.add(outcome.value.item.id);
           const witness = transition.treatmentOutcomeWitness;
-          if (witness && productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
+          if (
+            witness && proofCapableDiagnostic &&
+            productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
+          ) {
             repairTreatmentOutcomeWitnesses.push({
               ...productionEvent,
               basis: 'repair-lifecycle-outcome',
@@ -5574,7 +6698,10 @@ export async function tick(
           }
           continue;
         }
-        if (production.outcome !== 'proposal-created') continue;
+        if (production.outcome !== 'proposal-created') {
+          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          continue;
+        }
         const proposal = newPendingProposalsByItemId.get(outcome.value.item.id);
         if (
           !proposal ||
@@ -5593,21 +6720,25 @@ export async function tick(
           !trace?.trajectoryId ||
           !proposal.trajectoryId ||
           trace.trajectoryId !== proposal.trajectoryId
-        ) continue;
+        ) {
+          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          continue;
+        }
         const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
           kind: 'proposal-created',
           attemptId,
           proposalId: proposal.id,
-          ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
-            ? { treatmentCandidate: {
-              ...productionEvent,
-              basis: 'repair-lifecycle-candidate',
-              repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
-            } satisfies DispatchProductionEvent }
-            : {}),
+          ts: productionEvent.ts,
+          ...(treatmentCandidate ? { treatmentCandidate } : {}),
         });
+        if (transition.available && transition.disposition === 'retired') {
+          generatedRepairLifecycleSucceededItemIds.add(outcome.value.item.id);
+        }
         const witness = transition.treatmentOutcomeWitness;
-        if (witness && productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
+        if (
+          witness && proofCapableDiagnostic &&
+          productionEvent.repairTreatmentUnitId && productionEvent.repairTreatment
+        ) {
           repairTreatmentOutcomeWitnesses.push({
             ...productionEvent,
             basis: 'repair-lifecycle-outcome',
@@ -5621,27 +6752,98 @@ export async function tick(
     }
   }
 
+  // Authoritative generated-repair outcomes never mint worked authority. A
+  // canonical nonterminal row gets only a generation-scoped blocked cooldown;
+  // lifecycle proof and worked state are therefore never raced for one outcome.
+  // Shared claims settle after the selected control-plane transition.
+  const ownershipLostBeforeGeneratedRepairWorkedWrites = postDispatchOwnershipLost();
+  if (ownershipLostBeforeGeneratedRepairWorkedWrites) return ownershipLostBeforeGeneratedRepairWorkedWrites;
+  if (dispatchedCount > 0) {
+    for (const outcome of outcomes) {
+      if (
+        outcome.status !== 'fulfilled' ||
+        !outcome.value.dispatched ||
+        !isTrustedGeneratedRepairItem(outcome.value.item)
+      ) continue;
+      const itemId = outcome.value.item.id;
+      if (
+        productionWriteFailedItemIds.has(itemId) ||
+        (handoffFailedItemIds.has(itemId) && !generatedRepairFailedAttemptWitnessItemIds.has(itemId))
+      ) {
+        console.warn('[ashlr] daemon:tick generated repair authority incomplete', {
+          production: productionWriteFailedItemIds.has(itemId),
+          handoff: handoffFailedItemIds.has(itemId),
+          lifecycle: generatedRepairLifecycleSucceededItemIds.has(itemId),
+        });
+        workedOutcomeFailedItemIds.add(itemId);
+        continue;
+      }
+      if (generatedRepairCooldownItemIds.has(itemId)) {
+        if (!generatedRepairFailedAttemptWitnessItemIds.has(itemId)) {
+          console.warn('[ashlr] daemon:tick failed repair attempt receipt unavailable');
+          workedOutcomeFailedItemIds.add(itemId);
+          continue;
+        }
+        if (!coordinator.recordClaimOutcome(
+          itemId,
+          frozenWorkedItemId(outcome.value.item),
+          'dispatch-blocked',
+          machineId,
+        )) workedOutcomeFailedItemIds.add(itemId);
+        if (
+          generatedRepairFailedAttemptWitnessItemIds.has(itemId) &&
+          !settleGeneratedRepairExecution(itemId)
+        ) {
+          console.warn('[ashlr] daemon:tick failed repair attempt reservation settlement incomplete');
+          workedOutcomeFailedItemIds.add(itemId);
+        }
+        continue;
+      }
+      if (!generatedRepairLifecycleSucceededItemIds.has(itemId)) {
+        console.warn('[ashlr] daemon:tick generated repair lifecycle persistence incomplete');
+        workedOutcomeFailedItemIds.add(itemId);
+        continue;
+      }
+      if (sharedQueueMode && !coordinator.settleClaim(itemId, machineId)) {
+        workedOutcomeFailedItemIds.add(itemId);
+        continue;
+      }
+      if (!settleGeneratedRepairExecution(itemId)) {
+        console.warn('[ashlr] daemon:tick generated repair durable reservation settlement incomplete');
+        workedOutcomeFailedItemIds.add(itemId);
+      }
+    }
+  }
+
   const ownershipLostBeforeLifecycleWitnessWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeLifecycleWitnessWrites) return ownershipLostBeforeLifecycleWitnessWrites;
   if (repairTreatmentOutcomeWitnesses.length > 0) {
     for (const witness of repairTreatmentOutcomeWitnesses) {
-      const witnessWrite = recordDispatchProduction(witness);
       if (
-        witnessWrite.recorded !== 1 ||
         !witness.repairGenerationId ||
         !witness.repairTreatmentAttemptHash ||
-        !acknowledgeGeneratedRepairTreatmentOutcome(
+        !publishGeneratedRepairTreatmentOutcome(
           witness.repairGenerationId,
           witness.repairTreatmentAttemptHash,
         )
       ) {
+        repairTreatmentWitnessPersistenceFailed = true;
+        repairTreatmentPublicationFailed = true;
         console.warn('[ashlr] daemon:tick repair treatment witness persistence incomplete');
       }
     }
   }
   const ownershipLostBeforeTreatmentFlush = postDispatchOwnershipLost();
   if (ownershipLostBeforeTreatmentFlush) return ownershipLostBeforeTreatmentFlush;
-  if (!stopRequested()) flushPendingRepairTreatmentOutcomes();
+  if (!stopRequested()) {
+    const finalTreatmentFlush = flushPendingRepairTreatmentOutcomes();
+    if (!finalTreatmentFlush.complete) repairTreatmentWitnessPersistenceFailed = true;
+    if (finalTreatmentFlush.complete) {
+      repairTreatmentPublicationFailed = false;
+    } else if (finalTreatmentFlush.publicationFailed) {
+      repairTreatmentPublicationFailed = true;
+    }
+  }
 
   const ownershipLostBeforeActionWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeActionWrites) return ownershipLostBeforeActionWrites;
@@ -5747,6 +6949,13 @@ export async function tick(
   state.itemsProcessed += dispatchedCount;
   state.lastTickAt = now;
 
+  const hasUnsettledGeneratedRepairReservation = [...generatedRepairReservations.keys()].some(
+    (itemId) => !settledGeneratedRepairReservationItemIds.has(itemId),
+  );
+  const residentSafeTreatmentFailure = repairTreatmentPublicationFailed &&
+    workedOutcomeFailedItemIds.size === 0 &&
+    !proposalDuplicateAuthorityUnavailable &&
+    !hasUnsettledGeneratedRepairReservation;
   const tickRecord: DaemonTick = {
     ts: now,
     itemsConsidered: selected.length,
@@ -5754,9 +6963,15 @@ export async function tick(
     spentUsd: tickSpent,
     reason: stopRequested()
       ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
-      : workedOutcomeFailedItemIds.size > 0
+      : workedOutcomeFailedItemIds.size > 0 ||
+          repairTreatmentPublicationFailed ||
+          proposalDuplicateAuthorityUnavailable ||
+          hasUnsettledGeneratedRepairReservation
         ? 'state-persistence-failed'
         : 'ok',
+	    ...(residentSafeTreatmentFailure
+	      ? { residentSafePersistenceFailure: 'repair-treatment' as const }
+	      : {}),
 	    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
 	    ...(directionMode ? { directionMode } : {}),
 	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -5779,7 +6994,7 @@ export async function tick(
       summary: `tick completed but spend accounting save failed (${saveResult.error}); spend guard remains armed`,
       result: 'error',
     });
-    const failedTick = { ...tickRecord, reason: 'state-persistence-failed' };
+    const failedTick = nonResidentPersistenceFailureTick(tickRecord);
     recordTickAgentAction(failedTick, machineId);
     return failedTick;
   }
@@ -5792,7 +7007,7 @@ export async function tick(
       summary: `tick completed but spend guard clear failed (${clearGuardResult.error}); future ticks will refuse`,
       result: 'error',
     });
-    const failedTick = { ...tickRecord, reason: 'state-persistence-failed' };
+    const failedTick = nonResidentPersistenceFailureTick(tickRecord);
     recordTickAgentAction(failedTick, machineId);
     return failedTick;
   }
@@ -5885,6 +7100,7 @@ export async function tick(
     releaseLocalStoreLock(postSettlementFence);
   }
   } finally {
+    releaseGeneratedRepairReservations();
     stopLeaseRenewer();
   }
 }
@@ -6159,6 +7375,8 @@ export async function runDaemon(
     result: 'ok',
   });
 
+  if (!opts.dryRun) reconcilePreparedGeneratedRepairReservations();
+
   // -------------------------------------------------------------------------
   // H5 CHANGE 1 — WIRE THE ORPHAN SWEEP (crash-leftover reclaim).
   // On daemon start, BEFORE the first tick, reclaim crash-leftover worktrees with
@@ -6291,6 +7509,18 @@ export async function runDaemon(
         // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
         if (opts.dryRun) break;
 
+        if (tickResult.reason === 'state-persistence-failed' &&
+          tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
+          audit({
+            action: 'daemon:persistence-failed',
+            repo: null,
+            sandboxId: null,
+            summary: 'continuous daemon stopped after persistence authority failed; paid work remains dispatch-blocked',
+            result: 'refused',
+          });
+          break;
+        }
+
         if (killSwitchOn() || shutdown.signal.aborted || !ownsDaemonLock()) break;
         const afterTickLoaded = loadDaemonStateStrict();
         if (!afterTickLoaded.ok) {
@@ -6340,10 +7570,7 @@ export async function runDaemon(
           continue;
         }
 
-        const noWorkDispatched =
-          tickResult.itemsConsidered === 0 ||
-          tickResult.reason === 'no-backlog' ||
-          tickResult.reason === 'no-enrolled-repos';
+        const noWorkDispatched = !tickResult.dispatches?.some((dispatch) => dispatch.dispatched);
 
         if (afterLoopCfg.mode === 'continuous') {
           if (noWorkDispatched) {

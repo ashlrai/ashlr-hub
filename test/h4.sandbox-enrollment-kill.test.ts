@@ -50,14 +50,32 @@ import {
   readFileSync,
   writeFileSync,
   mkdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
   statSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+
+const privateStorageMocks = vi.hoisted(() => ({ assure: vi.fn() }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) =>
+      privateStorageMocks.assure.getMockImplementation()
+        ? privateStorageMocks.assure(...args)
+        : actual.assurePrivateStoragePath(...args),
+  };
+});
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { seedPendingProposal } from './helpers/h2-faults.js';
+import { withPlatform } from './helpers/platform.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 import {
   assertMayMutate,
@@ -68,6 +86,8 @@ import {
   setKill,
   killSwitchOn,
   enrollmentPath,
+  readEnrollmentRegistry,
+  setEnrollmentReadRaceHookForTest,
 } from '../src/core/sandbox/policy.js';
 import { createSandbox, sandboxesDir } from '../src/core/sandbox/worktree.js';
 import { runSwarm } from '../src/core/swarm/runner.js';
@@ -79,6 +99,18 @@ import type { AuditEntry } from '../src/core/types.js';
 
 // A no-op sink — the abort paths log to it but we assert on the returned run.
 const sink: StreamSink = () => {};
+
+beforeEach(() => {
+  privateStorageMocks.assure.mockImplementation((_path, _kind, mode) => ({
+    ok: true,
+    reason: mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+  }));
+});
+
+afterEach(() => {
+  setEnrollmentReadRaceHookForTest(undefined);
+  privateStorageMocks.assure.mockReset();
+});
 
 /**
  * Read every audit record written under the (isolated) ~/.ashlr/audit/ tree.
@@ -323,34 +355,219 @@ describe('H4 · ENROLLMENT · default-empty registry', () => {
     fx.cleanup();
   });
 
-  it('3.1 listEnrolled() === [] on a fresh isolated HOME (DEFAULT EMPTY)', () => {
-    // No enrollment.json exists in the fresh isolated HOME.
+  it('3.1 fresh authority snapshot is ready missing-empty without creating registry state', () => {
+    // No enrollment.json or ~/.ashlr directory exists in the fresh isolated HOME.
     expect(existsSync(enrollmentPath())).toBe(false);
+    expect(existsSync(join(fx.home, '.ashlr'))).toBe(false);
+    expect(readEnrollmentRegistry()).toEqual({
+      state: 'ready',
+      repos: [],
+      reason: 'missing-empty',
+    });
+    expect(existsSync(enrollmentPath())).toBe(false);
+    expect(existsSync(join(fx.home, '.ashlr'))).toBe(false);
+    // Legacy callers retain the DEFAULT EMPTY compatibility contract.
     expect(listEnrolled()).toEqual([]);
     // And isEnrolled is false for any disposable repo.
     const repo = fx.makeRepo();
     expect(isEnrolled(repo.dir)).toBe(false);
   });
 
-  it('3.2 absent/malformed enrollment.json yields { repos: [] } and never throws', () => {
-    // Absent → [].
-    expect(listEnrolled()).toEqual([]);
-    // Now write a MALFORMED registry and assert it degrades to [] (never throws).
+  it('3.2 malformed authority snapshot is degraded without mutation recovery', () => {
     const p = enrollmentPath();
-    // Ensure ~/.ashlr exists by enrolling+unenrolling a throwaway dir first.
-    const repo = fx.makeRepo();
-    enroll(repo.dir);
-    unenroll(repo.dir);
-    writeFileSync(p, '{ this is not valid json', 'utf8');
+    const malformed = JSON.stringify({ notRepos: 1 });
+    mkdirSync(join(fx.home, '.ashlr'), { recursive: true });
+    writeFileSync(p, malformed, 'utf8');
+    expect(readEnrollmentRegistry()).toEqual({
+      state: 'degraded',
+      reason: 'malformed-registry',
+    });
+    expect(readFileSync(p, 'utf8')).toBe(malformed);
+    // Legacy callers still fail closed to [] and never throw.
     expect(() => listEnrolled()).not.toThrow();
     expect(listEnrolled()).toEqual([]);
-    // A structurally-wrong (non-{repos:[]}) JSON also degrades to [].
-    writeFileSync(p, JSON.stringify({ notRepos: 1 }), 'utf8');
+    // Invalid JSON is also unreadable to compatibility callers and degrades to [].
+    writeFileSync(p, '{ this is not valid json', 'utf8');
     expect(listEnrolled()).toEqual([]);
     // An array (not an object) also degrades to [].
     writeFileSync(p, JSON.stringify(['/some/repo']), 'utf8');
     expect(listEnrolled()).toEqual([]);
   });
+
+  it('3.3 rejects an authority directory symlink instead of reporting missing-empty', () => {
+    const redirected = join(fx.home, 'redirected-authority');
+    const authorityDir = join(fx.home, '.ashlr');
+    mkdirSync(redirected, { recursive: true, mode: 0o700 });
+    symlinkSync(redirected, authorityDir, process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(readEnrollmentRegistry()).toEqual({
+      state: 'degraded',
+      reason: 'unsafe-ashlr-directory',
+    });
+    expect(listEnrolled()).toEqual([]);
+    expect(existsSync(join(redirected, 'enrollment.json'))).toBe(false);
+  });
+
+  it('3.4 validates Windows directory and registry authority without mutating either', () => {
+    const authorityDir = join(fx.home, '.ashlr');
+    const registry = enrollmentPath();
+    const bytes = `${JSON.stringify({ repos: [] })}\n`;
+    mkdirSync(authorityDir, { recursive: true, mode: 0o700 });
+    writeFileSync(registry, bytes, { encoding: 'utf8', mode: 0o600 });
+    privateStorageMocks.assure.mockReturnValue({ ok: true, reason: 'mock-assured' });
+
+    const snapshot = withPlatform('win32', () => readEnrollmentRegistry());
+
+    expect(snapshot).toEqual({ state: 'ready', repos: [], reason: 'healthy' });
+    expect(readFileSync(registry, 'utf8')).toBe(bytes);
+    expect(privateStorageMocks.assure.mock.calls).toEqual([
+      [authorityDir, 'directory', 'inspect-owned', { anchorPath: fx.home }],
+      [registry, 'file', 'inspect-existing', { anchorPath: authorityDir }],
+      [registry, 'file', 'inspect-existing', { anchorPath: authorityDir }],
+      [authorityDir, 'directory', 'inspect-owned', { anchorPath: fx.home }],
+    ]);
+  });
+
+  it('3.5 fails closed on unsafe Windows registry authority and identity replacement', () => {
+    const authorityDir = join(fx.home, '.ashlr');
+    const registry = enrollmentPath();
+    const registryBytes = `${JSON.stringify({ repos: [] })}\n`;
+    mkdirSync(authorityDir, { recursive: true, mode: 0o700 });
+    writeFileSync(registry, registryBytes, { encoding: 'utf8', mode: 0o600 });
+    for (const reason of [
+      'unexpected-ace-count',
+      'wrong-owner',
+      'reparse-point',
+      'powershell-unavailable',
+    ]) {
+      privateStorageMocks.assure.mockReset();
+      privateStorageMocks.assure.mockImplementation((_path, kind) => kind === 'directory'
+        ? { ok: true, reason: 'mock-assured' }
+        : { ok: false, reason });
+      expect(withPlatform('win32', () => readEnrollmentRegistry())).toEqual({
+        state: 'degraded',
+        reason: 'unsafe-or-oversized-registry',
+      });
+      expect(readFileSync(registry, 'utf8')).toBe(registryBytes);
+    }
+
+    privateStorageMocks.assure.mockReset();
+    const displaced = join(authorityDir, 'enrollment.displaced');
+    let replaced = false;
+    privateStorageMocks.assure.mockImplementation((path, kind) => {
+      if (kind === 'file' && !replaced) {
+        replaced = true;
+        renameSync(path, displaced);
+        writeFileSync(path, `${JSON.stringify({ repos: [fx.home] })}\n`, { encoding: 'utf8', mode: 0o600 });
+      }
+      return { ok: true, reason: 'mock-assured' };
+    });
+
+    expect(withPlatform('win32', () => readEnrollmentRegistry())).toEqual({
+      state: 'degraded',
+      reason: 'registry-identity-changed',
+    });
+    expect(replaced).toBe(true);
+
+    rmSync(displaced, { force: true });
+    writeFileSync(registry, registryBytes, { encoding: 'utf8', mode: 0o600 });
+    const originalAuthority = join(fx.home, '.ashlr-original');
+    const replacementAuthority = join(fx.home, '.ashlr-replacement');
+    mkdirSync(replacementAuthority, { mode: 0o700 });
+    writeFileSync(join(replacementAuthority, 'enrollment.json'), registryBytes, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    let parentReplaced = false;
+    privateStorageMocks.assure.mockReset();
+    privateStorageMocks.assure.mockImplementation((_path, kind) => {
+      if (kind === 'file' && !parentReplaced) {
+        parentReplaced = true;
+        renameSync(authorityDir, originalAuthority);
+        renameSync(replacementAuthority, authorityDir);
+      }
+      return { ok: true, reason: 'mock-assured' };
+    });
+    expect(withPlatform('win32', () => readEnrollmentRegistry())).toEqual({
+      state: 'degraded',
+      reason: 'registry-identity-changed',
+    });
+    expect(parentReplaced).toBe(true);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    '3.6 rejects a parent swapped for the read and restored before final validation',
+    () => {
+      const authorityDir = join(fx.home, '.ashlr');
+      const originalAuthority = join(fx.home, '.ashlr-original');
+      const injectedAuthority = join(fx.home, '.ashlr-injected');
+      mkdirSync(authorityDir, { recursive: true, mode: 0o700 });
+      writeFileSync(enrollmentPath(), `${JSON.stringify({ repos: [] })}\n`, { mode: 0o600 });
+      mkdirSync(injectedAuthority, { mode: 0o700 });
+      writeFileSync(
+        join(injectedAuthority, 'enrollment.json'),
+        `${JSON.stringify({ repos: [fx.home] })}\n`,
+        { mode: 0o600 },
+      );
+      renameSync(authorityDir, originalAuthority);
+      renameSync(injectedAuthority, authorityDir);
+      setEnrollmentReadRaceHookForTest(() => {
+        renameSync(authorityDir, injectedAuthority);
+        renameSync(originalAuthority, authorityDir);
+      });
+
+      expect(readEnrollmentRegistry()).toEqual({
+        state: 'degraded',
+        reason: 'registry-identity-changed',
+      });
+      expect(readFileSync(enrollmentPath(), 'utf8')).toBe(`${JSON.stringify({ repos: [] })}\n`);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')('3.7 rejects a native permissive registry DACL and authority junction', () => {
+    privateStorageMocks.assure.mockReset();
+    const authorityDir = join(fx.home, '.ashlr');
+    const registry = enrollmentPath();
+    mkdirSync(authorityDir, { recursive: true });
+    const directoryAssurance = assurePrivateStoragePath(
+      authorityDir,
+      'directory',
+      'secure-created',
+      { anchorPath: fx.home },
+    );
+    expect(directoryAssurance, directoryAssurance.reason).toMatchObject({ ok: true });
+    writeFileSync(registry, `${JSON.stringify({ repos: [] })}\n`, 'utf8');
+    const registryAssurance = assurePrivateStoragePath(
+      registry,
+      'file',
+      'secure-created',
+      { anchorPath: authorityDir },
+    );
+    expect(registryAssurance, registryAssurance.reason).toMatchObject({ ok: true });
+    expect(readEnrollmentRegistry()).toMatchObject({ state: 'ready', reason: 'healthy' });
+
+    const permissive = spawnSync('icacls.exe', [registry, '/grant', '*S-1-1-0:R'], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(permissive.status, permissive.stderr).toBe(0);
+    expect(readEnrollmentRegistry()).toEqual({
+      state: 'degraded',
+      reason: 'unsafe-or-oversized-registry',
+    });
+
+    rmSync(authorityDir, { recursive: true, force: true });
+    const redirected = join(fx.home, 'redirected-windows-authority');
+    mkdirSync(redirected, { recursive: true });
+    symlinkSync(redirected, authorityDir, 'junction');
+    expect(readEnrollmentRegistry()).toEqual({
+      state: 'degraded',
+      reason: 'unsafe-ashlr-directory',
+    });
+    expect(readdirSync(redirected)).toEqual([]);
+  }, 45_000);
 });
 
 describe('H4 · ENROLLMENT · normalization + assert gate', () => {

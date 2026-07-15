@@ -3500,6 +3500,8 @@ export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' 
 
 /** Fixed metadata-only instruction treatment for trusted diagnostic no-diff reslices. */
 export type RepairTreatment = 'baseline-reslice' | 'target-localization';
+/** Bounded generated-repair ancestry. A root repair is depth 0; its only child is depth 1. */
+export type RepairDepth = 0 | 1;
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a
  * single enrolled repo. Contains NO secrets. Pure analysis — never implies a
@@ -3526,6 +3528,12 @@ export interface WorkItem {
   tags: string[];
   /** ISO timestamp this item was generated. */
   ts: string;
+  /** Stable metadata-only identity shared by every repair descendant for one original objective. */
+  repairRootId?: string;
+  /** Canonical producer/parent authority input from which repairRootId is derived. */
+  repairRootAuthorityId?: string;
+  /** Explicit bounded ancestry within repairRootId. Rootless or deeper rows cannot dispatch autonomously. */
+  repairDepth?: RepairDepth;
   /** Durable parent-handoff observation that authorizes this generated repair projection. */
   repairHandoffId?: string;
   /** Stable generation identity derived from authoritative parent control identity. */
@@ -3852,6 +3860,9 @@ export interface Proposal {
   workItemId?: string;
   /** Hash binding a generated repair proposal to one immutable source generation. */
   workItemGenerationId?: string;
+  /** Root metadata copied by producers that can preserve exact generated-repair ancestry. */
+  repairRootId?: string;
+  repairDepth?: RepairDepth;
   /** Optional originating backlog scanner/source. */
   workSource?: WorkSource;
   /** Optional run/swarm id that produced this proposal. */
@@ -4265,6 +4276,8 @@ export interface DaemonTick {
   /** Why the tick did what it did (e.g. 'ok', 'kill-switch', 'budget-exhausted',
    *  'no-enrolled-repos', 'no-backlog', 'dry-run'). */
   reason: string;
+  /** A treatment-only persistence failure safe for the resident loop; any later daemon persistence failure strips this flag. */
+  residentSafePersistenceFailure?: 'repair-treatment';
   /** True when this tick was produced by a dry-run/simulation path. */
   dryRun?: boolean;
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
@@ -4320,6 +4333,11 @@ export interface DaemonTick {
     dispatchRepairPruned?: number;
     dispatchRepairPruneFailed?: number;
     dispatchRepairLifecycleUnavailable?: number;
+    repairRootAdmissionConsidered?: number;
+    repairRootAdmissionAdmitted?: number;
+    repairRootAdmissionAlreadyActive?: number;
+    repairRootAdmissionRootless?: number;
+    repairRootAdmissionDepthRejected?: number;
     repairHandoffObservations?: number;
     repairHandoffInvalidRows?: number;
     repairHandoffConflictingIds?: number;

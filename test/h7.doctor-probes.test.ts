@@ -8,8 +8,8 @@
  *  - NO-GUARD-WEAKENED / read-only: runDoctor mutates no enrollment / KILL /
  *    daemon / sandbox / repo state (byte-identical before/after); the lone write
  *    is checkAshlrWriteable's self-cleaning sentinel (no leftover).
- *  - Status rules: 0 enrolled ⇒ pass (fresh install fine); kill ON ⇒ warn;
- *    ~/.ashlr not writeable ⇒ fail.
+ *  - Status rules: valid 0 enrolled ⇒ pass (fresh install fine); degraded
+ *    enrollment ⇒ fail; kill ON ⇒ warn; ~/.ashlr not writeable ⇒ fail.
  *
  * SAFETY (inherited verbatim from H1/H2/H4/H5/H6):
  *  - ISOLATED HOME per test via makeFixture; DISPOSABLE REPOS (fx.makeRepo);
@@ -189,6 +189,27 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     const enrolledProbe = probe(oneEnrolled, 'enrollment');
     expect(enrolledProbe?.status).toBe('pass');
     expect(enrolledProbe?.detail).toMatch(/1 repo enrolled/i);
+  }, DOCTOR_PROBE_TIMEOUT_MS);
+
+  it("runDoctor's enrollment probe fails exactly when the registry is degraded", async () => {
+    expect.hasAssertions();
+    fx = makeFixture();
+    stubModelUp(false);
+
+    mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fx.ashlrDir, 'enrollment.json'), '{"repos":"invalid"}\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+
+    const report = await runDoctor(cfg());
+    expect(probe(report, 'enrollment')).toEqual({
+      id: 'enrollment',
+      label: 'Enrollment registry',
+      status: 'fail',
+      detail: 'Enrollment registry degraded: malformed-registry',
+      fix: 'Repair ~/.ashlr/enrollment.json before running autonomy.',
+    });
   }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes a 'daemon-state' probe; stopped/healthy ⇒ pass; self-healed dead-pid ⇒ pass", async () => {

@@ -2244,3 +2244,128 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Repair two M141 fixtures exposed by the first exhaustive pass that constructed future `01:00Z` rows during the UTC-midnight hour.
 - [x] Pass the exhaustive hermetic suite on the exact candidate: 534 files, 11,238 tests green, and 9 intentional skips in 600.68 seconds.
 - [ ] Commit, push, open a stacked protected PR against `codex/release-native-authority`, and observe the exact-SHA ten-check matrix without merging or deploying.
+
+## Lifecycle Attempt Authority Cycle (2026-07-14)
+- [x] Rehydrate the exact dispatch-attempt proof SHA in an isolated worktree while preserving canonical user edits and production NO-GO state.
+- [x] Bind diagnostic empty-diff and proposal-created lifecycle transitions to canonical immutable dispatch receipts.
+- [x] Make daemon dispatch production persistence precede lifecycle adoption and withhold settlement/cooldown authority on incomplete writes.
+- [x] Add receipt-complete generation resolution that avoids global partition scans and remains valid across long outages and mature ledgers.
+- [x] Reconcile crash-persisted empty and proposal attempts directly from exact generation receipts without trusting caller-only evidence.
+- [x] Preserve generation authority across unchanged parent recurrence and current writer activation rollover.
+- [x] Make terminal treatment publication immutable, idempotent, proof-revalidated, and recoverable after acknowledgement-save failure.
+- [x] Keep proofless legacy terminal rows observable and unpublished without mutating them during reads.
+- [x] Restore acknowledgement compatibility by requiring an exact already-durable treatment receipt and terminal attempt proof.
+- [x] Add native Windows receipt-path coverage plus adversarial lifecycle, recovery, replay, corruption, and portability tests.
+- [x] Pass the focused authority matrix: 7 files, 570 tests; typecheck, build, zero-error scoped lint, dependency audit, and diff checks.
+- [ ] Pass the final exhaustive hermetic suite and independent final review on the exact candidate.
+- [ ] Commit, push, open a protected stacked PR against `codex/dispatch-attempt-proof`, and observe the exact-SHA matrix without merging or deploying.
+
+## Authority Re-Review And Repair-Amplification Cycle (2026-07-15)
+- [x] Rehydrate the isolated authority worktree, canonical user edits, green stacked PRs, immutable production release, and Entire state.
+- [x] Run fresh adversarial reviews after the initial focused-green result instead of treating test counts as release authority.
+- [x] Fix terminal caller forgery, oversized-partition publication, rollback-marker adoption, generation-bound retention, and lifecycle memory amplification.
+- [x] Fix stale FleetStatus action authority and the disabled-auto-merge false-idle contradiction.
+- [x] Close post-retention protocol rollback, missing-protocol quality, alias-family reservation expansion, and pre-dispatch degraded-source blockers.
+- [x] Preserve proposal authority through lifecycle alias merges and finish retained-proof fallback on exact v5/v4 writer output.
+- [x] Establish treatment receipt/retention-marker DACLs in the real writer and include exact-DACL cases in the native selector.
+- [x] Finish full crash-state fixture validation and reduce lifecycle serialization memory headroom.
+- [x] Close ordinary/diagnostic outbox separation, schema-v1 acknowledgement migration, pre-spend attempt-quality refusal, stale diagnostic duplicate authority, and split alias-family degradation.
+- [x] Re-run corrected focused integration plus typecheck, changed-file lint, build, dependency audit, and diff checks.
+- [ ] Run the exact native Windows selectors, exhaustive hermetic suite, and final independent review on this corrected tree.
+- [ ] Update exact counts, commit/push a protected stacked PR, and keep production, auto-merge, self-merge, release, tag, and deploy unchanged/NO-GO.
+
+## Next P2 - Enrollment Read Truth
+- [x] Add a read-only typed enrollment-registry snapshot that distinguishes missing-empty from malformed/degraded authority without invoking mutation recovery.
+- [x] Propagate degraded enrollment into FleetStatus queue source quality, autonomous ship readiness, readiness preflight, and doctor; never render it as healthy-zero.
+- [x] Preserve the legacy `listEnrolled(): string[]` compatibility contract while adding explicit policy, M49, readiness, and doctor regressions.
+- [x] Reject symlinked or identity-changing `.ashlr` authority directories and make the writeability sentinel exclusive, no-follow, inode-bound, and replacement-safe.
+- [x] Prove prepared enrollment transactions remain byte-identical under read-only snapshots and repair a stale daemon fixture without weakening production tier or settlement checks.
+- [x] Pass the exact exhaustive suite: 534 files, 11,387 tests green, 11 intentional skips, 0 failures in 656.17 seconds under the unchanged 900-second hard cap.
+- [ ] Run the exact selectors on a native Windows host; the macOS replay passed 733 selector executions with 565 platform skips/filters but is not Windows authority.
+
+## Next P0 - Root-Bound Repair Admission
+- [ ] Add explicit metadata-only repair root identity and depth to work items and proposals; never infer lineage from titles.
+- [ ] Enforce one active repair per root and an initial maximum repair depth of one, with legacy unknown-root repairs withheld fail closed.
+- [ ] Unify capture/no-diff admission by root objective and make terminal pruning projection-complete and failure-visible.
+- [ ] Add root-level amplification and escape-funnel metrics: roots, descendants, depth, cap denials, proposal, verification, merge, and stable-window outcomes.
+- Live evidence: 68/80 queue rows are generated repairs, reconstructed chains reach depth 15, seven roots have multiple queued descendants, and one root has 20 rows.
+
+## Ruthless Operational Readiness Audit (2026-07-15)
+- [x] Recheck live daemon, guards, queue, verifier coverage, resource posture, attempts, trajectories, merges, and learning sources instead of relying on prior green tests.
+- [x] Confirm the fleet is safe and observable but not fully autonomous: 0 dispatch attempts, 0 trajectories, 0 merges, and 0 realized outcomes in the current 24-hour window.
+- [x] Quantify historical proposal yield: 372 dispatch outcomes produced 15 proposals (4.0%); 171 were empty diffs, 100 gate-blocked, 29 capture errors, and 175 repair attempts.
+- [x] Confirm all 24 enrolled repositories have valid explicit merge contracts, while 19 are silent and 53/74 visible backlog rows are concentrated in Phantom.
+- [x] Keep production merge authority disabled while the candidate still has open P1 findings and lacks native Windows/exhaustive evidence.
+- [ ] Close the final readiness, handoff, dispatch, lifecycle, repair-root, and proposal-source completeness findings with focused adversarial tests.
+- [ ] Re-run exact static, focused integration, exhaustive, local selector, and native Windows gates on one frozen tree.
+- [ ] Run a proposal-production canary with root-depth one, production-velocity routing, and explicit throughput SLOs before any auto-merge activation.
+- [ ] Activate docs/additive-test auto-merge only after protected remote preflight and complete causal/post-merge evidence; source changes remain gated.
+
+### Operating Decision
+- Optimize useful closed-loop throughput, not tick count, memory volume, goal count, or raw agent concurrency.
+- The next canary must produce at least 20 unique root attempts, at least 5 merge-grade proposals, greater than 30% proposal yield, 100% causal spine coverage, and no repair descendant deeper than one.
+- Recursive learning requires route -> attempt -> proposal/no-proposal -> verification -> protected merge/rejection -> stable/adverse post-merge classification. Event collection without realized outcomes is observational telemetry, not self-improvement.
+
+### Audit Checkpoint Result
+- [x] Restore complete proposal authority for the current 671-file inbox under the bounded 4,096-file/64-MiB reader contract.
+- [x] Make readiness writeability checks genuinely read-only and close degraded enrollment action authority.
+- [x] Close the reviewed lifecycle proposal-fence, duplicate-row, commit-marker, terminal-reader, and retained-receipt races.
+- [x] Close the reviewed handoff replay, durability, combined-source, torn-tail, capacity, compaction, and burst-test defects.
+- [x] Add canonical root/depth metadata, fail-closed legacy handling, root-local contention, atomic root admission, and reservation binding.
+- [x] Pass the seven-file integrated authority matrix: 578 tests green with 6 intentional platform skips, plus typecheck, quiet lint, build, zero-vulnerability audit, and diff checks.
+- [ ] Close remaining P1s: retired treatment identities suppress raw rows; compaction allocation is aggregate-bounded; native Windows covers the protocol-anchor DACL; failed-attempt receipts remain exact beyond 24 hours.
+- [ ] Run exhaustive hermetic and native Windows verification on one frozen tree before staging, commit, push, or PR.
+
+## Adversarial Authority Closure - Second Pass (2026-07-15)
+- [x] Make raw treatment rows non-terminal and require canonical immutable treatment receipts for terminal authority.
+- [x] Bound treatment compaction allocations and add exact receipt recovery beyond capped raw analytics history.
+- [x] Add root-scoped execution reservations so a crash-left marker fences every descendant of the same repair root.
+- [x] Reconstruct exact diagnostic and ordinary success outcomes after receipt-before-lifecycle crashes; keep receiptless failures reserved and fail closed.
+- [x] Bind ordinal-two alternate attempts to the failed ordinal-one backend and strip resident-safe persistence classification after any later critical persistence failure.
+- [x] Pass the first corrected integrated matrix: 593 tests with six intentional platform skips, plus typecheck, quiet lint, build, zero-vulnerability audit, and diff checks.
+- [x] Independently reject the implementer-green ledger after finding four additional P1s: retirement resurrection after raw partition deletion, duplicate raw events across failure-intent crashes, undiscoverable valid receipt sets above 256, and per-file Windows DACL probes hidden behind a batch preflight.
+- [ ] Preserve root/depth on generic success receipts and close the current four M201 integration failures; latest evidence is 211/215 green.
+- [ ] Close all four fresh ledger P1s with exact crash, deletion, maximum-cardinality, and native-DACL selector coverage.
+- [ ] Run fresh independent reviews of the corrected daemon/lifecycle and ledger/storage trees; focused green tests alone are insufficient.
+- [ ] Freeze one exact tree, rerun the full focused matrix and static gates, then run the 534-file exhaustive suite with the 900-second hard cap and a 720-second silent-run allowance.
+- [ ] Replay every Windows selector locally and require protected native Windows authority before staging, commit, push, or PR.
+
+### Corrected Tree Checkpoint
+- [x] Close treatment retirement resurrection after raw partition deletion, duplicate failure events across intent crashes, 2,048-receipt discovery, and hidden per-file Windows DACL probes.
+- [x] Separate modern exact treatment authority from bounded raw analytics; preserve raw fallback only for legacy schema v1.
+- [x] Recover failure-intent appends from exact offset, digest, physical file identity, size, and timestamps without scanning an oversized partition or assuming absence.
+- [x] Keep persistent treatment publication failure visible across no-backlog and all-skipped ticks until exact recovery, with critical persistence failures dominating resident-safe classification.
+- [x] Make ordinal-two diagnostic success publishable from its lifecycle capsule, bind alternate failures across legitimate generation aliases, and keep ordinary proposal lifecycle authority valid after raw partition cap, rotation, or deletion.
+- [x] Pass the corrected eight-file authority matrix: 624 tests green, six intentional platform skips, zero failures in 103.14 seconds.
+- [x] Pass typecheck, quiet full lint, production build, zero-vulnerability dependency audit, and `git diff --check` on the corrected tree.
+- [x] Migrate bounded schema-v1 retirement into exact modern tombstones before protocol mutation; preserve authority after raw deletion and fail closed with prior bytes unchanged on incomplete legacy history.
+- [x] Require exact aggregate membership for every compact treatment marker; committed readers reject orphan, extra, missing, conflicting, unsafe, replaced, or mutated markers.
+- [x] Separate objective control families, compatible active evidence aliases, and strict parent-row proof aliases; restore split-family degradation and writer-rollback queue suppression.
+- [x] Add the missing native Windows selectors for append crash, oversized offset recovery, mutation/refusal, and maximum-cardinality batch assurance.
+- [x] Pass the final corrected eight-file authority matrix: 639 tests green, six intentional platform skips, zero failures in 137.90 seconds.
+- [x] Pass final typecheck, quiet full lint, production build, zero-vulnerability dependency audit, and `git diff --check`.
+- [x] Receive SHIP from the final alias/control review and the one-question compact-membership review on this exact tree.
+- [x] Run the exhaustive 534-file hermetic suite with the 900-second hard cap and 720-second silent-run allowance: 11,470 passed, 17 skipped, six failed across two files in 821.95 seconds.
+- [x] Close the exhaustive regressions: pin the M402 canary fixtures to an injected active clock and preserve canonical root/depth metadata in the M170 repair fixture without weakening production checks.
+- [x] Rerun the corrected files, expanded authority matrix, static gates, and full exhaustive on one unchanged tree: 534 files, 11,476 passed, 17 skipped, zero failures in 756.28 seconds.
+- [x] Replay every exact Windows workflow selector locally: 751 passed, 739 platform/filter skips, zero failures across all three portability partitions and both native authority steps.
+- [ ] Require protected native Windows authority before staging, commit, push, or PR.
+
+### Ruthless Product Verdict
+- Ashlr Hub is a high-assurance autonomous control plane, not yet a high-output autonomous product factory.
+- Current autonomy grade is approximately 3/10; safety and observability are approximately B+.
+- The audited 24-hour window produced zero dispatch attempts, trajectories, evidence packs, merges, or realized outcomes despite healthy daemon and guard processes.
+- The current optimization target is `stable realized improvements/week`; an initial credible target is three to five, with proposal yield above 30% in the bounded 20-root canary.
+- Agent count, event volume, queue size, and memory count are not success metrics. Do not expand generation until repair depth is one, active goals are capped at four, source authority is healthy, and the escape funnel closes through protected merge plus stable/adverse post-merge classification.
+
+## Next P0 - Realized Learning Eligibility
+- [ ] Add an observation-only `LearningEligibilityV1` projection joining dispatch, proposal/no-proposal, verification, protected merge/rejection, and stable/adverse/inconclusive outcome by authenticated identity.
+- [ ] Persist the complete evaluated candidate-set digest, eligibility/refusal vector, policy version/epoch, and selection-propensity availability without raw prompts, diffs, output, environment, or repository contents.
+- [ ] Keep `policyEligible:false` and `recursiveLearningEligible:false` until denominator completeness, stable/adverse precedence, and multi-epoch sample gates are independently proven.
+- [ ] Stop learned-router positive credit at merge realization; consume realized post-merge outcomes only after the eligibility contract becomes authoritative.
+
+## Next P0 - Judge-Free Enforcement Closure
+- [ ] Expand test-weakening protection to every merge, canary, provenance, mutation-fence, and rollback-control suite; prove assertion removal is detected for each protected file.
+- [ ] Require producer-v2 provenance bound to proposal, repository, source revision, route, and diff identity; sign the evidence pack itself and reject legacy-only evidence for judge-free authority.
+- [ ] Require a safe minimum branch-protection policy, including strict checks, admin enforcement, no bypass actors, no force pushes/deletions, and explicit signature policy.
+- [ ] Constrain the first enforceable canary to the deterministic docs-only classifier and implement serialized admission, confirmed host enable/cancel, deterministic rollback, and external rollback-resistant freshness.

@@ -1,12 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
-import { dispatchProductionDir, recordDispatchProduction } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
+  dispatchProductionDir,
+  recordDispatchProduction,
+  sanitizeDispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  _setRepairHandoffJournalFaultForTest,
   compactRepairHandoffs,
   dispatchEventFromRepairHandoff,
   readRepairHandoffs,
@@ -37,6 +52,8 @@ import type { Proposal, WorkItem } from '../src/core/types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { queueSelfHealItem } from '../src/core/fleet/self-heal.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
+import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { inboxDir } from '../src/core/inbox/store.js';
 
 let fx: H1Fixture;
 
@@ -45,7 +62,10 @@ beforeEach(() => {
   fx = makeFixture();
 });
 
-afterEach(() => fx.cleanup());
+afterEach(() => {
+  _setRepairHandoffJournalFaultForTest(undefined);
+  fx.cleanup();
+});
 
 function event(repo: string, overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   return {
@@ -129,6 +149,151 @@ function reidentifyV2Observation(
     generationId: repairGenerationIdFromHandoffId(eventId)!,
     childItemId: `${basename(row.repo)}:${prefix}:${childHash}`,
   };
+}
+
+function recordDiagnosticEmpty(
+  item: WorkItem,
+  attemptId: string,
+  backend: 'local-coder' | 'kimi' | 'codex' | 'claude',
+  tier: 'mid' | 'frontier',
+  ordinal: 1 | 2,
+) {
+  const ts = new Date(Date.now() - (3 - ordinal) * 60_000).toISOString();
+  const routeReason = `m362 diagnostic attempt ${ordinal}`;
+  const production: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend,
+    tier,
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend,
+      tier,
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal: ordinal,
+  };
+  if (ordinal === 2) {
+    const previous = readGeneratedRepairLifecycle(item).lastAuthoritativeEmptyBackend;
+    if (previous) production.repairPreviousBackend = previous;
+  }
+  expect(recordDispatchProduction(production)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return recordGeneratedRepairLifecycle(item, { kind: 'dispatch-proof-empty-diff', eventTs: ts });
+}
+
+function recordDiagnosticProposal(
+  item: WorkItem,
+  attemptId: string,
+  proposalId: string,
+) {
+  const ts = new Date(Date.now() - 2 * 60_000).toISOString();
+  const tier = item.repairParentTier ?? 'mid';
+  const routeReason = 'm362 diagnostic proposal attempt';
+  const production: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend: 'local-coder',
+    tier,
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier,
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId,
+      diffFiles: 1,
+      diffLines: 2,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    spentUsd: 0,
+    diffFiles: 1,
+    diffLines: 2,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal: 1,
+  };
+  const diff = 'diff --git a/a b/a\n';
+  const proposal: Proposal = {
+    id: proposalId,
+    repo: item.repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'M362 diagnostic proposal',
+    summary: 'Exact durable proposal fixture for a journal-authorized diagnostic attempt.',
+    diff,
+    diffHash: createHash('sha256').update(diff, 'utf8').digest('hex'),
+    workItemId: item.id,
+    workItemGenerationId: item.repairGenerationId,
+    workSource: 'self',
+    runId: attemptId,
+    trajectoryId: production.trajectoryId,
+    runEventSummary: production.runEventSummary,
+    status: 'pending',
+    createdAt: ts,
+  };
+  const proposalsDir = inboxDir();
+  mkdirSync(proposalsDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(proposalsDir, `${proposal.id}.json`), `${JSON.stringify(proposal)}\n`, { mode: 0o600 });
+  expect(recordDispatchProduction(production)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  const transition = recordGeneratedRepairLifecycle(item, {
+    kind: 'proposal-created',
+    attemptId: production.trajectoryId!,
+    proposalId,
+    ts,
+  });
+  return { transition, proposal };
 }
 
 describe('M362 durable repair handoff journal', () => {
@@ -248,7 +413,43 @@ describe('M362 durable repair handoff journal', () => {
     });
   });
 
-  it('binds v2 authority to one activation and does not let historical rows certify a reactivation', () => {
+  it.each([
+    ['v1', '2026-07-10.jsonl'],
+    ['v2', '2026-07-11.jsonl'],
+  ] as const)('degrades when only the %s parent of a hashful v1/v2 alias family is lost', (_schema, partition) => {
+    const repo = fx.makeRepo();
+    const legacy = event(repo.dir, {
+      ts: '2026-07-10T12:00:00.000Z',
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
+    });
+    const current = event(repo.dir, {
+      ts: '2026-07-11T12:00:00.000Z',
+      runId: 'attempt-42345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-42345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(legacy)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(current, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(readRepairHandoffSchemaSummary()).toMatchObject({
+      sourceState: 'healthy',
+      aliasFamilies: 1,
+      conflictingIds: 0,
+    });
+
+    rmSync(join(dispatchProductionDir(), partition));
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+    });
+    expect(readRepairHandoffSchemaSummary()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+    });
+  });
+
+  it('tracks the active writer epoch without moving the immutable generation anchor', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);
 
@@ -276,8 +477,14 @@ describe('M362 durable repair handoff journal', () => {
     const rows = readRepairHandoffs().observations.filter((row) => row.schemaVersion === 2);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      writerActivationId: ACTIVATION_B.id,
-      writerActivatedAt: ACTIVATION_B.activatedAt,
+      ts: input.ts,
+      parentAttemptId: input.trajectoryId,
+      writerActivationId: ACTIVATION_A.id,
+      writerActivatedAt: ACTIVATION_A.activatedAt,
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
+      currentActivationV2Authorities: 0,
+      latestCurrentActivationV2At: null,
     });
     expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
       v2Authorities: 1,
@@ -287,18 +494,343 @@ describe('M362 durable repair handoff journal', () => {
     });
   });
 
-  it('keeps legacy unbound v2 rows readable but excludes them from activation authority', () => {
+  it('preserves the journal-wide high-water through compaction and rejects a stale writer generation', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir, {
+      itemId: 'repo:self:generation-a',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const rollover = event(repo.dir, {
+      itemId: 'repo:self:generation-b',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    const stale = event(repo.dir, {
+      itemId: 'repo:self:generation-c',
+      objectiveHash: 'c'.repeat(64),
+      ts: '2026-07-10T13:00:00.000Z',
+      backend: 'codex',
+      tier: 'frontier',
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
+    });
+
+    expect(recordRepairHandoffsRaw(first, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    const legacyReplay = readFileSync(repairHandoffV2JournalPath(), 'utf8');
+    writeFileSync(repairHandoffV2JournalPath(), legacyReplay, { encoding: 'utf8', flag: 'a' });
+    expect(recordRepairHandoffsRaw(rollover, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 3, after: 2, removed: 1 });
+    expect(recordRepairHandoffsRaw(stale, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 2,
+    });
+    expect(readRepairHandoffs().observations.map((row) => row.parentItemId).sort()).toEqual([
+      first.itemId,
+      rollover.itemId,
+    ]);
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
+      currentActivationV2Authorities: 0,
+      latestCurrentActivationV2At: null,
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: rollover.ts,
+    });
+
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 2, removed: 0 });
+  });
+
+  it('rejects a distinct writer id claiming the high-water activation instant', () => {
+    const repo = fx.makeRepo();
+    const ambiguousActivation: RepairHandoffV2Activation = {
+      id: '33333333-3333-4333-8333-333333333333',
+      activatedAt: ACTIVATION_A.activatedAt,
+    };
+    expect(recordRepairHandoffsRaw(event(repo.dir, {
+      itemId: 'repo:self:equal-time-a',
+      objectiveHash: 'a'.repeat(64),
+    }), { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(event(repo.dir, {
+      itemId: 'repo:self:equal-time-b',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    }), { schemaVersion: 2, activation: ambiguousActivation }))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({ parentItemId: 'repo:self:equal-time-a' })],
+    });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 1, after: 1, removed: 0 });
+  });
+
+  it('rejects an activation id that mutates its timestamp', () => {
+    const repo = fx.makeRepo();
+    const mutatedActivation: RepairHandoffV2Activation = {
+      id: ACTIVATION_A.id,
+      activatedAt: '2022-01-01T00:00:00.000Z',
+    };
+    expect(recordRepairHandoffsRaw(event(repo.dir, {
+      itemId: 'repo:self:id-mutation-a',
+      objectiveHash: 'a'.repeat(64),
+    }), { schemaVersion: 2, activation: ACTIVATION_A })).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(event(repo.dir, {
+      itemId: 'repo:self:id-mutation-b',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    }), { schemaVersion: 2, activation: mutatedActivation }))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({ parentItemId: 'repo:self:id-mutation-a' })],
+    });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 1, after: 1, removed: 0 });
+  });
+
+  it('journal activation authority: canonicalizes UUID casing before persistence and lookup', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);
+    const uppercaseActivation = { ...ACTIVATION_A, id: ACTIVATION_A.id.toUpperCase() };
+
+    expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: uppercaseActivation }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(JSON.parse(readFileSync(repairHandoffV2JournalPath(), 'utf8'))).toMatchObject({
+      writerActivationId: ACTIVATION_A.id,
+    });
+    expect(readRepairHandoffSchemaSummary(uppercaseActivation)).toMatchObject({
+      sourceState: 'healthy',
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: input.ts,
+    });
+  });
+
+  it('journal activation authority: quarantines UUID case-variant timestamp collisions', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir, {
+      itemId: 'repo:self:case-collision-a',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const second = event(repo.dir, {
+      itemId: 'repo:self:case-collision-b',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(first, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordDispatchProduction(second)).toMatchObject({ recorded: 1, failed: 0 });
+    const caseVariant = {
+      ...repairHandoffFromDispatchEvent(second)!,
+      writerActivationId: ACTIVATION_A.id.toUpperCase(),
+      writerActivatedAt: '2022-01-01T00:00:00.000Z',
+    };
+    writeFileSync(
+      repairHandoffV2JournalPath(),
+      `${JSON.stringify(caseVariant)}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 2,
+      observations: [],
+    });
+    expect(compactRepairHandoffs()).toMatchObject({ available: false, before: 2 });
+  });
+
+  it('reports the true latest authority timestamp across current-activation generations', () => {
+    const repo = fx.makeRepo();
+    const older = event(repo.dir, {
+      itemId: 'repo:self:latest-generation-a',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const newer = event(repo.dir, {
+      itemId: 'repo:self:latest-generation-b',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T14:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(older, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(newer, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      sourceState: 'healthy',
+      currentActivationV2Authorities: 2,
+      latestCurrentActivationV2At: newer.ts,
+    });
+  });
+
+  it('journal activation authority: reports the latest same-generation recurrence', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir);
+    const recurrence = event(repo.dir, {
+      ts: '2026-07-10T14:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(first, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(recurrence, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      sourceState: 'healthy',
+      v2Authorities: 1,
+      v2PhysicalRows: 2,
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: recurrence.ts,
+    });
+  });
+
+  it('degrades summary when an active-epoch recurrence loses its parent', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir);
+    const rollover = event(repo.dir, {
+      ts: '2026-07-11T12:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(first, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffsRaw(rollover, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+
+    writeFileSync(join(dispatchProductionDir(), '2026-07-11.jsonl'), '', { mode: 0o600 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [expect.objectContaining({ parentAttemptId: first.trajectoryId })],
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      currentActivationV2Authorities: 0,
+      latestCurrentActivationV2At: null,
+    });
+  });
+
+  it('journal activation authority: rejects recurrence authority when its immutable anchor parent is missing', () => {
+    const repo = fx.makeRepo();
+    const missingAnchor = event(repo.dir, {
+      itemId: 'repo:self:missing-generation-anchor',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const survivingRecurrence = event(repo.dir, {
+      ...missingAnchor,
+      ts: '2026-07-11T12:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    const healthyGeneration = event(repo.dir, {
+      itemId: 'repo:self:healthy-generation-anchor',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-12T12:00:00.000Z',
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(
+      [missingAnchor, survivingRecurrence, healthyGeneration],
+      { schemaVersion: 2, activation: ACTIVATION_B },
+    )).toMatchObject({ recorded: 3, failed: 0 });
+
+    writeFileSync(join(dispatchProductionDir(), '2026-07-10.jsonl'), '', { mode: 0o600 });
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [expect.objectContaining({ parentItemId: healthyGeneration.itemId })],
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      v2Authorities: 1,
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: healthyGeneration.ts,
+    });
+  });
+
+  it('journal activation authority: preserves unbound v2 rows written before activation', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir);
+    const bound = event(repo.dir, {
+      itemId: 'repo:self:bound-after-legacy',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
     expect(recordDispatchProduction(input)).toMatchObject({ recorded: 1, failed: 0 });
     const historical = repairHandoffFromDispatchEvent(input)!;
     mkdirSync(dirname(repairHandoffV2JournalPath()), { recursive: true, mode: 0o700 });
-    writeFileSync(repairHandoffV2JournalPath(), `\n${JSON.stringify(historical)}\n`, { mode: 0o600 });
+    writeFileSync(repairHandoffV2JournalPath(), `${JSON.stringify(historical)}\n`, { mode: 0o600 });
+    expect(recordRepairHandoffsRaw(bound, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
     expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
-      v2Authorities: 1,
-      currentActivationV2Authorities: 0,
+      sourceState: 'healthy',
+      v2Authorities: 2,
+      currentActivationV2Authorities: 1,
       unboundV2Authorities: 1,
+      latestCurrentActivationV2At: bound.ts,
     });
+  });
+
+  it('journal activation authority: quarantines unbound v2 rows written after activation', () => {
+    const repo = fx.makeRepo();
+    const bound = event(repo.dir, {
+      itemId: 'repo:self:bound-before-rollback',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const rollback = event(repo.dir, {
+      itemId: 'repo:self:unbound-after-activation',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffsRaw(bound, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordDispatchProduction(rollback)).toMatchObject({ recorded: 1, failed: 0 });
+    writeFileSync(
+      repairHandoffV2JournalPath(),
+      `${JSON.stringify(repairHandoffFromDispatchEvent(rollback)!)}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [expect.objectContaining({ parentItemId: bound.itemId })],
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_A)).toMatchObject({
+      sourceState: 'degraded',
+      v2Authorities: 1,
+      currentActivationV2Authorities: 1,
+      unboundV2Authorities: 0,
+      latestCurrentActivationV2At: bound.ts,
+    });
+    expect(compactRepairHandoffs()).toMatchObject({ available: false, before: 2 });
   });
 
   it('fails closed before appending a v2 row whose activation is malformed or after the event', () => {
@@ -315,17 +847,18 @@ describe('M362 durable repair handoff journal', () => {
     expect(existsSync(repairHandoffV2JournalPath())).toBe(false);
   });
 
-  it('quarantines activation metadata mutation for the same immutable attempt', () => {
+  it('rejects activation metadata mutation for the same immutable attempt', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);
     expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_A }))
       .toMatchObject({ recorded: 1, failed: 0 });
     expect(recordRepairHandoffsRaw(input, { schemaVersion: 2, activation: ACTIVATION_B }))
-      .toMatchObject({ recorded: 1, failed: 0 });
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
     expect(readRepairHandoffs()).toMatchObject({
-      sourceState: 'degraded',
-      conflictingIds: 1,
-      observations: [],
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({ writerActivationId: ACTIVATION_A.id })],
     });
   });
 
@@ -342,7 +875,7 @@ describe('M362 durable repair handoff journal', () => {
     expect(changed.generationId).not.toBe(first.generationId);
   });
 
-  it('projects newest route provenance without resetting objective control identity', () => {
+  it('keeps the first exact route tuple as the immutable generation anchor', () => {
     const repo = fx.makeRepo();
     const firstEvent = event(repo.dir, { tier: 'mid' });
     const newestEvent = event(repo.dir, {
@@ -358,25 +891,61 @@ describe('M362 durable repair handoff journal', () => {
     expect(read).toMatchObject({ sourceState: 'healthy', conflictingIds: 0 });
     expect(read.observations).toHaveLength(1);
     expect(read.observations[0]).toMatchObject({
-      parentBackend: 'codex',
-      parentTier: 'frontier',
-      parentAttemptId: newestEvent.trajectoryId,
+      ts: firstEvent.ts,
+      parentBackend: 'local-coder',
+      parentTier: 'mid',
+      parentAttemptId: firstEvent.trajectoryId,
+    });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toContain(newestEvent.trajectoryId!);
+  });
+
+  it('does not let a backdated recurrence replace the first durable anchor', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir, {
+      ts: '2026-07-10T12:00:00.000Z',
+      tier: 'mid',
+    });
+    const backdated = event(repo.dir, {
+      ts: '2026-07-10T11:00:00.000Z',
+      backend: 'codex',
+      tier: 'frontier',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    recordRepairHandoffs([first, backdated]);
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      observations: [{
+        ts: first.ts,
+        parentAttemptId: first.trajectoryId,
+        parentBackend: first.backend,
+        parentTier: first.tier,
+      }],
+    });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 2, removed: 0 });
+    expect(readRepairHandoffs().observations[0]).toMatchObject({
+      ts: first.ts,
+      parentAttemptId: first.trajectoryId,
     });
   });
 
-  it('fails closed on distinct v2 attempts with an equal timestamp', () => {
+  it('rejects a distinct v2 attempt with an equal timestamp before append', () => {
     const repo = fx.makeRepo();
-    recordRepairHandoffs([
+    expect(recordRepairHandoffs([
       event(repo.dir),
       event(repo.dir, {
         runId: 'attempt-22345678-1234-4123-8123-123456789abc',
         trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
       }),
-    ]);
+    ])).toEqual({ attempted: 2, recorded: 1, failed: 1 });
     expect(readRepairHandoffs()).toMatchObject({
-      sourceState: 'degraded',
-      conflictingIds: 1,
-      observations: [],
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({
+        parentAttemptId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
+      })],
     });
   });
 
@@ -556,6 +1125,10 @@ describe('M362 durable repair handoff journal', () => {
     const path = repairHandoffV2JournalPath();
     const conflict = { ...observation, parentTier: 'frontier' as const };
     writeFileSync(path, `${JSON.stringify(conflict)}\n`, { encoding: 'utf8', flag: 'a' });
+    const degraded = readFileSync(path, 'utf8');
+
+    expect(recordRepairHandoffs(event(repo.dir))).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(path, 'utf8')).toBe(degraded);
 
     const read = readRepairHandoffs();
     expect(read.sourceState).toBe('degraded');
@@ -675,6 +1248,62 @@ describe('M362 durable repair handoff journal', () => {
     }
   });
 
+  it('quarantines an exact parent with a conflicting backend/tier sibling', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:conflicting-parent-sibling' });
+    expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1, failed: 0 });
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-10.jsonl'),
+      `${JSON.stringify({ ...input, backend: 'codex', tier: 'frontier' })}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [],
+    });
+    expect(compactRepairHandoffs()).toMatchObject({ available: false, before: 1 });
+  });
+
+  it('quarantines a parent beyond the ledger tail without revoking an unrelated generation', () => {
+    const repo = fx.makeRepo();
+    const blocked = event(repo.dir, {
+      itemId: 'repo:self:parent-outside-tail',
+      objectiveHash: 'a'.repeat(64),
+    });
+    const healthy = event(repo.dir, {
+      itemId: 'repo:self:healthy-parent-generation',
+      objectiveHash: 'b'.repeat(64),
+      ts: '2026-07-11T12:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffs([blocked, healthy])).toMatchObject({ recorded: 2, failed: 0 });
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-10.jsonl'),
+      `${'x'.repeat(33 * 1024 * 1024)}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    const isolated = readRepairHandoffs();
+    expect(isolated).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      physicalRows: 2,
+      observations: [expect.objectContaining({
+        parentItemId: healthy.itemId,
+        generationId: repairHandoffFromDispatchEvent(healthy)!.generationId,
+      })],
+    });
+    expect(compactRepairHandoffs()).toEqual({ available: false, before: 2, after: 0, removed: 0 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [expect.objectContaining({ parentItemId: healthy.itemId })],
+    });
+  });
+
   it('keeps an exact parent authoritative beyond observational event limits', () => {
     const prior = process.env.ASHLR_HOME;
     process.env.ASHLR_HOME = fx.ashlrDir;
@@ -685,10 +1314,12 @@ describe('M362 durable repair handoff journal', () => {
       }))).toMatchObject({ recorded: 1, failed: 0 });
       const parentPath = join(dispatchProductionDir(), '2026-07-10.jsonl');
       const existing = readFileSync(parentPath, 'utf8');
-      const unrelated = Array.from({ length: 2_001 }, (_, index) => JSON.stringify(event(repo.dir, {
-        itemId: `repo:self:unrelated-${index}`,
-        ts: '2026-07-10T13:00:00.000Z',
-      }))).join('\n');
+      const unrelated = Array.from({ length: 2_001 }, (_, index) => JSON.stringify(
+        sanitizeDispatchProductionEvent(event(repo.dir, {
+          itemId: `repo:self:unrelated-${index}`,
+          ts: '2026-07-10T13:00:00.000Z',
+        }), { materializeLearningLabel: true }),
+      )).join('\n');
       writeFileSync(parentPath, `${existing}${unrelated}\n`, { mode: 0o600 });
 
       expect(readRepairHandoffs()).toMatchObject({
@@ -718,6 +1349,34 @@ describe('M362 durable repair handoff journal', () => {
     }
   });
 
+  it('journal activation authority: reconciles a file-durable append crash before parent settlement', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:file-durable-append-crash' });
+    expect(recordDispatchProduction(input)).toMatchObject({ recorded: 1, failed: 0 });
+    const durableAfterCrash = {
+      ...repairHandoffFromDispatchEvent(input)!,
+      writerActivationId: ACTIVATION_A.id,
+      writerActivatedAt: ACTIVATION_A.activatedAt,
+    };
+    mkdirSync(dirname(repairHandoffV2JournalPath()), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      repairHandoffV2JournalPath(),
+      `${JSON.stringify(durableAfterCrash)}\n`,
+      { mode: 0o600 },
+    );
+
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      physicalRows: 1,
+      observations: [expect.objectContaining({
+        eventId: durableAfterCrash.eventId,
+        parentItemId: input.itemId,
+      })],
+    });
+  });
+
   it('canonicalizes a lexical parent repo while scrubbing non-identity metadata', () => {
     const repo = fx.makeRepo();
     const secret = 'github_pat_1234567890abcdefghijklmnop';
@@ -736,7 +1395,7 @@ describe('M362 durable repair handoff journal', () => {
     expect(parentRaw).not.toContain(secret);
   });
 
-  it('quarantines schema authority placed in the wrong journal', () => {
+  it('rejects exact replay when combined v1 and v2 authority is quarantined', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir, { itemId: 'repo:self:cross-journal-conflict' });
     expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1 });
@@ -753,10 +1412,57 @@ describe('M362 durable repair handoff journal', () => {
       conflictingIds: 1,
       observations: [],
     });
+    const durableV2 = readFileSync(repairHandoffV2JournalPath(), 'utf8');
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toBe(durableV2);
     expect(compactRepairHandoffs()).toMatchObject({ available: false });
   });
 
-  it('isolates a torn tail and preserves a later valid append', () => {
+  it('rejects a fresh append while the sibling journal is malformed', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:malformed-v1-sibling' });
+    mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true, mode: 0o700 });
+    writeFileSync(repairHandoffJournalPath(), '{}\n', { mode: 0o600 });
+
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(existsSync(repairHandoffV2JournalPath())).toBe(false);
+
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 1, after: 0, removed: 1 });
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', invalidRows: 0 });
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  });
+
+  it.each([
+    'append-file-fsync',
+    'append-path-verification',
+    'append-directory-fsync',
+  ] as const)('deterministically reconciles exact replay after %s failure', (faultPoint) => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: `repo:self:${faultPoint}` });
+    const visits: string[] = [];
+    let inject = true;
+    _setRepairHandoffJournalFaultForTest((point) => {
+      visits.push(point);
+      if (point === faultPoint && inject) {
+        inject = false;
+        throw new Error(`injected ${point} failure`);
+      }
+    });
+
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toContain(input.itemId);
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(visits.filter((point) => point === faultPoint)).toHaveLength(2);
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      invalidRows: 0,
+      physicalRows: 1,
+    });
+  });
+
+  it('requires torn-tail compaction to restore health before any later append', () => {
     const repo = fx.makeRepo();
     const first = event(repo.dir, { itemId: 'repo:self:first' });
     const second = event(repo.dir, {
@@ -767,17 +1473,82 @@ describe('M362 durable repair handoff journal', () => {
     });
     recordRepairHandoffs(first);
     writeFileSync(repairHandoffV2JournalPath(), '{"partial":', { encoding: 'utf8', flag: 'a' });
+    const degraded = readFileSync(repairHandoffV2JournalPath(), 'utf8');
+
+    expect(recordRepairHandoffs(first)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toBe(degraded);
+    expect(recordRepairHandoffs(second)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toBe(degraded);
+
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 1, after: 1, removed: 0 });
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', invalidRows: 0 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).not.toContain('{"partial":');
     expect(recordRepairHandoffs(second)).toMatchObject({ recorded: 1, failed: 0 });
 
     const read = readRepairHandoffs();
-    expect(read.sourceState).toBe('degraded');
-    expect(read.invalidRows).toBe(1);
+    expect(read.sourceState).toBe('healthy');
+    expect(read.invalidRows).toBe(0);
     expect(read.observations.map((row) => row.parentItemId).sort()).toEqual([
       'repo:self:first',
       'repo:self:second',
     ]);
-    expect(compactRepairHandoffs()).toEqual({ available: true, before: 3, after: 2, removed: 1 });
-    expect(readRepairHandoffs().sourceState).toBe('healthy');
+  });
+
+  it('rejects exact replay when physical rows exceed the durable journal limit', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:over-limit-replay' });
+    expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    writeFileSync(path, '{}\n'.repeat(100_000), { encoding: 'utf8', flag: 'a' });
+    const overLimit = readFileSync(path, 'utf8');
+
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(path, 'utf8')).toBe(overLimit);
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      limitExceeded: true,
+      physicalRows: 100_001,
+    });
+  });
+
+  it('reserves capacity for a torn tail before appending its separator', () => {
+    const repo = fx.makeRepo();
+    const first = event(repo.dir, { itemId: 'repo:self:capacity-anchor' });
+    const next = event(repo.dir, {
+      itemId: 'repo:self:capacity-next',
+      ts: '2026-07-10T12:01:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    });
+    expect(recordRepairHandoffs(first)).toMatchObject({ recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    writeFileSync(path, `${'{}\n'.repeat(99_998)}{`, { encoding: 'utf8', flag: 'a' });
+    const atCapacityAfterSeparator = readFileSync(path, 'utf8');
+
+    expect(readRepairHandoffs()).toMatchObject({ physicalRows: 99_999, limitExceeded: false });
+    expect(recordRepairHandoffs(next)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(path, 'utf8')).toBe(atCapacityAfterSeparator);
+  });
+
+  it('fails compaction unavailable without rewriting an oversized unreadable journal', () => {
+    const path = repairHandoffV2JournalPath();
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, '', { mode: 0o600 });
+    truncateSync(path, 256 * 1024 * 1024 + 1);
+    const oversizedBytes = statSync(path).size;
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      limitExceeded: true,
+      physicalRows: 0,
+    });
+    expect(compactRepairHandoffs()).toEqual({
+      available: false,
+      before: 0,
+      after: 0,
+      removed: 0,
+    });
+    expect(statSync(path).size).toBe(oversizedBytes);
   });
 
   it('reconstructs an old unprojected child without dispatch-history limits', async () => {
@@ -819,9 +1590,16 @@ describe('M362 durable repair handoff journal', () => {
     const script = [
       `import { queueSelfHealItem } from './src/core/fleet/self-heal.ts';`,
       `const item = JSON.parse(process.env.ASHLR_TEST_ITEM);`,
-      `process.exit(queueSelfHealItem(item) ? 0 : 1);`,
+      `const queued = queueSelfHealItem(item);`,
+      `if (!queued) console.error(JSON.stringify({ queued, itemId: item.id }));`,
+      `process.exit(queued ? 0 : 1);`,
     ].join(' ');
-    const children = Array.from({ length: 12 }, (_, index) => new Promise<void>((resolve, reject) => {
+    const children = Array.from({ length: 12 }, (_, index) => new Promise<{
+      index: number;
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      stderr: string;
+    }>((resolve, reject) => {
       const child = spawn(join(process.cwd(), 'node_modules', '.bin', 'tsx'), ['-e', script], {
         cwd: process.cwd(),
         env: {
@@ -844,11 +1622,19 @@ describe('M362 durable repair handoff journal', () => {
         },
         stdio: 'pipe',
       });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
       child.once('error', reject);
-      child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`queue child exited ${code}`)));
+      child.once('exit', (code, signal) => resolve({ index, code, signal, stderr }));
     }));
 
-    await Promise.all(children);
+    const outcomes = await Promise.all(children);
+    expect(outcomes).toEqual(outcomes.map((outcome) => ({
+      index: outcome.index,
+      code: 0,
+      signal: null,
+      stderr: '',
+    })));
     const queue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as Array<{ id: string }>;
     expect(queue).toHaveLength(12);
     expect(new Set(queue.map((item) => item.id)).size).toBe(12);
@@ -856,10 +1642,12 @@ describe('M362 durable repair handoff journal', () => {
 
   it('preserves a concurrent journal burst and collapses replay by semantic event id', async () => {
     const repo = fx.makeRepo();
+    mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
     const script = [
       `import { recordRepairHandoffs } from './src/core/fleet/repair-handoff-journal.ts';`,
       `const event = JSON.parse(process.env.ASHLR_TEST_EVENT);`,
       `const result = recordRepairHandoffs(event, { schemaVersion: 2, activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2026-07-10T11:00:00.000Z' } });`,
+      `if (result.recorded !== 1) console.error(JSON.stringify(result));`,
       `process.exit(result.recorded === 1 ? 0 : 1);`,
     ].join(' ');
     const inputs = Array.from({ length: 12 }, (_, index) => event(repo.dir, {
@@ -867,7 +1655,12 @@ describe('M362 durable repair handoff journal', () => {
       runId: `attempt-${String(index).padStart(8, '0')}-1234-4123-8123-123456789abc`,
       trajectoryId: `run:attempt-${String(index).padStart(8, '0')}-1234-4123-8123-123456789abc`,
     }));
-    await Promise.all(inputs.map((input) => new Promise<void>((resolve, reject) => {
+    const outcomes = await Promise.all(inputs.map((input, index) => new Promise<{
+      index: number;
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      stderr: string;
+    }>((resolve, reject) => {
       const child = spawn(join(process.cwd(), 'node_modules', '.bin', 'tsx'), ['-e', script], {
         cwd: process.cwd(),
         env: {
@@ -878,8 +1671,16 @@ describe('M362 durable repair handoff journal', () => {
         },
         stdio: 'pipe',
       });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
       child.once('error', reject);
-      child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`journal child exited ${code}`)));
+      child.once('exit', (code, signal) => resolve({ index, code, signal, stderr }));
+    })));
+    expect(outcomes).toEqual(outcomes.map((outcome) => ({
+      index: outcome.index,
+      code: 0,
+      signal: null,
+      stderr: '',
     })));
     recordRepairHandoffsRaw(inputs[0]!, {
       schemaVersion: 2,
@@ -893,6 +1694,66 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.sourceState).toBe('healthy');
     expect(read.observations).toHaveLength(12);
     expect(new Set(read.observations.map((row) => row.eventId)).size).toBe(12);
+  }, 20_000);
+
+  it('serializes an equal-time activation race and keeps exact replay idempotent', async () => {
+    const repo = fx.makeRepo();
+    const activations: RepairHandoffV2Activation[] = [
+      ACTIVATION_A,
+      { id: '33333333-3333-4333-8333-333333333333', activatedAt: ACTIVATION_A.activatedAt },
+    ];
+    const inputs = activations.map((_activation, index) => event(repo.dir, {
+      itemId: `repo:self:activation-race-${index}`,
+      objectiveHash: `${index + 1}`.repeat(64),
+      runId: `attempt-${index + 1}2345678-1234-4123-8123-123456789abc`,
+      trajectoryId: `run:attempt-${index + 1}2345678-1234-4123-8123-123456789abc`,
+    }));
+    const script = [
+      `import { recordRepairHandoffs } from './src/core/fleet/repair-handoff-journal.ts';`,
+      `const payload = JSON.parse(process.env.ASHLR_TEST_PAYLOAD);`,
+      `console.log(JSON.stringify(recordRepairHandoffs(payload.event, { schemaVersion: 2, activation: payload.activation })));`,
+    ].join(' ');
+    const results = await Promise.all(inputs.map((input, index) => new Promise<{
+      attempted: number;
+      recorded: number;
+      failed: number;
+    }>((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      const child = spawn(join(process.cwd(), 'node_modules', '.bin', 'tsx'), ['-e', script], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: fx.home,
+          USERPROFILE: fx.home,
+          ASHLR_HOME: fx.ashlrDir,
+          ASHLR_TEST_PAYLOAD: JSON.stringify({ event: input, activation: activations[index] }),
+        },
+        stdio: 'pipe',
+      });
+      child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', (code) => {
+        if (code !== 0) reject(new Error(`activation race child exited ${code}: ${stderr}`));
+        else resolve(JSON.parse(stdout.trim()));
+      });
+    })));
+
+    expect(results.map((result) => result.recorded).sort()).toEqual([0, 1]);
+    expect(results.map((result) => result.failed).sort()).toEqual([0, 1]);
+    const winner = results.findIndex((result) => result.recorded === 1);
+    expect(recordRepairHandoffsRaw(inputs[winner]!, {
+      schemaVersion: 2,
+      activation: activations[winner]!,
+    })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({ parentItemId: inputs[winner]!.itemId })],
+    });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
   }, 20_000);
 
   it('does not let an older pending proposal suppress a newer repair generation', () => {
@@ -933,13 +1794,17 @@ describe('M362 durable repair handoff journal', () => {
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
     const first = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const firstCooldownKey = generatedRepairCooldownKey(first);
-    recordGeneratedRepairLifecycle(first, {
-      kind: 'proposal-created',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      proposalId: 'prop-terminal-generation',
-    });
+    const terminal = recordDiagnosticProposal(
+      first,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'prop-terminal-generation',
+    );
+    expect(terminal.transition).toMatchObject({ available: true, disposition: 'retired', recorded: true });
+    expect(readGeneratedRepairLifecycle(first)).toMatchObject({ available: true, disposition: 'retired' });
 
-    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:01:00.000Z'));
+    queueProposalRepairWorkForPendingProposals(undefined, new Date(), {
+      lifecycleProposals: [terminal.proposal],
+    });
     expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
 
     const recurrence = event(repo.dir, {
@@ -949,12 +1814,17 @@ describe('M362 durable repair handoff journal', () => {
     });
     recordRepairHandoffs(recurrence);
     const recurrenceHandoff = repairHandoffFromDispatchEvent(recurrence)!;
-    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T15:00:00.000Z'));
+    queueProposalRepairWorkForPendingProposals(undefined, new Date(), {
+      lifecycleProposals: [terminal.proposal],
+    });
     const active = await scanQueuedAutonomyWork(repo.dir);
 
     expect(active).toEqual([]);
     expect(recurrenceHandoff.generationId).toBe(first.repairGenerationId);
-    expect(readGeneratedRepairLifecycle(first).disposition).toBe('retired');
+    expect(readGeneratedRepairLifecycle(first)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
     recordOutcome(firstCooldownKey, 'empty');
     expect(recentlyDeclined(firstCooldownKey, 60_000)).toBe(true);
     expect(generatedRepairCooldownKey({ ...first, repairGenerationId: recurrenceHandoff.generationId }))
@@ -968,12 +1838,13 @@ describe('M362 durable repair handoff journal', () => {
     recordRepairHandoffs(firstEvent);
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
     const first = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(first, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    recordDiagnosticEmpty(
+      first,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+      1,
+    );
 
     const recurrence = event(repo.dir, {
       ts: '2026-07-10T14:00:00.000Z',
@@ -988,16 +1859,57 @@ describe('M362 durable repair handoff journal', () => {
 
     expect(current.repairGenerationId).toBe(first.repairGenerationId);
     expect(readGeneratedRepairLifecycle(current)).toMatchObject({
+      available: true,
       disposition: 'active',
       authoritativeEmptyRuns: 1,
     });
-    const exhausted = recordGeneratedRepairLifecycle(current, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
+    expect(recordDiagnosticEmpty(
+      current,
+      'attempt-52345678-1234-4123-8123-123456789abc',
+      'kimi',
+      'mid',
+      2,
+    )).toMatchObject({ disposition: 'quarantined', authoritativeEmptyRuns: 2 });
+  });
+
+  it('preserves generation proof across an intentional writer activation rollover', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const firstEvent = event(repo.dir, { tier: 'mid' });
+    expect(recordRepairHandoffsRaw(firstEvent, { schemaVersion: 2, activation: ACTIVATION_A }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
+    const first = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    expect(recordDiagnosticEmpty(
+      first,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+      1,
+    )).toMatchObject({ available: true, disposition: 'active', authoritativeEmptyRuns: 1 });
+
+    const rollover = event(repo.dir, {
+      ts: '2026-07-10T14:00:00.000Z',
+      backend: 'codex',
+      tier: 'frontier',
+      runId: 'attempt-42345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-42345678-1234-4123-8123-123456789abc',
     });
-    expect(exhausted).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
+    expect(recordRepairHandoffsRaw(rollover, { schemaVersion: 2, activation: ACTIVATION_B }))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T15:00:00.000Z'));
+    const current = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+
+    expect(current.repairGenerationId).toBe(first.repairGenerationId);
+    expect(readGeneratedRepairLifecycle(current)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+    });
+    expect(readRepairHandoffSchemaSummary(ACTIVATION_B)).toMatchObject({
+      currentActivationV2Authorities: 1,
+      latestCurrentActivationV2At: rollover.ts,
+    });
   });
 
   it('carries exact hashful v1 control evidence into the v2 objective family', async () => {
@@ -1010,12 +1922,13 @@ describe('M362 durable repair handoff journal', () => {
     writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(v1)}\n`, { mode: 0o600 });
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
     const legacyItem = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(legacyItem, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    recordDiagnosticEmpty(
+      legacyItem,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+      1,
+    );
     recordOutcome(generatedRepairCooldownKey(legacyItem), 'empty');
 
     const recurrence = event(repo.dir, {
@@ -1028,9 +1941,16 @@ describe('M362 durable repair handoff journal', () => {
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T15:00:00.000Z'));
     const current = (await scanQueuedAutonomyWork(repo.dir))[0]!;
 
+    const v2GenerationId = repairHandoffFromDispatchEvent(recurrence)!.generationId;
     expect(current.repairGenerationId).not.toBe(legacyItem.repairGenerationId);
+    expect(current.repairGenerationId).toBe(v2GenerationId);
+    expect(generatedRepairGenerationIds(current)).toEqual(expect.arrayContaining([
+      legacyItem.repairGenerationId,
+      v2GenerationId,
+    ]));
     expect(generatedRepairCooldownKeys(current)).toContain(generatedRepairCooldownKey(legacyItem));
     expect(readGeneratedRepairLifecycle(current)).toMatchObject({
+      available: true,
       disposition: 'active',
       authoritativeEmptyRuns: 1,
     });
@@ -1046,12 +1966,13 @@ describe('M362 durable repair handoff journal', () => {
     expect(pendingProposalItemKeysForBacklog([current], [oldProposal]))
       .toContain(workItemCoverageKey(current));
 
-    expect(recordGeneratedRepairLifecycle(current, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
-    })).toMatchObject({ disposition: 'quarantined', authoritativeEmptyRuns: 2 });
+    expect(recordDiagnosticEmpty(
+      current,
+      'attempt-52345678-1234-4123-8123-123456789abc',
+      'kimi',
+      'mid',
+      2,
+    )).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
   });
 
   it.each([
@@ -1119,12 +2040,13 @@ describe('M362 durable repair handoff journal', () => {
     writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(v1)}\n`, { mode: 0o600 });
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T13:00:00.000Z'));
     const legacyItem = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(legacyItem, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      backend: 'codex',
-      tier: 'frontier',
-    });
+    recordDiagnosticEmpty(
+      legacyItem,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'codex',
+      'frontier',
+      1,
+    );
     const lifecycle = JSON.parse(readFileSync(generatedRepairLifecyclePath(), 'utf8')) as {
       records: Array<{ emptyAttemptTiers?: string[] }>;
     };
@@ -1141,15 +2063,15 @@ describe('M362 durable repair handoff journal', () => {
     recordRepairHandoffs(recurrence);
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T15:00:00.000Z'));
     const current = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    const second = recordGeneratedRepairLifecycle(current, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-52345678-1234-4123-8123-123456789abc',
-      backend: 'claude',
-      tier: 'frontier',
-    });
+    const second = recordDiagnosticEmpty(
+      current,
+      'attempt-52345678-1234-4123-8123-123456789abc',
+      'claude',
+      'frontier',
+      2,
+    );
 
-    expect(second).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2 });
-    expect(second).not.toMatchObject({ disposition: 'quarantined' });
+    expect(second).toMatchObject({ available: false, disposition: 'active', authoritativeEmptyRuns: 0 });
   });
 
   it('preserves terminal objective control when the writer rolls back from v2 to v1', async () => {
@@ -1163,18 +2085,20 @@ describe('M362 durable repair handoff journal', () => {
     expect(recordRepairHandoffsRaw(firstEvent)).toMatchObject({ recorded: 1 });
     queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T12:30:00.000Z'));
     const legacyItem = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(legacyItem, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
-    expect(recordGeneratedRepairLifecycle(legacyItem, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-42345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
-    })).toMatchObject({ disposition: 'quarantined' });
+    recordDiagnosticEmpty(
+      legacyItem,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+      1,
+    );
+    expect(recordDiagnosticEmpty(
+      legacyItem,
+      'attempt-42345678-1234-4123-8123-123456789abc',
+      'kimi',
+      'mid',
+      2,
+    )).toMatchObject({ disposition: 'quarantined' });
 
     const v2Event = event(repo.dir, {
       ...firstEvent,
@@ -1210,10 +2134,10 @@ describe('M362 durable repair handoff journal', () => {
       repairHandoffFromDispatchEvent(v2Event)!.generationId,
       latest.generationId,
     ]));
-    expect(readGeneratedRepairLifecycle(rollbackItem)).toMatchObject({
-      available: true,
-      disposition: 'quarantined',
-      authoritativeEmptyRuns: 2,
+    expect(readGeneratedRepairLifecycle(rollbackItem)).toEqual({
+      available: false,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
     });
     expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
   });
@@ -1239,18 +2163,24 @@ describe('M362 durable repair handoff journal', () => {
     expect(new Set(queued.map((item) => item.repairGenerationId)).size).toBe(7);
   });
 
-  it('quarantines timestamp mutation within one v2 parent attempt', () => {
+  it('rejects timestamp mutation within one v2 parent attempt before append', () => {
     const repo = fx.makeRepo();
     const first = event(repo.dir, { ts: '2026-07-10T12:00:00.000Z' });
     const replay = event(repo.dir, { ts: '2026-07-10T12:05:00.000Z' });
-    recordRepairHandoffs([first, replay]);
+    expect(recordRepairHandoffs([first, replay]))
+      .toEqual({ attempted: 2, recorded: 1, failed: 1 });
 
     const read = readRepairHandoffs();
-    expect(read).toMatchObject({ sourceState: 'degraded', conflictingIds: 1, observations: [] });
-    expect(compactRepairHandoffs()).toMatchObject({ available: false });
+    expect(read).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      physicalRows: 1,
+      observations: [expect.objectContaining({ ts: first.ts })],
+    });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 1, after: 1, removed: 0 });
   });
 
-  it('projects the newest v2 attempt while compaction preserves attempt history', () => {
+  it('projects the immutable first v2 attempt while compaction preserves recurrence history', () => {
     const repo = fx.makeRepo();
     const first = event(repo.dir, {
       ts: '2026-07-10T12:00:00.000Z',
@@ -1268,7 +2198,12 @@ describe('M362 durable repair handoff journal', () => {
     const read = readRepairHandoffs();
     expect(read.sourceState).toBe('healthy');
     expect(read.observations).toHaveLength(1);
-    expect(read.observations[0]!.parentAttemptId).toBe(newest.trajectoryId);
+    expect(read.observations[0]).toMatchObject({
+      ts: first.ts,
+      parentAttemptId: first.trajectoryId,
+      parentBackend: first.backend,
+      parentTier: first.tier,
+    });
     expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
   });
 

@@ -29,11 +29,16 @@ const RAW_REPOSITORY = '/private/worktrees/docs-canary';
 const RAW_FETCH = 'https://token@example.invalid/owner/repo.git';
 const RAW_PUSH = 'git@example.invalid:owner/repo.git';
 const RAW_SHADOW_REASON = 'path is outside the documentation allowlist: /private/secret.md';
+const ACTIVE_FIXTURE_TIME = '2026-07-13T12:00:01.000Z';
 
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 let previousAshlrHome: string | undefined;
+
+function activeFixtureNow(): Date {
+  return new Date(ACTIVE_FIXTURE_TIME);
+}
 
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -450,12 +455,14 @@ describe('bounded shadow auto-merge canary store', () => {
     const evidence = shadowEvidence(active);
     const revisionEnv = { ...env, CANARY_CAS: JSON.stringify(cas(active)), CANARY_EVIDENCE: JSON.stringify(evidence) };
     expect(await runCrashingChild(crashSource('revision', false, String.raw`
+      const evidence = JSON.parse(process.env.CANARY_EVIDENCE);
       store.appendShadowObservation(
         JSON.parse(process.env.CANARY_CAS),
-        JSON.parse(process.env.CANARY_EVIDENCE),
+        evidence,
+        { now: new Date(evidence.observedAt) },
       );
     `), revisionEnv)).toBe(72);
-    const recoveredRevision = readAutomergeCanaryStore();
+    const recoveredRevision = readAutomergeCanaryStore({ now: activeFixtureNow() });
     expect(recoveredRevision).toMatchObject({
       sourceState: 'healthy', active: true, state: { revision: 2, state: 'shadow' },
     });
@@ -492,7 +499,7 @@ describe('bounded shadow auto-merge canary store', () => {
     expect(first.lastShadowEvidence).toBeNull();
 
     const evidence = shadowEvidence(first, { casRetries: 1 });
-    const appended = appendShadowObservation(cas(first), evidence);
+    const appended = appendShadowObservation(cas(first), evidence, { now: activeFixtureNow() });
     const { observationDigest: _staleDigest, casRetries: _retry, ...canonicalEvidence } = evidence;
     const reboundDigest = canonicalRetryObservationDigest(first, canonicalEvidence);
     expect(appended).toMatchObject({
@@ -531,9 +538,9 @@ describe('bounded shadow auto-merge canary store', () => {
     const fabricated = appendShadowObservation(cas(appended.state), {
       ...shadowEvidence(appended.state),
       counters: { admissions: 1, merges: 1, inFlight: 0, rollbacks: 0 },
-    } as AutoMergeCanaryShadowObservationInput);
+    } as AutoMergeCanaryShadowObservationInput, { now: new Date(appended.state.clockHighWater) });
     expect(fabricated).toEqual({ ok: false, reason: 'invalid' });
-    expect(readAutomergeCanaryStore().state?.revision).toBe(2);
+    expect(readAutomergeCanaryStore({ now: new Date(appended.state.clockHighWater) }).state?.revision).toBe(2);
   });
 
   it.each([
@@ -586,7 +593,7 @@ describe('bounded shadow auto-merge canary store', () => {
       fileCount: 0,
       lineCount: 0,
     });
-    const appended = appendShadowObservation(cas(first), binding);
+    const appended = appendShadowObservation(cas(first), binding, { now: activeFixtureNow() });
     expect(appended).toMatchObject({
       ok: true,
       state: {
@@ -600,49 +607,61 @@ describe('bounded shadow auto-merge canary store', () => {
     expect(appendShadowObservation(cas(appended.state), {
       ...next,
       outcome: 'binding-mismatch',
-    })).toEqual({ ok: false, reason: 'invalid' });
+    }), { now: new Date(appended.state.clockHighWater) }).toEqual({ ok: false, reason: 'invalid' });
     expect(appendShadowObservation(cas(appended.state), {
       ...next,
       casRetries: 2,
-    } as AutoMergeCanaryShadowObservationInput)).toEqual({ ok: false, reason: 'invalid' });
+    } as AutoMergeCanaryShadowObservationInput, { now: new Date(appended.state.clockHighWater) }))
+      .toEqual({ ok: false, reason: 'invalid' });
     expect(appendShadowObservation(cas(appended.state), {
       ...next,
       rawReason: RAW_SHADOW_REASON,
-    } as AutoMergeCanaryShadowObservationInput)).toEqual({ ok: false, reason: 'invalid' });
-    expect(readAutomergeCanaryStore().state?.revision).toBe(2);
+    } as AutoMergeCanaryShadowObservationInput, { now: new Date(appended.state.clockHighWater) }))
+      .toEqual({ ok: false, reason: 'invalid' });
+    expect(readAutomergeCanaryStore({ now: new Date(appended.state.clockHighWater) }).state?.revision).toBe(2);
   });
 
   it('deduplicates an observation digest idempotently without consuming a revision', () => {
     const first = activate();
     const evidence = shadowEvidence(first);
-    const appended = appendShadowObservation(cas(first), evidence);
+    const appended = appendShadowObservation(cas(first), evidence, { now: activeFixtureNow() });
     expect(appended.ok).toBe(true);
     if (!appended.ok) return;
 
-    expect(appendShadowObservation(cas(first), evidence)).toMatchObject({
+    expect(appendShadowObservation(cas(first), evidence, {
+      now: new Date(appended.state.clockHighWater),
+    })).toMatchObject({
       ok: true,
       state: { revision: 2, shadowCounters: { attempts: 1 } },
     });
-    expect(appendShadowObservation(cas(appended.state), evidence)).toMatchObject({
+    expect(appendShadowObservation(cas(appended.state), evidence, {
+      now: new Date(appended.state.clockHighWater),
+    })).toMatchObject({
       ok: true,
       state: { revision: 2, shadowCounters: { attempts: 1 } },
     });
-    const newer = appendShadowObservation(cas(appended.state), shadowEvidence(appended.state, {
+    const newerEvidence = shadowEvidence(appended.state, {
       observationDigest: digest('newer-shadow-observation'),
       outcome: 'rejected',
       treeOid: null,
       fileCount: 0,
       lineCount: 0,
-    }));
+    });
+    const newer = appendShadowObservation(cas(appended.state), newerEvidence, {
+      now: new Date(newerEvidence.observedAt),
+    });
     expect(newer).toMatchObject({ ok: true, state: { revision: 3, shadowCounters: { attempts: 2 } } });
-    expect(appendShadowObservation(cas(first), evidence)).toMatchObject({
+    if (!newer.ok) return;
+    expect(appendShadowObservation(cas(first), evidence, {
+      now: new Date(newer.state.clockHighWater),
+    })).toMatchObject({
       ok: true,
       state: { revision: 3, shadowCounters: { attempts: 2 } },
     });
     expect(appendShadowObservation(cas(first), {
       ...evidence,
       reasonDigest: digest('different-reason-with-reused-digest'),
-    })).toEqual({ ok: false, reason: 'invalid' });
+    }, { now: new Date(newer.state.clockHighWater) })).toEqual({ ok: false, reason: 'invalid' });
     expect(revisionFiles()).toHaveLength(3);
   });
 
@@ -682,7 +701,9 @@ describe('bounded shadow auto-merge canary store', () => {
     const halted = haltShadow(cas(active), { now: new Date(activeEvidence.observedAt) });
     expect(halted.ok).toBe(true);
     const haltedBefore = metadataSnapshot(path.join(home, '.ashlr'));
-    expect(appendShadowObservation(cas(active), activeEvidence)).toEqual({ ok: false, reason: 'conflict' });
+    expect(appendShadowObservation(cas(active), activeEvidence, {
+      now: new Date(activeEvidence.observedAt),
+    })).toEqual({ ok: false, reason: 'conflict' });
     expect(metadataSnapshot(path.join(home, '.ashlr'))).toEqual(haltedBefore);
 
     fs.rmSync(home, { recursive: true, force: true });
@@ -694,7 +715,9 @@ describe('bounded shadow auto-merge canary store', () => {
     expect(requested.ok).toBe(true);
     if (!requested.ok) return;
     const requestedBefore = metadataSnapshot(path.join(home, '.ashlr'));
-    expect(appendShadowObservation(cas(requested.state), shadowEvidence(requested.state)))
+    expect(appendShadowObservation(cas(requested.state), shadowEvidence(requested.state), {
+      now: new Date(requested.state.clockHighWater),
+    }))
       .toEqual({ ok: false, reason: 'conflict' });
     expect(metadataSnapshot(path.join(home, '.ashlr'))).toEqual(requestedBefore);
   });
@@ -747,7 +770,7 @@ describe('bounded shadow auto-merge canary store', () => {
 
   it('detects HMAC tampering and validly signed shadow counter or transition fabrication', () => {
     const first = activate();
-    const appended = appendShadowObservation(cas(first), shadowEvidence(first));
+    const appended = appendShadowObservation(cas(first), shadowEvidence(first), { now: activeFixtureNow() });
     expect(appended.ok).toBe(true);
     const latest = revisionFiles().at(-1)!;
     fs.writeFileSync(latest, fs.readFileSync(latest, 'utf8').replace('"attempts":1', '"attempts":2'));
@@ -756,7 +779,8 @@ describe('bounded shadow auto-merge canary store', () => {
     fs.rmSync(home, { recursive: true, force: true });
     fs.mkdirSync(home, { mode: 0o700 });
     const second = activate();
-    expect(appendShadowObservation(cas(second), shadowEvidence(second)).ok).toBe(true);
+    expect(appendShadowObservation(cas(second), shadowEvidence(second), { now: activeFixtureNow() }).ok)
+      .toBe(true);
     rewriteSignedRecord(revisionFiles().at(-1)!, (row) => {
       row['shadowCounters'] = {
         attempts: 2,
@@ -772,7 +796,9 @@ describe('bounded shadow auto-merge canary store', () => {
     fs.rmSync(home, { recursive: true, force: true });
     fs.mkdirSync(home, { mode: 0o700 });
     const third = activate();
-    const thirdObservation = appendShadowObservation(cas(third), shadowEvidence(third));
+    const thirdObservation = appendShadowObservation(cas(third), shadowEvidence(third), {
+      now: activeFixtureNow(),
+    });
     expect(thirdObservation.ok).toBe(true);
     if (!thirdObservation.ok) return;
     const ordinary = appendRevision(cas(thirdObservation.state), { state: 'shadow' }, {
@@ -854,11 +880,14 @@ describe('bounded shadow auto-merge canary store', () => {
     }
     expect(state.revision).toBe(63);
     expect(revisionFiles()).toHaveLength(63);
-    expect(appendRevision(cas(state), { state: 'shadow' })).toEqual({ ok: false, reason: 'capacity' });
-    expect(appendShadowObservation(cas(state), shadowEvidence(state)))
+    expect(appendRevision(cas(state), { state: 'shadow' }, { now: new Date(state.clockHighWater) }))
+      .toEqual({ ok: false, reason: 'capacity' });
+    expect(appendShadowObservation(cas(state), shadowEvidence(state), {
+      now: new Date(state.clockHighWater),
+    }))
       .toEqual({ ok: false, reason: 'capacity' });
     expect(revisionFiles()).toHaveLength(63);
-    expect(readAutomergeCanaryStore()).toMatchObject({
+    expect(readAutomergeCanaryStore({ now: new Date(state.clockHighWater) })).toMatchObject({
       sourceState: 'healthy',
       severity: 'critical',
       status: 'critical',
@@ -1116,9 +1145,11 @@ describe('bounded shadow auto-merge canary store', () => {
     });
     const source = String.raw`
       import { appendShadowObservation } from './src/core/fleet/automerge-canary-store.ts';
+      const evidence = JSON.parse(process.env.CANARY_EVIDENCE);
       const result = appendShadowObservation(
         JSON.parse(process.env.CANARY_CAS),
-        JSON.parse(process.env.CANARY_EVIDENCE),
+        evidence,
+        { now: new Date(evidence.observedAt) },
       );
       process.stdout.write(JSON.stringify(result));
     `;
@@ -1134,13 +1165,13 @@ describe('bounded shadow auto-merge canary store', () => {
     expect(results.filter((result) => result['ok'] === true), JSON.stringify(results)).toHaveLength(1);
     expect(results.filter((result) => result['reason'] === 'conflict'), JSON.stringify(results)).toHaveLength(1);
 
-    const winner = readAutomergeCanaryStore().state!;
+    const winner = readAutomergeCanaryStore({ now: activeFixtureNow() }).state!;
     expect(winner).toMatchObject({
       revision: 2,
       counters: { admissions: 0, merges: 0, inFlight: 0, rollbacks: 0 },
       shadowCounters: { attempts: 1, casRetries: 0 },
     });
-    const retry = appendShadowObservation(cas(winner), shadowEvidence(winner, {
+    const retryEvidence = shadowEvidence(winner, {
       observationDigest: digest('observer-retry-success'),
       outcome: 'inspection-error',
       baseOid: null,
@@ -1151,7 +1182,10 @@ describe('bounded shadow auto-merge canary store', () => {
       pathDigest: null,
       reasonDigest: digest('observer refreshed after CAS conflict'),
       casRetries: 1,
-    }));
+    });
+    const retry = appendShadowObservation(cas(winner), retryEvidence, {
+      now: new Date(retryEvidence.observedAt),
+    });
     expect(retry).toMatchObject({
       ok: true,
       state: {
@@ -1172,7 +1206,7 @@ describe('bounded shadow auto-merge canary store', () => {
     const reboundDigest = canonicalRetryObservationDigest(first, canonicalEvidence);
 
     expect(reboundDigest).not.toBe(staleDigest);
-    const appended = appendShadowObservation(cas(first), retried);
+    const appended = appendShadowObservation(cas(first), retried, { now: new Date(retriedAt) });
     expect(appended).toMatchObject({
       ok: true,
       state: {

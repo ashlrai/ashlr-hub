@@ -207,6 +207,22 @@ describe('M374 bounded detailed proposal enumeration', () => {
     expect(listProposalsDetailed({ maxFiles: 1, requireComplete: true }).proposals).toEqual([]);
   });
 
+  it('fails closed when the default source exceeds the hard proposal file cap', () => {
+    for (let index = 0; index < 4_097; index++) {
+      const id = `hard-cap-${String(index).padStart(4, '0')}`;
+      seed(`${id}.json`, proposal(id));
+    }
+
+    expect(listProposalsDetailed({ requireComplete: true })).toMatchObject({
+      proposals: [],
+      sourceState: 'degraded',
+      complete: false,
+      filesDiscovered: 4_097,
+      filesRead: 4_096,
+      stopReasons: ['file-limit'],
+    });
+  });
+
   it('uses the same authoritative per-file ceiling for writes and default reads', () => {
     const oversizedSummary = 'x'.repeat(4 * 1024 * 1024);
     const written = createProposal({

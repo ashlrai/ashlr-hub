@@ -57,6 +57,7 @@ import {
   readRepairHandoffs,
   recordRepairHandoffs,
 } from '../src/core/fleet/repair-handoff-journal.js';
+import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import {
   readSkillUseEvents,
   recordSkillCard,
@@ -66,6 +67,7 @@ import {
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import { writeDaemonActivity } from '../src/core/daemon/activity.js';
+import { loadQueuedAutonomyItemsDetailed } from '../src/core/portfolio/queued-autonomy.js';
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
 
@@ -364,6 +366,60 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
   };
 }
 
+function recordDiagnosticEmpty(
+  item: WorkItem,
+  attemptId: string,
+  backend: 'local-coder' | 'kimi',
+  ordinal: 1 | 2,
+) {
+  const ts = new Date(Date.now() - (3 - ordinal) * 1_000).toISOString();
+  const routeReason = `m49 diagnostic attempt ${ordinal}`;
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend,
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend,
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: ROUTER_POLICY_VERSION,
+    objectiveHash: workItemObjectiveHash(item),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal: ordinal,
+    ...(ordinal === 2 ? { repairPreviousBackend: 'local-coder' as const } : {}),
+  };
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return recordGeneratedRepairLifecycle(item, { kind: 'dispatch-proof-empty-diff', eventTs: ts });
+}
+
 function makeTrustedProposalRepairItem(repo: string, id = 'repo:proposal-repair:abcdef123456'): WorkItem {
   return {
     id,
@@ -487,7 +543,7 @@ function writeBacklogSnapshot(
   home: string,
   repo: string,
   items: WorkItem[],
-  generatedAt = '2026-07-03T00:00:00.000Z',
+  generatedAt = new Date().toISOString(),
 ): void {
   const ashlrDir = join(home, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
@@ -873,7 +929,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.merges.sourceQuality?.stopReasons).toContain('invalid-file');
   });
 
-  it('withholds auto-merge readiness when proposal enumeration stops at the file bound', async () => {
+  it('keeps auto-merge authority available for a complete 513-proposal source', async () => {
     const inbox = join(tmpHome, '.ashlr', 'inbox');
     const proposalRepo = join(tmpHome, 'proposal-file-bound-repo');
     mkdirSync(inbox, { recursive: true });
@@ -896,22 +952,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const status = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true } }));
 
-    expect(status.proposals.pending).toBe(512);
+    expect(status.proposals.pending).toBe(513);
     expect(status.proposals.sourceQuality).toMatchObject({
-      sourceState: 'degraded',
+      sourceState: 'healthy',
       sourcePresent: true,
-      complete: false,
+      complete: true,
       filesDiscovered: 513,
-      filesRead: 512,
+      filesRead: 513,
+      stopReasons: [],
     });
-    expect(status.proposals.sourceQuality?.stopReasons).toContain('file-limit');
     expect(status.proposals.authority).toMatchObject({
-      gate: 'unavailable',
-      detail: expect.stringContaining('complete healthy proposal source'),
+      gate: 'ready',
+      detail: expect.stringContaining('513/513 files read'),
     });
-    expect(status.autoMergeReadiness).toBeUndefined();
+    expect(status.autoMergeReadiness).toMatchObject({ pending: 513 });
     expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'auto-merge'))
-      .toMatchObject({ status: 'unavailable' });
+      .not.toMatchObject({ status: 'unavailable' });
   });
 
   it('keeps degraded cutoff observations structurally outside readiness and mission authority', async () => {
@@ -1161,6 +1217,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(repairHandoffProjectionTick([
       retainedUnavailable,
     ], 'b'.repeat(64), proof.activatedAt, proof)).toBe('2026-07-11T17:00:00.000Z');
+
+    const degradedProposals = tick('2026-07-11T18:00:00.000Z', 'b'.repeat(64), proof.id);
+    degradedProposals.producerMaintenance!.proposalRepairInboxAvailable = false;
+    expect(repairHandoffProjectionTick([
+      degradedProposals,
+    ], 'b'.repeat(64), proof.activatedAt, proof)).toBeNull();
   });
 
   it('does not refresh, persist, or audit backlog while building a status snapshot', async () => {
@@ -1193,7 +1255,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
       JSON.stringify({
-        generatedAt: '2026-07-01T00:00:00.000Z',
+        generatedAt: new Date().toISOString(),
         repos: [repo],
         items: [
           item,
@@ -2079,18 +2141,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   it('keeps quarantined generated repairs visible but terminal and ineligible', async () => {
     const repo = join(tmpHome, 'repo');
     const quarantined = makeTrustedDiagnosticResliceItem(repo, 'cccccccccccc');
-    recordGeneratedRepairLifecycle(quarantined, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
-    expect(recordGeneratedRepairLifecycle(quarantined, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-32345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
-    })).toMatchObject({ disposition: 'quarantined' });
+    recordDiagnosticEmpty(
+      quarantined,
+      'attempt-22345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      1,
+    );
+    expect(recordDiagnosticEmpty(
+      quarantined,
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      'kimi',
+      2,
+    )).toMatchObject({ disposition: 'quarantined' });
     writeBacklogSnapshot(tmpHome, repo, [quarantined]);
     writeRunningDaemon(tmpHome);
 
@@ -2160,7 +2222,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
     });
     writeRunningDaemon(tmpHome);
-    writeBacklogSnapshot(tmpHome, repo, [item]);
+    writeBacklogSnapshot(tmpHome, repo, [item], '2026-07-03T00:00:00.000Z');
     await withFakeNow(new Date('2026-07-01T00:00:00.000Z'), async () => {
       createProposal(
         {
@@ -2349,7 +2411,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
       JSON.stringify({
-        generatedAt: '2026-07-03T00:00:00.000Z',
+        generatedAt: new Date().toISOString(),
         repos: [repo],
         items: [{
           id: 'repo:self-heal:one',
@@ -5116,7 +5178,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       effort: 1,
       score: 5,
       tags: ['self-heal', 'test'],
-      ts: '2026-07-02T00:00:00.000Z',
+      ts: new Date().toISOString(),
     };
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
@@ -5128,6 +5190,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'utf8',
     );
     writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([queued]), 'utf8');
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
 
     const s = await buildFleetStatus(baseConfig());
 
@@ -5155,7 +5218,214 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         score: 5,
       },
     ]);
+    expect(s.queue.sources).toMatchObject({
+      cachedBacklog: {
+        provenance: 'persisted-backlog',
+        sourceState: 'complete',
+        freshness: 'stale',
+        visibleItems: 0,
+        actionableItems: 0,
+      },
+      queuedAutonomy: {
+        provenance: 'queued-autonomy',
+        sourceState: 'complete',
+        freshness: 'fresh',
+        visibleItems: 1,
+        actionableItems: 1,
+      },
+    });
+    expect(s.nextActions?.find((action) => action.id === 'build-backlog')).toMatchObject({
+      target: repo,
+      detail: expect.stringContaining('Fix broken test in repo'),
+    });
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('keeps stale cached inventory visible without granting queue or action authority', async () => {
+    const repo = join(tmpHome, 'repo');
+    const stale = makeBacklogItem(repo, 'repo:goal:stale-visible', 'Stale visible work', 9);
+    writeBacklogSnapshot(tmpHome, repo, [stale], '2026-07-01T00:00:00.000Z');
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+    const status = await buildFleetStatus(baseConfig());
+    const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 1,
+      eligibleBacklogItems: 0,
+      sources: {
+        cachedBacklog: {
+          provenance: 'persisted-backlog',
+          sourceState: 'complete',
+          freshness: 'stale',
+          observedAt: '2026-07-01T00:00:00.000Z',
+          visibleItems: 1,
+          actionableItems: 0,
+        },
+        queuedAutonomy: {
+          provenance: 'queued-autonomy',
+          sourceState: 'complete',
+          freshness: 'empty',
+          visibleItems: 0,
+          actionableItems: 0,
+        },
+      },
+    });
+    expect(status.queue.next).toBeUndefined();
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('build-backlog');
+    expect(queueSource).toMatchObject({
+      status: 'degraded',
+      freshness: 'stale',
+      sourceQuality: { badge: 'stale-source', sourcePresent: true },
+    });
+  });
+
+  it('keeps fresh queued autonomy actionable independently of a stale cached backlog', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const stale = makeBacklogItem(repo, 'repo:goal:stale-shadow', 'Stale cached work', 10);
+    const freshQueued: WorkItem = {
+      id: 'repo:self-heal:fresh-authority',
+      repo,
+      source: 'self',
+      title: 'Fix broken test in repo: FAIL src/fresh.test.ts: expected true to be false',
+      detail:
+        'Self-heal: test is RED.\n' +
+        'First failure: FAIL src/fresh.test.ts: expected true to be false.\n' +
+        'Investigate and verify the suite passes.',
+      value: 5,
+      effort: 1,
+      score: 7,
+      tags: ['self-heal', 'test'],
+      ts: new Date().toISOString(),
+    };
+    writeBacklogSnapshot(tmpHome, repo, [stale], '2026-07-01T00:00:00.000Z');
+    writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([freshQueued]), 'utf8');
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+    const status = await buildFleetStatus(baseConfig());
+    const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 2,
+      eligibleBacklogItems: 1,
+      sources: {
+        cachedBacklog: { freshness: 'stale', visibleItems: 1, actionableItems: 0 },
+        queuedAutonomy: {
+          provenance: 'queued-autonomy',
+          sourceState: 'complete',
+          freshness: 'fresh',
+          visibleItems: 1,
+          actionableItems: 1,
+        },
+      },
+    });
+    expect(status.queue.next?.map((item) => item.id)).toEqual([freshQueued.id]);
+    expect(status.queue.next?.map((item) => item.id)).not.toContain(stale.id);
+    expect(status.nextActions?.find((action) => action.id === 'build-backlog')).toMatchObject({
+      target: repo,
+      detail: expect.stringContaining('Fix broken test in repo'),
+    });
+    expect(queueSource).toMatchObject({
+      status: 'degraded',
+      freshness: 'fresh',
+      sourceQuality: { badge: 'degraded-source', sourcePresent: true },
+    });
+  });
+
+  it('keeps an old durable generated repair actionable from a fresh queued-autonomy observation', async () => {
+    await withFakeNow(new Date('2026-07-15T12:00:00.000Z'), async () => {
+      const ashlrDir = join(tmpHome, '.ashlr');
+      const repo = join(tmpHome, 'repo');
+      const repair = makeTrustedDiagnosticResliceItem(repo, 'feedfacecafe');
+      expect(Date.now() - Date.parse(repair.ts)).toBeGreaterThan(24 * 60 * 60 * 1000);
+      expect(generatedRepairDispatchState(repair)).toMatchObject({
+        applies: true,
+        state: 'active',
+        dispatchable: true,
+      });
+      writeBacklogSnapshot(tmpHome, repo, [], '2026-07-01T00:00:00.000Z');
+      writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([repair]), 'utf8');
+      writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+      const status = await buildFleetStatus(withRoutableFrontierAndMid());
+      const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+      expect(status.queue).toMatchObject({
+        backlogItems: 1,
+        eligibleBacklogItems: 1,
+        sources: {
+          cachedBacklog: { freshness: 'stale', visibleItems: 0, actionableItems: 0 },
+          queuedAutonomy: {
+            sourceState: 'complete',
+            freshness: 'fresh',
+            observedAt: '2026-07-15T12:00:00.000Z',
+            visibleItems: 1,
+            actionableItems: 1,
+          },
+        },
+      });
+      expect(status.queue.next?.map((item) => item.id)).toEqual([repair.id]);
+      expect(status.nextActions).toContainEqual(expect.objectContaining({
+        id: 'build-backlog',
+        target: repo,
+      }));
+      expect(queueSource).toMatchObject({ status: 'degraded', freshness: 'fresh' });
+    });
+  });
+
+  it('keeps expired ordinary queued autonomy out while stale cached inventory stays non-actionable', async () => {
+    await withFakeNow(new Date('2026-07-15T12:00:00.000Z'), async () => {
+      const ashlrDir = join(tmpHome, '.ashlr');
+      const repo = join(tmpHome, 'repo');
+      const staleCached = makeBacklogItem(repo, 'repo:goal:stale-cached', 'Stale cached work', 9);
+      const expiredOrdinary: WorkItem = {
+        id: 'repo:self-heal:expired-ordinary',
+        repo,
+        source: 'self',
+        title: 'Fix broken test in repo: FAIL src/expired.test.ts: expected true to be false',
+        detail:
+          'Self-heal: test is RED.\n' +
+          'First failure: FAIL src/expired.test.ts: expected true to be false.\n' +
+          'Investigate and verify the suite passes.',
+        value: 5,
+        effort: 1,
+        score: 8,
+        tags: ['self-heal', 'test'],
+        ts: '2026-06-30T12:00:00.000Z',
+      };
+      writeBacklogSnapshot(tmpHome, repo, [staleCached], '2026-07-01T00:00:00.000Z');
+      writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([expiredOrdinary]), 'utf8');
+      writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+      const status = await buildFleetStatus(baseConfig());
+      const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+      expect(status.queue).toMatchObject({
+        backlogItems: 1,
+        eligibleBacklogItems: 0,
+        sources: {
+          cachedBacklog: {
+            freshness: 'stale',
+            visibleItems: 1,
+            actionableItems: 0,
+          },
+          queuedAutonomy: {
+            sourceState: 'complete',
+            freshness: 'empty',
+            visibleItems: 0,
+            actionableItems: 0,
+          },
+        },
+      });
+      expect(status.queue.next).toBeUndefined();
+      expect(status.nextActions?.map((action) => action.id)).not.toContain('build-backlog');
+      expect(queueSource).toMatchObject({
+        status: 'degraded',
+        freshness: 'stale',
+        sourceQuality: { badge: 'stale-source', sourcePresent: true },
+      });
+    });
   });
 
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {
@@ -5418,6 +5688,54 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('keeps disabled auto-merge with pending proposals merge-blocked and inspection-only', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(
+      tmpHome,
+      repo,
+      [makeBacklogItem(repo, 'repo:goal:queued-behind-proposals', 'Queued behind pending proposals', 8)],
+      new Date().toISOString(),
+    );
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: false,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Pending while auto-merge is intentionally disabled',
+      diff: docsDiff('inspect only'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+
+    const status = await buildFleetStatus(cfg);
+    const inspection = status.nextActions?.find((action) => action.id === 'inspect-pending-proposals');
+
+    expect(status.autonomyEffectiveness).toMatchObject({
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+      counts: { pendingProposals: 1, backlogItems: 1, eligibleBacklogItems: 1 },
+    });
+    expect(status.autonomyEffectiveness?.summary).toContain('auto-merge disabled');
+    expect(inspection).toMatchObject({
+      priority: 'high',
+      commands: [
+        { argv: ['ashlr', 'inbox', '--json'], safety: 'read-only' },
+        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
+      ],
+    });
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('enable-auto-merge');
+    expect(status.autonomousShipReadiness).toMatchObject({
+      topBlocker: { id: 'auto-merge-disabled' },
+      primaryAction: { id: 'inspect-pending-proposals' },
+    });
+    expect(status.autonomousShipReadiness?.primaryAction?.id).not.toBe('build-backlog');
+    expect(status.missionBrief?.action).toMatchObject({ id: 'inspect-pending-proposals' });
+  });
+
   it('includes read-only auto-merge readiness for pending proposals', async () => {
     const cfg = withFoundry({
       autoMerge: {
@@ -5573,6 +5891,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       empty: true,
       sourcePresent: true,
     });
+    expect(s.queue.repos?.registry).toBeUndefined();
     expect(s.autonomousShipReadiness?.sourceQualitySummary?.['healthy-zero']).toBeGreaterThan(0);
     expect(s.autonomousShipReadiness?.evidenceMatrix).toMatchObject({
       version: 1,
@@ -5603,6 +5922,133 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         preflightReady: 1,
       },
     });
+  });
+
+  it('fails fleet status closed when the enrollment registry is malformed', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    const cached = makeBacklogItem(repo, 'repo:goal:withheld', 'Withheld cached work');
+    const queued: WorkItem = {
+      ...makeBacklogItem(repo, 'repo:self:withheld', 'FAIL src/withheld.test.ts: expected true', 8, 'self'),
+      detail: 'Self-heal: test is RED.\nFAIL src/withheld.test.ts: expected true to be false.',
+      tags: ['self-heal', 'test'],
+      ts: new Date().toISOString(),
+    };
+    writeFileSync(join(ashlrDir, 'enrollment.json'), '{', 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({ generatedAt: new Date().toISOString(), repos: [repo], items: [cached] }),
+      'utf8',
+    );
+    writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([queued]), 'utf8');
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    const mergeReady = createSignedProposal(cfg, {
+      title: 'Ready proposal withheld by enrollment authority',
+      diff: docsDiff('withheld ready proposal'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    recordFrontierShipDecision(mergeReady);
+    const awaitingHost = createSignedProposal(cfg, {
+      title: 'Host handoff withheld by enrollment authority',
+      diff: docsDiff('withheld host handoff'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    setStatus(awaitingHost.id, 'awaiting-host-merge');
+
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      sourceState: 'complete',
+      items: [expect.objectContaining({ id: queued.id })],
+    });
+
+    const status = await buildFleetStatus(cfg);
+    const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+    expect(status.queue.repos).toMatchObject({
+      enrolled: 0,
+      existing: 0,
+      withBacklog: 0,
+      silent: 0,
+      registry: {
+        state: 'degraded',
+        reason: expect.any(String),
+      },
+    });
+    expect(status.queue).toMatchObject({ backlogItems: 0, eligibleBacklogItems: 0 });
+    expect(status.queue.next).toBeUndefined();
+    expect(queueSource).toMatchObject({
+      status: 'degraded',
+      freshness: 'fresh',
+      sourceQuality: {
+        badge: 'degraded-source',
+        empty: true,
+        sourcePresent: true,
+      },
+    });
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: {
+        id: 'enrollment-registry-degraded',
+        source: 'queue',
+        severity: 'high',
+      },
+      primaryAction: { id: 'repair-enrollment-registry' },
+    });
+    expect(status.autonomyEffectiveness).toMatchObject({
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      counts: {
+        pendingProposals: 1,
+        awaitingHostMerge: 1,
+        preflightReady: 0,
+        authorityReady: 0,
+      },
+    });
+    expect(status.autoMergeReadiness).toMatchObject({
+      pending: 1,
+      preflightReady: 0,
+      authorityReady: 0,
+      branchAuthorityReady: 0,
+      remoteMainAuthorityReady: 0,
+      authorityBlocked: 1,
+      blocked: 1,
+    });
+    expect(status.nextActions).toEqual([
+      expect.objectContaining({
+        id: 'repair-enrollment-registry',
+        commands: expect.arrayContaining([
+          expect.objectContaining({
+            argv: ['ashlr', 'enroll', 'list', '--json'],
+            safety: 'read-only',
+          }),
+        ]),
+      }),
+    ]);
+    expect(status.nextActions?.flatMap((action) => action.commands).every((command) =>
+      command.safety === 'read-only'
+    )).toBe(true);
+    expect(status.nextActions?.map((action) => action.id)).not.toEqual(expect.arrayContaining([
+      'start-daemon',
+      'reconcile-host-prs',
+      'drain-ready-auto-merges',
+      'verify-pending-proposals',
+      'build-backlog',
+    ]));
+    expect(status.missionBrief).toMatchObject({
+      directive: 'Repair enrollment authority',
+      blocker: { id: 'enrollment-registry-degraded' },
+      action: { id: 'repair-enrollment-registry' },
+      whyNow: expect.stringContaining('Enrollment authority could not be proven'),
+    });
+    expect(readFileSync(join(ashlrDir, 'enrollment.json'), 'utf8')).toBe('{');
   });
 
   it('fails ship readiness closed when verification authority evidence is degraded', async () => {
@@ -5806,7 +6252,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('degrades autonomous ship readiness when ready work depends on a stale source', async () => {
     const repo = join(tmpHome, 'repo');
-    writeBacklogSnapshot(tmpHome, repo, []);
+    writeBacklogSnapshot(tmpHome, repo, [], '2026-07-01T00:00:00.000Z');
     writeRunningDaemon(tmpHome, [], new Date().toISOString());
     const cfg = withFoundry({
       autoMerge: {

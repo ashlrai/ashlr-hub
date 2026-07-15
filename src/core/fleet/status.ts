@@ -75,8 +75,8 @@ import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
-import { listEnrolled } from '../sandbox/policy.js';
-import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
+import { readEnrollmentRegistry } from '../sandbox/policy.js';
+import { loadQueuedAutonomyItemsDetailed } from '../portfolio/queued-autonomy.js';
 import {
   detectRepoExecutionProfile,
   type RepoPackageManager,
@@ -826,6 +826,16 @@ export interface FleetQueueNextItem {
   score: number;
 }
 
+export interface FleetQueueInventorySourceStatus {
+  provenance: 'persisted-backlog' | 'queued-autonomy';
+  sourceState: 'complete' | 'missing' | 'unavailable';
+  freshness: 'fresh' | 'stale' | 'unknown' | 'empty';
+  observedAt: string | null;
+  visibleItems: number;
+  actionableItems: number;
+  detail: string;
+}
+
 export interface FleetQueueGeneratedWorkStatus {
   total: number;
   selfHeal: number;
@@ -1054,6 +1064,11 @@ export interface FleetQueueRepoCoverage {
   existing: number;
   withBacklog: number;
   silent: number;
+  /** Present only when the read-only enrollment authority could not be proven. */
+  registry?: {
+    state: 'degraded';
+    reason: string;
+  };
   executionProfiles?: {
     reposWithProjects: number;
     reposWithVerifyCommands: number;
@@ -1307,6 +1322,10 @@ export interface FleetStatus {
     nextEligibleAt?: string | null;
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
+    sources?: {
+      cachedBacklog: FleetQueueInventorySourceStatus;
+      queuedAutonomy: FleetQueueInventorySourceStatus;
+    };
     shared?: FleetSharedQueueStatus;
     activeWork?: FleetActiveWorkStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
@@ -1406,6 +1425,17 @@ export interface FleetStatus {
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function queueInventoryFreshness(
+  observedAt: string | null,
+  nowMs = Date.now(),
+): FleetQueueInventorySourceStatus['freshness'] {
+  if (!observedAt) return 'unknown';
+  const observedMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedMs) || observedMs > nowMs + QUEUE_SOURCE_FUTURE_SKEW_MS) return 'unknown';
+  return nowMs - observedMs <= READINESS_QUEUE_STALE_MS ? 'fresh' : 'stale';
+}
 
 function isVisibleBacklogItem(item: WorkItem, enrolledRepos: Set<string>): boolean {
   if (enrolledRepos.size === 0) return false;
@@ -1781,6 +1811,7 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
   let queueSnapshotAt: string | null = null;
+  let queueAuthorityObservedAt: string | null = null;
   let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
   let queueSourceDetail = 'backlog snapshot has not been read yet';
 
@@ -1873,6 +1904,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── queue (backlog size) ──────────────────────────────────────────────────
   let backlogItems = 0;
   let visibleQueueItems: WorkItem[] = [];
+  let actionableQueueItems: WorkItem[] = [];
   let nextQueueItems: FleetQueueNextItem[] = [];
   let eligibleBacklogItems = 0;
   let cooldownItems = 0;
@@ -1887,9 +1919,24 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
   let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
+  let queueInventorySources: FleetStatus['queue']['sources'];
   let scannerEvidence: FleetQueueScannerEvidenceStatus | undefined;
   let resolutionObserver: FleetResolutionObserverStatus | undefined;
   let enrolledExistingRepos: string[] = [];
+  const enrollmentRegistry: {
+    state: 'ready';
+    repos: string[];
+    reason: string;
+  } | {
+    state: 'degraded';
+    reason: string;
+  } = (() => {
+    try {
+      return readEnrollmentRegistry();
+    } catch {
+      return { state: 'degraded', reason: 'enrollment registry read failed' };
+    }
+  })();
   const repairHandoffWriterConfigured = cfg.foundry?.repairHandoffV2Write === true;
   const repairHandoffActivationRaw = (cfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
   const repairHandoffActivation = validRepairHandoffV2Activation(repairHandoffActivationRaw)
@@ -1925,36 +1972,94 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         scannerDomains: new Set(backlog.observations.map((observation) => observation.scannerId)).size,
       };
     }
-    const enrolledRaw = (() => {
-      try {
-        return listEnrolled().map((repo) => resolve(repo));
-      } catch {
-        return [] as string[];
-      }
-    })();
+    const enrolledRaw = enrollmentRegistry.state === 'ready'
+      ? enrollmentRegistry.repos.map((repo) => resolve(repo))
+      : [];
     const enrolledRepos = new Set(enrolledRaw.filter((repo) => existsSync(repo)));
     enrolledExistingRepos = [...enrolledRepos];
-    const queuedAutonomyItems = loadQueuedAutonomyItems();
-    const items = mergeVisibleQueueItems(
-      [
-        ...(Array.isArray(backlog?.items) ? backlog.items : []),
-        ...queuedAutonomyItems,
-      ],
+    const nowMs = Date.now();
+    const cachedItems = mergeVisibleQueueItems(
+      Array.isArray(backlog?.items) ? backlog.items : [],
       enrolledRepos,
     );
-    if (backlog) {
-      queueSourceStatus = 'healthy';
-      queueSourceDetail = `${items.length} visible cached queue item(s) from persisted backlog snapshot`;
-    } else if (queuedAutonomyItems.length > 0) {
-      queueSourceStatus = 'degraded';
-      queueSourceDetail = 'persisted backlog snapshot unavailable; using queued self-heal/invent work only';
-    } else {
-      queueSourceStatus = 'unknown';
-      queueSourceDetail = 'no persisted backlog snapshot or queued autonomy work is available';
-    }
+    const cachedFreshness = backlog
+      ? queueInventoryFreshness(queueSnapshotAt, nowMs)
+      : 'unknown';
+    const queuedRead = loadQueuedAutonomyItemsDetailed();
+    const queuedItems = mergeVisibleQueueItems(queuedRead.items, enrolledRepos);
+    // The strict queued-autonomy read is a live observation. Its loader already
+    // applies daemon-equivalent intrinsic expiry while retaining generation-bound
+    // repairs for their durable lifecycle, so item.ts must not become a second
+    // source-freshness gate here.
+    const queuedObservedAt = queuedRead.sourceState === 'complete' && queuedItems.length > 0
+      ? generatedAt
+      : null;
+    const actionableQueuedItems = queuedRead.sourceState === 'complete' ? queuedItems : [];
+    const queuedFreshness: FleetQueueInventorySourceStatus['freshness'] = queuedItems.length === 0
+      ? queuedRead.sourceState === 'complete' ? 'empty' : 'unknown'
+      : queuedRead.sourceState === 'complete' ? 'fresh' : 'unknown';
+    const freshCachedItems = cachedFreshness === 'fresh' ? cachedItems : [];
+    actionableQueueItems = mergeVisibleQueueItems(
+      [...freshCachedItems, ...actionableQueuedItems],
+      enrolledRepos,
+    );
+    const items = mergeVisibleQueueItems([...cachedItems, ...queuedItems], enrolledRepos);
     visibleQueueItems = items;
     backlogItems = items.length;
     generatedWork = buildQueueGeneratedWorkStatus(items);
+    queueInventorySources = {
+      cachedBacklog: {
+        provenance: 'persisted-backlog',
+        sourceState: backlog ? 'complete' : 'missing',
+        freshness: backlog ? cachedFreshness : 'unknown',
+        observedAt: queueSnapshotAt,
+        visibleItems: cachedItems.length,
+        actionableItems: freshCachedItems.length,
+        detail: backlog
+          ? `${cachedItems.length} enrolled item(s) in persisted backlog snapshot`
+          : 'persisted backlog snapshot is missing or unreadable',
+      },
+      queuedAutonomy: {
+        provenance: 'queued-autonomy',
+        sourceState: queuedRead.sourceState,
+        freshness: queuedFreshness,
+        observedAt: queuedObservedAt,
+        visibleItems: queuedItems.length,
+        actionableItems: actionableQueuedItems.length,
+        detail: queuedRead.sourceState === 'complete'
+          ? `${actionableQueuedItems.length}/${queuedItems.length} queued autonomy item(s) passed daemon queue admission`
+          : `queued autonomy source is unavailable (${queuedRead.filesUnavailable} file(s) unavailable)`,
+      },
+    };
+    const observedTimestamps = [
+      queueSnapshotAt,
+      queuedObservedAt,
+    ].filter((ts): ts is string => ts !== null && Number.isFinite(Date.parse(ts)));
+    queueAuthorityObservedAt = observedTimestamps
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+    const hasDegradedInventory =
+      enrollmentRegistry.state === 'degraded' ||
+      (Boolean(backlog) && cachedFreshness !== 'fresh') ||
+      queuedRead.sourceState === 'unavailable';
+    if (hasDegradedInventory) {
+      queueSourceStatus = 'degraded';
+    } else if (backlog || queuedItems.length > 0) {
+      queueSourceStatus = 'healthy';
+    } else if (queuedRead.sourceState === 'complete') {
+      queueSourceStatus = 'unknown';
+    } else {
+      queueSourceStatus = 'unavailable';
+    }
+    queueSourceDetail = enrollmentRegistry.state === 'degraded'
+      ? `enrollment authority degraded: ${enrollmentRegistry.reason}; queue inventory withheld`
+      : `${items.length} visible queue item(s); ${actionableQueueItems.length} actionable from fresh sources; ` +
+        `cached backlog ${queueInventorySources.cachedBacklog.freshness}; ` +
+        `queued autonomy ${queueInventorySources.queuedAutonomy.freshness}`;
+    if (enrollmentRegistry.state === 'degraded') {
+      // The registry itself was observed during this snapshot. Its current
+      // degraded result must not be mislabeled as an unknown or healthy-zero source.
+      queueAuthorityObservedAt = generatedAt;
+    }
     if (
       generatedWork &&
       generatedWork.diagnosticReslices > 0 &&
@@ -1978,6 +2083,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       existing: enrolledRepos.size,
       withBacklog: byRepo.size,
       silent: Math.max(0, enrolledRepos.size - byRepo.size),
+      ...(enrollmentRegistry.state === 'degraded'
+        ? { registry: { state: 'degraded' as const, reason: enrollmentRegistry.reason } }
+        : {}),
       executionProfiles: buildRepoExecutionCoverage(enrolledRepos),
       byTier: (['core-fleet', 'force-multiplier', 'inventory', 'supporting'] as StrategicTier[])
         .flatMap((tier) => {
@@ -1992,10 +2100,45 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     backlogItems = 0;
     visibleQueueItems = [];
+    actionableQueueItems = [];
     nextQueueItems = [];
     queueSnapshotAt = null;
-    queueSourceStatus = 'unavailable';
-    queueSourceDetail = 'queue source could not be read';
+    queueAuthorityObservedAt = enrollmentRegistry.state === 'degraded' ? generatedAt : null;
+    queueSourceStatus = enrollmentRegistry.state === 'degraded' ? 'degraded' : 'unavailable';
+    queueSourceDetail = enrollmentRegistry.state === 'degraded'
+      ? `enrollment authority degraded: ${enrollmentRegistry.reason}; queue inventory withheld`
+      : 'queue source could not be read';
+    queueRepos = enrollmentRegistry.state === 'degraded'
+      ? {
+          enrolled: 0,
+          existing: 0,
+          withBacklog: 0,
+          silent: 0,
+          registry: { state: 'degraded', reason: enrollmentRegistry.reason },
+          top: [],
+          byTier: [],
+        }
+      : undefined;
+    queueInventorySources = {
+      cachedBacklog: {
+        provenance: 'persisted-backlog',
+        sourceState: 'unavailable',
+        freshness: 'unknown',
+        observedAt: null,
+        visibleItems: 0,
+        actionableItems: 0,
+        detail: 'persisted backlog source could not be read',
+      },
+      queuedAutonomy: {
+        provenance: 'queued-autonomy',
+        sourceState: 'unavailable',
+        freshness: 'unknown',
+        observedAt: null,
+        visibleItems: 0,
+        actionableItems: 0,
+        detail: 'queued autonomy source could not be read',
+      },
+    };
   }
 
   try {
@@ -2104,7 +2247,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   try {
     const eligibility = buildQueueEligibility(
-      visibleQueueItems,
+      actionableQueueItems,
       pendingProposals,
       cfg,
       repairHandoffSummary !== undefined &&
@@ -2121,9 +2264,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     repairTerminalItems = eligibility.repairTerminalItems;
     repairQuarantinedItems = eligibility.repairQuarantinedItems;
     generatedRepairRoutes = eligibility.generatedRepairRoutes;
-    eligibleOrdinaryItems = queueSourceStatus === 'healthy'
-      ? eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length
-      : null;
+    eligibleOrdinaryItems = queueSourceStatus === 'unknown' || queueSourceStatus === 'unavailable'
+      ? null
+      : eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length;
     nextEligibleAt = eligibility.nextEligibleAt;
     nextQueueItems = eligibility.eligibleItems
       .slice()
@@ -2137,7 +2280,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         score: item.score,
       }));
   } catch {
-    eligibleBacklogItems = backlogItems;
+    eligibleBacklogItems = 0;
     cooldownItems = 0;
     pendingItems = 0;
     nextEligibleAt = null;
@@ -2217,7 +2360,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // partial stores with observed rows remain fully withheld.
   if (proposalAuthority.gate === 'ready' || proposalSourceQuality.sourceState === 'missing') {
     try {
-      autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals, enrolledExistingRepos);
+      autoMergeReadiness = await buildAutoMergeReadinessStatus(
+        cfg,
+        pendingProposals,
+        enrolledExistingRepos,
+        enrollmentRegistry,
+      );
     } catch {
       autoMergeReadiness = undefined;
     }
@@ -2367,6 +2515,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       nextEligibleAt,
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
+      ...(queueInventorySources !== undefined ? { sources: queueInventorySources } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
       ...(activeWork !== undefined ? { activeWork } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
@@ -2649,7 +2798,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   status.nextActions = buildNextActions(status);
   status.autonomousShipReadiness = buildAutonomousShipReadiness(status, {
     generatedAt,
-    queueSnapshotAt,
+    queueSnapshotAt: queueAuthorityObservedAt,
     queueSourceStatus,
     queueSourceDetail,
   });
@@ -3736,6 +3885,16 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     knownVerificationFailed: readiness?.knownVerificationFailed ?? 0,
     recentMerges: status.merges.recent,
   };
+  const enrollmentRegistry = status.queue.repos?.registry;
+  if (enrollmentRegistry?.state === 'degraded') {
+    return {
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      summary: `Autonomy is control-blocked: enrollment authority degraded (${enrollmentRegistry.reason}).`,
+      counts,
+    };
+  }
   const firstGuardBlock = status.guardHealth?.blocks?.[0];
   if (status.killed || !status.daemon.running || firstGuardBlock) {
     const reason = status.killed
@@ -3806,7 +3965,7 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
-  if (readiness?.enabled && counts.blocked > 0) {
+  if (readiness && counts.blocked > 0) {
     const topReason = Object.entries(readiness.byReason)
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
     return {
@@ -3856,6 +4015,21 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
+  if (
+    counts.pendingProposals > 0 ||
+    counts.backlogItems > 0 ||
+    counts.awaitingHostMerge > 0
+  ) {
+    return {
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+      summary:
+        'Work inventory remains visible, but no complete action authority classification is available; ' +
+        'inspect queue and proposal source state.',
+      counts,
+    };
+  }
   return {
     phase: 'idle',
     canAutoMergeNow: false,
@@ -3873,6 +4047,22 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (actions.some((existing) => existing.id === action.id)) return;
     actions.push(action);
   };
+
+  const enrollmentRegistry = status.queue.repos?.registry;
+  if (enrollmentRegistry?.state === 'degraded') {
+    add({
+      id: 'repair-enrollment-registry',
+      priority: 'high',
+      label: 'Repair enrollment registry',
+      detail:
+        `Enrollment authority is degraded (${enrollmentRegistry.reason}); queue inventory and autonomous work are withheld.`,
+      commands: [
+        nextActionCommand('Inspect enrollment', ['ashlr', 'enroll', 'list', '--json'], 'read-only'),
+        nextActionCommand('Run preflight', ['ashlr', 'preflight', '--json'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
 
   if (status.killed) {
     add({
@@ -3971,6 +4161,23 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   const readiness = status.autoMergeReadiness;
+  const pendingProposalsBlockedByDisabledAutoMerge = Boolean(
+    readiness && !readiness.enabled && status.proposals.pending > 0,
+  );
+  if (pendingProposalsBlockedByDisabledAutoMerge && !controlBlocked) {
+    add({
+      id: 'inspect-pending-proposals',
+      priority: 'high',
+      label: 'Inspect pending proposals',
+      detail:
+        `${status.proposals.pending} proposal(s) are pending while auto-merge is intentionally disabled; ` +
+        'inspect their evidence and blockers without changing merge policy.',
+      commands: [
+        nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
+    });
+  }
   if (readiness?.enabled && !controlBlocked) {
     const configurationReady = readiness.configurationBlocker === undefined;
     const remoteProtectionReady = remoteProtectionAuthorityReady(readiness);
@@ -5025,6 +5232,16 @@ function chooseReadinessBlocker(
   status: FleetStatus,
   sources: FleetReadinessSourceHealth[],
 ): FleetAutonomousShipReadinessBlocker | null {
+  const enrollmentRegistry = status.queue.repos?.registry;
+  if (enrollmentRegistry?.state === 'degraded') {
+    return readinessBlocker(
+      'enrollment-registry-degraded',
+      'Enrollment registry degraded',
+      `Enrollment authority could not be proven (${enrollmentRegistry.reason}); queue inventory and autonomous work are withheld.`,
+      'high',
+      'queue',
+    );
+  }
   if (status.killed) {
     return readinessBlocker(
       'kill-switch',
@@ -5313,6 +5530,10 @@ function buildAutonomousShipReadiness(
   const primaryAction =
     topBlocker?.id === 'phantom-audit-risk'
       ? nextActions.find((action) => action.id === 'review-phantom-audit') ?? nextActions[0] ?? null
+      : topBlocker?.id === 'enrollment-registry-degraded'
+        ? nextActions.find((action) => action.id === 'repair-enrollment-registry') ?? nextActions[0] ?? null
+      : topBlocker?.id === 'auto-merge-disabled' && status.proposals.pending > 0
+        ? nextActions.find((action) => action.id === 'inspect-pending-proposals') ?? nextActions[0] ?? null
       : nextActions[0] ?? null;
   return {
     verdict: readinessVerdict(status, sourceSummary, topBlocker),
@@ -5367,6 +5588,7 @@ function missionDirective(
   action: FleetNextAction | null,
   effectiveness: FleetAutonomyEffectivenessStatus | null,
 ): string {
+  if (action?.id === 'repair-enrollment-registry') return 'Repair enrollment authority';
   if (status.killed) return 'Resume the fleet';
   if (!status.daemon.running) return 'Start the daemon';
   if (status.guardHealth?.blocked) return 'Repair the guard block';
@@ -5398,6 +5620,8 @@ function missionDirective(
       return 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
+    case 'repair-enrollment-registry':
+      return 'Repair enrollment authority';
     case 'inspect-attempt-causal-coverage':
       return 'Inspect causal learning coverage';
     case 'inspect-learning-evidence':
@@ -5455,6 +5679,7 @@ async function buildAutoMergeReadinessStatus(
   cfg: AshlrConfig,
   pendingProposals: Proposal[],
   enrolledRepos: string[],
+  enrollmentRegistry: { state: 'ready' } | { state: 'degraded'; reason: string },
 ): Promise<FleetAutoMergeReadinessStatus> {
   const autoMerge = cfg.foundry?.autoMerge;
   const enabled = autoMerge?.enabled === true;
@@ -5535,6 +5760,36 @@ async function buildAutoMergeReadinessStatus(
         : `protected remote configuration is not authoritative: ${remoteProtectionSignal.detail}`
       : 'protected remote authority is not required because remote main delivery is disabled',
   };
+  if (enrollmentRegistry.state === 'degraded') {
+    const reason = `enrollment authority degraded: ${enrollmentRegistry.reason}`;
+    const withheld = pendingProposals.length;
+    remoteProtection.detail = `${reason}; protected remote authority is withheld`;
+    return {
+      enabled,
+      trustBasis,
+      pending: withheld,
+      preflightReady: 0,
+      authorityReady: 0,
+      branchAuthorityReady: 0,
+      remoteMainAuthorityReady: 0,
+      authorityBlocked: withheld,
+      authorityByReason: withheld > 0 ? { [reason]: withheld } : {},
+      needsVerification: 0,
+      knownVerificationFailed: 0,
+      blocked: withheld,
+      byReason: withheld > 0 ? { [reason]: withheld } : {},
+      recentBlockers: pendingProposals.slice(0, 8).map((proposal) => ({
+        proposalId: proposal.id,
+        title: proposal.title,
+        tier: proposal.engineTier ?? null,
+        reason,
+        riskClass: null,
+      })),
+      verifierContracts,
+      ...(configurationBlocker ? { configurationBlocker } : {}),
+      remoteProtection,
+    };
+  }
   if (remoteProtectionRequired && remoteProtectionSignal.ok && remoteMainRepos.size > 0) {
     const targets = new Map<string, {
       repo: string;

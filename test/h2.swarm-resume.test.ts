@@ -30,10 +30,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-import type { AshlrConfig, RunState, RunUsage, SwarmRun, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, Proposal, RunState, RunUsage, SwarmRun, WorkItem } from '../src/core/types.js';
 import type { StreamSink } from '../src/core/run/streaming.js';
 import {
   makeFixture,
@@ -51,11 +51,27 @@ import {
   sweepOrphanSandboxes,
 } from '../src/core/sandbox/worktree.js';
 import { nullSink } from '../src/core/run/streaming.js';
-import { loadProposal, pendingCount } from '../src/core/inbox/store.js';
+import { createProposal, inboxDir, loadProposal, pendingCount } from '../src/core/inbox/store.js';
 import {
   generatedRepairGenerationId,
+  generatedRepairGenerationIds,
   readGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
+import {
+  dispatchProductionDir,
+  recordDispatchProduction,
+  resolveDispatchProductionAttemptReceiptWitnesses,
+  sanitizeDispatchProductionEvent,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchEventFromRepairHandoff,
+  recordRepairHandoffs,
+  repairHandoffFromDispatchEvent,
+} from '../src/core/fleet/repair-handoff-journal.js';
+import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Determinism: mock the ONLY model-touching surface (orchestrator.runGoal) and
@@ -142,6 +158,173 @@ const TERMINAL = new Set<SwarmRun['status']>([
 
 let fx: H1Fixture;
 let cfg: AshlrConfig;
+let previousAshlrHome: string | undefined;
+
+const HANDOFF_ACTIVATION = {
+  id: '11111111-1111-4111-8111-111111111111',
+  activatedAt: '2020-01-01T00:00:00.000Z',
+};
+const DIAGNOSTIC_PROPOSAL_DIFF =
+  'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
+
+async function diagnosticRepair(
+  repo: string,
+  parentId: string,
+  parentTs: string,
+  now: Date,
+  parentAttemptId = 'attempt-02345678-1234-4123-8123-123456789abc',
+  includeLegacyAlias = false,
+): Promise<WorkItem> {
+  const routeReason = 'h2 crash-recovery parent dispatch';
+  const parent: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: parentTs,
+    itemId: parentId,
+    source: 'goal',
+    repo,
+    title: 'Recover a crash-interrupted diagnostic repair',
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: parentAttemptId,
+    trajectoryId: `run:${parentAttemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: parentAttemptId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: 'a'.repeat(64),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+  };
+  if (includeLegacyAlias) {
+    expect(recordRepairHandoffs(parent)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  }
+  expect(recordRepairHandoffs(parent, {
+    schemaVersion: 2,
+    activation: HANDOFF_ACTIVATION,
+  })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  const handoff = repairHandoffFromDispatchEvent(parent)!;
+  const { noDiffResliceWorkItem } = await import('../src/core/fleet/proposal-repair-work.js');
+  return noDiffResliceWorkItem(dispatchEventFromRepairHandoff(handoff), now)!;
+}
+
+function diagnosticAttempt(
+  repair: WorkItem,
+  outcome: 'empty-diff' | 'proposal-created',
+  attemptId: string,
+  ts: string,
+  proposalId?: string,
+): DispatchProductionEvent {
+  const routeReason = `h2 ${outcome} crash-recovery attempt`;
+  return {
+    schemaVersion: 1,
+    ts,
+    itemId: repair.id,
+    source: repair.source,
+    repo: repair.repo,
+    title: repair.title,
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome,
+    proposalCreated: outcome === 'proposal-created',
+    ...(proposalId ? { proposalId } : {}),
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome,
+      proposalCreated: outcome === 'proposal-created',
+      ...(proposalId ? { proposalId, diffFiles: 1, diffLines: 2 } : {}),
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(repair),
+    spentUsd: 0,
+    ...(proposalId ? { diffFiles: 1, diffLines: 2 } : {}),
+    basis: 'run-proposal-outcome',
+    repairHandoffId: repair.repairHandoffId,
+    repairGenerationId: repair.repairGenerationId,
+    repairTreatmentUnitId: repair.repairTreatmentUnitId,
+    repairTreatment: repair.repairTreatment,
+    repairAttemptOrdinal: 1,
+  };
+}
+
+function diagnosticPendingProposal(
+  repair: WorkItem,
+  attemptId: string,
+  proposalId: string,
+  createdAt: string,
+  generationId = repair.repairGenerationId,
+): Proposal {
+  return {
+    id: proposalId,
+    repo: repair.repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Crash-persisted generated repair proposal',
+    summary: 'The proposal committed before canonical attempt persistence completed.',
+    diff: DIAGNOSTIC_PROPOSAL_DIFF,
+    diffHash: hashDiff(DIAGNOSTIC_PROPOSAL_DIFF),
+    workItemId: repair.id,
+    workItemGenerationId: generationId,
+    workSource: 'self',
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId,
+    },
+    status: 'pending',
+    createdAt,
+  };
+}
+
+function appendDispatchProductionWithoutReceipt(event: DispatchProductionEvent): void {
+  const canonical = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+  const date = canonical.ts.slice(0, 10);
+  mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
+  appendFileSync(
+    join(dispatchProductionDir(), `${date}.jsonl`),
+    `${JSON.stringify(canonical)}\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  );
+}
+
+function useIsolatedDispatchStore(): void {
+  process.env.ASHLR_HOME = fx.ashlrDir;
+}
 
 beforeEach(() => {
   // H2 false-green guard: every H2 it() MUST run at least one assertion. A
@@ -149,6 +332,7 @@ beforeEach(() => {
   // of passing vacuously — the headline risk this milestone exists to disprove.
   expect.hasAssertions();
   fx = makeFixture();
+  previousAshlrHome = process.env.ASHLR_HOME;
   cfg = makeCfg();
   runGoalGoals.length = 0;
   runGoalMutation = null;
@@ -158,6 +342,8 @@ beforeEach(() => {
 
 afterEach(() => {
   fx.cleanup();
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   // Drop the ASHLR_IN_SWARM flag runSwarm sets on this process so the next test
   // is not refused by the recursion guard (the fixture also clears it on setup).
   delete process.env.ASHLR_IN_SWARM;
@@ -412,22 +598,13 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
     const pendingBefore = pendingCount();
     const id = 'attempt-42345678-1234-4123-8123-123456789abc';
-    const repair: WorkItem = {
-      id: `${basename(repo.dir)}:proposal-repair:abcdef123456`,
-      repo: repo.dir,
-      source: 'self',
-      title: `Proposal repair for ${basename(repo.dir)} item repo:goal:resume-generation`,
-      detail:
-        'Proposal repair: recover a complete proposal from a prior attempt.\n' +
-        'Proposal: prop-resume-generation\n' +
-        'Original work item: repo:goal:resume-generation\n' +
-        'Produce a fresh complete fix and run merge-grade verification.',
-      value: 5,
-      effort: 1,
-      score: 5,
-      tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
-      ts: '2026-07-10T16:00:00.000Z',
-    };
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:resume-generation',
+      '2026-07-10T15:00:00.000Z',
+      new Date('2026-07-10T16:00:00.000Z'),
+      'attempt-32345678-1234-4123-8123-123456789abc',
+    );
     const workItemGenerationId = generatedRepairGenerationId(repair)!;
     const fakeSecret = 'sk-' + 'testvalueverysecret00000000';
     crashMidSwarm({
@@ -486,20 +663,41 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       workSource: 'self',
       runId: id,
       trajectoryId: `run:${id}`,
-      runEventSummary: { runId: id, proposalCreated: true },
+      runEventSummary: {
+        runId: id,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+      },
     });
     const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
-    const { queueProposalRepairWorkForPendingProposals } = await import(
+    const {
+      generatedRepairProposalDispatchAuthority,
+      queueProposalRepairWorkForPendingProposals,
+    } = await import(
       '../src/core/fleet/proposal-repair-work.js'
     );
     expect(queueSelfHealItem(repair)).toBe(true);
+    expect(recordDispatchProduction(diagnosticAttempt(
+      repair,
+      'proposal-created',
+      id,
+      proposal.createdAt,
+      proposal.id,
+    ))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('proven');
     expect(queueProposalRepairWorkForPendingProposals(undefined, new Date(), {
       dispatchEvents: [],
       lifecycleProposals: [proposal],
-    })).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
+    })).toMatchObject({
+      dispatchRepairRetired: 0,
+      dispatchRepairPruned: 0,
+      dispatchRepairLifecycleUnavailable: 0,
+      blockedItemKeys: [],
+    });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
-      disposition: 'retired',
+      disposition: 'active',
     });
     expect(reloadSwarm(id)?.proposalOutcome).toEqual(result.proposalOutcome);
     expect(JSON.stringify(reloadSwarm(id))).not.toContain(fakeSecret);
@@ -508,6 +706,400 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     expect(repo.shasumTree()).toBe(treeBefore);
     expect(repo.gitStatus()).toBe('');
     expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
+  });
+
+  it('recovers a persisted empty-diff receipt after a crash before lifecycle save', async () => {
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-empty-proof-crash',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const attempt = diagnosticAttempt(
+      repair,
+      'empty-diff',
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      '2026-07-04T11:00:00.000Z',
+    );
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const { queueProposalRepairWorkForPendingProposals } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(queueSelfHealItem(repair)).toBe(true);
+    expect(recordDispatchProduction(attempt)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+
+    const recovered = queueProposalRepairWorkForPendingProposals([], now, {
+      dispatchEvents: [],
+      lifecycleProposals: [],
+    });
+
+    expect(recovered).toMatchObject({
+      dispatchRepairPruned: 0,
+      dispatchRepairLifecycleUnavailable: 0,
+    });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+    });
+  });
+
+  it('recovers an old proposal receipt without scanning production history', async () => {
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-old-proposal-proof',
+      '2026-07-01T10:00:00.000Z',
+      now,
+    );
+    const attemptId = 'attempt-22345678-1234-4123-8123-123456789abc';
+    const proposalId = 'prop-h2-old-proof-recovery';
+    const attempt = diagnosticAttempt(
+      repair,
+      'proposal-created',
+      attemptId,
+      '2026-07-01T11:00:00.000Z',
+      proposalId,
+    );
+    const proposal = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      proposalId,
+      attempt.ts,
+    );
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const { queueProposalRepairWorkForPendingProposals } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(now.getTime() - Date.parse(attempt.ts)).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect(queueSelfHealItem(repair)).toBe(true);
+    mkdirSync(inboxDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(join(inboxDir(), `${proposal.id}.json`), `${JSON.stringify(proposal)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    expect(recordDispatchProduction(attempt)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    for (let index = 0; index < 40; index++) {
+      const date = new Date(Date.UTC(2024, 0, index + 1)).toISOString().slice(0, 10);
+      writeFileSync(join(dispatchProductionDir(), `${date}.jsonl`), 'malformed\n', 'utf8');
+    }
+
+    const recovered = queueProposalRepairWorkForPendingProposals([], now, {
+      dispatchEvents: [],
+      lifecycleProposals: [proposal],
+    });
+
+    expect(recovered).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
+  });
+
+  it('keeps a durable crash-before-intent proposal blocked despite healthy receipt absence', async () => {
+    useIsolatedDispatchStore();
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-proposal-before-receipt',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const attemptId = 'attempt-52345678-1234-4123-8123-123456789abc';
+    const proposalId = 'prop-h2-proposal-before-receipt';
+    const candidate = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      proposalId,
+      '2026-07-04T11:00:00.000Z',
+    );
+    const {
+      id: _id,
+      status: _status,
+      createdAt: _createdAt,
+      ...proposalInput
+    } = candidate;
+    const proposal = createProposal(proposalInput);
+    const { generatedRepairProposalDispatchAuthority } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+
+    expect(loadProposal(proposal.id)).toMatchObject({
+      id: proposal.id,
+      status: 'pending',
+      workItemId: repair.id,
+      workItemGenerationId: repair.repairGenerationId,
+    });
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const { queueProposalRepairWorkForPendingProposals } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(queueSelfHealItem(repair)).toBe(true);
+    expect(queueProposalRepairWorkForPendingProposals([proposal], now, {
+      dispatchEvents: [],
+      lifecycleProposals: [proposal],
+    })).toMatchObject({
+      dispatchRepairLifecycleUnavailable: 1,
+      dispatchRepairPruned: 0,
+      blockedItemKeys: expect.arrayContaining([expect.any(String)]),
+    });
+    mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('unavailable');
+  });
+
+  it('blocks an uncommitted pre-append intent until the exact original evidence is replayed', async () => {
+    useIsolatedDispatchStore();
+    repo.enroll();
+    const now = new Date();
+    const parentTs = new Date(now.getTime() - 2 * 60_000).toISOString();
+    const proposalTs = new Date(now.getTime() - 60_000).toISOString();
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-uncommitted-attempt-intent',
+      parentTs,
+      now,
+    );
+    const attemptId = 'attempt-57345678-1234-4123-8123-123456789abc';
+    const proposal = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      'prop-h2-uncommitted-attempt-intent',
+      proposalTs,
+    );
+    const attempt = diagnosticAttempt(
+      repair,
+      'proposal-created',
+      attemptId,
+      proposal.createdAt,
+      proposal.id,
+    );
+    const partition = join(dispatchProductionDir(), `${attempt.ts.slice(0, 10)}.jsonl`);
+    mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
+    const appendLock = acquireLocalStoreLock(`${partition}.lock`);
+    expect(appendLock).not.toBeNull();
+    try {
+      expect(recordDispatchProduction(attempt)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    } finally {
+      if (appendLock) releaseLocalStoreLock(appendLock);
+    }
+    const { generatedRepairProposalDispatchAuthority } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+      repairGenerationId: repair.repairGenerationId!,
+      repairAttemptOrdinal: 1,
+    }])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{ status: 'missing', reason: 'receipt-uncommitted' }],
+    });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('unavailable');
+
+    expect(recordDispatchProduction(attempt)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('proven');
+  });
+
+  it('blocks on an authoritative JSONL append when immutable receipt publication is missing', async () => {
+    useIsolatedDispatchStore();
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-append-before-receipt',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const attemptId = 'attempt-62345678-1234-4123-8123-123456789abc';
+    const proposalId = 'prop-h2-append-before-receipt';
+    const proposal = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      proposalId,
+      '2026-07-04T11:00:00.000Z',
+    );
+    const attempt = diagnosticAttempt(
+      repair,
+      'proposal-created',
+      attemptId,
+      proposal.createdAt,
+      proposalId,
+    );
+    const { generatedRepairProposalDispatchAuthority } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+
+    appendDispatchProductionWithoutReceipt(attempt);
+
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+      repairGenerationId: repair.repairGenerationId!,
+      repairAttemptOrdinal: 1,
+    }])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{ status: 'missing', reason: 'receipt-missing' }],
+    });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('proven');
+  });
+
+  it('fails closed for a valid non-current generation alias proposal', async () => {
+    useIsolatedDispatchStore();
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-generation-alias',
+      '2026-07-04T10:00:00.000Z',
+      now,
+      'attempt-12345678-2234-4123-8123-123456789abc',
+      true,
+    );
+    const current = generatedRepairGenerationId(repair)!;
+    const alias = generatedRepairGenerationIds(repair).find((generationId) => generationId !== current);
+    if (!alias) throw new Error('expected a valid non-current generation alias');
+    const proposal = diagnosticPendingProposal(
+      repair,
+      'attempt-72345678-1234-4123-8123-123456789abc',
+      'prop-h2-generation-alias',
+      '2026-07-04T11:00:00.000Z',
+      alias,
+    );
+    const { generatedRepairProposalDispatchAuthority } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+
+    expect(generatedRepairGenerationIds(repair)).toContain(alias);
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('unavailable');
+  });
+
+  it('turns a committed failed recovery attempt into fail-closed bounded state', async () => {
+    useIsolatedDispatchStore();
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-dedup-recovery-bound',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const attemptId = 'attempt-82345678-1234-4123-8123-123456789abc';
+    const proposal = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      'prop-h2-dedup-recovery-bound',
+      '2026-07-04T11:00:00.000Z',
+    );
+    const failedRetry: DispatchProductionEvent = {
+      ...diagnosticAttempt(repair, 'proposal-created', attemptId, proposal.createdAt, proposal.id),
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      proposalId: undefined,
+      reason: 'retry diff deduplicated against the crash-persisted pending proposal',
+    };
+    const { generatedRepairProposalDispatchAuthority } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+
+    mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('unavailable');
+    expect(recordDispatchProduction(failedRetry)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(generatedRepairProposalDispatchAuthority(repair, proposal)).toBe('unavailable');
+  });
+
+  it('does not advance diagnostic lifecycle from caller-only evidence', async () => {
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-forged-recovery-evidence',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const forged = diagnosticAttempt(
+      repair,
+      'empty-diff',
+      'attempt-32345678-1234-4123-8123-123456789abc',
+      '2026-07-04T11:00:00.000Z',
+    );
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const { queueProposalRepairWorkForPendingProposals } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(queueSelfHealItem(repair)).toBe(true);
+
+    queueProposalRepairWorkForPendingProposals([], now, {
+      dispatchEvents: [forged],
+      lifecycleProposals: [],
+    });
+
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+  });
+
+  it('does not let caller proposal identity replace the canonical receipt identity', async () => {
+    repo.enroll();
+    const now = new Date('2026-07-04T12:00:00.000Z');
+    const repair = await diagnosticRepair(
+      repo.dir,
+      'repo:goal:h2-proposal-identity-confusion',
+      '2026-07-04T10:00:00.000Z',
+      now,
+    );
+    const attemptId = 'attempt-42345678-1234-4123-8123-123456789abc';
+    const canonical = diagnosticAttempt(
+      repair,
+      'proposal-created',
+      attemptId,
+      '2026-07-04T11:00:00.000Z',
+      'prop-canonical-receipt',
+    );
+    const callerClaim: DispatchProductionEvent = {
+      ...canonical,
+      proposalId: 'prop-durable-inbox',
+      runEventSummary: {
+        ...canonical.runEventSummary!,
+        proposalId: 'prop-durable-inbox',
+      },
+    };
+    const proposal = diagnosticPendingProposal(
+      repair,
+      attemptId,
+      'prop-durable-inbox',
+      canonical.ts,
+    );
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const {
+      generatedRepairProposalDispatchAuthority,
+      queueProposalRepairWorkForPendingProposals,
+    } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(queueSelfHealItem(repair)).toBe(true);
+    expect(recordDispatchProduction(canonical)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+
+    const result = queueProposalRepairWorkForPendingProposals([], now, {
+      dispatchEvents: [callerClaim],
+      lifecycleProposals: [proposal],
+    });
+    const authority = generatedRepairProposalDispatchAuthority(repair, proposal);
+
+    expect(result).toMatchObject({ dispatchRepairRetired: 0, dispatchRepairPruned: 0 });
+    expect(authority).toBe('unavailable');
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
   });
 
   it('classifies a failed no-edit sandbox run as engine failure rather than empty diff', async () => {

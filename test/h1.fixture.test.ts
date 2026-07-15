@@ -63,6 +63,8 @@ describe('H1 testkit — makeFixture HOME isolation', () => {
       // os.homedir() (the seam the whole chain resolves through) now points at it.
       expect(resolve(homedir())).toBe(resolve(fx.home));
       expect(resolve(process.env.HOME ?? '')).toBe(resolve(fx.home));
+      expect(resolve(process.env.USERPROFILE ?? '')).toBe(resolve(fx.home));
+      expect(resolve(process.env.ASHLR_HOME ?? '')).toBe(resolve(fx.ashlrDir));
       // The isolated ~/.ashlr resolves under the tmp HOME, and enrollmentPath()
       // — the real production path helper — points inside it (never the real one).
       expect(fx.ashlrDir).toBe(join(fx.home, '.ashlr'));
@@ -72,12 +74,18 @@ describe('H1 testkit — makeFixture HOME isolation', () => {
     }
   });
 
-  it('cleanup() restores the prior process.env.HOME exactly', () => {
+  it('cleanup() restores the prior HOME, USERPROFILE, and ASHLR_HOME exactly', () => {
     const before = process.env.HOME;
+    const beforeUserProfile = process.env.USERPROFILE;
+    const beforeAshlrHome = process.env.ASHLR_HOME;
     const fx = makeFixture();
     expect(process.env.HOME).toBe(fx.home); // relocated
+    expect(process.env.USERPROFILE).toBe(fx.home);
+    expect(process.env.ASHLR_HOME).toBe(fx.ashlrDir);
     fx.cleanup();
     expect(process.env.HOME).toBe(before); // restored byte-for-byte
+    expect(process.env.USERPROFILE).toBe(beforeUserProfile);
+    expect(process.env.ASHLR_HOME).toBe(beforeAshlrHome);
     expect(resolve(homedir())).toBe(resolve(REAL_HOME ?? ''));
   });
 

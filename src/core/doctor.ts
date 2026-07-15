@@ -892,20 +892,30 @@ function checkTelemetrySink(
  * Probe: enrollment registry (H7).
  * id: 'enrollment'
  *
- * READ-ONLY via readEnrollmentState() → listEnrolled(). ALWAYS passes — an
- * empty registry is the legitimate fresh-install default (DEFAULT EMPTY), so 0
- * enrolled is a pass with a "none yet — run `ashlr onboard`" note rather than a
- * warning. Mutates nothing. Never throws.
+ * READ-ONLY via readEnrollmentState() → readEnrollmentRegistry(). A degraded
+ * registry fails because it cannot be treated as valid empty authority. A valid
+ * empty registry remains the legitimate fresh-install default (DEFAULT EMPTY),
+ * so 0 enrolled passes with a "none yet — run `ashlr onboard`" note. Mutates
+ * nothing. Never throws.
  */
 function checkEnrollment(): DoctorCheck {
   try {
-    const { count } = readEnrollmentState();
-    if (count > 0) {
+    const enrollment = readEnrollmentState();
+    if ('degraded' in enrollment) {
+      return check(
+        'enrollment',
+        'Enrollment registry',
+        'fail',
+        `Enrollment registry degraded: ${enrollment.reason}`,
+        'Repair ~/.ashlr/enrollment.json before running autonomy.',
+      );
+    }
+    if (enrollment.count > 0) {
       return check(
         'enrollment',
         'Enrollment registry',
         'pass',
-        `${count} repo${count !== 1 ? 's' : ''} enrolled`,
+        `${enrollment.count} repo${enrollment.count !== 1 ? 's' : ''} enrolled`,
       );
     }
     return check(
@@ -917,7 +927,7 @@ function checkEnrollment(): DoctorCheck {
     );
   } catch (err) {
     // readEnrollmentState never throws, but degrade defensively regardless.
-    return check('enrollment', 'Enrollment registry', 'pass', `enrollment unreadable: ${String(err)}`);
+    return check('enrollment', 'Enrollment registry', 'fail', `enrollment unreadable: ${String(err)}`);
   }
 }
 

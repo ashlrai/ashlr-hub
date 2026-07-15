@@ -1,17 +1,27 @@
 import { createHash } from 'node:crypto';
-import { basename, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { DecisionEntry, Proposal, RepairTreatment, WorkItem } from '../types.js';
-import { listProposals, loadProposal } from '../inbox/store.js';
+import type { DecisionEntry, Proposal, RepairDepth, RepairTreatment, WorkItem } from '../types.js';
+import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
+import { pruneQueuedSelfHealItems, queueSelfHealItemDetailed } from './self-heal.js';
+import { loadQueuedAutonomyItemsDetailed } from '../portfolio/queued-autonomy.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import {
   REJECTED_CAPTURE_REPAIR_MAX_AGE_MS,
   isActionableSelfHealItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
 } from './self-heal-trust.js';
-import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
+import {
+  readDispatchProductionEventsDetailed,
+  resolveDispatchProductionAttemptWitnesses,
+  resolveDispatchProductionAttemptReceiptWitnesses,
+  type DispatchProductionAttemptProofTarget,
+  type DispatchProductionEvent,
+  type DispatchProductionReadStopReason,
+} from './dispatch-production-ledger.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import {
   generatedRepairGenerationId,
@@ -48,6 +58,87 @@ const REJECTED_CAPTURE_MAX_SCANNED = 32;
 const MAX_PARENT_CONTEXT = 1_600;
 const PERSISTENCE_MISMATCH_DECISION_WINDOW_MS = 60_000;
 const DECISION_TIMESTAMP_SLOP_MS = 1_000;
+const PROPOSAL_ATTEMPT_SCAN_SLOP_MS = 1_000;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_ROOT_ADMISSION_COUNT = 10_000;
+
+export interface GeneratedRepairRootIdentity {
+  repairRootId: string;
+  repairRootAuthorityId: string;
+  repairDepth: RepairDepth;
+}
+
+function canonicalRepairRootId(repo: string, rootItemId: string): string | null {
+  let canonicalRepo: string;
+  try {
+    canonicalRepo = resolve(repo);
+  } catch {
+    return null;
+  }
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:repair-root:v2',
+    canonicalRepo,
+    rootItemId,
+  ])).digest('hex');
+}
+
+/** Canonical repo/root admission key. Runtime validation deliberately rejects widened depths. */
+export function generatedRepairRootKey(
+  item: Pick<WorkItem, 'repo' | 'repairRootId' | 'repairRootAuthorityId' | 'repairDepth'>,
+): string | null {
+  if ((item.repairDepth !== 0 && item.repairDepth !== 1) ||
+    typeof item.repairRootAuthorityId !== 'string' || !item.repairRootAuthorityId) return null;
+  const canonical = canonicalRepairRootId(item.repo, item.repairRootAuthorityId);
+  if (!canonical || item.repairRootId !== canonical) return null;
+  try {
+    return `${resolve(item.repo)}\0${item.repairRootId}`;
+  } catch {
+    return null;
+  }
+}
+
+export function proposalRepairRootIdentity(proposal: Proposal, repo: string): GeneratedRepairRootIdentity | null {
+  if (!proposal.id || proposal.workItemGenerationId !== undefined || proposal.repairRootId !== undefined || proposal.repairDepth !== undefined) {
+    return null;
+  }
+  // Legacy generated proposals predate bound lineage metadata. Recognizable
+  // generated ids are never allowed to masquerade as a fresh depth-zero root.
+  if (/:proposal-repair(?:-capture|-nodiff)?:/i.test(proposal.workItemId ?? '')) return null;
+  const repairRootAuthorityId = `proposal:${proposal.id}`;
+  const repairRootId = canonicalRepairRootId(repo, repairRootAuthorityId);
+  return repairRootId ? { repairRootId, repairRootAuthorityId, repairDepth: 0 } : null;
+}
+
+function dispatchRepairRootIdentity(
+  event: DispatchProductionEvent,
+  repo: string,
+  parent?: Pick<WorkItem, 'id' | 'repo' | 'repairRootId' | 'repairRootAuthorityId' | 'repairDepth'>,
+): GeneratedRepairRootIdentity | null {
+  if (parent) {
+    const parentKey = generatedRepairRootKey(parent);
+    let canonicalRepo: string;
+    try { canonicalRepo = resolve(repo); } catch { return null; }
+    if (!parentKey || resolve(parent.repo) !== canonicalRepo || parent.id !== event.itemId || parent.repairDepth !== 0) {
+      return null;
+    }
+    return {
+      repairRootId: parent.repairRootId!,
+      repairRootAuthorityId: parent.repairRootAuthorityId!,
+      repairDepth: 1,
+    };
+  }
+  // A generated parent without an exact active root is ambiguous. Item-id
+  // structure is used only to fail closed, never to infer or mint authority.
+  if (/:proposal-repair(?:-capture|-nodiff)?:/i.test(event.itemId)) return null;
+  if (!SHA256_RE.test(event.objectiveHash ?? '')) return null;
+  const repairRootAuthorityId = `dispatch:${event.itemId}:${event.source}:${event.objectiveHash}`;
+  const repairRootId = canonicalRepairRootId(repo, repairRootAuthorityId);
+  return repairRootId ? { repairRootId, repairRootAuthorityId, repairDepth: 0 } : null;
+}
+
+function incrementBounded(value: number | undefined): number {
+  return Math.min(MAX_ROOT_ADMISSION_COUNT, (value ?? 0) + 1);
+}
 
 interface CaptureDecisionProof {
   decisions: DecisionEntry[];
@@ -86,8 +177,15 @@ export interface ProposalRepairWorkResult {
   dispatchRepairPruned?: number;
   dispatchRepairPruneFailed?: number;
   dispatchRepairLifecycleUnavailable?: number;
+  repairRootAdmissionConsidered?: number;
+  repairRootAdmissionAdmitted?: number;
+  repairRootAdmissionAlreadyActive?: number;
+  repairRootAdmissionRootless?: number;
+  repairRootAdmissionDepthRejected?: number;
   /** Internal selection guard; never persisted by producer-maintenance summaries. */
   blockedItemKeys?: string[];
+  /** Internal root-scoped quarantine guard; never persisted verbatim. */
+  blockedRootKeys?: string[];
   handoffObservations?: number;
   handoffInvalidRows?: number;
   handoffConflictingIds?: number;
@@ -100,6 +198,11 @@ export interface ProposalRepairWorkResult {
   handoffCompacted?: number;
   handoffCompactionUnavailable?: number;
   proposalInboxAvailable?: boolean;
+  dispatchSourceState?: 'missing' | 'healthy' | 'degraded';
+  dispatchSourceComplete?: boolean;
+  dispatchSourceInvalidRows?: number;
+  dispatchSourceUnreadableFiles?: number;
+  dispatchSourceStopReasons?: DispatchProductionReadStopReason[];
 }
 
 export interface ProposalRepairWorkOptions {
@@ -197,7 +300,7 @@ function resolvedResliceDetail(parent: WorkItem, treatment: RepairTreatment): st
 export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticResliceParentResolution {
   const parents = new Map<string, WorkItem>();
   for (const item of items) {
-    if (item.tags.includes('proposal-repair')) continue;
+    if (item.tags.includes('proposal-repair') && item.repairDepth !== 0) continue;
     const key = parentKey(item.repo, item.id);
     if (key) parents.set(key, item);
   }
@@ -215,9 +318,30 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
     const parentId = repairParentItemId(item);
     const key = parentId ? parentKey(item.repo, parentId) : null;
     const parent = key ? parents.get(key) : undefined;
+    if (item.repairDepth === 1 && !parent) {
+      if (
+        generatedRepairRootKey(item) === null ||
+        item.repairParentSource !== 'self' ||
+        item.repairParentTier == null ||
+        !SHA256_RE.test(item.repairParentObjectiveHash ?? '') ||
+        generatedRepairGenerationId(item) === null
+      ) {
+        missing += 1;
+        quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
+        continue;
+      }
+      resolved += 1;
+      dispatchable.push(item);
+      continue;
+    }
     if (!parent) {
       missing += 1;
       quarantined.push({ itemId: item.id, reason: 'parent-missing' });
+      continue;
+    }
+    if (generatedRepairRootKey(item) === null) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
       continue;
     }
     if (
@@ -360,9 +484,6 @@ function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
   if (event.proposalCreated !== false) return false;
   if (event.proposalId) return false;
   if (!event.repo || !event.itemId) return false;
-  if (/\b(?:proposal-repair|dispatch-capture-repair|proposal-repair-capture)\b/i.test(`${event.itemId}\n${event.title}`)) {
-    return false;
-  }
   if (event.outcome === 'proposal-capture-error') return true;
   if (event.outcome !== 'gate-blocked') return false;
   if ((event.runEventSummary?.actionCounts?.completenessGateRuns ?? 0) > 0) return true;
@@ -386,9 +507,6 @@ function isDiagnosticNoDiffEvent(event: DispatchProductionEvent): boolean {
   if (event.proposalCreated !== false) return false;
   if (event.proposalId) return false;
   if (!event.repo || !event.itemId) return false;
-  if (/\b(?:proposal-repair|dispatch-capture-repair|proposal-repair-capture|proposal-repair-nodiff|diagnostic-reslice|no-diff-reslice)\b/i.test(`${event.itemId}\n${event.title}`)) {
-    return false;
-  }
   if (event.learningLabel && event.learningLabel.learningKind !== 'diagnostic-no-proposal') return false;
   return true;
 }
@@ -401,6 +519,8 @@ export function proposalRepairWorkItem(
   if (!proposalNeedsRepair(proposal, now, decisionProof) || !proposal.repo) return null;
   const repo = canonicalEnrolledExistingRepo(proposal.repo);
   if (!repo) return null;
+  const root = proposalRepairRootIdentity(proposal, repo);
+  if (!root) return null;
 
   const title = bounded(proposal.title, MAX_TITLE) || proposal.id;
   const reason = repairReason(proposal);
@@ -431,6 +551,7 @@ export function proposalRepairWorkItem(
       ...(proposal.status === 'rejected' ? ['rejected-capture-recovery'] : []),
     ],
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
+    ...root,
   };
 }
 
@@ -488,6 +609,7 @@ export function beginRejectedCaptureRecoveryDispatch<T>(
 export function captureGateRepairWorkItem(
   event: DispatchProductionEvent,
   now = new Date(),
+  parentRepair?: WorkItem,
 ): WorkItem | null {
   if (!isRepairableCaptureFailure(event)) return null;
   const eventMs = Date.parse(event.ts);
@@ -498,9 +620,11 @@ export function captureGateRepairWorkItem(
   }
   const repo = canonicalEnrolledExistingRepo(event.repo);
   if (!repo) return null;
-
   const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
   const itemId = bounded(event.itemId, 120) || 'unknown';
+  const repairItemId = captureRepairId(repo, itemId);
+  const root = dispatchRepairRootIdentity(event, repo, parentRepair);
+  if (!root) return null;
   const title = bounded(event.title, MAX_TITLE);
   const outcome = event.outcome;
   const value = 5;
@@ -512,7 +636,7 @@ export function captureGateRepairWorkItem(
   ].filter(Boolean).join(', ');
 
   const item: WorkItem = {
-    id: captureRepairId(repo, itemId),
+    id: repairItemId,
     repo,
     source: 'self',
     title: `Repair dispatch capture failure for ${bounded(basename(repo), 80) || 'repo'} item ${itemId}`,
@@ -530,6 +654,7 @@ export function captureGateRepairWorkItem(
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
     ts: new Date(eventMs).toISOString(),
+    ...root,
     ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
     ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
     ...(typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
@@ -551,6 +676,7 @@ export function captureGateRepairWorkItem(
 export function noDiffResliceWorkItem(
   event: DispatchProductionEvent,
   now = new Date(),
+  parentRepair?: WorkItem,
 ): WorkItem | null {
   if (!isDiagnosticNoDiffEvent(event)) return null;
   const eventMs = Date.parse(event.ts);
@@ -561,9 +687,11 @@ export function noDiffResliceWorkItem(
   }
   const repo = canonicalEnrolledExistingRepo(event.repo);
   if (!repo) return null;
-
   const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
   const itemId = bounded(event.itemId, 120) || 'unknown';
+  const repairItemId = noDiffResliceId(repo, itemId);
+  const root = dispatchRepairRootIdentity(event, repo, parentRepair);
+  if (!root) return null;
   const title = bounded(event.title, MAX_TITLE);
   const backend = bounded(event.backend ?? 'unknown', 80) || 'unknown';
   const source = bounded(event.source, 80) || 'unknown';
@@ -588,7 +716,7 @@ export function noDiffResliceWorkItem(
   const treatment = assignedTreatment;
 
   const item: WorkItem = {
-    id: noDiffResliceId(repo, itemId),
+    id: repairItemId,
     repo,
     source: 'self',
     title: `Reslice no-diff dispatch for ${bounded(basename(repo), 80) || 'repo'} item ${itemId}`,
@@ -610,6 +738,7 @@ export function noDiffResliceWorkItem(
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts: new Date(eventMs).toISOString(),
+    ...root,
     ...(event.repairHandoffId
       ? { repairHandoffId: event.repairHandoffId }
       : derivedHandoff ? { repairHandoffId: derivedHandoff.eventId } : {}),
@@ -630,14 +759,73 @@ export function noDiffResliceWorkItem(
   }) ? item : null;
 }
 
-function readRecentDispatchEvents(_now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
-  if (opts?.dispatchEvents) return opts.dispatchEvents;
-  if (opts?.includeDispatchCaptureFailures === false && opts?.includeDispatchNoDiffReslices === false) return [];
+interface RecentDispatchEventsRead {
+  events: DispatchProductionEvent[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+  invalidRows: number;
+  unreadableFiles: number;
+  stopReasons: DispatchProductionReadStopReason[];
+}
+
+function readRecentDispatchEvents(
+  now: Date,
+  opts?: ProposalRepairWorkOptions,
+  handoffRead?: ReturnType<typeof readRepairHandoffs>,
+): RecentDispatchEventsRead {
+  if (opts?.dispatchEvents) {
+    return {
+      events: opts.dispatchEvents,
+      sourceState: 'healthy',
+      complete: true,
+      invalidRows: 0,
+      unreadableFiles: 0,
+      stopReasons: [],
+    };
+  }
+  if (opts?.includeDispatchCaptureFailures === false && opts?.includeDispatchNoDiffReslices === false) {
+    return {
+      events: [],
+      sourceState: 'missing',
+      complete: true,
+      invalidRows: 0,
+      unreadableFiles: 0,
+      stopReasons: [],
+    };
+  }
   try {
-    const handoffs = readRepairHandoffs().observations.map(dispatchEventFromRepairHandoff);
-    return handoffs;
+    const handoffSource = handoffRead ?? readRepairHandoffs();
+    const handoffs = handoffSource.observations.map(dispatchEventFromRepairHandoff);
+    const sinceMs = now.getTime() - Math.max(0, opts?.dispatchWindowMs ?? DISPATCH_CAPTURE_WINDOW_MS);
+    const production = readDispatchProductionEventsDetailed({ sinceMs });
+    const byIdentity = new Map<string, DispatchProductionEvent>();
+    // Handoff projections carry the canonical generation identity for parent
+    // failures. Let them replace the analytics copy of the same parent row,
+    // while retaining child proposal-production rows that have no handoff.
+    for (const event of [...production.events, ...handoffs]) {
+      byIdentity.set(JSON.stringify([event.ts, event.itemId, event.repo, event.outcome, event.proposalId ?? null]), event);
+    }
+    const handoffsComplete = handoffSource.sourceState !== 'degraded' && !handoffSource.limitExceeded;
+    const complete = production.complete && production.sourceState !== 'degraded' && handoffsComplete;
+    return {
+      events: [...byIdentity.values()],
+      sourceState: complete
+        ? production.sourceState === 'healthy' || handoffSource.sourceState === 'healthy' ? 'healthy' : 'missing'
+        : 'degraded',
+      complete,
+      invalidRows: production.invalidRows,
+      unreadableFiles: production.unreadableFiles,
+      stopReasons: production.stopReasons,
+    };
   } catch {
-    return [];
+    return {
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 0,
+      unreadableFiles: 1,
+      stopReasons: ['io-error'],
+    };
   }
 }
 
@@ -667,23 +855,369 @@ function byNewestEvent(a: DispatchProductionEvent, b: DispatchProductionEvent): 
   return safeB - safeA;
 }
 
+function canonicalDiagnosticReceiptEvent(
+  item: WorkItem,
+  event: DispatchProductionEvent,
+  generationId: string,
+  ordinal: 1 | 2,
+): boolean {
+  if (
+    event.itemId !== item.id ||
+    event.source !== item.source ||
+    event.objectiveHash !== workItemObjectiveHash(item) ||
+    event.repairHandoffId !== item.repairHandoffId ||
+    event.repairGenerationId !== generationId ||
+    event.repairTreatmentUnitId !== item.repairTreatmentUnitId ||
+    event.repairTreatment !== item.repairTreatment ||
+    event.repairAttemptOrdinal !== ordinal ||
+    event.basis !== 'run-proposal-outcome'
+  ) return false;
+  try {
+    return resolve(event.repo) === resolve(item.repo);
+  } catch {
+    return false;
+  }
+}
+
+function diagnosticProposalAttemptTarget(
+  item: WorkItem,
+  proposal: Proposal,
+  generationId: string,
+  repairAttemptOrdinal: 1 | 2,
+  ts: string,
+): DispatchProductionAttemptProofTarget | null {
+  const objectiveHash = workItemObjectiveHash(item);
+  if (
+    objectiveHash === null ||
+    typeof item.repairHandoffId !== 'string' ||
+    typeof item.repairTreatmentUnitId !== 'string' ||
+    item.repairTreatment == null
+  ) return null;
+  return {
+    ts,
+    itemId: item.id,
+    repo: item.repo,
+    source: item.source,
+    outcome: 'proposal-created',
+    proposalId: proposal.id,
+    objectiveHash,
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: generationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal,
+  };
+}
+
+function canonicalDiagnosticProposalEvent(
+  item: WorkItem,
+  proposal: Proposal,
+  event: DispatchProductionEvent,
+  generationId: string,
+  ordinal: 1 | 2,
+): boolean {
+  return canonicalDiagnosticReceiptEvent(item, event, generationId, ordinal) &&
+    event.outcome === 'proposal-created' &&
+    event.proposalCreated === true &&
+    event.proposalId === proposal.id &&
+    event.runId === proposal.runId &&
+    event.trajectoryId === proposal.trajectoryId;
+}
+
+export type GeneratedRepairProposalDispatchAuthority =
+  | 'not-applicable'
+  | 'proven'
+  | 'unavailable';
+
+/**
+ * Decide whether one pending proposal may suppress redispatch of a diagnostic
+ * repair. A proposal is never proof by itself: only its exact immutable attempt
+ * receipt grants terminal lifecycle authority. A durable pending proposal stays
+ * blocking even when its receipt is absent: proposal persistence precedes the
+ * receipt intent, so absence can represent a completed producer crash. An
+ * uncommitted intent, malformed evidence, and unreadable storage also fail closed.
+ */
+export function generatedRepairProposalDispatchAuthority(
+  item: WorkItem,
+  proposal: Proposal,
+): GeneratedRepairProposalDispatchAuthority {
+  if (!isTrustedDiagnosticResliceItem(item) || proposal.status !== 'pending') {
+    return 'not-applicable';
+  }
+  const generationIds = generatedRepairGenerationIds(item);
+  if (
+    proposal.workItemId !== item.id ||
+    typeof proposal.workItemGenerationId !== 'string' ||
+    !generationIds.includes(proposal.workItemGenerationId)
+  ) return 'not-applicable';
+  try {
+    if (!proposal.repo || resolve(proposal.repo) !== resolve(item.repo)) return 'not-applicable';
+  } catch {
+    return 'not-applicable';
+  }
+
+  const generationId = generatedRepairGenerationId(item);
+  if (
+    generationId === null ||
+    item.repairGenerationId !== generationId ||
+    proposal.workItemGenerationId !== generationId ||
+    !durableGeneratedRepairProposal(item, proposal) ||
+    proposal.runEventSummary?.outcome !== 'proposal-created' ||
+    proposal.runEventSummary.proposalCreated !== true
+  ) return 'unavailable';
+
+  const targets = ([1, 2] as const).map((repairAttemptOrdinal) => ({
+    repairGenerationId: generationId,
+    repairAttemptOrdinal,
+  }));
+  const witnessed = resolveDispatchProductionAttemptReceiptWitnesses(targets);
+  if (witnessed.status !== 'resolved') return 'unavailable';
+
+  let canonicalEmptyReceipts = 0;
+  const missingOrdinals: Array<1 | 2> = [];
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index]!;
+    const resolution = witnessed.resolutions[index];
+    if (resolution?.status === 'missing' && resolution.reason === 'receipt-missing') {
+      missingOrdinals.push(target.repairAttemptOrdinal);
+      continue;
+    }
+    if (
+      resolution?.status !== 'proven' ||
+      resolution.proof.repairGenerationId !== generationId ||
+      resolution.proof.repairAttemptOrdinal !== target.repairAttemptOrdinal ||
+      resolution.proof.eventTs !== resolution.event.ts ||
+      !canonicalDiagnosticReceiptEvent(item, resolution.event, generationId, target.repairAttemptOrdinal)
+    ) return 'unavailable';
+
+    const event = resolution.event;
+    if (
+      event.outcome === 'empty-diff' &&
+      event.proposalCreated === false &&
+      event.proposalId === undefined
+    ) {
+      canonicalEmptyReceipts++;
+      continue;
+    }
+    if (canonicalDiagnosticProposalEvent(
+      item,
+      proposal,
+      event,
+      generationId,
+      target.repairAttemptOrdinal,
+    )) return 'proven';
+    return 'unavailable';
+  }
+
+  // Two canonical empty attempts are terminal lifecycle evidence. If projection
+  // has not pruned the item yet, keep it blocked rather than permit a third run.
+  if (canonicalEmptyReceipts >= 2 || missingOrdinals.length === 0) return 'unavailable';
+
+  const proposalMs = Date.parse(proposal.createdAt);
+  if (!Number.isFinite(proposalMs)) return 'unavailable';
+  let productionRead: ReturnType<typeof readDispatchProductionEventsDetailed>;
+  try {
+    productionRead = readDispatchProductionEventsDetailed({
+      sinceMs: Math.max(0, proposalMs - PROPOSAL_ATTEMPT_SCAN_SLOP_MS),
+    });
+  } catch {
+    return 'unavailable';
+  }
+  if (
+    productionRead.sourceState !== 'healthy' ||
+    !productionRead.complete ||
+    productionRead.invalidRows > 0 ||
+    productionRead.unreadableFiles > 0
+  ) return 'unavailable';
+
+  const missing = new Set<1 | 2>(missingOrdinals);
+  const partitionEmptyOrdinals = new Set<1 | 2>();
+  const proposalEvents: DispatchProductionEvent[] = [];
+  for (const event of productionRead.events) {
+    if (
+      event.repairGenerationId !== generationId ||
+      (event.repairAttemptOrdinal !== 1 && event.repairAttemptOrdinal !== 2) ||
+      !missing.has(event.repairAttemptOrdinal)
+    ) continue;
+    if (!canonicalDiagnosticReceiptEvent(
+      item,
+      event,
+      generationId,
+      event.repairAttemptOrdinal,
+    )) return 'unavailable';
+    if (
+      event.outcome === 'empty-diff' &&
+      event.proposalCreated === false &&
+      event.proposalId === undefined
+    ) {
+      partitionEmptyOrdinals.add(event.repairAttemptOrdinal);
+      continue;
+    }
+    if (canonicalDiagnosticProposalEvent(
+      item,
+      proposal,
+      event,
+      generationId,
+      event.repairAttemptOrdinal,
+    )) {
+      proposalEvents.push(event);
+      continue;
+    }
+    return 'unavailable';
+  }
+
+  for (const event of proposalEvents) {
+    const target = diagnosticProposalAttemptTarget(
+      item,
+      proposal,
+      generationId,
+      event.repairAttemptOrdinal!,
+      event.ts,
+    );
+    if (target === null) return 'unavailable';
+    const resolved = resolveDispatchProductionAttemptWitnesses([target]);
+    const proof = resolved.status === 'resolved' ? resolved.resolutions[0] : undefined;
+    if (
+      proof?.status !== 'proven' ||
+      proof.proof.eventTs !== event.ts ||
+      !canonicalDiagnosticProposalEvent(
+        item,
+        proposal,
+        proof.event,
+        generationId,
+        event.repairAttemptOrdinal!,
+      )
+    ) return 'unavailable';
+  }
+  if (proposalEvents.length > 0) return 'proven';
+  if (canonicalEmptyReceipts + partitionEmptyOrdinals.size >= 2) return 'unavailable';
+
+  // Receipt retention can make an otherwise clean partition miss ambiguous.
+  // Resolve each missing ordinal at the proposal timestamp so retention,
+  // mutation, or sequence ambiguity remains fail-closed.
+  const absenceTargets = missingOrdinals.map((ordinal) => diagnosticProposalAttemptTarget(
+      item,
+      proposal,
+      generationId,
+      ordinal,
+      new Date(proposalMs).toISOString(),
+    ));
+  if (absenceTargets.some((target) => target === null)) return 'unavailable';
+  const absence = resolveDispatchProductionAttemptWitnesses(
+    absenceTargets as DispatchProductionAttemptProofTarget[],
+  );
+  if (
+    absence.status !== 'resolved' ||
+    absence.resolutions.some((resolution) =>
+      resolution.status !== 'missing' &&
+      !(resolution.status === 'unproven' && resolution.reason === 'attempt-sequence-missing'))
+  ) return 'unavailable';
+  return 'unavailable';
+}
+
+function reconcileDiagnosticLifecycleFromReceipts(
+  item: WorkItem,
+  durableProposal: Proposal | undefined,
+): boolean {
+  const generationId = generatedRepairGenerationId(item);
+  if (generationId === null || item.repairGenerationId !== generationId) return false;
+  const targets = ([1, 2] as const).map((repairAttemptOrdinal) => ({
+    repairGenerationId: generationId,
+    repairAttemptOrdinal,
+  }));
+  const witnessed = resolveDispatchProductionAttemptReceiptWitnesses(targets);
+  if (witnessed.status !== 'resolved') return false;
+
+  const first = witnessed.resolutions[0];
+  const second = witnessed.resolutions[1];
+  if (durableProposal && witnessed.resolutions.every((resolution) =>
+    resolution.status === 'missing' && resolution.reason === 'receipt-missing')) {
+    return false;
+  }
+  const freshGeneration = first?.status === 'missing' && first.reason === 'receipt-missing' &&
+    second?.status === 'unproven' && second.reason === 'attempt-sequence-missing';
+  if (freshGeneration) return true;
+
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index]!;
+    const resolution = witnessed.resolutions[index];
+    if (resolution?.status === 'missing' && resolution.reason === 'receipt-missing') continue;
+    if (
+      resolution?.status !== 'proven' ||
+      resolution.proof.repairGenerationId !== generationId ||
+      resolution.proof.repairAttemptOrdinal !== target.repairAttemptOrdinal ||
+      resolution.proof.eventTs !== resolution.event.ts ||
+      !canonicalDiagnosticReceiptEvent(
+        item,
+        resolution.event,
+        generationId,
+        target.repairAttemptOrdinal,
+      )
+    ) return false;
+
+    const event = resolution.event;
+    if (
+      event.outcome === 'empty-diff' &&
+      event.proposalCreated === false &&
+      event.proposalId === undefined
+    ) {
+      recordGeneratedRepairLifecycle(item, {
+        kind: 'dispatch-proof-empty-diff',
+        eventTs: event.ts,
+      });
+      continue;
+    }
+    if (
+      event.outcome === 'proposal-created' &&
+      event.proposalCreated === true &&
+      durableProposal?.trajectoryId &&
+      durableProposal.workItemGenerationId === generationId &&
+      event.proposalId === durableProposal.id &&
+      event.runId === durableProposal.runId &&
+      event.trajectoryId === durableProposal.trajectoryId
+    ) {
+      recordGeneratedRepairLifecycle(item, {
+        kind: 'proposal-created',
+        attemptId: event.trajectoryId,
+        proposalId: event.proposalId,
+        ts: event.ts,
+      });
+      continue;
+    }
+    // Any other proven receipt is not terminal lifecycle evidence. Keep the
+    // generation operator-visible and blocked rather than minting new authority.
+    return false;
+  }
+  return true;
+}
+
 export function queueProposalRepairWorkForPendingProposals(
   proposals?: Proposal[],
   now = new Date(),
   opts?: ProposalRepairWorkOptions,
 ): ProposalRepairWorkResult {
-  const handoffs = proposals === undefined && !opts?.dispatchEvents ? readRepairHandoffs() : undefined;
+  let handoffs: ReturnType<typeof readRepairHandoffs> | undefined;
   let pending: Proposal[];
+  let availableProposals: Proposal[];
   let captureDecisionProof: CaptureDecisionProof;
   try {
+    handoffs = proposals === undefined && !opts?.dispatchEvents ? readRepairHandoffs() : undefined;
     captureDecisionProof = readCaptureDecisionProof(now);
-    const available = proposals ?? listProposals();
-    const rejectedCapture = available
+    if (proposals === undefined) {
+      const read = listProposalsDetailed({ requireComplete: true });
+      if (!read.complete || read.sourceState === 'degraded') {
+        throw new Error('proposal inbox is degraded or incomplete');
+      }
+      availableProposals = read.proposals;
+    } else {
+      availableProposals = proposals;
+    }
+    const rejectedCapture = availableProposals
       .filter((proposal) => isRecentRejectedCaptureArtifact(proposal, now, captureDecisionProof))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
       .slice(0, REJECTED_CAPTURE_MAX_SCANNED);
     pending = [
-      ...available.filter((proposal) => proposal.status === 'pending'),
+      ...availableProposals.filter((proposal) => proposal.status === 'pending'),
       ...rejectedCapture,
     ];
   } catch {
@@ -693,6 +1227,11 @@ export function queueProposalRepairWorkForPendingProposals(
       queued: 0,
       failed: 1,
       proposalInboxAvailable: false,
+      dispatchSourceState: 'degraded',
+      dispatchSourceComplete: false,
+      dispatchSourceInvalidRows: 0,
+      dispatchSourceUnreadableFiles: 1,
+      dispatchSourceStopReasons: ['io-error'],
       ...(handoffs ? {
         handoffObservations: handoffs.observations.length,
         handoffInvalidRows: handoffs.invalidRows,
@@ -704,17 +1243,57 @@ export function queueProposalRepairWorkForPendingProposals(
   }
   let lifecycleProposals: Proposal[] = [];
   if (opts?.terminalLifecycleEnabled !== false) {
-    try {
-      lifecycleProposals = opts?.lifecycleProposals ?? (proposals === undefined ? listProposals() : proposals);
-    } catch {
-      lifecycleProposals = [];
-    }
+    lifecycleProposals = opts?.lifecycleProposals ?? availableProposals;
   }
+  const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
   const includeCaptureRepairs = opts?.includeDispatchCaptureFailures !== false;
   const includeNoDiffReslices = opts?.includeDispatchNoDiffReslices !== false;
-  const dispatchEvents = (includeCaptureRepairs || includeNoDiffReslices
-    ? (proposals === undefined ? readRecentDispatchEvents(now, opts) : (opts?.dispatchEvents ?? []))
-    : [])
+  const dispatchRead: RecentDispatchEventsRead = includeCaptureRepairs || includeNoDiffReslices
+    ? proposals === undefined
+      ? readRecentDispatchEvents(now, opts, handoffs)
+      : opts?.dispatchEvents
+        ? readRecentDispatchEvents(now, opts)
+        : {
+            events: [], sourceState: 'missing', complete: true,
+            invalidRows: 0, unreadableFiles: 0, stopReasons: [],
+          }
+    : {
+        events: [], sourceState: 'missing', complete: true,
+        invalidRows: 0, unreadableFiles: 0, stopReasons: [],
+      };
+  if (!dispatchRead.complete || dispatchRead.sourceState === 'degraded') {
+    return {
+      scanned: pending.length,
+      eligible: 0,
+      queued: 0,
+      failed: 1,
+      proposalEligible: 0,
+      proposalQueued: 0,
+      proposalFailed: 0,
+      dispatchCaptureScanned: 0,
+      dispatchCaptureEligible: 0,
+      dispatchCaptureQueued: 0,
+      dispatchCaptureFailed: includeCaptureRepairs ? 1 : 0,
+      dispatchNoDiffScanned: 0,
+      dispatchNoDiffEligible: 0,
+      dispatchNoDiffQueued: 0,
+      dispatchNoDiffFailed: includeNoDiffReslices ? 1 : 0,
+      proposalInboxAvailable: true,
+      dispatchSourceState: dispatchRead.sourceState,
+      dispatchSourceComplete: dispatchRead.complete,
+      dispatchSourceInvalidRows: dispatchRead.invalidRows,
+      dispatchSourceUnreadableFiles: dispatchRead.unreadableFiles,
+      dispatchSourceStopReasons: dispatchRead.stopReasons,
+      ...(handoffs ? {
+        handoffObservations: handoffs.observations.length,
+        handoffInvalidRows: handoffs.invalidRows,
+        handoffConflictingIds: handoffs.conflictingIds,
+        handoffSourceState: handoffs.sourceState,
+        handoffAuthorityDigest: handoffs.authorityDigest,
+      } : {}),
+    };
+  }
+  const dispatchEvents = dispatchRead.events
     .slice()
     .sort(byNewestEvent);
   const maxCaptureQueued = Math.max(
@@ -748,8 +1327,19 @@ export function queueProposalRepairWorkForPendingProposals(
     dispatchRepairPruned: 0,
     dispatchRepairPruneFailed: 0,
     dispatchRepairLifecycleUnavailable: 0,
+    repairRootAdmissionConsidered: 0,
+    repairRootAdmissionAdmitted: 0,
+    repairRootAdmissionAlreadyActive: 0,
+    repairRootAdmissionRootless: 0,
+    repairRootAdmissionDepthRejected: 0,
     blockedItemKeys: [],
+    blockedRootKeys: [],
     proposalInboxAvailable: true,
+    dispatchSourceState: dispatchRead.sourceState,
+    dispatchSourceComplete: dispatchRead.complete,
+    dispatchSourceInvalidRows: dispatchRead.invalidRows,
+    dispatchSourceUnreadableFiles: dispatchRead.unreadableFiles,
+    dispatchSourceStopReasons: dispatchRead.stopReasons,
   };
   if (handoffs) {
     result.handoffObservations = handoffs.observations.length;
@@ -759,10 +1349,20 @@ export function queueProposalRepairWorkForPendingProposals(
     result.handoffAuthorityDigest = handoffs.authorityDigest;
   }
 
-  const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
   const terminalByKey = new Map<string, 'retired' | 'exhausted' | 'quarantined'>();
   const blockedItemKeys = new Set<string>();
+  const blockedRootKeys = new Set<string>();
   const lifecycleUnavailableKeys = new Set<string>();
+  const activeRepairItemsByRoot = new Map<string, Map<string, WorkItem>>();
+  const activeRepairItemsById = new Map<string, WorkItem>();
+  const registerActiveRoot = (item: WorkItem): void => {
+    const rootKey = generatedRepairRootKey(item);
+    if (!rootKey) return;
+    const items = activeRepairItemsByRoot.get(rootKey) ?? new Map<string, WorkItem>();
+    items.set(item.id, item);
+    activeRepairItemsByRoot.set(rootKey, items);
+    activeRepairItemsById.set(item.id, item);
+  };
   const observeLifecycle = (
     item: WorkItem,
   ): 'not-generated' | 'active' | 'terminal' | 'quarantined' | 'unavailable' => {
@@ -777,7 +1377,15 @@ export function queueProposalRepairWorkForPendingProposals(
     const durableProposal = lifecycleProposals
       .filter((proposal) => durableGeneratedRepairProposal(item, proposal))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
-    if (durableProposal?.trajectoryId) {
+    const diagnosticProposalProofRequired = isTrustedDiagnosticResliceItem(item);
+    if (diagnosticProposalProofRequired) {
+      if (!reconcileDiagnosticLifecycleFromReceipts(item, durableProposal)) {
+        terminalByKey.delete(key);
+        blockedItemKeys.add(key);
+        lifecycleUnavailableKeys.add(key);
+        return 'unavailable';
+      }
+    } else if (durableProposal?.trajectoryId) {
       recordGeneratedRepairLifecycle(item, {
         kind: 'proposal-created',
         attemptId: durableProposal.trajectoryId,
@@ -789,6 +1397,8 @@ export function queueProposalRepairWorkForPendingProposals(
     if (!lifecycle.available) {
       terminalByKey.delete(key);
       blockedItemKeys.add(key);
+      const rootKey = generatedRepairRootKey(item);
+      if (rootKey) blockedRootKeys.add(rootKey);
       lifecycleUnavailableKeys.add(key);
       return 'unavailable';
     }
@@ -810,13 +1420,82 @@ export function queueProposalRepairWorkForPendingProposals(
             maxAgeMs: REJECTED_CAPTURE_REPAIR_MAX_AGE_MS,
           })
         ) return true;
+        if (isTrustedGeneratedRepairItem(item) && generatedRepairRootKey(item) === null) {
+          result.repairRootAdmissionRootless = incrementBounded(result.repairRootAdmissionRootless);
+          return true;
+        }
         if (isTrustedDiagnosticResliceItem(item) && generatedRepairGenerationId(item) === null) return true;
         const lifecycle = observeLifecycle(item);
+        if (lifecycle === 'active' || lifecycle === 'unavailable') registerActiveRoot(item);
         return lifecycle === 'terminal' || lifecycle === 'quarantined';
       })
     : { scanned: 0, removed: 0, failed: false };
   result.dispatchRepairPruned = prune.removed;
   result.dispatchRepairPruneFailed = prune.failed ? 1 : 0;
+
+  const persistAdmittedRoot = (item: WorkItem): { admitted: boolean; changed: boolean } => {
+    result.repairRootAdmissionConsidered = incrementBounded(result.repairRootAdmissionConsidered);
+    if (item.repairDepth !== 0 && item.repairDepth !== 1) {
+      result.repairRootAdmissionDepthRejected = incrementBounded(result.repairRootAdmissionDepthRejected);
+      return { admitted: false, changed: false };
+    }
+    const rootKey = generatedRepairRootKey(item);
+    if (!rootKey) {
+      result.repairRootAdmissionRootless = incrementBounded(result.repairRootAdmissionRootless);
+      return { admitted: false, changed: false };
+    }
+    if (blockedRootKeys.has(rootKey)) return { admitted: false, changed: false };
+    const lockId = createHash('sha256').update(rootKey).digest('hex');
+    const lock = acquireLocalStoreLock(join(homedir(), '.ashlr', 'repair-root-admission', `${lockId}.lock`), 0);
+    if (!lock) {
+      blockedRootKeys.add(rootKey);
+      return { admitted: false, changed: false };
+    }
+    try {
+      const queued = loadQueuedAutonomyItemsDetailed();
+      if (queued.sourceState === 'unavailable') {
+        blockedRootKeys.add(rootKey);
+        return { admitted: false, changed: false };
+      }
+      const active = [...new Map([
+        ...queued.items,
+        ...(activeRepairItemsByRoot.get(rootKey)?.values() ?? []),
+      ].filter((candidate) => generatedRepairRootKey(candidate) === rootKey).map((candidate) => [candidate.id, candidate])).values()];
+      const same = active.filter((candidate) => candidate.id === item.id);
+      const replaceIds = active
+        .filter((parent) => item.repairDepth === 1 && parent.repairDepth === 0 && item.repairParentItemId === parent.id)
+        .map((parent) => parent.id);
+      if (active.length > same.length && replaceIds.length !== active.length - same.length) {
+        result.repairRootAdmissionAlreadyActive = incrementBounded(result.repairRootAdmissionAlreadyActive);
+        return { admitted: false, changed: false };
+      }
+      // Remove the parent projection before publishing its child. The root lock
+      // prevents a concurrent pass from observing the gap and publishing a sibling.
+      if (replaceIds.length > 0) {
+        const replace = new Set(replaceIds);
+        const pruned = pruneQueuedSelfHealItems((candidate) =>
+          replace.has(candidate.id) && generatedRepairRootKey(candidate) === rootKey);
+        result.dispatchRepairPruned = (result.dispatchRepairPruned ?? 0) + pruned.removed;
+        if (pruned.failed) {
+          result.dispatchRepairPruneFailed = 1;
+          blockedRootKeys.add(rootKey);
+          return { admitted: false, changed: false };
+        }
+      }
+      const persisted = queueSelfHealItemDetailed(item);
+      if (!persisted.ok) {
+        blockedRootKeys.add(rootKey);
+        return { admitted: false, changed: false };
+      }
+      activeRepairItemsByRoot.set(rootKey, new Map([[item.id, item]]));
+      for (const id of replaceIds) activeRepairItemsById.delete(id);
+      activeRepairItemsById.set(item.id, item);
+      result.repairRootAdmissionAdmitted = incrementBounded(result.repairRootAdmissionAdmitted);
+      return { admitted: true, changed: persisted.changed };
+    } finally {
+      releaseLocalStoreLock(lock);
+    }
+  };
 
   if (terminalLifecycleEnabled) for (const proposal of pending) {
     const requiresLiveFence = proposals === undefined && proposal.status === 'rejected';
@@ -834,15 +1513,12 @@ export function queueProposalRepairWorkForPendingProposals(
       if (!item) continue;
       const lifecycle = observeLifecycle(item);
       if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
+      const admission = persistAdmittedRoot(item);
+      if (!admission.admitted) continue;
       result.eligible++;
       result.proposalEligible!++;
-      if (queueSelfHealItem(item)) {
-        result.queued++;
-        result.proposalQueued!++;
-      } else {
-        result.failed++;
-        result.proposalFailed!++;
-      }
+      result.queued++;
+      result.proposalQueued!++;
     } finally {
       if (mutationLock) releaseProposalMutationLock(mutationLock);
     }
@@ -851,47 +1527,37 @@ export function queueProposalRepairWorkForPendingProposals(
   let captureMutations = 0;
   if (terminalLifecycleEnabled && includeCaptureRepairs) for (const event of dispatchEvents) {
     if (captureMutations >= maxCaptureQueued) break;
-    const item = captureGateRepairWorkItem(event, now);
+    const item = captureGateRepairWorkItem(event, now, activeRepairItemsById.get(event.itemId));
     if (!item) continue;
     if (seenCaptureIds.has(item.id)) continue;
     seenCaptureIds.add(item.id);
     const lifecycle = observeLifecycle(item);
     if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
+    const admission = persistAdmittedRoot(item);
+    if (!admission.admitted) continue;
     result.eligible++;
     result.dispatchCaptureEligible!++;
-    const queued = queueSelfHealItemDetailed(item);
-    if (queued.ok) {
-      result.queued++;
-      result.dispatchCaptureQueued!++;
-      if (queued.changed) captureMutations++;
-    } else {
-      result.failed++;
-      result.dispatchCaptureFailed!++;
-      break;
-    }
+    result.queued++;
+    result.dispatchCaptureQueued!++;
+    if (admission.changed) captureMutations++;
   }
   const seenNoDiffIds = new Set<string>();
   let noDiffMutations = 0;
   if (terminalLifecycleEnabled && includeNoDiffReslices) for (const event of dispatchEvents) {
     if (noDiffMutations >= maxNoDiffQueued) break;
-    const item = noDiffResliceWorkItem(event, now);
+    const item = noDiffResliceWorkItem(event, now, activeRepairItemsById.get(event.itemId));
     if (!item) continue;
     if (seenNoDiffIds.has(item.id)) continue;
     seenNoDiffIds.add(item.id);
     const lifecycle = observeLifecycle(item);
     if (lifecycle === 'terminal' || lifecycle === 'quarantined' || lifecycle === 'unavailable') continue;
+    const admission = persistAdmittedRoot(item);
+    if (!admission.admitted) continue;
     result.eligible++;
     result.dispatchNoDiffEligible!++;
-    const queued = queueSelfHealItemDetailed(item);
-    if (queued.ok) {
-      result.queued++;
-      result.dispatchNoDiffQueued!++;
-      if (queued.changed) noDiffMutations++;
-    } else {
-      result.failed++;
-      result.dispatchNoDiffFailed!++;
-      break;
-    }
+    result.queued++;
+    result.dispatchNoDiffQueued!++;
+    if (admission.changed) noDiffMutations++;
   }
 
   result.dispatchRepairRetired = [...terminalByKey.values()].filter((value) => value === 'retired').length;
@@ -899,6 +1565,7 @@ export function queueProposalRepairWorkForPendingProposals(
   result.dispatchRepairQuarantined = [...terminalByKey.values()].filter((value) => value === 'quarantined').length;
   result.dispatchRepairLifecycleUnavailable = lifecycleUnavailableKeys.size;
   result.blockedItemKeys = [...blockedItemKeys];
+  result.blockedRootKeys = [...blockedRootKeys];
   if (
     proposals === undefined &&
     !opts?.dispatchEvents &&

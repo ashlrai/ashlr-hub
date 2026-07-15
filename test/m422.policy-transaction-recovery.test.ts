@@ -101,6 +101,21 @@ function runPolicy(repo: string | null): { result?: unknown; repos: string[] } {
   return JSON.parse(child.stdout) as { result?: unknown; repos: string[] };
 }
 
+function runEnrollmentSnapshot(): unknown {
+  const source =
+    `import { readEnrollmentRegistry } from ${JSON.stringify(policyModuleUrl)}; ` +
+    `process.stdout.write(JSON.stringify(readEnrollmentRegistry()));`;
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
+    encoding: 'utf8',
+    timeout: 8_000,
+  });
+  if (child.error) throw child.error;
+  expect(child.status, child.stderr).toBe(0);
+  return JSON.parse(child.stdout) as unknown;
+}
+
 beforeEach(() => {
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
@@ -201,6 +216,18 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
     const paths = writeMarker(await deadOwnerPid(), before, after);
     writeFileSync(paths.temp, after, { mode: 0o600 });
+
+    const registryPath = join(home, '.ashlr', 'enrollment.json');
+    const registryBefore = readFileSync(registryPath);
+    const markerBefore = readFileSync(paths.marker);
+    const tempBefore = readFileSync(paths.temp);
+    expect(runEnrollmentSnapshot()).toEqual({
+      state: 'degraded',
+      reason: 'registry-transaction-incomplete',
+    });
+    expect(readFileSync(registryPath)).toEqual(registryBefore);
+    expect(readFileSync(paths.marker)).toEqual(markerBefore);
+    expect(readFileSync(paths.temp)).toEqual(tempBefore);
 
     expect(runPolicy(null)).toEqual({ repos: [] });
     expect(existsSync(paths.marker)).toBe(true);
