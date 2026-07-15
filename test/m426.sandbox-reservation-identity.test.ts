@@ -115,7 +115,7 @@ function realGitPath(): string {
 }
 
 function installGitShim(
-  mode: 'observe-add' | 'registration-noop' | 'common-dir-alias' |
+  mode: 'observe-add' | 'common-dir-alias' |
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
     'hang-worktree-descendant' | 'retarget-after-worktree-add' |
@@ -148,12 +148,6 @@ if (mode === 'observe-add' && worktreeIndex >= 0 && args[worktreeIndex + 1] === 
 
 if (mode === 'observe-pinned-argv' && worktreeIndex >= 0 && args[worktreeIndex + 1] === 'add') {
   fs.writeFileSync(process.env.M426_MARKER, JSON.stringify(args));
-}
-
-if (mode === 'registration-noop') {
-  if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) process.exit(0);
-  if (args[0] === 'branch' && args[1] === '-D') process.exit(0);
-  if (args[0] === 'show-ref' && args.at(-1)?.startsWith('refs/heads/ashlr/sandbox/')) process.exit(1);
 }
 
 if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
@@ -513,10 +507,12 @@ describe('M426 sandbox reservation and path identity', () => {
     const registrationGitdir = join(worktreeAdminDir, 'gitdir');
     const physicalRegistration = readFileSync(registrationGitdir, 'utf8');
     writeFileSync(registrationGitdir, `${join(aliasWorktree, '.git')}\n`, 'utf8');
-    expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
+    git(repo.dir, ['worktree', 'lock', '--reason', 'M426 retained registration', aliasWorktree]);
+    git(sandbox.worktreePath, ['checkout', '--detach']);
+    const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
+    expect(retainedBefore).toContain(aliasWorktree);
+    expect(retainedBefore).toContain('locked M426 retained registration');
 
-    process.env.PATH = originalPath;
-    installGitShim('registration-noop');
     try {
       const result = removeSandbox(sandbox);
       expect(result).toMatchObject({
@@ -525,9 +521,11 @@ describe('M426 sandbox reservation and path identity', () => {
       });
       expect(result.failureClasses).toContain('worktree-remaining');
       expect(existsSync(sandbox.worktreePath)).toBe(true);
+      expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
     } finally {
       process.env.PATH = originalPath;
       writeFileSync(registrationGitdir, physicalRegistration, 'utf8');
+      try { git(repo.dir, ['worktree', 'unlock', sandbox.worktreePath]); } catch { /* best effort */ }
       try { git(repo.dir, ['worktree', 'remove', '--force', sandbox.worktreePath]); } catch { /* best effort */ }
       try { git(repo.dir, ['worktree', 'prune']); } catch { /* best effort */ }
       try { git(repo.dir, ['branch', '-D', sandbox.branch]); } catch { /* best effort */ }

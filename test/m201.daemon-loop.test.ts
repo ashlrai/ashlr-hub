@@ -62,7 +62,7 @@
  *   - H1 fixture provides isolated tmp HOME per test.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -77,6 +77,30 @@ import type {
 } from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
+
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
@@ -397,6 +421,7 @@ import {
   type H1Fixture,
 } from './helpers/h1-fixture.js';
 import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Fixture lifecycle.
@@ -404,6 +429,26 @@ import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
 
 let fx: H1Fixture;
 let prevAshlrHome: string | undefined;
+
+beforeAll(() => {
+  if (process.platform !== 'win32') return;
+
+  const proofFixture = makeFixture();
+  const realCallsBefore = privateStorageHarness.realCalls;
+  fs.mkdirSync(proofFixture.ashlrDir, { recursive: true });
+  try {
+    expect(assurePrivateStoragePath(
+      proofFixture.ashlrDir,
+      'directory',
+      'secure-created',
+      { anchorPath: proofFixture.home },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+  } finally {
+    privateStorageHarness.useSemanticAdapter = true;
+    proofFixture.cleanup();
+  }
+});
 
 beforeEach(() => {
   mockRunSwarm.mockReset();
@@ -540,6 +585,10 @@ afterEach(() => {
   fx.cleanup();
   if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = prevAshlrHome;
+});
+
+afterAll(() => {
+  privateStorageHarness.useSemanticAdapter = false;
 });
 
 // ---------------------------------------------------------------------------

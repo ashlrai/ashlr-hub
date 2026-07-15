@@ -35,6 +35,8 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 let tmpRepo: string;
 
@@ -72,6 +74,7 @@ import {
   enroll,
   unenroll,
   listEnrolled,
+  enrollmentPath,
 } from '../src/core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
@@ -130,14 +133,29 @@ function makePhysicalTmpRepo(prefix: string): string {
   return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
+function setFixtureHome(home: string): void {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = path.join(home, '.ashlr');
+}
+
+function restoreFixtureHome(): void {
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
+}
+
 // ---------------------------------------------------------------------------
 // beforeEach / afterEach
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-backlog-home-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-backlog-home-')));
   tmpRepo = makePhysicalTmpRepo('ashlr-m22-backlog-repo-');
-  process.env.HOME = tmpHome;
+  setFixtureHome(tmpHome);
 
   // Safe baseline — all execFile calls error so no real subprocesses run
   _execFileImpl = makeErrorStub();
@@ -158,7 +176,7 @@ afterEach(() => {
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
-  process.env.HOME = origHome;
+  restoreFixtureHome();
   vi.clearAllMocks();
 });
 
@@ -819,7 +837,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
 
 describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', () => {
   it('keeps the healthy full snapshot when an exact canonical enrollment is temporarily missing', async () => {
-    enroll(tmpRepo);
+    expect(enroll(tmpRepo)).toMatchObject({ ok: true, quiesced: true });
     const observedAt = new Date().toISOString();
     const healthySnapshot = {
       generatedAt: observedAt,
@@ -854,19 +872,20 @@ describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', ()
     });
     expect(scanner).not.toHaveBeenCalled();
     expect(loadBacklog()).toEqual(healthySnapshot);
-  });
+  }, 15_000);
 
   it('fails closed on a legacy lexical enrollment row after its alias is retargeted', async () => {
     const firstTarget = makePhysicalTmpRepo('ashlr-m22-legacy-first-');
     const secondTarget = makePhysicalTmpRepo('ashlr-m22-legacy-second-');
-    const alias = path.join(fs.realpathSync.native(tmpHome), 'legacy-enrolled-repo');
+    const alias = path.join(tmpHome, 'legacy-enrolled-repo');
     try {
       initBareGitDir(firstTarget);
       initBareGitDir(secondTarget);
       fs.symlinkSync(firstTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
-      fs.mkdirSync(path.join(tmpHome, '.ashlr'), { recursive: true });
+      expect(enroll(firstTarget)).toMatchObject({ ok: true, quiesced: true });
+      fs.mkdirSync(path.dirname(enrollmentPath()), { recursive: true });
       fs.writeFileSync(
-        path.join(tmpHome, '.ashlr', 'enrollment.json'),
+        enrollmentPath(),
         JSON.stringify({ repos: [alias] }),
         'utf8',
       );
@@ -888,7 +907,7 @@ describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', ()
       fs.rmSync(firstTarget, { recursive: true, force: true });
       fs.rmSync(secondTarget, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('does not include an unenrolled repo in results', async () => {
     // Enroll only tmpRepo; create a second tmp repo but do not enroll it

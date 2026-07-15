@@ -2,7 +2,7 @@
  * test/m342.dispatch-production-ledger.test.ts — append-only dispatch-production history.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -24,6 +24,40 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  const semanticAssurance = { ok: true, reason: 'exact-private-dacl' } as const;
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return args[2] === 'inspect-owned'
+          ? { ok: true, reason: 'owned-safe-path' }
+          : semanticAssurance;
+      }
+      privateStorageHarness.realCalls++;
+      return actual.assurePrivateStoragePath(...args);
+    },
+    assurePrivateStoragePaths: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePaths>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return { ok: true, reason: args[0].length === 0 ? 'no-paths' : 'owned-safe-paths' };
+      }
+      privateStorageHarness.realCalls++;
+      return actual.assurePrivateStoragePaths(...args);
+    },
+  };
+});
+
 import {
   _setDispatchProductionLedgerRetentionHooksForTest,
   dispatchProductionDir,
@@ -171,6 +205,16 @@ function protectWindowsFixtureTree(path: string): void {
   if (result.status !== 0) {
     throw new Error(`failed to protect Windows fixture ACLs: ${result.stderr}`);
   }
+}
+
+// Lifecycle selectors use this after native DACL behavior has been separated
+// into the explicit Windows authority tests below.
+function useWindowsSemanticPrivateStorageFixture(): void {
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+}
+
+function useNativePrivateStorageFixture(): void {
+  privateStorageHarness.useSemanticAdapter = false;
 }
 
 function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
@@ -516,6 +560,7 @@ beforeEach(() => {
 
 afterEach(() => {
   _setDispatchProductionLedgerRetentionHooksForTest(undefined);
+  useNativePrivateStorageFixture();
   if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = prevAshlrHome;
   if (prevHome === undefined) delete process.env.HOME;
@@ -546,6 +591,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('persists physical repo identity and rejects legacy lexical or linked aliases', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const physicalRepo = join(home, 'physical-repo');
     const nested = join(physicalRepo, 'identity-probe');
     const linkedAlias = join(home, 'repo-alias');
@@ -816,6 +862,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('materializes exact failure receipts for treatment-free capture and proposal repair lineage', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const accepted = (['capture', 'proposal'] as const).map((kind, index) => {
       const handoffId = (10 + index).toString(16).padStart(64, '0');
       return makeGeneratedRepairFailureEvent(kind, {
@@ -919,6 +966,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('recovers a failure append crash without duplicating its authoritative raw event', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const event = makeGeneratedRepairFailureEvent('proposal', {
       runId: 'attempt-failure-append-crash',
       trajectoryId: 'run:attempt-failure-append-crash',
@@ -968,6 +1016,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('recovers one exact failure append beyond the analytics partition read bound', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const event = makeGeneratedRepairFailureEvent('capture', {
       runId: 'attempt-failure-oversized-append-crash',
       trajectoryId: 'run:attempt-failure-oversized-append-crash',
@@ -1015,6 +1064,7 @@ describe('M342 dispatch production ledger', () => {
   it.each(['replacement', 'truncation', 'mutation'] as const)(
     'fails closed when a crashed failure append partition suffers %s',
     (damage) => {
+      useWindowsSemanticPrivateStorageFixture();
       const event = makeGeneratedRepairFailureEvent('proposal', {
         runId: `attempt-failure-crash-${damage}`,
         trajectoryId: `run:attempt-failure-crash-${damage}`,
@@ -1878,6 +1928,8 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it.skipIf(process.platform !== 'win32')('establishes exact private DACLs for attempt authority writes', () => {
+    useNativePrivateStorageFixture();
+    const realCallsBefore = privateStorageHarness.realCalls;
     const committed = makeProofEvent({
       runId: 'run-windows-private-receipt',
       trajectoryId: 'run:attempt-windows-private-receipt',
@@ -1961,6 +2013,7 @@ describe('M342 dispatch production ledger', () => {
     expect(assurePrivateStoragePath(
       retentionPath, 'file', 'inspect-existing', { anchorPath: dispatchProductionDir() },
     ).ok).toBe(true);
+    expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
   }, 30_000);
 
   it('recovers bounded portable crash stages, including a reused legacy PID name', () => {
@@ -5257,6 +5310,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'exact-inspects receipt directory DACLs during pure authority reads',
     () => {
+      useNativePrivateStorageFixture();
       const attempt = makeProofEvent({
         runId: 'run-directory-dacl-attempt',
         trajectoryId: 'run:attempt-directory-dacl-attempt',
@@ -5295,6 +5349,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'rejects owner-safe but non-exact Windows ACLs before parsing treatment authority',
     () => {
+      useNativePrivateStorageFixture();
       const witness = treatmentEvents().find((event) =>
         event.basis === 'repair-lifecycle-outcome')!;
       expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
@@ -5358,6 +5413,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for treatment receipt, retention, and protocol writes',
     () => {
+      useNativePrivateStorageFixture();
       const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
       const receiptDir = join(dispatchProductionDir(), 'repair-treatment-outcomes');
       const baseMs = Date.parse('2025-01-01T00:00:00.000Z');

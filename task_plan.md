@@ -2397,6 +2397,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove the final M315 runner-speed race by splitting its real authority proof into bounded hooks without increasing hook, test, idle, or hard-runtime budgets.
 - [x] Close the `fa2e010` duplicate-run fixture costs in M2/M23/M220/M411/M415/M418/M422, and make M426 spell the retained Git registration through an alias without placing mutation authority behind that alias.
 - [x] Replay the corrected local Windows contracts on one tree: 1/3 passes 285 with one skip, 2/3 passes 213, 3/3 passes 66, and overflow passes 104 with one skip; typecheck, build, zero-vulnerability audit, and diff checks pass.
+- [x] Classify the `fcc12d0` native-only failures: M201/M342/M423 repeated PowerShell DACL work, M22 split Windows home authority, and M426 synthetic retained-registration behavior; no production authorization regression was found.
+- [x] Preserve explicit real native proofs while moving redundant semantic cases onto Windows-only private-storage adapters; make M22 coordinate all home variables and make M426 use Git-native locked alias retention.
+- [x] Pass the five-file correction matrix with 424 assertions green and four platform skips, plus typecheck, full lint at the existing warning baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
 - [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
