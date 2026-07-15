@@ -2232,3 +2232,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Older host auto-merge requests are not automatically revoked; this production installation has never enabled auto-merge.
 - Cooperative locks cannot stop an uncooperative same-user process, and external engines remain outside a filesystem jail beyond the cooperative sandbox protocol.
 - Host-local evidence cannot prove freshness after coherent state/key rollback; an external monotonic anchor remains required for enforcement.
+
+## Dispatch Attempt Proof Cycle (2026-07-14)
+- [x] Rehydrate exact green release-native authority SHA `080f8b9`, protected PR #31, production NO-GO state, canonical user edits, and Entire status.
+- [x] Define an observational, metadata-only, owner-writable-local dispatch-attempt proof contract without claiming cryptographic trust, rollback protection, or cross-ledger atomicity.
+- [x] Implement bounded writer-canonical partition reads, exact target matching, derived route/model/backend identity, and strict generated-repair lineage checks.
+- [x] Remove proof-reader writer-lock contention, bound target/date/byte/row work, and make matching linear in partition rows plus targets.
+- [x] Bind ordinal two to exactly one distinct ordinal-one attempt on the same tier and declared previous backend; propagate degraded predecessor authority.
+- [x] Add adversarial M342 coverage for malformed/torn/empty/oversized storage, replay/conflict, runtime-invalid targets, allocation bounds, contradictory no-diff evidence, impossible metadata, producer normalization, and sequence ambiguity.
+- [x] Pass focused and adjacent tests, daemon-producer compatibility, typecheck, lint, build, dependency audit, diff checks, and four independent final SHIP reviews.
+- [x] Repair two M141 fixtures exposed by the first exhaustive pass that constructed future `01:00Z` rows during the UTC-midnight hour.
+- [x] Pass the exhaustive hermetic suite on the exact candidate: 534 files, 11,238 tests green, and 9 intentional skips in 600.68 seconds.
+- [ ] Commit, push, open a stacked protected PR against `codex/release-native-authority`, and observe the exact-SHA ten-check matrix without merging or deploying.

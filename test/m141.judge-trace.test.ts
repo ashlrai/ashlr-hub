@@ -248,14 +248,15 @@ describe('m141 judge-trace — round-trip', () => {
       sourceState: 'healthy', sourcePresent: true, complete: true,
     });
 
-    const day = new Date().toISOString().slice(0, 10);
+    const recentTs = new Date(Date.now() - 60_000).toISOString();
+    const day = recentTs.slice(0, 10);
     fs.writeFileSync(
       path.join(dir, `${day}.jsonl`),
       [
         JSON.stringify({
           traceId: 'jt-valid', proposalId: 'p-valid', judgeEngine: 'judge', verdict: 'ship',
           scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
-          fullReasoning: 'ok', promptContext: 'ctx', ts: `${day}T01:00:00.000Z`,
+          fullReasoning: 'ok', promptContext: 'ctx', ts: recentTs,
         }),
         '{"proposalId":',
       ].join('\n') + '\n',
@@ -272,11 +273,12 @@ describe('m141 judge-trace — round-trip', () => {
       await import('../src/core/fleet/judge-trace.js');
     const dir = judgeTracesDir();
     fs.mkdirSync(dir, { recursive: true });
-    const day = new Date().toISOString().slice(0, 10);
+    const recentTs = new Date(Date.now() - 60_000).toISOString();
+    const day = recentTs.slice(0, 10);
     const row = {
       traceId: 'jt-dedup', proposalId: 'p-dedup', judgeEngine: 'judge', verdict: 'ship',
       scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
-      fullReasoning: 'same', promptContext: 'ctx', ts: `${day}T01:00:00.000Z`,
+      fullReasoning: 'same', promptContext: 'ctx', ts: recentTs,
     };
     const file = path.join(dir, `${day}.jsonl`);
     fs.writeFileSync(file, `${JSON.stringify(row)}\n${JSON.stringify(row)}\n`, 'utf8');
