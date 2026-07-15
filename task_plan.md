@@ -2392,6 +2392,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Repair M403/M415/M422 through production-secured roots and exact private artifact assurance; combined focused verification is 29/29 and the exact local Windows 1/3 contract is 285 passed with one intentional skip.
 - [x] Move first-use ACL setup outside timed M23/M411 test bodies and secure the M426 real root before its junction alias without changing production gates or test timeouts.
 - [x] Preserve the required Windows 3/3 check while splitting its active-progress workload into a bounded overflow job; local contracts pass 66/66 and 104 with one platform skip.
+- [x] Close `e45a583` native 1/3 and overflow fixture findings without production or timeout changes; six-file integration is 61/61 and corrected local contracts are 285+104 with two platform skips.
+- [x] Close the final native 2/3 authority/path separation findings and amortize M315 real private-storage proof without weakening handoff semantics; corrected 2/3 is 213/213 and 3/3 is 66/66 locally.
 - [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

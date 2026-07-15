@@ -503,7 +503,9 @@ describe('M426 sandbox reservation and path identity', () => {
     const aliasHome = makeDirectoryAlias(fx.home);
     process.env.HOME = aliasHome;
     process.env.USERPROFILE = aliasHome;
-    process.env.ASHLR_HOME = join(aliasHome, '.ashlr');
+    // Spell the sandbox worktree through the alias while keeping mutation
+    // authority on the already-proven physical root.
+    process.env.ASHLR_HOME = join(fx.home, '.ashlr');
 
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
     process.env.PATH = originalPath;

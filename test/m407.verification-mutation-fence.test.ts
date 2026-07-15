@@ -10,6 +10,19 @@ const verifyMocks = vi.hoisted(() => ({
   detectVerifyCommands: vi.fn(),
   runVerifyCommandAsync: vi.fn(),
 }));
+const privateStorageMocks = vi.hoisted(() => ({ useRealAssurance: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => privateStorageMocks.useRealAssurance
+      ? actual.assurePrivateStoragePath(...args)
+      : { ok: true, reason: 'exact-private-dacl' },
+  };
+});
 
 vi.mock('../src/core/run/verify-commands.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/run/verify-commands.js')>();
@@ -131,12 +144,18 @@ beforeEach(() => {
   });
 
   initRepo();
-  expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
-  expect(enroll(repo)).toMatchObject({ ok: true, quiesced: true });
+  privateStorageMocks.useRealAssurance = true;
+  try {
+    expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
+    expect(enroll(repo)).toMatchObject({ ok: true, quiesced: true });
+  } finally {
+    privateStorageMocks.useRealAssurance = false;
+  }
 });
 
 afterEach(() => {
   releaseVerification?.();
+  privateStorageMocks.useRealAssurance = false;
   try { setKill(false); } catch { /* best-effort cleanup */ }
   rmSync(home, { recursive: true, force: true });
 

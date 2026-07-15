@@ -54,6 +54,7 @@ import {
 } from '../src/core/sandbox/policy.js';
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const CHILD_TIMEOUT_MS = 8_000;
 const tsxImportUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
@@ -549,6 +550,12 @@ describe('M403 policy registry refusal contracts', () => {
     mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
     const malformed = `${JSON.stringify({ repos: [repo], unexpected: true })}\n`;
     writeFileSync(enrollmentPath(), malformed, { mode: 0o600 });
+    expect(assurePrivateStoragePath(
+      enrollmentPath(),
+      'file',
+      'secure-created',
+      { anchorPath: process.env.ASHLR_HOME! },
+    ).ok).toBe(true);
 
     expect(enroll(join(home, 'other-repo'))).toEqual({
       ok: false,

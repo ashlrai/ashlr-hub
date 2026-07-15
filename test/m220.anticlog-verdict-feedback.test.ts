@@ -22,7 +22,7 @@
  *  - ASHLR_IN_DAEMON / ASHLR_IN_SWARM cleaned up in afterEach.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -133,6 +133,15 @@ function initBareGitDir(dir: string): void {
   );
 }
 
+function resetAshlrTestState(): void {
+  const ashlrHome = path.join(tmpHome, '.ashlr');
+  // Retain the exact directory identities behind the cached Windows authority proof.
+  for (const entry of fs.readdirSync(ashlrHome)) {
+    if (entry === 'authority' || entry === 'enrollment.json') continue;
+    fs.rmSync(path.join(ashlrHome, entry), { recursive: true, force: true });
+  }
+}
+
 function makeItem(id: string, repo: string, over?: Partial<WorkItem>): WorkItem {
   return {
     id,
@@ -189,10 +198,10 @@ function createRejectedProposal(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// beforeEach / afterEach
+// File and test lifecycle
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
+beforeAll(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m220-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m220-repo-'));
   process.env.HOME = tmpHome;
@@ -201,6 +210,15 @@ beforeEach(() => {
 
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
+
+  const enrollment = enroll(tmpRepo);
+  if (!enrollment.ok) {
+    throw new Error(`M220 fixture enrollment failed: ${enrollment.reason}`);
+  }
+});
+
+beforeEach(() => {
+  resetAshlrTestState();
 
   mockRunSwarm.mockReset();
   mockRunGoal.mockReset();
@@ -232,8 +250,15 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try { unenroll(tmpRepo); } catch { /* ignore */ }
+  delete process.env.ASHLR_IN_DAEMON;
+  delete process.env.ASHLR_IN_SWARM;
+
+  vi.clearAllMocks();
+});
+
+afterAll(() => {
   try { setKill(false); } catch { /* ignore */ }
+  try { unenroll(tmpRepo); } catch { /* ignore */ }
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
@@ -247,8 +272,6 @@ afterEach(() => {
   else delete process.env.ASHLR_IN_DAEMON;
   if (origInSwarm !== undefined) process.env.ASHLR_IN_SWARM = origInSwarm;
   else delete process.env.ASHLR_IN_SWARM;
-
-  vi.clearAllMocks();
 });
 
 // ===========================================================================
@@ -532,10 +555,6 @@ describe('M220 sweepJudgedProposals — pure unit', () => {
 // ===========================================================================
 
 describe('M220 tick() integration — antiClog default ON', () => {
-  beforeEach(() => {
-    enroll(tmpRepo);
-  });
-
   it('an item whose proposal was judged noise is skipped on the next tick', async () => {
     const judgedId = 'judged-noise-item';
     const freshId = 'fresh-item';
@@ -660,10 +679,6 @@ describe('M220 tick() integration — antiClog default ON', () => {
 // ===========================================================================
 
 describe('M220 flag-off — antiClog:false is byte-identical to pre-M220', () => {
-  beforeEach(() => {
-    enroll(tmpRepo);
-  });
-
   it('with antiClog=false, a rejected proposal does NOT suppress the item in the ledger', async () => {
     const judgedId = 'should-not-be-suppressed';
 

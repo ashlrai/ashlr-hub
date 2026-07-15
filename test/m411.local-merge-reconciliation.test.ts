@@ -7,7 +7,21 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const privateStorageMocks = vi.hoisted(() => ({ useTestAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => privateStorageMocks.useTestAdapter
+      ? { ok: true, reason: 'exact-private-dacl' }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
 
 import { hashDiff, signLocalMergeIntent } from '../src/core/foundry/provenance.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
@@ -164,6 +178,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  privateStorageMocks.useTestAdapter = false;
   try { setKill(false); } catch { /* best effort */ }
   try { unenroll(repo); } catch { /* best effort */ }
   fs.rmSync(repo, { recursive: true, force: true });
@@ -218,6 +233,9 @@ describe('M411 local merge reconciliation', () => {
 
     beforeEach(() => {
       fixture = createInterruptedMerge('exact');
+      // The private-storage contract is covered independently. Keep this test's
+      // five-second body focused on reconciliation and fanout behavior.
+      privateStorageMocks.useTestAdapter = true;
     });
 
     it('completes realized-merge fanout when reconciliation retains live authority', async () => {

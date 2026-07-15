@@ -239,50 +239,57 @@ describe('M415 policy durability races', () => {
       name.startsWith('.enrollment.transaction.'))).toEqual([]);
   });
 
-  it('keeps a failed permissive install non-authoritative when rollback also fails', () => {
-    const originalRepo = join(home, 'original-repo');
-    const newlyEnrolledRepo = join(home, 'newly-enrolled-repo');
-    fs.writeFileSync(
-      faults.enrollmentPath,
-      `${JSON.stringify({ repos: [originalRepo] }, null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    secureInjectedAuthorityFile(faults.enrollmentPath);
-    faults.failPostInstall = true;
-    faults.failRollback = true;
+  describe('failed permissive install recovery', () => {
+    let originalRepo: string;
 
-    const result = enroll(newlyEnrolledRepo);
-
-    expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
-    expect(faults.postInstallFailed).toBe(true);
-    expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(true);
-    expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
-      repos: [originalRepo, canonicalEnrollmentPath(newlyEnrolledRepo)],
+    beforeEach(() => {
+      originalRepo = join(home, 'original-repo');
+      fs.writeFileSync(
+        faults.enrollmentPath,
+        `${JSON.stringify({ repos: [originalRepo] }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      secureInjectedAuthorityFile(faults.enrollmentPath);
     });
-    expect(listEnrolled()).toEqual([]);
-    expect(isEnrolled(newlyEnrolledRepo)).toBe(false);
-    expect(() => assertMayMutate(newlyEnrolledRepo)).toThrow(/not enrolled/i);
 
-    const child = spawnSync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        '--input-type=module',
-        '--eval',
-        `import { isEnrolled, listEnrolled } from ${JSON.stringify(policyModuleUrl)};` +
-          `process.stdout.write(JSON.stringify({ repos: listEnrolled(), enrolled: isEnrolled(${JSON.stringify(newlyEnrolledRepo)}) }));`,
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
-        encoding: 'utf8',
-        timeout: 5_000,
-      },
-    );
-    if (child.error) throw child.error;
-    expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout)).toEqual({ repos: [], enrolled: false });
+    it('keeps a failed permissive install non-authoritative when rollback also fails', () => {
+      const newlyEnrolledRepo = join(home, 'newly-enrolled-repo');
+      faults.failPostInstall = true;
+      faults.failRollback = true;
+
+      const result = enroll(newlyEnrolledRepo);
+
+      expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
+      expect(faults.postInstallFailed).toBe(true);
+      expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
+        repos: [originalRepo, canonicalEnrollmentPath(newlyEnrolledRepo)],
+      });
+      expect(listEnrolled()).toEqual([]);
+      expect(isEnrolled(newlyEnrolledRepo)).toBe(false);
+      expect(() => assertMayMutate(newlyEnrolledRepo)).toThrow(/not enrolled/i);
+
+      const child = spawnSync(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          '--input-type=module',
+          '--eval',
+          `import { isEnrolled, listEnrolled } from ${JSON.stringify(policyModuleUrl)};` +
+            `process.stdout.write(JSON.stringify({ repos: listEnrolled(), enrolled: isEnrolled(${JSON.stringify(newlyEnrolledRepo)}) }));`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
+          encoding: 'utf8',
+          timeout: 5_000,
+        },
+      );
+      if (child.error) throw child.error;
+      expect(child.status, child.stderr).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual({ repos: [], enrolled: false });
+    });
   });
 
   it('syncs and validates a concurrently-created sentinel before reporting success', () => {
