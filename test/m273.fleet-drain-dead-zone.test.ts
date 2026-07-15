@@ -28,6 +28,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 
@@ -36,6 +39,8 @@ import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 
 // ---------------------------------------------------------------------------
@@ -173,6 +178,10 @@ function shipVerdict(proposalId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m273-test-'));
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
   mockSetStatus.mockReturnValue(true);
   mockUpdateProposalField.mockReturnValue(true);
   setKill(false);
@@ -186,12 +195,16 @@ beforeEach(() => {
     reason: '',
   } as AutoMergeResult);
   mockJudgeProposal.mockResolvedValue(shipVerdict('mock'));
-  tmpHome = `/tmp/m273-test-${Date.now()}`;
-  process.env.HOME = tmpHome;
 });
 
 afterEach(() => {
-  process.env.HOME = origHome;
+  rmSync(tmpHome, { recursive: true, force: true });
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
 });
 
 // ---------------------------------------------------------------------------

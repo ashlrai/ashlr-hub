@@ -81,6 +81,7 @@ vi.mock('../src/core/providers.js', () => ({
 
 // Import doctor AFTER mocks are registered.
 import { runDoctor } from '../src/core/doctor.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
 // spend more than Vitest's 5s default in process startup across a single probe.
@@ -92,6 +93,8 @@ vi.setConfig({ testTimeout: 15_000 });
 
 let tmpHome: string;
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 const origPath = process.env.PATH;
 
 function makeTmpHome(): string {
@@ -122,6 +125,15 @@ function installAshlrShim(tmpH: string): void {
 function makeConfig(tmpH: string): AshlrConfig {
   const ashlrDir = join(tmpH, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
+  if (process.platform === 'win32') {
+    const assurance = assurePrivateStoragePath(
+      ashlrDir,
+      'directory',
+      'secure-created',
+      { anchorPath: tmpH },
+    );
+    if (!assurance.ok) throw new Error(`doctor fixture authority setup failed: ${assurance.reason}`);
+  }
   writeFileSync(
     join(ashlrDir, 'config.json'),
     JSON.stringify({
@@ -162,6 +174,8 @@ function makeConfig(tmpH: string): AshlrConfig {
 beforeEach(() => {
   tmpHome = makeTmpHome();
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
   installAshlrShim(tmpHome);
 
   // Reset to healthy defaults before each test.
@@ -179,7 +193,12 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmpHome, { recursive: true, force: true });
-  process.env.HOME = origHome;
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
   process.env.PATH = origPath;
 });
 

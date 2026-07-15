@@ -76,6 +76,7 @@ import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { seedPendingProposal } from './helpers/h2-faults.js';
 import { withPlatform } from './helpers/platform.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import { acquireOutwardMutationFence } from '../src/core/sandbox/mutation-fence.js';
 
 import {
   assertMayMutate,
@@ -567,6 +568,102 @@ describe('H4 · ENROLLMENT · default-empty registry', () => {
       reason: 'unsafe-ashlr-directory',
     });
     expect(readdirSync(redirected)).toEqual([]);
+  }, 45_000);
+
+  it.runIf(process.platform === 'win32')('3.8 secures a fresh Windows authority root before enrollment', () => {
+    privateStorageMocks.assure.mockReset();
+    const authorityDir = join(fx.home, '.ashlr');
+    const repo = fx.makeRepo();
+    expect(existsSync(authorityDir)).toBe(false);
+
+    expect(enroll(repo.dir)).toMatchObject({ ok: true, quiesced: true });
+    expect(assurePrivateStoragePath(
+      authorityDir,
+      'directory',
+      'inspect-existing',
+      { anchorPath: fx.home },
+    )).toMatchObject({ ok: true, reason: 'exact-private-dacl' });
+    expect(assurePrivateStoragePath(
+      join(authorityDir, 'authority'),
+      'directory',
+      'inspect-existing',
+      { anchorPath: authorityDir },
+    )).toMatchObject({ ok: true, reason: 'exact-private-dacl' });
+    expect(readEnrollmentRegistry()).toMatchObject({ state: 'ready', reason: 'healthy' });
+  }, 45_000);
+
+  it.runIf(process.platform === 'win32')('3.9 refuses without rewriting a pre-existing permissive Windows authority root', () => {
+    privateStorageMocks.assure.mockReset();
+    const authorityDir = join(fx.home, '.ashlr');
+    mkdirSync(authorityDir, { mode: 0o700 });
+    const permissive = spawnSync(
+      'icacls.exe',
+      [authorityDir, '/grant', '*S-1-1-0:(OI)(CI)F'],
+      { windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8' },
+    );
+    expect(permissive.status, permissive.stderr).toBe(0);
+    const before = spawnSync('icacls.exe', [authorityDir], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(before.status, before.stderr).toBe(0);
+    expect(assurePrivateStoragePath(
+      authorityDir,
+      'directory',
+      'inspect-owned',
+      { anchorPath: fx.home },
+    ).ok).toBe(false);
+
+    expect(acquireOutwardMutationFence()).toBeNull();
+    const after = spawnSync('icacls.exe', [authorityDir], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(after.status, after.stderr).toBe(0);
+    expect(after.stdout).toBe(before.stdout);
+    expect(readdirSync(authorityDir)).toEqual([]);
+  }, 45_000);
+
+  it.runIf(process.platform === 'win32')('3.10 refuses a permissive pre-existing Windows fence directory', () => {
+    privateStorageMocks.assure.mockReset();
+    const authorityRoot = join(fx.home, '.ashlr');
+    const fenceDir = join(authorityRoot, 'authority');
+    mkdirSync(authorityRoot, { mode: 0o700 });
+    expect(assurePrivateStoragePath(
+      authorityRoot,
+      'directory',
+      'secure-created',
+      { anchorPath: fx.home },
+    )).toMatchObject({ ok: true });
+    mkdirSync(fenceDir, { mode: 0o700 });
+    const permissive = spawnSync(
+      'icacls.exe',
+      [fenceDir, '/grant', '*S-1-1-0:(OI)(CI)F'],
+      { windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8' },
+    );
+    expect(permissive.status, permissive.stderr).toBe(0);
+    const before = spawnSync('icacls.exe', [fenceDir], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(before.status, before.stderr).toBe(0);
+
+    expect(acquireOutwardMutationFence()).toBeNull();
+    const after = spawnSync('icacls.exe', [fenceDir], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(after.status, after.stderr).toBe(0);
+    expect(after.stdout).toBe(before.stdout);
+    expect(readdirSync(fenceDir)).toEqual([]);
   }, 45_000);
 });
 

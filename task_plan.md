@@ -2369,3 +2369,21 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Require producer-v2 provenance bound to proposal, repository, source revision, route, and diff identity; sign the evidence pack itself and reject legacy-only evidence for judge-free authority.
 - [ ] Require a safe minimum branch-protection policy, including strict checks, admin enforcement, no bypass actors, no force pushes/deletions, and explicit signature policy.
 - [ ] Constrain the first enforceable canary to the deterministic docs-only classifier and implement serialized admission, confirmed host enable/cancel, deterministic rollback, and external rollback-resistant freshness.
+
+## PR #33 Native Windows Authority Repair (2026-07-15)
+- [x] Publish lifecycle attempt authority as `d3f534b` on protected stacked PR #33 without merging, releasing, deploying, or enabling auto-merge.
+- [x] Diagnose the exact-SHA Windows failure as one shared root cause: the outward lock recursively created inherited-ACL `.ashlr` state before enrollment could exact-inspect it.
+- [x] Secure fresh `.ashlr` and `.ashlr/authority` directories before local lock creation; inspect pre-existing directories without rewriting them and refuse unsafe roots or fence children.
+- [x] Bind partial and full registry recovery mutations to the originally verified `.ashlr` filesystem object.
+- [x] Add native proofs for exact fresh-root/fence DACLs, unchanged permissive-root refusal, and permissive nested-fence refusal; keep selector alternatives unique and manifest-bound.
+- [x] Repair Windows fixture isolation in M2/M113 and the missing-HOME assumptions exposed in M271/M273/M274 without weakening production authority.
+- [x] Pass focused authority verification: 119 passed with four platform skips; the eight exhaustive regressions were repaired and all 23 affected drain/judge tests pass.
+- [x] Pass typecheck, full lint with the existing warning baseline only, build, zero-vulnerability audit, and diff checks.
+- [x] Pass the corrected exhaustive suite: 534 files, 11,476 passed, 20 intentional skips, zero failures in 747.99 seconds.
+- [x] Receive independent SHIP on the final security boundary with no P0/P1 findings under the declared current-user/SYSTEM/Administrators trust model.
+- [ ] Push the corrected exact SHA and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
+
+### Remaining Defense In Depth
+- [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.
+- [ ] Evaluate atomic Windows directory creation with `Directory.CreateDirectory(path, DirectorySecurity)` to remove the transient inherited-ACL interval even inside the trusted-principal boundary.
+- [ ] Strengthen recovery ABA detection without treating legitimate child-entry ctime changes as parent replacement.

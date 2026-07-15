@@ -17,7 +17,6 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
-  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -393,6 +392,11 @@ function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function sameAshlrDirectoryObject(identity: Stats): boolean {
+  const current = readAshlrDirectorySnapshot();
+  return current.state === 'safe' && sameFile(identity, current.identity);
+}
+
 type EnrollmentReadRaceStage = 'after-file-read';
 let enrollmentReadRaceHookForTest: ((stage: EnrollmentReadRaceStage) => void) | undefined;
 
@@ -420,13 +424,30 @@ function missingPath(error: unknown): boolean {
 }
 
 function assureAshlrDir(): boolean {
+  let created = false;
   try {
     const dir = ashlrDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const stat = lstatSync(dir);
-    if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUser(stat)) return false;
-    if (process.platform !== 'win32') chmodSync(dir, 0o700);
-    return true;
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    }
+    const before = lstatSync(dir);
+    if (before.isSymbolicLink() || !before.isDirectory() || !ownedByCurrentUser(before)) return false;
+    if (process.platform !== 'win32') {
+      chmodSync(dir, 0o700);
+      return true;
+    }
+    const home = canonicalHome();
+    if (!home || !assurePrivateStoragePath(
+      dir,
+      'directory',
+      created ? 'secure-created' : 'inspect-owned',
+      { anchorPath: home },
+    ).ok) return false;
+    const after = lstatSync(dir);
+    return safeAuthorityDirectory(after) && sameFile(before, after);
   } catch {
     return false;
   }
@@ -842,6 +863,7 @@ function clearPartialRegistryTransaction(
 
 function recoverPartialInitialRegistryTransaction(
   marker: Extract<TransactionMarkerFileRead, { state: 'present' }>,
+  authorityIdentity: Stats,
 ): { ok: boolean; reason: string } {
   try {
     const dir = ashlrDir();
@@ -865,7 +887,11 @@ function recoverPartialInitialRegistryTransaction(
     if (temp.state !== 'present' || !validInitialRegistryTemp(temp.bytes)) {
       return { ok: false, reason: 'registry-transaction-tampered' };
     }
-    if (!clearPartialRegistryTransaction(registryTransactionPath(), marker)) {
+    if (!sameAshlrDirectoryObject(authorityIdentity) ||
+      !clearPartialRegistryTransaction(registryTransactionPath(), marker)) {
+      return { ok: false, reason: 'registry-transaction-recovery-failed' };
+    }
+    if (!sameAshlrDirectoryObject(authorityIdentity)) {
       return { ok: false, reason: 'registry-transaction-recovery-failed' };
     }
     if (removeVerifiedArtifact(tempPath, temp)) {
@@ -878,9 +904,14 @@ function recoverPartialInitialRegistryTransaction(
 }
 
 function recoverRegistryTransaction(): { ok: boolean; reason: string } {
+  if (!assureAshlrDir()) return { ok: false, reason: 'unsafe-ashlr-directory' };
+  const authority = readAshlrDirectorySnapshot();
+  if (authority.state !== 'safe') return { ok: false, reason: 'unsafe-ashlr-directory' };
   const observed = readRegistryTransaction();
   if (observed.state === 'missing') return { ok: true, reason: 'no-transaction' };
-  if (observed.state === 'partial') return recoverPartialInitialRegistryTransaction(observed.marker);
+  if (observed.state === 'partial') {
+    return recoverPartialInitialRegistryTransaction(observed.marker, authority.identity);
+  }
   if (observed.state === 'invalid') return { ok: false, reason: 'registry-transaction-tampered' };
   const transaction = observed.transaction;
   const owner = transactionOwnerState(transaction.record);
@@ -933,6 +964,9 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
   }
 
   try {
+    if (!sameAshlrDirectoryObject(authority.identity)) {
+      return { ok: false, reason: 'registry-transaction-recovery-failed' };
+    }
     if (prepared) {
       if (tempState.state !== 'match' || !removeVerifiedArtifact(temp, tempState.read)) {
         return { ok: false, reason: 'registry-transaction-recovery-failed' };
@@ -941,6 +975,9 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
       const backupRead = backupState as { state: 'match'; read: Extract<AuthorityFileRead, { state: 'present' }> };
       const current = lstatSync(backup);
       if (!safeAuthorityFile(current) || !sameFile(current, backupRead.read.identity)) {
+        return { ok: false, reason: 'registry-transaction-recovery-failed' };
+      }
+      if (!sameAshlrDirectoryObject(authority.identity)) {
         return { ok: false, reason: 'registry-transaction-recovery-failed' };
       }
       renameSync(backup, dest);
@@ -957,7 +994,7 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
       }
     }
     fsyncDirectory(dir);
-    if (!clearRegistryTransaction(transaction)) {
+    if (!sameAshlrDirectoryObject(authority.identity) || !clearRegistryTransaction(transaction)) {
       return { ok: false, reason: 'registry-transaction-recovery-failed' };
     }
     return {

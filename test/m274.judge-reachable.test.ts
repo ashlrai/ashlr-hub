@@ -42,6 +42,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 
@@ -50,6 +53,8 @@ import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 
 // ---------------------------------------------------------------------------
@@ -215,9 +220,11 @@ function shipVerdict(proposalId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  setKill(false);
-  tmpHome = `/tmp/m274-test-${Date.now()}`;
+  tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m274-test-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
+  setKill(false);
 
   // Default: claude is installed, spawns a valid ship JSON
   mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude');
@@ -239,7 +246,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  process.env.HOME = origHome;
+  rmSync(tmpHome, { recursive: true, force: true });
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
 });
 
 // ---------------------------------------------------------------------------

@@ -191,6 +191,7 @@ describe('M30 CI workflow', () => {
     ];
     const nativePathIdentityFiles = [
       'test/h1.fixture.test.ts',
+      'test/h4.sandbox-enrollment-kill.test.ts',
       'test/m165.self-heal.test.ts',
       'test/m201.daemon-loop.test.ts',
       'test/m22.backlog.test.ts',
@@ -234,6 +235,21 @@ describe('M30 CI workflow', () => {
         file: 'test/h1.fixture.test.ts',
         title: 'cleanup() restores the prior HOME, USERPROFILE, and ASHLR_HOME exactly',
         selector: String.raw`cleanup\(\) restores the prior HOME, USERPROFILE, and ASHLR_HOME exactly`,
+      },
+      {
+        file: 'test/h4.sandbox-enrollment-kill.test.ts',
+        title: '3.8 secures a fresh Windows authority root before enrollment',
+        selector: '3.8 secures a fresh Windows authority root before enrollment',
+      },
+      {
+        file: 'test/h4.sandbox-enrollment-kill.test.ts',
+        title: '3.9 refuses without rewriting a pre-existing permissive Windows authority root',
+        selector: '3.9 refuses without rewriting a pre-existing permissive Windows authority root',
+      },
+      {
+        file: 'test/h4.sandbox-enrollment-kill.test.ts',
+        title: '3.10 refuses a permissive pre-existing Windows fence directory',
+        selector: '3.10 refuses a permissive pre-existing Windows fence directory',
       },
       {
         file: 'test/m342.dispatch-production-ledger.test.ts',
