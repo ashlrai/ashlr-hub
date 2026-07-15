@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const faults = vi.hoisted(() => ({
+  establishPrivateRoot: null as (() => void) | null,
+  secureAuthorityFile: null as ((path: string) => void) | null,
   enrollmentPath: '',
   killPath: '',
   installedRegistry: false,
@@ -44,6 +46,8 @@ vi.mock('node:fs', async () => {
         (flags & actual.constants.O_CREAT) !== 0 && (flags & actual.constants.O_EXCL) !== 0) {
         faults.raceKillCreate = false;
         actual.writeFileSync(named, faults.raceKillBytes, { mode: 0o600 });
+        if (!faults.secureAuthorityFile) throw new Error('authority file assurer unavailable');
+        faults.secureAuthorityFile(named);
         faults.durabilityEvents.push('racer-created-kill');
         const error = new Error('injected concurrent sentinel create') as NodeJS.ErrnoException;
         error.code = 'EEXIST';
@@ -110,12 +114,25 @@ vi.mock('node:fs', async () => {
   };
 });
 
-vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>(),
-  acquireOutwardMutationFence: () => ({ path: 'm415-fence', token: 'owned', dev: 1, ino: 1 }),
-  ownsOutwardMutationFence: () => true,
-  releaseOutwardMutationFence: () => undefined,
-}));
+vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>();
+  faults.establishPrivateRoot = () => {
+    const fence = actual.acquireOutwardMutationFence();
+    try {
+      if (!actual.ownsOutwardMutationFence(fence)) {
+        throw new Error('production outward mutation fence unavailable');
+      }
+    } finally {
+      actual.releaseOutwardMutationFence(fence);
+    }
+  };
+  return {
+    ...actual,
+    acquireOutwardMutationFence: () => ({ path: 'm415-fence', token: 'owned', dev: 1, ino: 1 }),
+    ownsOutwardMutationFence: () => true,
+    releaseOutwardMutationFence: () => undefined,
+  };
+});
 
 import * as fs from 'node:fs';
 import {
@@ -126,19 +143,37 @@ import {
   listEnrolled,
   setKill,
 } from '../src/core/sandbox/policy.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
+
+function secureInjectedAuthorityFile(path: string): void {
+  const authorityRoot = process.env.ASHLR_HOME;
+  if (!authorityRoot) throw new Error('ASHLR_HOME unavailable for authority file assurance');
+  const assurance = assurePrivateStoragePath(
+    path,
+    'file',
+    'secure-created',
+    { anchorPath: authorityRoot },
+  );
+  if (!assurance.ok) {
+    throw new Error(`could not secure injected authority file: ${assurance.reason}`);
+  }
+}
 
 beforeEach(() => {
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
+  previousAshlrHome = process.env.ASHLR_HOME;
   home = join(tmpdir(), `ashlr-m415-${process.pid}-${randomUUID()}`);
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  fs.mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+  process.env.ASHLR_HOME = join(home, '.ashlr');
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
   faults.enrollmentPath = join(home, '.ashlr', 'enrollment.json');
   faults.killPath = join(home, '.ashlr', 'KILL');
@@ -154,6 +189,10 @@ beforeEach(() => {
   faults.failProcessIdentity = false;
   faults.openPaths.clear();
   faults.durabilityEvents.length = 0;
+  faults.secureAuthorityFile = secureInjectedAuthorityFile;
+  if (!faults.establishPrivateRoot) throw new Error('private root initializer unavailable');
+  faults.establishPrivateRoot();
+  faults.openPaths.clear();
 });
 
 afterEach(() => {
@@ -161,6 +200,8 @@ afterEach(() => {
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -206,6 +247,7 @@ describe('M415 policy durability races', () => {
       `${JSON.stringify({ repos: [originalRepo] }, null, 2)}\n`,
       { mode: 0o600 },
     );
+    secureInjectedAuthorityFile(faults.enrollmentPath);
     faults.failPostInstall = true;
     faults.failRollback = true;
 
@@ -233,7 +275,7 @@ describe('M415 policy durability races', () => {
       ],
       {
         cwd: process.cwd(),
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
         encoding: 'utf8',
         timeout: 5_000,
       },

@@ -212,6 +212,14 @@ beforeEach(() => {
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
   policyTestHooks.afterKillPrecheck = null;
+
+  // Establish the authority root through the production path so spawned Windows
+  // processes inherit the same protected root they are expected to validate.
+  const fence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(fence)) {
+    throw new Error('failed to establish the M403 outward mutation authority root');
+  }
+  releaseOutwardMutationFence(fence);
 });
 
 afterEach(async () => {

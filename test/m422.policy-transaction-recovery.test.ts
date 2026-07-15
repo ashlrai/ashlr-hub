@@ -1,15 +1,19 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { recoverEnrollmentRegistry } from '../src/core/sandbox/policy.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
 const children = new Set<ChildProcess>();
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
 
 function digest(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -17,6 +21,19 @@ function digest(bytes: Buffer): string {
 
 function registryBytes(repos: string[]): Buffer {
   return Buffer.from(`${JSON.stringify({ repos }, null, 2)}\n`, 'utf8');
+}
+
+function writeAuthorityFile(path: string, bytes: string | Buffer): void {
+  writeFileSync(path, bytes, { mode: 0o600 });
+  const assurance = assurePrivateStoragePath(
+    path,
+    'file',
+    'secure-created',
+    { anchorPath: join(home, '.ashlr') },
+  );
+  if (!assurance.ok) {
+    throw new Error(`M422 fixture authority file setup failed: ${assurance.reason}`);
+  }
 }
 
 function physicalIdentity(path: string): string {
@@ -49,7 +66,10 @@ function writeMarker(pid: number, before: Buffer | null, after: Buffer): { temp:
   };
   const root = join(home, '.ashlr');
   const marker = join(root, 'enrollment.transaction');
-  writeFileSync(marker, `${JSON.stringify({ ...payload, authentication: markerAuthentication(payload) })}\n`, { mode: 0o600 });
+  writeAuthorityFile(
+    marker,
+    `${JSON.stringify({ ...payload, authentication: markerAuthentication(payload) })}\n`,
+  );
   return { temp: join(root, tempName), backup: join(root, backupName), marker };
 }
 
@@ -58,8 +78,8 @@ function writeLegacyPartialInitialMarker(markerBytes: Buffer, after: Buffer): { 
   const root = join(home, '.ashlr');
   const temp = join(root, `.enrollment.${nonce}.tmp`);
   const marker = join(root, 'enrollment.transaction');
-  writeFileSync(temp, after, { mode: 0o600 });
-  writeFileSync(marker, markerBytes, { mode: 0o600 });
+  writeAuthorityFile(temp, after);
+  writeAuthorityFile(marker, markerBytes);
   return { temp, marker };
 }
 
@@ -119,10 +139,15 @@ function runEnrollmentSnapshot(): unknown {
 beforeEach(() => {
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
-  home = join(tmpdir(), `ashlr-m422-${process.pid}-${randomUUID()}`);
-  mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+  previousAshlrHome = process.env.ASHLR_HOME;
+  home = mkdtempSync(join(tmpdir(), 'ashlr-m422-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
+  const readiness = recoverEnrollmentRegistry({ waitMs: 1_000 });
+  if (readiness.state !== 'ready' || readiness.reason !== 'missing-empty') {
+    throw new Error(`M422 fixture authority setup failed: ${readiness.reason}`);
+  }
 });
 
 afterEach(async () => {
@@ -133,6 +158,8 @@ afterEach(async () => {
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -156,7 +183,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
   it('keeps a partial marker fail-closed when the registry pathname already exists', () => {
     const original = registryBytes([join(home, 'original')]);
     const registry = join(home, '.ashlr', 'enrollment.json');
-    writeFileSync(registry, original, { mode: 0o600 });
+    writeAuthorityFile(registry, original);
     const paths = writeLegacyPartialInitialMarker(
       Buffer.from('{"version":2', 'utf8'),
       registryBytes([join(home, 'abandoned')]),
@@ -195,10 +222,10 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     rmSync(completeWithoutTerminator.temp);
 
     const tampered = writeMarker(await deadOwnerPid(), null, after);
-    writeFileSync(tampered.temp, after, { mode: 0o600 });
+    writeAuthorityFile(tampered.temp, after);
     const marker = JSON.parse(readFileSync(tampered.marker, 'utf8')) as Record<string, unknown>;
     marker['authentication'] = 'f'.repeat(64);
-    writeFileSync(tampered.marker, `${JSON.stringify(marker)}\n`, { mode: 0o600 });
+    writeAuthorityFile(tampered.marker, `${JSON.stringify(marker)}\n`);
 
     expect(runPolicy(join(home, 'tampered-request'))).toMatchObject({
       result: { ok: false, reason: 'registry-transaction-tampered' },
@@ -213,9 +240,9 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     const requested = join(home, 'requested');
     const before = registryBytes([original]);
     const after = registryBytes([original, join(home, 'crashed')]);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), before);
     const paths = writeMarker(await deadOwnerPid(), before, after);
-    writeFileSync(paths.temp, after, { mode: 0o600 });
+    writeAuthorityFile(paths.temp, after);
 
     const registryPath = join(home, '.ashlr', 'enrollment.json');
     const registryBefore = readFileSync(registryPath);
@@ -246,7 +273,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     const requested = join(home, 'requested-after-cleanup-crash');
     const before = registryBytes([original]);
     const after = registryBytes([original, join(home, 'crashed')]);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), before);
     const paths = writeMarker(await deadOwnerPid(), before, after);
 
     expect(existsSync(paths.temp)).toBe(false);
@@ -278,8 +305,8 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     const before = registryBytes([original]);
     const after = registryBytes([original, crashed]);
     const paths = writeMarker(await deadOwnerPid(), before, after);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), after, { mode: 0o600 });
-    writeFileSync(paths.backup, before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), after);
+    writeAuthorityFile(paths.backup, before);
 
     expect(runPolicy(requested)).toMatchObject({ result: { ok: true, reason: 'enrolled' } });
     expect(JSON.parse(readFileSync(join(home, '.ashlr', 'enrollment.json'), 'utf8'))).toEqual({
@@ -293,11 +320,11 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     const original = join(home, 'original');
     const before = registryBytes([original]);
     const after = registryBytes([original, join(home, 'crashed')]);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), before);
 
     const owner = await startOwner();
     const live = writeMarker(owner.pid!, before, after);
-    writeFileSync(live.temp, after, { mode: 0o600 });
+    writeAuthorityFile(live.temp, after);
     expect(runPolicy(join(home, 'live-request'))).toMatchObject({
       result: { ok: false, reason: 'registry-transaction-owner-alive' },
       repos: [],
@@ -306,7 +333,7 @@ describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
     owner.kill('SIGKILL');
     await waitForExit(owner);
 
-    writeFileSync(live.temp, registryBytes([join(home, 'tampered')]), { mode: 0o600 });
+    writeAuthorityFile(live.temp, registryBytes([join(home, 'tampered')]));
     expect(runPolicy(join(home, 'tamper-request'))).toMatchObject({
       result: { ok: false, reason: 'registry-transaction-tampered' },
       repos: [],

@@ -2388,7 +2388,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove quadratic byte counting from the M360 100,000-record cap fixture; the exact case now completes in 1.91 seconds and full M360 passes in 20.54 seconds.
 - [x] Replay all three local Windows partitions and native alias authority: 285+213+170+31 assertions passed with two intentional platform skips.
 - [x] Pass the final frozen exhaustive suite: 534 files, 11,479 passed, 20 intentional skips, zero failures in 750.66 seconds.
-- [ ] Push the reporter correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
+- [x] Push the reporter correction as `c0cbe59`; protected macOS passed, while Windows portability 1/3 exposed three remaining permissive legacy fixtures.
+- [x] Repair M403/M415/M422 through production-secured roots and exact private artifact assurance; combined focused verification is 29/29 and the exact local Windows 1/3 contract is 285 passed with one intentional skip.
+- [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
 - [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.
