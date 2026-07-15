@@ -61,6 +61,7 @@ jobs:
           - os: windows-latest
             label: windows, portability 3/3
             test_args: >-
+              --reporter=dot
               test/m220.anticlog-verdict-feedback.test.ts
               test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts

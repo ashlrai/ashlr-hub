@@ -152,7 +152,7 @@ beforeEach(() => {
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = path.join(home, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
-  setKill(false);
+  expect(setKill(false).ok).toBe(true);
 
   execFileSync('git', ['init', '--initial-branch=main', repo], { stdio: 'pipe' });
   git(['config', 'user.email', 'test@ashlr.test']);

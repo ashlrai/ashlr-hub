@@ -2381,7 +2381,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass typecheck, full lint with the existing warning baseline only, build, zero-vulnerability audit, and diff checks.
 - [x] Pass the corrected exhaustive suite: 534 files, 11,476 passed, 20 intentional skips, zero failures in 747.99 seconds.
 - [x] Receive independent SHIP on the final security boundary with no P0/P1 findings under the declared current-user/SYSTEM/Administrators trust model.
-- [ ] Push the corrected exact SHA and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
+- [x] Push correction `594a5c4`; both protected macOS jobs passed, while duplicate Windows portability 3/3 jobs crossed the five-minute no-output watchdog before their first file result.
+- [x] Add real per-test dot progress to Windows portability 3/3 without synthetic heartbeats or a larger timeout; bind it in M30 and replay the exact selector locally (170 passed, one platform skip).
+- [x] Close the genuine Windows 1/3 and 2/3 fixture failures with coherent home authority, production-secured roots, and exact environment restoration; do not relax production gates or timeouts.
+- [x] Amortize repeated Windows first-use ACL proof only for the same exact root and authority filesystem objects, with replacement/different-root/unsafe-root regressions.
+- [x] Remove quadratic byte counting from the M360 100,000-record cap fixture; the exact case now completes in 1.91 seconds and full M360 passes in 20.54 seconds.
+- [x] Replay all three local Windows partitions and native alias authority: 285+213+170+31 assertions passed with two intentional platform skips.
+- [x] Pass the final frozen exhaustive suite: 534 files, 11,479 passed, 20 intentional skips, zero failures in 750.66 seconds.
+- [ ] Push the reporter correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
 - [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.

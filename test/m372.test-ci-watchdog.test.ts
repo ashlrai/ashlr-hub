@@ -42,11 +42,13 @@ describe('test-ci watchdog', () => {
   it('forwards shard argv and preserves successful exit status', () => {
     const result = runFixture(
       'console.log(JSON.stringify(process.argv.slice(2)));',
-      { args: ['--shard=2/3'] },
+      { args: ['--reporter=dot', '--shard=2/3'] },
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('["run","--no-file-parallelism","--shard=2/3"]');
+    expect(result.stdout).toContain(
+      '["run","--no-file-parallelism","--reporter=dot","--shard=2/3"]',
+    );
   });
 
   it('keeps an actively producing process alive past the idle window', () => {

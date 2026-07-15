@@ -76,7 +76,10 @@ import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { seedPendingProposal } from './helpers/h2-faults.js';
 import { withPlatform } from './helpers/platform.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
-import { acquireOutwardMutationFence } from '../src/core/sandbox/mutation-fence.js';
+import {
+  acquireOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 
 import {
   assertMayMutate,
@@ -665,6 +668,120 @@ describe('H4 · ENROLLMENT · default-empty registry', () => {
     expect(after.stdout).toBe(before.stdout);
     expect(readdirSync(fenceDir)).toEqual([]);
   }, 45_000);
+
+  it('3.11 reuses a Windows authority proof only for the same exact directory objects', () => {
+    const authorityRoot = join(fx.home, '.ashlr');
+    const fenceDir = join(authorityRoot, 'authority');
+    privateStorageMocks.assure.mockClear();
+
+    const first = withPlatform('win32', () => acquireOutwardMutationFence(100));
+    expect(first).not.toBeNull();
+    releaseOutwardMutationFence(first);
+    expect(privateStorageMocks.assure.mock.calls).toEqual([
+      [authorityRoot, 'directory', 'secure-created', { anchorPath: fx.home }],
+      [fenceDir, 'directory', 'secure-created', { anchorPath: authorityRoot }],
+    ]);
+
+    const second = withPlatform('win32', () => acquireOutwardMutationFence(100));
+    expect(second).not.toBeNull();
+    releaseOutwardMutationFence(second);
+    expect(privateStorageMocks.assure).toHaveBeenCalledTimes(2);
+
+    const alternateHome = join(fx.home, 'alternate-home');
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    mkdirSync(alternateHome, { mode: 0o700 });
+    process.env.HOME = alternateHome;
+    process.env.USERPROFILE = alternateHome;
+    try {
+      const differentRoot = withPlatform('win32', () => acquireOutwardMutationFence(100));
+      expect(differentRoot).not.toBeNull();
+      releaseOutwardMutationFence(differentRoot);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = originalUserProfile;
+    }
+    expect(privateStorageMocks.assure.mock.calls.slice(2)).toEqual([
+      [join(alternateHome, '.ashlr'), 'directory', 'secure-created', { anchorPath: alternateHome }],
+      [
+        join(alternateHome, '.ashlr', 'authority'),
+        'directory',
+        'secure-created',
+        { anchorPath: join(alternateHome, '.ashlr') },
+      ],
+    ]);
+  });
+
+  it('3.12 invalidates Windows authority proof on root or nested replacement', () => {
+    const authorityRoot = join(fx.home, '.ashlr');
+    const fenceDir = join(authorityRoot, 'authority');
+    const displacedRoot = join(fx.home, '.ashlr-displaced');
+    const displacedFence = join(fx.home, 'authority-displaced');
+
+    const initial = withPlatform('win32', () => acquireOutwardMutationFence(100));
+    expect(initial).not.toBeNull();
+    releaseOutwardMutationFence(initial);
+
+    renameSync(fenceDir, displacedFence);
+    mkdirSync(fenceDir, { mode: 0o700 });
+    privateStorageMocks.assure.mockClear();
+    privateStorageMocks.assure.mockImplementation((path) => ({
+      ok: path !== fenceDir,
+      reason: path === fenceDir ? 'untrusted-item-write' : 'owned-safe-path',
+    }));
+    expect(withPlatform('win32', () => acquireOutwardMutationFence(100))).toBeNull();
+    expect(privateStorageMocks.assure.mock.calls.map(([path]) => path)).toEqual([
+      authorityRoot,
+      fenceDir,
+    ]);
+
+    rmSync(fenceDir, { recursive: true, force: true });
+    renameSync(displacedFence, fenceDir);
+    privateStorageMocks.assure.mockImplementation(() => ({ ok: true, reason: 'owned-safe-path' }));
+    const restored = withPlatform('win32', () => acquireOutwardMutationFence(100));
+    expect(restored).not.toBeNull();
+    releaseOutwardMutationFence(restored);
+
+    renameSync(authorityRoot, displacedRoot);
+    mkdirSync(fenceDir, { recursive: true, mode: 0o700 });
+    privateStorageMocks.assure.mockClear();
+    privateStorageMocks.assure.mockImplementation((path) => ({
+      ok: path !== authorityRoot,
+      reason: path === authorityRoot ? 'untrusted-item-write' : 'owned-safe-path',
+    }));
+    expect(withPlatform('win32', () => acquireOutwardMutationFence(100))).toBeNull();
+    expect(privateStorageMocks.assure.mock.calls.map(([path]) => path)).toEqual([
+      authorityRoot,
+    ]);
+  });
+
+  it('3.13 refuses unsafe pre-existing Windows root and nested authority directories', () => {
+    const authorityRoot = join(fx.home, '.ashlr');
+    const fenceDir = join(authorityRoot, 'authority');
+    mkdirSync(fenceDir, { recursive: true, mode: 0o700 });
+
+    privateStorageMocks.assure.mockImplementation((path) => ({
+      ok: path !== authorityRoot,
+      reason: path === authorityRoot ? 'untrusted-item-write' : 'owned-safe-path',
+    }));
+    expect(withPlatform('win32', () => acquireOutwardMutationFence(100))).toBeNull();
+    expect(privateStorageMocks.assure.mock.calls.map(([path]) => path)).toEqual([
+      authorityRoot,
+    ]);
+
+    privateStorageMocks.assure.mockClear();
+    privateStorageMocks.assure.mockImplementation((path) => ({
+      ok: path !== fenceDir,
+      reason: path === fenceDir ? 'untrusted-item-write' : 'owned-safe-path',
+    }));
+    expect(withPlatform('win32', () => acquireOutwardMutationFence(100))).toBeNull();
+    expect(privateStorageMocks.assure.mock.calls.map(([path]) => path)).toEqual([
+      authorityRoot,
+      fenceDir,
+    ]);
+  });
 });
 
 describe('H4 · ENROLLMENT · normalization + assert gate', () => {

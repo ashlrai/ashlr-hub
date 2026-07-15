@@ -262,14 +262,18 @@ function writeSyntheticLifecycleLedger(
   mkdirSync(dirname(path), { recursive: true });
   const fd = openSync(path, 'w', 0o600);
   let chunk = '{"schemaVersion":1,"records":[';
+  let chunkBytes = Buffer.byteLength(chunk);
   try {
     for (let index = 0; index < count; index++) {
       const row = `${index === 0 ? '' : ','}${JSON.stringify(recordAt(index))}`;
-      if (Buffer.byteLength(chunk) + Buffer.byteLength(row) > 1024 * 1024) {
+      const rowBytes = Buffer.byteLength(row);
+      if (chunkBytes + rowBytes > 1024 * 1024) {
         writeSync(fd, chunk);
         chunk = '';
+        chunkBytes = 0;
       }
       chunk += row;
+      chunkBytes += rowBytes;
     }
     writeSync(fd, `${chunk}]}\n`);
   } finally {

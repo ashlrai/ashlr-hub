@@ -2,7 +2,7 @@
  * M23 applyProposal tests — the ONLY outward path; gate + enrollment invariants.
  *
  * SAFETY GUARDRAILS:
- *  - HOME is overridden to a tmp dir so real ~/.ashlr/{inbox,enrollment,...} untouched.
+ *  - HOME/USERPROFILE/ASHLR_HOME share a tmp root so real Ashlr state is untouched.
  *  - A real tmp git repo is used for 'patch' tests (local branch only; never pushed).
  *  - child_process.spawnSync is mocked to prevent real `gh` calls.
  *  - NEVER creates a real PR, push, or deploy during tests.
@@ -35,6 +35,8 @@ import { execFileSync } from 'node:child_process';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 let tmpRepo: string;
 
@@ -46,9 +48,10 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    // spawnSync used by github.ts (createPr). Return failure by default so no
-    // real gh commands run. Individual tests override this via _spawnSyncImpl.
-    spawnSync: (...args: unknown[]) => _spawnSyncImpl(...args),
+    // Keep real local adapters (including Windows ACL setup) available. Only
+    // gh is outward-facing here and must remain under the test double.
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) =>
+      args[0] === 'gh' ? _spawnSyncImpl(...args) : actual.spawnSync(...args),
   };
 });
 
@@ -165,15 +168,17 @@ function makeSimpleDiff(filename = 'patch-output.txt', content = 'added by patch
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m23-apply-home-'));
-  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m23-apply-repo-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m23-apply-home-')));
+  tmpRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m23-apply-repo-')));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 
   // Default: spawnSync fails (no real gh calls)
   _spawnSyncImpl = makeSpawnSyncFail();
 
-  // Ensure kill switch is off
-  setKill(false);
+  // Exercise production setup so the private outward authority root exists.
+  expect(setKill(false).ok).toBe(true);
 });
 
 afterEach(() => {
@@ -184,7 +189,12 @@ afterEach(() => {
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
-  process.env.HOME = origHome;
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
   vi.clearAllMocks();
 });
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -177,14 +177,17 @@ describe('M413 engineer run mutation fence', () => {
   let repo: string;
   let previousHome: string | undefined;
   let previousUserProfile: string | undefined;
+  let previousAshlrHome: string | undefined;
 
   beforeEach(() => {
     previousHome = process.env.HOME;
     previousUserProfile = process.env.USERPROFILE;
-    home = mkdtempSync(join(tmpdir(), 'ashlr-m413-home-'));
-    repo = mkdtempSync(join(tmpdir(), 'ashlr-m413-repo-'));
+    previousAshlrHome = process.env.ASHLR_HOME;
+    home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m413-home-')));
+    repo = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m413-repo-')));
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    process.env.ASHLR_HOME = join(home, '.ashlr');
 
     expect(setKill(false, { waitMs: 500 }).ok).toBe(true);
     expect(enroll(repo, { waitMs: 500 }).ok).toBe(true);
@@ -212,6 +215,8 @@ describe('M413 engineer run mutation fence', () => {
     else process.env.HOME = previousHome;
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;
+    if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+    else process.env.ASHLR_HOME = previousAshlrHome;
   });
 
   it('holds authority through blocked model cancellation and sandbox finalization', async () => {

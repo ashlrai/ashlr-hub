@@ -1,17 +1,22 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { EnrollmentRegistryReadiness } from '../src/core/sandbox/policy.js';
+import {
+  recoverEnrollmentRegistry,
+  type EnrollmentRegistryReadiness,
+} from '../src/core/sandbox/policy.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
 const children = new Set<ChildProcess>();
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
 
 function digest(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -19,6 +24,19 @@ function digest(bytes: Buffer): string {
 
 function registryBytes(repos: string[]): Buffer {
   return Buffer.from(`${JSON.stringify({ repos }, null, 2)}\n`, 'utf8');
+}
+
+function writeAuthorityFile(path: string, bytes: string | Buffer): void {
+  writeFileSync(path, bytes, { mode: 0o600 });
+  const assurance = assurePrivateStoragePath(
+    path,
+    'file',
+    'secure-created',
+    { anchorPath: join(home, '.ashlr') },
+  );
+  if (!assurance.ok) {
+    throw new Error(`M425 fixture authority file setup failed: ${assurance.reason}`);
+  }
 }
 
 function markerAuthentication(payload: Record<string, unknown>): string {
@@ -51,10 +69,9 @@ function writeMarker(
   };
   const root = join(home, '.ashlr');
   const marker = join(root, 'enrollment.transaction');
-  writeFileSync(
+  writeAuthorityFile(
     marker,
     `${JSON.stringify({ ...payload, authentication: markerAuthentication(payload) })}\n`,
-    { mode: 0o600 },
   );
   return { temp: join(root, tempName), backup: join(root, backupName), marker };
 }
@@ -102,7 +119,12 @@ function runReadiness(unknownPid?: number): EnrollmentRegistryReadiness {
   `;
   const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      ASHLR_HOME: join(home, '.ashlr'),
+    },
     encoding: 'utf8',
     timeout: 8_000,
   });
@@ -114,10 +136,15 @@ function runReadiness(unknownPid?: number): EnrollmentRegistryReadiness {
 beforeEach(() => {
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
-  home = join(tmpdir(), `ashlr-m425-${process.pid}-${randomUUID()}`);
-  mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+  previousAshlrHome = process.env.ASHLR_HOME;
+  home = mkdtempSync(join(tmpdir(), 'ashlr-m425-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
+  const readiness = recoverEnrollmentRegistry({ waitMs: 1_000 });
+  if (readiness.state !== 'ready' || readiness.reason !== 'missing-empty') {
+    throw new Error(`M425 fixture authority setup failed: ${readiness.reason}`);
+  }
 });
 
 afterEach(async () => {
@@ -128,6 +155,8 @@ afterEach(async () => {
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -138,8 +167,8 @@ describe('M425 enrollment registry startup recovery', { timeout: 15_000 }, () =>
     const before = registryBytes([original]);
     const after = registryBytes([original, committed]);
     const paths = writeMarker(await deadOwnerPid(), before, after);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), after, { mode: 0o600 });
-    writeFileSync(paths.backup, before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), after);
+    writeAuthorityFile(paths.backup, before);
 
     expect(runReadiness()).toEqual({
       state: 'ready',
@@ -155,10 +184,10 @@ describe('M425 enrollment registry startup recovery', { timeout: 15_000 }, () =>
     const original = join(home, 'original');
     const before = registryBytes([original]);
     const after = registryBytes([original, join(home, 'crashed')]);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), before);
     const owner = await startOwner();
     const paths = writeMarker(owner.pid!, before, after);
-    writeFileSync(paths.temp, after, { mode: 0o600 });
+    writeAuthorityFile(paths.temp, after);
 
     const readiness = runReadiness();
     expect(readiness).toEqual({
@@ -176,9 +205,9 @@ describe('M425 enrollment registry startup recovery', { timeout: 15_000 }, () =>
     const original = join(home, 'original');
     const before = registryBytes([original]);
     const after = registryBytes([original, join(home, 'crashed')]);
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), before, { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), before);
     const paths = writeMarker(unknownPid, before, after);
-    writeFileSync(paths.temp, after, { mode: 0o600 });
+    writeAuthorityFile(paths.temp, after);
 
     const readiness = runReadiness(unknownPid);
     expect(readiness).toEqual({
@@ -199,7 +228,7 @@ describe('M425 enrollment registry startup recovery', { timeout: 15_000 }, () =>
       reason: 'missing-empty',
     });
 
-    writeFileSync(join(home, '.ashlr', 'enrollment.json'), '{malformed}\n', { mode: 0o600 });
+    writeAuthorityFile(join(home, '.ashlr', 'enrollment.json'), '{malformed}\n');
     const degraded = runReadiness();
     expect(degraded).toEqual({
       state: 'degraded',

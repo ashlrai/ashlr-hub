@@ -26,6 +26,10 @@ import {
   sandboxesDir,
   sweepOrphanSandboxesDetailed,
 } from '../src/core/sandbox/worktree.js';
+import {
+  acquireOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import { enroll, isEnrolled } from '../src/core/sandbox/policy.js';
 import type { Sandbox } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
@@ -313,6 +317,12 @@ function makeDirectoryAlias(target: string): string {
   return alias;
 }
 
+function prepareSandboxAuthorityRoot(): void {
+  const fence = acquireOutwardMutationFence();
+  if (!fence) throw new Error('M426 fixture could not prepare sandbox authority root');
+  releaseOutwardMutationFence(fence);
+}
+
 beforeEach(() => {
   originalPath = process.env.PATH;
   originalNodeOptions = process.env.NODE_OPTIONS;
@@ -368,6 +378,7 @@ describe('M426 sandbox reservation and path identity', () => {
   it('keeps fresh metadata-free homes and reclaims them after a nonzero recovery age', () => {
     const id = 'm426-metadata-free';
     const home = join(sandboxesDir(), id);
+    prepareSandboxAuthorityRoot();
     mkdirSync(home, { recursive: true, mode: 0o700 });
 
     const fresh = sweepOrphanSandboxesDetailed();
@@ -491,6 +502,7 @@ describe('M426 sandbox reservation and path identity', () => {
     const aliasHome = makeDirectoryAlias(fx.home);
     process.env.HOME = aliasHome;
     process.env.USERPROFILE = aliasHome;
+    process.env.ASHLR_HOME = join(aliasHome, '.ashlr');
 
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
     process.env.PATH = originalPath;

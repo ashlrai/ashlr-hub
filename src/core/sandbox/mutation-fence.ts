@@ -20,6 +20,23 @@ export type OutwardMutationFence = Readonly<LocalStoreLock>;
 
 const acquiredFences = new WeakSet<object>();
 
+interface PrivateDirectoryProof {
+  readonly path: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+interface WindowsAuthorityProof {
+  readonly home: string;
+  readonly root: PrivateDirectoryProof;
+  readonly authority: PrivateDirectoryProof;
+}
+
+// ACL assurance proves that only current-user/SYSTEM/Administrators can mutate
+// or replace these objects. Reuse is therefore bounded to exact bigint file
+// identities; any pathname or object change discards the proof and re-assures.
+let windowsAuthorityProof: WindowsAuthorityProof | null = null;
+
 function isAcquiredFence(
   fence: OutwardMutationFence | null | undefined,
 ): fence is OutwardMutationFence {
@@ -42,21 +59,62 @@ export function outwardMutationFencePath(): string {
   return join(home, '.ashlr', 'authority', 'outward-mutation.lock');
 }
 
-function preparePrivateDirectory(path: string, anchorPath: string): boolean {
+function readPrivateDirectoryProof(path: string): PrivateDirectoryProof | null {
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.ino <= 0n) return null;
+    return { path, dev: stat.dev, ino: stat.ino };
+  } catch {
+    return null;
+  }
+}
+
+function samePrivateDirectory(
+  expected: PrivateDirectoryProof,
+  observed: PrivateDirectoryProof | null,
+): boolean {
+  return observed !== null && expected.path === observed.path &&
+    expected.dev === observed.dev && expected.ino === observed.ino;
+}
+
+function cachedWindowsAuthorityIsExact(
+  home: string,
+  rootPath: string,
+  authorityPath: string,
+): boolean {
+  const cached = windowsAuthorityProof;
+  if (!cached || cached.home !== home ||
+    cached.root.path !== rootPath || cached.authority.path !== authorityPath) return false;
+
+  const rootBefore = readPrivateDirectoryProof(rootPath);
+  const authorityBefore = readPrivateDirectoryProof(authorityPath);
+  const rootAfter = readPrivateDirectoryProof(rootPath);
+  const authorityAfter = readPrivateDirectoryProof(authorityPath);
+  return samePrivateDirectory(cached.root, rootBefore) &&
+    samePrivateDirectory(cached.authority, authorityBefore) &&
+    samePrivateDirectory(cached.root, rootAfter) &&
+    samePrivateDirectory(cached.authority, authorityAfter);
+}
+
+function preparePrivateDirectory(
+  path: string,
+  anchorPath: string,
+): PrivateDirectoryProof | null {
   let created = false;
   try {
     mkdirSync(path, { mode: 0o700 });
     created = true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
   }
 
   try {
-    const before = lstatSync(path);
-    if (before.isSymbolicLink() || !before.isDirectory()) return false;
+    const before = readPrivateDirectoryProof(path);
+    if (!before) return null;
     if (process.platform !== 'win32') {
       chmodSync(path, 0o700);
-      return true;
+      const after = readPrivateDirectoryProof(path);
+      return samePrivateDirectory(before, after) ? after : null;
     }
     const assurance = assurePrivateStoragePath(
       path,
@@ -64,21 +122,37 @@ function preparePrivateDirectory(path: string, anchorPath: string): boolean {
       created ? 'secure-created' : 'inspect-owned',
       { anchorPath },
     );
-    if (!assurance.ok) return false;
-    const after = lstatSync(path);
-    return after.isDirectory() && !after.isSymbolicLink() &&
-      before.dev === after.dev && before.ino === after.ino;
+    if (!assurance.ok) return null;
+    const after = readPrivateDirectoryProof(path);
+    return samePrivateDirectory(before, after) ? after : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 function prepareOutwardAuthorityRoot(): boolean {
   const home = canonicalHome();
   if (!home) return false;
-  const root = join(home, '.ashlr');
-  if (!preparePrivateDirectory(root, home)) return false;
-  return preparePrivateDirectory(join(root, 'authority'), root);
+  const rootPath = join(home, '.ashlr');
+  const authorityPath = join(rootPath, 'authority');
+  if (process.platform === 'win32') {
+    if (cachedWindowsAuthorityIsExact(home, rootPath, authorityPath)) return true;
+    windowsAuthorityProof = null;
+  }
+
+  const root = preparePrivateDirectory(rootPath, home);
+  if (!root) return false;
+  const authority = preparePrivateDirectory(authorityPath, rootPath);
+  if (!authority) return false;
+
+  if (process.platform === 'win32') {
+    const rootAfter = readPrivateDirectoryProof(rootPath);
+    const authorityAfter = readPrivateDirectoryProof(authorityPath);
+    if (!samePrivateDirectory(root, rootAfter) ||
+      !samePrivateDirectory(authority, authorityAfter)) return false;
+    windowsAuthorityProof = { home, root, authority };
+  }
+  return true;
 }
 
 export function acquireOutwardMutationFence(waitMs = 2_000): OutwardMutationFence | null {

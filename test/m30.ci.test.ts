@@ -119,6 +119,8 @@ describe('M30 CI workflow', () => {
     const windowsMatrixEntries = nativeMatrixEntries
       .filter((entry) => entry.includes('os: windows-latest'));
     const windowsEntries = windowsMatrixEntries.join('\n');
+    const windowsPortabilityThree = windowsMatrixEntries.find((entry) =>
+      entry.includes('label: windows, portability 3/3')) ?? '';
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
@@ -381,6 +383,13 @@ describe('M30 CI workflow', () => {
     expect([...macosDeclaredFiles].sort()).toEqual([...expectedMacosFiles].sort());
 
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
+    expect(windowsPortabilityThree).toContain('--reporter=dot');
+    expect(ciYml.match(/--reporter=dot/g)).toHaveLength(1);
+    for (const entry of windowsMatrixEntries) {
+      if (entry === windowsPortabilityThree) continue;
+      expect(entry).not.toContain('--reporter=dot');
+    }
+    expect(ciYml).not.toContain('ASHLR_TEST_CI_IDLE_TIMEOUT_MS');
     const duplicateFiles = declaredFiles.filter(
       (file, index) => declaredFiles.indexOf(file) !== index,
     );
