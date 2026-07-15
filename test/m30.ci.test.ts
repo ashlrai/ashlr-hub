@@ -103,11 +103,12 @@ describe('M30 CI workflow', () => {
 
   it('runs Ubuntu exhaustively with fixed Windows and macOS portability partitions', () => {
     expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
-    expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(3);
+    expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(4);
     expect(ciYml.match(/os:\s*macos-latest/g)).toHaveLength(1);
     for (const partition of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
+    expect(ciYml).toContain('label: windows, portability overflow');
     expect(ciYml).toContain('test_args: ""');
     expect(ciYml).not.toContain('--shard=');
 
@@ -121,6 +122,8 @@ describe('M30 CI workflow', () => {
     const windowsEntries = windowsMatrixEntries.join('\n');
     const windowsPortabilityThree = windowsMatrixEntries.find((entry) =>
       entry.includes('label: windows, portability 3/3')) ?? '';
+    const windowsPortabilityOverflow = windowsMatrixEntries.find((entry) =>
+      entry.includes('label: windows, portability overflow')) ?? '';
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
@@ -164,11 +167,14 @@ describe('M30 CI workflow', () => {
         'test/sandbox-reservation-recovery.test.ts',
       ],
       [
+        'test/m315.remote-handoff-truth.test.ts',
+        'test/m372.test-ci-watchdog.test.ts',
+        'test/m423.control-plane-lock-order.test.ts',
+      ],
+      [
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
-        'test/m315.remote-handoff-truth.test.ts',
         observerSchedulerTest,
-        'test/m372.test-ci-watchdog.test.ts',
         'test/m379.private-storage.test.ts',
         'test/m385.cutoff-checkpoint-scheduler.test.ts',
         'test/m385.cutoff-checkpoint-windows.test.ts',
@@ -178,7 +184,6 @@ describe('M30 CI workflow', () => {
         'test/m419.remote-handoff-intent.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
-        'test/m423.control-plane-lock-order.test.ts',
       ],
     ];
     const expectedMacosFiles = [
@@ -384,9 +389,10 @@ describe('M30 CI workflow', () => {
 
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
-    expect(ciYml.match(/--reporter=dot/g)).toHaveLength(1);
+    expect(windowsPortabilityOverflow).toContain('--reporter=dot');
+    expect(ciYml.match(/--reporter=dot/g)).toHaveLength(2);
     for (const entry of windowsMatrixEntries) {
-      if (entry === windowsPortabilityThree) continue;
+      if (entry === windowsPortabilityThree || entry === windowsPortabilityOverflow) continue;
       expect(entry).not.toContain('--reporter=dot');
     }
     expect(ciYml).not.toContain('ASHLR_TEST_CI_IDLE_TIMEOUT_MS');

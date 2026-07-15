@@ -62,9 +62,15 @@ jobs:
             label: windows, portability 3/3
             test_args: >-
               --reporter=dot
-              test/m220.anticlog-verdict-feedback.test.ts
-              test/m286.worktree-verify-env.test.ts test/m315.remote-handoff-truth.test.ts
+              test/m315.remote-handoff-truth.test.ts
               test/m372.test-ci-watchdog.test.ts
+              test/m423.control-plane-lock-order.test.ts
+          - os: windows-latest
+            label: windows, portability overflow
+            test_args: >-
+              --reporter=dot
+              test/m220.anticlog-verdict-feedback.test.ts
+              test/m286.worktree-verify-env.test.ts
               test/m367.daemon-observer-scheduler.test.ts
               test/m379.private-storage.test.ts test/m385.cutoff-checkpoint-windows.test.ts
               test/m385.cutoff-checkpoint-scheduler.test.ts
@@ -74,7 +80,6 @@ jobs:
               test/m419.remote-handoff-intent.test.ts
               test/m420.remote-handoff-recovery.test.ts
               test/m421.legacy-pulse-quiescence.test.ts
-              test/m423.control-plane-lock-order.test.ts
           - os: macos-latest
             label: macos, shared queue authority
             test_args: >-

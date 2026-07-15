@@ -179,6 +179,10 @@ beforeEach(() => {
 
   // Exercise production setup so the private outward authority root exists.
   expect(setKill(false).ok).toBe(true);
+
+  // Enrollment performs the remaining production-backed Windows authority
+  // setup. Keep that first-use ACL cost in the fixture hook, not test bodies.
+  expect(enroll(tmpRepo).ok).toBe(true);
 });
 
 afterEach(() => {
@@ -215,7 +219,6 @@ describe('M23 applyProposal — REFUSE: proposal not found', () => {
 
   it('does not mutate anything when proposal does not exist', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const branchesBefore = listBranches(tmpRepo);
     await applyProposal('nonexistent-id', { confirmed: true });
     const branchesAfter = listBranches(tmpRepo);
@@ -230,7 +233,6 @@ describe('M23 applyProposal — REFUSE: proposal not found', () => {
 describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-APPLIES)', () => {
   it('REFUSES a PENDING proposal (status=pending)', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     expect(p.status).toBe('pending');
 
@@ -244,7 +246,6 @@ describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-
 
   it('REFUSES a REJECTED proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'rejected');
 
@@ -257,7 +258,6 @@ describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-
 
   it('REFUSES an ALREADY APPLIED proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'approved');
     setStatus(p.id, 'applied', 'already applied');
@@ -268,7 +268,6 @@ describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-
 
   it('REFUSES a FAILED proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'failed', 'prior failure');
 
@@ -278,7 +277,6 @@ describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-
 
   it('does NOT create any branch on the repo when refusing a pending proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     const branchesBefore = listBranches(tmpRepo);
 
@@ -296,7 +294,6 @@ describe('M23 applyProposal — REFUSE: status !== approved (PENDING NEVER AUTO-
 describe('M23 applyProposal — REFUSE: opts.confirmed !== true', () => {
   it('REFUSES when confirmed=false even if status=approved', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'approved');
 
@@ -310,7 +307,6 @@ describe('M23 applyProposal — REFUSE: opts.confirmed !== true', () => {
 
   it('does NOT create any branch when confirmed=false', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'approved');
     const branchesBefore = listBranches(tmpRepo);
@@ -327,9 +323,12 @@ describe('M23 applyProposal — REFUSE: opts.confirmed !== true', () => {
 // ===========================================================================
 
 describe('M23 applyProposal — REFUSE: repo not enrolled', () => {
+  beforeEach(() => {
+    expect(unenroll(tmpRepo).ok).toBe(true);
+  });
+
   it('REFUSES when repo is not enrolled (assertMayMutate)', async () => {
     initRealGitRepo(tmpRepo);
-    // Deliberately NOT enrolling tmpRepo
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'approved');
 
@@ -344,7 +343,6 @@ describe('M23 applyProposal — REFUSE: repo not enrolled', () => {
 
   it('does NOT create any branch when repo not enrolled', async () => {
     initRealGitRepo(tmpRepo);
-    // Not enrolled
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
     setStatus(p.id, 'approved');
     const branchesBefore = listBranches(tmpRepo);
@@ -363,7 +361,6 @@ describe('M23 applyProposal — REFUSE: repo not enrolled', () => {
 describe('M23 applyProposal — REFUSE: kill switch', () => {
   it('REFUSES when kill switch is ON even for approved+confirmed+enrolled', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     setKill(true);
 
     const p = createProposal(makeInput({ diff: makeSimpleDiff() }));
@@ -382,7 +379,6 @@ describe('M23 applyProposal — REFUSE: kill switch', () => {
 describe('M23 applyProposal — REFUSE: partial review artifact', () => {
   it('REFUSES approval and application of a partial proposal without mutating its repo', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const branchBefore = getCurrentBranch(tmpRepo);
     const branchesBefore = listBranches(tmpRepo);
     const p = createProposal(makeInput({
@@ -408,7 +404,6 @@ describe('M23 applyProposal — REFUSE: partial review artifact', () => {
 describe('M23 applyProposal — patch: applies on NEW branch, never touches current branch', () => {
   it('creates a new branch with the ashlr/proposal/ prefix', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff('new-file.txt', 'hello patch\n') }));
     setStatus(p.id, 'approved');
 
@@ -428,7 +423,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('current branch is UNCHANGED after patch apply', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const branchBefore = getCurrentBranch(tmpRepo);
 
     const p = createProposal(makeInput({ diff: makeSimpleDiff('patch-test.txt', 'content\n') }));
@@ -442,7 +436,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('working tree of the source repo is BYTE-UNCHANGED after patch apply', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
 
     // Snapshot the working tree before apply
     function snapshotDir(dir: string): Map<string, Buffer> {
@@ -482,7 +475,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('NEVER pushes — no spawnSync call to gh push', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
 
     const spawnSpy = vi.fn(() => ({
       pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
@@ -504,7 +496,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('sets status=applied on success', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff('status-check.txt', 'ok\n') }));
     setStatus(p.id, 'approved');
 
@@ -517,7 +508,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('never throws even when diff application fails', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     // Provide a malformed diff that git apply will reject
     const p = createProposal(makeInput({ diff: 'THIS IS NOT A VALID DIFF\n' }));
     setStatus(p.id, 'approved');
@@ -527,7 +517,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 
   it('sets status=failed and returns ok:false when diff is invalid', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ diff: 'INVALID DIFF CONTENT' }));
     setStatus(p.id, 'approved');
 
@@ -545,7 +534,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
 describe('M23 applyProposal — pr kind: calls gated createPr (mocked), approved+confirmed only', () => {
   it('calls createPr (via mocked spawnSync) only when approved+confirmed', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     // Mock spawnSync to simulate a successful gh pr create
     _spawnSyncImpl = makeSpawnSyncPrSuccess();
 
@@ -566,7 +554,6 @@ describe('M23 applyProposal — pr kind: calls gated createPr (mocked), approved
 
   it('does NOT call createPr when status=pending', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const spawnSpy = makeSpawnSyncPrSuccess();
     _spawnSyncImpl = spawnSpy;
 
@@ -584,7 +571,6 @@ describe('M23 applyProposal — pr kind: calls gated createPr (mocked), approved
 
   it('does NOT call createPr when confirmed=false', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const spawnSpy = makeSpawnSyncPrSuccess();
     _spawnSyncImpl = spawnSpy;
 
@@ -608,7 +594,6 @@ describe('M23 applyProposal — pr kind: calls gated createPr (mocked), approved
 describe('M23 applyProposal — note kind: no-op, mutates nothing', () => {
   it('returns ok:true for a note proposal (no-op)', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ kind: 'note', repo: tmpRepo }));
     setStatus(p.id, 'approved');
 
@@ -618,7 +603,6 @@ describe('M23 applyProposal — note kind: no-op, mutates nothing', () => {
 
   it('sets status=applied for a note proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const p = createProposal(makeInput({ kind: 'note' }));
     setStatus(p.id, 'approved');
 
@@ -629,7 +613,6 @@ describe('M23 applyProposal — note kind: no-op, mutates nothing', () => {
 
   it('does not create any branches for a note proposal', async () => {
     initRealGitRepo(tmpRepo);
-    enroll(tmpRepo);
     const branchesBefore = listBranches(tmpRepo);
 
     const p = createProposal(makeInput({ kind: 'note' }));

@@ -213,17 +213,23 @@ describe('M411 local merge reconciliation', () => {
     expect(git(['rev-parse', 'main'])).toBe(fixture.mergeCommitOid);
   }, 15_000);
 
-  it('completes realized-merge fanout when reconciliation retains live authority', async () => {
-    const fixture = createInterruptedMerge('exact');
+  describe('realized-merge fanout authority', () => {
+    let fixture: MergeFixture;
 
-    const result = await autoMergeProposal(fixture.proposalId, config(true));
+    beforeEach(() => {
+      fixture = createInterruptedMerge('exact');
+    });
 
-    expect(result).toMatchObject({ ok: true, merged: true });
-    const applied = loadProposal(fixture.proposalId)!;
-    expect(applied.realizedMergeFanoutVersion).toBe(3);
-    expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
-      .filter((decision) => decision.action === 'merged' && decision.verdict === 'merged'))
-      .toHaveLength(1);
+    it('completes realized-merge fanout when reconciliation retains live authority', async () => {
+      const result = await autoMergeProposal(fixture.proposalId, config(true));
+
+      expect(result).toMatchObject({ ok: true, merged: true });
+      const applied = loadProposal(fixture.proposalId)!;
+      expect(applied.realizedMergeFanoutVersion).toBe(3);
+      expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
+        .filter((decision) => decision.action === 'merged' && decision.verdict === 'merged'))
+        .toHaveLength(1);
+    });
   });
 
   it('finds the exact interrupted merge after the base advances again', async () => {

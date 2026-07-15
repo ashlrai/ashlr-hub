@@ -2390,6 +2390,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass the final frozen exhaustive suite: 534 files, 11,479 passed, 20 intentional skips, zero failures in 750.66 seconds.
 - [x] Push the reporter correction as `c0cbe59`; protected macOS passed, while Windows portability 1/3 exposed three remaining permissive legacy fixtures.
 - [x] Repair M403/M415/M422 through production-secured roots and exact private artifact assurance; combined focused verification is 29/29 and the exact local Windows 1/3 contract is 285 passed with one intentional skip.
+- [x] Move first-use ACL setup outside timed M23/M411 test bodies and secure the M426 real root before its junction alias without changing production gates or test timeouts.
+- [x] Preserve the required Windows 3/3 check while splitting its active-progress workload into a bounded overflow job; local contracts pass 66/66 and 104 with one platform skip.
 - [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

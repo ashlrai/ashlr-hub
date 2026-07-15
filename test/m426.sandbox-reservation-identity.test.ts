@@ -499,6 +499,7 @@ describe('M426 sandbox reservation and path identity', () => {
 
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
     const repo = fx.makeRepo();
+    prepareSandboxAuthorityRoot();
     const aliasHome = makeDirectoryAlias(fx.home);
     process.env.HOME = aliasHome;
     process.env.USERPROFILE = aliasHome;
