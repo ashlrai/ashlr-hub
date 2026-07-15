@@ -297,36 +297,54 @@ function recordVerificationAuthority(proposalId: string, diff: string): void {
   });
 }
 
+let proofHome: string;
+let proofRepo: string;
+let proofRealCallsBefore = 0;
+
 beforeAll(() => {
-  const proofHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-home-')));
-  const proofRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-repo-')));
-  const realCallsBefore = privateStorageHarness.realCalls;
+  proofHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-home-')));
+  proofRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-repo-')));
+  proofRealCallsBefore = privateStorageHarness.realCalls;
   privateStorageHarness.useSemanticAdapter = false;
   setFixtureEnvironment(proofHome);
+  initRepo(proofRepo);
+});
 
-  try {
-    initRepo(proofRepo);
-    expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
-    expect(enroll(proofRepo)).toMatchObject({ ok: true, quiesced: true });
-    const proof = createProposal({
-      repo: proofRepo,
-      origin: 'agent',
-      kind: 'patch',
-      title: 'M315 production storage proof',
-      summary: 'Exercise real authority and private artifact storage before semantic adapters.',
-      diff: addFileDiff('docs/private-storage-proof.md', 'production storage proof'),
-    });
-    expect(loadProposal(proof.id)).toMatchObject({ id: proof.id, repo: proofRepo });
-    if (process.platform === 'win32') {
-      expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
-    }
-  } finally {
-    try { unenroll(proofRepo); } catch { /* best-effort proof cleanup */ }
-    try { setKill(false); } catch { /* best-effort proof cleanup */ }
-    fs.rmSync(proofRepo, { recursive: true, force: true });
-    fs.rmSync(proofHome, { recursive: true, force: true });
-    restoreFixtureEnvironment();
+beforeAll(() => {
+  expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
+});
+
+beforeAll(() => {
+  expect(enroll(proofRepo)).toMatchObject({ ok: true, quiesced: true });
+});
+
+beforeAll(() => {
+  const proof = createProposal({
+    repo: proofRepo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'M315 production storage proof',
+    summary: 'Exercise real authority and private artifact storage before semantic adapters.',
+    diff: addFileDiff('docs/private-storage-proof.md', 'production storage proof'),
+  });
+  expect(loadProposal(proof.id)).toMatchObject({ id: proof.id, repo: proofRepo });
+  if (process.platform === 'win32') {
+    expect(privateStorageHarness.realCalls).toBeGreaterThan(proofRealCallsBefore);
   }
+});
+
+beforeAll(() => {
+  expect(unenroll(proofRepo)).toMatchObject({ ok: true, quiesced: true });
+});
+
+beforeAll(() => {
+  expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
+});
+
+beforeAll(() => {
+  fs.rmSync(proofRepo, { recursive: true, force: true });
+  fs.rmSync(proofHome, { recursive: true, force: true });
+  restoreFixtureEnvironment();
 });
 
 beforeEach(() => {

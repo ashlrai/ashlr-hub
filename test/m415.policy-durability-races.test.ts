@@ -22,6 +22,29 @@ const faults = vi.hoisted(() => ({
   openPaths: new Map<number, string>(),
   durabilityEvents: [] as string[],
 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 vi.mock('../src/core/fleet/local-store-lock.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/fleet/local-store-lock.js')>();
@@ -166,6 +189,7 @@ function secureInjectedAuthorityFile(path: string): void {
 }
 
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
   previousAshlrHome = process.env.ASHLR_HOME;
@@ -196,6 +220,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
@@ -243,6 +268,7 @@ describe('M415 policy durability races', () => {
     let originalRepo: string;
 
     beforeEach(() => {
+      const realCallsBefore = privateStorageHarness.realCalls;
       originalRepo = join(home, 'original-repo');
       fs.writeFileSync(
         faults.enrollmentPath,
@@ -250,6 +276,10 @@ describe('M415 policy durability races', () => {
         { mode: 0o600 },
       );
       secureInjectedAuthorityFile(faults.enrollmentPath);
+      if (process.platform === 'win32') {
+        expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+        privateStorageHarness.useSemanticAdapter = true;
+      }
     });
 
     it('keeps a failed permissive install non-authoritative when rollback also fails', () => {

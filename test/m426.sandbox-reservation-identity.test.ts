@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve, win32 } from 'node:path';
+import { delimiter, dirname, join, relative, resolve, win32 } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -500,14 +500,21 @@ describe('M426 sandbox reservation and path identity', () => {
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
     const repo = fx.makeRepo();
     prepareSandboxAuthorityRoot();
-    const aliasHome = makeDirectoryAlias(fx.home);
-    process.env.HOME = aliasHome;
-    process.env.USERPROFILE = aliasHome;
-    // Spell the sandbox worktree through the alias while keeping mutation
-    // authority on the already-proven physical root.
-    process.env.ASHLR_HOME = join(fx.home, '.ashlr');
-
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
+    const aliasHome = makeDirectoryAlias(fx.home);
+    const aliasWorktree = join(aliasHome, relative(fx.home, sandbox.worktreePath));
+    const worktreeGitFile = join(sandbox.worktreePath, '.git');
+    const gitdirRecord = readFileSync(worktreeGitFile, 'utf8').trim();
+    expect(gitdirRecord).toMatch(/^gitdir: /u);
+    const worktreeAdminDir = resolve(
+      sandbox.worktreePath,
+      gitdirRecord.slice('gitdir: '.length),
+    );
+    const registrationGitdir = join(worktreeAdminDir, 'gitdir');
+    const physicalRegistration = readFileSync(registrationGitdir, 'utf8');
+    writeFileSync(registrationGitdir, `${join(aliasWorktree, '.git')}\n`, 'utf8');
+    expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
+
     process.env.PATH = originalPath;
     installGitShim('registration-noop');
     try {
@@ -520,6 +527,7 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
     } finally {
       process.env.PATH = originalPath;
+      writeFileSync(registrationGitdir, physicalRegistration, 'utf8');
       try { git(repo.dir, ['worktree', 'remove', '--force', sandbox.worktreePath]); } catch { /* best effort */ }
       try { git(repo.dir, ['worktree', 'prune']); } catch { /* best effort */ }
       try { git(repo.dir, ['branch', '-D', sandbox.branch]); } catch { /* best effort */ }

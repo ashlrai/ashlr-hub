@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const privateStorageMocks = vi.hoisted(() => ({ useTestAdapter: false }));
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -17,8 +17,11 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     ...actual,
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => privateStorageMocks.useTestAdapter
-      ? { ok: true, reason: 'exact-private-dacl' }
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
       : actual.assurePrivateStoragePath(...args),
   };
 });
@@ -37,6 +40,8 @@ const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 
 let home: string;
 let repo: string;
+
+const realWindowsAuthorityTest = 'refuses an exact-looking merge beyond the bounded first-parent window';
 
 function git(args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -159,7 +164,9 @@ function createInterruptedMerge(ancestry: Ancestry): MergeFixture {
   return { proposalId: proposal.id, baseBeforeOid, proposalHeadOid, mergeCommitOid, intent };
 }
 
-beforeEach(() => {
+beforeEach(({ task }) => {
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32'
+    && task.name !== realWindowsAuthorityTest;
   home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-home-')));
   repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-repo-')));
   process.env.HOME = home;
@@ -174,13 +181,19 @@ beforeEach(() => {
   fs.writeFileSync(path.join(repo, 'README.md'), '# fixture\n', 'utf8');
   git(['add', 'README.md']);
   git(['commit', '-m', 'init']);
-  expect(enroll(repo).ok).toBe(true);
+  try {
+    expect(enroll(repo).ok).toBe(true);
+  } finally {
+    // One bounded Windows fixture proves native authority setup. The remaining
+    // cases exercise reconciliation semantics without repeating native ACL work.
+    privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  }
 });
 
 afterEach(() => {
-  privateStorageMocks.useTestAdapter = false;
   try { setKill(false); } catch { /* best effort */ }
   try { unenroll(repo); } catch { /* best effort */ }
+  privateStorageHarness.useSemanticAdapter = false;
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(home, { recursive: true, force: true });
   if (originalHome === undefined) delete process.env.HOME;
@@ -233,9 +246,6 @@ describe('M411 local merge reconciliation', () => {
 
     beforeEach(() => {
       fixture = createInterruptedMerge('exact');
-      // The private-storage contract is covered independently. Keep this test's
-      // five-second body focused on reconciliation and fanout behavior.
-      privateStorageMocks.useTestAdapter = true;
     });
 
     it('completes realized-merge fanout when reconciliation retains live authority', async () => {
@@ -268,7 +278,7 @@ describe('M411 local merge reconciliation', () => {
     expect(git(['rev-parse', 'main'])).toBe(advancedHead);
   });
 
-  it('refuses an exact-looking merge beyond the bounded first-parent window', async () => {
+  it(realWindowsAuthorityTest, async () => {
     const fixture = createInterruptedMerge('exact');
     const tree = git(['rev-parse', `${fixture.mergeCommitOid}^{tree}`]);
     let head = fixture.mergeCommitOid;

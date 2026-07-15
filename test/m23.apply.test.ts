@@ -30,6 +30,25 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation — must happen before any module import resolves homedir()
 // ---------------------------------------------------------------------------
@@ -177,12 +196,15 @@ beforeEach(() => {
   // Default: spawnSync fails (no real gh calls)
   _spawnSyncImpl = makeSpawnSyncFail();
 
-  // Exercise production setup so the private outward authority root exists.
-  expect(setKill(false).ok).toBe(true);
-
-  // Enrollment performs the remaining production-backed Windows authority
-  // setup. Keep that first-use ACL cost in the fixture hook, not test bodies.
-  expect(enroll(tmpRepo).ok).toBe(true);
+  privateStorageHarness.useSemanticAdapter = false;
+  try {
+    // Preserve a production-backed private root and enrollment proof per fixture.
+    expect(setKill(false).ok).toBe(true);
+    expect(enroll(tmpRepo).ok).toBe(true);
+  } finally {
+    // Semantic assertions do not need to repeat the Windows PowerShell ACL proof.
+    privateStorageHarness.useSemanticAdapter = true;
+  }
 });
 
 afterEach(() => {
@@ -190,6 +212,7 @@ afterEach(() => {
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   // Ensure kill switch is off
   try { setKill(false); } catch { /* ignore */ }
+  privateStorageHarness.useSemanticAdapter = false;
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });

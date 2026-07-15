@@ -3,6 +3,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
+
 import type { AshlrConfig } from '../src/core/types.js';
 import { emitFleetEvent, runPulseSync } from '../src/core/integrations/pulse-sync.js';
 import { isEnrolled, setKill } from '../src/core/sandbox/policy.js';
@@ -20,6 +41,7 @@ let previousUserProfile: string | undefined;
 let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   home = join(tmpdir(), `ashlr-m418-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
   previousHome = process.env.HOME;
@@ -39,9 +61,11 @@ beforeEach(() => {
   } finally {
     releaseOutwardMutationFence(fence);
   }
+  privateStorageHarness.useSemanticAdapter = true;
 });
 
 afterEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   vi.unstubAllGlobals();
   delete process.env.PULSE_URL;
   delete process.env.PULSE_FLEET_PAT;

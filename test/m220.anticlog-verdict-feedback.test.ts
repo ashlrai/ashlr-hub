@@ -29,6 +29,25 @@ import * as path from 'node:path';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
 
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation — before any module import resolves homedir()
 // ---------------------------------------------------------------------------
@@ -215,6 +234,7 @@ beforeAll(() => {
   if (!enrollment.ok) {
     throw new Error(`M220 fixture enrollment failed: ${enrollment.reason}`);
   }
+  privateStorageHarness.useSemanticAdapter = true;
 });
 
 beforeEach(() => {
@@ -259,6 +279,7 @@ afterEach(() => {
 afterAll(() => {
   try { setKill(false); } catch { /* ignore */ }
   try { unenroll(tmpRepo); } catch { /* ignore */ }
+  privateStorageHarness.useSemanticAdapter = false;
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });

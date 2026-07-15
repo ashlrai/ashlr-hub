@@ -2394,6 +2394,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve the required Windows 3/3 check while splitting its active-progress workload into a bounded overflow job; local contracts pass 66/66 and 104 with one platform skip.
 - [x] Close `e45a583` native 1/3 and overflow fixture findings without production or timeout changes; six-file integration is 61/61 and corrected local contracts are 285+104 with two platform skips.
 - [x] Close the final native 2/3 authority/path separation findings and amortize M315 real private-storage proof without weakening handoff semantics; corrected 2/3 is 213/213 and 3/3 is 66/66 locally.
+- [x] Remove the final M315 runner-speed race by splitting its real authority proof into bounded hooks without increasing hook, test, idle, or hard-runtime budgets.
+- [x] Close the `fa2e010` duplicate-run fixture costs in M2/M23/M220/M411/M415/M418/M422, and make M426 spell the retained Git registration through an alias without placing mutation authority behind that alias.
+- [x] Replay the corrected local Windows contracts on one tree: 1/3 passes 285 with one skip, 2/3 passes 213, 3/3 passes 66, and overflow passes 104 with one skip; typecheck, build, zero-vulnerability audit, and diff checks pass.
 - [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
