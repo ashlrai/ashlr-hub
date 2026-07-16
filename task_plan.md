@@ -2560,5 +2560,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Require exact complete namespace reconciliation for offline migration and reject active overflow before publication.
 - [x] Prove 4,097 terminal records no longer consume active authority capacity while 4,097 active records fail closed.
 - [x] Remove unsafe runtime point-read activation and pass independent blocker re-review with SHIP.
+- [x] Publish protected stacked PR #43 on #42 with the dormant activation boundary explicit.
 - [ ] Add crash-recoverable proposal-plus-projection writer transactions and an external anti-rollback anchor.
 - [ ] Cut hot consumers over only after transaction recovery, source-completeness, and concurrent mutation tests pass.
