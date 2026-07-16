@@ -2666,3 +2666,4 @@
   - Independent review found and closed clock-regression poisoning, post-write lock revalidation, unsafe-directory healthy-miss reporting, key-rotation ambiguity, symmetric digest ambiguity, middle-phase skips, null crash boundaries, and Windows semantic private-storage coverage.
   - One known P1 remains: replaying an older valid active record cannot be detected until a monotonic floor is anchored outside that record. Therefore this journal is dormant, PR publication must be draft, and no proposal writer or runtime consumer may use it as authority yet.
   - Local evidence passes 46 combined M432/M433 assertions with one intentional platform skip, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
+  - Published the dormant journal as draft stacked PR #44 on PR #43. It remains intentionally non-activatable until the external monotonic floor closes valid-record replay.

@@ -2571,3 +2571,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fail closed for tamper, malformed state, unsafe storage, key replacement, phase skips, lock mismatch, and active overlap.
 - [ ] Add an externally anchored monotonic floor that rejects replay of an older valid active record.
 - [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
+- [x] Publish draft stacked PR #44 on #43 with valid-record replay called out as a merge blocker.
