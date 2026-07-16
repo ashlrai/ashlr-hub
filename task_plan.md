@@ -2655,5 +2655,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep every projected member `policyEligible:false` and `recursiveLearningEligible:false`; raw release labels and caller-supplied metadata remain non-authoritative.
 - [x] Reject partial candidate sets, duplicate subjects, malformed/oversized populations, invalid identities, missing keys, and degraded source inputs without persisting raw prompts, rationale, diffs, output, environment, paths, or contents.
 - [x] Pass 63 focused trajectory/population/firewall/eligibility assertions, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
-- [ ] Publish the isolated stacked PR on PR #48 and require the complete protected matrix.
+- [x] Publish the isolated stacked PR #49 on PR #48 and require the complete protected matrix.
 - [ ] Remove free-form chain-of-thought and prompt context from durable judge traces; project only validated closed semantic events and bounded numeric metadata.
