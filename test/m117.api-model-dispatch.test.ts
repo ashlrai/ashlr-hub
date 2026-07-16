@@ -228,6 +228,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         branch: 'ashlr-sandbox-test',
       }),
       removeSandbox: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -380,6 +381,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         branch: 'ashlr-sandbox-test',
       }),
       removeSandbox: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -474,6 +476,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     let lastCreated: Record<string, unknown> | null = null;
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -576,6 +579,78 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     vi.resetModules();
   });
 
+  it('rejects a proposal if the source revision changes during persistence', async () => {
+    const setStatus = vi.fn();
+    const inspectSandboxSourceRevision = vi.fn()
+      .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
+      .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
+      .mockReturnValue({
+        ok: false,
+        reason: 'source-revision-stale',
+        baseHead: 'base-head',
+        currentHead: 'advanced-head',
+      });
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      inspectSandboxSourceRevision,
+      sandboxDiff: () => ({
+        files: 1,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 1,
+        deletions: 1,
+      }),
+    }));
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (input: Record<string, unknown>) => ({
+          ...input,
+          id: 'stale-during-create',
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        }),
+        load: vi.fn(),
+        setStatus,
+      }),
+    }));
+    vi.doMock('../src/core/foundry/provenance.js', () => ({
+      hashDiff: () => 'hash-abc',
+      signProvenance: () => 'sig-abc',
+    }));
+
+    const { captureSandboxedProposal } = await import(
+      '../src/core/run/sandboxed-engine.js?stale-create=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+    const result = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: { completenessGate: false },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-stale-create',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-stale-create',
+        baseHead: 'base-head',
+        createdAt: new Date().toISOString(),
+      },
+      runId: 'run-m117-stale-create',
+    });
+
+    expect(inspectSandboxSourceRevision).toHaveBeenCalledTimes(3);
+    expect(setStatus).toHaveBeenCalledWith(
+      'stale-during-create',
+      'rejected',
+      'Source revision changed during proposal capture.',
+      'source revision admission refused',
+    );
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-revision-stale'),
+    });
+
+    vi.resetModules();
+  });
+
   it('blocks tiny docs-only api-model diffs before filing', async () => {
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
@@ -588,6 +663,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         branch: 'ashlr-sandbox-test',
       }),
       removeSandbox: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
       sandboxDiff: () => ({
         files: 1,
         patch: [

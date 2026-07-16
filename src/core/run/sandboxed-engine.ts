@@ -108,6 +108,7 @@ import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/caus
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 import { isDiffDedupResult } from '../inbox/store.js';
+import type { SandboxSourceRevisionAdmission } from '../sandbox/worktree.js';
 
 export interface SandboxedEngineResult {
   /** Delegated RunState (status/usage/engineModel/engineTier). */
@@ -287,6 +288,18 @@ function proposalOutcome(
         }
       : {}),
   };
+}
+
+function sourceRevisionRefusalOutcome(
+  admission: Exclude<SandboxSourceRevisionAdmission, { ok: true }>,
+): RunProposalOutcome {
+  const revisions = admission.baseHead && admission.currentHead
+    ? ` (base=${admission.baseHead.slice(0, 12)}, current=${admission.currentHead.slice(0, 12)})`
+    : '';
+  return proposalOutcome(
+    'sandbox-unavailable',
+    `sandbox source revision refused: ${admission.reason}${revisions}`,
+  );
 }
 
 function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposalOutcome {
@@ -1029,6 +1042,14 @@ export async function captureSandboxedProposal(
   try {
     const wt = await import('../sandbox/worktree.js');
     if (opts.signal?.aborted) return cancelledCapture();
+    const initialAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!initialAdmission.ok) {
+      const outcome = sourceRevisionRefusalOutcome(initialAdmission);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const diff: SandboxDiff = wt.sandboxDiff(sb);
     setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
@@ -1146,6 +1167,15 @@ export async function captureSandboxedProposal(
       ...(opts.isPartial ? { isPartial: true } : {}),
     } satisfies Omit<Proposal, 'id' | 'status' | 'createdAt'>;
 
+    const captureAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!captureAdmission.ok) {
+      const outcome = sourceRevisionRefusalOutcome(captureAdmission);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
+
     if (opts.draftOnly === true) {
       if (opts.signal?.aborted) return cancelledCapture();
       const draft: Proposal = {
@@ -1168,6 +1198,22 @@ export async function captureSandboxedProposal(
     const inbox = selectInboxStore(cfg);
     proposalCreationStarted = true;
     const proposal = inbox.create(proposalInput);
+    const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!persistedAdmission.ok) {
+      if (!isDiffDedupResult(proposal) && proposal.status === 'pending') {
+        inbox.setStatus(
+          proposal.id,
+          'rejected',
+          'Source revision changed during proposal capture.',
+          'source revision admission refused',
+        );
+      }
+      const outcome = sourceRevisionRefusalOutcome(persistedAdmission);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     if (isDiffDedupResult(proposal)) {
       const outcome = duplicateDiffOutcome(proposal, diff);
       return {
@@ -1455,6 +1501,30 @@ export async function runEngineSandboxed(
     };
   }
 
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    const outcome = sourceRevisionRefusalOutcome(sourceAdmission);
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      outcome,
+      status: 'failed',
+      actionCounts,
+    });
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
+    };
+  }
+
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
   let sandboxRetention: SandboxRetentionEvidence | undefined;
@@ -1597,6 +1667,32 @@ export async function runEngineSandboxed(
       if (opts.signal?.aborted) {
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
         break;
+      }
+      const attemptAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+      if (!attemptAdmission.ok) {
+        proposalOutcomeResult = sourceRevisionRefusalOutcome(attemptAdmission);
+        recordSandboxedRunAgentAction({
+          engine,
+          engineModel,
+          tier,
+          runId: id,
+          sourceRepo: opts.sourceRepo,
+          workItemId: opts.workItemId,
+          workSource: opts.workSource,
+          outcome: proposalOutcomeResult,
+          status: 'failed',
+          usage,
+          durationMs: _spawnDurationMs,
+          actionCounts,
+        });
+        return {
+          state: withProposalOutcome(
+            mk({ status: 'failed', result: proposalOutcomeResult.reason, usage }),
+            proposalOutcomeResult,
+            actionCounts,
+          ),
+          proposalOutcome: proposalOutcomeResult,
+        };
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
@@ -2362,6 +2458,30 @@ export async function runApiModelSandboxed(
         undefined,
         actionCounts,
       ),
+    };
+  }
+
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    const outcome = sourceRevisionRefusalOutcome(sourceAdmission);
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      outcome,
+      status: 'failed',
+      actionCounts,
+    });
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
     };
   }
 

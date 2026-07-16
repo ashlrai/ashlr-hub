@@ -22,6 +22,7 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
 }));
 
 vi.mock('../src/core/sandbox/worktree.js', () => ({
+  inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
   sandboxDiff: () => ({
     files: 1,
     patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,

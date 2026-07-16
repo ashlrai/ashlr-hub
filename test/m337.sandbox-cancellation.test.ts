@@ -84,6 +84,7 @@ function installHarness(opts: {
       branch: 'ashlr-sandbox-cancellation',
     }),
     removeSandbox: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
+    inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'test-head', currentHead: 'test-head' }),
     sandboxDiff: () => ({
       files: 1,
       patch: [

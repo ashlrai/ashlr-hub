@@ -35,6 +35,7 @@ import {
   readSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -795,6 +796,92 @@ function worktreeBelongsToRepo(repo: string, worktreePath: string): boolean {
   const worktreeCommon = gitTry(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const repoCommon = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   return worktreeCommon !== null && repoCommon !== null && resolve(worktreeCommon) === resolve(repoCommon);
+}
+
+export type SandboxSourceRevisionRefusal =
+  | 'source-repo-unavailable'
+  | 'source-repo-mismatch'
+  | 'sandbox-worktree-mismatch'
+  | 'base-revision-unavailable'
+  | 'source-revision-stale'
+  | 'source-revision-raced';
+
+export type SandboxSourceRevisionAdmission =
+  | { ok: true; baseHead: string; currentHead: string }
+  | { ok: false; reason: SandboxSourceRevisionRefusal; baseHead?: string; currentHead?: string };
+
+function canonicalGitDirectory(repo: string): string | null {
+  const common = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (!common) return null;
+  try {
+    return realpathSync.native(common);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bind a live sandbox to the exact source revision it forked from.
+ *
+ * This is read-only and fail-closed. The source HEAD is sampled before and
+ * after physical repository/worktree identity checks so a concurrent ref move
+ * cannot be admitted as a stable snapshot.
+ */
+export function inspectSandboxSourceRevision(
+  sb: Sandbox,
+  expectedSourceRepo: string = sb.sourceRepo,
+): SandboxSourceRevisionAdmission {
+  try {
+    const sourceHeadBefore = gitTry(expectedSourceRepo, ['rev-parse', '--verify', 'HEAD^{commit}']);
+    if (!sourceHeadBefore) return { ok: false, reason: 'source-repo-unavailable' };
+
+    const expectedCommon = canonicalGitDirectory(expectedSourceRepo);
+    const recordedCommon = canonicalGitDirectory(sb.sourceRepo);
+    if (!expectedCommon || !recordedCommon) {
+      return { ok: false, reason: 'source-repo-unavailable' };
+    }
+    if (expectedCommon !== recordedCommon) {
+      return { ok: false, reason: 'source-repo-mismatch', currentHead: sourceHeadBefore };
+    }
+
+    const worktreeCommon = canonicalGitDirectory(sb.worktreePath);
+    if (!worktreeCommon || worktreeCommon !== expectedCommon) {
+      return { ok: false, reason: 'sandbox-worktree-mismatch', currentHead: sourceHeadBefore };
+    }
+
+    const baseHead = gitTry(sb.worktreePath, [
+      'rev-parse',
+      '--verify',
+      `${sb.baseHead}^{commit}`,
+    ]);
+    if (!baseHead) {
+      return { ok: false, reason: 'base-revision-unavailable', currentHead: sourceHeadBefore };
+    }
+
+    const sourceHeadAfter = gitTry(expectedSourceRepo, ['rev-parse', '--verify', 'HEAD^{commit}']);
+    if (!sourceHeadAfter) {
+      return { ok: false, reason: 'source-repo-unavailable', baseHead };
+    }
+    if (sourceHeadBefore !== sourceHeadAfter) {
+      return {
+        ok: false,
+        reason: 'source-revision-raced',
+        baseHead,
+        currentHead: sourceHeadAfter,
+      };
+    }
+    if (baseHead !== sourceHeadAfter) {
+      return {
+        ok: false,
+        reason: 'source-revision-stale',
+        baseHead,
+        currentHead: sourceHeadAfter,
+      };
+    }
+    return { ok: true, baseHead, currentHead: sourceHeadAfter };
+  } catch {
+    return { ok: false, reason: 'source-repo-unavailable' };
+  }
 }
 
 function processStartRef(pid: number): string | undefined {

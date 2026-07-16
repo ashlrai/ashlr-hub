@@ -142,6 +142,10 @@ async function loadM17(): Promise<void> {
 type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
 type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult | void;
+type InspectSandboxSourceRevisionFn = (
+  sb: Sandbox,
+  expectedSourceRepo?: string,
+) => import('../sandbox/worktree.js').SandboxSourceRevisionAdmission;
 type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => void;
 // M24: lazy proposal sink — when opts.propose is set the captured sandbox diff
 // is recorded as a PENDING inbox proposal (applied LATER only by a human).
@@ -159,6 +163,7 @@ type SetProposalStatusFn = (
 let _createSandbox:  CreateSandboxFn  | null = null;
 let _sandboxDiff:    SandboxDiffFn    | null = null;
 let _removeSandbox:  RemoveSandboxFn  | null = null;
+let _inspectSandboxSourceRevision: InspectSandboxSourceRevisionFn | null = null;
 let _audit:          AuditFn          | null = null;
 let _createProposal: CreateProposalFn | null = null;
 let _loadProposal:   LoadProposalFn   | null = null;
@@ -177,10 +182,12 @@ async function loadM21(): Promise<void> {
       createSandbox: CreateSandboxFn;
       sandboxDiff: SandboxDiffFn;
       removeSandbox: RemoveSandboxFn;
+      inspectSandboxSourceRevision: InspectSandboxSourceRevisionFn;
     };
     _createSandbox = wt.createSandbox;
     _sandboxDiff   = wt.sandboxDiff;
     _removeSandbox = wt.removeSandbox;
+    _inspectSandboxSourceRevision = wt.inspectSandboxSourceRevision;
   } catch {
     // worktree.ts not built yet — sandbox mode degrades to no-op (default behavior)
   }
@@ -1063,7 +1070,13 @@ function captureSandboxAndCleanup(
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
   let captureFailureReason = 'sandbox diff capture unavailable';
-  if (_sandboxDiff !== null) {
+  const sourceAdmission = _inspectSandboxSourceRevision?.(sb, sb.sourceRepo);
+  if (!sourceAdmission?.ok) {
+    captureFailureReason = sourceAdmission
+      ? `sandbox source revision refused: ${sourceAdmission.reason}`
+      : 'sandbox source revision inspection unavailable';
+    emitLog(sink, `[M21] ${captureFailureReason}`);
+  } else if (_sandboxDiff !== null) {
     try {
       diff = _sandboxDiff(sb);
     } catch (err) {
@@ -1083,7 +1096,7 @@ function captureSandboxAndCleanup(
   }
 
   let outcome: RunProposalOutcome = {
-    kind: 'proposal-capture-error',
+    kind: sourceAdmission?.ok ? 'proposal-capture-error' : 'sandbox-unavailable',
     reason: captureFailureReason,
   };
 
@@ -1899,6 +1912,26 @@ async function runSwarmInternal(
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
+      }
+
+      if (activeSandbox !== null) {
+        const sourceAdmission = _inspectSandboxSourceRevision?.(
+          activeSandbox,
+          project ?? activeSandbox.sourceRepo,
+        );
+        if (!sourceAdmission?.ok) {
+          const reason = sourceAdmission
+            ? `sandbox source revision refused: ${sourceAdmission.reason}`
+            : 'sandbox source revision inspection unavailable';
+          run.status = 'failed';
+          run.result = `Swarm refused before phase ${phase}: ${reason}. No additional tasks were executed.`;
+          run.proposalOutcome = { kind: 'sandbox-unavailable', reason };
+          persist(run);
+          emitLog(sink, run.result);
+          captureSandboxAndCleanup(activeSandbox, run, sink, false, cfg, causal, !opts.dryRun);
+          await fireEmitSwarm(run, cfg);
+          return run;
+        }
       }
 
       const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel, sandboxCwd);

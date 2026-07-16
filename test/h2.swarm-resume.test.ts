@@ -30,6 +30,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
@@ -52,6 +53,7 @@ import {
 } from '../src/core/sandbox/worktree.js';
 import { nullSink } from '../src/core/run/streaming.js';
 import { loadProposal, pendingCount } from '../src/core/inbox/store.js';
+import { saveSwarm } from '../src/core/swarm/store.js';
 import {
   generatedRepairGenerationId,
   readGeneratedRepairLifecycle,
@@ -552,6 +554,54 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     expect(repo.shasumTree()).toBe(treeBefore);
     expect(repo.gitStatus()).toBe('');
     expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
+  });
+
+  it('refuses the next phase when the source revision advances mid-swarm', async () => {
+    await ensureImported();
+    repo.enroll();
+    const id = 'h2-resume-stale-source-revision';
+    const crashed = crashMidSwarm({
+      id,
+      goal: 'stop stale swarm phases',
+      project: repo.dir,
+      taskIds: ['build-current', 'verify-stale'],
+      doneTaskIds: [],
+      phase: 'build',
+    });
+    crashed.plan.tasks[1]!.phase = 'verify';
+    crashed.tasks[1]!.phase = 'verify';
+    expect(saveSwarm(crashed).ok).toBe(true);
+    runGoalMutation = () => {
+      repo.writeFile('source-advance.txt', 'new source revision\n');
+      execFileSync('git', ['add', 'source-advance.txt'], { cwd: repo.dir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'advance source'], { cwd: repo.dir, stdio: 'pipe' });
+    };
+
+    const result = await runSwarm(
+      { goal: 'stop stale swarm phases' },
+      cfg,
+      {
+        resumeId: id,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+        parallel: 1,
+      },
+      nullSink(),
+    );
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(runGoalGoals[0]).toContain('task build-current');
+    expect(result.status).toBe('failed');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-revision-stale'),
+    });
+    expect(result.tasks.find((task) => task.id === 'verify-stale')?.status).toBe('pending');
+    expect(pendingCount()).toBe(0);
+    expect(repo.gitStatus()).toBe('');
   });
 
   it('captures failed builtin swarm edits only as non-authoritative partial evidence', async () => {

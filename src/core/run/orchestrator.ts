@@ -2874,12 +2874,39 @@ async function runGoalInternal(
     ? { scopeId: state.id, generation: effectGeneration }
     : undefined;
 
+  let activeSandbox: Sandbox | null = null;
+  let sandboxModule: typeof import('../sandbox/worktree.js') | null = null;
+  let sourceRevisionRefusal: string | undefined;
+
+  const inspectEngineerSourceRevision = (
+    sandbox: Sandbox | null = activeSandbox,
+  ): string | undefined => {
+    if (!sandbox) return undefined;
+    const admission = sandboxModule?.inspectSandboxSourceRevision(
+      sandbox,
+      sandbox.sourceRepo,
+    );
+    if (admission?.ok) return undefined;
+    return admission
+      ? `sandbox source revision refused: ${admission.reason}`
+      : 'sandbox source revision inspection unavailable';
+  };
+
   const reserveRunModelStep = (
     taskId: string,
     kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
     summary: string,
     providerForCost: string,
   ): ModelStepReservation | undefined => {
+    const revisionRefusal = inspectEngineerSourceRevision();
+    if (revisionRefusal) {
+      sourceRevisionRefusal = revisionRefusal;
+      state.result = `Run refused before model execution: ${revisionRefusal}.`;
+      state.proposalOutcome = { kind: 'sandbox-unavailable', reason: revisionRefusal };
+      state.updatedAt = new Date().toISOString();
+      saveRun(state);
+      return undefined;
+    }
     if (
       cancelled() ||
       state.usage.steps >= budget.maxSteps ||
@@ -2956,8 +2983,6 @@ async function runGoalInternal(
   // confined to a throwaway git worktree; the captured diff is routed to the
   // approval inbox at the end — nothing reaches the live tree unapproved.
   let tools: unknown[] | undefined;
-  let activeSandbox: Sandbox | null = null;
-  let sandboxModule: typeof import('../sandbox/worktree.js') | null = null;
   let engCtx: EngineerContext | undefined;
   if (opts.tools !== false && client.supportsTools) {
     if (opts.engineer === true) {
@@ -3039,9 +3064,29 @@ async function runGoalInternal(
       if (opts.signal?.aborted || state.status === 'aborted' || state.terminationReason === 'cancelled') {
         return;
       }
+      const initialRevisionRefusal = inspectEngineerSourceRevision(sb);
+      if (initialRevisionRefusal) {
+        sourceRevisionRefusal = initialRevisionRefusal;
+        state.status = 'failed';
+        state.result = `Engineer proposal capture refused: ${initialRevisionRefusal}.`;
+        state.proposalOutcome = { kind: 'sandbox-unavailable', reason: initialRevisionRefusal };
+        state.updatedAt = new Date().toISOString();
+        saveRun(state);
+        return;
+      }
       const diff = wt.sandboxDiff(sb);
       if (diff.files > 0 && diff.patch.trim().length > 0) {
         try {
+          const captureRevisionRefusal = inspectEngineerSourceRevision(sb);
+          if (captureRevisionRefusal) {
+            sourceRevisionRefusal = captureRevisionRefusal;
+            state.status = 'failed';
+            state.result = `Engineer proposal capture refused: ${captureRevisionRefusal}.`;
+            state.proposalOutcome = { kind: 'sandbox-unavailable', reason: captureRevisionRefusal };
+            state.updatedAt = new Date().toISOString();
+            saveRun(state);
+            return;
+          }
           const proposalDelegationScope = summarizeDelegationScope(
             normalizeDelegationScope(
               {
@@ -3055,7 +3100,8 @@ async function runGoalInternal(
               { objective: goal, budget },
             ),
           );
-          const proposal = selectInboxStore(cfg).create({
+          const inbox = selectInboxStore(cfg);
+          const proposal = inbox.create({
             repo: sb.sourceRepo,
             origin: 'agent',
             kind: 'patch',
@@ -3071,6 +3117,24 @@ async function runGoalInternal(
             runId: state.id,
             ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
           });
+          const persistedRevisionRefusal = inspectEngineerSourceRevision(sb);
+          if (persistedRevisionRefusal) {
+            if (proposal.status === 'pending') {
+              inbox.setStatus(
+                proposal.id,
+                'rejected',
+                'Source revision changed during engineer proposal capture.',
+                'source revision admission refused',
+              );
+            }
+            sourceRevisionRefusal = persistedRevisionRefusal;
+            state.status = 'failed';
+            state.result = `Engineer proposal capture refused: ${persistedRevisionRefusal}.`;
+            state.proposalOutcome = { kind: 'sandbox-unavailable', reason: persistedRevisionRefusal };
+            state.updatedAt = new Date().toISOString();
+            saveRun(state);
+            return;
+          }
           process.stderr.write(
             `[ashlr run] engineer diff → inbox proposal ${proposal.id} ` +
               `(${diff.files} files); review with 'ashlr inbox'\n`,
@@ -3730,6 +3794,10 @@ async function runGoalInternal(
     if (cancelledAbort) {
       state.result = 'Run cancelled.';
       state.terminationReason = 'cancelled';
+    } else if (sourceRevisionRefusal) {
+      state.status = 'failed';
+      state.result = `Run refused before model execution: ${sourceRevisionRefusal}.`;
+      state.proposalOutcome = { kind: 'sandbox-unavailable', reason: sourceRevisionRefusal };
     }
     state.updatedAt = new Date().toISOString();
     saveRun(state);
