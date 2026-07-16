@@ -239,11 +239,53 @@ describe('local store lock installation handoff', () => {
     }
   });
 
+  it('keeps generic lock acquisition independent of private-storage assurance', () => {
+    const lockPath = path.join(tmpDir, 'generic-structural.lock');
+
+    const lock = acquireLocalStoreLock(lockPath, 0);
+
+    expect(lock).not.toBeNull();
+    expect(faults.assuranceCalls).toEqual([]);
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(faults.assuranceCalls).toEqual([]);
+  });
+
+  it('retains exact storage opt-in through ownership and release', () => {
+    const lockPath = path.join(tmpDir, 'exact-inspection-retained.lock');
+    const lock = acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: path.dirname(tmpDir),
+      exactPrivateStorage: true,
+    });
+    expect(lock).not.toBeNull();
+    const installed = fs.lstatSync(lockPath);
+    const installedBytes = fs.readFileSync(lockPath);
+    faults.rejectAssurance = (_target, _kind, mode) => mode === 'inspect-existing';
+
+    expect(ownsLocalStoreLock(lock)).toBe(false);
+    expect(releaseLocalStoreLock(lock)).toBe(false);
+
+    const retained = fs.lstatSync(lockPath);
+    expect({ dev: retained.dev, ino: retained.ino, nlink: retained.nlink }).toEqual({
+      dev: installed.dev,
+      ino: installed.ino,
+      nlink: 1,
+    });
+    expect(fs.readFileSync(lockPath)).toEqual(installedBytes);
+    expect(JSON.parse(installedBytes.toString('utf8'))).toMatchObject({ token: lock?.token });
+
+    faults.rejectAssurance = undefined;
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
   it('secures a fresh directory and candidate before writing lock payload bytes', () => {
     const lockDir = path.join(tmpDir, 'fresh-locks');
     const lockPath = path.join(lockDir, 'ordered.lock');
 
-    const lock = acquireLocalStoreLock(lockPath, 0, { anchorPath: tmpDir });
+    const lock = acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    });
 
     expect(lock).not.toBeNull();
     const directoryAssurance = `assure:secure-created:directory:${lockDir}`;
@@ -274,6 +316,7 @@ describe('local store lock installation handoff', () => {
 
     expect(acquireLocalStoreLock(lockPath, 0, {
       anchorPath: path.dirname(tmpDir),
+      exactPrivateStorage: true,
     })).toBeNull();
 
     const candidate = faults.assuranceCalls.find((call) => call.mode === 'secure-created')?.path;
@@ -292,6 +335,7 @@ describe('local store lock installation handoff', () => {
 
     expect(acquireLocalStoreLock(lockPath, 0, {
       anchorPath: path.dirname(tmpDir),
+      exactPrivateStorage: true,
     })).toBeNull();
 
     expect(faults.assuranceCalls).toContainEqual({
@@ -317,7 +361,7 @@ describe('local store lock installation handoff', () => {
     faults.rejectAssurance = (target, kind, mode) =>
       target.includes('.reclaim.owner.') && kind === 'file' && mode === 'secure-created';
 
-    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+    expect(acquireLocalStoreLock(lockPath, 0, { exactPrivateStorage: true })).toBeNull();
 
     const retained = fs.lstatSync(lockPath);
     expect({ dev: retained.dev, ino: retained.ino }).toEqual({ dev: stale.dev, ino: stale.ino });
@@ -393,7 +437,10 @@ describe('local store lock installation handoff', () => {
       fs.mkdirSync(trusted, { mode: 0o700 });
     };
 
-    expect(acquireLocalStoreLock(lockPath, 0, { anchorPath: trusted })).toBeNull();
+    expect(acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: trusted,
+      exactPrivateStorage: true,
+    })).toBeNull();
 
     expect(fs.existsSync(lockPath)).toBe(false);
     expect(fs.readdirSync(path.join(displaced, 'locks'))).toEqual([]);

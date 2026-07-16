@@ -95,6 +95,7 @@ export function acquireProposalStoreMutationLock(waitMs = 2_000): ProposalStoreM
   if (!root) return null;
   const lock = acquireLocalStoreLock(storeLockPath(root), waitMs, {
     anchorPath: root,
+    exactPrivateStorage: true,
   });
   if (!lock) return null;
   const handle = { token: Symbol('proposal-store-writer') };
@@ -140,6 +141,7 @@ export function acquireProposalMutationLock(
   if (!root) return null;
   const lock = acquireLocalStoreLock(lockPath(root, key), waitMs, {
     anchorPath: root,
+    exactPrivateStorage: true,
   });
   if (!lock) return null;
   const handle = { key, token: Symbol(key) };

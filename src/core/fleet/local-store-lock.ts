@@ -104,6 +104,7 @@ interface LockDirectory {
   readonly dev: number;
   readonly ino: number;
   readonly anchor: LockAnchor;
+  readonly exactPrivateStorage: boolean;
 }
 
 interface LockAnchor {
@@ -172,7 +173,7 @@ function releaseDirectoryState(directory: LockDirectory): 'stable' | 'retry' | '
     if (!sameFile(before, directory)) return 'lost';
     if (before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||
       !privateMode(before, PRIVATE_DIRECTORY_MODE)) return 'retry';
-    if (!assurePrivateStoragePath(
+    if (directory.exactPrivateStorage && !assurePrivateStoragePath(
       directory.path,
       'directory',
       'inspect-existing',
@@ -200,7 +201,11 @@ function fsyncDirectory(path: string): boolean {
   }
 }
 
-function assureLockDirectory(path: string, anchor: LockAnchor): LockDirectory | null {
+function assureLockDirectory(
+  path: string,
+  anchor: LockAnchor,
+  exactPrivateStorage: boolean,
+): LockDirectory | null {
   try {
     if (!stableAnchor(anchor) || !nestedWithin(anchor.path, path)) return null;
     let created = false;
@@ -218,20 +223,19 @@ function assureLockDirectory(path: string, anchor: LockAnchor): LockDirectory | 
       before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||
       !privateMode(before, PRIVATE_DIRECTORY_MODE) || !sameFile(initial, before)
     ) return null;
-    const assurance = assurePrivateStoragePath(
+    if (exactPrivateStorage && !assurePrivateStoragePath(
       path,
       'directory',
       created ? 'secure-created' : 'inspect-existing',
       { anchorPath: anchor.path },
-    );
-    if (!assurance.ok) return null;
+    ).ok) return null;
     const after = lstatSync(path);
     if (
       after.isSymbolicLink() || !after.isDirectory() || !owned(after.uid) ||
       !privateMode(after, PRIVATE_DIRECTORY_MODE) || !sameFile(before, after)
     ) return null;
     if (!stableAnchor(anchor) || (created && !fsyncDirectory(dirname(path)))) return null;
-    const directory = { path, dev: after.dev, ino: after.ino, anchor };
+    const directory = { path, dev: after.dev, ino: after.ino, anchor, exactPrivateStorage };
     return stableDirectory(directory) ? directory : null;
   } catch {
     return null;
@@ -251,7 +255,7 @@ function inspectExistingLockFile(
       before.isSymbolicLink() || !before.isFile() || !owned(before.uid) ||
       !privateMode(before, PRIVATE_FILE_MODE) || !allowedLinks.includes(before.nlink)
     ) return null;
-    if (!assurePrivateStoragePath(
+    if ((directory?.exactPrivateStorage ?? false) && !assurePrivateStoragePath(
       path,
       'file',
       'inspect-existing',
@@ -287,7 +291,7 @@ function secureFreshCandidate(
       namedBefore.size !== 0 || !owned(namedBefore.uid) || !privateMode(namedBefore, PRIVATE_FILE_MODE) ||
       !sameFile(before, namedBefore)
     ) return false;
-    if (!assurePrivateStoragePath(
+    if (directory.exactPrivateStorage && !assurePrivateStoragePath(
       path,
       'file',
       'secure-created',
@@ -979,7 +983,7 @@ function acquireReclaimElection(
 export function acquireLocalStoreLock(
   path: string,
   waitMs = 2_000,
-  options: { anchorPath?: string } = {},
+  options: { anchorPath?: string; exactPrivateStorage?: boolean } = {},
 ): LocalStoreLock | null {
   const start = currentStartIdentity();
   if (!start) return null;
@@ -1006,7 +1010,7 @@ export function acquireLocalStoreLock(
     if (sawContention && performance.now() >= deadline &&
       (observedState !== 'dead' || authorityAttempted)) return null;
     if (!directory) {
-      directory = assureLockDirectory(dir, anchor);
+      directory = assureLockDirectory(dir, anchor, options.exactPrivateStorage === true);
       if (!directory) return null;
       if (sawContention && performance.now() >= deadline &&
         (observedState !== 'dead' || authorityAttempted)) return null;

@@ -122,8 +122,11 @@ describe('proposal mutation authority fence', () => {
       mode: 'secure-created',
       anchorPath: home,
     });
-    expect(faults.assuranceCalls.findIndex((call) =>
-      call.kind === 'file' && call.mode === 'secure-created')).toBeGreaterThan(0);
+    expect(faults.assuranceCalls.find((call) =>
+      call.path.includes('.proposal-store-locks') &&
+      call.kind === 'file' && call.mode === 'secure-created')).toMatchObject({
+      anchorPath: root,
+    });
     releaseProposalStoreMutationLock(owner);
 
     faults.assuranceCalls.length = 0;
@@ -154,8 +157,14 @@ describe('proposal mutation authority fence', () => {
   });
 
   it('rejects unrelated same-process entrants and only accepts the exact owner capability', () => {
+    const root = join(home, '.ashlr');
     const owner = acquireProposalMutationLock('prop-authority-fence', 20);
     expect(owner).not.toBeNull();
+    expect(faults.assuranceCalls.find((call) =>
+      call.path.includes('.proposal-mutation-locks') &&
+      call.kind === 'file' && call.mode === 'secure-created')).toMatchObject({
+      anchorPath: root,
+    });
     expect(ownsProposalMutationLock('prop-authority-fence', owner)).toBe(true);
     expect(acquireProposalMutationLock('prop-authority-fence', 20)).toBeNull();
 
