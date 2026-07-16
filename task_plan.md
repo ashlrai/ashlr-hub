@@ -2439,6 +2439,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Push `480dcab` and classify its protected duplicates: M342 passes all 17 native cases in both 1/3 jobs, and both 2/3, 3/3, overflow, and macOS jobs pass; completing M342 exposes the same six latent M360 fixture failures in both native 1/3 jobs.
 - [x] Remove M360's hook-name-dependent adapter selection, keep only handoff/proposal prerequisites semantic, and explicitly re-enter native mode for dispatch receipt creation plus the exact lifecycle root, treatment directory, retention file, lifecycle publication, marker, receipt, replay, and read-recovery assertions.
 - [x] Pass full M360 locally at 111 assertions with two platform skips plus typecheck, focused lint, and diff checks.
+- [x] Classify protected `5254ff4`: every Ubuntu, macOS, Windows 2/3, Windows 3/3, and overflow duplicate passes, while both native 1/3 jobs reproduce the same five diagnostic fixture failures plus the dedicated native dispatch prerequisite failure.
+- [x] Bind Windows semantic mode directly to diagnostic fixture construction and natively secure every controlled semantic-created `.ashlr` prerequisite descendant before the dedicated lifecycle transaction.
+- [x] Pass the corrected full M360 locally at 111 assertions with two platform skips plus typecheck, full quiet lint, production build, zero-vulnerability audit, diff checks, and two independent SHIP reviews with no P0/P1/P2 findings.
 - [ ] Publish the M360 correction and require every duplicate protected job to pass before merge consideration.
 
 ## Next P0 - Source-Complete GitHub Policy Authority

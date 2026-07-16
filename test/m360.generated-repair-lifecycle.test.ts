@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   generatedRepairLifecyclePath,
@@ -39,7 +39,6 @@ import {
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
   repairHandoffJournalPath,
-  repairHandoffV2JournalPath,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { _setProposalReadRaceHookForTest, inboxDir } from '../src/core/inbox/store.js';
@@ -160,6 +159,10 @@ function captureRepairItem(overrides: Partial<WorkItem> = {}): WorkItem {
   });
 }
 
+function useSemanticDiagnosticFixtureStorage(): void {
+  if (process.platform === 'win32') privateStorageHarness.useSemanticAdapter = true;
+}
+
 function diagnosticRepairItem(
   parentBackend: 'local-coder' | 'codex' = 'local-coder',
   parentTier: 'mid' | 'frontier' = 'mid',
@@ -167,6 +170,9 @@ function diagnosticRepairItem(
   identitySuffix = '',
   parentOverrides: Partial<DispatchProductionEvent> = {},
 ): WorkItem {
+  // Diagnostic behavior fixtures intentionally model exact storage semantics
+  // without paying native Windows adapter startup for every prerequisite.
+  useSemanticDiagnosticFixtureStorage();
   const nonce = fx.home.replace(/[^a-zA-Z0-9]/g, '').slice(-16);
   const parent: DispatchProductionEvent = {
     schemaVersion: 1,
@@ -223,6 +229,31 @@ function diagnosticRepairItem(
     repairParentTier: parent.tier,
     repairParentObjectiveHash: parent.objectiveHash,
   };
+}
+
+function secureNativeFixtureDescendants(root: string, anchorPath: string): void {
+  for (const name of readdirSync(root)) {
+    const path = join(root, name);
+    const stat = lstatSync(path);
+    expect(stat.isSymbolicLink()).toBe(false);
+    if (stat.isDirectory()) {
+      expect(assurePrivateStoragePath(
+        path,
+        'directory',
+        'secure-created',
+        { anchorPath },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+      secureNativeFixtureDescendants(path, anchorPath);
+      continue;
+    }
+    expect(stat.isFile()).toBe(true);
+    expect(assurePrivateStoragePath(
+      path,
+      'file',
+      'secure-created',
+      { anchorPath },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+  }
 }
 
 function handoffCaptureRepairItem(): WorkItem {
@@ -342,6 +373,7 @@ function diagnosticEmptyEvent(
   ordinal: 1 | 2,
   ts = ordinal === 1 ? '2026-07-10T13:00:00.000Z' : '2026-07-10T14:00:00.000Z',
 ): DispatchProductionEvent {
+  useSemanticDiagnosticFixtureStorage();
   const routeReason = `test diagnostic attempt ${ordinal}`;
   const event: DispatchProductionEvent = {
     schemaVersion: 1,
@@ -400,6 +432,7 @@ function recordDiagnosticEmpty(
   ordinal: 1 | 2,
   ts = ordinal === 1 ? '2026-07-10T13:00:00.000Z' : '2026-07-10T14:00:00.000Z',
 ) {
+  useSemanticDiagnosticFixtureStorage();
   const event = diagnosticEmptyEvent(item, attemptId, backend, tier, ordinal, ts);
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
   return recordGeneratedRepairLifecycle(item, { kind: 'dispatch-proof-empty-diff', eventTs: ts });
@@ -580,6 +613,7 @@ function retireAttemptProofGeneration(
   item: WorkItem,
   droppedThrough: string,
 ): void {
+  useSemanticDiagnosticFixtureStorage();
   const generationId = item.repairGenerationId!;
   const attemptDir = join(dispatchProductionDir(), 'repair-attempt-proofs');
   addBlockedGenerationToProtocol(generationId);
@@ -609,6 +643,7 @@ function recordDiagnosticProposal(
   ordinal: 1 | 2,
   ts = ordinal === 1 ? '2026-07-10T13:00:00.000Z' : '2026-07-10T14:00:00.000Z',
 ) {
+  useSemanticDiagnosticFixtureStorage();
   const event = diagnosticProposalEvent(item, attemptId, proposalId, backend, tier, ordinal, ts);
   persistDurableProposal(item, event);
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
@@ -2830,30 +2865,8 @@ describe('generated repair lifecycle store', () => {
       );
       persistDurableProposal(item, event);
       privateStorageHarness.useSemanticAdapter = false;
-      const fleetDir = dirname(repairHandoffV2JournalPath());
-      expect(assurePrivateStoragePath(
-        fleetDir,
-        'directory',
-        'secure-created',
-        { anchorPath: fx.ashlrDir },
-      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
-      for (const name of readdirSync(fleetDir)) {
-        const path = join(fleetDir, name);
-        if (!statSync(path).isFile()) continue;
-        expect(assurePrivateStoragePath(
-          path,
-          'file',
-          'secure-created',
-          { anchorPath: fx.ashlrDir },
-        )).toEqual({ ok: true, reason: 'exact-private-dacl' });
-      }
+      secureNativeFixtureDescendants(fx.ashlrDir, fx.ashlrDir);
       const root = dispatchProductionDir();
-      expect(assurePrivateStoragePath(
-        root,
-        'directory',
-        'secure-created',
-        { anchorPath: fx.ashlrDir },
-      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
       expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
       const lifecyclePath = generatedRepairLifecyclePath();
       const lifecycleNativeCallsBefore = privateStorageHarness.realInvocations.length;
