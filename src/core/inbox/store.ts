@@ -903,6 +903,40 @@ function linkMilestoneOutcome(
 // Public API
 // ---------------------------------------------------------------------------
 
+function bindCreatedProposalRunSummary(
+  summary: Proposal['runEventSummary'],
+  runId: string | undefined,
+  proposalId: string | undefined,
+  proposalCreated = summary?.proposalCreated,
+): Proposal['runEventSummary'] {
+  if (!summary) return undefined;
+  const {
+    runId: _unboundRunId,
+    proposalId: _unboundProposalId,
+    proposalCreated: _unboundProposalCreated,
+    outcome: unboundOutcome,
+    actionCounts: unboundActionCounts,
+    ...metadata
+  } = summary;
+  const outcome = proposalCreated === false &&
+    (unboundOutcome === 'proposal-created' || unboundOutcome === 'filed')
+    ? undefined
+    : unboundOutcome;
+  let actionCounts = unboundActionCounts;
+  if (proposalCreated === false && actionCounts) {
+    const { proposalCreated: _unboundCreatedCount, ...remainingCounts } = actionCounts;
+    actionCounts = Object.keys(remainingCounts).length > 0 ? remainingCounts : undefined;
+  }
+  return {
+    ...metadata,
+    ...(runId ? { runId } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(actionCounts ? { actionCounts } : {}),
+    ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+    ...(proposalCreated === true && proposalId ? { proposalId } : {}),
+  };
+}
+
 /**
  * Create a new proposal, persist it, audit the creation, and return it.
  *
@@ -955,10 +989,11 @@ export function createProposal(
 
   const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
-  const boundRunEventSummary = input.runEventSummary?.proposalCreated === true &&
-    input.runEventSummary.proposalId === undefined
-    ? { ...input.runEventSummary, proposalId }
-    : input.runEventSummary;
+  const boundRunEventSummary = bindCreatedProposalRunSummary(
+    input.runEventSummary,
+    input.runId,
+    proposalId,
+  );
   const baseProposal: Proposal = {
     ...input,
     ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
@@ -1016,6 +1051,12 @@ export function createProposal(
           (existing) => existing.diffHash === input.diffHash,
         );
         if (duplicate) {
+          const dedupRunEventSummary = bindCreatedProposalRunSummary(
+            input.runEventSummary,
+            input.runId,
+            undefined,
+            false,
+          );
           audit({
             action: 'inbox:proposal-rejected',
             repo: (input.repo as string | null) ?? null,
@@ -1025,6 +1066,7 @@ export function createProposal(
           });
           return {
             ...input,
+            ...(dedupRunEventSummary ? { runEventSummary: dedupRunEventSummary } : {}),
             ...(owner !== undefined ? { owner } : {}),
             id: duplicate.id,
             status: 'rejected' as const,
@@ -1043,10 +1085,14 @@ export function createProposal(
     }
   }
 
+  const failedRunEventSummary = persisted
+    ? undefined
+    : bindCreatedProposalRunSummary(proposal.runEventSummary, proposal.runId, undefined, false);
   const returnedProposal: Proposal = persisted
     ? proposal
     : {
         ...proposal,
+        ...(failedRunEventSummary ? { runEventSummary: failedRunEventSummary } : {}),
         status: 'rejected',
         decisionReason: repoIdentityValid
           ? 'proposal persistence failed'

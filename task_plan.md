@@ -2544,3 +2544,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] P0: add a single-flight evidence-mode post-merge observation hold and deterministic adverse quarantine before granting positive learning credit.
 - [ ] P0: promote the shadow canary into a default-off, one-admission docs-only protected-remote controller with cancellation and containment authority.
 - [ ] Keep host auto-merge disabled until the controller, observation latch, rollback rehearsal, and protected matrix are complete.
+
+## Causal Proposal Identity Cycle (2026-07-16)
+- [x] Rebind created run summaries to the generated durable proposal ID and canonical top-level run ID.
+- [x] Strip proposal identity from false or omitted `proposalCreated` summaries.
+- [x] Neutralize proposal-created identity on diff-hash dedup returns without mutating the durable duplicate owner.
+- [x] Pass 188 focused assertions with two platform skips, typecheck, scoped lint, build, audit, and diff checks.
+- [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
+- [ ] Publish a stacked protected PR on fully protected-green #41.

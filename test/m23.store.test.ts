@@ -198,6 +198,109 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(p.runId).toBe(input.runId);
   });
 
+  it('rebinds a conflicting run summary to the generated durable proposal id', () => {
+    const p = createProposal(makeInput({
+      workItemId: 'repo:goal:causal-binding',
+      workSource: 'goal',
+      runId: 'run-causal-binding',
+      runEventSummary: {
+        runId: 'caller-controlled-run-id',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+        proposalId: 'caller-controlled-proposal-id',
+        actionCounts: { proposalCreated: 1, toolSteps: 2 },
+      },
+    }));
+
+    expect(p.id).not.toBe('caller-controlled-proposal-id');
+    expect(p.runEventSummary).toMatchObject({
+      runId: 'run-causal-binding',
+      proposalCreated: true,
+      proposalId: p.id,
+    });
+    expect(loadProposal(p.id)?.runEventSummary?.proposalId).toBe(p.id);
+  });
+
+  it.each([false, undefined])('removes an unbound proposal id when proposalCreated is %s', (proposalCreated) => {
+    const p = createProposal(makeInput({
+      runId: 'run-causal-non-created',
+      runEventSummary: {
+        runId: 'caller-controlled-run-id',
+        status: 'failed',
+        outcome: 'gate-blocked',
+        ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+        proposalId: 'caller-controlled-proposal-id',
+      },
+    }));
+
+    expect(p.runEventSummary).toMatchObject({ runId: 'run-causal-non-created' });
+    expect(p.runEventSummary?.proposalId).toBeUndefined();
+    expect(p.runEventSummary?.proposalCreated).toBe(proposalCreated);
+    expect(loadProposal(p.id)?.runEventSummary).toEqual(p.runEventSummary);
+  });
+
+  it('normalizes causal identity on a diff-hash dedup return', () => {
+    const diff = safeDiff();
+    const diffHash = hashDiff(diff);
+    const first = createProposal(makeInput({ title: 'Canonical diff owner', diff, diffHash }));
+    const duplicate = createProposal(makeInput({
+      title: 'Duplicate causal attempt',
+      diff,
+      diffHash,
+      runId: 'run-dedup-attempt',
+      runEventSummary: {
+        runId: 'caller-controlled-run-id',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+        proposalId: 'caller-controlled-proposal-id',
+        actionCounts: { proposalCreated: 1, toolSteps: 2 },
+      },
+    }));
+
+    expect(duplicate).toMatchObject({
+      id: first.id,
+      status: 'rejected',
+      runEventSummary: {
+        runId: 'run-dedup-attempt',
+        proposalCreated: false,
+      },
+    });
+    expect(duplicate.runEventSummary?.proposalId).toBeUndefined();
+    expect(duplicate.runEventSummary?.outcome).toBeUndefined();
+    expect(duplicate.runEventSummary?.actionCounts).toEqual({ toolSteps: 2 });
+    expect(loadProposal(first.id)?.title).toBe('Canonical diff owner');
+  });
+
+  it('does not claim proposal creation when persistence fails', () => {
+    const rejected = createProposal(makeInput({
+      repo: 'relative/repo',
+      runId: 'run-persistence-failed',
+      runEventSummary: {
+        runId: 'caller-controlled-run-id',
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'caller-controlled-proposal-id',
+        actionCounts: { proposalCreated: 1 },
+      },
+    }));
+
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      decisionReason: 'invalid proposal repository identity',
+      runEventSummary: {
+        runId: 'run-persistence-failed',
+        proposalCreated: false,
+      },
+    });
+    expect(rejected.runEventSummary?.proposalId).toBeUndefined();
+    expect(rejected.runEventSummary?.outcome).toBeUndefined();
+    expect(rejected.runEventSummary?.actionCounts).toBeUndefined();
+    expect(loadProposal(rejected.id)).toBeNull();
+  });
+
   it('refuses invalid repo identities without persisting or auditing raw path values', () => {
     const secret = 'github_pat_1234567890abcdefghijklmnop';
     const rawSecretRepo = path.join(tmpHome, `token=${secret}`);

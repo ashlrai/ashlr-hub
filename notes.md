@@ -2637,3 +2637,11 @@
   - Proposal-factory audit measured 671 live proposal files (669 rejected, two pending) and reproduced the deterministic 4,097-file production cliff. The next scaling slice is a transactional bounded operational projection, not deletion of historical records.
   - Post-merge audit found evidence-mode realized merges can receive positive fanout before deterministic adverse observation. The next safety slice is a one-in-flight repo/base observation latch that withholds positive credit and monotonically quarantines exact regressed/reverted outcomes.
   - Rollout audit found the current canary intentionally observation-only and host auto-merge safely absent. Enforcement must begin as a default-off, docs-only, one-admission controller with externally anchored state, proven cancellation, containment, and exact revert-PR rehearsal.
+
+- Causal proposal identity hardening (2026-07-16):
+  - Audit found `createProposal()` preserved caller-controlled `runEventSummary.proposalId` when already present, allowed non-created summaries to retain a foreign proposal ID, and rebuilt diff-hash dedup returns from pre-normalized input.
+  - Proposal creation now strips unbound summary IDs, binds summary `runId` only from the canonical top-level run, binds `proposalId` only when `proposalCreated:true`, and uses the generated durable ID. False/omitted creation claims carry no proposal ID.
+  - Dedup returns retain the existing duplicate ID for compatibility but force `proposalCreated:false`, remove proposal identity, bind only the attempt's canonical run ID, and leave the durable owner unchanged.
+  - Non-dedup persistence failures also force `proposalCreated:false` and remove proposal identity, so rejected non-persisted returns cannot masquerade as durable production.
+  - Forced-false paths also remove both creation outcomes (`proposal-created` and the producer-native `filed`) plus `actionCounts.proposalCreated`; independent adversarial re-review returns SHIP with all creation aliases and return paths normalized.
+  - Store, generated-repair lifecycle, and swarm-resume coverage passes 188 assertions with two platform skips; typecheck, scoped lint, build, zero-vulnerability audit, and diff checks pass.
