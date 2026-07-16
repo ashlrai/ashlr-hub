@@ -27,7 +27,13 @@ import { dirname, join } from 'node:path';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
+  nativeExactPath: undefined as string | undefined,
   realCalls: 0,
+  realInvocations: [] as Array<{
+    path: string;
+    kind: 'file' | 'directory';
+    mode: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  }>,
 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -38,12 +44,17 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
     ) => {
-      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+      const selectivelyNative = privateStorageHarness.nativeExactPath !== undefined &&
+        (args[0] === privateStorageHarness.nativeExactPath ||
+          args[0].startsWith(`${privateStorageHarness.nativeExactPath}.`));
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter &&
+        !selectivelyNative) {
         return args[2] === 'inspect-owned'
           ? { ok: true, reason: 'owned-safe-path' }
           : semanticAssurance;
       }
       privateStorageHarness.realCalls++;
+      privateStorageHarness.realInvocations.push({ path: args[0], kind: args[1], mode: args[2] });
       if (process.platform === 'win32') {
         return actual.assurePrivateStoragePath(
           args[0], args[1], args[2], { ...args[3], timeoutMs: 15_000 },
@@ -249,10 +260,17 @@ for ($index = 0; $index -lt $paths.Count; $index++) {
 // into the explicit Windows authority tests below.
 function useWindowsSemanticPrivateStorageFixture(): void {
   privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  privateStorageHarness.nativeExactPath = undefined;
+}
+
+function useWindowsSelectiveNativePrivateStorageFixture(path: string): void {
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  privateStorageHarness.nativeExactPath = path;
 }
 
 function useNativePrivateStorageFixture(): void {
   privateStorageHarness.useSemanticAdapter = false;
+  privateStorageHarness.nativeExactPath = undefined;
 }
 
 function establishNativePrivateStorageFixtureRoot(): void {
@@ -2000,17 +2018,29 @@ describe('M342 dispatch production ledger', () => {
       receiptPath, 'file', 'inspect-existing', { anchorPath: dispatchProductionDir() },
     ).ok).toBe(true);
 
-    const pendingHandoffId = 'd'.repeat(64);
     const pending = makeProofEvent({
-      repairHandoffId: pendingHandoffId,
-      repairGenerationId: repairGenerationIdFromHandoffId(pendingHandoffId)!,
+      repairHandoffId: committed.repairHandoffId,
+      repairGenerationId: committed.repairGenerationId,
       runId: 'run-windows-private-intent',
       trajectoryId: 'run:attempt-windows-private-intent',
+      backend: 'codex',
+      model: undefined,
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
     });
     const expectedIntentPath = join(
       receiptDir,
-      `${pending.repairGenerationId}-1.intent.json`,
+      `${pending.repairGenerationId}-2.intent.json`,
     );
+    useWindowsSelectiveNativePrivateStorageFixture(expectedIntentPath);
+    const intentNativeCallsBefore = privateStorageHarness.realInvocations.length;
     let assuredIntentPath: string | undefined;
     let intentExistedWhenAssured = false;
     _setDispatchProductionLedgerRetentionHooksForTest({
@@ -2021,12 +2051,21 @@ describe('M342 dispatch production ledger', () => {
       },
     });
     try {
-      for (let attempt = 0; attempt < 3 && assuredIntentPath === undefined; attempt++) {
-        expect(recordDispatchProduction(pending)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
-      }
+      expect(recordDispatchProduction(pending)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
     } finally {
       _setDispatchProductionLedgerRetentionHooksForTest(undefined);
     }
+    useNativePrivateStorageFixture();
+    expect(privateStorageHarness.realInvocations.slice(intentNativeCallsBefore)).toEqual([
+      {
+        path: expect.stringMatching(new RegExp(
+          `^${expectedIntentPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[a-f0-9]{32}\\.stage$`,
+        )),
+        kind: 'file',
+        mode: 'secure-created',
+      },
+      { path: expectedIntentPath, kind: 'file', mode: 'inspect-existing' },
+    ]);
     expect(assuredIntentPath).toBe(expectedIntentPath);
     expect(intentExistedWhenAssured).toBe(true);
     expect(existsSync(expectedIntentPath)).toBe(true);

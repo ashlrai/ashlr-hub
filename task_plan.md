@@ -2426,6 +2426,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bind the intent crash hook to the exact path only after production exact inspection and directory fsync, prove existence and bytes without a redundant adapter process, iterate owner paths as scalar static file ACL calls, and grant the multi-adapter directory proof a bounded 60-second native body.
 - [x] Classify `b698317`: both native 1/3 runs now pass every M342 case except the durable-intent setup, which fails before reaching the assured hook on its first attempt. Both directory/owner corrections pass, and macOS, 3/3, and overflow pass in both duplicate runs.
 - [x] Bound durable-intent setup recovery to three attempts and accept only the attempt that reaches the post-exact-inspection/fsync hook with the canonical path, live file, and expected bytes; deterministic authority failures still exhaust the bound and fail.
+- [x] Classify `6407e57`: both native 1/3 runs exhausted all three M342 setup attempts before the assured hook in 202-215 seconds, while both native 2/3 runs completed H7 rollback behavior after its existing deadlines. Treat both as repeated native fixture cost, not runner noise.
+- [x] Make M342's crash attempt ordinal two of the already-admitted generation, route only its exact intent and dot-delimited stage path through the real native adapter, assert the exact two native call tuples, remove retries, and restore full native mode before later DACL proofs.
+- [x] Give H7 one explicit real outward-fence authority proof and use the Windows semantic adapter only for its repeated rollback-behavior cases; preserve every assertion and the existing 5/15-second deadlines.
+- [x] Pass M342/H7/M30 at 156 assertions with four platform skips, full quiet lint, typecheck, build, zero-vulnerability audit, diff checks, and independent SHIP with no P0/P1 findings.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
