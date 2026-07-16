@@ -179,9 +179,8 @@ describe('M322 computeModelRoi', () => {
     expect(s5.judged).toBe(2);
     expect(s5.shipVerdicts).toBe(1);
     expect(s5.shipRate).toBeCloseTo(0.5, 5);
-    // M337: the fixture carries a DUPLICATE 'merged' entry for p-s5-a — the
-    // manager-gate double-record must count once per proposal.
-    expect(s5.merged).toBe(1);
+    // Factual merge rows cannot grant positive adaptive ROI before release.
+    expect(s5.merged).toBe(0);
     // the judge's own model never becomes a producer key
     expect(roi['claude-fable-5:claude-fable-5']).toBeUndefined();
     expect(roi['claude:fable-5']).toBeUndefined();
@@ -193,9 +192,9 @@ describe('M322 computeModelRoi', () => {
     expect(roi['claude:opus']!.judgeCostUsd).toBeCloseTo(0.25, 5);
   });
 
-  it('costPerMergedUsd = (producer + judge spend) / merged; null when 0 merged', () => {
+  it('withholds cost-per-merge until positive merge credit is released', () => {
     const roi = computeModelRoi('all');
-    expect(roi['claude:sonnet-5']!.costPerMergedUsd).toBeCloseTo(1.7, 5);
+    expect(roi['claude:sonnet-5']!.costPerMergedUsd).toBeNull();
     expect(roi['claude:opus']!.merged).toBe(0);
     expect(roi['claude:opus']!.costPerMergedUsd).toBeNull();
     expect(roi['claude:opus']!.rejected).toBe(1);
@@ -212,9 +211,9 @@ describe('M322 computeModelRoi', () => {
     fixture = [...flip, ...FIXTURE];
     try {
       const s5 = computeModelRoi('all')['claude:sonnet-5']!;
-      // p-s5-a merged once (dedup) + p-flip must NOT add a merged…
-      expect(s5.merged).toBe(1);
-      // …it lands in rejected exactly once instead.
+      // Neither factual merge row grants positive adaptive credit.
+      expect(s5.merged).toBe(0);
+      // The adverse observation remains active.
       expect(s5.rejected).toBe(1);
     } finally {
       fixture = FIXTURE;
@@ -243,7 +242,7 @@ describe('M322 computeModelRoi', () => {
     expect(roi7['claude:sonnet-5']!.dispatches).toBe(2);
   });
 
-  it('uses witness time for merge ROI windows', () => {
+  it('does not turn witness time into unreleased positive merge ROI', () => {
     const proposalId = 'p-windowed-witness';
     fixture = [
       {
@@ -274,10 +273,7 @@ describe('M322 computeModelRoi', () => {
       },
     }];
     try {
-      expect(computeModelRoi('7d')['claude:sonnet-5']).toMatchObject({
-        dispatches: 0,
-        merged: 1,
-      });
+      expect(computeModelRoi('7d')).toEqual({});
 
       const proposal = proposals[0]!;
       const evidence = proposal['realizedMerge'] as Record<string, unknown>;

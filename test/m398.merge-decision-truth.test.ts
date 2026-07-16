@@ -218,6 +218,7 @@ beforeEach(() => {
     id: 'anthropic',
     model: 'claude-opus-4-5',
     complete: async () => '{}',
+  });
   mocks.resolveFrontierJudgeClient.mockImplementation((_cfg, options) => {
     if (options?.producerModel !== PRODUCER_MODEL || options?.requireIndependent !== true) return null;
     return {

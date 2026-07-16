@@ -437,26 +437,26 @@ describe('m163 repos — per-repo health, commits, issues, tests', () => {
 // ---------------------------------------------------------------------------
 
 describe('m163 outcomes — 7d window stats', () => {
-  it('reflects merged + rejected counts from quality-metrics', async () => {
+  it('withholds positive merge counts while preserving adverse outcomes', async () => {
     mockEnrolled = [];
     mockMetrics = { merged: 4, rejected: 2, trivialRatio: 0.25 };
     execFileSyncImpl = makeGitMock();
 
     const { gatherStrategicContext } = await import('../src/core/vision/context.js');
     const ctx = await gatherStrategicContext();
-    expect(ctx.outcomes.merged7d).toBe(4);
+    expect(ctx.outcomes.merged7d).toBe(0);
     expect(ctx.outcomes.rejected7d).toBe(2);
     expect(ctx.outcomes.trivialRatio).toBeCloseTo(0.25);
   });
 
-  it('computes shipRate correctly', async () => {
+  it('withholds ship rate until positive learning credit is released', async () => {
     mockEnrolled = [];
     mockMetrics = { merged: 3, rejected: 1, trivialRatio: 0 };
     execFileSyncImpl = makeGitMock();
 
     const { gatherStrategicContext } = await import('../src/core/vision/context.js');
     const ctx = await gatherStrategicContext();
-    expect(ctx.outcomes.shipRate).toBeCloseTo(3 / 4);
+    expect(ctx.outcomes.shipRate).toBe(0);
   });
 
   it('shipRate is 0 when no proposals', async () => {
@@ -603,14 +603,15 @@ describe('m163 narrative — human-readable digest', () => {
     expect(ctx.narrative).toContain('narrative-repo');
   });
 
-  it('narrative contains outcome stats', async () => {
+  it('narrative makes positive-credit unavailability explicit', async () => {
     mockEnrolled = [];
     mockMetrics = { merged: 5, rejected: 2, trivialRatio: 0.1 };
     execFileSyncImpl = makeGitMock();
 
     const { gatherStrategicContext } = await import('../src/core/vision/context.js');
     const ctx = await gatherStrategicContext();
-    expect(ctx.narrative).toMatch(/merged/i);
+    expect(ctx.narrative).toMatch(/positive merge credit unavailable/i);
+    expect(ctx.narrative).not.toMatch(/5 merged/i);
   });
 
   it('narrative says "no enrolled repos" when list is empty', async () => {

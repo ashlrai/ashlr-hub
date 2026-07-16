@@ -107,10 +107,9 @@ describe('observe-only skill-selection equivalence', () => {
 
     const { selection, events } = observeSelection(cards, query, execution.route);
 
-    expect(selection.selectedSkillIds).toEqual([
-      'skill.typescript-tests',
-      'skill.typescript-types',
-    ]);
+    expect(selection.selectedSkillIds).toEqual([]);
+    expect(selection.selected).toEqual([]);
+    expect(events).toEqual([]);
     expect(events.map((event) => ({
       skillId: event.skillId,
       revision: event.skillRevision,
