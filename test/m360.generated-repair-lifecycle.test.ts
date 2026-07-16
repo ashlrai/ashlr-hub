@@ -15,6 +15,7 @@ import {
   recordGeneratedRepairLifecycle,
   readGeneratedRepairTerminalOutcome,
   _setGeneratedRepairLifecycleDirectoryFsyncHookForTest,
+  _setGeneratedRepairLifecycleAdmissionTraceHookForTest,
   _setGeneratedRepairLifecycleRaceHooksForTest,
   _resetGeneratedRepairLifecycleCacheForTest,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
@@ -30,6 +31,7 @@ import {
   readDispatchProductionFailureAttemptReceipts,
   readDispatchProductionEvents,
   recordDispatchProduction,
+  resolveDispatchProductionAttemptReceiptWitnesses,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
@@ -141,6 +143,7 @@ beforeEach(() => {
 afterEach(() => {
   _setGeneratedRepairLifecycleDirectoryFsyncHookForTest(undefined);
   _setGeneratedRepairLifecycleRaceHooksForTest(undefined);
+  _setGeneratedRepairLifecycleAdmissionTraceHookForTest(undefined);
   _setProposalReadRaceHookForTest(undefined);
   try {
     fx.cleanup();
@@ -568,6 +571,66 @@ function durableProposalId(requestedProposalId: string): string {
   return id;
 }
 
+function expectDurableDiagnosticAttemptWitness(
+  item: WorkItem,
+  event: DispatchProductionEvent,
+): void {
+  expect(event).toMatchObject({
+    itemId: item.id,
+    repo: item.repo,
+    source: item.source,
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    objectiveHash: workItemObjectiveHash(item),
+    repairGenerationId: generatedRepairGenerationId(item),
+    repairAttemptOrdinal: expect.any(Number),
+  });
+  expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+    repairGenerationId: event.repairGenerationId!,
+    repairAttemptOrdinal: event.repairAttemptOrdinal!,
+  }])).toMatchObject({
+    status: 'resolved',
+    resolutions: [{
+      status: 'proven',
+      event: {
+        proposalId: event.proposalId,
+        trajectoryId: event.trajectoryId,
+        runEventSummary: { proposalId: event.proposalId },
+      },
+    }],
+  });
+}
+
+function recordDiagnosticLifecycleWithTrace(
+  item: WorkItem,
+  event: DispatchProductionEvent,
+) {
+  const admissionTrace: string[] = [];
+  _setGeneratedRepairLifecycleAdmissionTraceHookForTest((stage) => admissionTrace.push(stage));
+  let transition: ReturnType<typeof recordGeneratedRepairLifecycle>;
+  try {
+    transition = recordGeneratedRepairLifecycle(item, {
+      kind: 'proposal-created',
+      attemptId: event.trajectoryId!,
+      proposalId: event.proposalId!,
+      ts: event.ts,
+    });
+  } finally {
+    _setGeneratedRepairLifecycleAdmissionTraceHookForTest(undefined);
+  }
+  expect(admissionTrace).toEqual([
+    'lifecycle-lock',
+    'handoff-authority',
+    'generation-authority',
+    'proposal-store-authority',
+    'durable-proposal',
+    'diagnostic-attempt-witness',
+    'treatment-candidate',
+    'terminal-attempt-receipt',
+  ]);
+  return transition;
+}
+
 function ordinaryProposalEvent(
   item: WorkItem,
   attemptId: string,
@@ -706,12 +769,8 @@ function recordDiagnosticProposal(
   const event = diagnosticProposalEvent(item, attemptId, proposalId, backend, tier, ordinal, ts);
   persistDurableProposal(item, event);
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
-  const transition = recordGeneratedRepairLifecycle(item, {
-    kind: 'proposal-created',
-    attemptId: event.trajectoryId!,
-    proposalId: event.proposalId!,
-    ts,
-  });
+  expectDurableDiagnosticAttemptWitness(item, event);
+  const transition = recordDiagnosticLifecycleWithTrace(item, event);
   expect(transition).toMatchObject({
     available: true,
     disposition: 'retired',
@@ -2935,6 +2994,7 @@ describe('generated repair lifecycle store', () => {
       );
       persistDurableProposal(item, event);
       expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      expectDurableDiagnosticAttemptWitness(item, event);
       const root = dispatchProductionDir();
       const receiptDir = join(root, 'repair-treatment-outcomes');
       const retentionPath = join(receiptDir, '.retention.json');
@@ -2955,12 +3015,7 @@ describe('generated repair lifecycle store', () => {
 
       const lifecyclePath = generatedRepairLifecyclePath();
       const lifecycleNativeCallsBefore = privateStorageHarness.realInvocations.length;
-      const transition = recordGeneratedRepairLifecycle(item, {
-        kind: 'proposal-created',
-        attemptId: event.trajectoryId!,
-        proposalId: event.proposalId!,
-        ts: event.ts,
-      });
+      const transition = recordDiagnosticLifecycleWithTrace(item, event);
       expect(transition.recorded).toBe(true);
       const lifecycleTempPattern = new RegExp(
         `^${lifecyclePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.[a-f0-9]{12}\\.tmp$`,

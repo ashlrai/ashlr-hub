@@ -2478,6 +2478,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the six remaining native M360 failures to its hand-written proposal JSON bypassing production persistence; do not relax locks, DACLs, lifecycle admission, assertions, or deadlines.
 - [x] File M360 authority fixtures through `createProposal()`, reload exact causal bindings through `loadProposal()`, and let production-generated proposal IDs flow into dispatch and lifecycle evidence.
 - [x] Pass full M360 at 111 assertions with two platform skips, H2 proposal persistence at 10/10, typecheck, scoped lint, and diff checks.
+- [x] Publish `cb273a6` and prove production proposal persistence/reload is no longer the native blocker; classify the next refusal as lexical lifecycle repo identity versus writer-canonical dispatch identity.
+- [x] Canonicalize lifecycle diagnostic proof targets through the writer's exact identity function, retain strict receipt comparison, and add ordered admission-stage plus immutable-witness regression proof.
+- [x] Repass full M360 at 111 assertions with two platform skips plus typecheck, focused lint, production build, and diff checks on the corrected tree.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1

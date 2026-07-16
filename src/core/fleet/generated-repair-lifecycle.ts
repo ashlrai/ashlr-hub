@@ -27,6 +27,7 @@ import {
 import type { EngineId, EngineTier, Proposal, RepairTreatment, WorkItem } from '../types.js';
 import { listProposalsDetailed, loadProposal } from '../inbox/store.js';
 import {
+  canonicalDispatchRepoIdentity,
   dispatchProductionDir,
   hasExactDispatchProductionTreatmentOutcomeReceipt,
   readDispatchProductionFailureAttemptReceipts,
@@ -163,6 +164,7 @@ let lifecycleRaceHooksForTest: {
   ordinaryProposalAuthorityValidated?: () => void;
   candidateInstalledBeforeCommit?: () => void;
 } | undefined;
+let lifecycleAdmissionTraceHookForTest: ((stage: string) => void) | undefined;
 
 /** Deterministic durability fault seam; production callers must never set this. */
 export function _setGeneratedRepairLifecycleDirectoryFsyncHookForTest(
@@ -176,6 +178,13 @@ export function _setGeneratedRepairLifecycleRaceHooksForTest(
   hooks: typeof lifecycleRaceHooksForTest,
 ): void {
   lifecycleRaceHooksForTest = hooks;
+}
+
+/** Test-only admission trace; production callers must never set this. */
+export function _setGeneratedRepairLifecycleAdmissionTraceHookForTest(
+  hook: ((stage: string) => void) | undefined,
+): void {
+  lifecycleAdmissionTraceHookForTest = hook;
 }
 
 export function _resetGeneratedRepairLifecycleCacheForTest(): void {
@@ -2131,8 +2140,8 @@ function diagnosticAttemptProofTarget(
     ? aliasedObjectiveHash!
     : workItemObjectiveHash(item);
   if (!treatmentUnitId || !treatment || !objectiveHash) return null;
-  let repo: string;
-  try { repo = resolve(item.repo); } catch { return null; }
+  const repo = canonicalDispatchRepoIdentity(item.repo);
+  if (repo === null) return null;
   return {
     ts: eventTs,
     sequenceStartTs: receiptHandoff.ts,
@@ -3436,6 +3445,7 @@ export function recordGeneratedRepairLifecycle(
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
   try {
+    lifecycleAdmissionTraceHookForTest?.('lifecycle-lock');
     if (!recoverLifecycleWriteFailureUnlocked()) {
       return {
         available: false,
@@ -3451,8 +3461,10 @@ export function recordGeneratedRepairLifecycle(
     if (!id) {
       return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
     }
+    lifecycleAdmissionTraceHookForTest?.('handoff-authority');
     const generationIds = generatedRepairGenerationIdsFromAuthority(item, authority);
     const transition = withDispatchProductionAliasFamilyAuthority(generationIds, () => {
+      lifecycleAdmissionTraceHookForTest?.('generation-authority');
       const record = () => recordGeneratedRepairLifecycleUnlocked(
         item,
         id,
@@ -3462,6 +3474,7 @@ export function recordGeneratedRepairLifecycle(
       );
       if (evidence.kind !== 'proposal-created') return record();
       const fenced = withProposalStoreAuthority(() => {
+        lifecycleAdmissionTraceHookForTest?.('proposal-store-authority');
         return record();
       });
       return fenced.ok
@@ -3596,6 +3609,9 @@ function recordGeneratedRepairLifecycleUnlocked(
   const durableProposal = evidence.kind === 'proposal-created'
     ? durableProposalAuthority(item, generationIds, evidence)
     : null;
+  lifecycleAdmissionTraceHookForTest?.(
+    durableProposal === null ? 'durable-proposal-missing' : 'durable-proposal',
+  );
   const exactOrdinaryAttempt = evidence.kind === 'proposal-created' && !diagnostic && durableProposal
     ? exactOrdinaryProposalAttempt(item, generationIds, evidence, durableProposal.proposal, authority)
     : null;
@@ -3748,6 +3764,9 @@ function recordGeneratedRepairLifecycleUnlocked(
         authority,
         emptyAttemptProofReceipts,
       );
+      lifecycleAdmissionTraceHookForTest?.(
+        resolved ? 'diagnostic-attempt-witness' : 'diagnostic-attempt-witness-missing',
+      );
       if (!resolved) return { ...resultFromRecord(false, existing), recorded: false };
       const { target, witness } = resolved;
       const proof = witness.proof;
@@ -3769,6 +3788,7 @@ function recordGeneratedRepairLifecycleUnlocked(
         witness.event!,
       ) ?? undefined;
       if (!treatmentCandidate) return { ...resultFromRecord(false, existing), recorded: false };
+      lifecycleAdmissionTraceHookForTest?.('treatment-candidate');
       terminalAttemptHash = proof.attemptHash;
       const failurePredecessor = emptyAttemptProofReceipts.length === 0 &&
         proof.repairAttemptOrdinal === 2
@@ -3783,6 +3803,7 @@ function recordGeneratedRepairLifecycleUnlocked(
       if (!terminalAttemptProofReceipt) {
         return { ...resultFromRecord(false, existing), recorded: false };
       }
+      lifecycleAdmissionTraceHookForTest?.('terminal-attempt-receipt');
       proposalAuthority = proposalAuthorityFromEvent(
         evidence.proposalId,
         evidence.attemptId,
