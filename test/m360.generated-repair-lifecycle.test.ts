@@ -3115,19 +3115,17 @@ describe('generated repair lifecycle store', () => {
         anchorPath: root,
       }]);
       const retentionCalls = publicationTargetCalls.filter((call) => call.path === retentionPath);
-      expect(retentionCalls.length).toBeGreaterThan(0);
-      expect(retentionCalls.every((call) =>
-        call.kind === 'file' && call.mode === 'inspect-existing')).toBe(true);
+      expect(retentionCalls.map((call) => [call.kind, call.mode])).toEqual([
+        ['file', 'inspect-owned'], ['file', 'inspect-existing'],
+        ['file', 'inspect-owned'], ['file', 'inspect-existing'],
+        ['file', 'inspect-owned'], ['file', 'inspect-existing'],
+        ['file', 'inspect-owned'], ['file', 'inspect-existing'],
+      ]);
       const receiptCalls = publicationTargetCalls.filter((call) => call.path === receiptPath);
       const receiptModes = receiptCalls.map((call) => call.mode);
-      const canonicalSecureIndex = receiptModes.indexOf('secure-created');
-      expect(canonicalSecureIndex).toBeGreaterThan(0);
-      expect(receiptModes.filter((mode) => mode === 'secure-created')).toHaveLength(1);
-      expect(receiptModes.slice(0, canonicalSecureIndex).every((mode) =>
-        mode === 'inspect-existing')).toBe(true);
-      expect(receiptModes.slice(canonicalSecureIndex + 1).length).toBeGreaterThan(0);
-      expect(receiptModes.slice(canonicalSecureIndex + 1).every((mode) =>
-        mode === 'inspect-existing')).toBe(true);
+      expect(receiptModes).toEqual([
+        'inspect-existing', 'secure-created', 'inspect-owned', 'inspect-existing',
+      ]);
       expect(receiptCalls.every((call) => call.kind === 'file')).toBe(true);
       _setGeneratedRepairLifecycleDirectoryFsyncHookForTest(undefined);
       expect(lifecycleFsyncs).toBeGreaterThanOrEqual(6);
