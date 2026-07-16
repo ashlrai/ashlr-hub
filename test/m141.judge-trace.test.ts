@@ -3,7 +3,7 @@
  *
  * Covers:
  *   1. recordJudgeTrace / readJudgeTraces round-trip (basic append + read-back)
- *   2. Secret scrubbing in fullReasoning and promptContext
+ *   2. Free-form reasoning and prompt context are never persisted
  *   3. linkOutcome refuses merged credit while attaching adverse outcomes (today's file)
  *   4. linkOutcome patches correct trace when multiple proposals present
  *   5. readJudgeTraces filters: proposalId, verdict, outcomeOnly, limit
@@ -227,8 +227,9 @@ describe('m141 judge-trace — round-trip', () => {
     }
   });
 
-  it('recordJudgeTrace writes a JSONL entry and readJudgeTraces reads it back', async () => {
-    const { recordJudgeTrace, readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
+  it('records metadata-only v2 rows and drops caller-supplied prose', async () => {
+    const { judgeTracesDir, recordJudgeTrace, readJudgeTraces } =
+      await import('../src/core/fleet/judge-trace.js');
 
     const id = pid();
     recordJudgeTrace({
@@ -247,10 +248,22 @@ describe('m141 judge-trace — round-trip', () => {
     expect(traces[0]!.verdict).toBe('ship');
     expect(traces[0]!.scores.value).toBe(4);
     expect(traces[0]!.scores.correctness).toBe(5);
-    expect(traces[0]!.fullReasoning).toContain('good improvement');
-    expect(traces[0]!.promptContext).toContain('test proposal');
+    expect(traces[0]).toMatchObject({
+      schemaVersion: 2,
+      fullReasoning: '',
+      promptContext: '',
+      reasoningState: 'not-persisted',
+      promptContextState: 'not-persisted',
+    });
     expect(typeof traces[0]!.ts).toBe('string');
     expect(traces[0]!.outcome).toBeUndefined();
+    const [file] = fs.readdirSync(judgeTracesDir());
+    const physical = fs.readFileSync(path.join(judgeTracesDir(), file!), 'utf8');
+    const physicalRow = JSON.parse(physical.trim()) as Record<string, unknown>;
+    expect(physicalRow).not.toHaveProperty('fullReasoning');
+    expect(physicalRow).not.toHaveProperty('promptContext');
+    expect(physical).not.toContain('good improvement');
+    expect(physical).not.toContain('test proposal');
   });
 
   it('distinguishes missing, healthy, and degraded bounded sources', async () => {
@@ -306,7 +319,17 @@ describe('m141 judge-trace — round-trip', () => {
     };
     const file = path.join(dir, `${day}.jsonl`);
     fs.writeFileSync(file, `${JSON.stringify(row)}\n${JSON.stringify(row)}\n`, 'utf8');
-    expect(readJudgeTracesDetailed()).toMatchObject({ complete: true, traces: [row] });
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      complete: true,
+      traces: [{
+        ...row,
+        schemaVersion: 1,
+        fullReasoning: '',
+        promptContext: '',
+        reasoningState: 'legacy-redacted',
+        promptContextState: 'legacy-redacted',
+      }],
+    });
 
     fs.appendFileSync(file, `${JSON.stringify({ ...row, verdict: 'harmful' })}\n`, 'utf8');
     const conflict = readJudgeTracesDetailed();
@@ -525,8 +548,8 @@ describe('scrubSecrets (shared util) — comprehensive redaction', () => {
 // 2. Secret scrubbing
 // ---------------------------------------------------------------------------
 
-describe('m141 judge-trace — secret scrubbing', () => {
-  it('scrubs sk- API keys from fullReasoning before writing', async () => {
+describe('m141 judge-trace — free-form privacy boundary', () => {
+  it('drops fullReasoning rather than retaining scrubbed prose', async () => {
     const { recordJudgeTrace, readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
 
     const id = pid();
@@ -540,11 +563,13 @@ describe('m141 judge-trace — secret scrubbing', () => {
     });
 
     const traces = readJudgeTraces({ proposalId: id });
-    expect(traces[0]!.fullReasoning).not.toContain('sk-abcdefghijklmnopqrstuvwx');
-    expect(traces[0]!.fullReasoning).toContain('[REDACTED]');
+    expect(traces[0]).toMatchObject({
+      fullReasoning: '',
+      reasoningState: 'not-persisted',
+    });
   });
 
-  it('scrubs Bearer tokens from promptContext before writing', async () => {
+  it('drops promptContext rather than retaining scrubbed prose', async () => {
     const { recordJudgeTrace, readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
 
     const id = pid();
@@ -558,8 +583,35 @@ describe('m141 judge-trace — secret scrubbing', () => {
     });
 
     const traces = readJudgeTraces({ proposalId: id });
-    expect(traces[0]!.promptContext).not.toContain('eyJ');
-    expect(traces[0]!.promptContext).toContain('[REDACTED]');
+    expect(traces[0]).toMatchObject({
+      promptContext: '',
+      promptContextState: 'not-persisted',
+    });
+  });
+
+  it('rejects v2 rows that smuggle free-form fields into the closed schema', async () => {
+    const { judgeTracesDir, readJudgeTracesDetailed, recordJudgeTrace } =
+      await import('../src/core/fleet/judge-trace.js');
+    recordJudgeTrace({
+      proposalId: pid(),
+      judgeEngine: 'test',
+      verdict: 'ship',
+      scores: { value: 4, correctness: 5, scope: 1, alignment: 4 },
+    });
+    const [file] = fs.readdirSync(judgeTracesDir());
+    const filePath = path.join(judgeTracesDir(), file!);
+    const row = JSON.parse(fs.readFileSync(filePath, 'utf8').trim()) as Record<string, unknown>;
+    fs.appendFileSync(filePath, `${JSON.stringify({
+      ...row,
+      traceId: 'jt-smuggled-prose',
+      fullReasoning: 'RAW_REASONING_CANARY',
+    })}\n`);
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      traces: [expect.objectContaining({ reasoningState: 'not-persisted' })],
+    });
   });
 });
 
@@ -1162,9 +1214,13 @@ describe('m141 runManager — records judge trace per proposal', () => {
       expect(trace.scores.correctness).toBe(4);
       expect(trace.scores.scope).toBe(1);
       expect(trace.scores.alignment).toBe(5);
-      // fullReasoning must contain the CoT content (not empty)
-      expect(trace.fullReasoning.length).toBeGreaterThan(0);
-      expect(trace.fullReasoning).toContain('VALUE:');
+      expect(trace).toMatchObject({
+        schemaVersion: 2,
+        fullReasoning: '',
+        promptContext: '',
+        reasoningState: 'not-persisted',
+        promptContextState: 'not-persisted',
+      });
     } finally {
       vi.doUnmock('../src/core/run/engines.js');
       vi.doUnmock('../src/core/inbox/store.js');

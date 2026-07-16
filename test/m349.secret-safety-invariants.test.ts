@@ -301,7 +301,13 @@ describe('M349 secret safety invariants', () => {
     expectRedacted('audit record', readBack.audit[0]);
     expectRedacted('decision record', readBack.decisions[0]);
     expectRedacted('agent-action record', readBack.actions[0]);
-    expectRedacted('judge trace record', readBack.judge[0]);
+    assertNoSecretValues(readBack.judge[0]);
+    expect(readBack.judge[0]).toMatchObject({
+      fullReasoning: '',
+      promptContext: '',
+      reasoningState: 'not-persisted',
+      promptContextState: 'not-persisted',
+    });
     expectRedacted('genome returned entry', readBack.genomeEntry);
     expectRedacted('genome loaded entry', readBack.genomeLoaded.find((row) => row.id === entry.id));
 
@@ -310,7 +316,13 @@ describe('M349 secret safety invariants', () => {
     expectRedacted('decisions raw bytes', allPersistedText(join(root, 'decisions')));
     expect(allPersistedText(join(root, 'dispatch-production'))).toBe('');
     expectRedacted('agent-actions raw bytes', allPersistedText(join(root, 'agent-actions')));
-    expectRedacted('judge raw bytes', allPersistedText(join(root, 'judge-traces')));
+    const judgeBytes = allPersistedText(join(root, 'judge-traces'));
+    assertNoSecretValues(judgeBytes);
+    for (const row of judgeBytes.trim().split('\n').filter(Boolean)) {
+      const parsed = JSON.parse(row) as Record<string, unknown>;
+      expect(parsed).not.toHaveProperty('fullReasoning');
+      expect(parsed).not.toHaveProperty('promptContext');
+    }
     expectRedacted('genome raw bytes', allPersistedText(join(root, 'genome')));
 
     assertNoSecretValues(readBack);

@@ -694,7 +694,9 @@ export async function judgeProposal(
   }
 
 
-  // M141: Record full judge trace for calibration / distillation. Best-of-N
+  // Record bounded verdict metadata for calibration. Free-form reasoning and
+  // prompt context remain ephemeral and never enter the durable trace ledger.
+  // Best-of-N
   // draft candidates opt out because their proposal ids are intentionally
   // ephemeral and will never receive real-world outcomes.
   if (options.recordTrace !== false) {
@@ -703,8 +705,6 @@ export async function judgeProposal(
       judgeEngine: (client as { model?: string }).model ?? 'unknown',
       verdict,
       scores: { value, correctness, scope, alignment },
-      fullReasoning,
-      promptContext: `${proposal.title} | ${proposal.kind} | engine:${proposal.engineModel ?? 'unknown'}${specCtx ? ' | vision:true' : ''}`,
     });
   }
 

@@ -160,8 +160,7 @@ export interface Misprediction {
   outcomeIntent: string;
   verdict: string;
   outcome: string;
-  fullReasoning: string;
-  promptContext: string;
+  scores: JudgeTrace['scores'];
 }
 
 /** Extract traces where the judge's verdict-intent disagreed with realized outcome. */
@@ -178,8 +177,7 @@ function extractMispredictions(traces: JudgeTrace[]): Misprediction[] {
         outcomeIntent: oi,
         verdict: t.verdict,
         outcome: t.outcome,
-        fullReasoning: t.fullReasoning.slice(0, 400),
-        promptContext: t.promptContext.slice(0, 200),
+        scores: { ...t.scores },
       });
     }
   }
@@ -202,8 +200,7 @@ function buildReflectionPrompt(
   Proposal: ${m.proposalId}
   Judge said: ${m.verdict} (intent: ${m.verdictIntent})
   Actual outcome: ${m.outcome} (intent: ${m.outcomeIntent})
-  Reasoning excerpt: ${m.fullReasoning || '(none)'}
-  Context: ${m.promptContext || '(none)'}`,
+  Scores: value=${m.scores.value}, correctness=${m.scores.correctness}, scope=${m.scores.scope}, alignment=${m.scores.alignment}`,
     )
     .join('\n\n');
 

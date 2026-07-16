@@ -2657,3 +2657,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass 63 focused trajectory/population/firewall/eligibility assertions, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish the isolated stacked PR #49 on PR #48 and require the complete protected matrix.
 - [ ] Remove free-form chain-of-thought and prompt context from durable judge traces; project only validated closed semantic events and bounded numeric metadata.
+
+## Metadata-Only Judge Trace (2026-07-16)
+- [x] Replace new durable judge-trace rows with a closed v2 metadata schema that omits reasoning and prompt context.
+- [x] Preserve legacy outcome history through redacted read models without returning historical raw text.
+- [x] Reject unknown v2 keys and raw-text smuggling as degraded source input.
+- [x] Remove legacy reasoning/context reuse from prompt-optimizer reflection while retaining verdict, outcome intent, and bounded scores.
+- [x] Pass 703 direct-consumer assertions across 24 suites, typecheck, scoped lint with zero errors, production build, zero-vulnerability audit, and diff checks.
+- [x] Rebase on the final PR #49 head and rerun the complete local evidence matrix.
+- [ ] Publish a protected stacked draft PR.
+- [ ] Replace remaining durable free-form decision rationale with closed reason codes in a separate compatibility-scoped slice.

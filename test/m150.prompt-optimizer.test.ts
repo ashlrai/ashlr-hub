@@ -201,6 +201,34 @@ describe('m150 optimizePrompt — GEPA improvement loop', () => {
   });
 });
 
+describe('m150 optimizePrompt — metadata-only reflection', () => {
+  it('never forwards legacy reasoning or prompt context into optimizer prompts', async () => {
+    const { optimizePrompt } = await import('../src/core/fleet/prompt-optimizer.js');
+    const client = {
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        reflection: 'Use the numeric rubric.',
+        candidates: ['candidate-a'],
+      })),
+    };
+    const trace = makeTrace({
+      verdict: 'ship',
+      outcome: 'rejected',
+      fullReasoning: 'RAW_LEGACY_REASONING_CANARY',
+      promptContext: 'RAW_LEGACY_PROMPT_CANARY',
+    });
+    await optimizePrompt({
+      basePrompt: 'base',
+      metric: () => 0,
+      rounds: 1,
+      candidatesPerRound: 1,
+    }, {}, client, [trace]);
+    const reflectionPrompt = String(client.complete.mock.calls[0]?.[1] ?? '');
+    expect(reflectionPrompt).not.toContain('RAW_LEGACY_REASONING_CANARY');
+    expect(reflectionPrompt).not.toContain('RAW_LEGACY_PROMPT_CANARY');
+    expect(reflectionPrompt).toContain('Scores: value=4, correctness=4, scope=2, alignment=4');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 2. Metric uses cohenKappa over mocked traces
 // ---------------------------------------------------------------------------
