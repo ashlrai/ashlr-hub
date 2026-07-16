@@ -2446,15 +2446,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Split independent blockers into stacked PR #34 (Windows reservation-sweep budget) and PR #35 (verifier PATH authority), with focused/static verification complete.
 - [x] Establish production exact-DACL authority in the repair-handoff store, inode-bind compaction durability, and replace M360's partial module mock with a sentinel-guarded canonical authenticated runner/observer.
 - [x] Pass integrated M360/M362/M379 at 203 assertions with four platform skips plus full quiet lint, typecheck, production build, zero-vulnerability audit, diff checks, and independent security reviews with all P2 requests addressed.
-- [ ] Publish the M360 correction and require every duplicate protected job to pass before merge consideration.
+- [x] Publish the M360 correction as `be0e89a` and classify both protected duplicates: every job except Windows portability 1/3 passes, while M360 returns before proposal persistence at the shared local-store lock.
+- [x] Correct the local-store lock's exact Windows directory/candidate/canonical authority, bind proposal locks to an exact `~/.ashlr` root, and prove lifecycle transition persistence plus contention/release/replacement safety locally.
+- [ ] Publish the lock-authority correction on an immutable SHA and require every duplicate protected job to pass before merge consideration.
 
 ## Next P0 - Source-Complete GitHub Policy Authority
-- [ ] Paginate effective branch rules to exhaustion and refuse truncated, over-limit, or permission-incomplete observations.
-- [ ] Bind classic protection to the exact branch's GraphQL rule, including force-push and pull-request bypass allowance completeness, while retaining REST App-bound status-check identities.
-- [ ] Preserve ruleset source boundaries and reject any unknown or non-empty bypass authority before flattening can confer judge-free evidence.
-- [ ] Re-read the exact branch head and effective-rule identity after observation, and fail closed on hybrid snapshots or any REST/GraphQL disagreement.
-- [ ] Require an exact one-to-one configured-check binding: reject subsets, duplicates, null App IDs, and conflicting context/App identities.
-- [ ] Version the policy snapshot and add a pure evidence-only safe-minimum verdict only after source completeness is proven; do not authorize historical flat snapshots.
+- [x] Paginate effective branch rules to exhaustion and refuse truncated, over-limit, or permission-incomplete observations.
+- [x] Bind classic protection to the exact branch's GraphQL rule, including force-push and pull-request bypass allowance completeness, while retaining REST App-bound status-check identities.
+- [x] Preserve ruleset source boundaries and reject unknown pagination, malformed source-local allowances, and incomplete typed-check bindings before flattening can appear authoritative.
+- [x] Re-read the exact branch head, classic rule, and every effective ruleset detail after observation, and fail closed on hybrid snapshots or identity drift.
+- [x] Require exact source-local configured-check bindings with `app_id:-1` any-app semantics while rejecting zero, malformed, duplicate, and conflicting identities.
+- [x] Publish schema-v2 source-complete policy evidence as stacked PR #36 (`d76eb66`), with 133 focused tests, full static gates, and live read-only attestation; no merge authority was enabled.
 - [ ] Add signed evidence-pack v3 after live policy closure, binding evaluator version, policy hash, exact configured checks, and the complete sealed pack digest.
 
 ### Remaining Defense In Depth

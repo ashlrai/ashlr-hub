@@ -669,12 +669,22 @@ function recordDiagnosticProposal(
   const event = diagnosticProposalEvent(item, attemptId, proposalId, backend, tier, ordinal, ts);
   persistDurableProposal(item, event);
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
-  return recordGeneratedRepairLifecycle(item, {
+  const transition = recordGeneratedRepairLifecycle(item, {
     kind: 'proposal-created',
     attemptId: event.trajectoryId!,
     proposalId,
     ts,
   });
+  expect(transition).toMatchObject({
+    available: true,
+    disposition: 'retired',
+    recorded: true,
+    treatmentOutcomeWitness: {
+      outcome: 'converted',
+      attemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    },
+  });
+  return transition;
 }
 
 describe('generated repair lifecycle store', () => {
@@ -2864,8 +2874,9 @@ describe('generated repair lifecycle store', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage',
     () => {
-      useObservedNativePrivateStorageRunner();
+      useSemanticPrivateStorageRunner();
       mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
+      useObservedNativePrivateStorageRunner();
       expect(assurePrivateStoragePath(
         fx.ashlrDir,
         'directory',
@@ -2887,9 +2898,24 @@ describe('generated repair lifecycle store', () => {
       );
       persistDurableProposal(item, event);
       expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const root = dispatchProductionDir();
+      const receiptDir = join(root, 'repair-treatment-outcomes');
+      const retentionPath = join(receiptDir, '.retention.json');
+      mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
+      writeFileSync(retentionPath, `${JSON.stringify({
+        schemaVersion: 1,
+        droppedThrough: '2026-07-09T00:00:00.000Z',
+      })}\n`, { mode: 0o600 });
+
       useObservedNativePrivateStorageRunner();
       secureNativeFixtureDescendants(fx.ashlrDir, fx.ashlrDir);
-      const root = dispatchProductionDir();
+      const proposalStoreLock = acquireProposalStoreMutationLock(0);
+      expect(proposalStoreLock).not.toBeNull();
+      releaseProposalStoreMutationLock(proposalStoreLock);
+      const proposalStoreLockAfterRelease = acquireProposalStoreMutationLock(0);
+      expect(proposalStoreLockAfterRelease).not.toBeNull();
+      releaseProposalStoreMutationLock(proposalStoreLockAfterRelease);
+
       const lifecyclePath = generatedRepairLifecyclePath();
       const lifecycleNativeCallsBefore = privateStorageHarness.realInvocations.length;
       const transition = recordGeneratedRepairLifecycle(item, {
@@ -2914,25 +2940,18 @@ describe('generated repair lifecycle store', () => {
           },
           { path: lifecyclePath, kind: 'file', mode: 'inspect-existing', anchorPath: fx.home },
       ]);
-      const receiptDir = join(root, 'repair-treatment-outcomes');
-      const retentionPath = join(receiptDir, '.retention.json');
       expect(assurePrivateStoragePath(
         root,
         'directory',
         'inspect-existing',
         { anchorPath: fx.ashlrDir },
       )).toEqual({ ok: true, reason: 'exact-private-dacl' });
-      mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
       expect(assurePrivateStoragePath(
         receiptDir,
         'directory',
         'secure-created',
         { anchorPath: root },
       )).toEqual({ ok: true, reason: 'exact-private-dacl' });
-      writeFileSync(retentionPath, `${JSON.stringify({
-        schemaVersion: 1,
-        droppedThrough: '2026-07-09T00:00:00.000Z',
-      })}\n`, { mode: 0o600 });
       expect(assurePrivateStoragePath(
         retentionPath,
         'file',
