@@ -12,6 +12,18 @@ const mocks = vi.hoisted(() => ({
   createProposal: vi.fn(() => ({ id: 'must-not-file' })),
 }));
 
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32'
+      ? { ok: true, reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl' }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: vi.fn(),
 }));

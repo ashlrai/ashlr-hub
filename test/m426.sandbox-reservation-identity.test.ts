@@ -37,6 +37,26 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 vi.setConfig({ testTimeout: 15_000 });
 
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+const gitCleanupHarness = vi.hoisted(() => ({
+  fail: false,
+  calls: [] as string[][],
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
+      const commandArgs = Array.isArray(args[1]) ? args[1].map(String) : [];
+      if (gitCleanupHarness.fail && args[0] === 'git' && commandArgs[0] === 'worktree' &&
+        (commandArgs[1] === 'remove' || commandArgs[1] === 'prune')) {
+        gitCleanupHarness.calls.push(commandArgs);
+        throw new Error(`M426 injected git ${commandArgs.slice(0, 2).join(' ')} failure`);
+      }
+      return actual.execFileSync(...args);
+    },
+  };
+});
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -133,8 +153,7 @@ function installGitShim(
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
     'hang-worktree-descendant' | 'retarget-after-worktree-add' |
-    'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove' |
-    'fail-worktree-cleanup',
+    'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove',
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m426-git-'));
   cleanupPaths.add(dir);
@@ -175,12 +194,6 @@ if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
   fs.writeFileSync(process.env.M426_MARKER, worktree);
   // The destination monitor owns termination once it observes the appeared path.
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
-}
-
-if (mode === 'fail-worktree-cleanup' && worktreeIndex >= 0 &&
-    (args[worktreeIndex + 1] === 'remove' || args[worktreeIndex + 1] === 'prune')) {
-  fs.appendFileSync(process.env.M426_MARKER, args.join('\\0') + '\\n');
-  process.exit(1);
 }
 
 if (mode === 'common-dir-alias') {
@@ -363,6 +376,8 @@ afterEach(() => {
   delete process.env.M426_SOURCE_GIT_DIR;
   delete process.env.M426_SOURCE_GIT_BACKUP;
   delete process.env.M426_REPLACEMENT_GIT_DIR;
+  gitCleanupHarness.fail = false;
+  gitCleanupHarness.calls = [];
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
   try {
@@ -520,9 +535,6 @@ describe('M426 sandbox reservation and path identity', () => {
 
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
     const repo = fx.makeRepo();
-    const cleanupMarker = join(fx.home, 'failed-worktree-cleanup.txt');
-    installGitShim('fail-worktree-cleanup');
-    process.env.M426_MARKER = cleanupMarker;
     prepareSandboxAuthorityRoot();
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
     const aliasHome = makeDirectoryAlias(fx.home);
@@ -546,6 +558,8 @@ describe('M426 sandbox reservation and path identity', () => {
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
     expect(retainedBefore).toContain(aliasWorktree);
     expect(retainedBefore).toContain('locked M426 retained registration');
+    gitCleanupHarness.fail = true;
+    gitCleanupHarness.calls = [];
     try {
       const result = removeSandbox(sandbox);
       expect(result).toMatchObject({
@@ -556,10 +570,14 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
       expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
-      const attemptedCleanup = readFileSync(cleanupMarker, 'utf8');
-      expect(attemptedCleanup).toContain('worktree\0remove');
-      expect(attemptedCleanup).toContain('worktree\0prune');
+      expect(gitCleanupHarness.calls.some((args) => (
+        args[0] === 'worktree' && args[1] === 'remove'
+      ))).toBe(true);
+      expect(gitCleanupHarness.calls.some((args) => (
+        args[0] === 'worktree' && args[1] === 'prune'
+      ))).toBe(true);
     } finally {
+      gitCleanupHarness.fail = false;
       process.env.PATH = originalPath;
       writeFileSync(registrationGitdir, physicalRegistration, 'utf8');
       try { git(repo.dir, ['worktree', 'unlock', sandbox.worktreePath]); } catch { /* best effort */ }

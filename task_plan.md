@@ -2412,8 +2412,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass full lint at the existing warning baseline, build, zero-vulnerability audit, and independent final SHIP review with no P0/P1 findings.
 - [x] Classify `a5ce1a7`: Ubuntu exhaustive, macOS shared-queue authority, Windows overflow, and Windows 3/3 passed in both duplicate runs; native 1/3 retained 24 lifecycle failures and native 2/3 retained one cleanup-injection failure.
 - [x] Isolate M342/M360/M362 into independent hermetic Vitest processes while preserving the exact manifest, selector set, five-minute idle watchdog, and one aggregate 15-minute hard cap.
-- [x] Install the M426 cleanup fault-injection shim before sandbox creation caches the pinned Git executable; preserve real Git inventory and fail only remove/prune.
-- [x] Pass the checked-in native lifecycle command (52 selected assertions), full M426 (19/19), M30 (7/7), typecheck, scoped lint, build, zero-vulnerability audit, and diff checks.
+- [x] Replace the still-bypassed Windows cleanup shim with deterministic remove/prune fault injection at the production `execFileSync` boundary; preserve real Git creation, alias spelling, locks, inventory, branch deletion, and postcondition reads.
+- [x] Isolate the remaining M342 failures to its three deliberate real-DACL cases, grant only that native test adapter the existing 15-second bounded ceiling, and keep production's five-second default unchanged.
+- [x] Remove unrelated Windows ACL startup from M413 cancellation/finalization semantics while retaining the real mutation fence, kill-switch, cancellation, and cleanup authority.
+- [x] Pass the checked-in native lifecycle command (52 selected assertions), full M342 (137 passed, four skipped), full M426 (19/19), exact 2/3 (213/213), M413 (1/1), M30 (7/7), typecheck, full lint at the unchanged baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

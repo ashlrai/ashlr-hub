@@ -44,6 +44,11 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
           : semanticAssurance;
       }
       privateStorageHarness.realCalls++;
+      if (process.platform === 'win32') {
+        return actual.assurePrivateStoragePath(
+          args[0], args[1], args[2], { ...args[3], timeoutMs: 15_000 },
+        );
+      }
       return actual.assurePrivateStoragePath(...args);
     },
     assurePrivateStoragePaths: (
