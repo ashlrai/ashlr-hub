@@ -845,6 +845,20 @@ describe('M236 terminationReason on RunState', () => {
           proposalCaptureAttempts: 1,
           proposalCreated: 1,
         });
+        expect(event?.semanticEvents).toEqual([
+          expect.objectContaining({
+            kind: 'intent',
+            subjectRef: `run:${result.state.id}`,
+            objectiveCode: 'work.execute',
+          }),
+          expect.objectContaining({ kind: 'action', actionCode: 'agent.run', status: 'completed' }),
+          expect.objectContaining({
+            kind: 'observation',
+            metricCode: 'agent.proposal.created',
+            value: 1,
+            unit: 'boolean',
+          }),
+        ]);
         const serialized = JSON.stringify(event);
         expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
         expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');

@@ -37,7 +37,7 @@ import type {
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 import {
-  agentSemanticProposalSubjectRef,
+  agentSemanticBoundSubjectRef,
   agentSemanticModelFamily,
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
@@ -584,11 +584,18 @@ function findOrCreateRecord(
 
 function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimelineEvent): void {
   const { semanticEvents: candidateSemanticEvents, ...metadata } = event;
-  const semanticEvents = sanitizeAgentSemanticEvents(
-    candidateSemanticEvents,
-    agentSemanticProposalSubjectRef(event.proposalId),
-    agentSemanticModelFamily(event.model ?? event.backend),
-  );
+  const semanticSubjectRef = agentSemanticBoundSubjectRef(candidateSemanticEvents, {
+    proposalId: event.proposalId,
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+  });
+  const semanticEvents = semanticSubjectRef
+    ? sanitizeAgentSemanticEvents(
+        candidateSemanticEvents,
+        semanticSubjectRef,
+        agentSemanticModelFamily(event.model ?? event.backend),
+      )
+    : undefined;
   const sanitized = {
     ...sanitizeMetadata(metadata),
     ...(semanticEvents ? { semanticEvents: semanticEvents.map((semanticEvent) => ({ ...semanticEvent })) } : {}),

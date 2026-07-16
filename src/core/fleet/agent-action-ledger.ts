@@ -53,7 +53,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import {
-  agentSemanticProposalSubjectRef,
+  agentSemanticBoundSubjectRef,
   agentSemanticModelFamily,
   remintAgentSemanticEvents,
   sanitizeAgentSemanticEvents,
@@ -384,8 +384,13 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const repo = boundedOptionalText(event.repo, 500);
   const itemId = boundedOptionalText(event.itemId, 240);
   const proposalId = boundedOptionalText(event.proposalId, 160);
+  const runId = boundedOptionalText(event.runId, 160);
   const model = boundedOptionalText(event.model, 160);
-  const semanticSubjectRef = agentSemanticProposalSubjectRef(proposalId);
+  const semanticSubjectRef = agentSemanticBoundSubjectRef(event.semanticEvents, {
+    proposalId,
+    runId,
+    trajectoryId: event.trajectoryId,
+  });
   const semanticEvents = semanticSubjectRef
     ? (remintSemanticOccurrence ? remintAgentSemanticEvents : sanitizeAgentSemanticEvents)(
         event.semanticEvents,
@@ -399,7 +404,6 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : event.semanticEvents !== undefined || event.semanticEventsState === 'rejected'
       ? 'rejected' as const
       : undefined;
-  const runId = boundedOptionalText(event.runId, 160);
   const reason = boundedOptionalText(event.reason, 240);
   const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
     ? event.repairHandoffId
@@ -525,10 +529,18 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
     validOptionalCausalRecord(obj['evidenceOutcome'], EVIDENCE_OUTCOME_KEYS, normalizeEvidenceOutcome) &&
     (obj['semanticEvents'] === undefined || (
-      agentSemanticProposalSubjectRef(boundedOptionalText(obj['proposalId'], 160)) !== undefined &&
+      agentSemanticBoundSubjectRef(obj['semanticEvents'], {
+        proposalId: boundedOptionalText(obj['proposalId'], 160),
+        runId: boundedOptionalText(obj['runId'], 160),
+        trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+      }) !== undefined &&
       sanitizeAgentSemanticEvents(
         obj['semanticEvents'],
-        agentSemanticProposalSubjectRef(boundedOptionalText(obj['proposalId'], 160)),
+        agentSemanticBoundSubjectRef(obj['semanticEvents'], {
+          proposalId: boundedOptionalText(obj['proposalId'], 160),
+          runId: boundedOptionalText(obj['runId'], 160),
+          trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+        }),
         agentSemanticModelFamily(obj['model'] ?? obj['backend']),
         expectedAgentActionSemanticProducer(obj['actor']),
       ) !== undefined

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import type { AgentSemanticEventKind, AgentSemanticEventV1 } from '../types.js';
+import type { AgentSemanticEventKind, AgentSemanticEventV1, RunState } from '../types.js';
 
 const MAX_EVENTS = 16;
 const EVENT_ID_RE = /^ase-[a-f0-9]{64}$/;
@@ -11,6 +11,8 @@ const SOURCE_REF_RE = /^occurrence:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0
 
 const PREDICATES = new Set([
   'agent.intent.execute',
+  'agent.run.terminal',
+  'agent.proposal.created',
   'manager.score.value',
   'manager.score.correctness',
   'manager.score.scope',
@@ -24,10 +26,13 @@ const PREDICATES = new Set([
   'verifier.run',
   'verification.result',
 ]);
-const OBJECTIVE_CODES = new Set(['proposal.evaluate']);
-const METRIC_CODES = new Set(['manager.value', 'manager.correctness', 'manager.scope', 'manager.alignment']);
+const OBJECTIVE_CODES = new Set(['proposal.evaluate', 'work.execute']);
+const METRIC_CODES = new Set([
+  'manager.value', 'manager.correctness', 'manager.scope', 'manager.alignment',
+  'agent.proposal.created',
+]);
 const OUTCOME_CODES = new Set(['proposal.positive-outcome']);
-const ACTION_CODES = new Set(['manager.judge', 'verification.execute']);
+const ACTION_CODES = new Set(['manager.judge', 'verification.execute', 'agent.run']);
 const EVIDENCE_CODES = new Set(['verification.merge-profile']);
 const CHALLENGE_CODES = new Set(['merge.bounds-exceeded', 'verdict.review', 'verdict.noise', 'verdict.harmful']);
 const PRODUCER_ROLES = new Set(['manager', 'agent', 'verifier', 'observer', 'system']);
@@ -98,6 +103,27 @@ export function agentSemanticProposalSubjectRef(value: unknown): string | undefi
   return typeof value === 'string' && MINTED_PROPOSAL_ID_RE.test(value) ? `proposal:${value}` : undefined;
 }
 
+export function agentSemanticBoundSubjectRef(
+  value: unknown,
+  identities: { proposalId?: unknown; runId?: unknown; trajectoryId?: unknown },
+): string | undefined {
+  if (!Array.isArray(value) || value.length === 0 || !value[0] || typeof value[0] !== 'object') {
+    return undefined;
+  }
+  const subjectRef = (value[0] as Record<string, unknown>)['subjectRef'];
+  if (typeof subjectRef !== 'string') return undefined;
+  const allowed = new Set<string>();
+  const proposalRef = agentSemanticProposalSubjectRef(identities.proposalId);
+  if (proposalRef) allowed.add(proposalRef);
+  if (typeof identities.runId === 'string' && OTHER_OPAQUE_ID_RE.test(identities.runId)) {
+    allowed.add(`run:${identities.runId}`);
+  }
+  if (typeof identities.trajectoryId === 'string' && OTHER_OPAQUE_ID_RE.test(identities.trajectoryId)) {
+    allowed.add(`trajectory:${identities.trajectoryId}`);
+  }
+  return allowed.has(subjectRef) ? subjectRef : undefined;
+}
+
 export function agentSemanticModelFamily(value: unknown): AgentSemanticEventV1['producerModelFamily'] {
   if (typeof value !== 'string') return 'unknown';
   const model = value.toLowerCase();
@@ -151,6 +177,38 @@ export function defineAgentSemanticEvents(
   );
   if (!validated) throw new Error('invalid semantic event batch');
   return validated;
+}
+
+export function agentRunSemanticEvents(input: {
+  runId: string;
+  model?: unknown;
+  status: RunState['status'];
+  proposalCreated?: boolean;
+}): AgentSemanticEventV1[] {
+  const drafts: AgentSemanticEventDraft[] = [
+    { kind: 'intent', predicate: 'agent.intent.execute', objectiveCode: 'work.execute' },
+    {
+      kind: 'action',
+      predicate: 'agent.run.terminal',
+      actionCode: 'agent.run',
+      status: input.status === 'aborted' ? 'blocked' : 'completed',
+    },
+  ];
+  if (input.proposalCreated !== undefined) {
+    drafts.push({
+      kind: 'observation',
+      predicate: 'agent.proposal.created',
+      metricCode: 'agent.proposal.created',
+      value: input.proposalCreated ? 1 : 0,
+      unit: 'boolean',
+    });
+  }
+  return defineAgentSemanticEvents({
+    subjectRef: agentSemanticSubjectRef('run', input.runId),
+    producerRole: 'agent',
+    producerModelFamily: agentSemanticModelFamily(input.model),
+    producerVersion: 'agent-semantic-v1',
+  }, drafts);
 }
 
 function validNumberDomain(event: Record<string, unknown>): boolean {

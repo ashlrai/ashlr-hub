@@ -7,6 +7,7 @@ import {
   agentSemanticEventId,
   agentSemanticModelFamily,
   agentSemanticSubjectRef,
+  agentRunSemanticEvents,
   defineAgentSemanticEvents,
   sanitizeAgentSemanticEvents,
 } from '../src/core/learning/agent-semantic-events.js';
@@ -143,6 +144,71 @@ describe('M435 metadata-only agent semantic events', () => {
     expect(persisted?.semanticEventsState).toBeUndefined();
     expect(persisted?.semanticEvents?.[0]?.sourceRef).not.toBe(input?.sourceRef);
     expect(persisted?.semanticEvents?.[0]?.eventId).not.toBe(input?.eventId);
+  });
+
+  it('persists run-bound agent work state without requiring a proposal identity', () => {
+    const runId = 'run-m435-agent-terminal';
+    const semanticEvents = agentRunSemanticEvents({
+      runId,
+      model: 'ollama/qwen3-coder',
+      status: 'done',
+      proposalCreated: false,
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:02.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'no-proposal',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId,
+      model: 'ollama/qwen3-coder',
+      semanticEvents,
+    });
+
+    const [persisted] = readAgentActions();
+    expect(persisted?.proposalId).toBeUndefined();
+    expect(persisted?.semanticEventsState).toBeUndefined();
+    expect(persisted?.semanticEvents?.map((event) => event.kind))
+      .toEqual(['intent', 'action', 'observation']);
+    expect(persisted?.semanticEvents).toEqual([
+      expect.objectContaining({
+        subjectRef: `run:${runId}`,
+        producerRole: 'agent',
+        objectiveCode: 'work.execute',
+      }),
+      expect.objectContaining({ actionCode: 'agent.run', status: 'completed' }),
+      expect.objectContaining({ metricCode: 'agent.proposal.created', value: 0, unit: 'boolean' }),
+    ]);
+    expect(persisted?.semanticEvents?.[0]?.sourceRef).not.toBe(semanticEvents[0]?.sourceRef);
+    expect(JSON.stringify(persisted?.semanticEvents)).not.toMatch(
+      /prompt|reasoning|rationale|diff|stdout|stderr|environment|file.?content/i,
+    );
+  });
+
+  it('rejects run semantics whose opaque subject does not match the carrier run', () => {
+    const semanticEvents = agentRunSemanticEvents({
+      runId: 'run-m435-wrong-subject',
+      model: 'gpt-5.5-codex',
+      status: 'failed',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:03.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'failed',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId: 'run-m435-actual-subject',
+      model: 'gpt-5.5-codex',
+      semanticEvents,
+    });
+
+    const [persisted] = readAgentActions();
+    expect(persisted?.semanticEvents).toBeUndefined();
+    expect(persisted?.semanticEventsState).toBe('rejected');
   });
 
   it('drops malformed nested events without dropping legacy carrier rows', () => {
