@@ -2569,6 +2569,28 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Enforce monotonic phases, clocks, signing-key generation, and unambiguous two-digest movement.
 - [x] Classify every before/after crash boundary from observed digests, including missing-artifact creation.
 - [x] Fail closed for tamper, malformed state, unsafe storage, key replacement, phase skips, lock mismatch, and active overlap.
-- [ ] Add an externally anchored monotonic floor that rejects replay of an older valid active record.
+- [x] Add an independent host-local replay ledger that rejects an older valid active record while its atomic state remains intact.
+- [ ] Add OS-backed or remote monotonic authority before claiming protection against coherent rollback of complete local state.
 - [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
 - [x] Publish draft stacked PR #44 on #43 with valid-record replay called out as a merge blocker.
+
+## Operational Projection Local Replay Ledger (2026-07-16)
+- [x] Add a separately keyed, atomically published bounded phase ledger and authenticated logical root under the global proposal-store mutation lock.
+- [x] Bind every floor advance to the exact authenticated active transaction record and reject fabricated, stale, skipped-phase, cross-lineage, and clock-regressing inputs.
+- [x] Detect older active-record replay, chain truncation, root tamper, malformed/canonical transport drift, and trailing bytes while the state remains intact.
+- [x] Remove the append/root crash wedge and mixed-snapshot reader race by publishing one complete state generation atomically.
+- [x] Rename direct transaction mutations as journal-only and add a coordinator that repairs one-phase crash gaps before any further advance.
+- [x] Reconcile a committed predecessor before successor preparation and repair the exact committed-to-new-prepared identity boundary after restart.
+- [x] Exact-assure private state storage on Windows and preserve exact POSIX directory/file modes.
+- [x] Recover an owned empty Windows authority directory left by interruption before DACL hardening.
+- [x] Sign literal `rollbackProtected:false` and `historicalAuthority:false`, and prove coherent whole-state rollback remains accepted without external authority.
+- [ ] Add authenticated checkpoint/retention before the 4,096-row bound is reached.
+- [ ] Publish protected draft PR #45 on #44 after independent blocker review.
+
+## Structured Agent Reasoning And Independent Review (2026-07-16)
+- [x] Audit current action, run-summary, trajectory, observer, manager, red-team, and Best-of-N telemetry contracts.
+- [x] Select a metadata-only `intent|observation|prediction|action|evidence|challenge` event union instead of persisting or parsing free-form chain-of-thought.
+- [ ] Add bounded strict semantic events to decisions, agent actions, outcomes, and trajectory projections with recursive raw-content rejection.
+- [ ] Emit the first deterministic semantic events from Manager's existing scores/verdict and measure calibration, challenge precision, and trajectory join coverage.
+- [ ] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
+- [ ] Repair Best-of-N's null correctness critic and draft-first deterministic test gap before treating candidate selection as independent review.

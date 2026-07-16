@@ -28,10 +28,10 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
 
 import { loadOrCreateKey, provenanceKeyPath } from '../src/core/foundry/provenance.js';
 import {
-  advanceOperationalProjectionTransaction,
+  advanceOperationalProjectionTransactionJournalOnly,
   classifyOperationalProjectionRecovery,
   operationalProjectionTransactionPath,
-  prepareOperationalProjectionTransaction,
+  prepareOperationalProjectionTransactionJournalOnly,
   readOperationalProjectionTransaction,
 } from '../src/core/inbox/operational-projection-transaction.js';
 import { operationalProposalProjectionDir } from '../src/core/inbox/operational-projection.js';
@@ -62,7 +62,7 @@ function acquire(): ProposalStoreMutationLock {
 }
 
 function prepare() {
-  return prepareOperationalProjectionTransaction({
+  return prepareOperationalProjectionTransactionJournalOnly({
     proposalId: 'proposal-433',
     before: BEFORE,
     after: AFTER,
@@ -117,7 +117,7 @@ describe('M433 operational projection transaction journal', () => {
     if (prepared.state !== 'healthy') return;
     const id = prepared.transaction.transactionId;
     for (const phase of ['proposal-installed', 'projection-installed', 'committed'] as const) {
-      expect(advanceOperationalProjectionTransaction(id, phase, lock!, NOW)).toMatchObject({
+      expect(advanceOperationalProjectionTransactionJournalOnly(id, phase, lock!, NOW)).toMatchObject({
         state: 'healthy', transaction: { transactionId: id, phase },
       });
     }
@@ -134,17 +134,17 @@ describe('M433 operational projection transaction journal', () => {
     expect(prepared.state).toBe('healthy');
     if (prepared.state !== 'healthy') return;
     const id = prepared.transaction.transactionId;
-    expect(advanceOperationalProjectionTransaction(id, 'projection-installed', lock!, NOW))
+    expect(advanceOperationalProjectionTransactionJournalOnly(id, 'projection-installed', lock!, NOW))
       .toMatchObject({ state: 'degraded', reason: 'transaction-phase-invalid' });
-    expect(advanceOperationalProjectionTransaction('f'.repeat(64), 'proposal-installed', lock!, NOW))
+    expect(advanceOperationalProjectionTransactionJournalOnly('f'.repeat(64), 'proposal-installed', lock!, NOW))
       .toMatchObject({ state: 'degraded', reason: 'transaction-identity-mismatch' });
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-other', before: BEFORE, after: AFTER, storeLock: lock!, now: NOW,
     })).toMatchObject({ state: 'degraded', reason: 'transaction-already-active' });
-    expect(advanceOperationalProjectionTransaction(id, 'proposal-installed', lock!, NOW).state).toBe('healthy');
-    expect(advanceOperationalProjectionTransaction(id, 'prepared', lock!, NOW))
+    expect(advanceOperationalProjectionTransactionJournalOnly(id, 'proposal-installed', lock!, NOW).state).toBe('healthy');
+    expect(advanceOperationalProjectionTransactionJournalOnly(id, 'prepared', lock!, NOW))
       .toMatchObject({ state: 'degraded', reason: 'transaction-phase-invalid' });
-    expect(advanceOperationalProjectionTransaction(
+    expect(advanceOperationalProjectionTransactionJournalOnly(
       id,
       'projection-installed',
       lock!,
@@ -153,7 +153,7 @@ describe('M433 operational projection transaction journal', () => {
     expect(readOperationalProjectionTransaction()).toMatchObject({
       state: 'healthy', transaction: { phase: 'proposal-installed' },
     });
-    expect(advanceOperationalProjectionTransaction(id, 'committed', lock!, NOW))
+    expect(advanceOperationalProjectionTransactionJournalOnly(id, 'committed', lock!, NOW))
       .toMatchObject({ state: 'degraded', reason: 'transaction-phase-invalid' });
     expect(readOperationalProjectionTransaction()).toMatchObject({
       state: 'healthy', transaction: { phase: 'proposal-installed' },
@@ -220,13 +220,13 @@ describe('M433 operational projection transaction journal', () => {
 
   it('requires exact writer-lock ownership and meaningful digest movement', () => {
     const foreign = { token: Symbol('foreign') } as ProposalStoreMutationLock;
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-433', before: BEFORE, after: AFTER, storeLock: foreign, now: NOW,
     })).toMatchObject({ state: 'degraded', reason: 'transaction-input-invalid' });
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-433', before: BEFORE, after: BEFORE, storeLock: acquire(), now: NOW,
     })).toMatchObject({ state: 'degraded', reason: 'transaction-input-invalid' });
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-433',
       before: BEFORE,
       after: { proposal: AFTER.proposal, projection: BEFORE.projection },
@@ -237,7 +237,7 @@ describe('M433 operational projection transaction journal', () => {
       before: BEFORE,
       after: { proposal: AFTER.proposal, projection: BEFORE.projection },
     }, AFTER)).toBe('unknown');
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-433',
       before: BEFORE,
       after: { proposal: BEFORE.proposal, projection: AFTER.projection },
@@ -249,7 +249,7 @@ describe('M433 operational projection transaction journal', () => {
 
   it('does not publish without the existing signing key', () => {
     fs.rmSync(provenanceKeyPath(), { force: true });
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-433', before: BEFORE, after: AFTER, storeLock: acquire(), now: NOW,
     })).toMatchObject({ state: 'degraded', reason: 'transaction-key-unavailable' });
     expect(fs.existsSync(operationalProjectionTransactionPath())).toBe(false);
@@ -261,9 +261,9 @@ describe('M433 operational projection transaction journal', () => {
     if (first.state !== 'healthy') return;
     const id = first.transaction.transactionId;
     for (const phase of ['proposal-installed', 'projection-installed', 'committed'] as const) {
-      expect(advanceOperationalProjectionTransaction(id, phase, lock!, NOW).state).toBe('healthy');
+      expect(advanceOperationalProjectionTransactionJournalOnly(id, phase, lock!, NOW).state).toBe('healthy');
     }
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-clock-rollback',
       before: { proposal: AFTER.proposal, projection: AFTER.projection },
       after: { proposal: '9'.repeat(64), projection: 'a'.repeat(64) },
@@ -273,7 +273,7 @@ describe('M433 operational projection transaction journal', () => {
     expect(readOperationalProjectionTransaction()).toMatchObject({
       state: 'healthy', transaction: { transactionId: id, phase: 'committed' },
     });
-    const second = prepareOperationalProjectionTransaction({
+    const second = prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-next',
       before: { proposal: AFTER.proposal, projection: AFTER.projection },
       after: { proposal: '5'.repeat(64), projection: '6'.repeat(64) },
@@ -286,7 +286,7 @@ describe('M433 operational projection transaction journal', () => {
     expect(second.state === 'healthy' && second.transaction.transactionId).not.toBe(id);
 
     fs.writeFileSync(operationalProjectionTransactionPath(), '{broken\n', { mode: 0o600 });
-    expect(prepareOperationalProjectionTransaction({
+    expect(prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-third',
       before: { proposal: '5'.repeat(64), projection: '6'.repeat(64) },
       after: { proposal: '7'.repeat(64), projection: '8'.repeat(64) },
