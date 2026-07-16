@@ -2528,4 +2528,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Revalidate evidence at staging, push, PR, and local-merge boundaries; remove unsigned summary text from the PR body.
 - [x] Make protected staging push atomic with the verified remote base and make local default-branch advancement an exact compare-and-swap.
 - [x] Pass 265 focused assertions with one intentional skip, typecheck, scoped lint, build, zero-vulnerability audit, and diff checks on the rebased PR #39 head.
-- [ ] Commit, push, open the protected activation PR on PR #39, and observe the complete protected matrix before any merge or deployment.
+- [x] Commit, push, and open protected activation PR #40 on PR #39 without merging or deploying.
+- [ ] Observe the complete PR #39 and PR #40 protected matrices before any merge or deployment.
