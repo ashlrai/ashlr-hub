@@ -36,10 +36,51 @@ const MAX_DIFF_FILES = 10_000;
 const MAX_DIFF_LINES = 100_000;
 const MAX_GIT_PATH_BYTES = 4 * 1024;
 const MAX_HEADER_SPLIT_CANDIDATES = 64;
-const TEST_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__']);
+const TEST_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', '__snapshots__']);
 const TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/i;
-const TEST_CONFIG_RE = /^(?:vitest|jest)\.(?:config|workspace|projects?)\.[cm]?[jt]sx?$/i;
-const TEST_SCRIPT_RE = /^scripts\/test(?:[-_.]|$)/i;
+const SNAPSHOT_FILE_RE = /\.snap$/i;
+// Config and project names may place a qualifier on either side of the control token.
+const TEST_CONFIG_RE =
+  /^(?:vite|vitest|jest)(?:[-_.][a-z0-9]+)*[-_.](?:config|workspace|projects?)(?:[-_.][a-z0-9]+)*\.(?:[cm]?[jt]sx?|json)$/i;
+const NON_EXECUTABLE_SCRIPT_EXTENSIONS = new Set([
+  'md', 'mdx', 'txt', 'rst', 'adoc', 'csv', 'json', 'jsonl', 'xml',
+  'html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf',
+  'yml', 'yaml', 'toml', 'ini', 'lock',
+]);
+const TEST_RUNNER_CONTEXT_TOKENS = new Set([
+  'run', 'runner', 'ci', 'suite', 'integration', 'unit', 'e2e', 'smoke', 'native',
+]);
+
+function isTestRunnerScript(path: string): boolean {
+  if (!path.toLowerCase().startsWith('scripts/')) return false;
+  const basename = path.split('/').at(-1) ?? '';
+  const extensionAt = basename.lastIndexOf('.');
+  const extension = extensionAt > 0 ? basename.slice(extensionAt + 1).toLowerCase() : '';
+  if (extension && NON_EXECUTABLE_SCRIPT_EXTENSIONS.has(extension)) return false;
+  const relativePath = path.slice('scripts/'.length);
+  const stem = extensionAt > 0 ? relativePath.slice(0, -(basename.length - extensionAt)) : relativePath;
+  const tokenize = (value: string): string[] => value
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .toLowerCase()
+    .replaceAll('/', '-')
+    .split(/[-_.]+/)
+    .filter(Boolean);
+  const tokens = tokenize(stem);
+  const basenameStem = extensionAt > 0 ? basename.slice(0, extensionAt) : basename;
+  const basenameTokens = tokenize(basenameStem);
+  const testLike = new Set(['test', 'tests', 'spec', 'specs', 'vitest', 'jest']);
+  const verifyLike = new Set(['verify', 'verification']);
+  const hasTestLike = tokens.some((token) => testLike.has(token));
+  const hasVerifyLike = tokens.some((token) => verifyLike.has(token));
+  const exactEntrypoint = basenameTokens.length === 1 &&
+    (testLike.has(basenameTokens[0]!) || verifyLike.has(basenameTokens[0]!));
+  const hasExecutionToken = tokens.some((token) =>
+    token === 'run' || token === 'runner' || token === 'command');
+  const hasRunnerContext = tokens.some((token) => TEST_RUNNER_CONTEXT_TOKENS.has(token));
+  return exactEntrypoint ||
+    ((hasTestLike || hasVerifyLike) && hasExecutionToken) ||
+    (hasTestLike && hasRunnerContext);
+}
 
 export function isSafetyTestFile(path: string): boolean {
   const segments = path.split('/');
@@ -47,8 +88,9 @@ export function isSafetyTestFile(path: string): boolean {
   return (
     segments.some((segment) => TEST_DIRECTORY_NAMES.has(segment.toLowerCase())) ||
     TEST_FILE_RE.test(basename) ||
+    SNAPSHOT_FILE_RE.test(basename) ||
     TEST_CONFIG_RE.test(basename) ||
-    TEST_SCRIPT_RE.test(path)
+    isTestRunnerScript(path)
   );
 }
 
@@ -185,11 +227,23 @@ function constrainPath(file: FileDiff, side: 'oldPath' | 'newPath', path: string
 }
 
 function resolvePaths(file: FileDiff): void {
-  if (file.candidates.length !== 1) throw new Error('ambiguous diff paths');
-  file.headerOldPath = file.candidates[0]!.oldPath;
-  file.headerNewPath = file.candidates[0]!.newPath;
-  file.oldPath = file.oldIsDevNull ? '' : file.headerOldPath;
-  file.newPath = file.newIsDevNull ? '' : file.headerNewPath;
+  const resolutions = file.candidates.map((candidate) => {
+    const oldPath = file.oldIsDevNull ? '' : candidate.oldPath;
+    const newPath = file.newIsDevNull ? '' : candidate.newPath;
+    const protectedPath = [oldPath, newPath].find((path) => path && isSafetyTestFile(path));
+    return { candidate, oldPath, newPath, protectedPath };
+  });
+  const protectedClassification = resolutions[0]!.protectedPath !== undefined;
+  if (resolutions.some((resolution) => (resolution.protectedPath !== undefined) !== protectedClassification)) {
+    throw new Error('ambiguous diff path classification');
+  }
+
+  const selected =
+    resolutions.find(({ candidate }) => candidate.oldPath === candidate.newPath) ?? resolutions[0]!;
+  file.headerOldPath = selected.candidate.oldPath;
+  file.headerNewPath = selected.candidate.newPath;
+  file.oldPath = selected.oldPath;
+  file.newPath = selected.newPath;
 }
 
 function assertDiffLineBound(diff: string): void {

@@ -845,6 +845,69 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
         "+export const exclude = ['test/**'];",
         '',
       ].join('\n'),
+      [
+        'diff --git a/vite.config.ts b/vite.config.ts',
+        '--- a/vite.config.ts',
+        '+++ b/vite.config.ts',
+        '@@ -1 +1,2 @@',
+        ' export default {};',
+        '+export default { test: { passWithNoTests: true } };',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/vitest.unit.config.ts b/vitest.unit.config.ts',
+        '--- a/vitest.unit.config.ts',
+        '+++ b/vitest.unit.config.ts',
+        '@@ -1 +1,2 @@',
+        ' export default {};',
+        "+export default { test: { exclude: ['test/**'] } };",
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/jest.config.json b/jest.config.json',
+        '--- a/jest.config.json',
+        '+++ b/jest.config.json',
+        '@@ -1 +1 @@',
+        '-{"testMatch":["**/*.test.ts"]}',
+        '+{"testMatch":[]}',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/src/__snapshots__/router.test.ts.snap b/src/__snapshots__/router.test.ts.snap',
+        '--- a/src/__snapshots__/router.test.ts.snap',
+        '+++ b/src/__snapshots__/router.test.ts.snap',
+        '@@ -1 +1 @@',
+        '-exports[`route 1`] = `secure`;',
+        '+exports[`route 1`] = `anything`;',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/scripts/run-tests.mjs b/scripts/run-tests.mjs',
+        '--- a/scripts/run-tests.mjs',
+        '+++ b/scripts/run-tests.mjs',
+        '@@ -1 +1 @@',
+        "-await import('vitest/node');",
+        '+process.exit(0);',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/scripts/ci-test.mjs b/scripts/ci-test.mjs',
+        '--- a/scripts/ci-test.mjs',
+        '+++ b/scripts/ci-test.mjs',
+        '@@ -1 +1 @@',
+        "-await import('./test-ci.mjs');",
+        '+process.exit(0);',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/scripts/run-verify-command.mjs b/scripts/run-verify-command.mjs',
+        '--- a/scripts/run-verify-command.mjs',
+        '+++ b/scripts/run-verify-command.mjs',
+        '@@ -1 +1 @@',
+        "-process.exit(runVerification());",
+        '+process.exit(0);',
+        '',
+      ].join('\n'),
     ];
 
     for (const [index, diff] of protectedDiffs.entries()) {
@@ -927,6 +990,46 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       );
       expect(verdict.authorized, diff).toBe(true);
     }
+  });
+
+  it('[E8ac] evidence preflight accepts benign ambiguous Git headers only with classification consensus', () => {
+    const ordinaryDiffs = [
+      [
+        'diff --git a/docs/x b/y.bin b/docs/x b/y.bin',
+        'index 1111111..2222222 100644',
+        'Binary files a/docs/x b/y.bin and b/docs/x b/y.bin differ',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/src/x b/tool.sh b/src/x b/tool.sh',
+        'old mode 100644',
+        'new mode 100755',
+        '',
+      ].join('\n'),
+    ];
+
+    for (const [index, diff] of ordinaryDiffs.entries()) {
+      const verdict = evaluateEvidenceAutoMergePreflight(
+        evidenceProposal(`e8ac-${index}`, diff),
+        evidenceCfg(),
+        { remoteAvailable: true },
+      );
+      expect(verdict.authorized, diff).toBe(true);
+    }
+
+    const classificationSpoof = [
+      'diff --git a/scripts/run b/tests.mjs b/scripts/run b/tests.mjs',
+      'index 1111111..2222222 100644',
+      'Binary files a/scripts/run b/tests.mjs and b/scripts/run b/tests.mjs differ',
+      '',
+    ].join('\n');
+    const refused = evaluateEvidenceAutoMergePreflight(
+      evidenceProposal('e8ac-spoof', classificationSpoof),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+    expect(refused.authorized).toBe(false);
+    expect(refused.reason).toMatch(/test-weakening.*unparseable diff/);
   });
 
   it('[E8b] weakened verification scripts are refused by evidence preflight', () => {

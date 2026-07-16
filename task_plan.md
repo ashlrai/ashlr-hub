@@ -2493,7 +2493,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Set the same isolated native test to a 240-second bounded budget after `b7e5cad` measured the full real-PowerShell transaction at roughly 131 seconds.
 - [x] Use protected `5750932` to prove M360 green and isolate the next native blocker to duplicate raw directory-fd fsync calls in repair-handoff append and compaction.
 - [x] Route both repair-handoff directory durability sites through the shared Windows-aware identity-validating primitive without relaxing file or directory authority.
-- [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
+- [x] Require every protected job on final immutable `e4ffbd4`: all six PR jobs passed, and the sole duplicate-asymmetric push timeout passed its exact failed-job rerun.
+
+## Refreshed Authority Stack (2026-07-16)
+- [x] Replay PR #34 as one patch-identical commit `1c243b7` on protected-green `e4ffbd4` and push with the exact prior remote lease.
+- [x] Replay PR #35 as one patch-identical commit `52463d2` on protected-green `e4ffbd4` and push with the exact prior remote lease.
+- [x] Replay PR #36 as one patch-identical commit `cc57322` on protected-green `e4ffbd4` and push with the exact prior remote lease.
+- [x] Replay PR #38 as one patch-identical commit `2beee4f` on refreshed PR #36 and push with the exact prior remote lease.
+- [ ] Require complete protected duplicate matrices on refreshed PRs #34, #35, #36, and #38 before merge consideration.
+- [x] Close PR #37 adversarial findings for Vite/Vitest/Jest variants, runner scripts, snapshots, and ambiguous Git-header classification; pass 75 focused tests, typecheck, build, and diff checks.
+- [ ] Publish the corrected PR #37 head and require a fresh complete protected matrix.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
 - [x] Select a pure versioned policy evaluator as the next authority slice after PR #36 source-complete observation.

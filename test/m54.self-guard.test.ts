@@ -50,6 +50,24 @@ function deleteFileDiff(path: string): string {
   ].join('\n');
 }
 
+function binaryFileDiff(path: string): string {
+  return [
+    `diff --git a/${path} b/${path}`,
+    'index 1111111..2222222 100644',
+    `Binary files a/${path} and b/${path} differ`,
+    '',
+  ].join('\n');
+}
+
+function modeOnlyDiff(path: string): string {
+  return [
+    `diff --git a/${path} b/${path}`,
+    'old mode 100644',
+    'new mode 100755',
+    '',
+  ].join('\n');
+}
+
 describe('M54 - protected test infrastructure paths', () => {
   it('protects test trees, colocated tests, configs, and repository test scripts case-insensitively', () => {
     for (const path of [
@@ -59,11 +77,49 @@ describe('M54 - protected test infrastructure paths', () => {
       'src/__TESTS__/unit.ts',
       'src/core/router.spec.ts',
       'src/core/router.TEST.TSX',
+      'src/__snapshots__/router.test.ts.snap',
+      'fixtures/router.snap',
+      'vite.config.ts',
+      'VITE.browser.config.mts',
       'vitest.config.ts',
+      'vitest.unit.config.ts',
+      'vitest.config.unit.ts',
       'Vitest.workspace.mts',
+      'vitest.unit.workspace.ts',
       'jest.config.cjs',
+      'jest.integration.config.cts',
+      'jest.browser.projects.ts',
+      'jest.config.json',
       'scripts/test-ci.mjs',
       'SCRIPTS/TEST-native-path-lifecycle.mjs',
+      'scripts/run-tests.mjs',
+      'scripts/ci-test.mjs',
+      'scripts/native/run_tests.ts',
+      'scripts/run-verify-command.mjs',
+      'scripts/run-vitest.mjs',
+      'scripts/vitest-runner.mjs',
+      'scripts/runTests.mjs',
+      'scripts/ci-test-native.mjs',
+      'scripts/integration-test-suite.ts',
+      'scripts/run-tests.pl',
+      'scripts/run-tests.ksh',
+      'scripts/vitest.mjs',
+      'scripts/jest.js',
+      'scripts/verify.mjs',
+      'scripts/verification.ts',
+      'scripts/vitest/run.mjs',
+      'scripts/test-runner/index.ts',
+      'scripts/tools/vitest.mjs',
+      'scripts/bin/jest.js',
+      'scripts/tools/verify.mjs',
+      'scripts/run-specs.mjs',
+      'scripts/spec-runner.ts',
+      'scripts/run-spec.sh',
+      'scripts/run-tests.r',
+      'scripts/run-tests.nu',
+      'scripts/run-tests.exs',
+      'scripts/run-tests.jl',
+      'scripts/run-tests.swift',
     ]) {
       expect(isSafetyTestFile(path), path).toBe(true);
     }
@@ -75,6 +131,20 @@ describe('M54 - protected test infrastructure paths', () => {
       'src/contest.ts',
       'docs/test-guide.md',
       'scripts/build.ts',
+      'scripts/contest.ts',
+      'scripts/latest.mjs',
+      'scripts/docs/run-tests.md',
+      'scripts/prod-test-data-migration.ts',
+      'scripts/verify-release.ts',
+      'scripts/verify-signature.py',
+      'scripts/vitest-migration.ts',
+      'scripts/jest-upgrade.rb',
+      'scripts/test-data.json',
+      'scripts/integration-test-results.xml',
+      'scripts/test-report.html',
+      'scripts/unit-test-logo.png',
+      'docs/vite-config.md',
+      'src/snapshot.ts',
       'README.md',
       'package.json',
     ]) {
@@ -105,10 +175,22 @@ describe('M54 - guardSafetyTests path-only policy', () => {
       'test/setup/home.ts',
       'test/helpers/h1-fixture.ts',
       'test/fixtures/package.json',
+      'src/__snapshots__/router.test.ts.snap',
+      'fixtures/router.snap',
+      'vite.config.ts',
+      'vitest.unit.config.ts',
+      'jest.integration.config.cts',
+      'jest.config.json',
       'vitest.config.ts',
       'jest.config.ts',
       'scripts/test-ci.mjs',
       'scripts/test-native-path-lifecycle.mjs',
+      'scripts/run-tests.mjs',
+      'scripts/ci-test.mjs',
+      'scripts/run-verify-command.mjs',
+      'scripts/run-vitest.mjs',
+      'scripts/vitest-runner.mjs',
+      'scripts/runTests.mjs',
     ]) {
       const verdict = guardSafetyTests(editFileDiff(path));
       expect(verdict.weakened, path).toBe(true);
@@ -194,6 +276,15 @@ describe('M54 - guardSafetyTests path-only policy', () => {
     ].join('\n');
     expect(guardSafetyTests(quoted).weakened).toBe(false);
 
+    const octalOrdinary = quoted.replaceAll('test guide.md', '\\303\\251 guide.md');
+    expect(guardSafetyTests(octalOrdinary).weakened).toBe(false);
+
+    const octalProtected = octalOrdinary.replaceAll('docs/', 'test/').replaceAll('.md', '.test.ts');
+    expect(guardSafetyTests(octalProtected)).toMatchObject({
+      weakened: true,
+      files: ['test/é guide.test.ts'],
+    });
+
     const mismatched = editFileDiff('src/core/router.ts').replace(
       '+++ b/src/core/router.ts',
       '+++ b/src/core/other.ts',
@@ -201,6 +292,40 @@ describe('M54 - guardSafetyTests path-only policy', () => {
     expect(guardSafetyTests(mismatched)).toMatchObject({
       weakened: true,
       reason: expect.stringMatching(/unparseable diff/),
+    });
+  });
+
+  it('accepts valid ambiguous binary and mode-only diffs when every candidate is ordinary', () => {
+    for (const diff of [
+      binaryFileDiff('docs/x b/y.bin'),
+      modeOnlyDiff('src/x b/tool.sh'),
+    ]) {
+      expect(guardSafetyTests(diff), diff).toMatchObject({
+        weakened: false,
+        reason: 'no protected test infrastructure touched',
+      });
+    }
+  });
+
+  it('protects unanimous ambiguous paths and fails closed when candidate classifications differ', () => {
+    expect(guardSafetyTests(binaryFileDiff('test/x b/y.bin'))).toMatchObject({
+      weakened: true,
+      reason: expect.stringMatching(/protected test infrastructure/),
+      files: ['test/x b/y.bin'],
+    });
+
+    const classificationSpoof = binaryFileDiff('scripts/run b/tests.mjs');
+    expect(guardSafetyTests(classificationSpoof)).toMatchObject({
+      weakened: true,
+      reason: expect.stringMatching(/unparseable diff/),
+      files: [],
+    });
+
+    const metadataDisambiguated = editFileDiff('scripts/run b/tests.mjs');
+    expect(guardSafetyTests(metadataDisambiguated)).toMatchObject({
+      weakened: true,
+      reason: expect.stringMatching(/protected test infrastructure/),
+      files: ['scripts/run b/tests.mjs'],
     });
   });
 
