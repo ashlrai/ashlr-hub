@@ -2685,4 +2685,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve proposal-less run semantics through the agent-action ledger and trajectory projection without adding raw prompts, reasoning, diffs, output, environment, paths, or file contents.
 - [x] Reject mismatched or unbound semantic subjects and retain the parent action with an explicit rejected state where applicable.
 - [x] Pass 273 assertions across 12 semantic/ledger/trajectory/sandbox consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
-- [ ] Publish protected stacked draft PR #52 on PR #51 and require the complete duplicate protected matrix.
+- [x] Publish protected stacked draft PR #52 on PR #51 and require the complete duplicate protected matrix.
