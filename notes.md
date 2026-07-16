@@ -2680,6 +2680,7 @@
   - Every signed root carries literal `rollbackProtected:false` and `historicalAuthority:false`. A matched old replay-ledger plus active-transaction snapshot is deliberately tested and remains accepted, proving that coherent whole-state rollback is outside host-local HMAC authority.
   - This closes PR #44's specific older-active-record replay gap only while the independent state remains intact. Authenticated checkpoint/retention is required before the 4,096-row bound; OS-backed or remote monotonic authority remains required before production enforcement.
   - Local evidence passes the final combined M432/M433/M434 matrix at 31 tests with three intentional platform skips, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
+  - Published commit `9a2654d` as draft protected PR #45 stacked on PR #44. No proposal writer, hot consumer, merge authority, production migration, deployment, or external rollback claim was activated; duplicate protected CI remains required.
 
 - Structured agent reasoning and independent-review audit (2026-07-16):
   - Free-form narration is not promoted into learning authority. The selected next contract is a closed metadata-only semantic event union for `intent`, `observation`, `prediction`, `action`, `evidence`, and `challenge`, with deterministic IDs/sequences, machine predicates, opaque subjects, bounded cardinality, and recursive rejection of prompts, text, content, raw lines, goals, diffs, stdout/stderr, env, and argv.

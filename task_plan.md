@@ -2585,7 +2585,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Recover an owned empty Windows authority directory left by interruption before DACL hardening.
 - [x] Sign literal `rollbackProtected:false` and `historicalAuthority:false`, and prove coherent whole-state rollback remains accepted without external authority.
 - [ ] Add authenticated checkpoint/retention before the 4,096-row bound is reached.
-- [ ] Publish protected draft PR #45 on #44 after independent blocker review.
+- [x] Publish protected draft PR #45 on #44 after independent blocker review and require duplicate protected CI before merge consideration.
 
 ## Structured Agent Reasoning And Independent Review (2026-07-16)
 - [x] Audit current action, run-summary, trajectory, observer, manager, red-team, and Best-of-N telemetry contracts.
