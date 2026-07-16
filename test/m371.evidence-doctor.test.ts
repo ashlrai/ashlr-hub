@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -13,6 +22,8 @@ import { cmdFleet } from '../src/cli/fleet.js';
 
 let home: string;
 let previousAshlrHome: string | undefined;
+let previousHome: string | undefined;
+let previousUserProfile: string | undefined;
 
 const quality = (overrides: Partial<FleetEvidenceDiagnosisQuality> = {}): FleetEvidenceDiagnosisQuality => ({
   sourceState: 'healthy',
@@ -29,13 +40,21 @@ const quality = (overrides: Partial<FleetEvidenceDiagnosisQuality> = {}): FleetE
 
 beforeEach(() => {
   previousAshlrHome = process.env.ASHLR_HOME;
+  previousHome = process.env.HOME;
+  previousUserProfile = process.env.USERPROFILE;
   home = mkdtempSync(join(tmpdir(), 'ashlr-m371-evidence-'));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
 });
 
 afterEach(() => {
   if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = previousAshlrHome;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = previousUserProfile;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -80,7 +99,7 @@ describe('M371 read-only fleet evidence doctor', () => {
     expect(calls).toBe(2);
   });
 
-  it.each(['file-limit', 'byte-limit', 'row-limit', 'event-limit'])('reports %s as a hard cap without retry', (reason) => {
+  it.each(['file-limit', 'byte-limit', 'row-limit', 'event-limit', 'bounded-limit'])('reports %s as a hard cap without retry', (reason) => {
     let calls = 0;
     const reader = () => {
       calls++;
@@ -113,6 +132,40 @@ describe('M371 read-only fleet evidence doctor', () => {
     });
     expect(readFileSync(file)).toEqual(before);
     expect(existsSync(join(dir, '.best-of-n.lock'))).toBe(false);
+  });
+
+  it('leaves malformed autonomy packs and storage unchanged during deep diagnosis', () => {
+    const root = process.env.ASHLR_HOME!;
+    const dir = join(root, 'evidence');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, 'malformed-pack.json');
+    const malformed = '{malformed-json\n';
+    writeFileSync(file, malformed, { mode: 0o600 });
+    const before = readFileSync(file);
+    const storageBefore = readdirSync(root, { recursive: true }).sort();
+    const provenanceKey = join(root, 'foundry', 'provenance.key');
+    expect(existsSync(provenanceKey)).toBe(false);
+
+    expect(diagnoseFleetEvidence('autonomy-packs', { deep: true })).toMatchObject({
+      source: 'autonomy-packs',
+      state: 'manual-inspection-required',
+      deep: true,
+      attempts: 1,
+      mutable: false,
+      quality: {
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: ['invalid-file'],
+        filesRead: 1,
+        bytesRead: Buffer.byteLength(malformed),
+        rowsScanned: 1,
+        invalidRows: 1,
+        unreadableFiles: 0,
+      },
+    });
+    expect(readFileSync(file)).toEqual(before);
+    expect(readdirSync(root, { recursive: true }).sort()).toEqual(storageBefore);
+    expect(existsSync(provenanceKey)).toBe(false);
   });
 
   it.skipIf(process.platform === 'win32')('does not migrate unsafe legacy modes during inspection', () => {
@@ -154,8 +207,9 @@ describe('M371 read-only fleet evidence doctor', () => {
 
   it('validates the closed source vocabulary', () => {
     for (const source of FLEET_EVIDENCE_SOURCES) expect(isFleetEvidenceSource(source)).toBe(true);
+    expect(FLEET_EVIDENCE_SOURCES).toContain('autonomy-packs');
     expect(isFleetEvidenceSource('arbitrary-ledger')).toBe(false);
-    expect(new Set<FleetEvidenceSource>(FLEET_EVIDENCE_SOURCES).size).toBe(6);
+    expect(new Set<FleetEvidenceSource>(FLEET_EVIDENCE_SOURCES).size).toBe(7);
   });
 
   it('wires JSON CLI diagnosis without endpoint or mutation authority', async () => {
@@ -165,12 +219,12 @@ describe('M371 read-only fleet evidence doctor', () => {
       return true;
     });
     try {
-      expect(await cmdFleet(['evidence', 'doctor', 'decisions', '--json'])).toBe(0);
+      expect(await cmdFleet(['evidence', 'doctor', 'autonomy-packs', '--json'])).toBe(0);
     } finally {
       stdout.mockRestore();
     }
     expect(JSON.parse(output)).toMatchObject({
-      source: 'decisions', state: 'cold-start', mutable: false, attempts: 1,
+      source: 'autonomy-packs', state: 'cold-start', mutable: false, attempts: 1,
     });
     expect(output).not.toContain('endpointPath');
   });

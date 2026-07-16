@@ -33,7 +33,10 @@ import type {
 } from '../types.js';
 import { realizedMergeOf } from '../inbox/realized-merge.js';
 import type { SharedQueueHealth } from './shared-store.js';
-import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
+import type {
+  AutonomyEvidencePack,
+  AutonomyEvidenceSourceQuality,
+} from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
@@ -253,6 +256,13 @@ export interface FleetAutonomyStatus {
   denied: number;
   byTier: Record<string, number>;
   recent: FleetAutonomyEvidenceSummary[];
+  /** Fail-closed health of the signed evidence authority store. */
+  authorityState: 'ready' | 'cold-start' | 'degraded';
+  protocols: {
+    sealedV3: number;
+    legacy: number;
+  };
+  sourceQuality: AutonomyEvidenceSourceQuality;
 }
 
 export interface FleetAutonomyDirectionSummary {
@@ -643,7 +653,7 @@ export interface FleetReadinessSourceHealth {
   id:
     | 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom'
     | 'decisions' | 'judge-traces' | 'agent-actions' | 'dispatch-production'
-    | 'dispatch-manifests' | 'best-of-n' | 'post-merge';
+    | 'dispatch-manifests' | 'best-of-n' | 'post-merge' | 'autonomy-packs';
   label: string;
   status: FleetReadinessSourceStatus;
   badge: 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
@@ -2345,10 +2355,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     denied: 0,
     byTier: {},
     recent: [],
+    authorityState: 'degraded',
+    protocols: { sealedV3: 0, legacy: 0 },
+    sourceQuality: {
+      sourceState: 'degraded',
+      sourcePresent: false,
+      complete: false,
+      filesRead: 0,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+      limitExceeded: false,
+    },
   };
   try {
-    const { listAutonomyEvidencePacks } = await import('../autonomy/evidence-pack.js');
-    autonomy = buildAutonomyStatus(listAutonomyEvidencePacks(200));
+    const { readAutonomyEvidencePacksDetailed } = await import('../autonomy/evidence-pack.js');
+    const evidenceRead = readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+    autonomy = buildAutonomyStatus(evidenceRead.packs, evidenceRead);
   } catch {
     // leave fallback
   }
@@ -4123,10 +4146,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (unhealthyEvidence.length > 0) {
     const labels = unhealthyEvidence.slice(0, 3).map((source) => source.label).join(', ');
     const firstSource = unhealthyEvidence[0]!.id;
+    const signedEvidenceBlocked = unhealthyEvidence.some((source) => source.id === 'autonomy-packs') &&
+      status.proposals.pending > 0;
     add({
-      id: 'inspect-learning-evidence',
-      priority: 'medium',
-      label: 'Inspect withheld evidence',
+      id: signedEvidenceBlocked ? 'inspect-signed-evidence' : 'inspect-learning-evidence',
+      priority: signedEvidenceBlocked ? 'high' : 'medium',
+      label: signedEvidenceBlocked ? 'Inspect signed evidence authority' : 'Inspect withheld evidence',
       detail:
         `${unhealthyEvidence.length} evidence source(s) are incomplete or degraded, so dependent ` +
         `authority, learning, or analytics remain fail-closed.${labels ? ` Sources: ${labels}.` : ''}`,
@@ -4898,7 +4923,29 @@ function learningEvidenceReadinessSources(
   status: FleetStatus,
   generatedAt: string,
 ): FleetReadinessSourceHealth[] {
+  const autonomyQuality = status.autonomy?.sourceQuality;
+  const autonomyEvidenceQuality: FleetReadinessEvidenceQuality | undefined = autonomyQuality
+    ? {
+        sourceState: autonomyQuality.sourceState,
+        sourcePresent: autonomyQuality.sourcePresent,
+        complete: autonomyQuality.complete,
+        stopReasons: [
+          ...(autonomyQuality.limitExceeded ? ['bounded-limit'] : []),
+          ...(autonomyQuality.invalidFiles > 0 ? ['invalid-file'] : []),
+          ...(autonomyQuality.unreadableFiles > 0 ? ['unreadable-file'] : []),
+        ],
+        filesRead: autonomyQuality.filesRead,
+        bytesRead: autonomyQuality.bytesRead,
+        rowsScanned: autonomyQuality.filesRead,
+        invalidRows: autonomyQuality.invalidFiles,
+        unreadableFiles: autonomyQuality.unreadableFiles,
+      }
+    : undefined;
   return [
+    evidenceReadinessSource({
+      id: 'autonomy-packs', label: 'Signed Evidence Authority', role: 'merge-authority',
+      quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
+    }),
     evidenceReadinessSource({
       id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
       quality: status.decisionsSource, generatedAt, applicability: 'required',
@@ -5264,6 +5311,18 @@ function chooseReadinessBlocker(
   if (guardBlock) {
     return readinessBlocker('guard-block', 'Guard block', guardBlock.detail, 'critical', 'guard');
   }
+  if (status.proposals.pending > 0 && status.autonomy?.authorityState === 'degraded') {
+    const quality = status.autonomy.sourceQuality;
+    return readinessBlocker(
+      'signed-evidence-degraded',
+      'Signed evidence authority degraded',
+      `The signed evidence store is incomplete (${quality.invalidFiles} invalid, ` +
+        `${quality.unreadableFiles} unreadable${quality.limitExceeded ? ', bounded read limit exceeded' : ''}); ` +
+        `${status.proposals.pending} pending proposal(s) remain fail-closed.`,
+      'high',
+      'autonomy-packs',
+    );
+  }
   const sharedQueue = status.queue.shared;
   if (sharedQueue && !sharedQueue.authorityReady) {
     const detail = !sharedQueue.trustedCoherentStorage
@@ -5530,6 +5589,8 @@ function buildAutonomousShipReadiness(
   const primaryAction =
     topBlocker?.id === 'phantom-audit-risk'
       ? nextActions.find((action) => action.id === 'review-phantom-audit') ?? nextActions[0] ?? null
+      : topBlocker?.id === 'signed-evidence-degraded'
+        ? nextActions.find((action) => action.id === 'inspect-signed-evidence') ?? nextActions[0] ?? null
       : topBlocker?.id === 'enrollment-registry-degraded'
         ? nextActions.find((action) => action.id === 'repair-enrollment-registry') ?? nextActions[0] ?? null
       : topBlocker?.id === 'auto-merge-disabled' && status.proposals.pending > 0
@@ -6138,13 +6199,18 @@ function buildAutonomyDirectionSummary(report: ResourceStrategyReport): FleetAut
   };
 }
 
-function buildAutonomyStatus(packs: AutonomyEvidencePack[]): FleetAutonomyStatus {
+function buildAutonomyStatus(
+  packs: AutonomyEvidencePack[],
+  sourceQuality: AutonomyEvidenceSourceQuality,
+): FleetAutonomyStatus {
   const byTier: Record<string, number> = {};
   let allowed = 0;
   let denied = 0;
   let latestAt: string | null = null;
+  let sealedV3 = 0;
 
   for (const pack of packs) {
+    if (pack.version === 3) sealedV3++;
     if (latestAt === null || Date.parse(pack.generatedAt) > Date.parse(latestAt)) {
       latestAt = pack.generatedAt;
     }
@@ -6160,6 +6226,13 @@ function buildAutonomyStatus(packs: AutonomyEvidencePack[]): FleetAutonomyStatus
     allowed,
     denied,
     byTier,
+    authorityState: sourceQuality.sourceState === 'missing'
+      ? 'cold-start'
+      : sourceQuality.sourceState === 'healthy' && sourceQuality.complete
+        ? 'ready'
+        : 'degraded',
+    protocols: { sealedV3, legacy: packs.length - sealedV3 },
+    sourceQuality: { ...sourceQuality },
     recent: packs.slice(0, 8).map((pack) => ({
       proposalId: pack.proposal.id,
       generatedAt: pack.generatedAt,

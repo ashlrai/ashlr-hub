@@ -4,6 +4,7 @@ import { readDecisionsDetailed } from './decisions-ledger.js';
 import { readDispatchManifestEventsDetailed } from './dispatch-manifest.js';
 import { readDispatchProductionEventsDetailed } from './dispatch-production-ledger.js';
 import { readJudgeTracesDetailed } from './judge-trace.js';
+import { readAutonomyEvidencePacksDetailed } from '../autonomy/evidence-pack.js';
 
 export const FLEET_EVIDENCE_SOURCES = [
   'decisions',
@@ -12,6 +13,7 @@ export const FLEET_EVIDENCE_SOURCES = [
   'dispatch-production',
   'dispatch-manifests',
   'best-of-n',
+  'autonomy-packs',
 ] as const;
 
 export type FleetEvidenceSource = typeof FLEET_EVIDENCE_SOURCES[number];
@@ -72,6 +74,25 @@ function qualityOf(value: FleetEvidenceDiagnosisQuality): FleetEvidenceDiagnosis
   };
 }
 
+function autonomyPacksQuality(deep: boolean): FleetEvidenceDiagnosisQuality {
+  const value = readAutonomyEvidencePacksDetailed(deep ? DEEP.maxFiles : undefined);
+  const stopReasons: string[] = [];
+  if (value.limitExceeded) stopReasons.push('bounded-limit');
+  if (value.invalidFiles > 0) stopReasons.push('invalid-file');
+  if (value.unreadableFiles > 0) stopReasons.push('unreadable-file');
+  return {
+    sourceState: value.sourceState,
+    sourcePresent: value.sourcePresent,
+    complete: value.complete,
+    stopReasons,
+    filesRead: value.filesRead,
+    bytesRead: value.bytesRead,
+    rowsScanned: value.filesRead,
+    invalidRows: value.invalidFiles,
+    unreadableFiles: value.unreadableFiles,
+  };
+}
+
 const DEFAULT_READERS: Record<FleetEvidenceSource, EvidenceReader> = {
   decisions: (deep) => qualityOf(readDecisionsDetailed(deep ? DEEP : {})),
   'judge-traces': (deep) => qualityOf(readJudgeTracesDetailed(deep ? DEEP : {})),
@@ -83,13 +104,15 @@ const DEFAULT_READERS: Record<FleetEvidenceSource, EvidenceReader> = {
   'best-of-n': (deep) => qualityOf(readBestOfNRecordsDetailed({
     ...(deep ? DEEP : {}), inspectionOnly: true,
   })),
+  'autonomy-packs': autonomyPacksQuality,
 };
 
 function diagnosisState(quality: FleetEvidenceDiagnosisQuality): FleetEvidenceDiagnosisState {
   if (quality.sourceState === 'missing') return 'cold-start';
   if (quality.sourceState === 'healthy' && quality.complete) return 'healthy';
   if (quality.stopReasons.some((reason) =>
-    reason === 'file-limit' || reason === 'byte-limit' || reason === 'row-limit' || reason === 'event-limit')) {
+    reason === 'file-limit' || reason === 'byte-limit' || reason === 'row-limit' ||
+    reason === 'event-limit' || reason === 'bounded-limit')) {
     return 'hard-cap-exceeded';
   }
   return 'manual-inspection-required';
