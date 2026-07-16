@@ -2597,4 +2597,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add independent post-effect observations and preregistered prediction mapping before enabling calibration metrics.
 - [ ] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
 - [ ] Repair Best-of-N's null correctness critic and draft-first deterministic test gap before treating candidate selection as independent review.
-- [ ] Publish protected stacked PR #46 after final independent blocker review.
+- [x] Publish protected draft PR #46 after final independent blocker review returned `SHIP`; require both duplicate protected matrices before promotion.
