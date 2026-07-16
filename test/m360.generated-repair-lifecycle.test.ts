@@ -46,52 +46,74 @@ import {
   acquireProposalStoreMutationLock,
   releaseProposalStoreMutationLock,
 } from '../src/core/inbox/proposal-mutation-lock.js';
-import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  type PrivateStorageInvocation,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
-const privateStorageHarness = vi.hoisted(() => ({
-  useSemanticAdapter: false,
-  realCalls: 0,
+const privateStorageHarness = {
   realInvocations: [] as Array<{
     path: string;
     kind: 'file' | 'directory';
     mode: 'secure-created' | 'inspect-existing' | 'inspect-owned';
     anchorPath: string | undefined;
   }>,
-}));
+};
 
-vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  return {
-    ...actual,
-    assurePrivateStoragePath: (
-      ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => {
-      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
-        return {
-          ok: true,
-          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
-        };
-      }
-      privateStorageHarness.realCalls++;
-      privateStorageHarness.realInvocations.push({
-        path: args[0],
-        kind: args[1],
-        mode: args[2],
-        anchorPath: args[3]?.anchorPath,
-      });
-      return actual.assurePrivateStoragePath(...args);
-    },
-    assurePrivateStoragePaths: (
-      ...args: Parameters<typeof actual.assurePrivateStoragePaths>
-    ) => {
-      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
-        return { ok: true, reason: args[0].length === 0 ? 'no-paths' : 'owned-safe-paths' };
-      }
-      privateStorageHarness.realCalls++;
-      return actual.assurePrivateStoragePaths(...args);
-    },
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
   };
-});
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
+
+function observePrivateStorageInvocation(invocation: PrivateStorageInvocation): void {
+  const request = JSON.parse(invocation.input) as {
+    operation: string;
+    path?: string;
+    kind?: 'file' | 'directory';
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+    anchorPath?: string;
+  };
+  if (request.operation !== 'assure-private-path' || request.path === undefined ||
+    request.kind === undefined || request.mode === undefined) return;
+  privateStorageHarness.realInvocations.push({
+    path: request.path,
+    kind: request.kind,
+    mode: request.mode,
+    anchorPath: request.anchorPath,
+  });
+}
+
+function useSemanticPrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+    runner: semanticPrivateStorageRunner,
+  });
+}
+
+function useObservedNativePrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+    observeInvocation: observePrivateStorageInvocation,
+  });
+}
 
 vi.mock('../src/core/run/engines.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
@@ -103,9 +125,9 @@ const MAX_LIFECYCLE_TEST_RSS_KIB = 768 * 1024;
 
 beforeEach(() => {
   expect.hasAssertions();
-  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
-  privateStorageHarness.realCalls = 0;
   privateStorageHarness.realInvocations.length = 0;
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  if (process.platform === 'win32') useSemanticPrivateStorageRunner();
   fx = makeFixture();
 });
 
@@ -116,7 +138,7 @@ afterEach(() => {
   try {
     fx.cleanup();
   } finally {
-    privateStorageHarness.useSemanticAdapter = false;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   }
 });
 
@@ -160,7 +182,7 @@ function captureRepairItem(overrides: Partial<WorkItem> = {}): WorkItem {
 }
 
 function useSemanticDiagnosticFixtureStorage(): void {
-  if (process.platform === 'win32') privateStorageHarness.useSemanticAdapter = true;
+  if (process.platform === 'win32') useSemanticPrivateStorageRunner();
 }
 
 function diagnosticRepairItem(
@@ -2842,7 +2864,7 @@ describe('generated repair lifecycle store', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage',
     () => {
-      privateStorageHarness.useSemanticAdapter = false;
+      useObservedNativePrivateStorageRunner();
       mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
       expect(assurePrivateStoragePath(
         fx.ashlrDir,
@@ -2853,7 +2875,7 @@ describe('generated repair lifecycle store', () => {
 
       // Handoff and proposal storage are prerequisites, not the authority under
       // test. Dispatch receipt and lifecycle publication re-enter native mode.
-      privateStorageHarness.useSemanticAdapter = true;
+      useSemanticPrivateStorageRunner();
       const item = diagnosticRepairItem();
       const event = diagnosticProposalEvent(
         item,
@@ -2864,10 +2886,10 @@ describe('generated repair lifecycle store', () => {
         1,
       );
       persistDurableProposal(item, event);
-      privateStorageHarness.useSemanticAdapter = false;
+      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      useObservedNativePrivateStorageRunner();
       secureNativeFixtureDescendants(fx.ashlrDir, fx.ashlrDir);
       const root = dispatchProductionDir();
-      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
       const lifecyclePath = generatedRepairLifecyclePath();
       const lifecycleNativeCallsBefore = privateStorageHarness.realInvocations.length;
       const transition = recordGeneratedRepairLifecycle(item, {
@@ -2876,6 +2898,7 @@ describe('generated repair lifecycle store', () => {
         proposalId: 'prop-publication-private-storage',
         ts: event.ts,
       });
+      expect(transition.recorded).toBe(true);
       const lifecycleTempPattern = new RegExp(
         `^${lifecyclePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.[a-f0-9]{12}\\.tmp$`,
       );

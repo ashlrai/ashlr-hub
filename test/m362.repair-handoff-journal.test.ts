@@ -17,7 +17,20 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
+  captureFileContents: false,
   realCalls: 0,
+  semanticInvocations: [] as Array<{
+    path: string;
+    kind: 'file' | 'directory';
+    mode: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+    anchorPath: string | undefined;
+    fileContents?: string;
+  }>,
+  semanticFailure: undefined as undefined | {
+    path: string;
+    kind: 'file' | 'directory';
+    mode: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  },
 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -27,7 +40,23 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
     ) => {
-      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+      if (privateStorageHarness.useSemanticAdapter) {
+        let fileContents: string | undefined;
+        if (privateStorageHarness.captureFileContents && args[1] === 'file' && existsSync(args[0])) {
+          try { fileContents = readFileSync(args[0], 'utf8'); } catch { /* changing test path */ }
+        }
+        privateStorageHarness.semanticInvocations.push({
+          path: args[0],
+          kind: args[1],
+          mode: args[2],
+          anchorPath: args[3]?.anchorPath,
+          ...(fileContents === undefined ? {} : { fileContents }),
+        });
+        if (
+          privateStorageHarness.semanticFailure?.path === args[0] &&
+          privateStorageHarness.semanticFailure.kind === args[1] &&
+          privateStorageHarness.semanticFailure.mode === args[2]
+        ) return { ok: false, reason: 'semantic-assurance-failure' };
         return {
           ok: true,
           reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
@@ -115,10 +144,16 @@ beforeAll(() => {
 beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
+  privateStorageHarness.semanticInvocations.length = 0;
+  privateStorageHarness.semanticFailure = undefined;
+  privateStorageHarness.captureFileContents = false;
 });
 
 afterEach(() => {
   _setRepairHandoffJournalFaultForTest(undefined);
+  privateStorageHarness.semanticFailure = undefined;
+  privateStorageHarness.captureFileContents = false;
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   fx.cleanup();
 });
 
@@ -1609,6 +1644,192 @@ describe('M362 durable repair handoff journal', () => {
     });
     expect(statSync(path).size).toBe(oversizedBytes);
   });
+
+  it('anchors fresh Windows fleet and journal authority before writing', () => {
+    privateStorageHarness.useSemanticAdapter = true;
+    const repo = fx.makeRepo();
+    const path = repairHandoffV2JournalPath();
+    const fleetDir = dirname(path);
+
+    expect(recordRepairHandoffs(event(repo.dir)))
+      .toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const authorityCalls = privateStorageHarness.semanticInvocations.filter(
+      (call) => call.path === fleetDir || call.path === path,
+    );
+    expect(authorityCalls).toEqual(expect.arrayContaining([
+      {
+        path: fleetDir,
+        kind: 'directory',
+        mode: 'secure-created',
+        anchorPath: fx.ashlrDir,
+      },
+      {
+        path,
+        kind: 'file',
+        mode: 'secure-created',
+        anchorPath: fleetDir,
+      },
+      {
+        path,
+        kind: 'file',
+        mode: 'inspect-existing',
+        anchorPath: fleetDir,
+      },
+    ]));
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', physicalRows: 1 });
+  });
+
+  it('exact-inspects pre-existing Windows fleet and journal authority without rewriting it', () => {
+    privateStorageHarness.useSemanticAdapter = true;
+    const path = repairHandoffV2JournalPath();
+    const fleetDir = dirname(path);
+    mkdirSync(fleetDir, { recursive: true, mode: 0o700 });
+    writeFileSync(path, '', { mode: 0o600 });
+
+    expect(readRepairHandoffs())
+      .toMatchObject({ sourceState: 'healthy', physicalRows: 0 });
+    const authorityCalls = privateStorageHarness.semanticInvocations.filter(
+      (call) => call.path === fleetDir || call.path === path,
+    );
+    expect(authorityCalls).toEqual(expect.arrayContaining([
+      {
+        path: fleetDir,
+        kind: 'directory',
+        mode: 'inspect-existing',
+        anchorPath: fx.ashlrDir,
+      },
+      {
+        path,
+        kind: 'file',
+        mode: 'inspect-existing',
+        anchorPath: fleetDir,
+      },
+    ]));
+    expect(authorityCalls.some((call) => call.mode === 'secure-created')).toBe(false);
+  });
+
+  it('fails closed when Windows directory or journal assurance fails', () => {
+    privateStorageHarness.useSemanticAdapter = true;
+    const repo = fx.makeRepo();
+    const path = repairHandoffV2JournalPath();
+    const fleetDir = dirname(path);
+    privateStorageHarness.semanticFailure = {
+      path: fleetDir,
+      kind: 'directory',
+      mode: 'secure-created',
+    };
+
+    expect(recordRepairHandoffs(event(repo.dir)))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(existsSync(path)).toBe(false);
+
+    privateStorageHarness.semanticFailure = {
+      path,
+      kind: 'file',
+      mode: 'secure-created',
+    };
+    expect(recordRepairHandoffs(event(repo.dir)))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(path, 'utf8')).toBe('');
+
+    rmSync(path);
+    writeFileSync(path, '', { mode: 0o600 });
+    privateStorageHarness.semanticFailure = {
+      path,
+      kind: 'file',
+      mode: 'inspect-existing',
+    };
+    expect(readRepairHandoffs())
+      .toMatchObject({ sourceState: 'degraded', observations: [] });
+    expect(recordRepairHandoffs(event(repo.dir)))
+      .toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readFileSync(path, 'utf8')).toBe('');
+  });
+
+  it('secures Windows compaction files before install and exact-inspects the result', () => {
+    privateStorageHarness.useSemanticAdapter = true;
+    const repo = fx.makeRepo();
+    const path = repairHandoffV2JournalPath();
+    const fleetDir = dirname(path);
+    expect(recordRepairHandoffs(event(repo.dir)))
+      .toMatchObject({ recorded: 1, failed: 0 });
+    const row = readRepairHandoffs().observations[0]!;
+    const compactedContents = `${JSON.stringify(row)}\n`;
+    writeFileSync(path, `${JSON.stringify(row)}\n`, { encoding: 'utf8', flag: 'a' });
+    privateStorageHarness.semanticInvocations.length = 0;
+    privateStorageHarness.captureFileContents = true;
+
+    expect(compactRepairHandoffs())
+      .toEqual({ available: true, before: 2, after: 1, removed: 1 });
+    const fileCalls = privateStorageHarness.semanticInvocations.filter(
+      (call) => call.kind === 'file' && call.anchorPath === fleetDir,
+    );
+    const securedTempIndex = fileCalls.findIndex((call) =>
+      call.mode === 'secure-created' &&
+      /^.+repair-handoffs-v2\.jsonl\.\d+\.[a-f0-9]{12}\.tmp$/.test(call.path));
+    const installedInspectIndex = fileCalls.findIndex((call, index) =>
+      index > securedTempIndex && call.path === path &&
+      call.mode === 'inspect-existing' && call.fileContents === compactedContents);
+    expect(securedTempIndex).toBeGreaterThanOrEqual(0);
+    expect(fileCalls[securedTempIndex]).toMatchObject({
+      mode: 'secure-created',
+      anchorPath: fleetDir,
+      fileContents: '',
+    });
+    expect(installedInspectIndex).toBeGreaterThan(securedTempIndex);
+    expect(fileCalls[installedInspectIndex]).toEqual({
+      path,
+      kind: 'file',
+      mode: 'inspect-existing',
+      anchorPath: fleetDir,
+      fileContents: compactedContents,
+    });
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'establishes native exact private DACLs for fresh and compacted repair handoff storage',
+    () => {
+      privateStorageHarness.useSemanticAdapter = false;
+      mkdirSync(fx.ashlrDir, { mode: 0o700 });
+      expect(assurePrivateStoragePath(
+        fx.ashlrDir,
+        'directory',
+        'secure-created',
+        { anchorPath: fx.home },
+      ).ok).toBe(true);
+      const realCallsBefore = privateStorageHarness.realCalls;
+      const repo = fx.makeRepo();
+      expect(recordRepairHandoffs(event(repo.dir)))
+        .toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const path = repairHandoffV2JournalPath();
+      const fleetDir = dirname(path);
+      expect(assurePrivateStoragePath(
+        fleetDir,
+        'directory',
+        'inspect-existing',
+        { anchorPath: fx.ashlrDir },
+      ).ok).toBe(true);
+      expect(assurePrivateStoragePath(
+        path,
+        'file',
+        'inspect-existing',
+        { anchorPath: fleetDir },
+      ).ok).toBe(true);
+      const row = readRepairHandoffs().observations[0]!;
+      writeFileSync(path, `${JSON.stringify(row)}\n`, { encoding: 'utf8', flag: 'a' });
+      expect(compactRepairHandoffs())
+        .toEqual({ available: true, before: 2, after: 1, removed: 1 });
+      expect(readFileSync(path, 'utf8')).toBe(`${JSON.stringify(row)}\n`);
+      expect(assurePrivateStoragePath(
+        path,
+        'file',
+        'inspect-existing',
+        { anchorPath: fleetDir },
+      ).ok).toBe(true);
+      expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+    },
+    90_000,
+  );
 
   it('reconstructs an old unprojected child without dispatch-history limits', async () => {
     const repo = fx.makeRepo();

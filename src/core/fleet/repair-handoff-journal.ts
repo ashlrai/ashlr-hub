@@ -33,6 +33,7 @@ import {
 import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_RECORDS = 100_000;
@@ -479,27 +480,71 @@ function sameParentProvenance(left: RepairHandoffObservation, right: RepairHando
     left.parentTier === right.parentTier;
 }
 
+function safeRepairHandoffDirectory(stat: Stats): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() && privateOwner(stat.uid);
+}
+
+function safeRepairHandoffJournal(stat: Stats): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && privateOwner(stat.uid) && stat.nlink === 1;
+}
+
+function assureRepairHandoffStoragePath(
+  path: string,
+  kind: 'file' | 'directory',
+  mode: PrivateStorageMode,
+  anchorPath: string,
+): void {
+  if (!assurePrivateStoragePath(
+    path, kind, mode, { anchorPath },
+  ).ok) throw new Error(`unsafe Windows repair handoff ${kind}`);
+}
+
+function assureRepairHandoffJournalFile(path: string, mode: PrivateStorageMode, opened: Stats): void {
+  assureRepairHandoffStoragePath(path, 'file', mode, dirname(path));
+  const named = lstatSync(path);
+  if (!safeRepairHandoffJournal(named) || named.dev !== opened.dev || named.ino !== opened.ino) {
+    throw new Error('unsafe repair handoff journal');
+  }
+}
+
 function ensurePrivatePath(path: string): Stats {
   const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const created = !existsSync(dir) && mkdirSync(dir, { recursive: true, mode: 0o700 }) !== undefined;
   const dirStat = lstatSync(dir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || !privateOwner(dirStat.uid)) {
+  if (!safeRepairHandoffDirectory(dirStat)) {
     throw new Error('unsafe repair handoff directory');
   }
   chmodSync(dir, 0o700);
+  assureRepairHandoffStoragePath(
+    dir,
+    'directory',
+    created ? 'secure-created' : 'inspect-existing',
+    dirname(dir),
+  );
+  const assuredDirStat = lstatSync(dir);
+  if (
+    !safeRepairHandoffDirectory(assuredDirStat) ||
+    assuredDirStat.dev !== dirStat.dev || assuredDirStat.ino !== dirStat.ino
+  ) throw new Error('unsafe repair handoff directory');
   if (existsSync(path)) {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1) {
+    if (!safeRepairHandoffJournal(stat)) {
       throw new Error('unsafe repair handoff journal');
     }
+    assureRepairHandoffJournalFile(path, 'inspect-existing', stat);
   }
-  return dirStat;
+  return assuredDirStat;
 }
 
 function appendObservation(observation: RepairHandoffObservation): boolean {
   const path = observation.schemaVersion === 2
     ? repairHandoffV2JournalPath()
     : repairHandoffJournalPath();
+  try {
+    ensurePrivatePath(path);
+  } catch {
+    return false;
+  }
   const lock = acquireLocalStoreLock(repairHandoffLockPath(path));
   if (!lock) return false;
   let fd: number | undefined;
@@ -525,13 +570,19 @@ function appendObservation(observation: RepairHandoffObservation): boolean {
     if (durable.physicalRows + (durable.tornTail ? 1 : 0) >= MAX_RECORDS) return false;
     if (!observationAdmissionAllowed(durable, observation)) return false;
     const before = existsSync(path) ? lstatSync(path) : undefined;
-    fd = openSync(path, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW, 0o600);
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+        (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
+      0o600,
+    );
     try {
       const stat = fstatSync(fd);
       const bytes = Buffer.from(`\n${JSON.stringify(observation)}\n`, 'utf8');
       if (!stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1 || stat.size + bytes.length > MAX_FILE_BYTES) return false;
       if (before && (before.dev !== stat.dev || before.ino !== stat.ino)) return false;
       fchmodSync(fd, 0o600);
+      if (!before) assureRepairHandoffJournalFile(path, 'secure-created', stat);
       if (bytes.length > MAX_ROW_BYTES) return false;
       if (writeSync(fd, bytes) !== bytes.length) return false;
       syncRepairHandoffAuthority(path, fd, directory);
@@ -1137,6 +1188,11 @@ function compactRepairHandoffFile(
   expectedSchemaVersion: 1 | 2,
 ): RepairHandoffCompactionResult {
   if (!existsSync(path)) return { available: true, before: 0, after: 0, removed: 0 };
+  try {
+    ensurePrivatePath(path);
+  } catch {
+    return { available: false, before: 0, after: 0, removed: 0 };
+  }
   const lock = acquireLocalStoreLock(repairHandoffLockPath(path));
   if (!lock) return { available: false, before: 0, after: 0, removed: 0 };
   let tmp: string | undefined;
@@ -1160,25 +1216,35 @@ function compactRepairHandoffFile(
     const directory = ensurePrivatePath(path);
     tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const openedTmp = fstatSync(fd);
+    if (!safeRepairHandoffJournal(openedTmp)) throw new Error('unsafe repair handoff compaction file');
+    fchmodSync(fd, 0o600);
+    assureRepairHandoffJournalFile(tmp, 'secure-created', openedTmp);
     const bytes = Buffer.from(compacted.map((row) => JSON.stringify(row)).join('\n') + (compacted.length ? '\n' : ''), 'utf8');
     if (writeSync(fd, bytes) !== bytes.length) throw new Error('short repair handoff compaction write');
-    fchmodSync(fd, 0o600);
     fsyncSync(fd);
     const compactedFile = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
     renameSync(tmp, path);
     tmp = undefined;
+    assureRepairHandoffJournalFile(path, 'inspect-existing', compactedFile);
     const authoritative = lstatSync(path);
     const currentDirectory = lstatSync(dirname(path));
     if (
       authoritative.isSymbolicLink() || !authoritative.isFile() || authoritative.nlink !== 1 ||
       authoritative.dev !== compactedFile.dev || authoritative.ino !== compactedFile.ino ||
+      !safeRepairHandoffDirectory(currentDirectory) ||
       currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
     ) throw new Error('repair handoff compaction path changed');
     let dirFd: number | undefined;
     try {
-      dirFd = openSync(dirname(path), fsConstants.O_RDONLY);
+      dirFd = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const openedDirectory = fstatSync(dirFd);
+      if (
+        !safeRepairHandoffDirectory(openedDirectory) ||
+        openedDirectory.dev !== directory.dev || openedDirectory.ino !== directory.ino
+      ) throw new Error('repair handoff directory changed after compaction');
       fsyncSync(dirFd);
     } finally {
       if (dirFd !== undefined) closeSync(dirFd);

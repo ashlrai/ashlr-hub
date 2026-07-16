@@ -247,6 +247,67 @@ export type PrivateStorageRunner = (invocation: PrivateStorageInvocation) => {
   error?: Error;
 };
 
+export const PRIVATE_STORAGE_TEST_CONTROL = Symbol.for(
+  'ashlr.private-storage.test-control.v1',
+);
+
+export interface PrivateStorageTestControl {
+  runner?: PrivateStorageRunner;
+  observeInvocation?: (invocation: PrivateStorageInvocation) => void;
+}
+
+interface PrivateStorageTestControlState extends PrivateStorageTestControl {
+  sentinel: symbol;
+}
+
+const PRIVATE_STORAGE_TEST_CONTROL_STATE = Symbol.for(
+  'ashlr.private-storage.test-control.state.v1',
+);
+
+function isVitestContext(): boolean {
+  return process.env['VITEST'] === 'true';
+}
+
+function activePrivateStorageTestControl(): PrivateStorageTestControlState | undefined {
+  const state = Reflect.get(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE) as
+    PrivateStorageTestControlState | undefined;
+  if (state === undefined) return undefined;
+  if (state.sentinel !== PRIVATE_STORAGE_TEST_CONTROL) {
+    throw new Error('Invalid private-storage test control state');
+  }
+  if (!isVitestContext()) {
+    throw new Error('Private-storage test control is restricted to Vitest');
+  }
+  return state;
+}
+
+export function _setPrivateStorageTestControlForTest(
+  sentinel: symbol,
+  control: PrivateStorageTestControl | undefined,
+): void {
+  if (sentinel !== PRIVATE_STORAGE_TEST_CONTROL) {
+    throw new Error('Invalid private-storage test control sentinel');
+  }
+  if (control === undefined) {
+    Reflect.deleteProperty(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE);
+    return;
+  }
+  if (!isVitestContext()) {
+    throw new Error('Private-storage test control is restricted to Vitest');
+  }
+  if (control.runner !== undefined && typeof control.runner !== 'function') {
+    throw new TypeError('Private-storage test runner must be a function');
+  }
+  if (control.observeInvocation !== undefined && typeof control.observeInvocation !== 'function') {
+    throw new TypeError('Private-storage invocation observer must be a function');
+  }
+  Reflect.set(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE, Object.freeze({
+    sentinel: PRIVATE_STORAGE_TEST_CONTROL,
+    runner: control.runner,
+    observeInvocation: control.observeInvocation,
+  } satisfies PrivateStorageTestControlState));
+}
+
 const FAILURE_REASONS = new Set([
   'adapter-error-ancestor-attributes', 'adapter-error-ancestor-get-acl',
   'adapter-error-ancestor-next', 'adapter-error-ancestor-owner',
@@ -329,17 +390,23 @@ export function assurePrivateStoragePath(
     kind,
     mode,
   });
+  const invocation: PrivateStorageInvocation = {
+    executable,
+    args: [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-EncodedCommand', ENCODED_WINDOWS_ACL_SCRIPT,
+    ],
+    input,
+    timeoutMs,
+    maxBuffer: MAX_OUTPUT_BYTES,
+  };
+  const testControl = activePrivateStorageTestControl();
   try {
-    const result = (options.runner ?? defaultRunner)({
-      executable,
-      args: [
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', ENCODED_WINDOWS_ACL_SCRIPT,
-      ],
-      input,
-      timeoutMs,
-      maxBuffer: MAX_OUTPUT_BYTES,
+    testControl?.observeInvocation?.({
+      ...invocation,
+      args: [...invocation.args],
     });
+    const result = (options.runner ?? testControl?.runner ?? defaultRunner)(invocation);
     if (result.error) return { ok: false, reason: 'adapter-failed' };
     const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout ?? '';
     if (!stdout || Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) return { ok: false, reason: 'invalid-output' };
@@ -407,17 +474,23 @@ export function assurePrivateStoragePaths(
   if (Buffer.byteLength(input, 'utf8') > 2 * 1024 * 1024) {
     return { ok: false, reason: 'input-too-large' };
   }
+  const invocation: PrivateStorageInvocation = {
+    executable,
+    args: [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-EncodedCommand', ENCODED_WINDOWS_OWNED_BATCH_SCRIPT,
+    ],
+    input,
+    timeoutMs,
+    maxBuffer: MAX_OUTPUT_BYTES,
+  };
+  const testControl = activePrivateStorageTestControl();
   try {
-    const result = (options.runner ?? defaultRunner)({
-      executable,
-      args: [
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', ENCODED_WINDOWS_OWNED_BATCH_SCRIPT,
-      ],
-      input,
-      timeoutMs,
-      maxBuffer: MAX_OUTPUT_BYTES,
+    testControl?.observeInvocation?.({
+      ...invocation,
+      args: [...invocation.args],
     });
+    const result = (options.runner ?? testControl?.runner ?? defaultRunner)(invocation);
     if (result.error) return { ok: false, reason: 'adapter-failed' };
     const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout ?? '';
     if (!stdout || Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) {

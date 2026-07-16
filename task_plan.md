@@ -2442,6 +2442,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify protected `5254ff4`: every Ubuntu, macOS, Windows 2/3, Windows 3/3, and overflow duplicate passes, while both native 1/3 jobs reproduce the same five diagnostic fixture failures plus the dedicated native dispatch prerequisite failure.
 - [x] Bind Windows semantic mode directly to diagnostic fixture construction and natively secure every controlled semantic-created `.ashlr` prerequisite descendant before the dedicated lifecycle transaction.
 - [x] Pass the corrected full M360 locally at 111 assertions with two platform skips plus typecheck, full quiet lint, production build, zero-vulnerability audit, diff checks, and two independent SHIP reviews with no P0/P1/P2 findings.
+- [x] Publish `daa4815` and classify duplicate protected authority: every Ubuntu, macOS, Windows 3/3, and overflow copy passes; both native Windows 1/3 copies reproduce the same six M360 failures, and one Windows 2/3 copy exposes an independent finite-timeout outlier.
+- [x] Split independent blockers into stacked PR #34 (Windows reservation-sweep budget) and PR #35 (verifier PATH authority), with focused/static verification complete.
+- [x] Establish production exact-DACL authority in the repair-handoff store, inode-bind compaction durability, and replace M360's partial module mock with a sentinel-guarded canonical authenticated runner/observer.
+- [x] Pass integrated M360/M362/M379 at 203 assertions with four platform skips plus full quiet lint, typecheck, production build, zero-vulnerability audit, diff checks, and independent security reviews with all P2 requests addressed.
 - [ ] Publish the M360 correction and require every duplicate protected job to pass before merge consideration.
 
 ## Next P0 - Source-Complete GitHub Policy Authority

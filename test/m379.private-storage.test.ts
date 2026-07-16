@@ -4,6 +4,8 @@ import { join, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
   assurePrivateStoragePath,
   assurePrivateStoragePaths,
   type PrivateStorageInvocation,
@@ -13,8 +15,13 @@ import {
 const homes: string[] = [];
 
 afterEach(() => {
-  for (const home of homes.splice(0)) {
-    rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  try {
+    for (const home of homes.splice(0)) {
+      rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  } finally {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+    vi.unstubAllEnvs();
   }
 });
 
@@ -38,6 +45,85 @@ function successfulRunner(
 }
 
 describe('M379 Windows private-storage assurance', () => {
+  it('shares the sentinel-guarded test control across module evaluation boundaries', async () => {
+    const runnerCalls: PrivateStorageInvocation[] = [];
+    const observed: PrivateStorageInvocation[] = [];
+    expect(Symbol.keyFor(PRIVATE_STORAGE_TEST_CONTROL))
+      .toBe('ashlr.private-storage.test-control.v1');
+    expect(() => _setPrivateStorageTestControlForTest(Symbol('wrong'), {
+      runner: successfulRunner(runnerCalls),
+    })).toThrow(/sentinel/i);
+
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: successfulRunner(runnerCalls),
+      observeInvocation: (invocation) => {
+        observed.push(invocation);
+        invocation.args[0] = 'observer-mutation';
+      },
+    });
+    vi.resetModules();
+    const duplicate = await import('../src/core/util/private-storage.js');
+    expect(duplicate.PRIVATE_STORAGE_TEST_CONTROL).toBe(PRIVATE_STORAGE_TEST_CONTROL);
+    expect(duplicate.assurePrivateStoragePath('C:\\tmp\\private', 'file', 'secure-created', {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+    })).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(observed).toHaveLength(1);
+    expect(runnerCalls).toHaveLength(1);
+    expect(runnerCalls[0]!.args[0]).toBe('-NoLogo');
+  });
+
+  it('keeps authenticated output validation active for the canonical test runner', () => {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: (invocation) => {
+        const request = JSON.parse(invocation.input) as { operation: string };
+        return { status: 0, stdout: JSON.stringify({
+          nonce: '0'.repeat(32),
+          operation: request.operation,
+          ok: true,
+          reason: 'exact-private-dacl',
+        }) };
+      },
+    });
+    expect(assurePrivateStoragePath('C:\\tmp\\private', 'file', 'secure-created', {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+    })).toEqual({ ok: false, reason: 'invalid-output' });
+  });
+
+  it('prefers an explicit per-call runner without invoking the global test runner', () => {
+    const globalCalls: PrivateStorageInvocation[] = [];
+    const explicitCalls: PrivateStorageInvocation[] = [];
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: successfulRunner(globalCalls),
+    });
+
+    expect(assurePrivateStoragePath('C:\\tmp\\private', 'file', 'secure-created', {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+      runner: successfulRunner(explicitCalls),
+    })).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(explicitCalls).toHaveLength(1);
+    expect(globalCalls).toHaveLength(0);
+  });
+
+  it('fails closed before invoking the configured runner when the global observer throws', () => {
+    const runnerCalls: PrivateStorageInvocation[] = [];
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: successfulRunner(runnerCalls),
+      observeInvocation: () => { throw new Error('observer failed'); },
+    });
+
+    expect(assurePrivateStoragePath('C:\\tmp\\private', 'file', 'secure-created', {
+      platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\tmp',
+    })).toEqual({ ok: false, reason: 'adapter-failed' });
+    expect(runnerCalls).toHaveLength(0);
+  });
+
+  it('rejects enabling the canonical test runner outside Vitest context', () => {
+    vi.stubEnv('VITEST', 'false');
+    expect(() => _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: successfulRunner([]),
+    })).toThrow(/restricted to Vitest/);
+  });
+
   it('uses a fixed executable/encoded argv and carries hostile paths only in JSON stdin', () => {
     const calls: PrivateStorageInvocation[] = [];
     const path = 'C:\\tmp\\path with spaces\\$env:USER;Remove-Item *\\[x]';
