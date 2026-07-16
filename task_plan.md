@@ -2676,4 +2676,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Replace rejected-proposal and Gate 7 persistence with fixed code-derived text while preserving immediate ephemeral Manager rationale.
 - [x] Stop proposal titles and judge reasoning from entering anti-playbook genome entries; retain finite negative observations only.
 - [x] Pass 1,759 direct-consumer assertions across 65 suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
-- [ ] Publish a protected stacked draft PR on PR #50 and require the complete duplicate protected matrix.
+- [x] Publish protected stacked draft PR #51 on PR #50 and require the complete duplicate protected matrix.
