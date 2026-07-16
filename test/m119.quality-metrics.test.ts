@@ -604,20 +604,110 @@ describe('m119 decisions-ledger', () => {
     expect(entries.length).toBe(2);
   });
 
-  it('scrubs secrets from detail field', async () => {
-    const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+  it('persists judged decisions as metadata-only v2 rows', async () => {
+    const {
+      decisionsDir,
+      recordDecision,
+      readDecisions,
+    } = await import('../src/core/fleet/decisions-ledger.js');
+    const rawCanary = 'RAW_JUDGE_RATIONALE_token=sk-abcdefghijklmnopqrstuvwxyz1234567890';
 
     recordDecision({
       ts: new Date().toISOString(),
       proposalId: 'prop-secret',
       action: 'judged',
-      detail: 'token=sk-abcdefghijklmnopqrstuvwxyz1234567890 was present',
+      verdict: 'noise',
+      reason: rawCanary,
+      detail: rawCanary,
     });
 
     const entries = readDecisions({ proposalId: 'prop-secret' });
     expect(entries.length).toBe(1);
-    expect(entries[0]!.detail).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
-    expect(entries[0]!.detail).toContain('[REDACTED]');
+    expect(entries[0]).toMatchObject({
+      judgeDecisionMetadataVersion: 2,
+      judgeReasonCode: 'judge-noise',
+      judgeRationaleState: 'not-persisted',
+    });
+    expect(entries[0]!.reason).toBeUndefined();
+    expect(entries[0]!.detail).toBeUndefined();
+    const file = path.join(decisionsDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const physical = fs.readFileSync(file, 'utf8');
+    expect(physical).not.toContain(rawCanary);
+    expect(physical).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
+  });
+
+  it('redacts legacy judged rationale while retaining finite outcome metadata', async () => {
+    const { decisionsDir, readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = new Date().toISOString();
+    fs.mkdirSync(decisionsDir(), { recursive: true });
+    fs.writeFileSync(path.join(decisionsDir(), `${ts.slice(0, 10)}.jsonl`), `${JSON.stringify({
+      ts,
+      proposalId: 'prop-legacy-rationale',
+      action: 'judged',
+      verdict: 'harmful',
+      reason: 'RAW_LEGACY_JUDGE_REASON',
+      detail: 'RAW_LEGACY_JUDGE_DETAIL',
+    })}\n`, 'utf8');
+
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-legacy-rationale' });
+    expect(detailed).toMatchObject({ sourceState: 'healthy', complete: true, invalidRows: 0 });
+    expect(detailed.decisions).toEqual([expect.objectContaining({
+      judgeDecisionMetadataVersion: 1,
+      judgeReasonCode: 'judge-harmful',
+      judgeRationaleState: 'legacy-redacted',
+    })]);
+    expect(detailed.decisions[0]!.reason).toBeUndefined();
+    expect(detailed.decisions[0]!.detail).toBeUndefined();
+    expect(JSON.stringify(detailed.decisions)).not.toContain('RAW_LEGACY');
+  });
+
+  it('normalizes caller-controlled judged verdict text to a finite value', async () => {
+    const { decisionsDir, recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    const rawVerdict = 'RAW_CALLER_CONTROLLED_VERDICT';
+    recordDecision({
+      ts: new Date().toISOString(),
+      proposalId: 'prop-unrecognized-verdict',
+      action: 'judged',
+      verdict: rawVerdict,
+      reason: 'RAW_CALLER_REASON',
+      detail: 'RAW_CALLER_DETAIL',
+    });
+
+    expect(readDecisions({ proposalId: 'prop-unrecognized-verdict' })).toEqual([
+      expect.objectContaining({
+        verdict: 'unrecognized',
+        judgeReasonCode: 'judge-verdict-unrecognized',
+        judgeRationaleState: 'not-persisted',
+      }),
+    ]);
+    const file = path.join(decisionsDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const physical = fs.readFileSync(file, 'utf8');
+    expect(physical).not.toContain(rawVerdict);
+    expect(physical).not.toContain('RAW_CALLER_REASON');
+    expect(physical).not.toContain('RAW_CALLER_DETAIL');
+  });
+
+  it('degrades v2 judged rows that smuggle raw rationale fields', async () => {
+    const { decisionsDir, readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = new Date().toISOString();
+    fs.mkdirSync(decisionsDir(), { recursive: true });
+    fs.writeFileSync(path.join(decisionsDir(), `${ts.slice(0, 10)}.jsonl`), `${JSON.stringify({
+      ts,
+      proposalId: 'prop-v2-smuggle',
+      action: 'judged',
+      verdict: 'review',
+      judgeDecisionMetadataVersion: 2,
+      judgeReasonCode: 'judge-review',
+      judgeRationaleState: 'not-persisted',
+      rationale: 'RAW_SMUGGLED_RATIONALE',
+    })}\n`, 'utf8');
+
+    expect(readDecisionsDetailed({ proposalId: 'prop-v2-smuggle' })).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      decisions: [],
+    });
   });
 
   it('never throws on missing decisions dir', async () => {
@@ -837,10 +927,13 @@ describe('m119 decisions-ledger', () => {
       tokensOut: 34,
       durationMs: 56,
       cacheHit: true,
+      judgeDecisionMetadataVersion: 1,
+      judgeReasonCode: 'judge-ship-review-required',
+      judgeRationaleState: 'legacy-redacted',
     });
     expect(entry?.judgeAttestation).toBe(attestation);
-    expect(entry?.reason).toContain('[REDACTED]');
-    expect(entry?.detail).toContain('[REDACTED]');
+    expect(entry?.reason).toBeUndefined();
+    expect(entry?.detail).toBeUndefined();
     expect(JSON.stringify(entry)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
     expect(JSON.stringify(entry)).not.toContain('RAW_PROMPT_SENTINEL');
   });

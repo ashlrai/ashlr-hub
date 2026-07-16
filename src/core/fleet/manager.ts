@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AgentSemanticEventV1, AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
+import { judgeDecisionReasonCode } from './judge-decision-metadata.js';
 import { recordJudgeTrace } from './judge-trace.js';
 import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
 import { computeQualityMetrics } from './quality-metrics.js';
@@ -1487,7 +1488,7 @@ export async function runManager(
         ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
         ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
         verdict: verdict.verdict,
-        reason: verdict.rationale,
+        ...(!judgeClient ? { reason: 'manager-judge-unavailable' } : {}),
         detail: verdict.wouldMerge && reviewerIndependent ? 'would-merge' : '',
         ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
@@ -1500,7 +1501,12 @@ export async function runManager(
       if (applyRejects && (verdict.verdict === 'noise' || verdict.verdict === 'harmful')) {
         try {
           const { setStatus } = await import('../inbox/store.js');
-          setStatus(proposal.id, 'rejected', undefined, verdict.rationale);
+          setStatus(
+            proposal.id,
+            'rejected',
+            undefined,
+            judgeDecisionReasonCode(verdict.verdict, false),
+          );
         } catch {
           // Best-effort — never throws.
         }

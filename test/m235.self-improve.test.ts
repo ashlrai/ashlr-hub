@@ -129,16 +129,17 @@ describe('M235 deriveLesson — pure function', () => {
     }
   });
 
-  it('embeds the verdict and title in the lesson text', () => {
+  it('embeds only the finite verdict lesson and discards proposal text', () => {
     const lesson = deriveLesson('noise', 'it was too trivial', 'Rename a variable');
     expect(lesson).toContain('noise');
-    expect(lesson).toContain('Rename a variable');
-    expect(lesson).toContain('trivial');
+    expect(lesson).not.toContain('Rename a variable');
+    expect(lesson).not.toContain('it was too trivial');
   });
 
-  it('embeds the reasoning when provided', () => {
+  it('never embeds model reasoning', () => {
     const lesson = deriveLesson('harmful', 'deletes prod data', 'Drop table users');
-    expect(lesson).toContain('deletes prod data');
+    expect(lesson).not.toContain('deletes prod data');
+    expect(lesson).not.toContain('Drop table users');
   });
 
   it('handles empty reasoning gracefully', () => {
@@ -149,24 +150,21 @@ describe('M235 deriveLesson — pure function', () => {
     expect(lesson).not.toContain('Judge reasoning:');
   });
 
-  it('truncates extremely long titles to 80 chars', () => {
+  it('does not persist extremely long titles', () => {
     const longTitle = 'A'.repeat(200);
     const lesson = deriveLesson('noise', '', longTitle);
-    // The 80-char truncated title must appear; the full 200-char one must not
-    expect(lesson).toContain('A'.repeat(80));
-    expect(lesson).not.toContain('A'.repeat(81));
+    expect(lesson).not.toContain('A'.repeat(80));
   });
 
-  it('truncates extremely long reasoning to 400 chars', () => {
+  it('does not persist extremely long reasoning', () => {
     const longReason = 'X'.repeat(500);
     const lesson = deriveLesson('review', longReason, 'title');
-    expect(lesson).toContain('X'.repeat(400));
-    expect(lesson).not.toContain('X'.repeat(401));
+    expect(lesson).not.toContain('X');
   });
 
-  it('falls back to "(untitled)" when title is empty', () => {
+  it('needs no title fallback because title is not retained', () => {
     const lesson = deriveLesson('harmful', '', '');
-    expect(lesson).toContain('(untitled)');
+    expect(lesson).not.toContain('untitled');
   });
 });
 
@@ -191,6 +189,8 @@ describe('M235 learnFromRejection — writes anti-playbook for rejection verdict
     // text must contain the lesson
     expect(typeof input['text']).toBe('string');
     expect((input['text'] as string).length).toBeGreaterThan(10);
+    expect(JSON.stringify(input)).not.toContain('Rename a variable');
+    expect(JSON.stringify(input)).not.toContain('too trivial');
   });
 
   it('calls appendHubEntry once for verdict "harmful"', () => {

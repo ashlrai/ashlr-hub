@@ -34,6 +34,12 @@ import {
 } from '../learning/agent-semantic-events.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit.js';
+import {
+  isJudgeDecisionReasonCode,
+  isJudgeDecisionVerdict,
+  judgeDecisionReasonCode,
+  normalizeJudgeDecisionVerdict,
+} from './judge-decision-metadata.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -129,6 +135,12 @@ function optionalJudgeAttestation(value: unknown): string | undefined {
 }
 
 function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = false): DecisionEntry {
+  const action = entry.action;
+  const verdict = action === 'judged'
+    ? normalizeJudgeDecisionVerdict(entry.verdict)
+    : entry.verdict;
+  const detail = entry.detail;
+  const judged = action === 'judged';
   const parsedTs = Date.parse(entry.ts);
   const proposalId = stripSecrets(entry.proposalId);
   const semanticSubjectRef = agentSemanticProposalSubjectRef(proposalId);
@@ -148,7 +160,7 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
   const clean: DecisionEntry = {
     ts: Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString(),
     proposalId,
-    action: entry.action,
+    action,
     ...(optionalScrubbedText(entry.workItemId) !== undefined ? { workItemId: optionalScrubbedText(entry.workItemId) } : {}),
     ...(optionalScrubbedText(entry.workSource) !== undefined ? { workSource: optionalScrubbedText(entry.workSource) as DecisionEntry['workSource'] } : {}),
     ...(optionalScrubbedText(entry.runId) !== undefined ? { runId: optionalScrubbedText(entry.runId) } : {}),
@@ -164,9 +176,20 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
     ...(semanticEventsState ? { semanticEventsState } : {}),
     ...(optionalScrubbedText(entry.engine) !== undefined ? { engine: optionalScrubbedText(entry.engine) } : {}),
     ...(optionalScrubbedText(entry.model) !== undefined ? { model: optionalScrubbedText(entry.model) } : {}),
-    ...(optionalScrubbedText(entry.verdict) !== undefined ? { verdict: optionalScrubbedText(entry.verdict) } : {}),
-    ...(optionalScrubbedText(entry.reason) !== undefined ? { reason: optionalScrubbedText(entry.reason) } : {}),
-    ...(optionalScrubbedText(entry.detail) !== undefined ? { detail: optionalScrubbedText(entry.detail) } : {}),
+    ...(optionalScrubbedText(verdict) !== undefined ? { verdict: optionalScrubbedText(verdict) } : {}),
+    ...(judged ? {
+      judgeDecisionMetadataVersion: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
+        ? 2 as const
+        : 1 as const,
+      judgeReasonCode: judgeDecisionReasonCode(verdict, detail === 'would-merge'),
+      judgeRationaleState: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
+        ? 'not-persisted' as const
+        : 'legacy-redacted' as const,
+      ...(detail === 'would-merge' ? { detail: 'would-merge' } : {}),
+    } : {
+      ...(optionalScrubbedText(entry.reason) !== undefined ? { reason: optionalScrubbedText(entry.reason) } : {}),
+      ...(optionalScrubbedText(detail) !== undefined ? { detail: optionalScrubbedText(detail) } : {}),
+    }),
     ...(optionalJudgeAttestation(entry.judgeAttestation) !== undefined ? { judgeAttestation: optionalJudgeAttestation(entry.judgeAttestation) } : {}),
     ...(optionalScrubbedText(entry.judgeAttestationIssuedAt) !== undefined
       ? { judgeAttestationIssuedAt: optionalScrubbedText(entry.judgeAttestationIssuedAt) }
@@ -510,6 +533,40 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
               typeof obj['action'] === 'string'
             ) {
               if (!isDecisionAction(obj['action'])) {
+                result.invalidRows++;
+                continue;
+              }
+              const judged = obj['action'] === 'judged';
+              const judgeMetadataVersion = obj['judgeDecisionMetadataVersion'];
+              if (judged && judgeMetadataVersion !== undefined &&
+                judgeMetadataVersion !== 1 && judgeMetadataVersion !== 2) {
+                result.invalidRows++;
+                continue;
+              }
+              if (judged && judgeMetadataVersion === 2) {
+                const expectedCode = judgeDecisionReasonCode(
+                  obj['verdict'], obj['detail'] === 'would-merge',
+                );
+                if (
+                  !isJudgeDecisionVerdict(obj['verdict']) ||
+                  obj['judgeRationaleState'] !== 'not-persisted' ||
+                  !isJudgeDecisionReasonCode(obj['judgeReasonCode']) ||
+                  obj['judgeReasonCode'] !== expectedCode ||
+                  (obj['detail'] !== undefined && obj['detail'] !== 'would-merge') ||
+                  Object.hasOwn(obj, 'reason') ||
+                  Object.hasOwn(obj, 'rationale') ||
+                  Object.hasOwn(obj, 'fullReasoning') ||
+                  Object.hasOwn(obj, 'promptContext')
+                ) {
+                  result.invalidRows++;
+                  continue;
+                }
+              }
+              if (!judged && (
+                judgeMetadataVersion !== undefined ||
+                obj['judgeReasonCode'] !== undefined ||
+                obj['judgeRationaleState'] !== undefined
+              )) {
                 result.invalidRows++;
                 continue;
               }

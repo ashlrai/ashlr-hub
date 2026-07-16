@@ -5414,6 +5414,14 @@ export interface RunEstimate {
  * M119: One entry in the append-only decisions ledger
  * (~/.ashlr/decisions/YYYY-MM-DD.jsonl).
  */
+export type JudgeDecisionReasonCode =
+  | 'judge-ship-would-merge'
+  | 'judge-ship-review-required'
+  | 'judge-review'
+  | 'judge-noise'
+  | 'judge-harmful'
+  | 'judge-verdict-unrecognized';
+
 export interface DecisionEntry {
   /** ISO timestamp. */
   ts: string;
@@ -5464,6 +5472,12 @@ export interface DecisionEntry {
   model?: string;
   /** Human-readable verdict (e.g. 'approved', 'rejected'). */
   verdict?: string;
+  /** Metadata-only schema marker for judged decisions. */
+  judgeDecisionMetadataVersion?: 1 | 2;
+  /** Deterministic code derived from verdict and authenticated merge intent. */
+  judgeReasonCode?: JudgeDecisionReasonCode;
+  /** Explains why model-authored rationale is absent from the read model. */
+  judgeRationaleState?: 'not-persisted' | 'legacy-redacted';
   /** Human-readable reason for the decision. */
   reason?: string;
   /** Optional extra detail (secret-scrubbed before persisting). */

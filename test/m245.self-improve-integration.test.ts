@@ -625,6 +625,13 @@ describe('INTEGRATION S2: M235 learnFromRejection → anti-playbooks in genome',
     for (const e of antiPlaybooks) {
       expect(e['project'], `anti-playbook must have null project (hub-only write)`).toBeNull();
     }
+    const persisted = JSON.stringify(antiPlaybooks);
+    expect(persisted).not.toContain('Rename a trivial variable');
+    expect(persisted).not.toContain('Drop production table');
+    expect(persisted).not.toContain('Add logging to auth');
+    expect(persisted).not.toContain('too trivial');
+    expect(persisted).not.toContain('deletes prod data');
+    expect(persisted).not.toContain('needs human review');
   });
 
   it('"ship" verdict does NOT write an anti-playbook', () => {

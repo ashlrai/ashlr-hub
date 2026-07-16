@@ -207,7 +207,6 @@ async function runAuthorizedFrontierJudge(
             engine: judgeEngine,
             model: judgeEngine,
             verdict: 'ship',
-            reason: verdict.rationale ?? '',
             detail: reviewerIndependent ? 'would-merge' : '',
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
@@ -306,9 +305,9 @@ function runAuthorizedPostJudgePersistence(
       try {
         learnFromRejection(
           proposal.id,
-          proposal.title ?? '',
+          '',
           verdict?.verdict ?? 'review',
-          verdict?.rationale ?? '',
+          '',
           cfg,
         );
       } catch { /* best-effort learning */ }
