@@ -2563,3 +2563,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Publish protected stacked PR #43 on #42 with the dormant activation boundary explicit.
 - [ ] Add crash-recoverable proposal-plus-projection writer transactions and an external anti-rollback anchor.
 - [ ] Cut hot consumers over only after transaction recovery, source-completeness, and concurrent mutation tests pass.
+
+## Operational Projection Transaction Journal (2026-07-16)
+- [x] Persist an authenticated active two-artifact intent under exact writer-lock ownership.
+- [x] Enforce monotonic phases, clocks, signing-key generation, and unambiguous two-digest movement.
+- [x] Classify every before/after crash boundary from observed digests, including missing-artifact creation.
+- [x] Fail closed for tamper, malformed state, unsafe storage, key replacement, phase skips, lock mismatch, and active overlap.
+- [ ] Add an externally anchored monotonic floor that rejects replay of an older valid active record.
+- [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
