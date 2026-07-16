@@ -238,7 +238,10 @@ describe('M142 — N=3 candidate selection', () => {
 // ---------------------------------------------------------------------------
 
 describe('M142 — all-empty → no winner', () => {
-  afterEach(() => { vi.resetModules(); });
+  afterEach(() => {
+    vi.doUnmock('../src/core/run/run-tests.js');
+    vi.resetModules();
+  });
 
   it('returns no winner when all candidates produce no proposalId', async () => {
     // withProposalAt: [] → none get proposals
@@ -259,6 +262,10 @@ describe('M142 — all-empty → no winner', () => {
   });
 
   it('returns no winner when sandboxed-engine module is unavailable', async () => {
+    vi.doMock('../src/core/run/run-tests.js', () => ({
+      runTests: vi.fn(async () => true),
+      runTestsForProposal: vi.fn(async () => true),
+    }));
     vi.doMock('../src/core/run/sandboxed-engine.js', () => {
       throw new Error('module not found');
     });

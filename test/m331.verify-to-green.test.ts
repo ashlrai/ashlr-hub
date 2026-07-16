@@ -50,7 +50,12 @@ vi.mock('../src/core/sandbox/worktree.js', () => ({
   removeSandbox: vi.fn((sandbox: { id: string }) => { removedSandboxes.push(sandbox.id); }),
 }));
 
-import { runTests, runTestsDetailed } from '../src/core/run/run-tests.js';
+import {
+  runTests,
+  runTestsDetailed,
+  runTestsForProposal,
+  runTestsForProposalDetailed,
+} from '../src/core/run/run-tests.js';
 import { iterateToGreen } from '../src/core/run/verify-to-green.js';
 
 // ---------------------------------------------------------------------------
@@ -202,6 +207,18 @@ describe('M331 runTestsDetailed', () => {
     expect(r.skipped).toBeUndefined();
     expect(r.passed).toBe(true);
     expect(r.commands.some((c) => c.kind === 'test' && c.ok)).toBe(true);
+  }, 30_000);
+
+  it('verifies an in-memory proposal without requiring an inbox identity', async () => {
+    repoWith({ name: 'fx', version: '1.0.0', scripts: { test: REQUIRES_DIFF_FILE } }, ADD_FILE_DIFF);
+    const proposal = { repo: fixtureRepo, diff: ADD_FILE_DIFF };
+
+    const detailed = await runTestsForProposalDetailed(proposal, cfg, 'quick');
+
+    expect(detailed).toMatchObject({ passed: true });
+    expect(detailed.skipped).toBeUndefined();
+    expect(detailed.commands.some((command) => command.kind === 'test' && command.ok)).toBe(true);
+    expect(await runTestsForProposal(proposal, cfg, 'quick')).toBe(true);
   }, 30_000);
 
   it('failing test script → passed:false with the failing command recorded', async () => {
