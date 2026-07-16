@@ -1,42 +1,18 @@
 /**
- * self.ts — M54 (v5 Open Fleet): the self-improving fleet's safety harness.
+ * M54: safety controls for changes authored against ashlr-hub itself.
  *
- * The fleet may modify ashlr-hub's OWN source, but it may NEVER weaken its own
- * safety guarantees. Two pure mechanisms enforce that:
- *
- *   1. `guardSafetyTests(diff)` — the never-weaken guard. Refuses, BY CONSTRUCTION
- *      and BEFORE any verification runs, any diff that deletes a safety/invariant
- *      test file, removes assertions from one, or focuses/skips safety tests. A
- *      self-authored change can fix bugs and add tests, but can never disarm the
- *      gates that keep the fleet safe.
- *   2. `selfEvalParity(runSuite)` — the self-eval harness contract: a self-target
- *      change is only eligible when the invariant suite is green with the foundry
- *      flag OFF *and* ON. Higher-order + pure so it is unit-testable with a stub
- *      runner; the gated auto-merge pass supplies the real suite runner.
- *
- * Plus `isSelfTargetProposal` — detect when a proposal targets ashlr-hub itself
- * (by package name, not a brittle absolute path).
- *
- * All functions are PURE (except the bounded fs read in isSelfTargetProposal) and
- * NEVER throw.
+ * Test infrastructure is immutable to judge-free automation. Differential
+ * runtime evidence may eventually permit safe additions, but path authority is
+ * intentionally fail-closed until that proof exists.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
 
-// ---------------------------------------------------------------------------
-// Self-target detection
-// ---------------------------------------------------------------------------
-
-/** The package name that identifies ashlr-hub's own repo. */
 const SELF_PACKAGE_NAME = '@ashlr/hub';
 
-/**
- * True when `proposal` targets ashlr-hub's own source tree — detected by reading
- * the repo's package.json `name` (=== '@ashlr/hub'), never a hardcoded path.
- * Bounded read; never throws; false on any doubt.
- */
+/** Detect an ashlr-hub checkout with a bounded package.json read. */
 export function isSelfTargetProposal(proposal: Proposal, _cfg?: AshlrConfig): boolean {
   const repo = proposal.repo;
   if (!repo) return false;
@@ -44,158 +20,268 @@ export function isSelfTargetProposal(proposal: Proposal, _cfg?: AshlrConfig): bo
     const pkgPath = join(repo, 'package.json');
     if (!existsSync(pkgPath)) return false;
     const raw = readFileSync(pkgPath, 'utf8');
-    if (raw.length > 256 * 1024) return false; // bounded
-    const pkg = JSON.parse(raw) as { name?: unknown };
-    return pkg.name === SELF_PACKAGE_NAME;
+    if (raw.length > 256 * 1024) return false;
+    return (JSON.parse(raw) as { name?: unknown }).name === SELF_PACKAGE_NAME;
   } catch {
     return false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// The never-weaken guard
+// The test-infrastructure guard
 // ---------------------------------------------------------------------------
 
-/**
- * Patterns for test files whose weakening would disarm a safety invariant. A
- * diff that deletes one of these, or nets out assertions from one, is refused.
- */
-const SAFETY_FILE_PATTERNS: readonly RegExp[] = [
-  /^test\/h\d+[.-].*\.test\.ts$/, // h1..h8 hardening / invariant suites
-  /^test\/m45\.foundry\.test\.ts$/, // sandboxed-engine containment
-  /^test\/m47[._].*\.test\.ts$/, // merge gate + provenance
-  /^test\/m51\.trust\.test\.ts$/, // tri-tier trust
-  /^test\/m52\..*\.test\.ts$/, // OS confinement
-  /^test\/m54\..*\.test\.ts$/, // the self-improvement guard itself
-  /daemon-gates/, // daemon-no-primitive source grep-guard
-  /proposal-only/,
-  /\.safety\./,
-];
+const MAX_DIFF_BYTES = 8 * 1024 * 1024;
+const MAX_DIFF_FILES = 10_000;
+const MAX_DIFF_LINES = 100_000;
+const MAX_GIT_PATH_BYTES = 4 * 1024;
+const MAX_HEADER_SPLIT_CANDIDATES = 64;
+const TEST_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__']);
+const TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/i;
+const TEST_CONFIG_RE = /^(?:vitest|jest)\.(?:config|workspace|projects?)\.[cm]?[jt]sx?$/i;
+const TEST_SCRIPT_RE = /^scripts\/test(?:[-_.]|$)/i;
 
-/** Whether a repo-relative path names a safety/invariant test file. */
 export function isSafetyTestFile(path: string): boolean {
-  const p = path.replace(/^\.\//, '');
-  return SAFETY_FILE_PATTERNS.some((re) => re.test(p));
+  const segments = path.split('/');
+  const basename = segments[segments.length - 1] ?? '';
+  return (
+    segments.some((segment) => TEST_DIRECTORY_NAMES.has(segment.toLowerCase())) ||
+    TEST_FILE_RE.test(basename) ||
+    TEST_CONFIG_RE.test(basename) ||
+    TEST_SCRIPT_RE.test(path)
+  );
 }
 
-/** Lines that represent a test assertion or block — the protected substance. */
-const ASSERTION_RE =
-  /^\s*(?:(?:await|return|void)\s+)?(?:it|test|describe|expect|assert)\b|^\s*(?:\)|\.)\s*\.(?:not|resolves|rejects|to[A-Z]\w*)\b|^\s*(?:toBe|toEqual|toThrow|toMatch)\b/;
-const SKIPPED_OR_ONLY_TEST_RE =
-  /^\s*(?:describe|it|test)(?:\.\w+)*\.(?:skip|only|skipIf)\b|^\s*skipIf\s*\(/;
-
 export interface SafetyGuardVerdict {
-  /** True ⇒ the diff weakens a safety guarantee and MUST be refused. */
   weakened: boolean;
   reason: string;
-  /** Safety files the diff touched (for the audit trail). */
   files: string[];
 }
 
-interface FileDiff {
-  path: string;
-  deleted: boolean;
-  addedAssertions: number;
-  removedAssertions: number;
-  removedAssertionLines: string[];
-  addedSkippedOrOnlyTests: string[];
+interface GitHeaderPaths {
+  oldPath: string;
+  newPath: string;
 }
 
-/** Split a unified diff into per-file sections and tally assertion deltas. */
+const GIT_ESCAPES: Readonly<Record<string, number>> = {
+  a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92,
+};
+
+function parseQuotedGitPath(input: string): string {
+  const bytes: number[] = [];
+  let index = 1;
+  while (index < input.length - 1) {
+    const char = input[index]!;
+    if (char === '"') throw new Error('unescaped quote in Git path');
+    if (char !== '\\') {
+      const literal = String.fromCodePoint(input.codePointAt(index)!);
+      bytes.push(...Buffer.from(literal));
+      index += literal.length;
+      continue;
+    }
+    index++;
+    const escaped = input[index++];
+    if (escaped === undefined) throw new Error('unterminated Git path escape');
+    const simple = GIT_ESCAPES[escaped];
+    if (simple !== undefined) bytes.push(simple);
+    else if (/[0-7]/.test(escaped)) {
+      let octal = escaped;
+      while (index < input.length - 1 && octal.length < 3 && /[0-7]/.test(input[index]!)) {
+        octal += input[index++]!;
+      }
+      const value = Number.parseInt(octal, 8);
+      if (value > 255) throw new Error('invalid Git path escape');
+      bytes.push(value);
+    } else throw new Error('invalid Git path escape');
+    if (bytes.length > MAX_GIT_PATH_BYTES) throw new Error('Git path exceeds limit');
+  }
+  const path = Buffer.from(bytes).toString('utf8');
+  if (path.includes('\ufffd')) throw new Error('invalid UTF-8 Git path');
+  return path;
+}
+
+function parseGitPath(input: string): string {
+  let path: string;
+  if (input.startsWith('"')) {
+    if (!input.endsWith('"') || input.length < 2) throw new Error('invalid quoted Git path');
+    path = parseQuotedGitPath(input);
+  } else {
+    if (!input || /[\\"\r\n]/.test(input)) throw new Error('invalid Git path');
+    path = input;
+  }
+  if (Buffer.byteLength(path) > MAX_GIT_PATH_BYTES) throw new Error('Git path exceeds limit');
+  return path;
+}
+
+function canonicalRepoPath(path: string): string {
+  const segments = path.split('/');
+  if (
+    !path ||
+    path.startsWith('/') ||
+    Array.from(path).some((char) => {
+      const code = char.codePointAt(0)!;
+      return code <= 31 || code === 127;
+    }) ||
+    segments.some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    throw new Error('noncanonical repository path');
+  }
+  return path;
+}
+
+function prefixedPath(input: string, prefix: 'a' | 'b'): string {
+  const path = parseGitPath(input);
+  if (!path.startsWith(`${prefix}/`)) throw new Error('noncanonical diff prefix');
+  return canonicalRepoPath(path.slice(2));
+}
+
+function parseDiffHeader(line: string): GitHeaderPaths[] {
+  if (!line.startsWith('diff --git ')) throw new Error('invalid diff header');
+  const body = line.slice(11);
+  if (Buffer.byteLength(body) > MAX_GIT_PATH_BYTES * 2 + 8) throw new Error('header too long');
+  const candidates: GitHeaderPaths[] = [];
+  for (let split = 0; split < body.length; split++) {
+    if (body[split] !== ' ') continue;
+    const right = body.slice(split + 1);
+    if (!right.startsWith('b/') && !right.startsWith('"b/')) continue;
+    try {
+      const candidate = {
+        oldPath: prefixedPath(body.slice(0, split), 'a'),
+        newPath: prefixedPath(right, 'b'),
+      };
+      if (!candidates.some((item) => item.oldPath === candidate.oldPath && item.newPath === candidate.newPath)) {
+        candidates.push(candidate);
+      }
+      if (candidates.length > MAX_HEADER_SPLIT_CANDIDATES) throw new Error('too many paths');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'too many paths') throw error;
+    }
+  }
+  if (candidates.length === 0) throw new Error('invalid diff paths');
+  return candidates;
+}
+
+function metadataPath(input: string, prefix?: 'a' | 'b'): string {
+  const raw = input.endsWith('\t') ? input.slice(0, -1) : input;
+  return prefix ? prefixedPath(raw, prefix) : canonicalRepoPath(parseGitPath(raw));
+}
+
+interface FileDiff {
+  candidates: GitHeaderPaths[];
+  headerOldPath: string;
+  headerNewPath: string;
+  oldPath: string;
+  newPath: string;
+  oldIsDevNull: boolean;
+  newIsDevNull: boolean;
+  oldMarkerCount: number;
+  newMarkerCount: number;
+  inHunk: boolean;
+}
+
+function constrainPath(file: FileDiff, side: 'oldPath' | 'newPath', path: string): void {
+  file.candidates = file.candidates.filter((candidate) => candidate[side] === path);
+  if (file.candidates.length === 0) throw new Error('path metadata disagrees with header');
+}
+
+function resolvePaths(file: FileDiff): void {
+  if (file.candidates.length !== 1) throw new Error('ambiguous diff paths');
+  file.headerOldPath = file.candidates[0]!.oldPath;
+  file.headerNewPath = file.candidates[0]!.newPath;
+  file.oldPath = file.oldIsDevNull ? '' : file.headerOldPath;
+  file.newPath = file.newIsDevNull ? '' : file.headerNewPath;
+}
+
+function assertDiffLineBound(diff: string): void {
+  let lines = 1;
+  for (let index = diff.indexOf('\n'); index !== -1; index = diff.indexOf('\n', index + 1)) {
+    if (++lines > MAX_DIFF_LINES) throw new Error('diff line limit exceeded');
+  }
+}
+
 function parseDiff(diff: string): FileDiff[] {
+  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) throw new Error('diff byte limit exceeded');
+  assertDiffLineBound(diff);
+  const lines = diff.split('\n');
   const files: FileDiff[] = [];
-  let cur: FileDiff | null = null;
-  for (const line of diff.split('\n')) {
+  let file: FileDiff | null = null;
+
+  const finish = (): void => {
+    if (!file) return;
+    resolvePaths(file);
+    files.push(file);
+    file = null;
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (line.startsWith('diff --') && !line.startsWith('diff --git ')) throw new Error('unsupported diff');
     if (line.startsWith('diff --git')) {
-      if (cur) files.push(cur);
-      // `diff --git a/<path> b/<path>` — take the b/ path.
-      const m = line.match(/ b\/(.+)$/);
-      cur = {
-        path: m ? m[1]! : '',
-        deleted: false,
-        addedAssertions: 0,
-        removedAssertions: 0,
-        removedAssertionLines: [],
-        addedSkippedOrOnlyTests: [],
+      finish();
+      if (files.length >= MAX_DIFF_FILES) throw new Error('diff file limit exceeded');
+      file = {
+        candidates: parseDiffHeader(line), headerOldPath: '', headerNewPath: '', oldPath: '', newPath: '',
+        oldIsDevNull: false, newIsDevNull: false, oldMarkerCount: 0, newMarkerCount: 0,
+        inHunk: false,
       };
       continue;
     }
-    if (!cur) continue;
-    if (line.startsWith('deleted file mode')) {
-      cur.deleted = true;
+    if (!file) continue;
+    if (line.startsWith('@@')) {
+      file.inHunk = true;
       continue;
     }
-    if (line.startsWith('+++ /dev/null')) {
-      cur.deleted = true;
-      continue;
-    }
-    // `--- a/path` / `+++ b/path` headers are not content; refine the path from +++.
-    if (line.startsWith('+++ b/')) {
-      cur.path = line.slice('+++ b/'.length);
-      continue;
-    }
-    if (line.startsWith('---') || line.startsWith('+++')) continue;
-    if (line.startsWith('+')) {
-      const content = line.slice(1);
-      if (ASSERTION_RE.test(content)) cur.addedAssertions++;
-      if (SKIPPED_OR_ONLY_TEST_RE.test(content)) cur.addedSkippedOrOnlyTests.push(content.trim());
-    } else if (line.startsWith('-')) {
-      const content = line.slice(1);
-      if (ASSERTION_RE.test(content)) {
-        cur.removedAssertions++;
-        cur.removedAssertionLines.push(content.trim());
+    if (!file.inHunk) {
+      if (line === '--- /dev/null' || line === '--- /dev/null\t') {
+        if (++file.oldMarkerCount !== 1) throw new Error('duplicate old path marker');
+        file.oldIsDevNull = true;
+      } else if (line === '+++ /dev/null' || line === '+++ /dev/null\t') {
+        if (++file.newMarkerCount !== 1) throw new Error('duplicate new path marker');
+        file.newIsDevNull = true;
+      } else if (line.startsWith('--- ')) {
+        if (++file.oldMarkerCount !== 1) throw new Error('duplicate old path marker');
+        constrainPath(file, 'oldPath', metadataPath(line.slice(4), 'a'));
+      } else if (line.startsWith('+++ ')) {
+        if (++file.newMarkerCount !== 1) throw new Error('duplicate new path marker');
+        constrainPath(file, 'newPath', metadataPath(line.slice(4), 'b'));
+      } else if (line.startsWith('rename from ')) {
+        constrainPath(file, 'oldPath', metadataPath(line.slice(12)));
+      } else if (line.startsWith('rename to ')) {
+        constrainPath(file, 'newPath', metadataPath(line.slice(10)));
+      } else if (line.startsWith('copy from ')) {
+        constrainPath(file, 'oldPath', metadataPath(line.slice(10)));
+      } else if (line.startsWith('copy to ')) {
+        constrainPath(file, 'newPath', metadataPath(line.slice(8)));
       }
     }
   }
-  if (cur) files.push(cur);
+  finish();
+  if (files.length === 0) throw new Error('diff has no Git file headers');
   return files;
 }
 
-/**
- * The never-weaken guard. Refuses (weakened:true) when the diff:
- *   - deletes a safety/invariant test file, OR
- *   - removes assertions from a safety/invariant test file, OR
- *   - adds focused/skipped test declarations in a safety/invariant test file.
- * Conservative by design: a diff that touches a safety file and removes
- * protected assertion substance is refused even if it also adds unrelated code.
- * PURE; never throws.
- */
+/** Any mutation of test infrastructure requires judge or human review. */
 export function guardSafetyTests(diff: string): SafetyGuardVerdict {
-  const touched: string[] = [];
   if (!diff || !diff.trim()) return { weakened: false, reason: 'empty diff', files: [] };
-  let parsed: FileDiff[];
+  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) {
+    return { weakened: true, reason: 'unparseable diff over self-target - refused', files: [] };
+  }
+
+  let files: FileDiff[];
   try {
-    parsed = parseDiff(diff);
+    files = parseDiff(diff);
   } catch {
-    // Unparseable diff over self ⇒ refuse (ambiguous = unsafe).
-    return { weakened: true, reason: 'unparseable diff over self-target — refused', files: [] };
+    return { weakened: true, reason: 'unparseable diff over self-target - refused', files: [] };
   }
-  for (const f of parsed) {
-    if (!f.path || !isSafetyTestFile(f.path)) continue;
-    touched.push(f.path);
-    if (f.deleted) {
-      return {
-        weakened: true,
-        reason: `diff deletes safety/invariant test file '${f.path}' — refused`,
-        files: touched,
-      };
-    }
-    if (f.addedSkippedOrOnlyTests.length > 0) {
-      return {
-        weakened: true,
-        reason: `diff adds skipped/focused safety test declaration in '${f.path}' — refused`,
-        files: touched,
-      };
-    }
-    if (f.removedAssertions > 0) {
-      return {
-        weakened: true,
-        reason: `diff removes ${f.removedAssertions} assertion(s) from safety test '${f.path}' — refused`,
-        files: touched,
-      };
-    }
+
+  const touched: string[] = [];
+  for (const file of files) {
+    const path = [file.oldPath, file.newPath].find((candidate) => candidate && isSafetyTestFile(candidate));
+    if (!path) continue;
+    touched.push(path);
+    return { weakened: true, reason: `diff touches protected test infrastructure '${path}' - refused`, files: touched };
   }
-  return { weakened: false, reason: 'no safety test weakened', files: touched };
+  return { weakened: false, reason: 'no protected test infrastructure touched', files: touched };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,56 +293,24 @@ export interface SelfEvalVerdict {
   reason: string;
 }
 
-/**
- * The self-eval harness contract: a self-target change is eligible only when the
- * invariant suite is green with the foundry flag OFF *and* ON. `runSuite(flagOn)`
- * runs the suite in the (already diff-applied) sandbox worktree and returns
- * whether it passed. PURE over its injected runner; never throws — a runner that
- * throws counts as a failing suite (fail-closed).
- */
 export function selfEvalParity(runSuite: (flagOn: boolean) => boolean): SelfEvalVerdict {
   let offGreen: boolean;
   let onGreen: boolean;
-  try {
-    offGreen = runSuite(false);
-  } catch {
-    offGreen = false;
-  }
-  if (!offGreen) {
-    return { ok: false, reason: 'invariant suite not green with foundry flag OFF' };
-  }
-  try {
-    onGreen = runSuite(true);
-  } catch {
-    onGreen = false;
-  }
-  if (!onGreen) {
-    return { ok: false, reason: 'invariant suite not green with foundry flag ON' };
-  }
+  try { offGreen = runSuite(false); } catch { offGreen = false; }
+  if (!offGreen) return { ok: false, reason: 'invariant suite not green with foundry flag OFF' };
+  try { onGreen = runSuite(true); } catch { onGreen = false; }
+  if (!onGreen) return { ok: false, reason: 'invariant suite not green with foundry flag ON' };
   return { ok: true, reason: 'invariant suite green flag-off AND flag-on' };
 }
 
-/** Async variant for callers whose suite runner must not block daemon timers. */
 export async function selfEvalParityAsync(
   runSuite: (flagOn: boolean) => boolean | Promise<boolean>,
 ): Promise<SelfEvalVerdict> {
   let offGreen: boolean;
   let onGreen: boolean;
-  try {
-    offGreen = await runSuite(false);
-  } catch {
-    offGreen = false;
-  }
-  if (!offGreen) {
-    return { ok: false, reason: 'invariant suite not green with foundry flag OFF' };
-  }
-  try {
-    onGreen = await runSuite(true);
-  } catch {
-    onGreen = false;
-  }
-  if (!onGreen) {
-    return { ok: false, reason: 'invariant suite not green with foundry flag ON' };
-  }
+  try { offGreen = await runSuite(false); } catch { offGreen = false; }
+  if (!offGreen) return { ok: false, reason: 'invariant suite not green with foundry flag OFF' };
+  try { onGreen = await runSuite(true); } catch { onGreen = false; }
+  if (!onGreen) return { ok: false, reason: 'invariant suite not green with foundry flag ON' };
   return { ok: true, reason: 'invariant suite green flag-off AND flag-on' };
 }

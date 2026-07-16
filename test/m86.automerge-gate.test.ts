@@ -783,7 +783,7 @@ describe('M86 PURE — evidence safety lane', () => {
       evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-only', onlyDiff), evidenceCfg(), {
         remoteAvailable: true,
       }).reason,
-    ).toMatch(/skipped\/focused/);
+    ).toMatch(/protected test infrastructure/);
   });
 
   it('refuses verification script changes before evidence activation', () => {

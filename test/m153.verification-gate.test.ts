@@ -770,7 +770,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     expect(r.reason).toMatch(/signed provenance is required|provenance/);
   });
 
-  it('[E8] partial captures and test-weakening changes are refused by evidence preflight', () => {
+  it('[E8] partial captures and every existing-test edit are refused by evidence preflight', () => {
     const partial = evaluateEvidenceAutoMergePreflight(
       { ...evidenceProposal('e8-partial'), isPartial: true },
       evidenceCfg(),
@@ -779,58 +779,154 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     expect(partial.authorized).toBe(false);
     expect(partial.reason).toMatch(/partial/);
 
-    const weakeningDiff = [
-      'diff --git a/test/h1.safety.test.ts b/test/h1.safety.test.ts',
-      '--- a/test/h1.safety.test.ts',
-      '+++ b/test/h1.safety.test.ts',
-      '@@ -1 +0,0 @@',
-      '-expect(true).toBe(true);',
+    const existingTestDiff = [
+      'diff --git a/test/m153.verification-gate.test.ts b/test/m153.verification-gate.test.ts',
+      '--- a/test/m153.verification-gate.test.ts',
+      '+++ b/test/m153.verification-gate.test.ts',
+      '@@ -1 +1,2 @@',
+      " it('existing coverage', () => {});",
+      "+it('additive coverage', () => {});",
       '',
     ].join('\n');
-    const diffHash = hashDiff(weakeningDiff);
-    const weakening = evidenceProposal('e8-weakening', weakeningDiff);
-    weakening.diffHash = diffHash;
-    weakening.provenanceSig = signProvenance('local:qwen3-coder', 'local', diffHash);
-    weakening.verifyResult = {
-      passed: true,
-      detail: 'all checks passed',
-      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-      baseBranch: 'main',
-      baseHead: '0123456789abcdef0123456789abcdef01234567',
-      diffHash,
-    };
-
-    const r = evaluateEvidenceAutoMergePreflight(weakening, evidenceCfg(), { remoteAvailable: true });
+    const r = evaluateEvidenceAutoMergePreflight(
+      evidenceProposal('e8-existing-test', existingTestDiff),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
     expect(r.authorized).toBe(false);
-    expect(r.reason).toMatch(/test-weakening|safety\/invariant/);
+    expect(r.reason).toMatch(/test-weakening.*protected test infrastructure/);
+  });
 
-    const equalCountDiff = [
-      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
-      '--- a/test/m54.self-guard.test.ts',
-      '+++ b/test/m54.self-guard.test.ts',
-      '@@ -1 +1 @@',
-      '-expect(realGate).toBe(true);',
-      '+expect(true).toBe(true);',
-      '',
-    ].join('\n');
-    const equalCount = evidenceProposal('e8-equal-count', equalCountDiff);
-    expect(
-      evaluateEvidenceAutoMergePreflight(equalCount, evidenceCfg(), { remoteAvailable: true }).reason,
-    ).toMatch(/test-weakening|removes \d+ assertion/);
+  it('[E8a] evidence preflight refuses all new tests and test-control edits before source inspection', () => {
+    const protectedDiffs = [
+      [
+        'diff --git a/test/ordinary.test.ts b/test/ordinary.test.ts',
+        'new file mode 100644',
+        '--- /dev/null',
+        '+++ b/test/ordinary.test.ts',
+        '@@ -0,0 +1,1 @@',
+        "+it('works', () => expect(true).toBe(true));",
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/test/obfuscated.test.ts b/test/obfuscated.test.ts',
+        'new file mode 100644',
+        '--- /dev/null',
+        '+++ b/test/obfuscated.test.ts',
+        '@@ -0,0 +1,2 @@',
+        "+const mode = 'skip';",
+        "+test[mode]('disabled', () => {});",
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/test/setup/home.ts b/test/setup/home.ts',
+        '--- a/test/setup/home.ts',
+        '+++ b/test/setup/home.ts',
+        '@@ -1 +1,2 @@',
+        " import { vi } from 'vitest';",
+        "+beforeEach((ctx) => ctx.skip());",
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/test/helpers/h1-fixture.ts b/test/helpers/h1-fixture.ts',
+        '--- a/test/helpers/h1-fixture.ts',
+        '+++ b/test/helpers/h1-fixture.ts',
+        '@@ -1 +1,2 @@',
+        ' export const fixture = true;',
+        '+export const bypass = true;',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/vitest.config.ts b/vitest.config.ts',
+        '--- a/vitest.config.ts',
+        '+++ b/vitest.config.ts',
+        '@@ -1 +1,2 @@',
+        ' export default {};',
+        "+export const exclude = ['test/**'];",
+        '',
+      ].join('\n'),
+    ];
 
-    const skipDiff = [
-      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
-      '--- a/test/m54.self-guard.test.ts',
-      '+++ b/test/m54.self-guard.test.ts',
-      '@@ -1 +1 @@',
-      "-it('guards safety', () => {",
-      "+it.skip('guards safety', () => {",
-      '',
-    ].join('\n');
-    const skipped = evidenceProposal('e8-skipped', skipDiff);
-    expect(
-      evaluateEvidenceAutoMergePreflight(skipped, evidenceCfg(), { remoteAvailable: true }).reason,
-    ).toMatch(/skipped\/focused/);
+    for (const [index, diff] of protectedDiffs.entries()) {
+      const verdict = evaluateEvidenceAutoMergePreflight(
+        evidenceProposal(`e8a-${index}`, diff),
+        evidenceCfg(),
+        { remoteAvailable: true },
+      );
+      expect(verdict.authorized, diff).toBe(false);
+      expect(verdict.reason, diff).toMatch(/test-weakening.*protected test infrastructure/);
+    }
+  });
+
+  it('[E8aa] evidence preflight refuses test rename, copy, deletion, and case aliases', () => {
+    const protectedDiffs = [
+      [
+        'diff --git a/test/existing.test.ts b/test/existing.test.ts',
+        'deleted file mode 100644',
+        '--- a/test/existing.test.ts',
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        "-it('existing', () => {});",
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/test/existing.test.ts b/archive/existing.ts',
+        'similarity index 100%',
+        'rename from test/existing.test.ts',
+        'rename to archive/existing.ts',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/src/fixture.ts b/tests/copied.test.ts',
+        'similarity index 100%',
+        'copy from src/fixture.ts',
+        'copy to tests/copied.test.ts',
+        '',
+      ].join('\n'),
+      [
+        'diff --git a/Test/existing.test.ts b/Test/existing.test.ts',
+        '--- a/Test/existing.test.ts',
+        '+++ b/Test/existing.test.ts',
+        '@@ -1 +1,2 @@',
+        " it('existing', () => {});",
+        "+it('added', () => {});",
+        '',
+      ].join('\n'),
+    ];
+
+    for (const [index, diff] of protectedDiffs.entries()) {
+      const verdict = evaluateEvidenceAutoMergePreflight(
+        evidenceProposal(`e8aa-${index}`, diff),
+        evidenceCfg(),
+        { remoteAvailable: true },
+      );
+      expect(verdict.authorized, diff).toBe(false);
+      expect(verdict.reason, diff).toMatch(/test-weakening.*protected test infrastructure/);
+    }
+  });
+
+  it('[E8ab] evidence preflight preserves unrelated source and documentation changes', () => {
+    const diffs = [
+      [
+        'diff --git a/src/core/router.ts b/src/core/router.ts',
+        '--- a/src/core/router.ts',
+        '+++ b/src/core/router.ts',
+        '@@ -1 +1,2 @@',
+        ' export const route = true;',
+        '+export const fixed = true;',
+        '',
+      ].join('\n'),
+      docsDiff(),
+    ];
+
+    for (const [index, diff] of diffs.entries()) {
+      const verdict = evaluateEvidenceAutoMergePreflight(
+        evidenceProposal(`e8ab-${index}`, diff),
+        evidenceCfg(),
+        { remoteAvailable: true },
+      );
+      expect(verdict.authorized, diff).toBe(true);
+    }
   });
 
   it('[E8b] weakened verification scripts are refused by evidence preflight', () => {
