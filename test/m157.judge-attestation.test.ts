@@ -35,6 +35,9 @@
  *  manager.ts signing path
  *  [M1]  judgeProposal 'ship' + frontier (claude-*) → recordDecision includes judgeAttestation
  *  [M1b] judgeProposal 'ship' + wouldMerge=false → NO judgeAttestation
+ *  [M1c] unavailable independent reviewer → escalated, never judged
+ *  [M1d] mixed Claude/OpenAI producers → opposite-family reviewer per proposal
+ *  [M1e] escalation cannot displace prior independent judged authority
  *  [M2]  judgeProposal 'ship' + local judge (qwen) → NO attestation in recordDecision
  *  [M3]  judgeProposal 'review' + frontier → NO attestation (only 'ship' is signed)
  *  [M4]  judgeProposal 'noise' + frontier → NO attestation
@@ -73,10 +76,12 @@ vi.mock('../src/core/vision/spec.js', () => ({
 }));
 
 const mockEngineInstalled = vi.fn(() => false);
+const mockBuildEngineCommand = vi.fn((engine: string) => ({ engine }));
+const mockSpawnEngine = vi.fn((_command: unknown) => ({ ok: false, output: '' }));
 vi.mock('../src/core/run/engines.js', () => ({
   engineInstalled: (...args: unknown[]) => mockEngineInstalled(...args),
-  buildEngineCommand: () => null,
-  spawnEngine: () => ({ ok: false, output: '' }),
+  buildEngineCommand: (...args: unknown[]) => mockBuildEngineCommand(args[0] as string),
+  spawnEngine: (...args: unknown[]) => mockSpawnEngine(args[0]),
 }));
 
 const mockGetActiveClient = vi.fn();
@@ -122,6 +127,8 @@ beforeEach(() => {
   mockRecordDecision.mockReturnValue(undefined);
   mockReadDecisions.mockReturnValue([]);
   mockEngineInstalled.mockReturnValue(false);
+  mockBuildEngineCommand.mockImplementation((engine: string) => ({ engine }));
+  mockSpawnEngine.mockReturnValue({ ok: false, output: '' });
 });
 
 afterEach(() => {
@@ -481,7 +488,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
   const managerCfg: AshlrConfig = {
     foundry: {
       allowedBackends: ['builtin'],
-      managerJudgeEngine: 'local',
+      managerJudgeEngine: 'auto',
       managerJudgeModel: 'qwen2.5:72b-instruct-q4_K_M',
     },
   } as unknown as AshlrConfig;
@@ -490,6 +497,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     vi.mocked(storeMock.listProposals).mockReturnValueOnce([testProposal] as never);
     mockEngineInstalled.mockReturnValue(false);
     mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
       model: JUDGE_ENGINE,
       complete: async () =>
         JSON.stringify({ verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'looks great' }),
@@ -547,6 +555,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     vi.mocked(storeMock.listProposals).mockReturnValueOnce([prop] as never);
     mockEngineInstalled.mockReturnValue(false);
     mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
       model: JUDGE_ENGINE,
       complete: async () =>
         JSON.stringify({ verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'looks good but exceeds merge bounds' }),
@@ -566,11 +575,181 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     expect(entry.judgeAttestation).toBeUndefined();
   });
 
+  it('[M1c] no independent reviewer records escalated, never a newer judged row', async () => {
+    const correlated = {
+      ...testProposal,
+      id: 'mgr-prop-001c',
+      engineModel: 'claude:claude-sonnet-4-6',
+      engineTier: 'frontier' as const,
+    };
+    vi.mocked(storeMock.listProposals).mockReturnValueOnce([correlated] as never);
+    mockEngineInstalled.mockImplementation((engine: unknown) => engine === 'claude');
+    mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
+      model: JUDGE_ENGINE,
+      complete: async () => JSON.stringify({
+        verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5,
+        rationale: 'same-family advisory ship',
+      }),
+    });
+
+    await runManager(managerCfg, { window: '7d', limit: 1 });
+
+    const proposalEntries = mockRecordDecision.mock.calls
+      .map((args) => args[0] as DecisionEntry)
+      .filter((entry) => entry.proposalId === correlated.id);
+    expect(proposalEntries.some((entry) => entry.action === 'judged')).toBe(false);
+    const escalated = proposalEntries.find(
+      (entry) => entry.action === 'escalated',
+    );
+    expect(escalated).toBeDefined();
+    expect(escalated?.verdict).toBe('review');
+    expect(escalated?.judgeAttestation).toBeUndefined();
+    expect(escalated?.reason).toMatch(/independent reviewer|judge available/i);
+  });
+
+  it('[M1d] mixed Claude/OpenAI producers route to opposite-family reviewers', async () => {
+    const claudeProposal: Proposal = {
+      ...testProposal,
+      id: 'mgr-prop-claude',
+      engineModel: 'claude:claude-sonnet-4-6',
+      engineTier: 'frontier',
+    };
+    const openAiProposal: Proposal = {
+      ...testProposal,
+      id: 'mgr-prop-openai',
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    };
+    vi.mocked(storeMock.listProposals).mockReturnValueOnce([
+      claudeProposal,
+      openAiProposal,
+    ] as never);
+    mockEngineInstalled.mockImplementation(
+      (engine: unknown) => engine === 'claude' || engine === 'codex',
+    );
+    mockSpawnEngine.mockImplementation((command: unknown) => {
+      const engine = (command as { engine?: string }).engine;
+      const verdict = JSON.stringify({
+        verdict: 'ship',
+        value: 5,
+        correctness: 5,
+        scope: 1,
+        alignment: 5,
+        rationale: `${engine} independently approved`,
+      });
+      return engine === 'claude'
+        ? { ok: true, output: JSON.stringify({ result: verdict }) }
+        : { ok: true, output: verdict };
+    });
+
+    const mixedCfg: AshlrConfig = {
+      foundry: {
+        allowedBackends: ['builtin'],
+        managerJudgeEngine: 'auto',
+      },
+    } as unknown as AshlrConfig;
+
+    const report = await runManager(mixedCfg, { window: '7d', limit: 2 });
+
+    const judgedEntries = mockRecordDecision.mock.calls
+      .map((args) => args[0] as DecisionEntry)
+      .filter(
+        (entry) => (entry.proposalId === claudeProposal.id || entry.proposalId === openAiProposal.id) &&
+          entry.action === 'judged',
+      );
+    expect(judgedEntries).toHaveLength(2);
+
+    const claudeProducerReview = judgedEntries.find(
+      (entry) => entry.proposalId === claudeProposal.id,
+    );
+    const openAiProducerReview = judgedEntries.find(
+      (entry) => entry.proposalId === openAiProposal.id,
+    );
+    expect(claudeProducerReview?.model ?? claudeProducerReview?.engine).toMatch(/gpt-5|codex/i);
+    expect(openAiProducerReview?.model ?? openAiProducerReview?.engine).toMatch(/claude/i);
+    expect(claudeProducerReview?.judgeAttestation).toHaveLength(64);
+    expect(openAiProducerReview?.judgeAttestation).toHaveLength(64);
+
+    expect(verifyJudgeAttestation(claudeProducerReview?.judgeAttestation, {
+      proposalId: claudeProposal.id,
+      judgeEngine: claudeProducerReview?.engine ?? '',
+      verdict: 'ship',
+      diffHash: hashDiff(claudeProposal.diff ?? ''),
+      issuedAt: claudeProducerReview?.judgeAttestationIssuedAt,
+      mergeIntent: claudeProducerReview?.judgeAttestationIntent,
+    }).ok).toBe(true);
+    expect(verifyJudgeAttestation(openAiProducerReview?.judgeAttestation, {
+      proposalId: openAiProposal.id,
+      judgeEngine: openAiProducerReview?.engine ?? '',
+      verdict: 'ship',
+      diffHash: hashDiff(openAiProposal.diff ?? ''),
+      issuedAt: openAiProducerReview?.judgeAttestationIssuedAt,
+      mergeIntent: openAiProducerReview?.judgeAttestationIntent,
+    }).ok).toBe(true);
+
+    const answeringEngines = new Set(
+      mockSpawnEngine.mock.calls.map(([command]) => (command as { engine?: string }).engine),
+    );
+    expect(answeringEngines).toEqual(new Set(['claude', 'codex']));
+    expect(report.judgeEngine).toMatch(/^mixed:/);
+    expect(report.judgeEngine).toMatch(/claude/i);
+    expect(report.judgeEngine).toMatch(/gpt-5/i);
+  });
+
+  it('[M1e] escalation cannot displace an existing valid independent judged authority', async () => {
+    const correlated = {
+      ...testProposal,
+      id: 'mgr-prop-001e',
+      engineModel: 'claude:claude-sonnet-4-6',
+      engineTier: 'frontier' as const,
+    };
+    const priorJudgeEngine = 'gpt-5.5';
+    const priorDiffHash = hashDiff(correlated.diff ?? '');
+    const priorIndependentShip: DecisionEntry = {
+      ts: new Date().toISOString(),
+      proposalId: correlated.id,
+      action: 'judged',
+      engine: priorJudgeEngine,
+      model: priorJudgeEngine,
+      verdict: 'ship',
+      detail: 'would-merge',
+      judgeAttestation: signJudgeAttestation({
+        proposalId: correlated.id,
+        judgeEngine: priorJudgeEngine,
+        verdict: 'ship',
+        diffHash: priorDiffHash,
+      }),
+    };
+    mockReadDecisions.mockReturnValue([priorIndependentShip]);
+    vi.mocked(storeMock.listProposals).mockReturnValueOnce([correlated] as never);
+    mockEngineInstalled.mockImplementation((engine: unknown) => engine === 'claude');
+    mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
+      model: JUDGE_ENGINE,
+      complete: async () => JSON.stringify({
+        verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5,
+        rationale: 'correlated retry',
+      }),
+    });
+
+    await runManager(managerCfg, { window: '7d', limit: 1 });
+
+    const newEntries = mockRecordDecision.mock.calls
+      .map((args) => args[0] as DecisionEntry)
+      .filter((entry) => entry.proposalId === correlated.id);
+    expect(newEntries).toHaveLength(1);
+    expect(newEntries[0]?.action).toBe('escalated');
+    expect(newEntries[0]?.judgeAttestation).toBeUndefined();
+    expect(newEntries.some((entry) => entry.action === 'judged')).toBe(false);
+  });
+
   it('[M2] local judge (qwen) + verdict ship → NO judgeAttestation in recordDecision', async () => {
     const localProp = { ...testProposal, id: 'mgr-prop-002' };
     vi.mocked(storeMock.listProposals).mockReturnValueOnce([localProp] as never);
     mockEngineInstalled.mockReturnValue(false);
     mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
       model: LOCAL_ENGINE,
       complete: async () =>
         JSON.stringify({ verdict: 'ship', value: 4, correctness: 4, scope: 1, alignment: 4, rationale: 'local ship' }),
@@ -598,6 +777,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     vi.mocked(storeMock.listProposals).mockReturnValueOnce([{ ...testProposal, id: 'mgr-prop-003' }] as never);
     mockEngineInstalled.mockReturnValue(false);
     mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
       model: JUDGE_ENGINE,
       complete: async () =>
         JSON.stringify({ verdict: 'review', value: 3, correctness: 3, scope: 3, alignment: 3, rationale: 'needs review' }),
@@ -618,6 +798,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     vi.mocked(storeMock.listProposals).mockReturnValueOnce([{ ...testProposal, id: 'mgr-prop-004' }] as never);
     mockEngineInstalled.mockReturnValue(false);
     mockGetActiveClient.mockResolvedValue({
+      id: 'anthropic',
       model: JUDGE_ENGINE,
       complete: async () =>
         JSON.stringify({ verdict: 'noise', value: 1, correctness: 1, scope: 1, alignment: 1, rationale: 'trivial' }),

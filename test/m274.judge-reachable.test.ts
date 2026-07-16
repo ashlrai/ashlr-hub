@@ -341,6 +341,109 @@ describe('M274 frontier judge reachability', () => {
     expect(client!.model).toBe('gpt-5.5');
   });
 
+  it('[R12] routes a Claude producer to an installed Codex reviewer', () => {
+    const cfg = baseCfg({ managerJudgeEngine: 'auto' });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude:claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+
+    expect(client?.model).toBe('gpt-5.5');
+  });
+
+  it('[R13] routes an OpenAI producer to an installed Claude reviewer', () => {
+    const cfg = baseCfg({ managerJudgeEngine: 'auto' });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'codex:gpt-5.5',
+      requireIndependent: true,
+    });
+
+    expect(client?.model).toMatch(/claude/i);
+  });
+
+  it('[R13b] honors an explicit correlated reviewer by failing pending', () => {
+    const cfg = baseCfg({ managerJudgeEngine: 'claude' });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude:claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+
+    expect(client).toBeNull();
+  });
+
+  it('[R14] fails pending when only a same-family frontier reviewer is installed', () => {
+    const cfg = baseCfg({ managerJudgeEngine: 'auto' });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude:claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+
+    expect(client).toBeNull();
+  });
+
+  it('[R15] judgeAllowedBackends=[claude] blocks Codex independent fallback', () => {
+    const cfg = baseCfg({
+      managerJudgeEngine: 'auto',
+      judgeAllowedBackends: ['claude'],
+    });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude:claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+
+    expect(client).toBeNull();
+  });
+
+  it('[R16] judgeAllowedBackends=[codex] blocks Claude independent fallback', () => {
+    const cfg = baseCfg({
+      managerJudgeEngine: 'auto',
+      judgeAllowedBackends: ['codex'],
+    });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'codex:gpt-5.5',
+      requireIndependent: true,
+    });
+
+    expect(client).toBeNull();
+  });
+
+  it('[R17] judgeAllowedBackends=[codex] permits Codex independent fallback', () => {
+    const cfg = baseCfg({
+      managerJudgeEngine: 'auto',
+      judgeAllowedBackends: ['codex'],
+    });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude:claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+
+    expect(client?.model).toBe('gpt-5.5');
+  });
+
+  it('[R18] explicit frontier-only allowlist cannot fall through to Ollama', () => {
+    const cfg = baseCfg({
+      managerJudgeEngine: 'claude',
+      judgeAllowedBackends: ['claude'],
+    });
+    mockEngineInstalled.mockReturnValue(false);
+
+    expect(resolveFrontierJudgeClient(cfg)).toBeNull();
+  });
+
   it('[R8] returns null when claude not installed AND ollama unreachable', () => {
     // Both paths fail → resolveFrontierJudgeClient catches and returns null.
     mockEngineInstalled.mockReturnValue(false); // no claude

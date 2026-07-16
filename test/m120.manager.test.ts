@@ -45,6 +45,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const mockProposals: Partial<Proposal>[] = [];
+const RUN_MANAGER_PRODUCER_MODEL = 'codex:gpt-5.5';
+const RUN_MANAGER_REVIEWER_MODEL = 'claude-sonnet-4-5';
 
 // Track setStatus calls for shadow-mode assertions
 const setStatusCalls: Array<[string, string, string | undefined, string | undefined]> = [];
@@ -119,6 +121,8 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     kind: 'patch',
     title: 'test proposal',
     summary: 'a useful change',
+    engineModel: RUN_MANAGER_PRODUCER_MODEL,
+    engineTier: 'frontier',
     status: 'pending',
     createdAt: new Date().toISOString(),
     ...overrides,
@@ -141,33 +145,37 @@ function makeDiff(files: number, linesPerFile: number): string {
 }
 
 /** Create a mock client that returns a fixed JSON verdict string. */
-function mockClient(verdictJson: object): { complete: (s: string, u: string) => Promise<string>; model: string } {
+function mockClient(verdictJson: object): { id: string; complete: (s: string, u: string) => Promise<string>; model: string } {
   return {
-    model: 'test-judge',
+    id: 'anthropic',
+    model: RUN_MANAGER_REVIEWER_MODEL,
     complete: vi.fn().mockResolvedValue(JSON.stringify(verdictJson)),
   };
 }
 
 /** Create a mock client that returns raw judge output. */
-function mockClientRaw(raw: string): { complete: (s: string, u: string) => Promise<string>; model: string } {
+function mockClientRaw(raw: string): { id: string; complete: (s: string, u: string) => Promise<string>; model: string } {
   return {
-    model: 'test-judge',
+    id: 'anthropic',
+    model: RUN_MANAGER_REVIEWER_MODEL,
     complete: vi.fn().mockResolvedValue(raw),
   };
 }
 
 /** Create a mock client that returns unparseable prose. */
-function mockClientParseFail(): { complete: (s: string, u: string) => Promise<string>; model: string } {
+function mockClientParseFail(): { id: string; complete: (s: string, u: string) => Promise<string>; model: string } {
   return {
-    model: 'test-judge',
+    id: 'anthropic',
+    model: RUN_MANAGER_REVIEWER_MODEL,
     complete: vi.fn().mockResolvedValue('I cannot provide a structured assessment at this time.'),
   };
 }
 
 /** Create a mock client that throws on complete(). */
-function mockClientThrows(): { complete: (s: string, u: string) => Promise<string>; model: string } {
+function mockClientThrows(): { id: string; complete: (s: string, u: string) => Promise<string>; model: string } {
   return {
-    model: 'test-judge',
+    id: 'anthropic',
+    model: RUN_MANAGER_REVIEWER_MODEL,
     complete: vi.fn().mockRejectedValue(new Error('network error')),
   };
 }
@@ -713,7 +721,8 @@ describe('m120 runManager — shadow mode', () => {
     // Alternate between ship and review
     let call = 0;
     (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue({
-      model: 'test',
+      id: 'anthropic',
+      model: RUN_MANAGER_REVIEWER_MODEL,
       complete: vi.fn().mockImplementation(() => {
         const v = call++ % 2 === 0 ? 'ship' : 'review';
         return Promise.resolve(JSON.stringify({
@@ -791,6 +800,63 @@ describe('m120 runManager — shadow mode', () => {
       expect(v.wouldMerge).toBe(false);
     }
   });
+
+  it('escalates a proposal whose producer identity is unknown', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockClient({ verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'Good.' }),
+    );
+    const proposal = makeProposal({
+      id: 'prop-unknown-producer',
+      engineModel: undefined,
+      engineTier: undefined,
+    });
+    mockProposals.push(proposal);
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never);
+
+    expect(report.verdicts).toMatchObject([
+      { proposalId: proposal.id, verdict: 'review', wouldMerge: false },
+    ]);
+    const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    const entry = readDecisions().find((decision) => decision.proposalId === proposal.id);
+    expect(entry).toMatchObject({
+      action: 'escalated',
+      engine: 'unavailable',
+      verdict: 'review',
+    });
+    expect(getActiveClient).not.toHaveBeenCalled();
+  });
+
+  it('rejects a frontier-looking model served by the wrong provider', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'ollama',
+      model: RUN_MANAGER_REVIEWER_MODEL,
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'spoofed',
+      })),
+    });
+    const proposal = makeProposal({ id: 'prop-provider-model-mismatch' });
+    mockProposals.push(proposal);
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never);
+
+    expect(report.verdicts).toMatchObject([
+      { proposalId: proposal.id, verdict: 'review', wouldMerge: false },
+    ]);
+    const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    expect(readDecisions().find((decision) => decision.proposalId === proposal.id)).toMatchObject({
+      action: 'escalated',
+      engine: 'unavailable',
+    });
+    expect(getActiveClient).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ provider: 'anthropic' }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -804,7 +870,8 @@ describe('m120 runManager — applyRejects=true', () => {
     const verdicts = ['ship', 'noise', 'review', 'harmful', 'noise'];
     let idx = 0;
     (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue({
-      model: 'test',
+      id: 'anthropic',
+      model: RUN_MANAGER_REVIEWER_MODEL,
       complete: vi.fn().mockImplementation(() => {
         const v = verdicts[idx++] ?? 'review';
         return Promise.resolve(JSON.stringify({

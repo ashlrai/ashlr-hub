@@ -17,7 +17,7 @@
  * ║   4. MERGE AUTHORITY — two modes selected by trustBasis (DEFAULT 'tier'):  ║
  * ║      'tier' (M51): engineTier === 'frontier' AND {engine,model} ∈           ║
  * ║        mergeAuthority. Byte-identical to pre-M153 when absent/'tier'.       ║
- * ║      'verification' (M153): STRONGER 5-criterion bar that REPLACES the     ║
+ * ║      'verification' (M153): STRONGER 6-criterion bar that REPLACES the     ║
  * ║        tier check. ANY producer tier clears if ALL hold:                    ║
  * ║        (a) most-recent 'judged' decision verdict='ship' AND judge engine   ║
  * ║            is a frontier (claude-*) model — NEVER the local 72b fallback   ║
@@ -143,7 +143,8 @@ import {
   verifyJudgeAttestation,
   verifyProvenance,
 } from '../foundry/provenance.js';
-import { judgeProposal } from '../fleet/manager.js';
+import { judgeProposal, resolveFrontierJudgeClient } from '../fleet/manager.js';
+import { evaluateReviewerIndependence } from '../fleet/reviewer-independence.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
@@ -1612,7 +1613,7 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
  *
  * Called ONLY when cfg.foundry.autoMerge.trustBasis === 'verification'.
  * Replaces the frontier-tier/mergeAuthority check (M51 Gate 4) with a
- * STRONGER 5-criterion bar. ALL must hold, or the gate refuses.
+ * STRONGER 6-criterion bar. ALL must hold, or the gate refuses.
  *
  * Criteria (all required):
  *
@@ -1621,6 +1622,10 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
  *      DecisionEntry.engine must be a frontier (claude-*) model. If the judge
  *      was local/72b or no 'judged' entry exists → REFUSE. The producer may be
  *      any tier; the JUDGE must be frontier. Non-negotiable anti-self-confirm.
+ *
+ *   1b. PROVIDER-FAMILY INDEPENDENCE: the provenance-signed producer model
+ *       and attested reviewer model must both map to known, different families.
+ *       Route snapshots are observational and cannot satisfy this criterion.
  *
  *   2. SUITE GREEN: proposal.verifyResult.passed === true — the full test suite
  *      ran and passed (set by verifyProposal Gate 6). Gate 6 is a prerequisite
@@ -1712,6 +1717,10 @@ export function evaluateVerificationGate(
       `verification gate: judge '${judgeEngine ?? 'unknown'}' is not a frontier (claude-*) model — ` +
         `local/72b judges cannot provide independent confirmation (self-confirmation trap)`,
     );
+  }
+  const reviewerIndependence = evaluateReviewerIndependence(proposal, judgeEngine);
+  if (!reviewerIndependence.independent) {
+    return refuse(`verification gate: ${reviewerIndependence.reason}`);
   }
 
   // Verify the HMAC attestation. diffHash is recomputed from the CURRENT proposal
@@ -1818,10 +1827,10 @@ export function evaluateVerificationGate(
     );
   }
 
-  // All 5 criteria met — including HMAC-verified judge attestation (M157).
+  // All 6 criteria met, including family independence and HMAC attestation.
   return {
     authorized: true,
-    reason: `verification gate cleared: frontier judge='${judgeEngine}' ship'd (HMAC attested); suite green; risk=${risk}≤${maxRisk}; scope ok (${scopeFiles}f/${scopeLines}l); EDV confirmed; provenance valid`,
+    reason: `verification gate cleared: independent frontier judge='${judgeEngine}' ship'd (HMAC attested); suite green; risk=${risk}≤${maxRisk}; scope ok (${scopeFiles}f/${scopeLines}l); EDV confirmed; provenance valid`,
   };
 }
 
@@ -2890,7 +2899,7 @@ export async function autoMergeProposal(
     //   pre-M153 behavior). mid → branch/PR only; local → proposal-only.
     //
     //   'verification': M153 — REPLACE the tier check with the full
-    //   5-criterion verification bar (evaluateVerificationGate). ANY producer
+    //   6-criterion verification bar (evaluateVerificationGate). ANY producer
     //   tier may proceed; the bar IS the authority. The merge target is always
     //   'main' in this mode (the verification bar is stronger than tier-gating).
     //
@@ -3282,6 +3291,7 @@ export async function autoMergeProposal(
       let managerVerdict: { verdict: string; wouldMerge: boolean; rationale: string } | null = null;
 
       const cachedJudgeEngine = cachedEntry?.engine ?? cachedEntry?.model;
+      const cachedReviewerIndependent = evaluateReviewerIndependence(proposal, cachedJudgeEngine).independent;
       const cachedIssuedAt = cachedEntry?.judgeAttestationIssuedAt;
       const cachedIssuedMs = typeof cachedIssuedAt === 'string' ? Date.parse(cachedIssuedAt) : NaN;
       const cacheNow = Date.now();
@@ -3293,6 +3303,7 @@ export async function autoMergeProposal(
         cachedIssuedMs <= cacheNow + 60_000 &&
         cachedIssuedMs >= cacheNow - STALE_MS &&
         isFrontierJudge(cachedJudgeEngine) &&
+        cachedReviewerIndependent &&
         verifyJudgeAttestation(cachedEntry.judgeAttestation, {
           proposalId: proposal.id,
           judgeEngine: cachedJudgeEngine ?? '',
@@ -3313,43 +3324,19 @@ export async function autoMergeProposal(
         // Resolve the judge client (same pattern as runManager; fail closed if unavailable).
         // M153: capture the actual judge engine string so it can be recorded in
         // the decisions ledger and later read by evaluateVerificationGate criterion 1.
-        let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+        let judgeClient: {
+          complete: (system: string, user: string) => Promise<string>;
+          model?: string;
+        } | null = null;
         let inlineJudgeEngine = 'gate7-inline'; // updated to real model string below
         try {
-          const { getActiveClient } = await import('../run/provider-client.js');
-          const judgeModel =
-            ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ??
-            'qwen2.5:72b-instruct-q4_K_M';
-          let rawClient: unknown = null;
-          try {
-            rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel });
-          } catch {
-            try {
-              rawClient = await getActiveClient(cfg, { allowCloud: false, model: judgeModel });
-            } catch {
-              rawClient = null;
-            }
-          }
-          if (rawClient && typeof (rawClient as Record<string, unknown>)['complete'] === 'function') {
-            judgeClient = rawClient as { complete: (s: string, u: string) => Promise<string> };
-            // Capture the model string from the client if available (set by provider-client).
-            const clientModel = (rawClient as Record<string, unknown>)['model'];
-            if (typeof clientModel === 'string' && clientModel) {
-              inlineJudgeEngine = clientModel;
-            } else {
-              // Fall back to the configured model string — better than 'gate7-inline'.
-              inlineJudgeEngine = judgeModel;
-            }
-          } else if (rawClient && typeof (rawClient as Record<string, unknown>)['chat'] === 'function') {
-            const chat = (rawClient as { chat: (msgs: Array<{role:string;content:string}>) => Promise<{content:string}> }).chat.bind(rawClient);
-            judgeClient = {
-              complete: async (system: string, user: string) => {
-                const resp = await chat([{ role: 'system', content: system }, { role: 'user', content: user }]);
-                return resp.content;
-              },
-            };
-            const clientModel = (rawClient as Record<string, unknown>)['model'];
-            inlineJudgeEngine = typeof clientModel === 'string' && clientModel ? clientModel : judgeModel;
+          const resolved = resolveFrontierJudgeClient(cfg, {
+            producerModel: proposal.engineModel,
+            requireIndependent: true,
+          });
+          if (resolved && typeof resolved.model === 'string' && resolved.model.length > 0) {
+            inlineJudgeEngine = resolved.model;
+            judgeClient = resolved;
           }
         } catch {
           judgeClient = null;
@@ -3386,7 +3373,9 @@ export async function autoMergeProposal(
           // can verify the HMAC regardless of which path produced the ledger entry.
           let inlineAttestation: string | undefined;
           const ts = new Date().toISOString();
-          if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine)) {
+          const inlineReviewerIndependence = evaluateReviewerIndependence(proposal, inlineJudgeEngine);
+          if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine) &&
+            inlineReviewerIndependence.independent) {
             try {
               const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
               const dh = hd(proposal.diff ?? '');
@@ -3415,13 +3404,17 @@ export async function autoMergeProposal(
             model: inlineJudgeEngine,
             verdict: verdict.verdict,
             reason: verdict.rationale,
-            detail: verdict.wouldMerge ? 'would-merge' : '',
+            detail: verdict.wouldMerge && inlineReviewerIndependence.independent ? 'would-merge' : '',
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
             ...(inlineAttestation !== undefined
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
               : {}),
           });
+          if (verdict.verdict === 'ship' && verdict.wouldMerge === true &&
+            !inlineReviewerIndependence.independent) {
+            return refuse(`manager quality gate: ${inlineReviewerIndependence.reason}`, repo);
+          }
           managerVerdict = {
             verdict: verdict.verdict,
             wouldMerge: verdict.wouldMerge,

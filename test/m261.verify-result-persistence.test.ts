@@ -208,7 +208,7 @@ function makeProposal(id: string, over: Partial<Proposal> = {}): Proposal {
     diff: SMALL_DIFF,
     status: 'pending',
     engineTier: 'frontier',
-    engineModel: 'claude-sonnet-4-5',
+    engineModel: 'codex:gpt-5.5',
     createdAt: new Date().toISOString(),
     ...over,
   };

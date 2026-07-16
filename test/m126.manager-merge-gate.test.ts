@@ -80,8 +80,10 @@ import { execFileSync } from 'node:child_process';
 
 // Mock judgeProposal from fleet/manager.ts
 const mockJudgeProposal = vi.fn();
+const mockResolveFrontierJudgeClient = vi.fn();
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
+  resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
 // Mock decision-ledger reads/writes with an in-memory durable projection.
@@ -254,7 +256,11 @@ beforeEach(() => {
   } satisfies ManagerVerdict);
   // Default: provider client available with a .complete() method
   mockGetActiveClient.mockResolvedValue({
-    model: 'mock-model',
+    model: 'claude-opus-4-8',
+    complete: async (_s: string, _u: string) => '{"verdict":"review","value":3,"correctness":3,"scope":3,"alignment":3,"rationale":"mock"}',
+  });
+  mockResolveFrontierJudgeClient.mockReturnValue({
+    model: 'claude-opus-4-8',
     complete: async (_s: string, _u: string) => '{"verdict":"review","value":3,"correctness":3,"scope":3,"alignment":3,"rationale":"mock"}',
   });
   mockRecordDecision.mockReturnValue(undefined);
@@ -400,6 +406,63 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
+  it('[2b] same-family cached ship is advisory and triggers a fresh review', async () => {
+    initRepo(tmpRepo, 'main');
+    enroll(tmpRepo);
+    const diff = docsDiff('docs/correlated-cache.md');
+    const p = frontierPatch(diff);
+    const cacheTs = new Date().toISOString();
+    mockReadDecisions.mockReturnValue([{
+      ts: cacheTs,
+      proposalId: p.id,
+      action: 'judged',
+      engine: 'gpt-5.5',
+      model: 'gpt-5.5',
+      verdict: 'ship',
+      detail: 'would-merge',
+      judgeAttestation: signJudgeAttestation({
+        proposalId: p.id,
+        judgeEngine: 'gpt-5.5',
+        verdict: 'ship',
+        diffHash: hashDiff(diff),
+        issuedAt: cacheTs,
+        mergeIntent: 'would-merge',
+      }),
+      judgeAttestationIssuedAt: cacheTs,
+      judgeAttestationIntent: 'would-merge',
+    }]);
+    mockJudgeProposal.mockResolvedValueOnce({
+      ...shipVerdict(p.id),
+      verdict: 'review',
+      wouldMerge: false,
+      rationale: 'independent reviewer did not ship',
+    });
+
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/manager gate.*review/i);
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+  });
+
+  it('[2c] same-family inline ship cannot mint manager-gate authority', async () => {
+    initRepo(tmpRepo, 'main');
+    enroll(tmpRepo);
+    const p = frontierPatch(docsDiff('docs/correlated-inline.md'));
+    mockResolveFrontierJudgeClient.mockReturnValueOnce({
+      model: 'gpt-5.5',
+      complete: async () => '{}',
+    });
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/reviewer independence denied.*both openai/i);
+    const judged = recordedDecisions.find((entry) => entry['action'] === 'judged');
+    expect(judged?.['judgeAttestation']).toBeUndefined();
+    expect(judged?.['detail']).toBe('');
+  });
+
   it('[3] ledger cache stale (no recent entry) → judge called inline → ship → merges', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
@@ -518,7 +581,7 @@ describe('M126 Gate 7 — fail-closed when judge unavailable', () => {
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
     // Both client resolution paths throw
-    mockGetActiveClient.mockRejectedValue(new Error('no provider configured'));
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const r = await autoMergeProposal(p.id, baseCfg());
 
@@ -540,7 +603,7 @@ describe('M126 Gate 7 — fail-closed when judge unavailable', () => {
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
     // Return an object with no usable methods
-    mockGetActiveClient.mockResolvedValue({ model: 'mystery-model' });
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const r = await autoMergeProposal(p.id, baseCfg());
 
@@ -549,6 +612,25 @@ describe('M126 Gate 7 — fail-closed when judge unavailable', () => {
     expect(r.reason).toMatch(/unavailable|fail closed/i);
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
     expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('[10b] provider client without runtime model identity cannot borrow configured identity', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(docsDiff('docs/missing-reviewer-identity.md'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(result.reason).toMatch(/judge unavailable|fail closed/i);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(recordedDecisions.some((entry) => entry['action'] === 'judged')).toBe(false);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
   });
 });
 
@@ -1081,7 +1163,7 @@ describe('M126 status invariants', () => {
     const diff = docsDiff('docs/status29.md');
     const p = frontierPatch(diff);
 
-    mockGetActiveClient.mockRejectedValue(new Error('no provider'));
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const r = await autoMergeProposal(p.id, baseCfg());
     expect(r.ok).toBe(false);
@@ -1136,7 +1218,7 @@ describe('M126 never-throws', () => {
     const p = frontierPatch(diff);
 
     mockJudgeProposal.mockRejectedValue(new Error('simulated crash'));
-    mockGetActiveClient.mockRejectedValue(new Error('no provider'));
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const results = await Promise.all([
       autoMergeProposal(p.id, baseCfg({ enabled: false })),

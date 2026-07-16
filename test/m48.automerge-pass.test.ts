@@ -1109,6 +1109,7 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
   it('records a signed attestation for GPT-5/Codex frontier judges', async () => {
     pendingProposals = [makeProposal('frontier-gpt', {
       engineTier: 'frontier',
+      engineModel: 'claude:claude-sonnet-4-5',
       workItemId: '/tmp/repo:issue:frontier-gpt',
       workSource: 'issue',
       runId: 'run-frontier-gpt',

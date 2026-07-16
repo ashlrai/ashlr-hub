@@ -74,6 +74,10 @@ import { recordAgentAction } from './agent-action-ledger.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
 import { isApprovedRemoteHandoffRetryCandidate } from '../inbox/remote-handoff.js';
 import {
+  evaluateReviewerIndependence,
+  reviewModelFamily,
+} from './reviewer-independence.js';
+import {
   acquireProposalMutationLock,
   ownsProposalMutationLock,
   releaseProposalMutationLock,
@@ -177,7 +181,8 @@ async function runAuthorizedFrontierJudge(
         const judgeEngine = judgeClient.model;
         let judgeAttestation: string | undefined;
         const ts = new Date().toISOString();
-        if (isFrontierJudge(judgeEngine)) {
+        const reviewerIndependent = evaluateReviewerIndependence(proposal, judgeEngine).independent;
+        if (isFrontierJudge(judgeEngine) && reviewerIndependent) {
           try {
             judgeAttestation = signJudgeAttestation({
               proposalId: proposal.id,
@@ -205,7 +210,7 @@ async function runAuthorizedFrontierJudge(
             model: judgeEngine,
             verdict: 'ship',
             reason: verdict.rationale ?? '',
-            detail: 'would-merge',
+            detail: reviewerIndependent ? 'would-merge' : '',
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
             ...(judgeAttestation !== undefined
@@ -472,6 +477,7 @@ function hasRecentShipVerdict(proposal: Proposal): boolean | 'degraded' {
     if (!latest || latest.verdict !== 'ship' || latest.detail !== 'would-merge') return false;
     const judgeEngine = latest.engine ?? latest.model;
     if (!judgeEngine || !isFrontierJudge(judgeEngine)) return false;
+    if (!evaluateReviewerIndependence(proposal, judgeEngine).independent) return false;
     const issuedAt = latest.judgeAttestationIssuedAt;
     const issuedMs = typeof issuedAt === 'string' ? Date.parse(issuedAt) : NaN;
     const now = Date.now();
@@ -869,10 +875,10 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     return 0;
   });
 
-  // Lazily resolve judge client once per pass (avoid re-calling getActiveClient
-  // for every proposal). null = judge unavailable → fail-closed (proposals stay unjudged).
-  let judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string } | null | undefined =
-    undefined; // undefined = not yet resolved; null = unavailable (fail-closed)
+  // Resolve at most once per signed producer family. Mixed-family queues need
+  // different reviewers; null remains fail-closed for that family.
+  type JudgeClient = { complete: (system: string, user: string) => Promise<string>; model: string };
+  const judgeClientsByProducerFamily = new Map<string, JudgeClient | null>();
 
   for (const p of pending) {
     if (killSwitchOn()) break;
@@ -1068,10 +1074,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         continue; // Skip: backlog will be processed in subsequent pass ticks.
       }
 
-      // Lazily resolve the judge client.
-      if (judgeClient === undefined) {
-        judgeClient = resolveFrontierJudgeClient(cfg);
+      const producerFamily = reviewModelFamily(p.engineModel);
+      if (!judgeClientsByProducerFamily.has(producerFamily)) {
+        judgeClientsByProducerFamily.set(producerFamily, resolveFrontierJudgeClient(cfg, {
+          producerModel: p.engineModel,
+          requireIndependent: true,
+        }));
       }
+      const judgeClient = judgeClientsByProducerFamily.get(producerFamily) ?? null;
 
       if (judgeClient !== null) {
         const judgeResult = await runAuthorizedFrontierJudge(p, cfg, judgeClient);

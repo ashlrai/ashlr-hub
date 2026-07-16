@@ -102,9 +102,13 @@ export function agentSemanticModelFamily(value: unknown): AgentSemanticEventV1['
   if (typeof value !== 'string') return 'unknown';
   const model = value.toLowerCase();
   const hasToken = (token: string): boolean => new RegExp(`(^|[/:._-])${token}([/:._-]|$)`).test(model);
-  if (hasToken('claude')) return 'claude';
+  if (['claude', 'anthropic'].some(hasToken)) return 'claude';
   if (['gpt', 'codex', 'openai'].some(hasToken)) return 'openai';
-  if (['local', 'ollama', 'qwen', 'llama', 'deepseek', 'kimi', 'nim'].some(hasToken)) {
+  if ([
+    'local', 'ollama', 'qwen', 'llama', 'deepseek', 'kimi', 'nim',
+    'builtin', 'ashlrcode', 'aw', 'hermes', 'grok', 'xai', 'gemini',
+    'mistral', 'moonshot',
+  ].some(hasToken)) {
     return 'local';
   }
   return 'unknown';
