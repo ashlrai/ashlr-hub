@@ -169,12 +169,12 @@ describe('M233 partial-diff capture on timeout', () => {
             spawnAttempts: 1,
             proposalCaptureAttempts: 1,
             completenessGateRuns: 1,
-            proposalCreated: 0,
             proposalBlocked: 1,
             proposalDisabled: 0,
             diffFiles: 1,
           },
         });
+        expect(proposal!.runEventSummary?.actionCounts).not.toHaveProperty('proposalCreated');
         expect(proposal!.runEventSummary?.actionCounts?.diffLines).toBeGreaterThan(0);
         expect(result.proposalOutcome).toMatchObject({ kind: 'filed', isPartial: true });
       } finally {

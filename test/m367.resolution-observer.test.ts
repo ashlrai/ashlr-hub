@@ -174,6 +174,9 @@ describe('M367 bounded advisory resolution observer', () => {
     const prior = checkpoint();
     let writes = 0;
     const options = {
+      // This test exercises durable witness replay, not the production scheduler
+      // budget. Give loaded Linux CI enough room for the real fsync path.
+      deadlineMs: 2_000,
       now: () => new Date('2026-07-11T11:31:00.000Z'),
       deps: {
         loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]),

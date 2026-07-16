@@ -2552,3 +2552,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass 188 focused assertions with two platform skips, typecheck, scoped lint, build, audit, and diff checks.
 - [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
 - [x] Publish protected stacked PR #42 on fully protected-green #41; require duplicate protected CI before merge consideration.
+- [x] Repair Ubuntu CI contract/timing assertions without changing production causal semantics or observer deadlines; rerun 18 focused assertions and static gates.
