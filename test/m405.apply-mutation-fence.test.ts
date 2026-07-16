@@ -10,6 +10,16 @@ import {
   releaseProposalMutationLock,
 } from '../src/core/inbox/proposal-mutation-lock.js';
 import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
+import {
   makeAddFileDiff,
   makeFixture,
   type DisposableRepo,
@@ -17,6 +27,27 @@ import {
 } from './helpers/h1-fixture.js';
 
 const CHILD_TIMEOUT_MS = 8_000;
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
 const CHILD_SOURCE = String.raw`
   import {
@@ -163,17 +194,31 @@ async function releaseFenceHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   fx = makeFixture();
+  const fence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(fence)) {
+    throw new Error('failed to establish the M405 outward mutation authority root');
+  }
+  releaseOutwardMutationFence(fence);
+  _setPrivateStorageTestControlForTest(
+    PRIVATE_STORAGE_TEST_CONTROL,
+    process.platform === 'win32' ? { runner: semanticPrivateStorageRunner } : undefined,
+  );
   repo = fx.makeRepo();
 });
 
 afterEach(async () => {
-  if (holder && holder.exitCode === null && holder.signalCode === null) {
-    holder.kill('SIGKILL');
-    await waitForExit(holder);
+  try {
+    if (holder && holder.exitCode === null && holder.signalCode === null) {
+      holder.kill('SIGKILL');
+      await waitForExit(holder);
+    }
+    holder = undefined;
+    fx.cleanup();
+  } finally {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   }
-  holder = undefined;
-  fx.cleanup();
 });
 
 describe('M405 applyProposal outward mutation fence', { timeout: 15_000 }, () => {

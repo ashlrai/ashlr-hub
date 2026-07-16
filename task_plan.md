@@ -2450,7 +2450,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Correct the local-store lock's exact Windows directory/candidate/canonical authority, bind proposal locks to an exact `~/.ashlr` root, and prove lifecycle transition persistence plus contention/release/replacement safety locally.
 - [x] Publish the first lock-authority correction as immutable `4211282` and classify its protected failures without waivers: generic exact-DACL enforcement broke monitoring cursors, proposal persistence regressed on Ubuntu, and fixture contracts exposed changed assurance/config behavior.
 - [x] Make exact private-storage assurance an explicit proposal-only option, preserve generic structural lock hardening, repair the Linux fixtures, and prove post-acquisition ownership/release remain exact and fail closed.
-- [ ] Publish the corrected immutable SHA, pass the combined PR #35 exhaustive local gate, and require every duplicate protected job to pass before merge consideration.
+- [x] Publish corrected immutable `5a96c8d` and classify its narrowed matrix: native M416/Windows 3/3 pass; remaining failures are one zero-wait reclaim bug plus bounded authority-fixture costs and Linux anchor assumptions.
+- [x] Grant one race-safe installation attempt after proven-dead zero-wait reclaim, make authority fixtures cross-platform and cost-bounded, preserve all assertions/deadlines, and pass focused/static plus PR #35 combined verification.
+- [ ] Publish the next immutable SHA and require every duplicate protected job, including native 1/3 authority, to pass before merge consideration.
 
 ## Next P0 - Source-Complete GitHub Policy Authority
 - [x] Paginate effective branch rules to exhaustion and refuse truncated, over-limit, or permission-incomplete observations.

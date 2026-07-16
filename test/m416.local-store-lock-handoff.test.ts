@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { PathLike } from 'node:fs';
 
@@ -16,6 +17,10 @@ const faults = vi.hoisted(() => ({
   failCanonicalLstatCount: 0,
   replaceWhenElectionInstalledFor: undefined as string | undefined,
   replacementToken: 'successor-token',
+  competingDeadGenerationFor: undefined as string | undefined,
+  competingDeadGenerationPid: undefined as number | undefined,
+  competingDeadGenerationLinkAttempts: 0,
+  competingDeadGenerationToken: 'competing-dead-token',
   strandedGuardPath: undefined as string | undefined,
   installedPaths: new Set<string>(),
   events: [] as string[],
@@ -45,9 +50,23 @@ vi.mock('node:fs', async (importOriginal) => {
       actual.fsyncSync(fd);
     },
     linkSync(existingPath: PathLike, newPath: PathLike): void {
-      actual.linkSync(existingPath, newPath);
       const existing = String(existingPath);
       const installed = String(newPath);
+      if (
+        installed === faults.competingDeadGenerationFor && existing.endsWith('.candidate')
+      ) {
+        faults.competingDeadGenerationLinkAttempts += 1;
+        if (faults.competingDeadGenerationLinkAttempts === 2) {
+          actual.writeFileSync(installed, `${JSON.stringify({
+            pid: faults.competingDeadGenerationPid,
+            token: faults.competingDeadGenerationToken,
+            startRef: '0'.repeat(64),
+            startRefVerified: true,
+            startRefSource: 'self-clock-epoch-second',
+          })}\n`, { encoding: 'utf8', mode: 0o600 });
+        }
+      }
+      actual.linkSync(existingPath, newPath);
       faults.installedPaths.add(installed);
       if (
         existing === faults.crashAfterGuardLinkFor &&
@@ -169,14 +188,32 @@ const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
   };
 };
 
-function writeProvablyStaleLock(lockPath: string, token = 'stale-token'): void {
+function writeProvablyStaleLock(
+  lockPath: string,
+  token = 'stale-token',
+  pid = DEFINITELY_ABSENT_PID,
+): void {
   fs.writeFileSync(lockPath, `${JSON.stringify({
-    pid: DEFINITELY_ABSENT_PID,
+    pid,
     token,
     startRef: '0'.repeat(64),
     startRefVerified: true,
     startRefSource: 'self-clock-epoch-second',
   })}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+function exitedChildPid(): number {
+  const child = spawnSync(
+    process.execPath,
+    ['-e', 'process.stdout.write(String(process.pid))'],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  const pid = Number(child.stdout);
+  expect(child.status).toBe(0);
+  expect(Number.isSafeInteger(pid)).toBe(true);
+  expect(pid).toBeGreaterThan(0);
+  expect(() => process.kill(pid, 0)).toThrow();
+  return pid;
 }
 
 beforeEach(() => {
@@ -188,6 +225,10 @@ beforeEach(() => {
   faults.failCanonicalLstatCount = 0;
   faults.replaceWhenElectionInstalledFor = undefined;
   faults.replacementToken = 'successor-token';
+  faults.competingDeadGenerationFor = undefined;
+  faults.competingDeadGenerationPid = undefined;
+  faults.competingDeadGenerationLinkAttempts = 0;
+  faults.competingDeadGenerationToken = 'competing-dead-token';
   faults.strandedGuardPath = undefined;
   faults.installedPaths.clear();
   faults.events.length = 0;
@@ -211,6 +252,9 @@ afterEach(() => {
   faults.crashAfterGuardLinkFor = undefined;
   faults.failCanonicalLstatPath = undefined;
   faults.replaceWhenElectionInstalledFor = undefined;
+  faults.competingDeadGenerationFor = undefined;
+  faults.competingDeadGenerationPid = undefined;
+  faults.competingDeadGenerationLinkAttempts = 0;
   faults.strandedGuardPath = undefined;
   faults.events.length = 0;
   faults.fdPaths.clear();
@@ -253,7 +297,7 @@ describe('local store lock installation handoff', () => {
   it('retains exact storage opt-in through ownership and release', () => {
     const lockPath = path.join(tmpDir, 'exact-inspection-retained.lock');
     const lock = acquireLocalStoreLock(lockPath, 0, {
-      anchorPath: path.dirname(tmpDir),
+      anchorPath: tmpDir,
       exactPrivateStorage: true,
     });
     expect(lock).not.toBeNull();
@@ -315,7 +359,7 @@ describe('local store lock installation handoff', () => {
     faults.rejectAssurance = (_target, kind, mode) => kind === 'file' && mode === 'secure-created';
 
     expect(acquireLocalStoreLock(lockPath, 0, {
-      anchorPath: path.dirname(tmpDir),
+      anchorPath: tmpDir,
       exactPrivateStorage: true,
     })).toBeNull();
 
@@ -334,7 +378,7 @@ describe('local store lock installation handoff', () => {
       target === lockPath && kind === 'file' && mode === 'inspect-existing';
 
     expect(acquireLocalStoreLock(lockPath, 0, {
-      anchorPath: path.dirname(tmpDir),
+      anchorPath: tmpDir,
       exactPrivateStorage: true,
     })).toBeNull();
 
@@ -342,13 +386,13 @@ describe('local store lock installation handoff', () => {
       path: tmpDir,
       kind: 'directory',
       mode: 'inspect-existing',
-      anchorPath: path.dirname(tmpDir),
+      anchorPath: tmpDir,
     });
     expect(faults.assuranceCalls).toContainEqual({
       path: lockPath,
       kind: 'file',
       mode: 'inspect-existing',
-      anchorPath: path.dirname(tmpDir),
+      anchorPath: tmpDir,
     });
     expect(fs.readFileSync(lockPath)).toEqual(before);
     expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
@@ -413,7 +457,7 @@ describe('local store lock installation handoff', () => {
 
   it('bounds live-owner contention without repeating exact storage assurance', () => {
     const lockPath = path.join(tmpDir, 'bounded-live-contention.lock');
-    const anchorPath = path.dirname(tmpDir);
+    const anchorPath = tmpDir;
     const holder = acquireLocalStoreLock(lockPath, 0, { anchorPath });
     expect(holder).not.toBeNull();
     faults.assuranceCalls.length = 0;
@@ -660,6 +704,41 @@ describe('local store lock installation handoff', () => {
         windowsHide: true,
       });
     }
+  });
+
+  it('reclaims a proven-dead canonical lock with a zero wait budget', () => {
+    const lockPath = path.join(tmpDir, 'zero-wait-dead-owner.lock');
+    const staleToken = 'zero-wait-stale-token';
+    writeProvablyStaleLock(lockPath, staleToken, exitedChildPid());
+
+    const lock = acquireLocalStoreLock(lockPath, 0);
+
+    expect(lock).not.toBeNull();
+    expect(lock?.token).not.toBe(staleToken);
+    expect(ownsLocalStoreLock(lock)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: process.pid,
+      token: lock?.token,
+    });
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('spends the zero-wait reclaim allowance on only one canonical installation attempt', () => {
+    const lockPath = path.join(tmpDir, 'zero-wait-dead-churn.lock');
+    const competingPid = exitedChildPid();
+    writeProvablyStaleLock(lockPath, 'first-dead-token', exitedChildPid());
+    faults.competingDeadGenerationFor = lockPath;
+    faults.competingDeadGenerationPid = competingPid;
+
+    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+
+    expect(faults.competingDeadGenerationLinkAttempts).toBe(2);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: competingPid,
+      token: faults.competingDeadGenerationToken,
+    });
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
   });
 
   it('does not unlink a new ownership generation that keeps the observed inode', () => {

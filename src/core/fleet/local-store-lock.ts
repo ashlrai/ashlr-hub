@@ -998,6 +998,8 @@ export function acquireLocalStoreLock(
   let directory: LockDirectory | null = null;
   let sawContention = false;
   let authorityAttempted = false;
+  let postDeadReclaimInstallAvailable = false;
+  let postDeadReclaimInstallConsumed = false;
   while (true) {
     const observedState = contendedOwnerState(path);
     if (observedState !== 'absent' && observedState !== 'dead') {
@@ -1007,13 +1009,15 @@ export function acquireLocalStoreLock(
       continue;
     }
     if (observedState === 'dead') sawContention = true;
+    const mayInstallAfterDeadReclaim =
+      postDeadReclaimInstallAvailable && observedState === 'absent';
     if (sawContention && performance.now() >= deadline &&
-      (observedState !== 'dead' || authorityAttempted)) return null;
+      (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) return null;
     if (!directory) {
       directory = assureLockDirectory(dir, anchor, options.exactPrivateStorage === true);
       if (!directory) return null;
       if (sawContention && performance.now() >= deadline &&
-        (observedState !== 'dead' || authorityAttempted)) return null;
+        (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) return null;
     }
     authorityAttempted = true;
 
@@ -1021,6 +1025,7 @@ export function acquireLocalStoreLock(
     let candidateIdentity: Stats | undefined;
     let candidateSecured = false;
     let installedLock: LocalStoreLock | undefined;
+    let usedPostDeadReclaimInstall = false;
     const candidate = `${path}.${process.pid}.${token}.candidate`;
     try {
       fd = openSync(candidate, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
@@ -1050,6 +1055,11 @@ export function acquireLocalStoreLock(
         !stableDirectory(directory)) {
         throw new Error('unsafe persisted local store lock');
       }
+      usedPostDeadReclaimInstall = postDeadReclaimInstallAvailable;
+      if (usedPostDeadReclaimInstall) {
+        postDeadReclaimInstallAvailable = false;
+        postDeadReclaimInstallConsumed = true;
+      }
       linkSync(candidate, path);
       installedLock = acquiredLock(path, token, stat.dev, stat.ino, directory);
       if (!collapsePublishedCandidate(path, candidate, { ...stat, token }, directory)) {
@@ -1069,6 +1079,7 @@ export function acquireLocalStoreLock(
         else removeEmptyCandidate(candidate, candidateIdentity, directory);
       }
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      if (usedPostDeadReclaimInstall && performance.now() >= deadline) return null;
       try {
         const stat = inspectExistingLockFile(path, [1, 2], directory);
         if (!stat) {
@@ -1115,6 +1126,7 @@ export function acquireLocalStoreLock(
               }, directory);
               if (finalOwner.state !== 'dead' || finalOwner.token !== owner.token) return null;
               if (!safelyUnlink(path, { ...stat, token: owner.token }, directory)) return null;
+              if (!postDeadReclaimInstallConsumed) postDeadReclaimInstallAvailable = true;
               continue;
             } finally {
               releaseLocalStoreLock(election);
