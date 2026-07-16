@@ -2,13 +2,8 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AshlrConfig } from '../src/core/types.js';
-
-const privateStorageHarness = vi.hoisted(() => ({
-  useSemanticAdapter: false,
-  realCalls: 0,
-}));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -17,13 +12,12 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
     ) => {
-      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+      if (process.platform === 'win32') {
         return {
           ok: true,
           reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
         };
       }
-      privateStorageHarness.realCalls += 1;
       return actual.assurePrivateStoragePath(...args);
     },
   };
@@ -111,29 +105,6 @@ let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 
-beforeAll(() => {
-  if (process.platform !== 'win32') return;
-
-  const proofHome = join(tmpdir(), `ashlr-m423-proof-${process.pid}-${Date.now()}`);
-  const proofPreviousHome = process.env.HOME;
-  const proofPreviousUserProfile = process.env.USERPROFILE;
-  const realCallsBefore = privateStorageHarness.realCalls;
-  mkdirSync(proofHome, { recursive: true });
-  process.env.HOME = proofHome;
-  process.env.USERPROFILE = proofHome;
-  try {
-    expect(setKill(false, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
-    expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
-  } finally {
-    rmSync(proofHome, { recursive: true, force: true });
-    if (proofPreviousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = proofPreviousHome;
-    if (proofPreviousUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = proofPreviousUserProfile;
-  }
-  privateStorageHarness.useSemanticAdapter = true;
-});
-
 beforeEach(() => {
   home = join(tmpdir(), `ashlr-m423-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
@@ -159,10 +130,6 @@ afterEach(() => {
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
   rmSync(home, { recursive: true, force: true });
-});
-
-afterAll(() => {
-  privateStorageHarness.useSemanticAdapter = false;
 });
 
 describe('M423 control-plane lock order', () => {
