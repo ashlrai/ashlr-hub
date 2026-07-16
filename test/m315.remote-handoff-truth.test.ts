@@ -142,8 +142,30 @@ let tmpRepo: string;
 let bareRepo: string;
 let ghCallsFile: string;
 const TEST_POLICY_SNAPSHOT = {
-  schemaVersion: 1,
-  classic: { enforceAdmins: true },
+  schemaVersion: 2,
+  classic: {
+    ruleId: 'BPR_fixture',
+    pattern: 'main',
+    bypassForcePushAllowanceCount: 0,
+    bypassForcePushAllowances: { users: [], teams: [], apps: [] },
+    requiredDeployments: null,
+    requiredStatusChecks: {
+      strict: true,
+      enforcementLevel: 'non_admins',
+      checks: [{ context: 'ci/test', appId: '1' }],
+    },
+    enforceAdmins: true,
+    requiredPullRequestReviews: null,
+    pushRestrictions: null,
+    requiredSignatures: false,
+    requiredLinearHistory: false,
+    allowForcePushes: false,
+    allowDeletions: false,
+    blockCreations: false,
+    requiredConversationResolution: false,
+    lockBranch: false,
+    allowForkSyncing: false,
+  },
   rulesets: [],
 } as const;
 
@@ -498,6 +520,51 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(git(tmpRepo, ['ls-remote', '--heads', 'origin'])).not.toContain(branch);
     expect(git(tmpRepo, ['rev-parse', '--verify', `refs/heads/${branch}`])).toMatch(/^[a-f0-9]{40}$/);
   }, 60_000);
+
+  it.each([
+    ['initial evidence capture', 1, false, false, false],
+    ['pre-push authority check', 2, false, false, false],
+    ['post-push authority check', 3, true, false, false],
+    ['post-PR authority check', 4, true, true, true],
+  ] as const)(
+    'refuses unsafe protected-remote policy drift at the %s',
+    async (_checkpoint, unsafeRead, remoteBranchExists, prExists, handoffExists) => {
+      const readProtection = branchProtectionMock.getMockImplementation() as (...args: unknown[]) => unknown;
+      let protectionReads = 0;
+      branchProtectionMock.mockImplementation(async (...args: unknown[]) => {
+        const result = await readProtection(...args) as Record<string, unknown>;
+        protectionReads++;
+        if (protectionReads !== unsafeRead) return result;
+        return {
+          ...result,
+          policySnapshot: {
+            ...TEST_POLICY_SNAPSHOT,
+            classic: {
+              ...TEST_POLICY_SNAPSHOT.classic,
+              allowDeletions: true,
+            },
+          },
+        };
+      });
+
+      const { proposal, result } = await createRemoteHandoffProposal();
+      const branch = `ashlr/merge/${proposal.id}`;
+      const remoteBranches = git(tmpRepo, ['ls-remote', '--heads', 'origin', branch]);
+
+      expect(remoteBranches.includes(branch)).toBe(remoteBranchExists);
+      expect(createPrMock).toHaveBeenCalledTimes(prExists ? 1 : 0);
+      expect(branchProtectionMock).toHaveBeenCalledTimes(unsafeRead);
+      if (handoffExists) {
+        expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+        expect(loadProposal(proposal.id)?.remoteHandoff?.detail)
+          .toContain('host auto-merge refused because live protection changed');
+      } else {
+        expect(result).toMatchObject({ ok: false, merged: false });
+        expect(result.reason).toMatch(/safe-minimum protected-remote policy unavailable|live branch protection changed/);
+      }
+    },
+    60_000,
+  );
 
   it('does not let pause report quiescence between push and PR creation', async () => {
     let pauseResult: ReturnType<typeof setKill> | undefined;

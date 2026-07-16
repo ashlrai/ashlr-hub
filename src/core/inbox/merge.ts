@@ -127,6 +127,7 @@ import {
 import type { GitHubOriginAuthority } from '../git.js';
 import {
   createPr,
+  evaluateSafeMinimumProtectedRemotePolicyV1,
   readBranchProtectionAttestation,
   viewPr,
   type BranchProtectionAttestation,
@@ -1035,6 +1036,10 @@ export interface EvidenceRemoteProtectionSignal {
   expectationMode: 'exact' | 'legacy' | 'invalid' | 'missing';
 }
 
+const MAX_CONFIGURED_GITHUB_APP_ID_LENGTH = 20;
+const MAX_CONFIGURED_REQUIRED_CHECKS = 100;
+const MAX_CONFIGURED_REQUIRED_CHECK_CONTEXT_LENGTH = 256;
+
 export interface EvidenceAutoMergePreflightOptions {
   /** Whether the proposal targets Ashlr Hub's own source. */
   selfTarget?: boolean;
@@ -1063,46 +1068,67 @@ export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): Eviden
   let expectationMode: EvidenceRemoteProtectionSignal['expectationMode'] = 'missing';
   let expectationError: string | undefined;
   if (Array.isArray(rawRequiredChecks) && rawRequiredChecks.length > 0) {
-    const legacy = rawRequiredChecks.filter((entry): entry is string => typeof entry === 'string');
-    if (legacy.length > 0) {
-      expectationMode = legacy.length === rawRequiredChecks.length && legacy.every((entry) => entry.trim().length > 0)
-        ? 'legacy'
-        : 'invalid';
-      expectationError = expectationMode === 'legacy'
-        ? 'legacy required-check names do not bind GitHub App identity; configure {context,appId} entries'
-        : 'required remote checks mix legacy names with typed App identity expectations';
+    if (rawRequiredChecks.length > MAX_CONFIGURED_REQUIRED_CHECKS) {
+      expectationMode = 'invalid';
+      expectationError = `required remote checks exceed the ${MAX_CONFIGURED_REQUIRED_CHECKS}-check limit`;
     } else {
-      expectationMode = 'exact';
-      const contexts = new Map<string, string>();
-      for (const entry of rawRequiredChecks) {
-        if (!isObjectRecord(entry)) {
-          expectationMode = 'invalid';
-          expectationError = 'required remote check expectation must be {context,appId}';
-          break;
+      const oversizedContext = rawRequiredChecks.some((entry) => {
+        if (typeof entry === 'string') return entry.length > MAX_CONFIGURED_REQUIRED_CHECK_CONTEXT_LENGTH;
+        const record = isObjectRecord(entry) ? entry : null;
+        return typeof record?.['context'] === 'string' &&
+          record['context'].length > MAX_CONFIGURED_REQUIRED_CHECK_CONTEXT_LENGTH;
+      });
+      if (oversizedContext) {
+        expectationMode = 'invalid';
+        expectationError = `required remote check context exceeds ${MAX_CONFIGURED_REQUIRED_CHECK_CONTEXT_LENGTH} characters`;
+      } else {
+        const legacy = rawRequiredChecks.filter((entry): entry is string => typeof entry === 'string');
+        if (legacy.length > 0) {
+          expectationMode = legacy.length === rawRequiredChecks.length && legacy.every((entry) => entry.trim().length > 0)
+            ? 'legacy'
+            : 'invalid';
+          expectationError = expectationMode === 'legacy'
+            ? 'legacy required-check names do not bind GitHub App identity; configure {context,appId} entries'
+            : 'required remote checks mix legacy names with typed App identity expectations';
+        } else {
+          expectationMode = 'exact';
+          const contexts = new Map<string, string>();
+          for (const entry of rawRequiredChecks) {
+            if (!isObjectRecord(entry) || Object.keys(entry).length !== 2 ||
+                !Object.prototype.hasOwnProperty.call(entry, 'context') ||
+                !Object.prototype.hasOwnProperty.call(entry, 'appId')) {
+              expectationMode = 'invalid';
+              expectationError = 'required remote check expectation must contain exactly {context,appId}';
+              break;
+            }
+            const rawContext = entry['context'];
+            const context = typeof rawContext === 'string' ? rawContext.trim() : '';
+            const rawAppId = entry['appId'];
+            let appId: string | undefined;
+            if (typeof rawAppId === 'number' && Number.isSafeInteger(rawAppId) && rawAppId > 0) {
+              appId = String(rawAppId);
+            } else if (typeof rawAppId === 'string' &&
+                rawAppId.length <= MAX_CONFIGURED_GITHUB_APP_ID_LENGTH &&
+                /^[1-9]\d*$/.test(rawAppId)) {
+              appId = BigInt(rawAppId).toString();
+            }
+            if (!context || !appId) {
+              expectationMode = 'invalid';
+              expectationError = 'required remote check expectation needs a non-empty context and positive GitHub App id';
+              break;
+            }
+            const priorAppId = contexts.get(context);
+            if (priorAppId !== undefined) {
+              expectationMode = 'invalid';
+              expectationError = priorAppId === appId
+                ? `duplicate configured required-check context: ${context}`
+                : `conflicting GitHub App identities configured for required-check context: ${context}`;
+              break;
+            }
+            contexts.set(context, appId);
+            requiredCheckBindings.push({ context, appId });
+          }
         }
-        const context = typeof entry['context'] === 'string' ? entry['context'].trim() : '';
-        const rawAppId = entry['appId'];
-        let appId: string | undefined;
-        if (typeof rawAppId === 'number' && Number.isSafeInteger(rawAppId) && rawAppId > 0) {
-          appId = String(rawAppId);
-        } else if (typeof rawAppId === 'string' && /^[1-9]\d*$/.test(rawAppId)) {
-          appId = BigInt(rawAppId).toString();
-        }
-        if (!context || !appId) {
-          expectationMode = 'invalid';
-          expectationError = 'required remote check expectation needs a non-empty context and positive GitHub App id';
-          break;
-        }
-        const priorAppId = contexts.get(context);
-        if (priorAppId !== undefined) {
-          expectationMode = 'invalid';
-          expectationError = priorAppId === appId
-            ? `duplicate configured required-check context: ${context}`
-            : `conflicting GitHub App identities configured for required-check context: ${context}`;
-          break;
-        }
-        contexts.set(context, appId);
-        requiredCheckBindings.push({ context, appId });
       }
     }
   }
@@ -1191,26 +1217,32 @@ export async function evaluateLiveProtectedRemoteAuthority(
   ) {
     return { authorized: false, reason: 'live branch protection identity/base binding does not match verification' };
   }
-  const liveChecks = new Set(live.requiredChecks);
-  const missingChecks = expected.requiredChecks.filter((check) => !liveChecks.has(check));
-  if (missingChecks.length > 0) {
+  const safeMinimum = evaluateSafeMinimumProtectedRemotePolicyV1(
+    live.policySnapshot,
+    expected.requiredCheckBindings,
+  );
+  if (!safeMinimum.ok) {
     return {
       authorized: false,
-      reason: `configured required checks are not live branch requirements: ${missingChecks.join(', ')}`,
+      reason: `live safe-minimum protected-remote policy unavailable (${safeMinimum.reason}): ${safeMinimum.detail}`,
     };
   }
-  const liveBindings = new Set(
-    live.requiredCheckBindings
-      .filter((binding): binding is { context: string; appId: string } => binding.appId !== null)
-      .map((binding) => `${binding.context}\0${binding.appId}`),
-  );
-  const mismatchedBindings = expected.requiredCheckBindings.filter(
-    (binding) => !liveBindings.has(`${binding.context}\0${binding.appId}`),
-  );
-  if (mismatchedBindings.length > 0) {
+  const expectedChecks = [...expected.requiredChecks].sort();
+  const liveChecks = [...live.requiredChecks].sort();
+  const expectedBindings = expected.requiredCheckBindings
+    .map((binding) => `${binding.context}\0${binding.appId}`)
+    .sort();
+  const liveBindings = live.requiredCheckBindings
+    .map((binding) => binding.appId === null ? null : `${binding.context}\0${binding.appId}`)
+    .sort();
+  if (JSON.stringify(liveChecks) !== JSON.stringify(expectedChecks) ||
+      liveBindings.some((binding) => binding === null) ||
+      JSON.stringify(liveBindings) !== JSON.stringify(expectedBindings)) {
     return {
       authorized: false,
-      reason: `configured required checks do not match live GitHub App identities: ${mismatchedBindings.map((binding) => `${binding.context}@${binding.appId}`).join(', ')}`,
+      reason: `configured required checks do not match live GitHub App identities exactly: ${
+        expected.requiredCheckBindings.map((binding) => `${binding.context}@${binding.appId}`).join(', ')
+      }`,
     };
   }
   return {

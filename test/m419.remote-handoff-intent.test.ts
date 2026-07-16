@@ -78,8 +78,30 @@ const originalUserProfile = process.env.USERPROFILE;
 const originalAshlrHome = process.env.ASHLR_HOME;
 const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 const TEST_POLICY_SNAPSHOT = {
-  schemaVersion: 1,
-  classic: { enforceAdmins: true },
+  schemaVersion: 2,
+  classic: {
+    ruleId: 'BPR_fixture',
+    pattern: 'main',
+    bypassForcePushAllowanceCount: 0,
+    bypassForcePushAllowances: { users: [], teams: [], apps: [] },
+    requiredDeployments: null,
+    requiredStatusChecks: {
+      strict: true,
+      enforcementLevel: 'non_admins',
+      checks: [{ context: 'ci/test', appId: '1' }],
+    },
+    enforceAdmins: true,
+    requiredPullRequestReviews: null,
+    pushRestrictions: null,
+    requiredSignatures: false,
+    requiredLinearHistory: false,
+    allowForcePushes: false,
+    allowDeletions: false,
+    blockCreations: false,
+    requiredConversationResolution: false,
+    lockBranch: false,
+    allowForkSyncing: false,
+  },
   rulesets: [],
 } as const;
 
@@ -320,8 +342,9 @@ describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
 
     const result = await autoMergeProposal(proposal.id, config());
 
-    expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
+    expect(result.ok, result.reason).toBe(true);
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
   });
 
   it('persists authenticated mid-tier handoff intent before staging push', async () => {
@@ -330,8 +353,9 @@ describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
 
     const result = await autoMergeProposal(proposal.id, config());
 
-    expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
+    expect(result.ok, result.reason).toBe(true);
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true, branched: true });
+    expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
     expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
   });
 
