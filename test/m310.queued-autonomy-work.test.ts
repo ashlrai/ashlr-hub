@@ -60,8 +60,35 @@ import {
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from '../src/core/inbox/persistence-mismatch.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
 let fx: H1Fixture;
+
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 
 beforeEach(() => {
   expect.hasAssertions();
@@ -746,34 +773,45 @@ describe('queued autonomy work scanner', () => {
   });
 
   it('persists physical proposal repo identity and rejects legacy alias authority', () => {
-    const repo = fx.makeRepo();
-    const canonicalRepo = realpathSync.native(repo.dir);
-    const nested = join(repo.dir, 'identity-probe');
-    const lexicalAlias = join(nested, '..');
-    const linkedAlias = join(fx.home, 'proposal-repo-alias');
-    mkdirSync(nested);
-    symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    if (process.platform === 'win32') {
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+        runner: semanticPrivateStorageRunner,
+      });
+    }
+    try {
+      const repo = fx.makeRepo();
+      const canonicalRepo = realpathSync.native(repo.dir);
+      const nested = join(repo.dir, 'identity-probe');
+      const lexicalAlias = join(nested, '..');
+      const linkedAlias = join(fx.home, 'proposal-repo-alias');
+      mkdirSync(nested);
+      symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
 
-    const createForRepo = (repoPath: string, title: string) => {
-      const candidate = partialProposal(repoPath, { title, diffHash: undefined });
-      const { id: _id, status: _status, createdAt: _createdAt, ...input } = candidate;
-      return createProposal(input);
-    };
-    const lexical = createForRepo(lexicalAlias, 'Lexical repo alias proposal');
-    const linked = createForRepo(linkedAlias, 'Linked repo alias proposal');
+      const createForRepo = (repoPath: string, title: string) => {
+        const candidate = partialProposal(repoPath, { title, diffHash: undefined });
+        const { id: _id, status: _status, createdAt: _createdAt, ...input } = candidate;
+        return createProposal(input);
+      };
+      const lexical = createForRepo(lexicalAlias, 'Lexical repo alias proposal');
+      const linked = createForRepo(linkedAlias, 'Linked repo alias proposal');
 
-    expect(lexical.repo).toBe(canonicalRepo);
-    expect(linked.repo).toBe(canonicalRepo);
-    expect(loadProposal(lexical.id)?.repo).toBe(canonicalRepo);
-    expect(loadProposal(linked.id)?.repo).toBe(canonicalRepo);
+      expect(lexical.repo).toBe(canonicalRepo);
+      expect(linked.repo).toBe(canonicalRepo);
+      expect(loadProposal(lexical.id)?.repo).toBe(canonicalRepo);
+      expect(loadProposal(linked.id)?.repo).toBe(canonicalRepo);
 
-    const linkedPath = join(fx.ashlrDir, 'inbox', `${linked.id}.json`);
-    const persisted = JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal;
-    expect(persisted.repo).toBe(canonicalRepo);
+      const linkedPath = join(fx.ashlrDir, 'inbox', `${linked.id}.json`);
+      const persisted = JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal;
+      expect(persisted.repo).toBe(canonicalRepo);
 
-    writeFileSync(linkedPath, JSON.stringify({ ...persisted, repo: linkedAlias }, null, 2) + '\n', 'utf8');
-    expect(loadProposal(linked.id)).toBeNull();
-    expect((JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal).repo).toBe(linkedAlias);
+      writeFileSync(linkedPath, JSON.stringify({ ...persisted, repo: linkedAlias }, null, 2) + '\n', 'utf8');
+      expect(loadProposal(linked.id)).toBeNull();
+      expect((JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal).repo).toBe(linkedAlias);
+    } finally {
+      if (process.platform === 'win32') {
+        _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+      }
+    }
   });
 
   it('does not derive or journal repair authority from an invalid raw repo identity', () => {

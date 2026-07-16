@@ -2467,3 +2467,19 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.
 - [ ] Evaluate atomic Windows directory creation with `Directory.CreateDirectory(path, DirectorySecurity)` to remove the transient inherited-ACL interval even inside the trusted-principal boundary.
 - [ ] Strengthen recovery ABA detection without treating legitimate child-entry ctime changes as parent replacement.
+
+## PR #33 Final Native Fixture Closure (2026-07-16)
+- [x] Publish zero-wait recovery correction `c26a5e9`; both protected duplicates passed macOS, Ubuntu, Windows 2/3, Windows 3/3, and overflow.
+- [x] Classify the sole duplicate hermetic failure as M403 creating enrollment state through a semantic adapter before a native child exact-inspected it.
+- [x] Establish the M403 enrollment registry through the native production path, then restore the semantic adapter only for repeated parent-side contention mechanics; all 14 focused cases pass unchanged.
+- [x] Prove the M403 correction in both protected Windows 1/3 hermetic runs; the child now returns the expected authoritative `unenrolled` result.
+- [x] Classify the remaining duplicate native-step failure as one M310 identity fixture exceeding its unchanged five-second body during repeated exact proposal-lock assurances.
+- [x] Scope the authenticated semantic private-storage adapter to M310's physical alias/canonicalization behavior and restore native mode in `finally`; no production code, assertion, timeout, or exact-DACL proof changes.
+- [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
+
+## Next P0 - Safe-Minimum Protected-Remote Policy V1
+- [x] Select a pure versioned policy evaluator as the next authority slice after PR #36 source-complete observation.
+- [ ] Require strict App-bound checks, admin enforcement, zero bypass actors, force-push/deletion prohibition, and explicit signature policy across source-local classic/ruleset evidence.
+- [ ] Re-evaluate at every force-fresh remote checkpoint and project unsafe or unknown policy as unavailable.
+- [ ] Publish as a stacked PR on #36 only after exhaustive policy, drift, status, static, and protected verification.
+- [ ] Add signed evidence-pack v3 only after the evaluator is authoritative.
