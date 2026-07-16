@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -14,6 +14,31 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
+
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
+
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   dispatchProductionDir,
@@ -54,8 +79,29 @@ import { queueSelfHealItem } from '../src/core/fleet/self-heal.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { inboxDir } from '../src/core/inbox/store.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 let fx: H1Fixture;
+
+beforeAll(() => {
+  if (process.platform !== 'win32') return;
+
+  const proofFixture = makeFixture();
+  const realCallsBefore = privateStorageHarness.realCalls;
+  mkdirSync(proofFixture.ashlrDir, { recursive: true });
+  try {
+    expect(assurePrivateStoragePath(
+      proofFixture.ashlrDir,
+      'directory',
+      'secure-created',
+      { anchorPath: proofFixture.home },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+  } finally {
+    privateStorageHarness.useSemanticAdapter = true;
+    proofFixture.cleanup();
+  }
+});
 
 beforeEach(() => {
   expect.hasAssertions();
@@ -65,6 +111,10 @@ beforeEach(() => {
 afterEach(() => {
   _setRepairHandoffJournalFaultForTest(undefined);
   fx.cleanup();
+});
+
+afterAll(() => {
+  privateStorageHarness.useSemanticAdapter = false;
 });
 
 function event(repo: string, overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {

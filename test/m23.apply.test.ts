@@ -425,8 +425,11 @@ describe('M23 applyProposal — REFUSE: partial review artifact', () => {
 // ===========================================================================
 
 describe('M23 applyProposal — patch: applies on NEW branch, never touches current branch', () => {
-  it('creates a new branch with the ashlr/proposal/ prefix', async () => {
+  beforeEach(() => {
     initRealGitRepo(tmpRepo);
+  });
+
+  it('creates a new branch with the ashlr/proposal/ prefix', async () => {
     const p = createProposal(makeInput({ diff: makeSimpleDiff('new-file.txt', 'hello patch\n') }));
     setStatus(p.id, 'approved');
 
@@ -445,7 +448,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('current branch is UNCHANGED after patch apply', async () => {
-    initRealGitRepo(tmpRepo);
     const branchBefore = getCurrentBranch(tmpRepo);
 
     const p = createProposal(makeInput({ diff: makeSimpleDiff('patch-test.txt', 'content\n') }));
@@ -458,8 +460,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('working tree of the source repo is BYTE-UNCHANGED after patch apply', async () => {
-    initRealGitRepo(tmpRepo);
-
     // Snapshot the working tree before apply
     function snapshotDir(dir: string): Map<string, Buffer> {
       const snap = new Map<string, Buffer>();
@@ -497,8 +497,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('NEVER pushes — no spawnSync call to gh push', async () => {
-    initRealGitRepo(tmpRepo);
-
     const spawnSpy = vi.fn(() => ({
       pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
     }));
@@ -518,7 +516,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('sets status=applied on success', async () => {
-    initRealGitRepo(tmpRepo);
     const p = createProposal(makeInput({ diff: makeSimpleDiff('status-check.txt', 'ok\n') }));
     setStatus(p.id, 'approved');
 
@@ -530,7 +527,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('never throws even when diff application fails', async () => {
-    initRealGitRepo(tmpRepo);
     // Provide a malformed diff that git apply will reject
     const p = createProposal(makeInput({ diff: 'THIS IS NOT A VALID DIFF\n' }));
     setStatus(p.id, 'approved');
@@ -539,7 +535,6 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
   });
 
   it('sets status=failed and returns ok:false when diff is invalid', async () => {
-    initRealGitRepo(tmpRepo);
     const p = createProposal(makeInput({ diff: 'INVALID DIFF CONTENT' }));
     setStatus(p.id, 'approved');
 

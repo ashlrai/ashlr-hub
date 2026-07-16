@@ -48,6 +48,39 @@ import {
 } from '../src/core/inbox/proposal-mutation-lock.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls++;
+      return actual.assurePrivateStoragePath(...args);
+    },
+    assurePrivateStoragePaths: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePaths>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return { ok: true, reason: args[0].length === 0 ? 'no-paths' : 'owned-safe-paths' };
+      }
+      privateStorageHarness.realCalls++;
+      return actual.assurePrivateStoragePaths(...args);
+    },
+  };
+});
+
 vi.mock('../src/core/run/engines.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
   return { ...actual, engineInstalled: () => true };
@@ -55,9 +88,19 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
 
 let fx: H1Fixture;
 const MAX_LIFECYCLE_TEST_RSS_KIB = 768 * 1024;
+const WINDOWS_LIFECYCLE_SEMANTIC_TESTS = new Set([
+  'consumes protocol v5 emitted by the real dispatch writer',
+  'keeps a proven converted witness pending until exact immutable publication',
+  'publishes an ordinal-2 retained proof at the writer retention cutoff',
+  'retries converted publication after receipt storage is repaired',
+  'treats exact immutable publication replay as idempotent',
+  'accepts an exact-inspected v2 receipt tombstone after the live receipt is retained',
+]);
 
-beforeEach(() => {
+beforeEach(({ task }) => {
   expect.hasAssertions();
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32' &&
+    WINDOWS_LIFECYCLE_SEMANTIC_TESTS.has(task.name);
   fx = makeFixture();
 });
 
@@ -65,7 +108,11 @@ afterEach(() => {
   _setGeneratedRepairLifecycleDirectoryFsyncHookForTest(undefined);
   _setGeneratedRepairLifecycleRaceHooksForTest(undefined);
   _setProposalReadRaceHookForTest(undefined);
-  fx.cleanup();
+  try {
+    fx.cleanup();
+  } finally {
+    privateStorageHarness.useSemanticAdapter = false;
+  }
 });
 
 function repairItem(overrides: Partial<WorkItem> = {}): WorkItem {
@@ -2754,6 +2801,15 @@ describe('generated repair lifecycle store', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage',
     () => {
+      const realCallsBefore = privateStorageHarness.realCalls;
+      mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
+      expect(assurePrivateStoragePath(
+        fx.ashlrDir,
+        'directory',
+        'secure-created',
+        { anchorPath: fx.home },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+
       const item = diagnosticRepairItem();
       const transition = recordDiagnosticProposal(
         item,
@@ -2846,6 +2902,7 @@ describe('generated repair lifecycle store', () => {
         _resetGeneratedRepairLifecycleCacheForTest();
       }
       expect(readGeneratedRepairLifecycle(item).available).toBe(true);
+      expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
     },
     60_000,
   );

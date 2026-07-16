@@ -158,7 +158,8 @@ if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
   const worktree = args[worktreeIndex + 3];
   fs.mkdirSync(worktree, { recursive: true });
   fs.writeFileSync(process.env.M426_MARKER, worktree);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+  // The destination monitor owns termination once it observes the appeared path.
+  for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
 
 if (mode === 'common-dir-alias') {
@@ -506,9 +507,13 @@ describe('M426 sandbox reservation and path identity', () => {
     );
     const registrationGitdir = join(worktreeAdminDir, 'gitdir');
     const physicalRegistration = readFileSync(registrationGitdir, 'utf8');
-    writeFileSync(registrationGitdir, `${join(aliasWorktree, '.git')}\n`, 'utf8');
-    git(repo.dir, ['worktree', 'lock', '--reason', 'M426 retained registration', aliasWorktree]);
+    const aliasRegistration = `${join(aliasWorktree, '.git')}\n`;
+    git(repo.dir, [
+      'worktree', 'lock', '--reason', 'M426 retained registration', sandbox.worktreePath,
+    ]);
     git(sandbox.worktreePath, ['checkout', '--detach']);
+    writeFileSync(registrationGitdir, aliasRegistration, 'utf8');
+    expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
     expect(retainedBefore).toContain(aliasWorktree);
     expect(retainedBefore).toContain('locked M426 retained registration');
@@ -521,6 +526,7 @@ describe('M426 sandbox reservation and path identity', () => {
       });
       expect(result.failureClasses).toContain('worktree-remaining');
       expect(existsSync(sandbox.worktreePath)).toBe(true);
+      expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
       expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
     } finally {
       process.env.PATH = originalPath;

@@ -51,9 +51,11 @@ vi.mock('node:child_process', async (importOriginal) => {
   return {
     ...actual,
     execFile: (...args: unknown[]) => _execFileImpl(...args),
-    // spawnSync is used by github.ts internally (listIssues → githubStatus)
-    // Return a "not a repo" response so scanIssues degrades gracefully.
-    spawnSync: () => ({ pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null }),
+    // Keep production-local adapters available for authority setup. Only gh is
+    // outward-facing here and must remain under the test double.
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) => args[0] === 'gh'
+      ? { pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null }
+      : actual.spawnSync(...args),
   };
 });
 
@@ -75,6 +77,7 @@ import {
   unenroll,
   listEnrolled,
   enrollmentPath,
+  setKill,
 } from '../src/core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
@@ -837,6 +840,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
 
 describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', () => {
   it('keeps the healthy full snapshot when an exact canonical enrollment is temporarily missing', async () => {
+    expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
     expect(enroll(tmpRepo)).toMatchObject({ ok: true, quiesced: true });
     const observedAt = new Date().toISOString();
     const healthySnapshot = {
@@ -882,6 +886,7 @@ describe('M22 buildBacklog — ENROLLMENT-SCOPED: only scans enrolled repos', ()
       initBareGitDir(firstTarget);
       initBareGitDir(secondTarget);
       fs.symlinkSync(firstTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
       expect(enroll(firstTarget)).toMatchObject({ ok: true, quiesced: true });
       fs.mkdirSync(path.dirname(enrollmentPath()), { recursive: true });
       fs.writeFileSync(

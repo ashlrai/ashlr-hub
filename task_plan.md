@@ -2400,6 +2400,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify the `fcc12d0` native-only failures: M201/M342/M423 repeated PowerShell DACL work, M22 split Windows home authority, and M426 synthetic retained-registration behavior; no production authorization regression was found.
 - [x] Preserve explicit real native proofs while moving redundant semantic cases onto Windows-only private-storage adapters; make M22 coordinate all home variables and make M426 use Git-native locked alias retention.
 - [x] Pass the five-file correction matrix with 424 assertions green and four platform skips, plus typecheck, full lint at the existing warning baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
+- [x] Classify `4957f59`: every Ubuntu, macOS, overflow, and 3/3 duplicate passed; the remaining native selector failures were confined to M22/M342/M360/M362 fixture authority and M23/M426 Windows Git/runtime behavior.
+- [x] Preserve real native-DACL proofs while scoping semantic adapters, keep M22's local authority adapter live, move M23 bootstrap into fixture setup, and make M426's rollback race production-monitor-owned.
+- [x] Pass the corrected eight-file integration (643 passed, six skipped), exact native path/lifecycle selector (52 passed), 2/3 (213), 3/3 (66), native alias (31), and all static/security gates.
 - [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

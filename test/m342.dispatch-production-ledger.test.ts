@@ -217,6 +217,18 @@ function useNativePrivateStorageFixture(): void {
   privateStorageHarness.useSemanticAdapter = false;
 }
 
+function establishNativePrivateStorageFixtureRoot(): void {
+  useNativePrivateStorageFixture();
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const ashlrHome = join(home, '.ashlr');
+  process.env.ASHLR_HOME = ashlrHome;
+  mkdirSync(ashlrHome, { mode: 0o700 });
+  expect(assurePrivateStoragePath(
+    ashlrHome, 'directory', 'secure-created', { anchorPath: home },
+  ).ok).toBe(true);
+}
+
 function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   const repo = overrides.repo ?? join(home, 'proof-repo');
   mkdirSync(repo, { recursive: true });
@@ -554,7 +566,7 @@ beforeEach(() => {
   prevAshlrHome = process.env.ASHLR_HOME;
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
-  home = mkdtempSync(join(tmpdir(), 'ashlr-m342-dispatch-production-'));
+  home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m342-dispatch-production-')));
   process.env.ASHLR_HOME = home;
 });
 
@@ -1204,6 +1216,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('retires an uncommitted intent so a cross-day retry can acquire authority', () => {
+    useWindowsSemanticPrivateStorageFixture();
     seedUnrelatedDatedPartitions(40);
     const currentDayStart = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
     const original = makeProofEvent({
@@ -1653,6 +1666,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it('proves an old complete sequence from a physical attempt receipt without scanning global partitions', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const first = makeProofEvent({
       ts: '2025-01-01T12:00:00.000Z',
       runId: 'run-old-receipt-first',
@@ -1928,7 +1942,7 @@ describe('M342 dispatch production ledger', () => {
   });
 
   it.skipIf(process.platform !== 'win32')('establishes exact private DACLs for attempt authority writes', () => {
-    useNativePrivateStorageFixture();
+    establishNativePrivateStorageFixtureRoot();
     const realCallsBefore = privateStorageHarness.realCalls;
     const committed = makeProofEvent({
       runId: 'run-windows-private-receipt',
@@ -2316,6 +2330,7 @@ describe('M342 dispatch production ledger', () => {
   }, 30_000);
 
   it('bounds and crash-recovers 2,048 same-generation failures with batched assurance', () => {
+    useWindowsSemanticPrivateStorageFixture();
     const receiptDir = join(dispatchProductionDir(), 'repair-attempt-proofs');
     const handoffId = '8'.repeat(64);
     const generationId = repairGenerationIdFromHandoffId(handoffId)!;
@@ -2435,6 +2450,7 @@ describe('M342 dispatch production ledger', () => {
   it.each(['failure-receipt', 'failure-intent'] as const)(
     'recovers an interrupted retention manifest for an exact %s artifact',
     (kind) => {
+      useWindowsSemanticPrivateStorageFixture();
       const handoffId = kind === 'failure-receipt' ? 'e'.repeat(64) : 'f'.repeat(64);
       const retired = sanitizeDispatchProductionEvent(makeGeneratedRepairFailureEvent(
         kind === 'failure-receipt' ? 'capture' : 'proposal', {
@@ -5310,7 +5326,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'exact-inspects receipt directory DACLs during pure authority reads',
     () => {
-      useNativePrivateStorageFixture();
+      establishNativePrivateStorageFixtureRoot();
       const attempt = makeProofEvent({
         runId: 'run-directory-dacl-attempt',
         trajectoryId: 'run:attempt-directory-dacl-attempt',
@@ -5349,7 +5365,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'rejects owner-safe but non-exact Windows ACLs before parsing treatment authority',
     () => {
-      useNativePrivateStorageFixture();
+      establishNativePrivateStorageFixtureRoot();
       const witness = treatmentEvents().find((event) =>
         event.basis === 'repair-lifecycle-outcome')!;
       expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
@@ -5413,7 +5429,7 @@ describe('M342 dispatch production ledger', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for treatment receipt, retention, and protocol writes',
     () => {
-      useNativePrivateStorageFixture();
+      establishNativePrivateStorageFixtureRoot();
       const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
       const receiptDir = join(dispatchProductionDir(), 'repair-treatment-outcomes');
       const baseMs = Date.parse('2025-01-01T00:00:00.000Z');
