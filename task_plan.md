@@ -2630,3 +2630,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose the exact independence blocker through existing readiness/status authority explanations.
 - [x] Pass focused resolver, attestation, verification-gate, manager-gate, automerge, status, static, build, audit, and adversarial review gates.
 - [x] Publish protected draft PR #47 stacked on PR #46 without activating merge or deployment authority.
+
+## Post-Merge Positive-Credit Firewall (2026-07-16)
+- [x] Audit every immediate merge fanout and separate immutable operational merge facts from positive recursive-learning credit.
+- [x] Reserve one exact post-merge release label while making it structurally non-authoritative without a distinct proof verifier.
+- [x] Stop realized merge receipts from immediately linking positive judge outcomes, worked-ledger productivity events, or reusable skills.
+- [x] Keep routing, model ROI, feedback, calibration, and skill consumers dormant even when raw ledgers contain the reserved label.
+- [x] Preserve factual realized-merge quality, trajectory, fanout, notification, and event-bus reporting independently from adaptive credit.
+- [x] Keep historical realized-merge records readable as factual lifecycle evidence without allowing them to train positive policy.
+- [x] Complete fixture migration and a 786-assertion changed-surface matrix.
+- [x] Complete final adversarial bypass review with no remaining P0/P1/P2.
+- [x] Pass the 864-assertion changed-surface matrix, typecheck, lint, build, zero-vulnerability audit, and diff checks.
+- [ ] Require the complete protected CI matrix on the immutable PR head.
+- [ ] Publish the firewall as draft PR #48 stacked on PR #47 without claiming a stability release protocol.
+- [ ] Build the separate protected-base release authority with reservation, detached verification, denominator-complete observation, monotonic quarantine, and crash-safe idempotent fanout.

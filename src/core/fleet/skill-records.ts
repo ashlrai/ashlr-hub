@@ -36,6 +36,7 @@ import type {
 } from '../types.js';
 import { causalMetadata } from '../learning/causal.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { isPostMergeCreditReleaseLabel } from './post-merge-credit.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const DEFAULT_READ_LIMIT = 100;
@@ -498,7 +499,22 @@ function appendPrivateFile(filePath: string, contents: string): void {
 }
 
 export function recordSkillCard(input: SkillCard | SkillCard[]): void {
-  appendRecords(input, skillCardsDir(), sanitizeSkillCard);
+  try {
+    const cards: SkillCard[] = [];
+    for (const raw of Array.isArray(input) ? input : [input]) {
+      try {
+        const card = sanitizeSkillCard(raw);
+        if (isPostMergeCreditReleaseLabel(card.labelBasis)) continue;
+        if (card.tags?.some((tag) => tag.trim().toLowerCase() === 'credit:released-v1')) continue;
+        cards.push(card);
+      } catch {
+        // Preserve per-row isolation: one hostile card cannot suppress siblings.
+      }
+    }
+    if (cards.length > 0) appendRecords(cards, skillCardsDir(), sanitizeSkillCard);
+  } catch {
+    // Skill persistence is best-effort and never disrupts callers.
+  }
 }
 
 export function recordSkillUseEvent(input: SkillUseEvent | SkillUseEvent[]): void {

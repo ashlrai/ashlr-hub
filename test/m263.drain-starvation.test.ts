@@ -141,7 +141,7 @@ function makeProposal(id: string, over?: Partial<Proposal>): Proposal {
     diffHash: `hash-${id}`,
     status: 'pending',
     engineTier: 'frontier',
-    engineModel: 'claude:claude-sonnet-4-5',
+    engineModel: 'codex:gpt-5.5',
     createdAt: isoAt(0),
     ...over,
   };

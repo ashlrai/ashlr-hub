@@ -171,7 +171,7 @@ function makeDecision(
     proposalId,
     action,
     verdict,
-    ...(action === 'merged' ? { labelBasis: 'realized-merge-v1' as const } : {}),
+    ...(action === 'merged' ? { labelBasis: 'post-merge-credit-release-v1' as const } : {}),
   };
 }
 
@@ -190,7 +190,7 @@ function makeItem(source: WorkSource, repo = '/repo/alpha'): WorkItem {
   };
 }
 
-/** Build N distinct merged proposals; duplicate lifecycle rows are not samples. */
+/** Build N distinct proposals with caller-controlled raw v1 merge labels. */
 function fillMergedDecisions(p: Proposal, n = MIN_SAMPLES): Proposal[] {
   p.status = 'applied';
   const proposals = [p];
@@ -224,7 +224,24 @@ it('selection-only dispatch blocks do not become empty execution priors', async 
 
   const priors = await computeOutcomePriors({ listProposals: () => [] });
 
-  expect(priors.global['todo']).toMatchObject({ diffCount: 1, emptyCount: 1 });
+  expect(priors.global['todo']).toMatchObject({ diffCount: 0, emptyCount: 1 });
+});
+
+it('realized-merge-v1 does not grant positive EDV feedback credit', async () => {
+  const p = makeProposal({ kind: 'patch' as ProposalKind, status: 'applied' });
+  _mockDecisions = [{
+    ...makeDecision(p.id, 'merged', 'applied'),
+    labelBasis: 'realized-merge-v1',
+  }];
+
+  const priors = await computeOutcomePriors({
+    listProposals: () => [p],
+    edvVerify: true,
+  });
+
+  expect(priors.global['todo']?.merged).toBe(0);
+  expect(priors.global['todo']?.mergedWeightedSum).toBeUndefined();
+  expect(priors.global['todo']?.acceptRate).toBe(0);
 });
 
 // ---------------------------------------------------------------------------
@@ -351,13 +368,12 @@ describe('M151 §4 — edvConfirmationWeight: never throws', () => {
 // §5 — computeOutcomePriors + EDV ON: confirmed accept → full acceptRate
 // ---------------------------------------------------------------------------
 
-describe('M151 §5 — EDV ON: confirmed accept reinforces at full weight', () => {
-  it('proposal with verifyResult.passed=true → acceptRate uses weight 1.0', async () => {
+describe('M151 §5 — EDV ON: verification cannot release held merge credit', () => {
+  it('verifyResult.passed=true does not authorize a raw v1 merge label', async () => {
     const p = makeProposal({
       kind: 'patch' as ProposalKind,
       verifyResult: { passed: true },
     });
-    // MIN_SAMPLES merged decisions + created entry from the proposal list
     const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
     const priors = await computeOutcomePriors({
@@ -367,12 +383,8 @@ describe('M151 §5 — EDV ON: confirmed accept reinforces at full weight', () =
 
     const stats = priors.global['todo'];
     expect(stats).toBeDefined();
-    // mergedWeightedSum should equal MIN_SAMPLES × 1.0
-    expect(stats!.mergedWeightedSum).toBeCloseTo(MIN_SAMPLES * 1.0, 5);
-    // acceptRate = (mergedWeightedSum + 0) / created = MIN_SAMPLES / 1
-    // (created=1 from the single proposal; merged each decision counts but
-    // the proposal was created once)
-    expect(stats!.mergedWeightedSum).toBeGreaterThan(0);
+    expect(stats).toMatchObject({ merged: 0, acceptRate: 0 });
+    expect(stats!.mergedWeightedSum).toBeUndefined();
   });
 });
 
@@ -380,8 +392,8 @@ describe('M151 §5 — EDV ON: confirmed accept reinforces at full weight', () =
 // §6 — computeOutcomePriors + EDV ON: unconfirmed accept → reduced acceptRate
 // ---------------------------------------------------------------------------
 
-describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', () => {
-  it('proposal with no verifyResult → mergedWeightedSum < merged (integer)', async () => {
+describe('M151 §6 — EDV ON: unconfirmed raw labels remain held', () => {
+  it('proposal with no verifyResult receives no integer or weighted merge credit', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind }); // no verifyResult
     const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
@@ -392,16 +404,11 @@ describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', (
 
     const stats = priors.global['todo'];
     expect(stats).toBeDefined();
-    // Integer merged is MIN_SAMPLES; weighted sum is MIN_SAMPLES × 0.3
-    expect(stats!.merged).toBe(MIN_SAMPLES);
-    expect(stats!.mergedWeightedSum).toBeCloseTo(MIN_SAMPLES * EDV_UNVERIFIED_WEIGHT, 5);
-    // acceptRate (EDV) < acceptRate (flag-off) for same data
-    const edvAcceptRate = stats!.acceptRate;
-    const flagOffAcceptRate = (MIN_SAMPLES + 0) / 1; // merged/created
-    expect(edvAcceptRate).toBeLessThan(flagOffAcceptRate);
+    expect(stats).toMatchObject({ merged: 0, acceptRate: 0 });
+    expect(stats!.mergedWeightedSum).toBeUndefined();
   });
 
-  it('two proposals: one confirmed, one not — weighted sum is 1.0 + 0.3', async () => {
+  it('verification differences cannot turn either raw v1 row into credit', async () => {
     const p1 = makeProposal({
       kind: 'patch' as ProposalKind,
       status: 'applied',
@@ -419,8 +426,8 @@ describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', (
 
     const stats = priors.global['todo'];
     expect(stats).toBeDefined();
-    expect(stats!.merged).toBe(2);
-    expect(stats!.mergedWeightedSum).toBeCloseTo(1.0 + EDV_UNVERIFIED_WEIGHT, 5);
+    expect(stats).toMatchObject({ merged: 0, acceptRate: 0 });
+    expect(stats!.mergedWeightedSum).toBeUndefined();
   });
 });
 
@@ -429,7 +436,7 @@ describe('M151 §6 — EDV ON: unconfirmed accept contributes reduced weight', (
 // ---------------------------------------------------------------------------
 
 describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
-  it('EDV OFF → mergedWeightedSum is absent, acceptRate identical to flag-off formula', async () => {
+  it('EDV OFF also grants no raw v1 merge credit', async () => {
     const p = makeProposal({ kind: 'patch' as ProposalKind }); // no verifyResult
     const proposals = fillMergedDecisions(p, MIN_SAMPLES);
 
@@ -442,8 +449,7 @@ describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
     expect(statsOff).toBeDefined();
     // No mergedWeightedSum field when EDV is off
     expect(statsOff!.mergedWeightedSum).toBeUndefined();
-    // Every distinct proposal merged, so merged/created is exactly one.
-    expect(statsOff!.acceptRate).toBeCloseTo(1, 5);
+    expect(statsOff).toMatchObject({ merged: 0, acceptRate: 0 });
   });
 
   it('EDV OFF and EDV ON (confirmed) produce same integer merged count', async () => {
@@ -479,8 +485,8 @@ describe('M151 §7 — Flag-off parity (edvVerify=false)', () => {
 // §8 — scoreAdjustment: EDV-confirmed source scores higher than unconfirmed
 // ---------------------------------------------------------------------------
 
-describe('M151 §8 — scoreAdjustment: confirmed > unconfirmed source', () => {
-  it('confirmed source multiplier > unconfirmed source multiplier (same sample count)', async () => {
+describe('M151 §8 — scoreAdjustment: held credit stays neutral across verification', () => {
+  it('confirmed and unconfirmed raw v1 rows cannot create a routing preference', async () => {
     const pConfirmed   = makeProposal({ kind: 'patch' as ProposalKind, repo: '/repo/a', verifyResult: { passed: true } });
     const pUnconfirmed = makeProposal({ kind: 'security' as ProposalKind, repo: '/repo/a' });
 
@@ -500,8 +506,7 @@ describe('M151 §8 — scoreAdjustment: confirmed > unconfirmed source', () => {
     const mTodo     = scoreAdjustment(itemTodo, priors);
     const mSecurity = scoreAdjustment(itemSecurity, priors);
 
-    // todo source is confirmed, security is not — todo multiplier should be higher
-    expect(mTodo).toBeGreaterThan(mSecurity);
+    expect(mTodo).toBe(mSecurity);
   });
 });
 

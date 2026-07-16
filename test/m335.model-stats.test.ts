@@ -128,7 +128,7 @@ function seed(): void {
   ];
   ledger = [
     // sonnet-5: 2 dispatches, judged ship + merged on p1
-    { ts: ts(1), proposalId: 'p1', action: 'merged', labelBasis: 'realized-merge-v1', engine: 'claude', model: 'claude:claude-sonnet-5' },
+    { ts: ts(1), proposalId: 'p1', action: 'merged', labelBasis: 'post-merge-credit-release-v1', engine: 'claude', model: 'claude:claude-sonnet-5' },
     { ts: ts(2), proposalId: 'p1', action: 'judged', engine: 'claude-fable-5', model: 'claude-fable-5', verdict: 'ship', costUsd: 0.2 },
     { ts: ts(3), proposalId: 'p1', action: 'proposed', engine: 'claude', model: 'claude:claude-sonnet-5', costUsd: 1.0, tokensIn: 1000, tokensOut: 200, durationMs: 60_000 },
     { ts: ts(4), proposalId: 'p2', action: 'proposed', engine: 'claude', model: 'sonnet-5', costUsd: 0.8 },
@@ -152,13 +152,14 @@ function seed(): void {
 }
 
 describe('M335 computeModelStats', () => {
-  it('joins ROI + outcomes + best-of-N onto canonical keys', () => {
+  it('joins model telemetry while withholding raw v1 ROI credit', () => {
     seed();
     const stats = computeModelStats('all');
     const s5 = stats.find((s) => s.engineModel === 'claude:sonnet-5');
     expect(s5).toBeDefined();
     expect(s5!.dispatches).toBe(2); // both spellings collapsed
-    expect(s5!.merged).toBe(1);
+    expect(s5!.merged).toBe(0);
+    expect(s5!.costPerMergedUsd).toBeNull();
     expect(s5!.judgeCostUsd).toBeCloseTo(0.2, 5);
     expect(s5!.outcomes.reverted).toBe(1); // producer join, not the judge's key
     expect(s5!.bestOfN).toEqual({ entered: 1, won: 1, winRate: 1 });
@@ -175,6 +176,20 @@ describe('M335 computeModelStats', () => {
     expect(loser).toBeDefined();
     expect(loser!.dispatches).toBe(0);
     expect(loser!.bestOfN).toEqual({ entered: 1, won: 0, winRate: 0 });
+  });
+
+  it('withholds realized-only ROI while preserving adverse outcomes and model joins', () => {
+    seed();
+    ledger = ledger.map((entry) => entry['action'] === 'merged'
+      ? { ...entry, labelBasis: 'realized-merge-v1' }
+      : entry);
+
+    const s5 = computeModelStats('all').find((s) => s.engineModel === 'claude:sonnet-5');
+    expect(s5).toBeDefined();
+    expect(s5!.dispatches).toBe(2);
+    expect(s5!.merged).toBe(0);
+    expect(s5!.costPerMergedUsd).toBeNull();
+    expect(s5!.outcomes.reverted).toBe(1);
   });
 
   it('sorts by dispatches desc', () => {

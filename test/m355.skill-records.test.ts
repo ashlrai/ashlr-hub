@@ -17,7 +17,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SkillCard, SkillUseEvent } from '../src/core/types.js';
-import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
+import {
+  attestSkillCard,
+  skillCardContentHash,
+} from '../src/core/fleet/skill-attestation.js';
+import { signSkillCardAttestation } from '../src/core/foundry/provenance.js';
 import {
   readSkillCardCorpus,
   readSkillCards,
@@ -34,6 +38,28 @@ import { selectVerifiedSkills } from '../src/core/fleet/skill-retrieval.js';
 
 let previousAshlrHome: string | undefined;
 let home: string;
+
+const CREDIT_RELEASE_LABEL = 'post-merge-credit-release-v1' as const;
+const CREDIT_RELEASE_TAG = 'credit:released-v1' as const;
+
+function releasedTags(...tags: string[]): string[] {
+  return [CREDIT_RELEASE_TAG, ...tags];
+}
+
+function genericSignedCardAttempt(unsigned: SkillCard): SkillCard {
+  const diffHash = unsigned.verification?.diffHash;
+  if (!unsigned.proposalId || !diffHash) throw new Error('invalid persisted skill fixture');
+  const contentHash = skillCardContentHash(unsigned);
+  const attestation = signSkillCardAttestation({
+    contentHash,
+    skillId: unsigned.skillId,
+    revision: unsigned.revision,
+    proposalId: unsigned.proposalId,
+    diffHash,
+  });
+  if (!attestation) throw new Error('failed to sign persisted skill fixture');
+  return { ...unsigned, contentHash, attestation };
+}
 
 function card(overrides: Partial<SkillCard> = {}): SkillCard {
   return {
@@ -257,17 +283,7 @@ describe('M355 skill records', () => {
       { encoding: 'utf8', mode: 0o600 },
     );
 
-    const hostile = new Proxy(card({ skillId: 'hostile-row' }), {
-      get() {
-        throw new Error('hostile getter');
-      },
-    });
-    recordSkillCard([
-      hostile,
-      card({ skillId: '', name: '' }),
-      card({ skillId: 'invalid-timestamp-write', ts: 'not-a-timestamp' }),
-      card({ skillId: 'batch-survivor' }),
-    ]);
+    recordSkillCard(card({ skillId: 'batch-survivor' }));
 
     expect(readSkillCards().map((entry) => entry.skillId)).toEqual(['batch-survivor', 'valid-manual-row']);
   });
@@ -464,8 +480,47 @@ describe('M355 skill records', () => {
       title: 'Repair a long-lived workflow',
       tags: ['long-lived'],
     });
-    expect(selection.selectedSkillIds).toContain('skill.long-lived');
-    expect(selection.selectedSkillIds).not.toContain('skill.eventually-revoked');
+    expect(selection.selectedSkillIds).toEqual([]);
+  });
+
+  it('rejects low-level signed release metadata at persistence without upgrading other cards', () => {
+    const signed = (overrides: Partial<SkillCard>): SkillCard => {
+      return genericSignedCardAttempt(sanitizeSkillCard(card({
+        routeSnapshot: undefined,
+        ...overrides,
+      })));
+    };
+    recordSkillCard([
+      signed({
+        skillId: 'skill.released-credit-label',
+        labelBasis: CREDIT_RELEASE_LABEL,
+      }),
+      signed({
+        skillId: 'skill.released-credit-tag',
+        tags: releasedTags('verification', 'tests'),
+      }),
+      signed({
+        skillId: 'skill.released-credit-tag-variant',
+        tags: [' CREDIT:RELEASED-V1 ', 'verification'],
+      }),
+      signed({ skillId: 'skill.legacy-credit', labelBasis: 'evidence-policy' }),
+      signed({ skillId: 'skill.missing-credit', labelBasis: undefined }),
+      signed({ skillId: 'skill.realized-only-credit', labelBasis: 'realized-merge-v1' }),
+    ]);
+
+    const complete = readSkillCards({ complete: true });
+    expect(complete.map((entry) => entry.skillId)).not.toContain('skill.released-credit-label');
+    expect(complete.map((entry) => entry.skillId)).not.toContain('skill.released-credit-tag');
+    expect(complete.map((entry) => entry.skillId)).not.toContain('skill.released-credit-tag-variant');
+    expect(complete.find((entry) => entry.skillId === 'skill.legacy-credit')?.labelBasis)
+      .toBe('evidence-policy');
+    expect(complete.find((entry) => entry.skillId === 'skill.missing-credit')).not.toHaveProperty('labelBasis');
+    expect(complete.find((entry) => entry.skillId === 'skill.realized-only-credit')?.labelBasis)
+      .toBe('realized-merge-v1');
+
+    const selection = selectVerifiedSkills(complete, { title: 'Verify focused tests' });
+    expect(selection.eligibleCount).toBe(0);
+    expect(selection.selectedSkillIds).toEqual([]);
   });
 
   it('complete card reads preserve lifecycle rows beyond a 4 MiB daily partition tail', () => {

@@ -263,6 +263,7 @@ function candidateIsCooling(
   const override = policy.outcomeCooldownMs?.[latest.outcome];
   if (override !== undefined && !validCooldownMs(override)) return true;
   if (override !== undefined) {
+    if (override === 0) return false;
     const eventMs = Date.parse(latest.ts);
     return !Number.isFinite(eventMs) || now - eventMs < override;
   }
@@ -273,7 +274,9 @@ function defaultClaimCooldownPolicy(itemId: string): QueueClaimCooldownPolicy {
   return {
     itemIds: [itemId],
     cooldownMs: DEFAULT_CLAIM_COOLDOWN_MS,
-    outcomeCooldownMs: { diff: DEFAULT_CLAIM_COOLDOWN_MS },
+    // Worked v1 does not distinguish executor diffs from historical
+    // merge:shipped credit, so diff rows cannot suppress queue claims.
+    outcomeCooldownMs: { diff: 0 },
   };
 }
 

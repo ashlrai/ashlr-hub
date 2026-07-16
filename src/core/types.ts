@@ -3997,8 +3997,8 @@ export interface Proposal {
   /**
    * Version 1 is a legacy best-effort fanout marker. Version 2 proves the
    * authoritative decision ledger contains exactly one realized-merge row.
-   * Version 3 proves every applicable idempotent projection was durable and
-   * remains revalidated so later projection loss can be repaired.
+   * Version 3 proves factual idempotent projections were durable. It does not
+   * grant positive learning credit; that requires post-merge-credit-release-v1.
    */
   realizedMergeFanoutVersion?: 1 | 2 | 3;
   /**

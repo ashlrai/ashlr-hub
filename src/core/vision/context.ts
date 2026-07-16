@@ -257,14 +257,13 @@ async function gatherOutcomes(): Promise<OutcomeContext> {
       }).length;
     } catch { /* best-effort */ }
 
-    const denominator = m.merged + m.rejected;
-    const shipRate = denominator > 0 ? m.merged / denominator : 0;
-
     return {
-      merged7d: m.merged,
+      // Operational quality surfaces retain factual merges. Autonomous vision
+      // context withholds them until a proof-bound credit release exists.
+      merged7d: 0,
       reverted7d,
       rejected7d: m.rejected,
-      shipRate,
+      shipRate: 0,
       trivialRatio: m.trivialRatio,
     };
   } catch {
@@ -312,8 +311,7 @@ function buildNarrative(
 
   // Outcome window
   lines.push(
-    `7-day outcomes: ${outcomes.merged7d} merged, ${outcomes.rejected7d} rejected, ${outcomes.reverted7d} reverted` +
-      ` | ship rate ${(outcomes.shipRate * 100).toFixed(0)}%` +
+    `7-day adaptive outcomes: positive merge credit unavailable, ${outcomes.rejected7d} rejected, ${outcomes.reverted7d} reverted` +
       ` | trivial ratio ${(outcomes.trivialRatio * 100).toFixed(0)}%`,
   );
 

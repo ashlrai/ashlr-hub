@@ -8,7 +8,7 @@
  *  3. genome-write-throw → swallowed, learnFromApplied never throws.
  *  4. distillWorkflow produces an abstracted workflow, NOT the raw diff verbatim.
  *  5. stale/missing/denied/skill-assisted evidence fails closed.
- *  6. curateSkills: stale-archive cap (90d) + char cap (SKILL_INJECT_CAP).
+ *  6. curateSkills remains disabled until a release-proof verifier exists.
  *
  * HERMETICITY:
  *  - HOME overridden to a fresh tmp dir per test — no real ~/.ashlr touched.
@@ -77,6 +77,24 @@ vi.mock('../src/core/fleet/skill-records.js', async (importOriginal) => {
   };
 });
 
+const mockHasReleasedPostMergeCredit = vi.fn();
+vi.mock('../src/core/fleet/post-merge-credit.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/post-merge-credit.js')>();
+  return {
+    ...actual,
+    hasReleasedPostMergeCredit: (...args: unknown[]) => mockHasReleasedPostMergeCredit(...args),
+  };
+});
+
+const mockAttestSkillCard = vi.fn();
+vi.mock('../src/core/fleet/skill-attestation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/skill-attestation.js')>();
+  return {
+    ...actual,
+    attestSkillCard: (...args: unknown[]) => mockAttestSkillCard(...args),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Lazy import — after mocks
 // ---------------------------------------------------------------------------
@@ -85,8 +103,8 @@ import {
   learnFromApplied,
   distillWorkflow,
   curateSkills,
-  SKILL_INJECT_CAP,
 } from '../src/core/fleet/skill-library.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from '../src/core/fleet/post-merge-credit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -106,6 +124,7 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     title: 'Fix null pointer in auth module',
     summary: 'Added null check before accessing user.token to prevent crash',
     status: 'applied',
+    labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
     createdAt: FIXED_TS.toISOString(),
     engineTier: 'frontier',
     engineModel: 'claude:claude-opus-4-5',
@@ -218,6 +237,17 @@ function expectNoWrites(): void {
   expect(mockRecordDecision).not.toHaveBeenCalled();
 }
 
+function enableReleaseGateValidation(): void {
+  mockHasReleasedPostMergeCredit.mockImplementation(
+    (labelBasis) => labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL,
+  );
+}
+
+function expectRejectedBeforeAttestation(): void {
+  expectNoWrites();
+  expect(mockAttestSkillCard).not.toHaveBeenCalled();
+}
+
 function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
   return {
     version: 1,
@@ -263,10 +293,14 @@ beforeEach(() => {
   mockReadAutonomyEvidencePack.mockReset();
   mockVerifyAutonomyEvidencePackV3.mockReset();
   mockRecordSkillCard.mockReset();
+  mockHasReleasedPostMergeCredit.mockReset();
+  mockAttestSkillCard.mockReset();
 
   mockAppendHubEntry.mockReturnValue(undefined);
   mockRecordDecision.mockReturnValue(undefined);
   mockRecordSkillCard.mockReturnValue(undefined);
+  mockHasReleasedPostMergeCredit.mockReturnValue(false);
+  mockAttestSkillCard.mockReturnValue(null);
   mockVerifyAutonomyEvidencePackV3.mockReturnValue({ ok: true, reason: 'valid signed fixture' });
 });
 
@@ -353,153 +387,34 @@ describe('M243 distillWorkflow — pure function', () => {
 });
 
 // ===========================================================================
-// 2. learnFromApplied — ship verdict writes a skill
+// 2. learnFromApplied — no current release authority
 // ===========================================================================
 
-describe('M243 learnFromApplied — applied+ship writes skill to genome', () => {
-  it('calls appendHubEntry once with workflow tagged m243:skill', () => {
-    const p = makeProposal();
-    learnVerified(p, makeCfg());
-
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
-
-    // Tags must include the skill tag
-    const tags = input['tags'] as string[];
-    expect(tags).toContain('m243:skill');
-
-    // hubOnly must be true
-    expect(input['hubOnly']).toBe(true);
-
-    // text must be a non-empty string (the workflow)
-    expect(typeof input['text']).toBe('string');
-    expect((input['text'] as string).length).toBeGreaterThan(10);
+describe('M243 learnFromApplied — current reuse remains fail closed', () => {
+  it('does not mint skill authority from caller-supplied release metadata', () => {
+    learnVerified(makeProposal(), makeCfg());
+    expectNoWrites();
   });
 
-  it('workflow text does NOT contain raw diff verbatim', () => {
-    const p = makeProposal({
-      diff: '--- a/foo.ts\n+++ b/foo.ts\n@@ -1 +1 @@\n+const x = 1;',
-    });
-    learnVerified(p, makeCfg());
+  it('does not mint when skillLibrary is enabled explicitly or by default', () => {
+    learnVerified(makeProposal(), makeCfgNoFlag());
+    expectNoWrites();
 
-    const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
-    const text = input['text'] as string;
-    expect(text).not.toContain('--- a/foo.ts');
-    expect(text).not.toContain('+++ b/foo.ts');
+    mockAppendHubEntry.mockClear();
+    mockRecordSkillCard.mockClear();
+    mockRecordDecision.mockClear();
+    learnVerified(makeProposal(), makeCfgWithSkillLibrary(true));
+    expectNoWrites();
   });
 
-  it('tags include the first 24 chars of proposalId in the proposal: tag', () => {
-    const longId = 'abcdefghijklmnopqrstuvwxyz1234567890';
-    const p = makeProposal({ id: longId });
-    learnVerified(p, makeCfg());
-
-    const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
-    const tags = input['tags'] as string[];
-    const proposalTag = tags.find((t) => t.startsWith('proposal:'));
-    expect(proposalTag).toBeDefined();
-    expect(proposalTag).toBe(`proposal:${longId.slice(0, 24)}`);
-  });
-
-  it('records a decisions-ledger entry with action "skill-library:written"', () => {
-    const p = makeProposal();
-    learnVerified(p, makeCfg());
-
-    expect(mockRecordDecision).toHaveBeenCalledOnce();
-    const [entry] = mockRecordDecision.mock.calls[0] as [Record<string, unknown>];
-    expect(entry['action']).toBe('skill-library:written');
-    expect(entry['proposalId']).toBe(p.id);
-    expect(entry['detail']).toContain('engine=');
-  });
-
-  it('writes a forced verified-proposal SkillCard from authoritative state', () => {
-    const p = makeProposal();
-    learnVerified(p, makeCfg());
-
-    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
-    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
-    expect(card).toMatchObject({
-      schemaVersion: 1,
-      status: 'verified',
-      source: 'verified-proposal',
-      proposalId: p.id,
-      commandKinds: ['test'],
-      verification: {
-        passed: true,
-        diffHash: p.diffHash,
-        commandKinds: ['test'],
-      },
-      evidenceOutcome: {
-        verificationPassed: true,
-        policyAllowed: true,
-      },
-    });
-    expect(card['contentHash']).toMatch(/^[a-f0-9]{64}$/);
-    expect(card['attestation']).toMatch(/^[a-f0-9]{64}$/);
-    expect(JSON.stringify(card)).not.toContain(p.diff);
-  });
-
-  it('uses the reloaded applied proposal instead of caller-provided status or tier', () => {
+  it('does not turn authoritative caller state into a release protocol', () => {
     const authoritative = makeProposal({ status: 'applied', engineTier: 'frontier' });
-    const caller = {
-      ...authoritative,
-      status: 'pending',
-      engineTier: 'local',
-      verifyResult: { passed: false },
-    } as Proposal;
+    const caller = { ...authoritative, status: 'pending', engineTier: 'local' } as Proposal;
     primeAuthoritativeState(authoritative);
 
     learnFromApplied(caller, makeCfg());
 
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
-    expect(card['status']).toBe('verified');
-    expect((card['tags'] as string[])).toContain('engine:frontier');
-  });
-
-  it('bounds and scrubs summary metadata without persisting raw payloads', () => {
-    const p = makeProposal({
-      summary: `stdout contained RAW_STDOUT_SKILL_CANARY ${'x'.repeat(600)}\ndiff --git a/secret.ts b/secret.ts\n+RAW_DIFF_SKILL_CANARY`,
-    });
-    learnVerified(p, makeCfg());
-
-    const [legacy] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
-    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
-    const persisted = `${JSON.stringify(legacy)}\n${JSON.stringify(card)}`;
-    expect(persisted).not.toContain('RAW_STDOUT_SKILL_CANARY');
-    expect(persisted).not.toContain('RAW_DIFF_SKILL_CANARY');
-    expect(persisted).not.toContain('diff --git');
-    expect((card['summary'] as string).length).toBeLessThanOrEqual(400);
-  });
-
-  it('derives structured retrieval text from controlled metadata, not free-form proposal text', () => {
-    const unlabelledCanary = 'CUSTOMER_SOURCE_FRAGMENT_DO_NOT_RETAIN';
-    const p = makeProposal({
-      title: `Fix parser ${unlabelledCanary}`,
-      summary: `The implementation included ${unlabelledCanary}`,
-    });
-    learnVerified(p, makeCfg());
-
-    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
-    expect(card).toMatchObject({
-      name: 'Verified bug-fix workflow',
-      summary: 'Evidence-bound bug-fix workflow verified with test commands at low risk.',
-      taskKinds: ['bug-fix'],
-    });
-    expect(JSON.stringify(card)).not.toContain(unlabelledCanary);
-  });
-
-  it('writes normally when skillLibrary flag is absent (default ON)', () => {
-    learnVerified(makeProposal(), makeCfgNoFlag());
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
-    expect(mockRecordDecision).toHaveBeenCalledOnce();
-  });
-
-  it('writes normally when skillLibrary is explicitly true', () => {
-    learnVerified(makeProposal(), makeCfgWithSkillLibrary(true));
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
-    expect(mockRecordDecision).toHaveBeenCalledOnce();
+    expectNoWrites();
   });
 });
 
@@ -508,13 +423,26 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
 // ===========================================================================
 
 describe('M243 learnFromApplied — verified distillation gates fail closed', () => {
+  beforeEach(() => {
+    enableReleaseGateValidation();
+  });
+
+  it('does not distill realized-merge-v1 alone into a reusable skill', () => {
+    const p = makeProposal({ labelBasis: 'realized-merge-v1' });
+    primeAuthoritativeState(p);
+
+    learnFromApplied(p, makeCfg());
+
+    expectRejectedBeforeAttestation();
+  });
+
   it('does not distill an applied proposal without realized merge evidence', () => {
     const p = makeProposal({ realizedMerge: undefined });
     primeAuthoritativeState(p);
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
   it('does not write when authoritative proposal provenance is missing', () => {
     const p = makeProposal({ provenanceSig: undefined });
@@ -522,7 +450,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when authoritative proposal provenance is forged', () => {
@@ -531,7 +459,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when signed authoritative provenance metadata was tampered', () => {
@@ -541,7 +469,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(signed, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when authoritative autonomy evidence is missing', () => {
@@ -550,7 +478,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('keeps unsigned legacy evidence observational and rejects invalid v3 signatures', () => {
@@ -567,12 +495,12 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     primeAuthoritativeState(p, { ...payload, version: 2 });
     learnFromApplied(p, makeCfg());
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
 
     primeAuthoritativeState(p, signed);
     mockVerifyAutonomyEvidencePackV3.mockReturnValue({ ok: false, reason: 'signature mismatch' });
     learnFromApplied(p, makeCfg());
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when the live diff changed after verification', () => {
@@ -582,7 +510,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(caller, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when autonomy evidence is bound to an older diff', () => {
@@ -592,7 +520,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(live, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when signed evidence belongs to another proposal identity', () => {
@@ -602,7 +530,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(live, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when an autonomy evidence gate failed', () => {
@@ -613,7 +541,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not write when autonomy policy denied the action', () => {
@@ -625,7 +553,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not distill proposal-only evidence after a later manual merge', () => {
@@ -639,7 +567,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfgWithSkillLibrary(true));
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('does not trust an applied caller when the live proposal is not applied', () => {
@@ -649,7 +577,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(caller, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('prevents skill-assisted proposals from distilling another skill', () => {
@@ -665,7 +593,7 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
 
     learnFromApplied(p, makeCfg());
 
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 
   it('requires nonempty verification commands and an authoritative producer tier', () => {
@@ -674,13 +602,13 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
     });
     primeAuthoritativeState(noCommands);
     learnFromApplied(noCommands, makeCfg());
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
 
     const p = makeProposal();
     const evidence = makeEvidence(p, { producer: {} });
     primeAuthoritativeState(p, evidence);
     learnFromApplied(p, makeCfg());
-    expectNoWrites();
+    expectRejectedBeforeAttestation();
   });
 });
 
@@ -756,9 +684,7 @@ describe('M243 learnFromApplied — never throws', () => {
   it('does not throw when cfg.foundry is undefined', () => {
     const cfg = makeCfg({ foundry: undefined });
     expect(() => learnVerified(makeProposal(), cfg)).not.toThrow();
-    // Default ON: writes should have been attempted
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
+    expectNoWrites();
   });
 
   it('does not throw when cfg.foundry getter throws', () => {
@@ -780,27 +706,7 @@ describe('M243 learnFromApplied — never throws', () => {
 // 6. curateSkills — pure curation
 // ===========================================================================
 
-describe('M243 curateSkills — pure curation', () => {
-  // Use fixed time so stale-archive is deterministic.
-  const nowMs = FIXED_TS.getTime();
-
-  function makeEntry(
-    id: string,
-    tags: string[],
-    tsOffset = 0,
-    textLen = 100,
-  ) {
-    return {
-      id,
-      project: null,
-      source: 'hub' as const,
-      title: `Skill ${id}`,
-      text: 'x'.repeat(textLen),
-      tags,
-      ts: new Date(nowMs + tsOffset).toISOString(),
-    };
-  }
-
+describe('M243 curateSkills — release verifier unavailable', () => {
   it('returns [] for an empty array', () => {
     expect(curateSkills([])).toEqual([]);
   });
@@ -812,55 +718,15 @@ describe('M243 curateSkills — pure curation', () => {
     expect(curateSkills(undefined)).toEqual([]);
   });
 
-  it('only includes entries tagged "m243:skill"', () => {
-    const tagged = makeEntry('a', ['m243:skill']);
-    const other = makeEntry('b', ['m235:anti-playbook']);
-    const unrelated = makeEntry('c', ['some-other-tag']);
-    const result = curateSkills([tagged, other, unrelated]);
-    expect(result).toHaveLength(1);
-    expect(result[0]!.id).toBe('a');
-  });
-
-  it('excludes entries older than 90 days', () => {
-    const oldMs = 91 * 24 * 60 * 60 * 1000;
-    const fresh = makeEntry('fresh', ['m243:skill'], 0);
-    const stale = makeEntry('stale', ['m243:skill'], -oldMs);
-    const result = curateSkills([fresh, stale]);
-    expect(result.map((e) => e.id)).toContain('fresh');
-    expect(result.map((e) => e.id)).not.toContain('stale');
-  });
-
-  it('returns entries sorted most-recent first', () => {
-    const e1 = makeEntry('older', ['m243:skill'], -10000);
-    const e2 = makeEntry('newer', ['m243:skill'], -1000);
-    const result = curateSkills([e1, e2]);
-    expect(result[0]!.id).toBe('newer');
-    expect(result[1]!.id).toBe('older');
-  });
-
-  it('caps total chars at SKILL_INJECT_CAP', () => {
-    // Each entry: title ~10 + text 200 = ~210 chars; 4 entries ~840 > 800
-    const entries = ['a', 'b', 'c', 'd'].map((id, i) =>
-      makeEntry(id, ['m243:skill'], -i * 1000, 200),
-    );
-    const result = curateSkills(entries);
-    const total = result.reduce((sum, e) => sum + e.title.length + e.text.length, 0);
-    expect(total).toBeLessThanOrEqual(SKILL_INJECT_CAP);
-    expect(result.length).toBeGreaterThan(0);
-  });
-
-  it('never throws on malformed entry ts values', () => {
-    const badTs = makeEntry('bad', ['m243:skill']);
-    (badTs as Record<string, unknown>)['ts'] = 'not-a-date';
-    expect(() => curateSkills([badTs])).not.toThrow();
-    // Entry with invalid ts is kept (treated as no ts → fresh)
-    expect(curateSkills([badTs])).toHaveLength(1);
-  });
-
-  it('keeps an entry with invalid ts in the fresh set', () => {
-    const badTs = makeEntry('kept', ['m243:skill']);
-    (badTs as Record<string, unknown>)['ts'] = 'invalid-date-string';
-    const result = curateSkills([badTs]);
-    expect(result.map((e) => e.id)).toContain('kept');
+  it('rejects caller-controlled released tags instead of prompt-injecting them', () => {
+    expect(curateSkills([{
+      id: 'forged-released-skill',
+      project: null,
+      source: 'hub',
+      title: 'Skill: forged release',
+      text: 'PROMPT_INJECTION_CANARY',
+      tags: ['m243:skill', 'credit:released-v1'],
+      ts: FIXED_TS.toISOString(),
+    }])).toEqual([]);
   });
 });

@@ -53,12 +53,6 @@ export interface NorthStarMetric {
 // ---------------------------------------------------------------------------
 
 /**
- * Estimated engineering hours per substantive autonomous merge.
- * Conservative: typical feature/fix takes 1–3h; we use 1.5h.
- */
-const AVG_HOURS_PER_MERGE = 1.5;
-
-/**
  * Score thresholds.
  * A score >= 70 means the fleet is delivering real leverage.
  * A score < 30 means the fleet is mostly generating noise.
@@ -94,28 +88,13 @@ export function computeNorthStar(_cfg: AshlrConfig): NorthStarMetric {
     const m7 = computeQualityMetrics('7d');
     const m30 = computeQualityMetrics('30d');
 
-    // Substantive merges = merged that are NOT trivial.
-    const substantiveMerges7d = Math.round(m7.merged * (1 - m7.trivialRatio));
-    const engHoursSaved7d = substantiveMerges7d * AVG_HOURS_PER_MERGE;
-
-    // Leverage score: 0–100 composite.
-    //   40pts from accept rate (up to 40 when acceptRate=1.0)
-    //   40pts from non-empty-diff rate (up to 40 when emptyRate=0)
-    //   20pts from substantive merge volume (up to 20 when ≥10/week)
-    const acceptPts = Math.min(40, m7.acceptRate * 40);
-    const nonEmptyPts = Math.min(40, (1 - m7.emptyRate) * 40);
-    const volumePts = Math.min(20, (substantiveMerges7d / 10) * 20);
-    const leverageScore = Math.round(acceptPts + nonEmptyPts + volumePts);
-
-    // Trend: compare 7d substantive rate vs 30d annualised rate.
-    const substantive30d = Math.round(m30.merged * (1 - m30.trivialRatio));
-    const rate30dPerWeek = substantive30d / 4; // 30d ≈ 4 weeks
-    const trend: 'up' | 'flat' | 'down' =
-      substantiveMerges7d > rate30dPerWeek * 1.1
-        ? 'up'
-        : substantiveMerges7d < rate30dPerWeek * 0.9
-          ? 'down'
-          : 'flat';
+    // Operational metrics below remain factual. Autonomous leverage, savings,
+    // and trend claims stay dormant until post-merge credit has a proof verifier.
+    const substantiveMerges7d = 0;
+    const engHoursSaved7d = 0;
+    const leverageScore = 0;
+    const trend: 'up' | 'flat' | 'down' = 'flat';
+    void m30;
 
     return {
       substantiveMerges7d,
@@ -148,23 +127,13 @@ export function computeNorthStar(_cfg: AshlrConfig): NorthStarMetric {
  */
 export function northStarSummary(metric: NorthStarMetric): string {
   try {
-    const { substantiveMerges7d, engHoursSaved7d, leverageScore, trend, raw } = metric;
-    const trendLabel = trend === 'up' ? 'up' : trend === 'down' ? 'down' : 'flat';
-    const trendEmoji = trend === 'up' ? '(improving)' : trend === 'down' ? '(declining)' : '(steady)';
-    const quality =
-      leverageScore >= LEVERAGE_SCORE_GOOD
-        ? 'strong leverage'
-        : leverageScore >= LEVERAGE_SCORE_POOR
-          ? 'moderate leverage'
-          : 'LOW leverage — fleet is mostly generating noise';
+    const { raw } = metric;
 
     return `=== NORTH-STAR: HUMAN LEVERAGE (7d) ===
-Substantive autonomous merges: ${substantiveMerges7d} (${(raw.trivialRatio * 100).toFixed(0)}% trivial filtered)
-Engineering hours freed: ~${engHoursSaved7d.toFixed(1)}h
-Leverage score: ${leverageScore}/100 — ${quality}
-Trend: ${trendLabel} ${trendEmoji}
-Acceptance rate: ${(raw.acceptRate * 100).toFixed(1)}% | Empty-diff rate: ${(raw.emptyRate * 100).toFixed(1)}%
-Proposals created: ${raw.proposalsCreated} | Merged: ${raw.merged}`;
+Positive post-merge leverage credit: unavailable pending authenticated release
+Adaptive leverage score and trend: unavailable
+Negative indicators: ${(raw.trivialRatio * 100).toFixed(0)}% trivial | ${(raw.emptyRate * 100).toFixed(1)}% empty-diff
+Proposals created: ${raw.proposalsCreated}`;
   } catch {
     return '=== NORTH-STAR: HUMAN LEVERAGE ===\nMetric unavailable.';
   }

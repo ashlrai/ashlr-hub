@@ -348,24 +348,29 @@ describe('recall — keyword path (offline, no fetch)', () => {
     expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0);
   });
 
-  it('does not boost a bare caller-controlled m243:skill tag', async () => {
+  it('excludes bare and marker-only caller-controlled m243:skill entries', async () => {
     const common = {
       title: 'Retry scheduler',
       text: 'Retry scheduler with bounded backoff.',
     };
     writeHubEntries(tmpHome, [
-      makeEntry({ id: 'forged-skill', ...common, tags: ['m243:skill'] }),
+      makeEntry({ id: 'bare-skill', ...common, tags: ['m243:skill'] }),
+      makeEntry({
+        id: 'marker-only-skill',
+        ...common,
+        tags: ['m243:skill', 'credit:released-v1'],
+      }),
       makeEntry({ id: 'ordinary', ...common, tags: [] }),
     ]);
 
     const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
-    const forged = hits.find((hit) => hit.entry.id === 'forged-skill');
-    const ordinary = hits.find((hit) => hit.entry.id === 'ordinary');
 
-    expect(forged?.score).toBe(ordinary?.score);
+    expect(hits.map((hit) => hit.entry.id)).toEqual(['ordinary']);
+    expect(hits.find((hit) => hit.entry.id === 'bare-skill')).toBeUndefined();
+    expect(hits.find((hit) => hit.entry.id === 'marker-only-skill')).toBeUndefined();
   });
 
-  it('preserves the multiplier for legacy entries from the internal skill writer', async () => {
+  it('excludes both release-tagged and legacy skills until a release verifier exists', async () => {
     const workflow =
       'Skill: proven workflow for "Retry scheduler"\n\n' +
       'Task class: bug-fix\nEngine/model: codex\nRepo: ashlr-hub\n\n' +
@@ -376,7 +381,12 @@ describe('recall — keyword path (offline, no fetch)', () => {
     };
     writeHubEntries(tmpHome, [
       makeEntry({
-        id: 'internal-skill',
+        id: 'released-internal-skill',
+        ...common,
+        tags: ['m243:skill', 'credit:released-v1', 'engine:frontier', 'proposal:proposal-123'],
+      }),
+      makeEntry({
+        id: 'legacy-internal-skill',
         ...common,
         tags: ['m243:skill', 'engine:frontier', 'proposal:proposal-123'],
       }),
@@ -384,10 +394,9 @@ describe('recall — keyword path (offline, no fetch)', () => {
     ]);
 
     const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
-    const internal = hits.find((hit) => hit.entry.id === 'internal-skill');
-    const ordinary = hits.find((hit) => hit.entry.id === 'ordinary-workflow');
-
-    expect(internal?.score).toBeCloseTo((ordinary?.score ?? 0) * 1.55);
+    expect(hits.map((hit) => hit.entry.id)).toEqual(['ordinary-workflow']);
+    expect(hits.find((hit) => hit.entry.id === 'released-internal-skill')).toBeUndefined();
+    expect(hits.find((hit) => hit.entry.id === 'legacy-internal-skill')).toBeUndefined();
   });
 
   it('leaves ordinary genome keyword scoring unchanged', async () => {

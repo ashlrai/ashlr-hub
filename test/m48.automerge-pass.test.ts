@@ -1011,7 +1011,7 @@ describe('M48 runAutoMergePass — post-merge authority', () => {
     expect(mockLearnFromApplied).not.toHaveBeenCalled();
   });
 
-  it('awaits all bounded effects while merge authority remains live', async () => {
+  it('emits factual merge effects but withholds positive credit while merge authority remains live', async () => {
     const proposal = enrolledMergedProposal('all-effects');
 
     await runAutoMergePass(enabledCfg());
@@ -1026,9 +1026,11 @@ describe('M48 runAutoMergePass — post-merge authority', () => {
       { authority: expect.any(Object) },
     );
     expect(mockEventBusEmit).toHaveBeenCalledWith(
-      'merge:shipped', expect.objectContaining({ proposalId: proposal.id }), expect.any(Object),
+      'merge:shipped',
+      expect.objectContaining({ proposalId: proposal.id, repo: proposal.repo }),
+      expect.any(Object),
     );
-    expect(mockLearnFromApplied).toHaveBeenCalledWith(proposal, expect.any(Object));
+    expect(mockLearnFromApplied).not.toHaveBeenCalled();
   });
 });
 

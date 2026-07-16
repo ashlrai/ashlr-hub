@@ -6,6 +6,7 @@ import {
   signSkillCardAttestation,
   verifySkillCardAttestation,
 } from '../foundry/provenance.js';
+import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -31,6 +32,9 @@ export function skillCardContentHash(card: SkillCard): string {
 
 export function attestSkillCard(card: SkillCard): SkillCard | null {
   try {
+    // The generic attester cannot mint positive post-merge learning authority.
+    // A future release protocol must own that proof and its signing boundary.
+    if (hasReleasedPostMergeCredit(card.labelBasis)) return null;
     const diffHash = card.verification?.diffHash;
     if (!card.proposalId || !diffHash) return null;
     const contentHash = skillCardContentHash(card);

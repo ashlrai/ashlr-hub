@@ -174,27 +174,27 @@ describe('M162 — computeNorthStar', () => {
     expect(['up', 'flat', 'down']).toContain(metric.trend);
   });
 
-  it('computes substantive merges as merged * (1 - trivialRatio)', async () => {
+  it('keeps factual merges raw while withholding substantive credit', async () => {
     const { computeNorthStar } = await import('../src/core/vision/north-star.js');
     const metric = computeNorthStar(mockCfgBase);
 
-    // 7d: merged=6, trivialRatio=0.15 → substantive = round(6 * 0.85) = 5
-    expect(metric.substantiveMerges7d).toBe(5);
+    expect(metric.raw.merged).toBe(6);
+    expect(metric.substantiveMerges7d).toBe(0);
   });
 
   it('computes engHoursSaved as substantiveMerges * 1.5', async () => {
     const { computeNorthStar } = await import('../src/core/vision/north-star.js');
     const metric = computeNorthStar(mockCfgBase);
 
-    expect(metric.engHoursSaved7d).toBe(metric.substantiveMerges7d * 1.5);
+    expect(metric.engHoursSaved7d).toBe(0);
   });
 
-  it('leverageScore is higher when accept rate is high and empty rate is low', async () => {
+  it('does not turn factual accept and empty rates into leverage credit', async () => {
     const { computeNorthStar } = await import('../src/core/vision/north-star.js');
     const metric = computeNorthStar(mockCfgBase);
 
-    // With 75% accept rate and 5% empty rate, score should be reasonably good.
-    expect(metric.leverageScore).toBeGreaterThan(50);
+    expect(metric.raw.acceptRate).toBe(0.75);
+    expect(metric.leverageScore).toBe(0);
   });
 
   it('never throws on any input', async () => {
@@ -213,9 +213,9 @@ describe('M162 — northStarSummary', () => {
     expect(typeof summary).toBe('string');
     expect(summary.length).toBeGreaterThan(20);
     expect(summary).toContain('NORTH-STAR');
-    expect(summary).toContain('Substantive');
-    expect(summary).toContain('Engineering hours');
-    expect(summary).toContain('Leverage score');
+    expect(summary).toContain('Positive post-merge leverage credit: unavailable');
+    expect(summary).toContain('Adaptive leverage score and trend: unavailable');
+    expect(summary).not.toContain('Acceptance rate:');
   });
 
   it('never throws on any metric shape', async () => {
@@ -365,7 +365,9 @@ describe('M162 — briefing structure', () => {
     expect(capturedPrompts.length).toBeGreaterThan(0);
     // The north-star section must appear in the user prompt.
     expect(capturedPrompts[0]).toContain('NORTH-STAR');
-    expect(capturedPrompts[0]).toContain('Substantive');
+    expect(capturedPrompts[0]).toContain('Positive post-merge leverage credit: unavailable');
+    expect(capturedPrompts[0]).not.toContain('Acceptance rate:');
+    expect(capturedPrompts[0]).not.toContain('Merged:');
   });
 
   it('goal focus discipline section appears in user prompt when active goals exist', async () => {

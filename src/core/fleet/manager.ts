@@ -1244,11 +1244,10 @@ function buildNarrative(metrics: QualityMetrics, verdicts: ManagerVerdict[]): st
   const harmful = verdicts.filter((v) => v.verdict === 'harmful').length;
   const reviews = total - ships - noises - harmful;
 
-  const acceptPct = (metrics.acceptRate * 100).toFixed(1);
   return (
     `Fleet judged ${total} proposal(s) in the ${metrics.window} window. ` +
     `${ships} ready to ship, ${reviews} need review, ${noises} noise, ${harmful} harmful. ` +
-    `Overall accept rate ${acceptPct}% (${metrics.merged} merged of ${metrics.proposalsCreated} created). ` +
+    'Positive post-merge learning credit is unavailable pending authenticated release. ' +
     `Trivial ratio ${(metrics.trivialRatio * 100).toFixed(1)}%, empty-diff rate ${(metrics.emptyRate * 100).toFixed(1)}%.`
   );
 }
@@ -1265,10 +1264,6 @@ function buildRecommendations(metrics: QualityMetrics, verdicts: ManagerVerdict[
   if (metrics.rejectRate > 0.5) {
     recs.push('Rejection rate is high — tune proposal quality gates or add a pre-filter.');
   }
-  if (metrics.acceptRate < 0.1 && metrics.proposalsCreated > 5) {
-    recs.push('Very low accept rate — review backlog quality or tighten spec generation.');
-  }
-
   const noiseCount = verdicts.filter((v) => v.verdict === 'noise').length;
   if (noiseCount > 2) {
     recs.push(`${noiseCount} noise proposals detected — consider raising the minimum diff-size threshold.`);

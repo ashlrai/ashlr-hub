@@ -198,6 +198,18 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(p.runId).toBe(input.runId);
   });
 
+  it.each([
+    'post-merge-credit-release-v1',
+    '  post-merge-credit-release-v1  ',
+  ])('does not let createProposal mint the reserved post-merge credit basis: %j', (labelBasis) => {
+    const p = createProposal(makeInput({
+      labelBasis,
+    }));
+
+    expect(p.labelBasis).toBe('proposal-status');
+    expect(loadProposal(p.id)?.labelBasis).toBe('proposal-status');
+  });
+
   it('rebinds a conflicting run summary to the generated durable proposal id', () => {
     const p = createProposal(makeInput({
       workItemId: 'repo:goal:causal-binding',

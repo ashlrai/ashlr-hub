@@ -48,6 +48,9 @@ const ROOT_SCAN_MAX_DIRS = 5000;
 /** Max depth to descend under each configured root when discovering repos. */
 const ROOT_SCAN_MAX_DEPTH = 4;
 
+const SKILL_TAG = 'm243:skill';
+const SKILL_CREDIT_RELEASE_TAG = 'credit:released-v1';
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -550,7 +553,11 @@ export function appendHubEntry(input: LearnInput): GenomeEntry {
     'Note';
 
   const project = scrubSecrets(input.project ?? '').trim() || null;
-  const tags = (input.tags ?? []).map((t) => scrubSecrets(t).trim()).filter(Boolean);
+  let tags = (input.tags ?? []).map((t) => scrubSecrets(t).trim()).filter(Boolean);
+  const canonicalTags = tags.map((tag) => tag.toLowerCase());
+  if (canonicalTags.includes(SKILL_TAG) && canonicalTags.includes(SKILL_CREDIT_RELEASE_TAG)) {
+    tags = tags.filter((tag) => tag.toLowerCase() !== SKILL_CREDIT_RELEASE_TAG);
+  }
   const text = safeText;
 
   // Id: stable slug from title + timestamp (unique per call).

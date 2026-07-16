@@ -39,6 +39,7 @@ import {
   hasRealizedMergeEvidence,
   realizedMergeOf,
 } from '../inbox/realized-merge.js';
+import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
 import { verifyProducerProvenanceV2 } from '../foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ export interface SourceStats {
   created: number;
   /** Proposals that received a manager verdict (judged count). */
   judged: number;
-  /** Distinct proposals with a merged row and exact realized-merge evidence. */
+  /** Distinct proposals with released post-merge credit and exact merge evidence. */
   merged: number;
   /** Proposals explicitly rejected. */
   rejected: number;
@@ -192,8 +193,8 @@ function judgePredictionKey(entry: DecisionEntry): string {
   return `${entry.proposalId}\u0000${entry.engine ?? ''}\u0000${entry.model ?? ''}`;
 }
 
-function isCanonicalMergedDecision(entry: DecisionEntry): boolean {
-  return entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1';
+function isReleasedMergedDecision(entry: DecisionEntry): boolean {
+  return entry.action === 'merged' && hasReleasedPostMergeCredit(entry.labelBasis);
 }
 
 function isInWindow(timestampMs: number, sinceMs: number | undefined): boolean {
@@ -352,13 +353,13 @@ export async function computeOutcomePriors(
 
     // ── Process decisions ─────────────────────────────────────────────────────
     // Decision rows identify when an outcome entered this reporting window,
-    // but only the current proposal's exact realized-merge witness can grant
-    // positive credit. A newer witness overrides stale rejection history.
+    // but positive credit requires both the release label and the current
+    // proposal's exact realized-merge witness.
     const latestMerged = new Map<string, DecisionEntry>();
     const latestRejection = new Map<string, DecisionEntry>();
     const latestJudgePrediction = new Map<string, DecisionEntry>();
     for (const d of decisions) {
-      if (isCanonicalMergedDecision(d)) {
+      if (isReleasedMergedDecision(d)) {
         const existing = latestMerged.get(d.proposalId);
         if (isNewerDecision(d, existing)) latestMerged.set(d.proposalId, d);
       }
@@ -403,7 +404,8 @@ export async function computeOutcomePriors(
     for (const [proposalId, terminal] of latestRejection) {
       if (!isInWindow(Date.parse(terminal.ts), sinceMs)) continue;
       const meta = proposalMeta.get(proposalId);
-      if (meta !== undefined && realizedEvidenceSupersedes(meta.proposal, terminal)) continue;
+      if (meta !== undefined && latestMerged.has(proposalId) &&
+        realizedEvidenceSupersedes(meta.proposal, terminal)) continue;
       if (terminal.action !== 'rejected') continue;
       const source = meta?.source ?? 'unknown';
       const repo = meta?.repo ?? null;
@@ -445,8 +447,10 @@ export async function computeOutcomePriors(
 
       if (ev.outcome === 'dispatch-blocked') continue;
       if (ev.outcome === 'diff') {
-        gStats(source).diffCount++;
-        if (repo) rStats(repo, source).diffCount++;
+        // Historical executor diffs and merge:shipped credit share one
+        // origin-less schema. Until an origin-bound v2 event exists, treating
+        // either as positive adaptive credit would preserve false merge reward.
+        continue;
       } else {
         gStats(source).emptyCount++;
         if (repo) rStats(repo, source).emptyCount++;

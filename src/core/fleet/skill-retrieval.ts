@@ -10,6 +10,9 @@
 import { createHash } from 'node:crypto';
 import type { SkillCard } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+import {
+  POST_MERGE_CREDIT_RELEASE_LABEL,
+} from './post-merge-credit.js';
 import { verifyAttestedSkillCard } from './skill-attestation.js';
 
 export const SKILL_RETRIEVAL_POLICY_VERSION = 'verified-skills-v1';
@@ -80,6 +83,8 @@ export interface ShadowSkillSummary {
   matchedFields: SkillMatchField[];
   status: 'verified';
   source: 'verified-proposal';
+  labelBasis: typeof POST_MERGE_CREDIT_RELEASE_LABEL;
+  creditReleased: true;
 }
 
 export interface ShadowSkillSelection {
@@ -117,6 +122,7 @@ interface ParsedCard {
   taskKinds: string[];
   commandKinds: string[];
   verificationEligible: boolean;
+  creditReleased: boolean;
   tainted: boolean;
   fingerprint: string;
 }
@@ -237,6 +243,10 @@ function parseCard(value: unknown): ParsedCard | null {
     const taskKinds = safeList(value['taskKinds']);
     const topLevelCommandKinds = safeList(value['commandKinds'], 12);
     if (!tags || !taskKinds || !topLevelCommandKinds) return null;
+    // Generic skill-card attestations bind structure and provenance only. They
+    // cannot prove post-merge credit release until a distinct proof domain and
+    // verifier exist, regardless of caller-supplied labels or tags.
+    const creditReleased = false;
 
     const verification = value['verification'];
     const verificationPassed = isObject(verification) && verification['passed'] === true;
@@ -290,6 +300,7 @@ function parseCard(value: unknown): ParsedCard | null {
       taskKinds: taskKinds.values,
       commandKinds,
       verificationEligible,
+      creditReleased,
       tainted,
     };
     return {
@@ -405,6 +416,7 @@ function isEligibleCard(card: ParsedCard): boolean {
   return card.status === 'verified'
     && card.source === 'verified-proposal'
     && card.verificationEligible
+    && card.creditReleased
     && !card.tainted;
 }
 
@@ -492,6 +504,8 @@ export function selectVerifiedSkills(
       matchedFields: entry.matchedFields,
       status: 'verified',
       source: 'verified-proposal',
+      labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
+      creditReleased: true,
     }));
     return {
       mode: 'shadow',

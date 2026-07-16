@@ -201,7 +201,7 @@ function chains(
         proposalId: pid,
         action: 'merged',
         verdict: 'applied',
-        labelBasis: 'realized-merge-v1',
+        labelBasis: 'post-merge-credit-release-v1',
       });
     }
   });
@@ -242,7 +242,7 @@ function freshChains(
         proposalId: pid,
         action: 'merged',
         verdict: 'applied',
-        labelBasis: 'realized-merge-v1',
+        labelBasis: 'post-merge-credit-release-v1',
       });
     }
   });
@@ -318,23 +318,23 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M323 buildProducerScores', () => {
-  it('attributes realized outcomes to the PRODUCER with canonical keys', () => {
+  it('withholds raw v1 positives while attributing negatives to canonical producers', () => {
     fixture = SONNET_GOOD;
     const scores = buildProducerScores('issue', NOW);
     expect(scores.has('claude:sonnet-5')).toBe(true);
-    expect(scores.has('claude:opus')).toBe(true);
+    expect(scores.has('claude:opus')).toBe(false);
     // judge identity never becomes a key
     expect(scores.has('claude-fable-5:claude-fable-5')).toBe(false);
     expect(scores.has('claude-fable-5:fable-5')).toBe(false);
     const s5 = scores.get('claude:sonnet-5')!;
-    expect(s5.samples).toBeGreaterThanOrEqual(LEARNED_ROUTING_MIN_SAMPLES);
-    expect(s5.score).toBeGreaterThan(0.7);
+    expect(s5.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(s5.score).toBe(0.5);
   });
 
-  it('filters producers by taskClass', () => {
+  it('does not create task-class scores from raw v1 positives', () => {
     fixture = chains('s5', 'claude:claude-sonnet-5', ['ship', 'ship', 'ship', 'ship', 'ship'], 'lint');
     expect(buildProducerScores('issue', NOW).size).toBe(0);
-    expect(buildProducerScores('lint', NOW).size).toBe(1);
+    expect(buildProducerScores('lint', NOW).size).toBe(0);
   });
 
   it('cold start → empty map', () => {
@@ -398,20 +398,20 @@ describe('M323 buildProducerScores', () => {
     expect(buildProducerScores('issue', NOW).size).toBe(0);
   });
 
-  it('does not credit a producer for a legacy merged row with a current witness', () => {
+  it('does not credit a producer for an old realized-merge label with a current witness', () => {
     const count = LEARNED_ROUTING_MIN_SAMPLES + 2;
     fixture = chains(
       'legacy-merge',
       'claude:claude-sonnet-5',
       Array.from({ length: count }, () => 'ship'),
     ).map((entry) => entry['action'] === 'merged'
-      ? Object.fromEntries(Object.entries(entry).filter(([key]) => key !== 'labelBasis'))
+      ? { ...entry, labelBasis: 'realized-merge-v1' }
       : entry);
 
     expect(buildProducerScores('issue', NOW).size).toBe(0);
   });
 
-  it('uses signed proposal identity instead of a forged proposed ledger identity', () => {
+  it('signed proposal identity cannot upgrade a raw v1 label into credit', () => {
     const count = LEARNED_ROUTING_MIN_SAMPLES + 1;
     fixture = chains(
       'forged-producer',
@@ -427,7 +427,7 @@ describe('M323 buildProducerScores', () => {
 
     const scores = buildProducerScores('issue', NOW);
     expect(scores.has('claude:sonnet-5')).toBe(false);
-    expect(scores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+    expect(scores.has('codex:gpt-5.5')).toBe(false);
   });
 
   it('uses signed proposal identity for negative outcomes despite forged ledger labels', () => {
@@ -503,7 +503,7 @@ describe('M323 buildProducerScores', () => {
     expect(buildProducerScores('issue', NOW).size).toBe(0);
   });
 
-  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh producer samples above the weighted floor`, () => {
+  it(`withholds exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh raw v1 producer samples`, () => {
     const fixedNow = 1_700_000_000_000;
     fixture = freshChains(
       'op-fresh',
@@ -512,15 +512,12 @@ describe('M323 buildProducerScores', () => {
       fixedNow,
     );
     const scores = buildProducerScores('issue', fixedNow + 1);
-    const opus = scores.get('claude:opus');
-    expect(opus).toBeDefined();
-    expect(opus!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
-    expect(opus!.score).toBeGreaterThan(0.5);
+    expect(scores.has('claude:opus')).toBe(false);
   });
 });
 
 describe('M323 realized model ROI', () => {
-  it('deduplicates judge retries and terminal rows while realized evidence wins', () => {
+  it('deduplicates judge retries while raw v1 merges lose to adverse truth', () => {
     const proposalId = 'roi-realized';
     fixture = [
       {
@@ -535,8 +532,20 @@ describe('M323 realized model ROI', () => {
         ts: ts(2), proposalId, action: 'judged', engine: 'claude-fable-5',
         model: 'claude-fable-5', verdict: 'ship', costUsd: 0.5,
       },
-      { ts: ts(1.5), proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
-      { ts: ts(1), proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
+      {
+        ts: ts(1.5),
+        proposalId,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'post-merge-credit-release-v1',
+      },
+      {
+        ts: ts(1),
+        proposalId,
+        action: 'merged',
+        verdict: 'applied',
+        labelBasis: 'post-merge-credit-release-v1',
+      },
       { ts: ts(2.5), proposalId, action: 'rejected', verdict: 'rejected' },
     ];
 
@@ -546,10 +555,10 @@ describe('M323 realized model ROI', () => {
       judged: 1,
       shipVerdicts: 1,
       shipRate: 1,
-      merged: 1,
-      rejected: 0,
+      merged: 0,
+      rejected: 1,
       judgeCostUsd: 0.5,
-      costPerMergedUsd: 2.5,
+      costPerMergedUsd: null,
     });
   });
 
@@ -571,6 +580,38 @@ describe('M323 realized model ROI', () => {
       costPerMergedUsd: null,
     });
   });
+
+  it('does not let old realized-merge labels bias ROI over a rejection', () => {
+    const proposalId = 'roi-old-realized-label';
+    fixture = [
+      {
+        ts: ts(4), proposalId, action: 'proposed', engine: 'claude',
+        model: 'claude:claude-sonnet-5', costUsd: 2,
+      },
+      {
+        ts: ts(3), proposalId, action: 'judged', engine: 'claude-fable-5',
+        model: 'claude-fable-5', verdict: 'ship', costUsd: 0.5,
+      },
+      {
+        ts: ts(2), proposalId, action: 'merged', verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      },
+      {
+        ts: ts(1.5), proposalId, action: 'merged', verdict: 'applied',
+        labelBasis: 'realized-merge-v1',
+      },
+      { ts: ts(1), proposalId, action: 'rejected', verdict: 'rejected' },
+    ];
+
+    expect(computeModelRoi('all')['claude:sonnet-5']).toMatchObject({
+      dispatches: 1,
+      judged: 1,
+      shipVerdicts: 1,
+      merged: 0,
+      rejected: 1,
+      costPerMergedUsd: null,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -582,18 +623,18 @@ describe('M323 selectCostAwareModel', () => {
     (m) => m.engine === 'claude' && m.tier === 'large' && m.id !== 'claude:fable-5',
   );
 
-  it('picks the cheapest candidate clearing the bar', () => {
+  it('returns no learned candidate from raw v1 positive history', () => {
     fixture = SONNET_GOOD;
     const scores = buildProducerScores('issue', NOW);
     const pick = selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.6 });
-    expect(pick?.id).toBe('claude:sonnet-5'); // cheaper than opus, clears 0.6
+    expect(pick).toBeNull();
   });
 
-  it('raising the bar past sonnet-5 selects opus', () => {
+  it('a lower or higher bar cannot authorize raw v1 positives', () => {
     fixture = SONNET_GOOD; // s5 ≈ 0.83, opus = 1.0
     const scores = buildProducerScores('issue', NOW);
     const pick = selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.9 });
-    expect(pick?.id).toBe('claude:opus');
+    expect(pick).toBeNull();
   });
 
   it('never learns INTO a bad model: all sampled < 0.5 → null', () => {
@@ -618,7 +659,7 @@ describe('M323 selectCostAwareModel', () => {
     expect(selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.6 })).toBeNull();
   });
 
-  it(`keeps ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh producer samples thin for model selection`, () => {
+  it(`withholds ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh raw v1 producer samples`, () => {
     const fixedNow = 1_700_000_000_000;
     fixture = freshChains(
       'op-thin',
@@ -627,9 +668,7 @@ describe('M323 selectCostAwareModel', () => {
       fixedNow,
     );
     const scores = buildProducerScores('issue', fixedNow + 1);
-    const opus = scores.get('claude:opus');
-    expect(opus).toBeDefined();
-    expect(opus!.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(scores.has('claude:opus')).toBe(false);
     expect(selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.6 })).toBeNull();
   });
 });
@@ -641,21 +680,21 @@ describe('M323 selectCostAwareModel', () => {
 describe('M323 routeTask integration', () => {
   const flagOn = { modelGranularRouting: { enabled: true } };
 
-  it('steers AWAY from a bad default: sonnet-5 rejected-heavy → opus wins', () => {
+  it('does not steer into an uncredited raw v1 alternative', () => {
     fixture = SONNET_BAD_OPUS_GOOD;
     const item = makeItem({ source: 'issue' });
     const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
     expect(result.engine).toBe('claude');
-    expect(result.catalogEntry?.id).toBe('claude:opus');
-    expect(result.reason).toContain('M323 learned');
+    expect(result.catalogEntry?.id).toBe('claude:sonnet-5');
+    expect(result.reason).not.toContain('M323 learned');
   });
 
-  it('good sonnet-5 stays the (cheapest clearing) pick with learned reason', () => {
+  it('raw v1 positive history preserves the static sonnet pick', () => {
     fixture = SONNET_GOOD;
     const item = makeItem({ source: 'issue' });
     const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
     expect(result.model).toBe('claude-sonnet-5');
-    expect(result.reason).toContain('M323 learned');
+    expect(result.reason).not.toContain('M323 learned');
   });
 
   it('flag OFF: static M321 decision even with a bad-ship-rate ledger', () => {
@@ -684,7 +723,7 @@ describe('M323 routeTask integration', () => {
     expect(result.reason).not.toContain('M323');
   });
 
-  it(`flag ON + exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh producer samples can override the static model`, () => {
+  it(`flag ON + exactly ${LEARNED_ROUTING_MIN_SAMPLES} raw v1 positives preserves static routing`, () => {
     const fixedNow = 1_700_000_000_000;
     vi.useFakeTimers();
     vi.setSystemTime(new Date(fixedNow));
@@ -698,8 +737,8 @@ describe('M323 routeTask integration', () => {
 
     const item = makeItem({ source: 'issue' });
     const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
-    expect(result.catalogEntry?.id).toBe('claude:opus');
-    expect(result.reason).toContain('M323 learned');
+    expect(result.catalogEntry?.id).toBe('claude:sonnet-5');
+    expect(result.reason).not.toContain('M323 learned');
   });
 
   it(`flag ON + ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh producer samples preserves the static model`, () => {

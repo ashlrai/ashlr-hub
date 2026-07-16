@@ -47,6 +47,8 @@ SAFETY INVARIANTS (you cannot bypass these — they are enforced by existing cod
 - Every proposal passes the judge before merge — you cannot skip this
 - The kill-switch is respected; you can set it (emergency) but cannot unset without Mason
 - The daily budget cascade cannot be overridden by your BackendHint
+- Realized merge totals are factual lifecycle telemetry only; never infer engine quality, success, or routing preference from them
+- Positive skill signals require authenticated post-merge release; an absent skill signal means there is no trusted positive skill input
 
 OUTPUT FORMAT:
 Respond with ONLY a valid JSON object matching this exact schema:
@@ -108,13 +110,13 @@ export function renderDirectorPrompt(ctx: DirectorContext): string {
 
   // ── 24h outcomes ─────────────────────────────────────────────────────────
   parts.push('=== 24H OUTCOMES ===');
-  parts.push(`Merged: ${ctx.outcomes.mergedCount}, Rejected: ${ctx.outcomes.rejectedCount}`);
+  parts.push(`Realized merges (factual only): ${ctx.outcomes.mergedCount}, Rejected: ${ctx.outcomes.rejectedCount}`);
   parts.push(`Cost today: $${ctx.outcomes.costUsdToday.toFixed(4)}`);
   const cacheHitPct = Math.round(ctx.outcomes.cacheHitRate * 100);
   parts.push(`Cache hit rate: ${cacheHitPct}%`);
   const shipRates = Object.entries(ctx.outcomes.engineShipRates);
   if (shipRates.length > 0) {
-    parts.push('Engine ship rates: ' + shipRates.map(([e, r]) => `${e}=${r}%`).join(', '));
+    parts.push('Released-credit engine ship rates: ' + shipRates.map(([e, r]) => `${e}=${r}%`).join(', '));
   }
   if (ctx.outcomes.blockedGoals.length > 0) {
     parts.push(`Blocked goals: ${ctx.outcomes.blockedGoals.join(', ')}`);
@@ -158,7 +160,7 @@ export function renderDirectorPrompt(ctx: DirectorContext): string {
 
   // ── Learning signal ───────────────────────────────────────────────────────
   if (ctx.learning.lessonsCount > 0 || ctx.learning.skillCount > 0) {
-    parts.push('=== LEARNING (7d) ===');
+    parts.push('=== LEARNING (7d; positive skills require authenticated release) ===');
     parts.push(`Lessons: ${ctx.learning.lessonsCount}, Skills: ${ctx.learning.skillCount}`);
     if (ctx.learning.recentLessonTitles.length > 0) {
       parts.push('Recent: ' + ctx.learning.recentLessonTitles.join('; '));

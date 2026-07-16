@@ -150,6 +150,25 @@ function localMergeEvidence(observedAt: string): RealizedMergeEvidence {
   };
 }
 
+async function recordFactualMerge(
+  ...proposals: MockProposal[]
+): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  for (const proposal of proposals) {
+    const evidence = proposal.realizedMerge;
+    const ts = evidence && 'observedAt' in evidence
+      ? evidence.observedAt
+      : proposal.createdAt;
+    recordDecision({
+      ts,
+      proposalId: proposal.id,
+      action: 'merged',
+      verdict: 'applied',
+      labelBasis: 'realized-merge-v1',
+    });
+  }
+}
+
 /** A substantial diff with 10 changed lines. */
 const SUBSTANTIAL_DIFF = [
   '--- a/foo.ts',
@@ -203,14 +222,16 @@ describe('m119 computeQualityMetrics', () => {
     expect(m.byRepo).toEqual({});
   });
 
-  it('counts only evidence-qualified applied proposals as merged', async () => {
+  it('counts exact realized-merge witnesses as factual operational merges', async () => {
+    const credited = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
     mockProposals.push(
-      makeProposal({ status: 'applied',  createdAt: daysAgo(1) }),
+      credited,
       makeProposal({ status: 'approved', createdAt: daysAgo(2) }),
       makeProposal({ status: 'rejected', createdAt: daysAgo(2) }),
       makeProposal({ status: 'failed',   createdAt: daysAgo(3) }),
       makeProposal({ status: 'pending',  createdAt: daysAgo(1) }),
     );
+    await recordFactualMerge(credited);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('30d');
@@ -224,14 +245,14 @@ describe('m119 computeQualityMetrics', () => {
   });
 
   it('does not credit branch/manual applied status without an exact witness', async () => {
-    mockProposals.push(
-      makeProposal({
-        status: 'applied',
-        createdAt: daysAgo(1),
-        engineModel: 'codex:gpt-5.5',
-        realizedMerge: undefined,
-      }),
-    );
+    const proposal = makeProposal({
+      status: 'applied',
+      createdAt: daysAgo(1),
+      engineModel: 'codex:gpt-5.5',
+      realizedMerge: undefined,
+    });
+    mockProposals.push(proposal);
+    await recordFactualMerge(proposal);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const metrics = computeQualityMetrics('7d');
@@ -242,7 +263,9 @@ describe('m119 computeQualityMetrics', () => {
   });
 
   it('returns neutral metrics instead of learning from a partial proposal source', async () => {
-    mockProposals.push(makeProposal({ status: 'applied', createdAt: daysAgo(1) }));
+    const proposal = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
+    mockProposals.push(proposal);
+    await recordFactualMerge(proposal);
     mockProposalSourceComplete = false;
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
@@ -322,12 +345,24 @@ describe('m119 computeQualityMetrics', () => {
   });
 
   it('byEngine breakdown: keyed by engineModel', async () => {
+    const firstCodex = makeProposal({
+      status: 'applied',
+      createdAt: daysAgo(1),
+      engineModel: 'codex:gpt-5.5',
+      diff: SUBSTANTIAL_DIFF,
+    });
+    const secondCodex = makeProposal({
+      status: 'applied',
+      createdAt: daysAgo(1),
+      engineModel: 'codex:gpt-5.5',
+    });
     mockProposals.push(
-      makeProposal({ status: 'applied', createdAt: daysAgo(1), engineModel: 'codex:gpt-5.5', diff: SUBSTANTIAL_DIFF }),
-      makeProposal({ status: 'applied', createdAt: daysAgo(1), engineModel: 'codex:gpt-5.5' }),
+      firstCodex,
+      secondCodex,
       makeProposal({ status: 'rejected', createdAt: daysAgo(1), engineModel: 'claude:claude-opus-4' }),
       makeProposal({ status: 'pending',  createdAt: daysAgo(1), engineModel: 'codex:gpt-5.5' }),
     );
+    await recordFactualMerge(firstCodex, secondCodex);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');
@@ -369,6 +404,7 @@ describe('m119 computeQualityMetrics', () => {
     const oldRealization = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
     oldRealization.realizedMerge = localMergeEvidence(daysAgo(8));
     mockProposals.push(recentlyRealized, oldRealization);
+    await recordFactualMerge(recentlyRealized, oldRealization);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');
@@ -377,13 +413,28 @@ describe('m119 computeQualityMetrics', () => {
     expect(m.merged).toBe(1);
   });
 
+  it('reports a realized merge in its witness window even when creation was older', async () => {
+    const held = makeProposal({ status: 'applied', createdAt: daysAgo(8) });
+    held.realizedMerge = localMergeEvidence(daysAgo(1));
+    mockProposals.push(held);
+
+    const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
+    expect(computeQualityMetrics('7d')).toMatchObject({
+      proposalsCreated: 1,
+      merged: 1,
+      acceptRate: 1,
+    });
+  });
+
   it('does not credit a future-dated realized witness', async () => {
     const future = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
-    mockProposals.push(makeProposal({
+    const proposal = makeProposal({
       status: 'applied',
       createdAt: daysAgo(1),
       realizedMerge: localMergeEvidence(future),
-    }));
+    });
+    mockProposals.push(proposal);
+    await recordFactualMerge(proposal);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');
@@ -401,20 +452,7 @@ describe('m119 computeQualityMetrics', () => {
     const ts = daysAgo(1);
     for (const proposal of [realized, bare]) {
       recordDecision({ ts, proposalId: proposal.id, action: 'proposed' });
-      recordDecision({
-        ts,
-        proposalId: proposal.id,
-        action: 'merged',
-        verdict: 'applied',
-        labelBasis: 'realized-merge-v1',
-      });
-      recordDecision({
-        ts,
-        proposalId: proposal.id,
-        action: 'merged',
-        verdict: 'applied',
-        labelBasis: 'realized-merge-v1',
-      });
+      await recordFactualMerge(proposal, proposal);
     }
     recordDecision({
       ts: new Date(Date.parse(ts) - 1_000).toISOString(),
@@ -430,19 +468,25 @@ describe('m119 computeQualityMetrics', () => {
     expect(metrics.trend?.[0]).toMatchObject({ merged: 1, acceptRate: 0.5 });
   });
 
-  it('does not let a legacy merged row borrow a current witness for trend credit', async () => {
+  it('counts realized-merge-v1 as factual aggregate and trend reporting', async () => {
     const realized = makeProposal({ status: 'applied', createdAt: daysAgo(1) });
     mockProposals.push(realized);
     const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
     const ts = daysAgo(1);
     recordDecision({ ts, proposalId: realized.id, action: 'proposed' });
-    recordDecision({ ts, proposalId: realized.id, action: 'merged', verdict: 'applied' });
+    recordDecision({
+      ts,
+      proposalId: realized.id,
+      action: 'merged',
+      verdict: 'applied',
+      labelBasis: 'realized-merge-v1',
+    });
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const metrics = computeQualityMetrics('all');
 
     expect(metrics.merged).toBe(1);
-    expect(metrics.trend?.[0]).toMatchObject({ merged: 0, acceptRate: 0 });
+    expect(metrics.trend?.[0]).toMatchObject({ merged: 1, acceptRate: 1 });
   });
 
   it('never throws on bad/corrupt state', async () => {
@@ -496,6 +540,46 @@ describe('m119 decisions-ledger', () => {
     expect(entries[0]!.action).toBe('merged');
     expect(entries[0]!.engine).toBe('codex');
     expect(entries[0]!.reason).toBe('looks good');
+  });
+
+  it('generic decision writes reject exact and padded reserved release labels', async () => {
+    const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+
+    for (const [proposalId, labelBasis] of [
+      ['prop-forged-release', 'post-merge-credit-release-v1'],
+      ['prop-padded-release', '  post-merge-credit-release-v1\t'],
+    ] as const) {
+      recordDecision({
+        ts: new Date().toISOString(),
+        proposalId,
+        action: 'merged',
+        labelBasis,
+      });
+    }
+
+    expect(readDecisions({ proposalId: 'prop-forged-release' })).toEqual([]);
+    expect(readDecisions({ proposalId: 'prop-padded-release' })).toEqual([]);
+  });
+
+  it('generic decision writes reject a stateful getter that yields a reserved label', async () => {
+    const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    let reads = 0;
+    const entry = {
+      ts: new Date().toISOString(),
+      proposalId: 'prop-stateful-release',
+      action: 'merged' as const,
+      get labelBasis() {
+        reads++;
+        return reads === 1
+          ? 'realized-merge-v1' as const
+          : 'post-merge-credit-release-v1' as const;
+      },
+    };
+
+    recordDecision(entry);
+
+    expect(reads).toBeGreaterThan(0);
+    expect(readDecisions({ proposalId: entry.proposalId })).toEqual([]);
   });
 
   it('readDecisions filters by proposalId', async () => {
@@ -882,11 +966,18 @@ describe('m119 store.setStatus ledger hook', () => {
 
 describe('m119 scorecard --json shape', () => {
   it('--json output matches QualityMetrics shape with correct fields', async () => {
+    const credited = makeProposal({
+      status: 'applied',
+      createdAt: daysAgo(1),
+      engineModel: 'codex:gpt-5.5',
+      diff: SUBSTANTIAL_DIFF,
+    });
     mockProposals.push(
-      makeProposal({ status: 'applied',  createdAt: daysAgo(1), engineModel: 'codex:gpt-5.5', diff: SUBSTANTIAL_DIFF }),
+      credited,
       makeProposal({ status: 'rejected', createdAt: daysAgo(2), engineModel: 'claude:opus' }),
       makeProposal({ status: 'pending',  createdAt: daysAgo(1) }),
     );
+    await recordFactualMerge(credited);
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');

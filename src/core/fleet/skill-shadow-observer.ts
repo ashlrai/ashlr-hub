@@ -32,6 +32,17 @@ export interface ObserveShadowSkillsDeps {
   record?: typeof recordSkillUseEvent;
 }
 
+function isDormantSelection(selection: ShadowSkillSelection): boolean {
+  if (
+    selection.mode !== 'shadow' ||
+    selection.policyVersion !== SKILL_RETRIEVAL_POLICY_VERSION ||
+    !Array.isArray(selection.selected) ||
+    !Array.isArray(selection.selectedSkillIds) ||
+    selection.selected.length !== selection.selectedSkillIds.length
+  ) return false;
+  return selection.selected.length === 0 && selection.selectedSkillIds.length === 0;
+}
+
 export function observeShadowSkills(
   input: ObserveShadowSkillsInput,
   deps: ObserveShadowSkillsDeps = {},
@@ -41,6 +52,7 @@ export function observeShadowSkills(
   const record = deps.record ?? recordSkillUseEvent;
   try {
     const selection = select(input.cards, input.query);
+    if (!isDormantSelection(selection)) throw new Error('skill release verifier unavailable');
     const events = selection.selected.flatMap((skill) => {
       const event = buildEvent({
         identity: input.identity,
