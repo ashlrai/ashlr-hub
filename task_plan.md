@@ -2641,6 +2641,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Complete fixture migration and a 786-assertion changed-surface matrix.
 - [x] Complete final adversarial bypass review with no remaining P0/P1/P2.
 - [x] Pass the 864-assertion changed-surface matrix, typecheck, lint, build, zero-vulnerability audit, and diff checks.
+- [x] Align the native shared-queue authority test with the v1 diff-origin ambiguity contract while preserving explicit diff-cooldown enforcement.
 - [ ] Require the complete protected CI matrix on the immutable PR head.
 - [x] Publish the firewall as draft PR #48 stacked on PR #47 without claiming a stability release protocol.
 - [ ] Build the separate protected-base release authority with reservation, detached verification, denominator-complete observation, monotonic quarantine, and crash-safe idempotent fanout.
