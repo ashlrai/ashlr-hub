@@ -2944,6 +2944,9 @@ describe('generated repair lifecycle store', () => {
         .update('\0', 'utf8')
         .update(JSON.stringify(witness), 'utf8')
         .digest('hex');
+      // Reconstruct a pre-protocol v2 authority fixture. Current writers create
+      // the protocol anchor eagerly, while legacy v2 tombstones predate it.
+      rmSync(join(receiptDir, '.protocol.json'), { force: true });
       const retentionPath = join(receiptDir, '.retention.json');
       writeFileSync(retentionPath, `${JSON.stringify({
         schemaVersion: 2,
@@ -3032,6 +3035,7 @@ describe('generated repair lifecycle store', () => {
             mode: 'secure-created',
             anchorPath: fx.home,
           },
+          { path: lifecyclePath, kind: 'file', mode: 'inspect-existing', anchorPath: fx.home },
           { path: lifecyclePath, kind: 'file', mode: 'inspect-existing', anchorPath: fx.home },
       ]);
       expect(assurePrivateStoragePath(

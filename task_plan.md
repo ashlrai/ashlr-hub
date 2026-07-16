@@ -2485,6 +2485,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Correct the retained-live-receipt regression assumption and extend bounded test-only tracing across proposal binding, record construction, save outcome, and exact caught persistence error.
 - [x] Use protected `98f9e15` to identify Windows directory-fd `fsync` `EPERM` as the final persistence refusal after valid lifecycle record construction.
 - [x] Replace the lifecycle's duplicate raw directory fsync with the shared identity-validating Windows-aware durability primitive, preserving exact DACL inspection and all rollback/file-fsync guarantees.
+- [x] Use protected `f4adc11` to prove Windows persistence succeeds and reduce native M360 from six failures to two post-success fixture expectations.
+- [x] Reconstruct a genuine pre-protocol v2 tombstone fixture and require the successful transaction's post-commit lifecycle-file DACL inspection without changing production authority.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
