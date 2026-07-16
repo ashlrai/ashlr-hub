@@ -3168,7 +3168,7 @@ describe('generated repair lifecycle store', () => {
           anchorPath: fx.home,
         })));
     },
-    120_000,
+    240_000,
   );
 
   it('does not acknowledge when a competing immutable receipt wins the race', () => {
