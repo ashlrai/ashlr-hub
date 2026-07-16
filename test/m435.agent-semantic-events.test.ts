@@ -286,9 +286,10 @@ describe('M435 metadata-only agent semantic events', () => {
 
   it('withholds run signals when the physical agent-action source is degraded', () => {
     const runId = 'run-m435-degraded-signal';
+    const recordedAt = new Date().toISOString();
     recordAgentAction({
       schemaVersion: 1,
-      ts: '2026-07-16T20:00:07.000Z',
+      ts: recordedAt,
       actor: 'agent',
       kind: 'maintenance',
       outcome: 'ok',
@@ -303,7 +304,7 @@ describe('M435 metadata-only agent semantic events', () => {
       }),
     });
     fs.appendFileSync(
-      path.join(agentActionsDir(), '2026-07-16.jsonl'),
+      path.join(agentActionsDir(), `${recordedAt.slice(0, 10)}.jsonl`),
       `${JSON.stringify({ schemaVersion: 1, invalid: true })}\n`,
     );
 
