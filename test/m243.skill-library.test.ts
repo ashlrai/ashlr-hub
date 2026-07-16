@@ -23,7 +23,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
-import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import type {
+  AutonomyEvidencePack,
+  SignedAutonomyEvidencePackV3,
+} from '../src/core/autonomy/evidence-pack.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
@@ -59,8 +62,10 @@ vi.mock('../src/core/inbox/store.js', () => ({
 }));
 
 const mockReadAutonomyEvidencePack = vi.fn();
+const mockVerifyAutonomyEvidencePackV3 = vi.fn();
 vi.mock('../src/core/autonomy/evidence-pack.js', () => ({
   readAutonomyEvidencePack: (...args: unknown[]) => mockReadAutonomyEvidencePack(...args),
+  verifyAutonomyEvidencePackV3: (...args: unknown[]) => mockVerifyAutonomyEvidencePackV3(...args),
 }));
 
 const mockRecordSkillCard = vi.fn();
@@ -142,7 +147,7 @@ function makeEvidence(
 ): AutonomyEvidencePack {
   const diffHash = hashDiff(proposal.diff ?? '');
   return {
-    version: 1,
+    version: 3,
     generatedAt: FIXED_TS.toISOString(),
     proposal: {
       id: proposal.id,
@@ -159,8 +164,8 @@ function makeEvidence(
     },
     diff: { hash: diffHash, files: ['src/auth.ts'], changedLines: 1 },
     target: 'main',
-    trustBasis: 'verification',
-    remotePreferred: false,
+    trustBasis: 'evidence',
+    remotePreferred: true,
     riskClass: 'low',
     gates: {
       authority: { ok: true, detail: 'authority passed' },
@@ -185,8 +190,13 @@ function makeEvidence(
       allowed: true,
       reason: 'verified evidence passed',
     },
+    payloadDigest: 'a'.repeat(64),
+    signatureAlgorithm: 'hmac-sha256',
+    signingKeyId: 'd'.repeat(64),
+    signature: 'b'.repeat(64),
+    sealedPackDigest: 'c'.repeat(64),
     ...overrides,
-  };
+  } as SignedAutonomyEvidencePackV3;
 }
 
 function primeAuthoritativeState(
@@ -251,11 +261,13 @@ beforeEach(() => {
   mockRecordDecision.mockReset();
   mockLoadProposal.mockReset();
   mockReadAutonomyEvidencePack.mockReset();
+  mockVerifyAutonomyEvidencePackV3.mockReset();
   mockRecordSkillCard.mockReset();
 
   mockAppendHubEntry.mockReturnValue(undefined);
   mockRecordDecision.mockReturnValue(undefined);
   mockRecordSkillCard.mockReturnValue(undefined);
+  mockVerifyAutonomyEvidencePackV3.mockReturnValue({ ok: true, reason: 'valid signed fixture' });
 });
 
 afterEach(() => {
@@ -541,6 +553,28 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
     expectNoWrites();
   });
 
+  it('keeps unsigned legacy evidence observational and rejects invalid v3 signatures', () => {
+    const p = makeProposal();
+    const signed = makeEvidence(p) as SignedAutonomyEvidencePackV3;
+    const {
+      payloadDigest: _payloadDigest,
+      signatureAlgorithm: _signatureAlgorithm,
+      signingKeyId: _signingKeyId,
+      signature: _signature,
+      sealedPackDigest: _sealedPackDigest,
+      ...payload
+    } = signed;
+
+    primeAuthoritativeState(p, { ...payload, version: 2 });
+    learnFromApplied(p, makeCfg());
+    expectNoWrites();
+
+    primeAuthoritativeState(p, signed);
+    mockVerifyAutonomyEvidencePackV3.mockReturnValue({ ok: false, reason: 'signature mismatch' });
+    learnFromApplied(p, makeCfg());
+    expectNoWrites();
+  });
+
   it('does not write when the live diff changed after verification', () => {
     const caller = makeProposal();
     const live = { ...caller, diff: `${caller.diff}\n+const later = true;` } as Proposal;
@@ -555,6 +589,16 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
     const oldProposal = makeProposal();
     const live = makeProposal({ diff: `${DEFAULT_DIFF}\n+const current = true;` });
     primeAuthoritativeState(live, makeEvidence(oldProposal));
+
+    learnFromApplied(live, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when signed evidence belongs to another proposal identity', () => {
+    const signedFor = makeProposal();
+    const live = makeProposal({ repo: '/home/user/another-repo' });
+    primeAuthoritativeState(live, makeEvidence(signedFor));
 
     learnFromApplied(live, makeCfg());
 
@@ -580,6 +624,20 @@ describe('M243 learnFromApplied — verified distillation gates fail closed', ()
     primeAuthoritativeState(p, evidence);
 
     learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not distill proposal-only evidence after a later manual merge', () => {
+    const p = makeProposal();
+    const evidence = makeEvidence(p, {
+      target: 'proposal',
+      trustBasis: 'tier',
+      policy: { tier: 'T1', action: 'propose-only', allowed: true, reason: 'proposal only' },
+    });
+    primeAuthoritativeState(p, evidence);
+
+    learnFromApplied(p, makeCfgWithSkillLibrary(true));
 
     expectNoWrites();
   });

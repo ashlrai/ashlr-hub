@@ -8,6 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SpawnSyncReturns } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const { spawnSyncMock } = vi.hoisted(() => ({ spawnSyncMock: vi.fn() }));
 
@@ -19,7 +20,10 @@ vi.mock('node:child_process', async (importOriginal) => ({
 import { evaluateEvidenceRemoteProtectionSignal } from '../src/core/inbox/merge.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import {
+  SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_ID,
+  SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION,
   SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_VERSION,
+  buildCanonicalProtectedRemotePolicyDigestV1,
   evaluateSafeMinimumProtectedRemotePolicyV1,
   readBranchProtectionAttestation,
   type BranchProtectionPolicySnapshot,
@@ -467,6 +471,475 @@ function expectRefusal(
     reason,
   });
 }
+
+function reversePolicyInsertionOrder(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(reversePolicyInsertionOrder).reverse();
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .reverse()
+        .map(([key, item]) => [key, reversePolicyInsertionOrder(item)]),
+    );
+  }
+  return value;
+}
+
+describe('M429 canonical protected-remote policy authority identity', () => {
+  it('exports a stable evaluator identity and a pinned canonical digest', () => {
+    expect(SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_ID).toBe(
+      'ashlr:github:safe-minimum-protected-remote-policy',
+    );
+    expect(SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION).toBe(1);
+    expect(SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_VERSION).toBe(
+      SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION,
+    );
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      composedSnapshot(),
+      CONFIGURED_BINDINGS,
+    )).toBe('454f61ac37a2905398b0dbfc09cc15cd568c034375a688df1b805440c3b7d080');
+  });
+
+  it('is independent of object, source, rule, and binding insertion order', () => {
+    const snapshot = composedSnapshot();
+    snapshot.classic!.requiredDeployments = { environments: ['staging', 'production'] };
+    snapshot.classic!.pushRestrictions = {
+      users: [
+        { id: '42', name: 'maintainer' },
+        { id: '43', name: 'release-manager' },
+      ],
+      teams: [],
+      apps: [],
+    };
+    snapshot.rulesets[0]!.conditions = {
+      ref_name: { include: ['refs/heads/release', '~DEFAULT_BRANCH'], exclude: ['refs/heads/legacy'] },
+    };
+    const reordered = reversePolicyInsertionOrder(snapshot);
+    const expected = buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS);
+
+    expect(expected).toMatch(/^[a-f0-9]{64}$/);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      reordered,
+      [...CONFIGURED_BINDINGS].reverse(),
+    )).toBe(expected);
+  });
+
+  it('is domain-separated from an unframed snapshot hash', () => {
+    const snapshot = classicSnapshot();
+    const digest = buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS);
+    const unframed = createHash('sha256')
+      .update(JSON.stringify(snapshot), 'utf8')
+      .digest('hex');
+
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(digest).not.toBe(unframed);
+  });
+
+  it.each([
+    ['classic source identity', () => mutateClassic((classic) => { classic.ruleId = '999'; })],
+    ['classic pattern', () => mutateClassic((classic) => { classic.pattern = 'release'; })],
+    ['signature posture', () => classicSnapshot(true)],
+    ['deployment policy', () => mutateClassic((classic) => {
+      classic.requiredDeployments = { environments: ['production'] };
+    })],
+    ['review semantics', () => mutateClassic((classic) => {
+      classic.requiredPullRequestReviews = {
+        dismissStaleReviews: true,
+        requireCodeOwnerReviews: true,
+        requiredApprovingReviewCount: 2,
+        requireLastPushApproval: true,
+        restrictReviewDismissals: false,
+        dismissalRestrictions: emptyActors(),
+        bypassPullRequestAllowances: emptyActors(),
+      };
+    })],
+  ] as const)('separates a %s tamper', (_name, buildTampered) => {
+    const baseline = buildCanonicalProtectedRemotePolicyDigestV1(
+      classicSnapshot(),
+      CONFIGURED_BINDINGS,
+    );
+    const tampered = buildCanonicalProtectedRemotePolicyDigestV1(
+      buildTampered(),
+      CONFIGURED_BINDINGS,
+    );
+
+    expect(tampered).toMatch(/^[a-f0-9]{64}$/);
+    expect(tampered).not.toBe(baseline);
+  });
+
+  it.each([
+    ['ruleset identity', (ruleset: CanonicalRulesetProtection) => { ruleset.id = '999'; }],
+    ['ruleset source', (ruleset: CanonicalRulesetProtection) => { ruleset.source = 'acme/other'; }],
+    ['ruleset conditions', (ruleset: CanonicalRulesetProtection) => {
+      ruleset.conditions = {
+        ref_name: { include: ['refs/heads/release'], exclude: [] },
+      };
+    }],
+    ['ruleset rule parameters', (ruleset: CanonicalRulesetProtection) => {
+      const status = ruleset.rules.find((rule) => rule.type === 'required_status_checks')!;
+      status.parameters!['do_not_enforce_on_create'] = true;
+    }],
+  ] as const)('separates a %s tamper', (_name, mutate) => {
+    const baselineSnapshot = rulesetSnapshot();
+    const tamperedSnapshot = rulesetSnapshot();
+    mutate(tamperedSnapshot.rulesets[0]!);
+
+    const baseline = buildCanonicalProtectedRemotePolicyDigestV1(
+      baselineSnapshot,
+      CONFIGURED_BINDINGS,
+    );
+    const tampered = buildCanonicalProtectedRemotePolicyDigestV1(
+      tamperedSnapshot,
+      CONFIGURED_BINDINGS,
+    );
+    expect(tampered).toMatch(/^[a-f0-9]{64}$/);
+    expect(tampered).not.toBe(baseline);
+  });
+
+  it('binds normalized configured GitHub App identities', () => {
+    const changedBindings = structuredClone(CONFIGURED_BINDINGS);
+    changedBindings[0]!.appId = '999';
+    const changedSnapshot = classicSnapshot();
+    changedSnapshot.classic!.requiredStatusChecks!.checks = structuredClone(changedBindings);
+
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      changedSnapshot,
+      changedBindings,
+    )).not.toBe(buildCanonicalProtectedRemotePolicyDigestV1(
+      classicSnapshot(),
+      CONFIGURED_BINDINGS,
+    ));
+  });
+
+  it.each([
+    ['force-push permission', mutateClassic((classic) => { classic.allowForcePushes = true; })],
+    ['ruleset bypass authority', mutateRuleset((ruleset) => {
+      ruleset.bypassActors.push({ actorId: '42', actorType: 'Team', bypassMode: 'always' });
+    })],
+    ['ruleset binding disagreement', mutateRuleset((ruleset) => {
+      ruleset.requiredCheckBindings[0]!.appId = '999';
+    })],
+    ['duplicate classic check', mutateClassic((classic) => {
+      classic.requiredStatusChecks!.checks.push({ ...classic.requiredStatusChecks!.checks[0]! });
+    })],
+  ] as const)('does not mint authority for evaluator-refused %s', (_name, snapshot) => {
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS).ok).toBe(false);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS)).toBeNull();
+  });
+
+  it.each([
+    ['selector strings', () => {
+      const snapshot = rulesetSnapshot();
+      const refName = snapshot.rulesets[0]!.conditions['ref_name'] as {
+        include: string[];
+        exclude: string[];
+      };
+      refName.include.push(refName.include[0]!);
+      return snapshot;
+    }],
+    ['classic actor objects', () => {
+      const snapshot = fullyPopulatedClassicSnapshot();
+      snapshot.classic!.pushRestrictions!.users.push({
+        id: snapshot.classic!.pushRestrictions!.users[0]!.id,
+        name: 'alternate-maintainer',
+      });
+      return snapshot;
+    }],
+    ['ruleset bypass actor identities', () => {
+      const snapshot = rulesetSnapshot();
+      snapshot.rulesets[0]!.bypassActors.push(
+        { actorId: '42', actorType: 'Team', bypassMode: 'always' },
+        { actorId: '42', actorType: 'Team', bypassMode: 'pull_request' },
+      );
+      return snapshot;
+    }],
+    ['deployment environments', () => {
+      const snapshot = classicSnapshot();
+      snapshot.classic!.requiredDeployments = { environments: ['production', 'production'] };
+      return snapshot;
+    }],
+    ['rule parameter values', () => {
+      const snapshot = rulesetSnapshot();
+      snapshot.rulesets[0]!.rules.push({
+        type: 'pull_request',
+        parameters: {
+          allowed_merge_methods: ['merge', 'merge'],
+          dismiss_stale_reviews_on_push: false,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_approving_review_count: 0,
+          required_review_thread_resolution: false,
+        },
+      });
+      return snapshot;
+    }],
+    ['code-scanning tool identities', () => {
+      const snapshot = rulesetSnapshot();
+      snapshot.rulesets[0]!.rules.push({
+        type: 'code_scanning',
+        parameters: {
+          code_scanning_tools: [
+            {
+              alerts_threshold: 'errors',
+              security_alerts_threshold: 'high_or_higher',
+              tool: 'CodeQL',
+            },
+            {
+              alerts_threshold: 'all',
+              security_alerts_threshold: 'critical',
+              tool: 'CodeQL',
+            },
+          ],
+        },
+      });
+      return snapshot;
+    }],
+    ['rule parameter objects', () => {
+      const snapshot = rulesetSnapshot();
+      const workflow = { path: '.github/workflows/ci.yml', repository_id: 42 };
+      snapshot.rulesets[0]!.rules.push({
+        type: 'workflows',
+        parameters: {
+          workflows: [workflow, { repository_id: 42, path: '.github/workflows/ci.yml' }],
+        },
+      });
+      return snapshot;
+    }],
+    ['nested Unicode-equivalent collection members', () => {
+      const snapshot = rulesetSnapshot();
+      snapshot.rulesets[0]!.rules.push({
+        type: 'pull_request',
+        parameters: {
+          dismiss_stale_reviews_on_push: false,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_approving_review_count: 0,
+          required_review_thread_resolution: false,
+          required_reviewers: [
+            {
+              file_patterns: ['\u00e9', 'e\u0301'],
+              minimum_approvals: 1,
+              reviewer: { id: 42, type: 'Team' },
+            },
+            {
+              file_patterns: ['e\u0301', '\u00e9'],
+              minimum_approvals: 1,
+              reviewer: { id: 42, type: 'Team' },
+            },
+          ],
+        },
+      });
+      return snapshot;
+    }],
+  ] as const)('rejects duplicate %s across evaluator and digest semantics', (_name, buildSnapshot) => {
+    const snapshot = buildSnapshot();
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS).ok).toBe(false);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS)).toBeNull();
+  });
+
+  it('canonicalizes nested set-valued rule parameters across permutations', () => {
+    const snapshot = rulesetSnapshot();
+    snapshot.rulesets[0]!.rules.push({
+      type: 'pull_request',
+      parameters: {
+        allowed_merge_methods: ['merge', 'squash', 'rebase'],
+        dismiss_stale_reviews_on_push: true,
+        require_code_owner_review: true,
+        require_last_push_approval: true,
+        required_approving_review_count: 2,
+        required_review_thread_resolution: true,
+        required_reviewers: [
+          {
+            file_patterns: ['src/**', 'test/**'],
+            minimum_approvals: 1,
+            reviewer: { id: 42, type: 'Team' },
+          },
+          {
+            file_patterns: ['docs/**'],
+            minimum_approvals: 1,
+            reviewer: { id: 43, type: 'Team' },
+          },
+        ],
+      },
+    });
+    const reordered = reversePolicyInsertionOrder(snapshot);
+
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS).ok).toBe(true);
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(reordered, CONFIGURED_BINDINGS).ok).toBe(true);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      reordered,
+      [...CONFIGURED_BINDINGS].reverse(),
+    )).toBe(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS));
+  });
+
+  it('orders byte-distinct Unicode members deterministically without normalizing them', () => {
+    const snapshot = rulesetSnapshot();
+    snapshot.rulesets[0]!.conditions = {
+      ref_name: { include: ['\u00e9', 'e\u0301', '~DEFAULT_BRANCH'], exclude: [] },
+    };
+    const reordered = structuredClone(snapshot);
+    const refName = reordered.rulesets[0]!.conditions['ref_name'] as {
+      include: string[];
+      exclude: string[];
+    };
+    refName.include.reverse();
+    const normalizedAway = structuredClone(snapshot);
+    const normalizedRefName = normalizedAway.rulesets[0]!.conditions['ref_name'] as {
+      include: string[];
+      exclude: string[];
+    };
+    normalizedRefName.include = ['\u00e9', '~DEFAULT_BRANCH'];
+
+    const digest = buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS);
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS).ok).toBe(true);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      reordered,
+      CONFIGURED_BINDINGS,
+    )).toBe(digest);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      normalizedAway,
+      CONFIGURED_BINDINGS,
+    )).not.toBe(digest);
+  });
+
+  it('does not erase a JSON-parsed __proto__ field before strict evaluation', () => {
+    const serialized = JSON.stringify(classicSnapshot());
+    const snapshot = JSON.parse(
+      serialized.replace(/^\{/, '{"__proto__":{"futureAuthority":true},'),
+    ) as unknown;
+
+    expect(Object.keys(snapshot as Record<string, unknown>)).toContain('__proto__');
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS)).toMatchObject({
+      ok: false,
+      reason: 'snapshot-schema-unsupported',
+    });
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS)).toBeNull();
+  });
+
+  it.each([
+    ['legacy schema', { schemaVersion: 1, classic: null, rulesets: [] }, CONFIGURED_BINDINGS],
+    ['unknown schema', { schemaVersion: 3, classic: null, rulesets: [] }, CONFIGURED_BINDINGS],
+    ['unknown snapshot field', {
+      ...classicSnapshot(),
+      futureAuthority: true,
+    }, CONFIGURED_BINDINGS],
+    ['unknown nested field', mutateClassic((classic) => {
+      (classic as unknown as Record<string, unknown>)['futureAuthority'] = true;
+    }), CONFIGURED_BINDINGS],
+    ['missing policy source', { schemaVersion: 2, classic: null, rulesets: [] }, CONFIGURED_BINDINGS],
+    ['duplicate ruleset identity', {
+      schemaVersion: 2,
+      classic: null,
+      rulesets: [rulesetPolicy(), rulesetPolicy()],
+    }, CONFIGURED_BINDINGS],
+    ['duplicate ruleset rule', mutateRuleset((ruleset) => {
+      ruleset.rules.push({ type: 'deletion', parameters: null });
+    }), CONFIGURED_BINDINGS],
+    ['malformed configured binding', classicSnapshot(), [{ context: 'ci/test', appId: 'any' }]],
+    ['duplicate configured binding', classicSnapshot(), [
+      CONFIGURED_BINDINGS[0]!,
+      CONFIGURED_BINDINGS[0]!,
+    ]],
+  ] as Array<[string, unknown, readonly RequiredCheckBinding[]]>)('rejects %s', (
+    _name,
+    snapshot,
+    bindings,
+  ) => {
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, bindings)).toBeNull();
+  });
+
+  it('rejects configured binding, source, rule, actor, array, string, byte, and node overflows', () => {
+    const tooManySources: BranchProtectionPolicySnapshot = {
+      schemaVersion: 2,
+      classic: null,
+      rulesets: Array.from({ length: 101 }, (_, index) => compactRuleset(String(index + 1))),
+    };
+    const tooManyRules = rulesetSnapshot();
+    tooManyRules.rulesets[0]!.rules = Array.from(
+      { length: 101 },
+      () => ({ type: 'deletion', parameters: null }),
+    );
+    const tooManyActors = rulesetSnapshot();
+    tooManyActors.rulesets[0]!.bypassActors = Array.from({ length: 101 }, (_, index) => ({
+      actorId: String(index + 1),
+      actorType: 'Team' as const,
+      bypassMode: 'always' as const,
+    }));
+    const tooManyArrayItems = rulesetSnapshot();
+    tooManyArrayItems.rulesets[0]!.conditions = {
+      ref_name: {
+        include: Array.from({ length: 257 }, (_, index) => `refs/heads/${index}`),
+        exclude: [],
+      },
+    };
+    const oversizedString = classicSnapshot();
+    oversizedString.classic!.pattern = 'x'.repeat(8_193);
+    const byteOverflow: BranchProtectionPolicySnapshot = {
+      schemaVersion: 2,
+      classic: null,
+      rulesets: Array.from({ length: 3 }, (_, sourceIndex) => {
+        const ruleset = compactRuleset(String(sourceIndex + 1));
+        ruleset.conditions = {
+          ref_name: {
+            include: Array.from({ length: 256 }, (_, index) =>
+              `refs/heads/${sourceIndex}/${index}/${'x'.repeat(480)}`),
+            exclude: [],
+          },
+        };
+        return ruleset;
+      }),
+    };
+    const nodeOverflow: BranchProtectionPolicySnapshot = {
+      schemaVersion: 2,
+      classic: null,
+      rulesets: Array.from({ length: 40 }, (_, sourceIndex) => {
+        const ruleset = compactRuleset(String(sourceIndex + 1));
+        ruleset.conditions = {
+          ref_name: {
+            include: Array.from({ length: 256 }, (_, index) => `refs/heads/${index}`),
+            exclude: [],
+          },
+        };
+        return ruleset;
+      }),
+    };
+
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      classicSnapshot(),
+      manyBindings(101),
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      tooManySources,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      tooManyRules,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      tooManyActors,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      tooManyArrayItems,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      oversizedString,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      byteOverflow,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(
+      nodeOverflow,
+      CONFIGURED_BINDINGS,
+    )).toBeNull();
+  });
+});
 
 describe('M429 safe-minimum protected-remote policy V1', () => {
   it.each([

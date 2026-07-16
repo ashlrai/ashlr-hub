@@ -126,11 +126,11 @@ import {
 } from '../git.js';
 import type { GitHubOriginAuthority } from '../git.js';
 import {
+  buildCanonicalProtectedRemotePolicyDigestV1,
   createPr,
   evaluateSafeMinimumProtectedRemotePolicyV1,
   readBranchProtectionAttestation,
   viewPr,
-  type BranchProtectionAttestation,
   type CreatePrResult,
 } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
@@ -1160,21 +1160,6 @@ export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): Eviden
   };
 }
 
-function liveProtectionPolicyHash(attestation: BranchProtectionAttestation): string {
-  return createHash('sha256').update(JSON.stringify({
-    nameWithOwner: attestation.nameWithOwner,
-    repositoryId: attestation.repositoryId,
-    defaultBranch: attestation.defaultBranch,
-    branch: attestation.branch,
-    baseHead: attestation.baseHead,
-    requirements: attestation.requirements,
-    requiredChecks: attestation.requiredChecks,
-    requiredCheckBindings: attestation.requiredCheckBindings,
-    sources: attestation.sources,
-    policySnapshot: attestation.policySnapshot,
-  })).digest('hex');
-}
-
 function githubNameWithOwnerFromOrigin(repo: string): string | null {
   return resolveGitHubOriginAuthority(repo);
 }
@@ -1227,6 +1212,16 @@ export async function evaluateLiveProtectedRemoteAuthority(
       reason: `live safe-minimum protected-remote policy unavailable (${safeMinimum.reason}): ${safeMinimum.detail}`,
     };
   }
+  const policyHash = buildCanonicalProtectedRemotePolicyDigestV1(
+    live.policySnapshot,
+    expected.requiredCheckBindings,
+  );
+  if (!policyHash) {
+    return {
+      authorized: false,
+      reason: 'live safe-minimum protected-remote policy digest is unavailable',
+    };
+  }
   const expectedChecks = [...expected.requiredChecks].sort();
   const liveChecks = [...live.requiredChecks].sort();
   const expectedBindings = expected.requiredCheckBindings
@@ -1260,7 +1255,7 @@ export async function evaluateLiveProtectedRemoteAuthority(
       requiredChecks: [...live.requiredChecks],
       requiredCheckBindings: live.requiredCheckBindings.map((binding) => ({ ...binding })),
       policySources: [...live.sources],
-      policyHash: liveProtectionPolicyHash(live),
+      policyHash,
     },
   };
 }
