@@ -2537,7 +2537,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add signed evidence as required merge-authority evidence and emit a high-priority read-only diagnosis action when pending proposals are fail-closed.
 - [x] Add read-only `autonomy-packs` evidence-doctor coverage without storage/key creation or malformed-file mutation.
 - [x] Complete CLI, standalone Fleet, and Mission Control degraded/cold-start rendering; pass 194 focused tests, CI manifest, and static gates.
-- [ ] Publish a stacked protected PR on #40 only after local review and verification.
+- [x] Publish stacked protected PR #41 on #40 after local review and verification; require duplicate protected CI before merge consideration.
 
 ## Ranked Autonomy Follow-Ups (2026-07-16 Audit)
 - [ ] P0: replace whole-history proposal authority with a transactional bounded operational projection before the 4,096-file cliff stops production.
