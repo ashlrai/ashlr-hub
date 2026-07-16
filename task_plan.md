@@ -2619,7 +2619,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove 100,000 seeded raw-content canaries persist zero semantic rows and near-authorized semantic evidence cannot replace cryptographic merge authority.
 - [ ] Add independent post-effect observations and preregistered prediction mapping before enabling calibration metrics.
 - [x] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
-- [ ] Repair Best-of-N's null correctness critic and draft-first deterministic test gap before treating candidate selection as independent review.
+- [x] Close Best-of-N's draft-first deterministic verification gap without adding judge or model calls.
+- [ ] Replace Best-of-N's null correctness critic only behind an explicit token budget and measurable selection lift; it is not independent review authority.
 - [x] Publish protected draft PR #46 after final independent blocker review returned `SHIP`; require both duplicate protected matrices before promotion.
 
 ## Independent Reviewer Family Authority (2026-07-16)
@@ -2687,3 +2688,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Project bounded replay-idempotent run signals for peer coordination, collapse contradictory facts to unknown, and withhold the projection when source evidence is degraded.
 - [x] Pass 477 assertions across 15 semantic/ledger/trajectory/workspace/status/dashboard/sandbox consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #52 on PR #51 and require the complete duplicate protected matrix.
+
+## Deterministic Best-of-N Draft Verification (2026-07-16)
+- [x] Extract proposal-object verification so in-memory drafts and persisted proposals share one quick verification implementation.
+- [x] Verify every captured Best-of-N draft before winner selection without persisting loser proposals.
+- [x] Make explicit deterministic failures ineligible and prefer verified-green candidates over unverified candidates.
+- [x] Prove highest-scored failure exclusion, all-fail no-winner behavior, verifier-unavailable ordering, and winner-only filing.
+- [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
+- [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
