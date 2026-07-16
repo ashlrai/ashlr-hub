@@ -14,6 +14,7 @@ import {
   renameSync,
   unlinkSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -168,8 +169,8 @@ function repairHandoffLockPath(path: string): string {
   return `${path}.lock`;
 }
 
-function privateOwner(uid: number): boolean {
-  return typeof process.getuid !== 'function' || uid === process.getuid();
+function privateOwner(uid: number | bigint): boolean {
+  return typeof process.getuid !== 'function' || BigInt(process.getuid()) === BigInt(uid);
 }
 
 function validIdentity(value: string): boolean {
@@ -481,11 +482,11 @@ function sameParentProvenance(left: RepairHandoffObservation, right: RepairHando
     left.parentTier === right.parentTier;
 }
 
-function safeRepairHandoffDirectory(stat: Stats): boolean {
+function safeRepairHandoffDirectory(stat: Stats | BigIntStats): boolean {
   return !stat.isSymbolicLink() && stat.isDirectory() && privateOwner(stat.uid);
 }
 
-function safeRepairHandoffJournal(stat: Stats): boolean {
+function safeRepairHandoffJournal(stat: Stats | BigIntStats): boolean {
   return !stat.isSymbolicLink() && stat.isFile() && privateOwner(stat.uid) && stat.nlink === 1;
 }
 
@@ -508,10 +509,10 @@ function assureRepairHandoffJournalFile(path: string, mode: PrivateStorageMode, 
   }
 }
 
-function ensurePrivatePath(path: string): Stats {
+function ensurePrivatePath(path: string): BigIntStats {
   const dir = dirname(path);
   const created = !existsSync(dir) && mkdirSync(dir, { recursive: true, mode: 0o700 }) !== undefined;
-  const dirStat = lstatSync(dir);
+  const dirStat = lstatSync(dir, { bigint: true });
   if (!safeRepairHandoffDirectory(dirStat)) {
     throw new Error('unsafe repair handoff directory');
   }
@@ -522,7 +523,7 @@ function ensurePrivatePath(path: string): Stats {
     created ? 'secure-created' : 'inspect-existing',
     dirname(dir),
   );
-  const assuredDirStat = lstatSync(dir);
+  const assuredDirStat = lstatSync(dir, { bigint: true });
   if (
     !safeRepairHandoffDirectory(assuredDirStat) ||
     assuredDirStat.dev !== dirStat.dev || assuredDirStat.ino !== dirStat.ino
@@ -603,20 +604,20 @@ function appendObservation(observation: RepairHandoffObservation): boolean {
   }
 }
 
-function syncRepairHandoffAuthority(path: string, fd: number, directory: Stats): void {
+function syncRepairHandoffAuthority(path: string, fd: number, directory: BigIntStats): void {
   repairHandoffJournalFaultForTest?.('append-file-fsync');
   fsyncSync(fd);
   repairHandoffJournalFaultForTest?.('append-path-verification');
   const persisted = fstatSync(fd);
   const authoritative = lstatSync(path);
-  const currentDirectory = lstatSync(dirname(path));
+  const currentDirectory = lstatSync(dirname(path), { bigint: true });
   if (
     persisted.nlink !== 1 || authoritative.isSymbolicLink() || !authoritative.isFile() ||
     authoritative.dev !== persisted.dev || authoritative.ino !== persisted.ino ||
     currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
   ) throw new Error('repair handoff path changed after append');
   fsyncDirectoryDurably(dirname(path), {
-    expectedIdentity: { dev: BigInt(directory.dev), ino: BigInt(directory.ino) },
+    expectedIdentity: { dev: directory.dev, ino: directory.ino },
     beforeFsync: () => repairHandoffJournalFaultForTest?.('append-directory-fsync'),
   });
 }
@@ -1222,7 +1223,7 @@ function compactRepairHandoffFile(
     tmp = undefined;
     assureRepairHandoffJournalFile(path, 'inspect-existing', compactedFile);
     const authoritative = lstatSync(path);
-    const currentDirectory = lstatSync(dirname(path));
+    const currentDirectory = lstatSync(dirname(path), { bigint: true });
     if (
       authoritative.isSymbolicLink() || !authoritative.isFile() || authoritative.nlink !== 1 ||
       authoritative.dev !== compactedFile.dev || authoritative.ino !== compactedFile.ino ||
@@ -1230,7 +1231,7 @@ function compactRepairHandoffFile(
       currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
     ) throw new Error('repair handoff compaction path changed');
     fsyncDirectoryDurably(dirname(path), {
-      expectedIdentity: { dev: BigInt(directory.dev), ino: BigInt(directory.ino) },
+      expectedIdentity: { dev: directory.dev, ino: directory.ino },
     });
     const repaired = readRepairHandoffsInternal(path, expectedSchemaVersion);
     const repairedAuthority = combineRepairHandoffReads([repaired]);
