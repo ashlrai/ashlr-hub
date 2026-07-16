@@ -2553,3 +2553,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
 - [x] Publish protected stacked PR #42 on fully protected-green #41; require duplicate protected CI before merge consideration.
 - [x] Repair Ubuntu CI contract/timing assertions without changing production causal semantics or observer deadlines; rerun 24 focused assertions and static gates.
+
+## Operational Proposal Projection Foundation (2026-07-16)
+- [x] Define proposal-local operational membership without mutable side-ledger authority.
+- [x] Add a bounded, private, domain-keyed sealed manifest and fail-closed read path.
+- [x] Require exact complete namespace reconciliation for offline migration and reject active overflow before publication.
+- [x] Prove 4,097 terminal records no longer consume active authority capacity while 4,097 active records fail closed.
+- [x] Remove unsafe runtime point-read activation and pass independent blocker re-review with SHIP.
+- [ ] Add crash-recoverable proposal-plus-projection writer transactions and an external anti-rollback anchor.
+- [ ] Cut hot consumers over only after transaction recovery, source-completeness, and concurrent mutation tests pass.
