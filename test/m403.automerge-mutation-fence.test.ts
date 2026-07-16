@@ -387,12 +387,17 @@ describe('M403 cooperative outward mutation fence', { timeout: 15_000 }, () => {
 
   it('linearizes unenrollment after an already-held outward fence', async () => {
     const repo = join(home, 'repo');
-    expect(enroll(repo)).toEqual({
-      ok: true,
-      changed: true,
-      quiesced: true,
-      reason: 'enrolled',
-    });
+    if (process.platform === 'win32') useNativePrivateStorageRunner();
+    try {
+      expect(enroll(repo)).toEqual({
+        ok: true,
+        changed: true,
+        quiesced: true,
+        reason: 'enrolled',
+      });
+    } finally {
+      if (process.platform === 'win32') useSemanticPrivateStorageRunner();
+    }
     const holder = await startHolder();
     const worker = spawnWorker('unenroll', {
       M403_REPO: repo,
