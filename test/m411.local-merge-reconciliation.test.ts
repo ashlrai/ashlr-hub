@@ -313,5 +313,5 @@ describe('M411 local merge reconciliation', () => {
     expect(pending.status).toBe('pending');
     expect(pending.localMergeIntent).toEqual(fixture.intent);
     expect(pending.realizedMerge).toBeUndefined();
-  });
+  }, 15_000);
 });

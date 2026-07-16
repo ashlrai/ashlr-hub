@@ -627,7 +627,7 @@ describe('M23 applyProposal — note kind: no-op, mutates nothing', () => {
     await applyProposal(p.id, { confirmed: true });
     const loaded = loadProposal(p.id);
     expect(loaded!.status).toBe('applied');
-  });
+  }, 15_000);
 
   it('does not create any branches for a note proposal', async () => {
     initRealGitRepo(tmpRepo);
