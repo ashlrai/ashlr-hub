@@ -60,6 +60,7 @@ import {
 import { workItemObjectiveHash } from './work-item-objective.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
+import { fsyncDirectory as fsyncDirectoryDurably } from '../util/durability.js';
 
 const MAX_RECORDS = 100_000;
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024;
@@ -1396,13 +1397,7 @@ function fsyncDirectory(dir: string): void {
     throw new Error('unsafe Windows generated repair lifecycle directory');
   }
   lifecycleDirectoryFsyncHookForTest?.(dir);
-  let fd: number | undefined;
-  try {
-    fd = openSync(dir, fsConstants.O_RDONLY);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  fsyncDirectoryDurably(dir);
 }
 
 function atomicPrivateWrite(path: string, bytes: Buffer): void {
