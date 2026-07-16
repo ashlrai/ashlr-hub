@@ -997,6 +997,7 @@ export function verifyProducerProvenanceV2(p: ProducerProvenanceV2Fields): Prove
 }
 
 const LOCAL_MERGE_INTENT_DOMAIN = 'ashlr.local-merge-intent.v1';
+const LOCAL_MERGE_INTENT_SEALED_V3_DOMAIN = 'ashlr.local-merge-intent.sealed-v3.v1';
 const LOCAL_REALIZED_MERGE_DOMAIN = 'ashlr.local-realized-merge.v1';
 const HEX40_RE = /^[0-9a-f]{40}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -1004,6 +1005,7 @@ const AUTHORIZATION_ID_RE = /^[0-9a-f]{32}$/;
 
 function validIntentFields(intent: Omit<ProposalLocalMergeIntent, 'attestation'>): boolean {
   return intent.schemaVersion === 1 && intent.branch.length > 0 && intent.branch.length <= 255 &&
+    (intent.evidenceProtocol === undefined || intent.evidenceProtocol === 'sealed-v3') &&
     intent.base.length > 0 && intent.base.length <= 255 &&
     HEX40_RE.test(intent.baseBeforeOid) && HEX40_RE.test(intent.proposalHeadOid) &&
     HEX64_RE.test(intent.diffHash) && HEX64_RE.test(intent.evidencePackDigest) &&
@@ -1018,9 +1020,13 @@ function localMergeIntentPayload(
   try {
     if (!proposalId || proposalId.length > 255 || !repo || !validIntentFields(intent)) return null;
     return JSON.stringify([
-      LOCAL_MERGE_INTENT_DOMAIN, proposalId, realpathSync(repo), intent.schemaVersion,
+      intent.evidenceProtocol === 'sealed-v3'
+        ? LOCAL_MERGE_INTENT_SEALED_V3_DOMAIN
+        : LOCAL_MERGE_INTENT_DOMAIN,
+      proposalId, realpathSync(repo), intent.schemaVersion,
       intent.branch, intent.base, intent.baseBeforeOid, intent.proposalHeadOid,
       intent.diffHash, intent.evidencePackDigest, intent.authorizationId, intent.authorizedAt,
+      ...(intent.evidenceProtocol === 'sealed-v3' ? [intent.evidenceProtocol] : []),
     ]);
   } catch {
     return null;

@@ -3769,6 +3769,8 @@ export interface ProposalRemoteHandoff {
 /** Signed authorization minted after every merge gate passes and before local mutation. */
 export interface ProposalLocalMergeIntent {
   schemaVersion: 1;
+  /** New active authority binds evidencePackDigest to a verified signed evidence-pack v3 seal. */
+  evidenceProtocol?: 'sealed-v3';
   branch: string;
   base: string;
   baseBeforeOid: string;

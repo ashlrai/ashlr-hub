@@ -38,6 +38,20 @@ import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
 const mockIsWebApp = vi.hoisted(() => vi.fn<[string], boolean>(() => false));
 const mockVerifyInBrowser = vi.hoisted(() => vi.fn());
+const mockLocalCommitTreeHook = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
+      const result = actual.execFileSync(...args);
+      const commandArgs = Array.isArray(args[1]) ? args[1].map(String) : [];
+      if (args[0] === 'git' && commandArgs.includes('commit-tree')) mockLocalCommitTreeHook();
+      return result;
+    },
+  };
+});
 
 vi.mock('../src/core/run/browser-verify.js', () => ({
   isWebApp: mockIsWebApp,
@@ -123,6 +137,7 @@ beforeEach(() => {
   mockIsWebApp.mockReset();
   mockIsWebApp.mockReturnValue(false);
   mockVerifyInBrowser.mockReset();
+  mockLocalCommitTreeHook.mockReset();
   setKill(false);
 });
 
@@ -768,14 +783,47 @@ describe('M47 autoMergeProposal — local happy path', () => {
     // M301: a successful autonomous merge leaves a durable evidence pack behind
     // so future learning/operator UX can inspect why the merge was allowed.
     const evidenceRaw = fs.readFileSync(evidencePath(p.id), 'utf8');
-    expect(evidenceRaw).toContain('"tier": "T4"');
-    expect(evidenceRaw).toContain('"action": "merge-main"');
+    expect(JSON.parse(evidenceRaw)).toMatchObject({
+      version: 3,
+      policy: { tier: 'T4', action: 'merge-main' },
+    });
     expect(evidenceRaw).not.toContain('diff --git');
     expect(evidenceRaw).not.toContain('+fresh doc');
 
     // The merged file is reachable from main.
     const tree = git(tmpRepo, ['ls-tree', '-r', '--name-only', 'main']);
     expect(tree).toContain('docs/new.md');
+  });
+
+  it('refuses the local CAS when signed evidence disappears after merge-commit construction', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOriginWithHead(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const diff = addFileDiff('docs/evidence-cas.md', 'must remain authorized');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'local evidence CAS',
+      summary: 'Recheck evidence immediately before default-branch CAS.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    });
+    setStatus(proposal.id, 'approved');
+    mockLocalCommitTreeHook.mockImplementationOnce(() => fs.unlinkSync(evidencePath(proposal.id)));
+
+    const result = await autoMergeProposal(proposal.id, cfgWith());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/signed evidence seal is no longer live during local merge/);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
   });
 
   it('REFUSES local merge when the default branch is checked out (documented guard)', async () => {

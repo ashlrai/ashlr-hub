@@ -100,7 +100,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import type {
   AshlrConfig,
@@ -159,8 +160,12 @@ import { parseFailedTestIds } from '../run/completeness-gate.js';
 import {
   buildAutonomyEvidencePack,
   persistAutonomyEvidencePack,
+  readAutonomyEvidencePack,
+  sealAutonomyEvidencePackV3,
+  verifyAutonomyEvidencePackV3,
   type AutonomyGateEvidence,
   type AutonomyRemoteProtectionEvidence,
+  type SignedAutonomyEvidencePackV3,
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
@@ -1984,6 +1989,76 @@ function hasRequiredVerificationCommandEvidence(result: ProposalVerifyResult | u
   return Array.isArray(result?.ran) && result.ran.some((command) => command.required !== false);
 }
 
+function signedEvidenceMatchesMutationProposal(
+  pack: SignedAutonomyEvidencePackV3,
+  proposal: Proposal,
+): boolean {
+  const verification = proposal.verifyResult;
+  const diffHash = currentProposalDiffHash(proposal);
+  if (!verification || !proposal.repo || !proposal.diffHash) return false;
+  const commandKinds = (verification.ran ?? []).map((command) => command.kind);
+  return (
+    (proposal.status === 'pending' || proposal.status === 'approved') &&
+    pack.proposal.id === proposal.id &&
+    pack.proposal.repo === proposal.repo &&
+    pack.proposal.kind === proposal.kind &&
+    pack.proposal.status === proposal.status &&
+    pack.proposal.origin === proposal.origin &&
+    pack.proposal.title === proposal.title &&
+    pack.proposal.createdAt === proposal.createdAt &&
+    pack.producer.engineModel === proposal.engineModel &&
+    pack.producer.engineTier === proposal.engineTier &&
+    proposal.diffHash === diffHash &&
+    pack.diff.hash === diffHash &&
+    pack.verification.passed === verification.passed &&
+    isDeepStrictEqual(pack.verification.commandKinds, commandKinds) &&
+    pack.verification.baseBranch === verification.baseBranch &&
+    pack.verification.baseHead === verification.baseHead &&
+    pack.verification.diffHash === verification.diffHash &&
+    pack.verification.verifiedAt === verification.verifiedAt &&
+    pack.verification.source === verification.source &&
+    isDeepStrictEqual(pack.verification.browser, verification.browser)
+  );
+}
+
+function signedEvidenceSealIsLive(proposalId: string, sealedPackDigest: string): boolean {
+  const pack = readAutonomyEvidencePack(proposalId);
+  return Boolean(pack && pack.version === 3 &&
+    pack.sealedPackDigest === sealedPackDigest && verifyAutonomyEvidencePackV3(pack).ok);
+}
+
+function persistNonAuthorizingEvidence(
+  proposalId: string,
+  pack: SignedAutonomyEvidencePackV3,
+): boolean {
+  const lock = acquireProposalMutationLock(proposalId);
+  if (!lock) return false;
+  try {
+    const existing = readAutonomyEvidencePack(proposalId);
+    if (existing?.version === 3 && verifyAutonomyEvidencePackV3(existing).ok) return true;
+    return persistAutonomyEvidencePack(pack);
+  } finally {
+    releaseProposalMutationLock(lock);
+  }
+}
+
+function remoteProtectionEvidenceMatches(
+  left: AutonomyRemoteProtectionEvidence,
+  right: AutonomyRemoteProtectionEvidence,
+): boolean {
+  return (
+    left.nameWithOwner === right.nameWithOwner &&
+    left.repositoryId === right.repositoryId &&
+    left.branch === right.branch &&
+    left.baseHead === right.baseHead &&
+    left.policyHash === right.policyHash &&
+    isDeepStrictEqual(left.requirements, right.requirements) &&
+    isDeepStrictEqual(left.requiredChecks, right.requiredChecks) &&
+    isDeepStrictEqual(left.requiredCheckBindings, right.requiredCheckBindings) &&
+    isDeepStrictEqual(left.policySources, right.policySources)
+  );
+}
+
 function verifyCommandIdentity(command: VerifyCommand): string {
   return JSON.stringify([command.id ?? null, command.cwd ?? '.', command.cmd]);
 }
@@ -2683,11 +2758,32 @@ function mergeLocally(
   try {
     const mergeAuthorityFailure = finalAuthority?.();
     if (mergeAuthorityFailure) throw new Error(mergeAuthorityFailure);
-    gitRun(tmpDir, ['merge', '--no-ff', '--no-edit', branch]);
-    const mergeCommitOid = gitTry(tmpDir, ['rev-parse', 'HEAD']);
+    const proposalParentOid = gitTry(repo, ['rev-parse', `${proposalHeadOid}^`]);
+    if (proposalParentOid !== baseBeforeOid) {
+      throw new Error('proposal head is not an exact child of the verified base');
+    }
+    const proposalTreeOid = gitTry(repo, ['rev-parse', `${proposalHeadOid}^{tree}`]);
+    if (!proposalTreeOid || !/^[a-f0-9]{40}$/i.test(proposalTreeOid)) {
+      throw new Error('proposal tree identity could not be resolved');
+    }
+    const mergeCommitOid = gitRun(repo, [
+      '-c', 'commit.gpgSign=false',
+      'commit-tree', proposalTreeOid,
+      '-p', baseBeforeOid,
+      '-p', proposalHeadOid,
+      '-m', `ashlr: merge proposal branch ${branch}`,
+    ], {
+      GIT_AUTHOR_NAME: 'Ashlr Fleet',
+      GIT_AUTHOR_EMAIL: 'fleet@ashlr.local',
+      GIT_COMMITTER_NAME: 'Ashlr Fleet',
+      GIT_COMMITTER_EMAIL: 'fleet@ashlr.local',
+    });
     if (!mergeCommitOid || !/^[a-f0-9]{40}$/i.test(mergeCommitOid) || mergeCommitOid === baseBeforeOid) {
       throw new Error('local merge completed without a distinct merge commit identity');
     }
+    const updateAuthorityFailure = finalAuthority?.();
+    if (updateAuthorityFailure) throw new Error(updateAuthorityFailure);
+    gitRun(repo, ['update-ref', `refs/heads/${base}`, mergeCommitOid, baseBeforeOid]);
     detail = `merged '${branch}' into '${base}' @ ${mergeCommitOid.slice(0, 8)} (local, not pushed)`;
     return {
       ok: true,
@@ -2703,9 +2799,7 @@ function mergeLocally(
       },
     };
   } catch (err) {
-    detail = `git merge --no-ff failed: ${err instanceof Error ? err.message : String(err)}`;
-    // Abort any partial merge so the default branch is left clean.
-    gitTry(tmpDir, ['merge', '--abort']);
+    detail = `local merge commit failed: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
     gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
     gitTry(repo, ['worktree', 'prune']);
@@ -3495,7 +3589,7 @@ export async function autoMergeProposal(
         detail: `${capturedProtection.evidence.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
       };
     }
-    const evidencePack = buildAutonomyEvidencePack({
+    const evidenceDraft = buildAutonomyEvidencePack({
       proposal,
       target: toMain ? 'main' : 'branch',
       trustBasis,
@@ -3532,27 +3626,34 @@ export async function autoMergeProposal(
           }
         : {}),
     });
-    const policy = evaluateAutonomyPolicy(evidencePack, cfg);
-    evidencePack.policy = policy;
-    evidencePack.evidenceOutcome = evidenceOutcomeSummary({
-      ...(evidencePack.evidenceOutcome ?? {}),
+    const policy = evaluateAutonomyPolicy(evidenceDraft, cfg);
+    evidenceDraft.policy = policy;
+    evidenceDraft.evidenceOutcome = evidenceOutcomeSummary({
+      ...(evidenceDraft.evidenceOutcome ?? {}),
       policyAllowed: policy.allowed,
       policyAction: policy.action,
       policyTier: policy.tier,
     });
-    if (!persistAutonomyEvidencePack(evidencePack)) {
-      return refuse('autonomy evidence pack could not be persisted — fail closed', repo);
+    const sealedEvidencePack = sealAutonomyEvidencePackV3(evidenceDraft);
+    if (!sealedEvidencePack) {
+      return refuse('autonomy evidence pack could not be signed and sealed — fail closed', repo);
     }
-    const evidencePackDigest = createHash('sha256')
-      .update(JSON.stringify(evidencePack), 'utf8')
-      .digest('hex');
+    const sealedPolicy = evaluateAutonomyPolicy(sealedEvidencePack, cfg);
+    if (sealedPolicy.allowed !== policy.allowed || sealedPolicy.action !== policy.action ||
+      sealedPolicy.tier !== policy.tier || sealedPolicy.reason !== policy.reason) {
+      return refuse('signed autonomy evidence policy changed during sealing — fail closed', repo);
+    }
+    let evidencePackDigest = sealedEvidencePack.sealedPackDigest;
     if (!policy.allowed) {
+      persistNonAuthorizingEvidence(id, sealedEvidencePack);
       return refuse(`autonomy policy denied ${policy.action}: ${policy.reason}`, repo);
     }
     if (toMain && policy.action !== 'merge-main') {
+      persistNonAuthorizingEvidence(id, sealedEvidencePack);
       return refuse(`autonomy policy returned '${policy.action}' but main merge requires 'merge-main'`, repo);
     }
     if (!toMain && policy.action !== 'apply-local-branch' && policy.action !== 'open-ready-pr') {
+      persistNonAuthorizingEvidence(id, sealedEvidencePack);
       return refuse(`autonomy policy returned '${policy.action}' but branch application requires branch/PR action`, repo);
     }
 
@@ -3566,8 +3667,53 @@ export async function autoMergeProposal(
       const fencedConflict = finalAuthorityConflict() ?? currentProposalConflict();
       if (fencedConflict) return refuse(fencedConflict, repo);
 
+      if (!persistAutonomyEvidencePack(sealedEvidencePack)) {
+        return refuse('autonomy evidence pack could not be persisted under proposal authority — fail closed', repo);
+      }
+      const persistedEvidence = readAutonomyEvidencePack(id);
+      if (!persistedEvidence || persistedEvidence.version !== 3) {
+        return refuse('signed autonomy evidence pack could not be reread — refusing mutation authority', repo);
+      }
+      const persistedEvidenceVerdict = verifyAutonomyEvidencePackV3(persistedEvidence);
+      if (!persistedEvidenceVerdict.ok ||
+        persistedEvidence.sealedPackDigest !== sealedEvidencePack.sealedPackDigest) {
+        return refuse(
+          `signed autonomy evidence pack changed after persistence: ${persistedEvidenceVerdict.reason}`,
+          repo,
+        );
+      }
+      const liveProposal = loadProposal(id);
+      if (!liveProposal || !signedEvidenceMatchesMutationProposal(persistedEvidence, liveProposal)) {
+        return refuse('signed autonomy evidence no longer matches the live proposal — refusing mutation authority', repo);
+      }
+      if (persistedEvidence.target !== (toMain ? 'main' : 'branch') ||
+        persistedEvidence.trustBasis !== trustBasis ||
+        persistedEvidence.remotePreferred !== (wantRemote && hasGithub) ||
+        persistedEvidence.riskClass !== risk) {
+        return refuse('signed autonomy evidence action context changed after persistence', repo);
+      }
+      const persistedPolicy = evaluateAutonomyPolicy(persistedEvidence, cfg);
+      if (!persistedPolicy.allowed || persistedPolicy.action !== policy.action ||
+        persistedPolicy.tier !== policy.tier || persistedPolicy.reason !== policy.reason ||
+        persistedEvidence.policy?.allowed !== policy.allowed ||
+        persistedEvidence.policy.action !== policy.action ||
+        persistedEvidence.policy.tier !== policy.tier ||
+        persistedEvidence.policy.reason !== policy.reason) {
+        return refuse('signed autonomy evidence policy no longer authorizes the requested action', repo);
+      }
+      if (remoteProtectionEvidence) {
+        const signedRemote = persistedEvidence.gates.remoteProtection;
+        if (!signedRemote) return refuse('signed remote protection evidence is missing', repo);
+        remoteProtectionEvidence = signedRemote;
+      }
+      evidencePackDigest = persistedEvidence.sealedPackDigest;
+
     // ── ACTION: stage the diff on a branch off the default branch ────────────
-    const base = verify.baseBranch;
+    const base = persistedEvidence.verification.baseBranch;
+    const boundBaseHead = persistedEvidence.verification.baseHead;
+    if (!base || !boundBaseHead) {
+      return refuse('signed autonomy evidence omitted the verified base binding', repo);
+    }
     const currentDefaultBranch = defaultBranch(repo);
     if (currentDefaultBranch !== base) {
       return refuse(
@@ -3575,10 +3721,46 @@ export async function autoMergeProposal(
         repo,
       );
     }
+    const lockedLocalBaseHead = resolveDefaultBranchHead(repo, base);
+    if (!lockedLocalBaseHead || lockedLocalBaseHead !== boundBaseHead) {
+      return refuse(`default branch '${base}' moved after signed evidence persistence`, repo);
+    }
+    if (wantRemote && githubOrigin) {
+      if (!githubOriginAuthorityMatches(repo, githubOrigin)) {
+        return refuse('canonical GitHub origin changed after signed evidence persistence', repo);
+      }
+      const lockedRemoteBaseHead = resolveRemoteBranchHead(repo, base, githubOrigin.pushUrl);
+      if (!lockedRemoteBaseHead || lockedRemoteBaseHead !== boundBaseHead) {
+        return refuse(`protected remote branch '${base}' moved after signed evidence persistence`, repo);
+      }
+      if (toMain) {
+        const lockedProtection = await evaluateLiveProtectedRemoteAuthority(
+          repo,
+          base,
+          boundBaseHead,
+          cfg,
+        );
+        if (!lockedProtection.authorized || !remoteProtectionEvidence ||
+          !remoteProtectionEvidenceMatches(lockedProtection.evidence, remoteProtectionEvidence)) {
+          return refuse(
+            `live branch protection changed after signed evidence persistence${
+              lockedProtection.authorized ? '' : `: ${lockedProtection.reason}`
+            }`,
+            repo,
+          );
+        }
+      }
+    }
     const preStageAuthority = finalAuthorityConflict() ?? currentProposalConflict();
     if (preStageAuthority) return refuse(preStageAuthority, repo);
-    const stagedMutation = runFencedMutationSync(repo, 'staging branch creation', () =>
-      buildMergeBranch(repo, id, diff, base, verify.baseHead, finalAuthorityConflict));
+    const stagedMutation = runFencedMutationSync(repo, 'staging branch creation', () => {
+      const stagedAuthority = (): string | null =>
+        finalAuthorityConflict() ??
+        (signedEvidenceSealIsLive(id, evidencePackDigest)
+          ? null
+          : 'signed evidence seal is no longer live during staging');
+      return buildMergeBranch(repo, id, diff, base, boundBaseHead, stagedAuthority);
+    });
     if (!stagedMutation.ok) return refuse(stagedMutation.reason, repo);
     const staged = stagedMutation.value;
     if (!staged.branch || !staged.head) {
@@ -3589,7 +3771,7 @@ export async function autoMergeProposal(
     shadowObservation = {
       repo,
       baseRef: base,
-      baseOid: verify.baseHead,
+      baseOid: boundBaseHead,
       headOid: stagedHead,
       cfg,
     };
@@ -3619,7 +3801,7 @@ export async function autoMergeProposal(
       const prePushConflict = currentProposalConflict();
       if (prePushConflict) return refuseStaged(prePushConflict);
       const baseHeadBeforePush = resolveDefaultBranchHead(repo, base);
-      if (!baseHeadBeforePush || baseHeadBeforePush !== verify.baseHead) {
+      if (!baseHeadBeforePush || baseHeadBeforePush !== boundBaseHead) {
         return refuseStaged(
           `default branch '${base}' moved since verification — refusing remote handoff; reverify required`,
         );
@@ -3631,15 +3813,15 @@ export async function autoMergeProposal(
             `could not resolve protected remote branch '${base}' before remote handoff — reverify required`,
           );
         }
-        if (remoteBaseHeadBeforePush !== verify.baseHead) {
+        if (remoteBaseHeadBeforePush !== boundBaseHead) {
           return refuseStaged(
-            `protected remote branch '${base}' moved since verification (verified ${verify.baseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforePush.slice(0, 8)}) — refusing remote handoff; reverify required`,
+            `protected remote branch '${base}' moved since verification (verified ${boundBaseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforePush.slice(0, 8)}) — refusing remote handoff; reverify required`,
           );
         }
         const finalProtection = await evaluateLiveProtectedRemoteAuthority(
           repo,
           base,
-          verify.baseHead,
+          boundBaseHead,
           cfg,
         );
         if (!finalProtection.authorized) {
@@ -3657,10 +3839,9 @@ export async function autoMergeProposal(
       // H5: scrub secret-shaped tokens from the PR title/body before they leave
       // the host, and cap length (title ≤120, body ≤4000) to avoid leaking or
       // bloating the outward PR payload.
-      const safeTitle = scrubSecrets(`ashlr auto-merge: ${proposal.title}`).slice(0, 120);
+      const safeTitle = scrubSecrets(`ashlr auto-merge: ${liveProposal.title}`).slice(0, 120);
       const safeBody = scrubSecrets(
-        `${proposal.summary}\n\n` +
-          `Auto-merged by ashlr M47 (risk=${risk}, ${authority.reason}). ` +
+        `Auto-merged by ashlr M47 (risk=${risk}, ${authority.reason}). ` +
           `Verified: ${verify.detail}.`,
       ).slice(0, 4000);
 
@@ -3669,7 +3850,7 @@ export async function autoMergeProposal(
       // and the durable host outcome so pause cannot report quiescence in the
       // middle of a handoff.
       const remoteMutation = await runFencedMutation(repo, 'remote protected handoff', async (stillOwnsFence) => {
-        if (!proposal.diffHash || !verify.baseHead) {
+        if (!liveProposal.diffHash) {
           return {
             ok: false,
             merged: false,
@@ -3697,17 +3878,18 @@ export async function autoMergeProposal(
           'attestation' | 'authorizationId'
         > = {
           schemaVersion: 1,
+          evidenceProtocol: 'sealed-v3',
           branch,
           base,
-          baseBeforeOid: verify.baseHead,
+          baseBeforeOid: boundBaseHead,
           proposalHeadOid: stagedHead,
-          diffHash: proposal.diffHash,
+          diffHash: liveProposal.diffHash,
           evidencePackDigest,
           authorizedAt,
           remoteAuthority: boundRemoteAuthority,
         };
         const authorizationId = remoteIntentAuthorizationId(
-          proposal.remoteHandoff?.recovery ? 'recovery' : 'pre-effect',
+          liveProposal.remoteHandoff?.recovery ? 'recovery' : 'pre-effect',
           intentWithoutAuthorization,
         );
         const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
@@ -3727,7 +3909,7 @@ export async function autoMergeProposal(
         }
 
         const createdAt = new Date().toISOString();
-        const recovery = proposal.remoteHandoff?.recovery;
+        const recovery = liveProposal.remoteHandoff?.recovery;
         const recoveryMarker = recovery?.marker === REMOTE_HANDOFF_RECOVERY_MARKER
           ? ` ${REMOTE_HANDOFF_RECOVERY_MARKER}`
           : '';
@@ -3786,11 +3968,17 @@ export async function autoMergeProposal(
         const reusedExactRemoteHead = priorRemoteStagedHead === stagedHead;
         let pushed = reusedExactRemoteHead;
         if (!reusedExactRemoteHead && priorRemoteStagedHead === null) {
+          if (!signedEvidenceSealIsLive(id, evidencePackDigest)) {
+            return uncertain('signed evidence seal is no longer live; staging push not started');
+          }
           pushed = gitTry(repo, [
             'push',
             '--porcelain',
+            '--atomic',
             `--force-with-lease=${remoteStagingRef}:`,
+            `--force-with-lease=refs/heads/${base}:${boundBaseHead}`,
             githubOrigin.pushUrl,
+            `${boundBaseHead}:refs/heads/${base}`,
             `${stagedHead}:${remoteStagingRef}`,
           ]) !== null;
         }
@@ -3821,7 +4009,7 @@ export async function autoMergeProposal(
           return uncertain('canonical GitHub origin changed after push; PR creation not started');
         }
         if (toMain) {
-          const postPushProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+          const postPushProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, boundBaseHead, cfg);
           if (
             !postPushProtection.authorized ||
             remoteProtectionEvidence === undefined ||
@@ -3839,6 +4027,9 @@ export async function autoMergeProposal(
         }
         if (!remoteAuthorityMatchesRepo(repo, boundRemoteAuthority)) {
           return uncertain('canonical GitHub origin changed before PR creation; outcome requires reconciliation');
+        }
+        if (!signedEvidenceSealIsLive(id, evidencePackDigest)) {
+          return uncertain('signed evidence seal is no longer live after push; PR creation not started');
         }
 
         // PREFERRED path — open a PR to the default branch; branch protection /
@@ -3893,7 +4084,7 @@ export async function autoMergeProposal(
         const remoteHeadMatches = latestRemoteHead === stagedHead;
         let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
         if (toMain) {
-          const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+          const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, boundBaseHead, cfg);
           const originStable = githubOriginAuthorityMatches(repo, githubOrigin) &&
             remoteAuthorityMatchesRepo(repo, boundRemoteAuthority);
           if (!remoteHeadMatches) {
@@ -3947,16 +4138,17 @@ export async function autoMergeProposal(
       // LOCAL fallback — conservative; refuses if default branch is checked out.
       const preMergeConflict = currentProposalConflict();
       if (preMergeConflict) return refuse(preMergeConflict, repo);
-      if (!verify.baseHead || !proposal.diffHash) {
+      if (!liveProposal.diffHash) {
         return refuse('local merge intent requires verified base and signed diff identity', repo);
       }
       const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
         schemaVersion: 1,
+        evidenceProtocol: 'sealed-v3',
         branch,
         base,
-        baseBeforeOid: verify.baseHead,
+        baseBeforeOid: boundBaseHead,
         proposalHeadOid: stagedHead,
-        diffHash: proposal.diffHash,
+        diffHash: liveProposal.diffHash,
         evidencePackDigest,
         authorizationId: randomBytes(16).toString('hex'),
         authorizedAt: new Date().toISOString(),
@@ -3973,7 +4165,12 @@ export async function autoMergeProposal(
       const preLocalMergeAuthority = finalAuthorityConflict();
       if (preLocalMergeAuthority) return refuse(preLocalMergeAuthority, repo);
       const localMutation = runFencedMutationSync(repo, 'local default-branch merge', (stillOwnsFence) => {
-        const local = mergeLocally(repo, branch, base, verify.baseHead, finalAuthorityConflict);
+        const localAuthority = (): string | null =>
+          finalAuthorityConflict() ??
+          (signedEvidenceSealIsLive(id, evidencePackDigest)
+            ? null
+            : 'signed evidence seal is no longer live during local merge');
+        const local = mergeLocally(repo, branch, base, boundBaseHead, localAuthority);
         if (!local.ok) return { local, receiptPersisted: false };
         if (!stillOwnsFence()) return { local, receiptPersisted: false };
         // Keep the fence through the durable receipt. Revocation that loses this

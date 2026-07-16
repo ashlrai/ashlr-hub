@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   getActiveClient: vi.fn(),
   judgeProposal: vi.fn(),
   persistEvidencePack: vi.fn(),
+  persistedEvidencePack: null as unknown,
 }));
 
 vi.mock('../src/core/fleet/manager.js', () => ({
@@ -26,7 +27,15 @@ vi.mock('../src/core/autonomy/evidence-pack.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/autonomy/evidence-pack.js')>();
   return {
     ...actual,
-    persistAutonomyEvidencePack: (...args: unknown[]) => mocks.persistEvidencePack(...args),
+    persistAutonomyEvidencePack: (...args: unknown[]) => {
+      const persisted = mocks.persistEvidencePack(...args);
+      if (persisted) mocks.persistedEvidencePack = args[0];
+      return persisted;
+    },
+    readAutonomyEvidencePack: (proposalId: string) => {
+      const pack = mocks.persistedEvidencePack as { proposal?: { id?: string } } | null;
+      return pack?.proposal?.id === proposalId ? pack : null;
+    },
   };
 });
 
@@ -184,6 +193,7 @@ function trajectoriesFor(proposal: Proposal, decisions: DecisionEntry[]) {
 }
 
 beforeEach(() => {
+  mocks.persistedEvidencePack = null;
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m398-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m398-repo-'));
   process.env.HOME = tmpHome;

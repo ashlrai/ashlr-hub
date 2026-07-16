@@ -9,6 +9,7 @@ const {
   loadProposalMock,
   originAuthorityMock,
   outwardOwnsMock,
+  readEvidenceMock,
   recordRealizedMergeMock,
   setStatusMock,
   updateProposalFieldMock,
@@ -19,6 +20,7 @@ const {
   loadProposalMock: vi.fn(),
   originAuthorityMock: vi.fn(),
   outwardOwnsMock: vi.fn(),
+  readEvidenceMock: vi.fn(),
   recordRealizedMergeMock: vi.fn(),
   setStatusMock: vi.fn(),
   updateProposalFieldMock: vi.fn(),
@@ -37,6 +39,11 @@ vi.mock('../src/core/foundry/provenance.js', () => ({
   signLocalMergeIntent: () => '9'.repeat(64),
   verifyJudgeAttestation: vi.fn(),
   verifyLocalMergeIntent: () => true,
+}));
+
+vi.mock('../src/core/autonomy/evidence-pack.js', () => ({
+  readAutonomyEvidencePack: (...args: unknown[]) => readEvidenceMock(...args),
+  verifyAutonomyEvidencePackV3: () => ({ ok: true, reason: 'valid signed evidence pack v3' }),
 }));
 
 vi.mock('../src/core/inbox/merge.js', () => ({
@@ -69,6 +76,9 @@ vi.mock('../src/core/inbox/remote-handoff-attestation.js', () => ({
 }));
 
 let proposal: Proposal;
+let evidenceTarget: 'main' | 'branch';
+let evidenceTrustBasis: 'tier' | 'verification' | 'evidence';
+let evidencePolicyAction: 'merge-main' | 'open-ready-pr';
 
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposalsDetailed: () => ({
@@ -98,6 +108,9 @@ import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 
 const HEAD = 'a'.repeat(40);
 const BRANCH = 'ashlr/merge/prop-m420';
+const DIFF_HASH = 'c'.repeat(64);
+const EVIDENCE_SEAL = 'd'.repeat(64);
+const VERIFIED_AT = '2026-07-14T00:00:20.000Z';
 const RECOVERY_MARKER = '[ashlr-remote-handoff-retry:1]';
 const ORIGIN_A = {
   nameWithOwner: 'ashlrai/fixture',
@@ -116,12 +129,13 @@ function makeProposal(): Proposal {
   const authority = remoteAuthorityBinding(ORIGIN_A)!;
   const intentWithoutAuthorization = {
     schemaVersion: 1 as const,
+    evidenceProtocol: 'sealed-v3' as const,
     branch: BRANCH,
     base: 'main',
     baseBeforeOid: 'b'.repeat(40),
     proposalHeadOid: HEAD,
-    diffHash: 'c'.repeat(64),
-    evidencePackDigest: 'd'.repeat(64),
+    diffHash: DIFF_HASH,
+    evidencePackDigest: EVIDENCE_SEAL,
     authorizedAt: '2026-07-14T00:00:30.000Z',
     remoteAuthority: authority,
   };
@@ -132,11 +146,23 @@ function makeProposal(): Proposal {
     kind: 'patch',
     title: 'recover URL-less handoff',
     summary: 'bounded retry',
+    diff: '',
+    diffHash: DIFF_HASH,
     status: 'awaiting-host-merge',
     createdAt: '2026-07-14T00:00:00.000Z',
     repo: process.cwd(),
     engineModel: 'codex:gpt-5.5',
     engineTier: 'frontier',
+    verifyResult: {
+      passed: true,
+      detail: 'merge verification passed',
+      ran: [{ kind: 'test', required: true, passed: true, detail: 'passed' }],
+      baseBranch: 'main',
+      baseHead: 'b'.repeat(40),
+      diffHash: DIFF_HASH,
+      verifiedAt: VERIFIED_AT,
+      source: 'fresh',
+    },
     localMergeIntent: {
       ...intentWithoutAuthorization,
       authorizationId: remoteIntentAuthorizationId('pre-effect', intentWithoutAuthorization),
@@ -164,6 +190,51 @@ beforeEach(() => {
   outwardOwnsMock.mockReset();
   outwardOwnsMock.mockReturnValue(true);
   proposal = makeProposal();
+  evidenceTarget = 'main';
+  evidenceTrustBasis = 'evidence';
+  evidencePolicyAction = 'merge-main';
+  readEvidenceMock.mockReset();
+  readEvidenceMock.mockImplementation(() => ({
+    version: 3,
+    generatedAt: '2026-07-14T00:00:25.000Z',
+    proposal: {
+      id: proposal.id,
+      repo: proposal.repo,
+      kind: proposal.kind,
+      status: 'approved',
+      origin: proposal.origin,
+      title: proposal.title,
+      createdAt: proposal.createdAt,
+    },
+    producer: { engineModel: proposal.engineModel, engineTier: proposal.engineTier },
+    diff: { hash: DIFF_HASH, files: [], changedLines: 0 },
+    target: evidenceTarget,
+    trustBasis: evidenceTrustBasis,
+    remotePreferred: true,
+    riskClass: 'low',
+    gates: {},
+    verification: {
+      passed: true,
+      detail: 'merge verification passed',
+      commandKinds: ['test'],
+      baseBranch: 'main',
+      baseHead: 'b'.repeat(40),
+      diffHash: DIFF_HASH,
+      verifiedAt: VERIFIED_AT,
+      source: 'fresh',
+    },
+    policy: {
+      tier: 'frontier',
+      action: evidencePolicyAction,
+      allowed: true,
+      reason: 'safe protected remote',
+    },
+    payloadDigest: '1'.repeat(64),
+    signatureAlgorithm: 'hmac-sha256',
+    signingKeyId: '2'.repeat(16),
+    signature: '3'.repeat(64),
+    sealedPackDigest: EVIDENCE_SEAL,
+  }));
   viewPrWithReconciliationMock.mockReset();
   viewPrWithReconciliationMock.mockReturnValue(null);
   execFileSyncMock.mockReset();
@@ -190,6 +261,57 @@ beforeEach(() => {
 });
 
 describe('M420 URL-less remote handoff recovery', () => {
+  it.each([
+    ['tier main', 'main', 'tier', 'merge-main'],
+    ['verification main', 'main', 'verification', 'merge-main'],
+    ['tier review branch', 'branch', 'tier', 'open-ready-pr'],
+  ] as const)('accepts coherent sealed-v3 recovery for %s authority', (
+    _label,
+    target,
+    trustBasis,
+    action,
+  ) => {
+    evidenceTarget = target;
+    evidenceTrustBasis = trustBasis;
+    evidencePolicyAction = action;
+    execFileSyncMock.mockImplementation((file: string) => (
+      file === 'gh' ? '[]' : `${HEAD}\trefs/heads/${BRANCH}\n`
+    ));
+
+    expect(reconcileRemoteHandoffs()).toMatchObject({ checked: 1, recovered: 1 });
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('refuses legacy opaque evidence from minting new recovery authority', () => {
+    const intent = proposal.localMergeIntent!;
+    const {
+      evidenceProtocol: _evidenceProtocol,
+      attestation: _attestation,
+      authorizationId: _authorizationId,
+      ...legacyFields
+    } = intent;
+    const authorizationId = remoteIntentAuthorizationId('pre-effect', legacyFields);
+    proposal = {
+      ...proposal,
+      localMergeIntent: {
+        ...legacyFields,
+        authorizationId,
+        attestation: 'f'.repeat(64),
+      },
+      remoteHandoff: {
+        ...proposal.remoteHandoff!,
+        intentAttestation: 'f'.repeat(64),
+      },
+    };
+    execFileSyncMock.mockImplementation((file: string) => (
+      file === 'gh' ? '[]' : `${HEAD}\trefs/heads/${BRANCH}\n`
+    ));
+
+    expect(reconcileRemoteHandoffs()).toMatchObject({ checked: 1, unknown: 1 });
+    expect(proposal.status).toBe('awaiting-host-merge');
+    expect(setStatusMock).not.toHaveBeenCalled();
+  });
+
   it('returns an exact remote branch with no PR for one retry, then terminates on repeated proof', () => {
     execFileSyncMock.mockImplementation((file: string) => (
       file === 'gh' ? '[]' : `${HEAD}\trefs/heads/${BRANCH}\n`

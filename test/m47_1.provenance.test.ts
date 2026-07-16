@@ -22,7 +22,9 @@ import {
   provenanceKeyPath,
   loadOrCreateKey,
   hashDiff,
+  signLocalMergeIntent,
   signProvenance,
+  verifyLocalMergeIntent,
   verifyProvenance,
 } from '../src/core/foundry/provenance.js';
 
@@ -55,6 +57,43 @@ describe('M47.1 provenance — sign/verify roundtrip', () => {
     const p = signedProposal();
     const v = verifyProvenance(p);
     expect(v.ok).toBe(true);
+  });
+
+  it('domain-separates legacy and sealed-v3 mutation intents', () => {
+    const legacy = {
+      schemaVersion: 1 as const,
+      branch: 'ashlr/merge/proposal-1',
+      base: 'main',
+      baseBeforeOid: 'a'.repeat(40),
+      proposalHeadOid: 'b'.repeat(40),
+      diffHash: 'c'.repeat(64),
+      evidencePackDigest: 'd'.repeat(64),
+      authorizationId: 'e'.repeat(32),
+      authorizedAt: '2026-07-16T00:00:00.000Z',
+    };
+    const sealed = { ...legacy, evidenceProtocol: 'sealed-v3' as const };
+    const legacyAttestation = signLocalMergeIntent('proposal-1', tmpHome, legacy);
+    const sealedAttestation = signLocalMergeIntent('proposal-1', tmpHome, sealed);
+
+    expect(legacyAttestation).toMatch(/^[a-f0-9]{64}$/);
+    expect(sealedAttestation).toMatch(/^[a-f0-9]{64}$/);
+    expect(sealedAttestation).not.toBe(legacyAttestation);
+    expect(verifyLocalMergeIntent('proposal-1', tmpHome, {
+      ...legacy,
+      attestation: legacyAttestation,
+    })).toBe(true);
+    expect(verifyLocalMergeIntent('proposal-1', tmpHome, {
+      ...sealed,
+      attestation: sealedAttestation,
+    })).toBe(true);
+    expect(verifyLocalMergeIntent('proposal-1', tmpHome, {
+      ...sealed,
+      attestation: legacyAttestation,
+    })).toBe(false);
+    expect(verifyLocalMergeIntent('proposal-1', tmpHome, {
+      ...legacy,
+      attestation: sealedAttestation,
+    })).toBe(false);
   });
 
   it('creates the key file at ~/.ashlr/foundry/provenance.key with mode 0600', () => {
