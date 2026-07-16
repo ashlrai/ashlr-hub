@@ -36,6 +36,20 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 vi.setConfig({ testTimeout: 15_000 });
 
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? { ok: true, reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl' }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 interface PublicationObservation {
   metadataExists: boolean;
   ownerPid: number | null;
@@ -119,7 +133,8 @@ function installGitShim(
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
     'hang-worktree-descendant' | 'retarget-after-worktree-add' |
-    'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove',
+    'retarget-source-path-during-discovery' | 'fail-add-then-appear-on-remove' |
+    'fail-worktree-cleanup',
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m426-git-'));
   cleanupPaths.add(dir);
@@ -160,6 +175,12 @@ if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
   fs.writeFileSync(process.env.M426_MARKER, worktree);
   // The destination monitor owns termination once it observes the appeared path.
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+}
+
+if (mode === 'fail-worktree-cleanup' && worktreeIndex >= 0 &&
+    (args[worktreeIndex + 1] === 'remove' || args[worktreeIndex + 1] === 'prune')) {
+  fs.appendFileSync(process.env.M426_MARKER, args.join('\\0') + '\\n');
+  process.exit(1);
 }
 
 if (mode === 'common-dir-alias') {
@@ -322,6 +343,7 @@ beforeEach(() => {
   originalPath = process.env.PATH;
   originalNodeOptions = process.env.NODE_OPTIONS;
   originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   fx = makeFixture();
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
 });
@@ -343,8 +365,12 @@ afterEach(() => {
   delete process.env.M426_REPLACEMENT_GIT_DIR;
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
-  fx.cleanup();
-  cleanupTrackedPaths({ deferTransientWindowsLocks: true, maxRetries: 10 });
+  try {
+    fx.cleanup();
+    cleanupTrackedPaths({ deferTransientWindowsLocks: true, maxRetries: 10 });
+  } finally {
+    privateStorageHarness.useSemanticAdapter = false;
+  }
 });
 
 afterAll(() => {
@@ -517,6 +543,9 @@ describe('M426 sandbox reservation and path identity', () => {
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
     expect(retainedBefore).toContain(aliasWorktree);
     expect(retainedBefore).toContain('locked M426 retained registration');
+    const cleanupMarker = join(fx.home, 'failed-worktree-cleanup.txt');
+    installGitShim('fail-worktree-cleanup');
+    process.env.M426_MARKER = cleanupMarker;
 
     try {
       const result = removeSandbox(sandbox);
@@ -528,6 +557,9 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
       expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
+      const attemptedCleanup = readFileSync(cleanupMarker, 'utf8');
+      expect(attemptedCleanup).toContain('worktree\0remove');
+      expect(attemptedCleanup).toContain('worktree\0prune');
     } finally {
       process.env.PATH = originalPath;
       writeFileSync(registrationGitdir, physicalRegistration, 'utf8');

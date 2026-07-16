@@ -88,19 +88,13 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
 
 let fx: H1Fixture;
 const MAX_LIFECYCLE_TEST_RSS_KIB = 768 * 1024;
-const WINDOWS_LIFECYCLE_SEMANTIC_TESTS = new Set([
-  'consumes protocol v5 emitted by the real dispatch writer',
-  'keeps a proven converted witness pending until exact immutable publication',
-  'publishes an ordinal-2 retained proof at the writer retention cutoff',
-  'retries converted publication after receipt storage is repaired',
-  'treats exact immutable publication replay as idempotent',
-  'accepts an exact-inspected v2 receipt tombstone after the live receipt is retained',
-]);
+const WINDOWS_LIFECYCLE_NATIVE_AUTHORITY_TEST =
+  'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage';
 
 beforeEach(({ task }) => {
   expect.hasAssertions();
   privateStorageHarness.useSemanticAdapter = process.platform === 'win32' &&
-    WINDOWS_LIFECYCLE_SEMANTIC_TESTS.has(task.name);
+    task.name !== WINDOWS_LIFECYCLE_NATIVE_AUTHORITY_TEST;
   fx = makeFixture();
 });
 

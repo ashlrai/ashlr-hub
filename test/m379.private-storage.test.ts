@@ -117,6 +117,7 @@ describe('M379 Windows private-storage assurance', () => {
       operation: 'assure-private-paths',
       paths: ['C:\\tmp\\one.json', 'C:\\tmp\\two.json'],
     });
+    expect(calls[0]!.timeoutMs).toBe(15_000);
   });
 
   it('rejects invalid paths and bypasses PowerShell on POSIX', () => {

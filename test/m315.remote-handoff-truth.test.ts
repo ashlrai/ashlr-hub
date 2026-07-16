@@ -6,7 +6,7 @@
  * counted as applied/merged until a reconciler proves the host outcome.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -296,56 +296,6 @@ function recordVerificationAuthority(proposalId: string, diff: string): void {
     reason: 'independent verification confirmed',
   });
 }
-
-let proofHome: string;
-let proofRepo: string;
-let proofRealCallsBefore = 0;
-
-beforeAll(() => {
-  proofHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-home-')));
-  proofRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-proof-repo-')));
-  proofRealCallsBefore = privateStorageHarness.realCalls;
-  privateStorageHarness.useSemanticAdapter = false;
-  setFixtureEnvironment(proofHome);
-  initRepo(proofRepo);
-});
-
-beforeAll(() => {
-  expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
-});
-
-beforeAll(() => {
-  expect(enroll(proofRepo)).toMatchObject({ ok: true, quiesced: true });
-});
-
-beforeAll(() => {
-  const proof = createProposal({
-    repo: proofRepo,
-    origin: 'agent',
-    kind: 'patch',
-    title: 'M315 production storage proof',
-    summary: 'Exercise real authority and private artifact storage before semantic adapters.',
-    diff: addFileDiff('docs/private-storage-proof.md', 'production storage proof'),
-  });
-  expect(loadProposal(proof.id)).toMatchObject({ id: proof.id, repo: proofRepo });
-  if (process.platform === 'win32') {
-    expect(privateStorageHarness.realCalls).toBeGreaterThan(proofRealCallsBefore);
-  }
-});
-
-beforeAll(() => {
-  expect(unenroll(proofRepo)).toMatchObject({ ok: true, quiesced: true });
-});
-
-beforeAll(() => {
-  expect(setKill(false)).toMatchObject({ ok: true, quiesced: true });
-});
-
-beforeAll(() => {
-  fs.rmSync(proofRepo, { recursive: true, force: true });
-  fs.rmSync(proofHome, { recursive: true, force: true });
-  restoreFixtureEnvironment();
-});
 
 beforeEach(() => {
   tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-')));

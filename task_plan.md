@@ -2403,7 +2403,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify `4957f59`: every Ubuntu, macOS, overflow, and 3/3 duplicate passed; the remaining native selector failures were confined to M22/M342/M360/M362 fixture authority and M23/M426 Windows Git/runtime behavior.
 - [x] Preserve real native-DACL proofs while scoping semantic adapters, keep M22's local authority adapter live, move M23 bootstrap into fixture setup, and make M426's rollback race production-monitor-owned.
 - [x] Pass the corrected eight-file integration (643 passed, six skipped), exact native path/lifecycle selector (52 passed), 2/3 (213), 3/3 (66), native alias (31), and all static/security gates.
-- [ ] Push the fixture correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
+- [x] Push `7d4e637` and classify its remaining duplicate failures: one fail-closed M315 authority acquisition plus M342 batch timeout and incomplete M360/M362 semantic adapter coverage.
+- [x] Keep single-path assurance at five seconds, give bounded batch assurance the 15-second ceiling, remove M315's redundant DACL proof, and preserve dedicated native authority in M379/H4 plus explicit lifecycle proofs.
+- [x] Pass M315/M342/M360/M362/M379 (387 passed, seven skipped), exact 3/3 (66 passed), typecheck, changed-file lint, and diff checks.
+- [x] Classify both 2/3 duplicates: Windows Git legitimately removed the locked alias registration, and one unrelated M426 path case exhausted its 15-second body on redundant DACL startup.
+- [x] Fault-inject only worktree remove/prune after a real alias registration, prove residual inventory and attempted cleanup, and keep M426 path semantics behind the real mutation fence with dedicated ACL proofs elsewhere.
+- [x] Pass full M426 (19/19), M23+M426 integration (49/49), typecheck, changed-file lint, and diff checks.
+- [x] Pass full lint at the existing warning baseline, build, zero-vulnerability audit, and independent final SHIP review with no P0/P1 findings.
+- [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
 - [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.

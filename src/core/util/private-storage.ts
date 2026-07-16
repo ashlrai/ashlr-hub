@@ -5,6 +5,7 @@ import { win32 } from 'node:path';
 const OPERATION = 'assure-private-path';
 const MAX_OUTPUT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_BATCH_TIMEOUT_MS = 15_000;
 
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -392,7 +393,7 @@ export function assurePrivateStoragePaths(
   if (!executable) return { ok: false, reason: 'powershell-unavailable' };
   const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
     ? Math.max(100, Math.min(15_000, Math.floor(options.timeoutMs)))
-    : DEFAULT_TIMEOUT_MS;
+    : DEFAULT_BATCH_TIMEOUT_MS;
   const nonce = randomBytes(16).toString('hex');
   const operation = 'assure-private-paths';
   const input = JSON.stringify({
