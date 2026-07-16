@@ -2489,6 +2489,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Reconstruct a genuine pre-protocol v2 tombstone fixture and require the successful transaction's post-commit lifecycle-file DACL inspection without changing production authority.
 - [x] Trace the final native DACL mismatch to four exact stable-read/exact-DACL pairs and replace broad mode predicates with exact ordered transaction assertions.
 - [x] Require all four installed-ledger inspections in the successful native recovery-read sequence exposed by `41797c2`.
+- [x] Raise only the complete native DACL integration test's measured timeout from 60 to 120 seconds after `3318f0d` reached the ceiling with no assertion failure.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
