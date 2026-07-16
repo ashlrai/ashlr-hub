@@ -627,6 +627,9 @@ function recordDiagnosticLifecycleWithTrace(
     'diagnostic-attempt-witness',
     'treatment-candidate',
     'terminal-attempt-receipt',
+    'proposal-authority',
+    'lifecycle-record',
+    'lifecycle-ledger-saved',
   ]);
   return transition;
 }
@@ -769,7 +772,6 @@ function recordDiagnosticProposal(
   const event = diagnosticProposalEvent(item, attemptId, proposalId, backend, tier, ordinal, ts);
   persistDurableProposal(item, event);
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
-  expectDurableDiagnosticAttemptWitness(item, event);
   const transition = recordDiagnosticLifecycleWithTrace(item, event);
   expect(transition).toMatchObject({
     available: true,

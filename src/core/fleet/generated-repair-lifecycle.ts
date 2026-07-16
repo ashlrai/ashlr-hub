@@ -1757,7 +1757,10 @@ function saveLedger(ledger: GeneratedRepairLifecycleLedger): boolean {
       return false;
     }
     return true;
-  } catch {
+  } catch (error) {
+    lifecycleAdmissionTraceHookForTest?.(
+      `lifecycle-ledger-save-error:${error instanceof Error ? error.message : 'unknown'}`,
+    );
     markerPrepared = markerPrepared || existsSync(lifecycleFailurePath());
     if (markerPrepared && priorBytes !== undefined) {
       try {
@@ -3810,6 +3813,7 @@ function recordGeneratedRepairLifecycleUnlocked(
         witness.event!,
         durableProposal!.contentDigest,
       );
+      lifecycleAdmissionTraceHookForTest?.('proposal-authority');
     } else {
       terminalAttemptHash = generatedRepairLifecycleAttemptHash(evidence.attemptId);
       proposalAuthority = proposalAuthorityFromEvent(
@@ -3999,8 +4003,12 @@ function recordGeneratedRepairLifecycleUnlocked(
     ...(proposalAuthority ? { proposalAuthority } : {}),
     updatedAt: now,
   };
+  lifecycleAdmissionTraceHookForTest?.('lifecycle-record');
   replaceLifecycleFamily(loaded.ledger, record, generationIds);
   const recorded = saveLedger(loaded.ledger);
+  lifecycleAdmissionTraceHookForTest?.(
+    recorded ? 'lifecycle-ledger-saved' : 'lifecycle-ledger-save-failed',
+  );
   return recorded
     ? {
       ...resultFromRecord(true, record),

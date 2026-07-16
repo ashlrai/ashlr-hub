@@ -2481,6 +2481,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Publish `cb273a6` and prove production proposal persistence/reload is no longer the native blocker; classify the next refusal as lexical lifecycle repo identity versus writer-canonical dispatch identity.
 - [x] Canonicalize lifecycle diagnostic proof targets through the writer's exact identity function, retain strict receipt comparison, and add ordered admission-stage plus immutable-witness regression proof.
 - [x] Repass full M360 at 111 assertions with two platform skips plus typecheck, focused lint, production build, and diff checks on the corrected tree.
+- [x] Use protected `8e65fdd` to prove canonical receipt targeting reaches terminal proof construction on Windows and isolate the remaining refusal to lifecycle-ledger persistence.
+- [x] Correct the retained-live-receipt regression assumption and extend bounded test-only tracing across proposal binding, record construction, save outcome, and exact caught persistence error.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
