@@ -20,7 +20,12 @@ import type { WorkedEvent } from '../fleet/worked-ledger.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import type { RacingStats } from '../fleet/model-racing.js';
 import { racingStats } from '../fleet/model-racing.js';
-import { readDecisions } from '../fleet/decisions-ledger.js';
+import { readDecisions, type DecisionSourceQuality } from '../fleet/decisions-ledger.js';
+import {
+  agentSemanticProposalSubjectRef,
+  agentSemanticModelFamily,
+  sanitizeAgentSemanticEvents,
+} from '../learning/agent-semantic-events.js';
 import type {
   AutonomyEvidencePack,
   AutonomyEvidencePackList,
@@ -74,6 +79,7 @@ export interface OutcomeRecordDecision {
   labelBasis?: DecisionEntry['labelBasis'];
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  semanticEvents?: DecisionEntry['semanticEvents'];
   verdict?: string;
   reason?: string;
   engine?: string;
@@ -128,6 +134,7 @@ export interface OutcomeRecord {
   postMergeObservations?: PostMergeObservation[];
   postMergeObservationSourceQuality?: Omit<PostMergeObservationReadResult, 'observations'>;
   evidenceSourceQuality?: AutonomyEvidenceSourceQuality;
+  decisionSourceQuality?: DecisionSourceQuality;
   racing?: RacingStats;
 }
 
@@ -222,7 +229,19 @@ function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
   };
 }
 
-function decisionSnapshot(decision: DecisionEntry): OutcomeRecordDecision {
+function decisionSnapshot(
+  decision: DecisionEntry,
+  proposalId: string,
+  allowSemanticEvents: boolean,
+): OutcomeRecordDecision {
+  const semanticEvents = allowSemanticEvents
+    ? sanitizeAgentSemanticEvents(
+        decision.semanticEvents,
+        agentSemanticProposalSubjectRef(proposalId),
+        agentSemanticModelFamily(decision.model ?? decision.engine),
+        { producerRole: 'manager', producerVersion: 'manager-semantic-v1' },
+      )
+    : undefined;
   return {
     ts: decision.ts,
     action: decision.action,
@@ -237,6 +256,7 @@ function decisionSnapshot(decision: DecisionEntry): OutcomeRecordDecision {
     ...(decision.labelBasis ? { labelBasis: decision.labelBasis } : {}),
     ...(decision.routerPolicyVersion ? { routerPolicyVersion: decision.routerPolicyVersion } : {}),
     ...(decision.learningEpoch ? { learningEpoch: decision.learningEpoch } : {}),
+    ...(semanticEvents ? { semanticEvents: semanticEvents.map((event) => ({ ...event })) } : {}),
     ...(decision.verdict ? { verdict: decision.verdict } : {}),
     ...(decision.reason ? { reason: decision.reason } : {}),
     ...(decision.engine ? { engine: decision.engine } : {}),
@@ -303,6 +323,13 @@ export function listOutcomeRecords(
   try {
     const proposals = safeArray(() => (deps.listProposals ?? listProposals)());
     const decisions = safeArray(() => (deps.readDecisions ?? readDecisions)());
+    const decisionSourceQuality = (decisions as DecisionEntry[] & {
+      sourceQuality?: DecisionSourceQuality;
+    }).sourceQuality;
+    const decisionSemanticsHealthy = decisionSourceQuality === undefined || (
+      decisionSourceQuality.sourceState === 'healthy' && decisionSourceQuality.complete &&
+      (decisionSourceQuality.semanticRejectedRows ?? 0) === 0
+    );
     const traces = safeArray(() => deps.readJudgeTraces
       ? deps.readJudgeTraces()
       : readJudgeTraces({ requireComplete: true }));
@@ -381,7 +408,9 @@ export function listOutcomeRecords(
           proposalWorked[0]?.ts,
           proposalPostMerge[0]?.observedAt,
         ),
-        decisions: proposalDecisions.map(decisionSnapshot),
+        decisions: proposalDecisions.map((decision) => decisionSnapshot(
+          decision, proposal.id, decisionSemanticsHealthy,
+        )),
         judgeTraces: proposalTraces.map(judgeTraceSnapshot),
         evidencePacks: proposalEvidence.map(evidenceSnapshot),
         workedEvents: proposalWorked.map(workedSnapshot),
@@ -390,6 +419,7 @@ export function listOutcomeRecords(
           ? { postMergeObservationSourceQuality: (({ observations: _observations, ...quality }) => quality)(postMergeRead) }
           : {}),
         ...(evidenceSourceQuality ? { evidenceSourceQuality } : {}),
+        ...(decisionSourceQuality ? { decisionSourceQuality } : {}),
         ...(racing ? { racing } : {}),
       };
     });

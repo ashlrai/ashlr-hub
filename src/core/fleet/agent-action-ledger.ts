@@ -26,6 +26,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
   EngineId,
   EngineTier,
+  AgentSemanticEventV1,
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
@@ -51,6 +52,12 @@ import { listEnrolled } from '../sandbox/policy.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import {
+  agentSemanticProposalSubjectRef,
+  agentSemanticModelFamily,
+  remintAgentSemanticEvents,
+  sanitizeAgentSemanticEvents,
+} from '../learning/agent-semantic-events.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -137,6 +144,10 @@ export interface AgentActionEvent {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   learningLabel?: ProductionAttemptLearningLabel;
+  /** Metadata-only semantic telemetry; observational and non-authoritative. */
+  semanticEvents?: AgentSemanticEventV1[];
+  /** Writer rejected a supplied semantic batch; parent history remains readable. */
+  semanticEventsState?: 'rejected';
   repairHandoffId?: string;
   repairGenerationId?: string;
   repairTreatmentUnitId?: string;
@@ -350,7 +361,16 @@ function sanitizeTags(tags: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
+function expectedAgentActionSemanticProducer(
+  actor: unknown,
+): Pick<AgentSemanticEventV1, 'producerRole' | 'producerVersion'> {
+  if (actor === 'judge') return { producerRole: 'manager', producerVersion: 'manager-semantic-v1' };
+  if (actor === 'agent') return { producerRole: 'agent', producerVersion: 'agent-semantic-v1' };
+  if (actor === 'verifier') return { producerRole: 'verifier', producerVersion: 'verifier-semantic-v1' };
+  return { producerRole: 'system', producerVersion: 'system-semantic-v1' };
+}
+
+function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false): AgentActionEvent {
   const ts = eventTimestamp(event.ts);
   const tags = sanitizeTags(event.tags);
   const counts = sanitizeCounts(event.counts);
@@ -364,8 +384,22 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const repo = boundedOptionalText(event.repo, 500);
   const itemId = boundedOptionalText(event.itemId, 240);
   const proposalId = boundedOptionalText(event.proposalId, 160);
-  const runId = boundedOptionalText(event.runId, 160);
   const model = boundedOptionalText(event.model, 160);
+  const semanticSubjectRef = agentSemanticProposalSubjectRef(proposalId);
+  const semanticEvents = semanticSubjectRef
+    ? (remintSemanticOccurrence ? remintAgentSemanticEvents : sanitizeAgentSemanticEvents)(
+        event.semanticEvents,
+        semanticSubjectRef,
+        agentSemanticModelFamily(model ?? backend),
+        expectedAgentActionSemanticProducer(event.actor),
+      )
+    : undefined;
+  const semanticEventsState = semanticEvents
+    ? undefined
+    : event.semanticEvents !== undefined || event.semanticEventsState === 'rejected'
+      ? 'rejected' as const
+      : undefined;
+  const runId = boundedOptionalText(event.runId, 160);
   const reason = boundedOptionalText(event.reason, 240);
   const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
     ? event.repairHandoffId
@@ -448,6 +482,8 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     ...(runId ? { runId } : {}),
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),
+    ...(semanticEvents ? { semanticEvents } : {}),
+    ...(semanticEventsState ? { semanticEventsState } : {}),
     ...(repairLineageInvalid
       ? { repairLineageInvalid: true as const }
       : repairLineageComplete
@@ -488,6 +524,18 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     validOptionalCausalRecord(obj['routeSnapshot'], ROUTE_SNAPSHOT_KEYS, normalizeRouteSnapshot, ['routerPolicyVersion']) &&
     validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
     validOptionalCausalRecord(obj['evidenceOutcome'], EVIDENCE_OUTCOME_KEYS, normalizeEvidenceOutcome) &&
+    (obj['semanticEvents'] === undefined || (
+      agentSemanticProposalSubjectRef(boundedOptionalText(obj['proposalId'], 160)) !== undefined &&
+      sanitizeAgentSemanticEvents(
+        obj['semanticEvents'],
+        agentSemanticProposalSubjectRef(boundedOptionalText(obj['proposalId'], 160)),
+        agentSemanticModelFamily(obj['model'] ?? obj['backend']),
+        expectedAgentActionSemanticProducer(obj['actor']),
+      ) !== undefined
+    )) &&
+    (obj['semanticEventsState'] === undefined || (
+      obj['semanticEventsState'] === 'rejected' && obj['semanticEvents'] === undefined
+    )) &&
     (!['proposal-created', 'verified', 'judged', 'merged', 'rejected'].includes(String(obj['outcome'])) ||
       (typeof obj['proposalId'] === 'string' && obj['proposalId'].trim() !== ''))
   );
@@ -539,6 +587,7 @@ export interface AgentActionSourceQuality {
   bytesRead: number;
   rowsScanned: number;
   invalidRows: number;
+  semanticRejectedRows?: number;
   unreadableFiles: number;
 }
 
@@ -667,7 +716,7 @@ export function recordAgentActionResult(
     const partitions = new Set<string>();
     for (const event of events) {
       try {
-        const record = sanitizeEvent(event);
+        const record = sanitizeEvent(event, true);
         if (!isAgentActionEvent(record)) continue;
         const partition = eventDateString(record.ts);
         if (!partitions.has(partition) && partitions.size >= MAX_WRITE_PARTITIONS_PER_CALL) continue;
@@ -722,6 +771,7 @@ function emptyAgentActionRead(
     bytesRead: 0,
     rowsScanned: 0,
     invalidRows: 0,
+    semanticRejectedRows: 0,
     unreadableFiles: 0,
     ...overrides,
   };
@@ -875,6 +925,9 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
             result.invalidRows++;
             continue;
           }
+          if (parsed.semanticEventsState === 'rejected') {
+            result.semanticRejectedRows = (result.semanticRejectedRows ?? 0) + 1;
+          }
           const eventMs = Date.parse(parsed.ts);
           const partitionDate = DATE_LEDGER_FILE_RE.exec(file)?.[1];
           if (!Number.isFinite(eventMs) ||
@@ -952,6 +1005,7 @@ export function readAgentActions(opts: ReadAgentActionsOptions = {}): AgentActio
       bytesRead: result.bytesRead,
       rowsScanned: result.rowsScanned,
       invalidRows: result.invalidRows,
+      semanticRejectedRows: result.semanticRejectedRows,
       unreadableFiles: result.unreadableFiles,
     } satisfies AgentActionSourceQuality,
     enumerable: false,

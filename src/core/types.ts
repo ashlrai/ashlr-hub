@@ -80,6 +80,71 @@ export type LabelBasis =
   | 'unknown'
   | string;
 
+export type AgentSemanticEventKind =
+  | 'intent'
+  | 'observation'
+  | 'prediction'
+  | 'action'
+  | 'evidence'
+  | 'challenge';
+
+interface AgentSemanticEventBaseV1 {
+  schemaVersion: 1;
+  /** Deterministic `ase-<sha256>` identity over the complete event payload. */
+  eventId: string;
+  /** Producer-local ordering. Persisted sets are bounded to 16 events. */
+  sequence: number;
+  kind: AgentSemanticEventKind;
+  /** Closed machine predicate, never prose. */
+  predicate: string;
+  /** Parent-bound opaque durable id (`proposal:<id>`, `run:<id>`, or `trajectory:<id>`). */
+  subjectRef: string;
+  producerRole: 'manager' | 'agent' | 'verifier' | 'observer' | 'system';
+  producerModelFamily: 'claude' | 'openai' | 'local' | 'unknown';
+  producerVersion:
+    | 'manager-semantic-v1'
+    | 'agent-semantic-v1'
+    | 'verifier-semantic-v1'
+    | 'system-semantic-v1'
+    | 'test-semantic-v1';
+  /** Opaque occurrence identity; preserved unchanged through every projection. */
+  sourceRef: string;
+}
+
+export type AgentSemanticEventV1 =
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'intent';
+      objectiveCode: string;
+    })
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'observation';
+      metricCode: string;
+      value: number;
+      unit: 'score-1-5' | 'boolean' | 'count' | 'ratio';
+    })
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'prediction';
+      outcomeCode: string;
+      probability: number;
+      horizon: 'decision' | 'verification' | 'post-merge';
+    })
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'action';
+      actionCode: string;
+      status: 'planned' | 'started' | 'completed' | 'blocked';
+    })
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'evidence';
+      evidenceCode: string;
+      result: 'supports' | 'contradicts' | 'inconclusive';
+    })
+  | (AgentSemanticEventBaseV1 & {
+      kind: 'challenge';
+      challengeCode: string;
+      severity: 'low' | 'medium' | 'high' | 'critical';
+      targetEventId?: string;
+    });
+
 export interface RouteSnapshot {
   backend?: EngineId | string | null;
   tier?: EngineTier | string | null;
@@ -5376,6 +5441,10 @@ export interface DecisionEntry {
   routerPolicyVersion?: string;
   /** Coarse learning epoch, currently an ISO day string. */
   learningEpoch?: string;
+  /** Bounded metadata-only semantic events. Observational; never merge authority. */
+  semanticEvents?: AgentSemanticEventV1[];
+  /** Writer rejected a supplied semantic batch; parent history remains readable. */
+  semanticEventsState?: 'rejected';
   /** Lifecycle action. */
   action:
     | 'proposed'

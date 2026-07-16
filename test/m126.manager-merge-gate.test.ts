@@ -112,6 +112,7 @@ import { autoMergeProposal, classifyRisk } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
 import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
+import { agentSemanticSubjectRef, defineAgentSemanticEvents } from '../src/core/learning/agent-semantic-events.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 
@@ -340,6 +341,63 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     // judgeProposal must NOT have been called — verdict came from cache
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockReadDecisions).toHaveBeenCalledWith(expect.objectContaining({ requireComplete: true }));
+  });
+
+  it('[2a] semantic verification support cannot replace cached merge authority', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = docsDiff('docs/semantic-near-authority.md');
+    const p = frontierPatch(diff);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const cacheTs = new Date().toISOString();
+    const semanticEvents = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', p.id),
+      producerRole: 'verifier',
+      producerModelFamily: 'local',
+      producerVersion: 'test-semantic-v1',
+    }, [{
+      kind: 'evidence',
+      predicate: 'verification.result',
+      evidenceCode: 'verification.merge-profile',
+      result: 'supports',
+    }]);
+
+    // Near-authorized cached ship: every ordinary field is valid, but the
+    // cryptographic judge attestation is absent. Semantic evidence is metadata only.
+    mockReadDecisions.mockReturnValue([{
+      ts: cacheTs,
+      proposalId: p.id,
+      action: 'judged',
+      engine: 'claude-opus-4-5',
+      verdict: 'ship',
+      reason: 'cached small docs change with semantic verification support',
+      detail: 'would-merge',
+      judgeAttestationIssuedAt: cacheTs,
+      judgeAttestationIntent: 'would-merge',
+      semanticEvents,
+    }]);
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: p.id,
+      verdict: 'review',
+      value: 3,
+      correctness: 3,
+      scope: 3,
+      alignment: 3,
+      rationale: 'missing merge-authoritative attestation',
+      wouldMerge: false,
+    } satisfies ManagerVerdict);
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/manager gate.*review/i);
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
   it('[3] ledger cache stale (no recent entry) → judge called inline → ship → merges', async () => {

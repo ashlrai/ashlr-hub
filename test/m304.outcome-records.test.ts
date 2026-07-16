@@ -19,6 +19,10 @@ import {
 import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import {
+  agentSemanticSubjectRef,
+  defineAgentSemanticEvents,
+} from '../src/core/learning/agent-semantic-events.js';
 import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { WorkedEvent } from '../src/core/fleet/worked-ledger.js';
 import type { PostMergeObservationReadResult } from '../src/core/fleet/post-merge-observations.js';
@@ -26,6 +30,8 @@ import type { DecisionEntry, Proposal } from '../src/core/types.js';
 
 const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const TEST_DIFF_HASH = hashDiff(TEST_DIFF);
+const SEMANTIC_PROPOSAL_ID = 'prop-m304abc1-000001-bbbbbbbbbbbbbbbbbbbbbbbb';
+const DEGRADED_PROPOSAL_ID = 'prop-m304abc1-000002-cccccccccccccccccccccccc';
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 let tmpHome: string;
@@ -483,5 +489,58 @@ describe('m302 listOutcomeRecords', () => {
       now: new Date('2026-07-03T03:30:00.000Z'),
       deps: { listAutonomyEvidencePacks: () => [legacy], loadProposal: () => live },
     })).toEqual([]);
+  });
+
+  it('preserves bounded semantic decision events without judge reasoning text', () => {
+    const semanticEvent = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
+      producerRole: 'manager', producerModelFamily: 'openai', producerVersion: 'manager-semantic-v1',
+    }, [{
+      kind: 'prediction', predicate: 'manager.outcome.positive',
+      outcomeCode: 'proposal.positive-outcome', probability: 0.8, horizon: 'post-merge',
+    }])[0]!;
+    const [record] = listOutcomeRecords({
+      deps: deps({
+        listProposals: () => [proposal({
+          id: SEMANTIC_PROPOSAL_ID, createdAt: '2026-07-16T20:00:00.000Z',
+        })],
+        readDecisions: () => [decision(
+          SEMANTIC_PROPOSAL_ID,
+          '2026-07-16T20:01:00.000Z',
+          { semanticEvents: [semanticEvent], reason: 'private rationale is not an event field', model: 'gpt-5.5' },
+        )],
+      }),
+    });
+    expect(record?.decisions[0]?.semanticEvents).toEqual([semanticEvent]);
+    expect(JSON.stringify(record?.decisions[0]?.semanticEvents)).not.toContain('private rationale');
+  });
+
+  it('withholds semantic projections and exposes degraded decision source quality', () => {
+    const semanticEvent = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', DEGRADED_PROPOSAL_ID),
+      producerRole: 'manager', producerModelFamily: 'openai', producerVersion: 'manager-semantic-v1',
+    }, [{
+      kind: 'action', predicate: 'manager.judge.completed',
+      actionCode: 'manager.judge', status: 'completed',
+    }])[0]!;
+    const degraded = [decision(
+      DEGRADED_PROPOSAL_ID, '2026-07-16T20:01:00.000Z',
+      { semanticEvents: [semanticEvent], model: 'gpt-5.5' },
+    )] as DecisionEntry[] & { sourceQuality?: Record<string, unknown> };
+    Object.defineProperty(degraded, 'sourceQuality', {
+      value: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 1, bytesRead: 100,
+        rowsScanned: 2, invalidRows: 1, unreadableFiles: 0,
+      },
+    });
+    const [record] = listOutcomeRecords({ deps: deps({
+      listProposals: () => [proposal({
+        id: DEGRADED_PROPOSAL_ID, createdAt: '2026-07-16T20:00:00.000Z',
+      })],
+      readDecisions: () => degraded,
+    }) });
+    expect(record?.decisionSourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(record?.decisions[0]?.semanticEvents).toBeUndefined();
   });
 });

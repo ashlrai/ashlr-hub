@@ -108,6 +108,8 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 let _idSeq = 0;
+const SEMANTIC_PROPOSAL_A = 'prop-m120abc1-000001-eeeeeeeeeeeeeeeeeeeeeeee';
+const SEMANTIC_PROPOSAL_B = 'prop-m120abc1-000002-ffffffffffffffffffffffff';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
@@ -177,7 +179,7 @@ function mockClientThrows(): { complete: (s: string, u: string) => Promise<strin
 describe('m120 judgeProposal — score parsing', () => {
   it('parses a clean JSON response into the correct ManagerVerdict shape', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
-    const proposal = makeProposal({ diff: makeDiff(2, 10) });
+    const proposal = makeProposal({ id: SEMANTIC_PROPOSAL_A, diff: makeDiff(2, 10) });
     const client = mockClient({
       verdict: 'ship',
       value: 5,
@@ -197,11 +199,13 @@ describe('m120 judgeProposal — score parsing', () => {
     expect(verdict.alignment).toBe(5);
     expect(verdict.rationale).toBe('Solid improvement with low blast radius.');
     expect(typeof verdict.wouldMerge).toBe('boolean');
+    expect(verdict.semanticEvents?.map((event) => event.kind)).toEqual(['action']);
+    expect(JSON.stringify(verdict.semanticEvents)).not.toContain(verdict.rationale);
   });
 
   it('parses a JSON block wrapped in markdown fences', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
-    const proposal = makeProposal();
+    const proposal = makeProposal({ id: SEMANTIC_PROPOSAL_A });
     const wrapped = '```json\n' + JSON.stringify({
       verdict: 'review',
       value: 3,
@@ -218,6 +222,7 @@ describe('m120 judgeProposal — score parsing', () => {
 
     const verdict = await judgeProposal(proposal, {} as never, client);
     expect(verdict.verdict).toBe('review');
+    expect(verdict.semanticEvents?.map((event) => event.kind)).toEqual(['action', 'challenge']);
     expect(verdict.rationale).toBe('Needs closer inspection.');
   });
 
@@ -275,6 +280,18 @@ describe('m120 judgeProposal — score parsing', () => {
 
     const verdict = await judgeProposal(proposal, {} as never, client);
     expect(verdict.verdict).toBe('review');
+    expect(verdict.semanticEvents).toBeUndefined();
+  });
+
+  it('omits semantics instead of throwing for a non-opaque parent id', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ id: 'private goal text is not an opaque id' });
+    const verdict = await judgeProposal(proposal, {} as never, mockClient({
+      verdict: 'review', value: 3, correctness: 3, scope: 3, alignment: 3,
+      rationale: 'valid JSON but invalid semantic parent',
+    }));
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.semanticEvents).toBeUndefined();
   });
 
   it('parses a complete reasoning-only ship verdict', async () => {
@@ -296,6 +313,7 @@ RATIONALE: Small correct fix with low blast radius.
     expect(verdict.scope).toBe(1);
     expect(verdict.alignment).toBe(4);
     expect(verdict.wouldMerge).toBe(true);
+    expect(verdict.semanticEvents).toBeUndefined();
   });
 
   it('keeps weak-correctness reasoning as review, not a mergeable ship', async () => {
@@ -314,6 +332,7 @@ RATIONALE: Valuable but correctness is too uncertain to ship.
     expect(verdict.verdict).toBe('review');
     expect(verdict.correctness).toBe(2);
     expect(verdict.wouldMerge).toBe(false);
+    expect(verdict.semanticEvents).toBeUndefined();
   });
 
   it('parses verdict text from Codex-style JSONL message content', async () => {
@@ -575,6 +594,7 @@ describe('m120 judgeProposal — parse failure', () => {
     expect(verdict.verdict).toBe('review');
     expect(verdict.wouldMerge).toBe(false);
     expect(verdict.proposalId).toBe(proposal.id);
+    expect(verdict.semanticEvents).toBeUndefined();
   });
 
   it('defaults to verdict=review when client.complete() throws', async () => {
@@ -586,6 +606,7 @@ describe('m120 judgeProposal — parse failure', () => {
 
     expect(verdict.verdict).toBe('review');
     expect(verdict.wouldMerge).toBe(false);
+    expect(verdict.semanticEvents).toBeUndefined();
   });
 
   it('parse-failure never produces noise or harmful verdict', async () => {
@@ -612,13 +633,13 @@ describe('m120 runManager — shadow mode', () => {
     );
 
     mockProposals.push(makeProposal({
-      id: 'prop-shadow-001',
+      id: SEMANTIC_PROPOSAL_A,
       workItemId: '/repos/alpha:issue:001',
       workSource: 'issue',
       runId: 'run-shadow-001',
     }));
     mockProposals.push(makeProposal({
-      id: 'prop-shadow-002',
+      id: SEMANTIC_PROPOSAL_B,
       workItemId: '/repos/alpha:todo:002',
       workSource: 'todo',
       runId: 'run-shadow-002',
@@ -637,11 +658,14 @@ describe('m120 runManager — shadow mode', () => {
     expect(entries.length).toBeGreaterThanOrEqual(2);
     const actions = entries.map((e) => e.action);
     expect(actions.every((a) => a === 'judged')).toBe(true);
-    expect(entries.find((e) => e.proposalId === 'prop-shadow-001')).toMatchObject({
+    const firstDecision = entries.find((e) => e.proposalId === SEMANTIC_PROPOSAL_A);
+    expect(firstDecision).toMatchObject({
       workItemId: '/repos/alpha:issue:001',
       workSource: 'issue',
       runId: 'run-shadow-001',
     });
+    expect(firstDecision?.semanticEvents?.map((event) => event.kind)).toEqual(['action']);
+    expect(JSON.stringify(firstDecision?.semanticEvents)).not.toContain('Good.');
   });
 
   it('does NOT call setStatus in shadow mode (applyRejects=false)', async () => {

@@ -16,6 +16,10 @@ import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-product
 import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import type { Proposal, SkillUseEvent } from '../src/core/types.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
+import {
+  agentSemanticSubjectRef,
+  defineAgentSemanticEvents,
+} from '../src/core/learning/agent-semantic-events.js';
 
 const TS0 = '2026-07-09T12:00:00.000Z';
 const TS1 = '2026-07-09T12:01:00.000Z';
@@ -26,6 +30,7 @@ const REPO = '/tmp/ashlr-hub-fixture';
 const RAW_SECRET = 'RAW_EVIDENCE_SECRET_SHOULD_NOT_LEAK';
 const DIFF_SECRET = 'diff --git a/secret.ts b/secret.ts';
 const STDOUT_SECRET = 'stdout contained literal-secret-value';
+const SEMANTIC_PROPOSAL_ID = 'prop-m354abc1-000001-dddddddddddddddddddddddd';
 
 function dispatch(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   return {
@@ -1434,5 +1439,142 @@ describe('Trajectory records', () => {
     expect(suppressed.recent.every((record) => !('skillUse' in record.coverage))).toBe(true);
     expect(JSON.stringify(suppressed)).not.toContain('modeCounts');
     expect(JSON.stringify(suppressed)).not.toContain('stageCounts');
+  });
+
+  it('projects semantic decision events onto the existing decision timeline row', () => {
+    const semanticEvent = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
+      producerRole: 'manager', producerModelFamily: 'openai', producerVersion: 'manager-semantic-v1',
+    }, [{
+      kind: 'challenge', predicate: 'manager.verdict.review',
+      challengeCode: 'verdict.review', severity: 'medium',
+    }])[0]!;
+    const baseOutcome = outcomeRecord();
+    const outcome = outcomeRecord({
+      proposal: { ...baseOutcome.proposal, id: SEMANTIC_PROPOSAL_ID },
+      decisions: [{
+        ts: TS3,
+        action: 'judged',
+        verdict: 'review',
+        model: 'gpt-5.5',
+        semanticEvents: [semanticEvent],
+      }],
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [outcome],
+        readAgentActions: () => [],
+      }),
+    });
+    const decisionEvent = record?.timeline.find((event) => event.kind === 'decision');
+    expect(decisionEvent?.semanticEvents).toEqual([semanticEvent]);
+    expect(record?.timeline.filter((event) => event.kind === 'decision')).toHaveLength(1);
+  });
+
+  it('preserves decision source degradation without creating semantic timeline evidence', () => {
+    const semanticEvent = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
+      producerRole: 'manager', producerModelFamily: 'openai', producerVersion: 'manager-semantic-v1',
+    }, [{
+      kind: 'action', predicate: 'manager.judge.completed',
+      actionCode: 'manager.judge', status: 'completed',
+    }])[0]!;
+    const baseOutcome = outcomeRecord();
+    const outcome = outcomeRecord({
+      proposal: { ...baseOutcome.proposal, id: SEMANTIC_PROPOSAL_ID },
+      decisionSourceQuality: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 1, bytesRead: 100,
+        rowsScanned: 2, invalidRows: 1, unreadableFiles: 0,
+      },
+      decisions: [{
+        ts: TS3, action: 'judged', verdict: 'review', model: 'gpt-5.5',
+        semanticEvents: [semanticEvent],
+      }],
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [outcome],
+        readAgentActions: () => [],
+      }),
+    });
+    expect(record?.decisionSourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(record?.timeline.find((event) => event.kind === 'decision')?.semanticEvents).toBeUndefined();
+  });
+
+  it('preserves action-carried semantics on the existing action timeline row', () => {
+    const semanticEvent = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
+      producerRole: 'agent', producerModelFamily: 'local', producerVersion: 'agent-semantic-v1',
+    }, [{
+      kind: 'intent', predicate: 'agent.intent.execute', objectiveCode: 'proposal.evaluate',
+    }])[0]!;
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          proposalId: SEMANTIC_PROPOSAL_ID,
+          runId: 'run-semantic-action',
+          trajectoryId: 'traj-semantic-action',
+          semanticEvents: [semanticEvent],
+        })],
+      }),
+    });
+    const actionEvent = record?.timeline.find((event) => event.kind === 'agent-action');
+    expect(actionEvent?.semanticEvents).toEqual([semanticEvent]);
+    expect(record?.timeline.filter((event) => event.kind === 'agent-action')).toHaveLength(1);
+  });
+
+  it('publishes degraded agent-action source quality instead of a healthy empty timeline', () => {
+    const actions = [action({
+      proposalId: SEMANTIC_PROPOSAL_ID,
+      runId: 'run-degraded-actions',
+      trajectoryId: 'traj-degraded-actions',
+    })];
+    Object.defineProperty(actions, 'sourceQuality', {
+      value: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 1, bytesRead: 100,
+        rowsScanned: 2, invalidRows: 1, unreadableFiles: 0,
+      },
+      enumerable: false,
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        listOutcomeRecords: () => [],
+        readAgentActions: () => actions,
+      }),
+    });
+    expect(record?.agentActionSourceQuality).toMatchObject({
+      sourceState: 'degraded', complete: false, invalidRows: 1,
+    });
+  });
+
+  it('retains the newest semantic occurrence when the timeline exceeds its cap', () => {
+    const [semanticEvent] = defineAgentSemanticEvents({
+      subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
+      producerRole: 'agent', producerModelFamily: 'local', producerVersion: 'agent-semantic-v1',
+    }, [{ kind: 'intent', predicate: 'agent.intent.execute', objectiveCode: 'proposal.evaluate' }]);
+    const baseMs = Date.parse(TS1);
+    const actions = Array.from({ length: 41 }, (_, index) => action({
+      ts: new Date(baseMs + index * 1_000).toISOString(),
+      proposalId: SEMANTIC_PROPOSAL_ID,
+      runId: 'run-timeline-cap',
+      trajectoryId: 'traj-timeline-cap',
+      ...(index === 40 ? { semanticEvents: [semanticEvent!] } : {}),
+    }));
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({ listOutcomeRecords: () => [], readAgentActions: () => actions }),
+    });
+    expect(record?.timeline).toHaveLength(40);
+    expect(record?.timeline.at(-1)?.semanticEvents).toEqual([semanticEvent]);
+    expect(record?.timeline[0]?.ts).toBe(new Date(baseMs + 1_000).toISOString());
   });
 });
