@@ -3161,12 +3161,12 @@ describe('generated repair lifecycle store', () => {
       expect(readGeneratedRepairLifecycle(item).available).toBe(true);
       expect(privateStorageHarness.realInvocations
         .slice(recoveryReadNativeCallsBefore)
-        .filter((call) => call.path === lifecyclePath)).toEqual([{
-        path: lifecyclePath,
-        kind: 'file',
-        mode: 'inspect-existing',
-        anchorPath: fx.home,
-      }]);
+        .filter((call) => call.path === lifecyclePath)).toEqual(Array.from({ length: 4 }, () => ({
+          path: lifecyclePath,
+          kind: 'file',
+          mode: 'inspect-existing',
+          anchorPath: fx.home,
+        })));
     },
     60_000,
   );

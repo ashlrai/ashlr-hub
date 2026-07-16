@@ -2488,6 +2488,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Use protected `f4adc11` to prove Windows persistence succeeds and reduce native M360 from six failures to two post-success fixture expectations.
 - [x] Reconstruct a genuine pre-protocol v2 tombstone fixture and require the successful transaction's post-commit lifecycle-file DACL inspection without changing production authority.
 - [x] Trace the final native DACL mismatch to four exact stable-read/exact-DACL pairs and replace broad mode predicates with exact ordered transaction assertions.
+- [x] Require all four installed-ledger inspections in the successful native recovery-read sequence exposed by `41797c2`.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
