@@ -848,23 +848,38 @@ describe('spawnOptionsFor', () => {
     expect(opts.shell).toBe(process.platform === 'win32');
   });
 
-  it('prepends nested and repo-local binaries before common tool paths', () => {
+  it('orders repo-local bins before inherited PATH and generic fallback directories', () => {
     const nested = join(workdir, 'apps', 'web');
     const nestedBin = join(nested, 'node_modules', '.bin');
     const rootBin = join(workdir, 'node_modules', '.bin');
+    const inheritedBin = join(workdir, 'healthy-node-bin');
+    const relocatedHome = join(workdir, 'relocated-home');
+    const previousPath = process.env.PATH;
+    const previousHome = process.env.HOME;
     mkdirSync(nestedBin, { recursive: true });
     mkdirSync(rootBin, { recursive: true });
 
-    const opts = spawnOptionsFor(nested, 120_000, 'bun', process.platform, {
-      extraBinRoots: [workdir],
-    });
-    const pathEntries = String(opts.env?.PATH ?? '').split(delimiter);
+    process.env.PATH = inheritedBin;
+    process.env.HOME = relocatedHome;
+    try {
+      const opts = spawnOptionsFor(nested, 120_000, 'bun', process.platform, {
+        extraBinRoots: [workdir],
+      });
+      const pathEntries = String(opts.env?.PATH ?? '').split(delimiter);
 
-    expect(pathEntries[0]).toBe(resolve(nestedBin));
-    expect(pathEntries[1]).toBe(resolve(rootBin));
-    expect(pathEntries).toContain(join(process.env.HOME ?? '', '.cargo', 'bin'));
-    expect(pathEntries).toContain(join(process.env.HOME ?? '', '.bun', 'bin'));
-    expect(pathEntries).toContain('/opt/homebrew/bin');
+      expect(pathEntries.slice(0, 3)).toEqual([
+        resolve(nestedBin),
+        resolve(rootBin),
+        inheritedBin,
+      ]);
+      expect(pathEntries.indexOf(join(relocatedHome, '.local', 'bin'))).toBeGreaterThan(2);
+      expect(pathEntries.indexOf('/opt/homebrew/bin')).toBeGreaterThan(2);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 });
 

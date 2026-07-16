@@ -330,13 +330,18 @@ export function spawnOptionsFor(
     ...(opts?.extraBinRoots ?? []),
   ].map((root) => resolve(root, 'node_modules', '.bin'));
   const localBins = [...new Set(binRoots)].filter((binRoot) => existsSync(binRoot));
+  const separator = isWin ? ';' : ':';
+  const inheritedPath = process.env.PATH ?? '';
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: buildToolPath({
-      prepend: localBins,
+      // Verification trusts the caller's toolchain before generic fallbacks.
+      // Repo-local bins retain highest precedence for workspace-owned tools.
+      prepend: [...localBins, ...inheritedPath.split(separator)],
+      basePath: '',
       // M341b: explicit for BOTH branches — 'undefined' fell back to the
       // HOST delimiter, so simulating linux on a win32 host joined with ';'.
-      separator: isWin ? ';' : ':',
+      separator,
     }),
   };
 
