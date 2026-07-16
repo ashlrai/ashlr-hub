@@ -2433,6 +2433,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify `2cd75e1`: H7 passes both native 2/3 duplicates and M342's exact intent stage/final proof passes both native 1/3 jobs; only the later retention recovery trigger still fails after repeated unrelated ACL assurances. Both Ubuntu, macOS, and 3/3 duplicates pass; one PR-only M407 overflow timeout is duplicate-asymmetric.
 - [x] Route only the retention marker's atomic stage rewrite and final canonical path through the real native adapter, assert the exact two calls, restore full native mode, and retain the final real readback inspection.
 - [x] Repass M342/H7/M30 at 156 assertions with four platform skips plus typecheck, focused lint, and diff checks after the retention correction.
+- [x] Classify protected `789ee10`: both native 1/3 duplicates complete retention recovery but record six canonical pre-rewrite inspections before the exact stage/final pair; all 2/3, 3/3, and overflow duplicates pass, while one PR-only macOS M426 marker read races the production destination monitor.
+- [x] Make M342's selective native contract transaction-aware so only the successful stage creation and first post-stage canonical inspection delegate to the real adapter; publish M426's out-of-band randomized-path marker before making the monitored path appear.
+- [x] Pass the corrected M342/M426/H7 integration at 168 assertions with four platform skips, repeat the M426 race case 20/20, and pass typecheck, full quiet lint, build, zero-vulnerability audit, and diff checks.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

@@ -171,8 +171,8 @@ if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
 if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
     args[worktreeIndex + 1] === 'remove') {
   const worktree = args[worktreeIndex + 3];
-  fs.mkdirSync(worktree, { recursive: true });
   fs.writeFileSync(process.env.M426_MARKER, worktree);
+  fs.mkdirSync(worktree, { recursive: true });
   // The destination monitor owns termination once it observes the appeared path.
   for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }

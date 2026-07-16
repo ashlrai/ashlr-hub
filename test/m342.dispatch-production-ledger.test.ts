@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
   nativeExactPath: undefined as string | undefined,
+  nativeRewriteStageObserved: false,
   realCalls: 0,
   realInvocations: [] as Array<{
     path: string;
@@ -44,21 +45,32 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
     ) => {
-      const selectivelyNative = privateStorageHarness.nativeExactPath !== undefined &&
-        (args[0] === privateStorageHarness.nativeExactPath ||
-          args[0].startsWith(`${privateStorageHarness.nativeExactPath}.`));
+      const selectivelyNativeStage = privateStorageHarness.nativeExactPath !== undefined &&
+        args[0].startsWith(`${privateStorageHarness.nativeExactPath}.`) &&
+        args[2] === 'secure-created';
+      const selectivelyNativeFinal = privateStorageHarness.nativeExactPath !== undefined &&
+        privateStorageHarness.nativeRewriteStageObserved &&
+        args[0] === privateStorageHarness.nativeExactPath &&
+        args[2] === 'inspect-existing';
       if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter &&
-        !selectivelyNative) {
+        !selectivelyNativeStage && !selectivelyNativeFinal) {
         return args[2] === 'inspect-owned'
           ? { ok: true, reason: 'owned-safe-path' }
           : semanticAssurance;
       }
+      if (selectivelyNativeFinal) {
+        privateStorageHarness.nativeRewriteStageObserved = false;
+      }
       privateStorageHarness.realCalls++;
       privateStorageHarness.realInvocations.push({ path: args[0], kind: args[1], mode: args[2] });
       if (process.platform === 'win32') {
-        return actual.assurePrivateStoragePath(
+        const result = actual.assurePrivateStoragePath(
           args[0], args[1], args[2], { ...args[3], timeoutMs: 15_000 },
         );
+        if (selectivelyNativeStage && result.ok) {
+          privateStorageHarness.nativeRewriteStageObserved = true;
+        }
+        return result;
       }
       return actual.assurePrivateStoragePath(...args);
     },
@@ -261,16 +273,19 @@ for ($index = 0; $index -lt $paths.Count; $index++) {
 function useWindowsSemanticPrivateStorageFixture(): void {
   privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   privateStorageHarness.nativeExactPath = undefined;
+  privateStorageHarness.nativeRewriteStageObserved = false;
 }
 
 function useWindowsSelectiveNativePrivateStorageFixture(path: string): void {
   privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   privateStorageHarness.nativeExactPath = path;
+  privateStorageHarness.nativeRewriteStageObserved = false;
 }
 
 function useNativePrivateStorageFixture(): void {
   privateStorageHarness.useSemanticAdapter = false;
   privateStorageHarness.nativeExactPath = undefined;
+  privateStorageHarness.nativeRewriteStageObserved = false;
 }
 
 function expectSelectiveNativeFileRewrite(path: string, callsBefore: number): void {
