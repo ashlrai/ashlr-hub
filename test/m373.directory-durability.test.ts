@@ -118,6 +118,38 @@ describe('M373 directory durability', () => {
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
 
+  it('rejects a named directory that differs from the caller-captured identity', () => {
+    const fs = fakeFs();
+
+    expect(() => fsyncDirectory(directory, {
+      platform: 'win32',
+      fs,
+      expectedIdentity: { dev: namedStat.dev, ino: namedStat.ino + 1n },
+    })).toThrow('directory identity changed');
+    expect(fs.openSync).not.toHaveBeenCalled();
+    expect(fs.fsyncSync).not.toHaveBeenCalled();
+  });
+
+  it('runs the caller hook after descriptor identity validation and immediately before fsync', () => {
+    const order: string[] = [];
+    const fs = fakeFs({
+      fstatSync: vi.fn(() => {
+        order.push('identity');
+        return namedStat;
+      }),
+      fsyncSync: vi.fn(() => { order.push('fsync'); }),
+    });
+
+    fsyncDirectory(directory, {
+      platform: 'linux',
+      fs,
+      expectedIdentity: { dev: namedStat.dev, ino: namedStat.ino },
+      beforeFsync: () => order.push('hook'),
+    });
+
+    expect(order).toEqual(['identity', 'hook', 'fsync']);
+  });
+
   it('compares identities without losing precision above Number.MAX_SAFE_INTEGER', () => {
     const impreciseIdentity = 2n ** 54n;
     const named = new Proxy(namedStat, {

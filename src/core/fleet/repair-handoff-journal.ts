@@ -34,6 +34,7 @@ import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
+import { fsyncDirectory as fsyncDirectoryDurably } from '../util/durability.js';
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_RECORDS = 100_000;
@@ -614,19 +615,10 @@ function syncRepairHandoffAuthority(path: string, fd: number, directory: Stats):
     authoritative.dev !== persisted.dev || authoritative.ino !== persisted.ino ||
     currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
   ) throw new Error('repair handoff path changed after append');
-  let dirFd: number | undefined;
-  try {
-    dirFd = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const openedDirectory = fstatSync(dirFd);
-    if (
-      !openedDirectory.isDirectory() || openedDirectory.dev !== directory.dev ||
-      openedDirectory.ino !== directory.ino
-    ) throw new Error('repair handoff directory changed after append');
-    repairHandoffJournalFaultForTest?.('append-directory-fsync');
-    fsyncSync(dirFd);
-  } finally {
-    if (dirFd !== undefined) closeSync(dirFd);
-  }
+  fsyncDirectoryDurably(dirname(path), {
+    expectedIdentity: { dev: BigInt(directory.dev), ino: BigInt(directory.ino) },
+    beforeFsync: () => repairHandoffJournalFaultForTest?.('append-directory-fsync'),
+  });
 }
 
 function exactObservationHasHealthyAuthority(observation: RepairHandoffObservation): boolean {
@@ -1237,18 +1229,9 @@ function compactRepairHandoffFile(
       !safeRepairHandoffDirectory(currentDirectory) ||
       currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
     ) throw new Error('repair handoff compaction path changed');
-    let dirFd: number | undefined;
-    try {
-      dirFd = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      const openedDirectory = fstatSync(dirFd);
-      if (
-        !safeRepairHandoffDirectory(openedDirectory) ||
-        openedDirectory.dev !== directory.dev || openedDirectory.ino !== directory.ino
-      ) throw new Error('repair handoff directory changed after compaction');
-      fsyncSync(dirFd);
-    } finally {
-      if (dirFd !== undefined) closeSync(dirFd);
-    }
+    fsyncDirectoryDurably(dirname(path), {
+      expectedIdentity: { dev: BigInt(directory.dev), ino: BigInt(directory.ino) },
+    });
     const repaired = readRepairHandoffsInternal(path, expectedSchemaVersion);
     const repairedAuthority = combineRepairHandoffReads([repaired]);
     if (

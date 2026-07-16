@@ -2491,6 +2491,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Require all four installed-ledger inspections in the successful native recovery-read sequence exposed by `41797c2`.
 - [x] Raise only the complete native DACL integration test's measured timeout from 60 to 120 seconds after `3318f0d` reached the ceiling with no assertion failure.
 - [x] Set the same isolated native test to a 240-second bounded budget after `b7e5cad` measured the full real-PowerShell transaction at roughly 131 seconds.
+- [x] Use protected `5750932` to prove M360 green and isolate the next native blocker to duplicate raw directory-fd fsync calls in repair-handoff append and compaction.
+- [x] Route both repair-handoff directory durability sites through the shared Windows-aware identity-validating primitive without relaxing file or directory authority.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
