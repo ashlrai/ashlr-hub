@@ -414,7 +414,7 @@ describe('readBranchProtectionAttestation parsing', () => {
           ],
           conditions: {
             ref_name: {
-              include: ['~DEFAULT_BRANCH', 'refs/heads/release/v1'],
+              include: ['refs/heads/release/v1', '~DEFAULT_BRANCH'],
               exclude: ['refs/heads/archive/*'],
             },
           },
@@ -492,7 +492,7 @@ describe('readBranchProtectionAttestation parsing', () => {
         ],
         conditions: {
           ref_name: {
-            include: ['~DEFAULT_BRANCH', 'refs/heads/main'],
+            include: ['refs/heads/main', '~DEFAULT_BRANCH'],
             exclude: ['refs/heads/archive/*'],
           },
         },

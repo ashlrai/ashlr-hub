@@ -51,8 +51,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal, ProposalLocalMergeIntent } from '../src/core/types.js';
-import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
-import { persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import type { AutonomyEvidencePackLegacy } from '../src/core/autonomy/evidence-pack.js';
+import {
+  persistAutonomyEvidencePack,
+  sealAutonomyEvidencePackV3,
+} from '../src/core/autonomy/evidence-pack.js';
 import {
   hashDiff,
   signLocalMergeIntent,
@@ -319,6 +322,7 @@ function makeProposal(
     verifyResult: {
       passed: true,
       ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      baseBranch: 'main',
       baseHead: '1'.repeat(40),
       diffHash,
       verifiedAt: FIXED_ISO,
@@ -375,14 +379,14 @@ function persistVerifiedAppliedProposal(proposal: Proposal): void {
   );
 
   const diffHash = hashDiff(proposal.diff ?? '');
-  const evidence: AutonomyEvidencePack = {
-    version: 1,
+  const evidence: AutonomyEvidencePackLegacy = {
+    version: 2,
     generatedAt: FIXED_ISO,
     proposal: {
       id: proposal.id,
       repo: proposal.repo,
       kind: proposal.kind,
-      status: proposal.status,
+      status: 'approved',
       origin: proposal.origin,
       title: proposal.title,
       createdAt: proposal.createdAt,
@@ -393,8 +397,8 @@ function persistVerifiedAppliedProposal(proposal: Proposal): void {
     },
     diff: { hash: diffHash, files: ['src/foo.ts'], changedLines: 1 },
     target: 'main',
-    trustBasis: 'verification',
-    remotePreferred: false,
+    trustBasis: 'evidence',
+    remotePreferred: true,
     riskClass: 'low',
     gates: {
       authority: { ok: true, detail: 'authority passed' },
@@ -402,23 +406,42 @@ function persistVerifiedAppliedProposal(proposal: Proposal): void {
       verification: { ok: true, detail: 'verification passed' },
       risk: { ok: true, detail: 'risk passed' },
       scope: { ok: true, detail: 'scope passed' },
+      remoteProtection: {
+        ok: true,
+        live: true,
+        detail: 'exact protected remote fixture',
+        nameWithOwner: 'ashlrai/fixture',
+        repositoryId: 'R_fixture',
+        branch: 'main',
+        baseHead: '1'.repeat(40),
+        observedAt: FIXED_ISO,
+        requirements: ['required_status_checks'],
+        requiredChecks: ['ci/test'],
+        requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+        policySources: ['classic'],
+        policyHash: '5'.repeat(64),
+      },
     },
     verification: {
       passed: true,
       detail: 'verification passed',
       commandKinds: ['test'],
+      baseBranch: 'main',
+      baseHead: '1'.repeat(40),
       diffHash,
       verifiedAt: FIXED_ISO,
       source: 'auto-merge',
     },
     policy: {
-      tier: 'verified-source',
+      tier: 'T4',
       action: 'merge-main',
       allowed: true,
       reason: 'verified evidence passed',
     },
   };
-  expect(persistAutonomyEvidencePack(evidence)).toBe(true);
+  const signedEvidence = sealAutonomyEvidencePackV3(evidence);
+  expect(signedEvidence).not.toBeNull();
+  expect(persistAutonomyEvidencePack(signedEvidence!)).toBe(true);
 }
 
 function learnVerifiedApplied(proposal: Proposal, cfg: AshlrConfig): void {

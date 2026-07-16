@@ -70,6 +70,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add selection-phase global workspace telemetry for recursive repair learning
 - [x] Follow-up: Add prompt-trackr explicit merge-grade verification contract
 - [ ] Follow-up: Set valid Raycast author account for publish validation
+- [x] Follow-up: Repair signed-evidence v3 protected CI fixture and verifier-runtime failures
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?

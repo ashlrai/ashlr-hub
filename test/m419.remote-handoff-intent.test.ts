@@ -157,7 +157,7 @@ function initRepo(dir: string): void {
     commands: [{
       id: 'merge-test',
       kind: 'test',
-      cmd: ['node', '-e', 'process.exit(0)'],
+      cmd: [process.execPath, '-e', 'process.exit(0)'],
       required: true,
       profiles: ['merge'],
     }],
@@ -314,7 +314,7 @@ beforeEach(() => {
     });
     return { ok: true, url, detail: 'PR created' };
   });
-});
+}, 60_000);
 
 afterEach(() => {
   try {
