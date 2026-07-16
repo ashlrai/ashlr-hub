@@ -39,6 +39,7 @@ import {
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
   repairHandoffJournalPath,
+  repairHandoffV2JournalPath,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { _setProposalReadRaceHookForTest, inboxDir } from '../src/core/inbox/store.js';
@@ -51,6 +52,12 @@ import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
   realCalls: 0,
+  realInvocations: [] as Array<{
+    path: string;
+    kind: 'file' | 'directory';
+    mode: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+    anchorPath: string | undefined;
+  }>,
 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -67,6 +74,12 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
         };
       }
       privateStorageHarness.realCalls++;
+      privateStorageHarness.realInvocations.push({
+        path: args[0],
+        kind: args[1],
+        mode: args[2],
+        anchorPath: args[3]?.anchorPath,
+      });
       return actual.assurePrivateStoragePath(...args);
     },
     assurePrivateStoragePaths: (
@@ -88,13 +101,12 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
 
 let fx: H1Fixture;
 const MAX_LIFECYCLE_TEST_RSS_KIB = 768 * 1024;
-const WINDOWS_LIFECYCLE_NATIVE_AUTHORITY_TEST =
-  'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage';
 
-beforeEach(({ task }) => {
+beforeEach(() => {
   expect.hasAssertions();
-  privateStorageHarness.useSemanticAdapter = process.platform === 'win32' &&
-    task.name !== WINDOWS_LIFECYCLE_NATIVE_AUTHORITY_TEST;
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  privateStorageHarness.realCalls = 0;
+  privateStorageHarness.realInvocations.length = 0;
   fx = makeFixture();
 });
 
@@ -2795,7 +2807,7 @@ describe('generated repair lifecycle store', () => {
   it.skipIf(process.platform !== 'win32')(
     'establishes exact private DACLs for lifecycle treatment receipt and existing retention storage',
     () => {
-      const realCallsBefore = privateStorageHarness.realCalls;
+      privateStorageHarness.useSemanticAdapter = false;
       mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
       expect(assurePrivateStoragePath(
         fx.ashlrDir,
@@ -2804,8 +2816,11 @@ describe('generated repair lifecycle store', () => {
         { anchorPath: fx.home },
       )).toEqual({ ok: true, reason: 'exact-private-dacl' });
 
+      // Handoff and proposal storage are prerequisites, not the authority under
+      // test. Dispatch receipt and lifecycle publication re-enter native mode.
+      privateStorageHarness.useSemanticAdapter = true;
       const item = diagnosticRepairItem();
-      const transition = recordDiagnosticProposal(
+      const event = diagnosticProposalEvent(
         item,
         ATTEMPT_TWO,
         'prop-publication-private-storage',
@@ -2813,18 +2828,85 @@ describe('generated repair lifecycle store', () => {
         'mid',
         1,
       );
+      persistDurableProposal(item, event);
+      privateStorageHarness.useSemanticAdapter = false;
+      const fleetDir = dirname(repairHandoffV2JournalPath());
+      expect(assurePrivateStoragePath(
+        fleetDir,
+        'directory',
+        'secure-created',
+        { anchorPath: fx.ashlrDir },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+      for (const name of readdirSync(fleetDir)) {
+        const path = join(fleetDir, name);
+        if (!statSync(path).isFile()) continue;
+        expect(assurePrivateStoragePath(
+          path,
+          'file',
+          'secure-created',
+          { anchorPath: fx.ashlrDir },
+        )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+      }
       const root = dispatchProductionDir();
+      expect(assurePrivateStoragePath(
+        root,
+        'directory',
+        'secure-created',
+        { anchorPath: fx.ashlrDir },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const lifecyclePath = generatedRepairLifecyclePath();
+      const lifecycleNativeCallsBefore = privateStorageHarness.realInvocations.length;
+      const transition = recordGeneratedRepairLifecycle(item, {
+        kind: 'proposal-created',
+        attemptId: event.trajectoryId!,
+        proposalId: 'prop-publication-private-storage',
+        ts: event.ts,
+      });
+      const lifecycleTempPattern = new RegExp(
+        `^${lifecyclePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.[a-f0-9]{12}\\.tmp$`,
+      );
+      const lifecycleTargetCalls = privateStorageHarness.realInvocations
+        .slice(lifecycleNativeCallsBefore)
+        .filter((call) => call.path === lifecyclePath || lifecycleTempPattern.test(call.path));
+      expect(lifecycleTargetCalls).toEqual([
+          {
+            path: expect.stringMatching(lifecycleTempPattern),
+            kind: 'file',
+            mode: 'secure-created',
+            anchorPath: fx.home,
+          },
+          { path: lifecyclePath, kind: 'file', mode: 'inspect-existing', anchorPath: fx.home },
+      ]);
       const receiptDir = join(root, 'repair-treatment-outcomes');
       const retentionPath = join(receiptDir, '.retention.json');
+      expect(assurePrivateStoragePath(
+        root,
+        'directory',
+        'inspect-existing',
+        { anchorPath: fx.ashlrDir },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
       mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
+      expect(assurePrivateStoragePath(
+        receiptDir,
+        'directory',
+        'secure-created',
+        { anchorPath: root },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
       writeFileSync(retentionPath, `${JSON.stringify({
         schemaVersion: 1,
         droppedThrough: '2026-07-09T00:00:00.000Z',
       })}\n`, { mode: 0o600 });
+      expect(assurePrivateStoragePath(
+        retentionPath,
+        'file',
+        'secure-created',
+        { anchorPath: root },
+      )).toEqual({ ok: true, reason: 'exact-private-dacl' });
 
       const generationId = item.repairGenerationId!;
       const attemptHash = transition.treatmentOutcomeWitness!.attemptHash;
-      const lifecyclePath = generatedRepairLifecyclePath();
+      const receiptPath = join(receiptDir, `${generationId}-${attemptHash}.json`);
       const lifecycleDir = dirname(lifecyclePath);
       const lifecycleAssurances: Array<{ ok: boolean; reason: string }> = [];
       const markerKinds: string[] = [];
@@ -2863,14 +2945,43 @@ describe('generated repair lifecycle store', () => {
           )) as { kind: string }).kind);
         }
       });
+      const publicationNativeCallsBefore = privateStorageHarness.realInvocations.length;
       expect(publishGeneratedRepairTreatmentOutcome(generationId, attemptHash)).toBe(true);
+      const receiptTempPattern = new RegExp(
+        `^${receiptPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.tmp$`,
+      );
+      const publicationTargetCalls = privateStorageHarness.realInvocations
+        .slice(publicationNativeCallsBefore)
+        .filter((call) => call.path === receiptPath || call.path === retentionPath ||
+          receiptTempPattern.test(call.path));
+      expect(publicationTargetCalls.every((call) => call.anchorPath === root)).toBe(true);
+      expect(publicationTargetCalls.filter((call) => receiptTempPattern.test(call.path))).toEqual([{
+        path: expect.stringMatching(receiptTempPattern),
+        kind: 'file',
+        mode: 'secure-created',
+        anchorPath: root,
+      }]);
+      const retentionCalls = publicationTargetCalls.filter((call) => call.path === retentionPath);
+      expect(retentionCalls.length).toBeGreaterThan(0);
+      expect(retentionCalls.every((call) =>
+        call.kind === 'file' && call.mode === 'inspect-existing')).toBe(true);
+      const receiptCalls = publicationTargetCalls.filter((call) => call.path === receiptPath);
+      const receiptModes = receiptCalls.map((call) => call.mode);
+      const canonicalSecureIndex = receiptModes.indexOf('secure-created');
+      expect(canonicalSecureIndex).toBeGreaterThan(0);
+      expect(receiptModes.filter((mode) => mode === 'secure-created')).toHaveLength(1);
+      expect(receiptModes.slice(0, canonicalSecureIndex).every((mode) =>
+        mode === 'inspect-existing')).toBe(true);
+      expect(receiptModes.slice(canonicalSecureIndex + 1).length).toBeGreaterThan(0);
+      expect(receiptModes.slice(canonicalSecureIndex + 1).every((mode) =>
+        mode === 'inspect-existing')).toBe(true);
+      expect(receiptCalls.every((call) => call.kind === 'file')).toBe(true);
       _setGeneratedRepairLifecycleDirectoryFsyncHookForTest(undefined);
       expect(lifecycleFsyncs).toBeGreaterThanOrEqual(6);
       expect(markerKinds).toEqual(['rollback-required', 'commit-complete']);
       expect(lifecycleAssurances).toHaveLength(5);
       expect(lifecycleAssurances.every((assurance) =>
         assurance.ok && assurance.reason === 'exact-private-dacl')).toBe(true);
-      const receiptPath = join(receiptDir, `${generationId}-${attemptHash}.json`);
       for (const [path, kind] of [
         [receiptDir, 'directory'],
         [receiptPath, 'file'],
@@ -2895,8 +3006,16 @@ describe('generated repair lifecycle store', () => {
         else process.env.SystemRoot = systemRoot;
         _resetGeneratedRepairLifecycleCacheForTest();
       }
+      const recoveryReadNativeCallsBefore = privateStorageHarness.realInvocations.length;
       expect(readGeneratedRepairLifecycle(item).available).toBe(true);
-      expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+      expect(privateStorageHarness.realInvocations
+        .slice(recoveryReadNativeCallsBefore)
+        .filter((call) => call.path === lifecyclePath)).toEqual([{
+        path: lifecyclePath,
+        kind: 'file',
+        mode: 'inspect-existing',
+        anchorPath: fx.home,
+      }]);
     },
     60_000,
   );

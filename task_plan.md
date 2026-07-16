@@ -2436,7 +2436,19 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify protected `789ee10`: both native 1/3 duplicates complete retention recovery but record six canonical pre-rewrite inspections before the exact stage/final pair; all 2/3, 3/3, and overflow duplicates pass, while one PR-only macOS M426 marker read races the production destination monitor.
 - [x] Make M342's selective native contract transaction-aware so only the successful stage creation and first post-stage canonical inspection delegate to the real adapter; publish M426's out-of-band randomized-path marker before making the monitored path appear.
 - [x] Pass the corrected M342/M426/H7 integration at 168 assertions with four platform skips, repeat the M426 race case 20/20, and pass typecheck, full quiet lint, build, zero-vulnerability audit, and diff checks.
-- [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
+- [x] Push `480dcab` and classify its protected duplicates: M342 passes all 17 native cases in both 1/3 jobs, and both 2/3, 3/3, overflow, and macOS jobs pass; completing M342 exposes the same six latent M360 fixture failures in both native 1/3 jobs.
+- [x] Remove M360's hook-name-dependent adapter selection, keep only handoff/proposal prerequisites semantic, and explicitly re-enter native mode for dispatch receipt creation plus the exact lifecycle root, treatment directory, retention file, lifecycle publication, marker, receipt, replay, and read-recovery assertions.
+- [x] Pass full M360 locally at 111 assertions with two platform skips plus typecheck, focused lint, and diff checks.
+- [ ] Publish the M360 correction and require every duplicate protected job to pass before merge consideration.
+
+## Next P0 - Source-Complete GitHub Policy Authority
+- [ ] Paginate effective branch rules to exhaustion and refuse truncated, over-limit, or permission-incomplete observations.
+- [ ] Bind classic protection to the exact branch's GraphQL rule, including force-push and pull-request bypass allowance completeness, while retaining REST App-bound status-check identities.
+- [ ] Preserve ruleset source boundaries and reject any unknown or non-empty bypass authority before flattening can confer judge-free evidence.
+- [ ] Re-read the exact branch head and effective-rule identity after observation, and fail closed on hybrid snapshots or any REST/GraphQL disagreement.
+- [ ] Require an exact one-to-one configured-check binding: reject subsets, duplicates, null App IDs, and conflicting context/App identities.
+- [ ] Version the policy snapshot and add a pure evidence-only safe-minimum verdict only after source completeness is proven; do not authorize historical flat snapshots.
+- [ ] Add signed evidence-pack v3 after live policy closure, binding evaluator version, policy hash, exact configured checks, and the complete sealed pack digest.
 
 ### Remaining Defense In Depth
 - [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.
