@@ -955,8 +955,13 @@ export function createProposal(
 
   const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
+  const boundRunEventSummary = input.runEventSummary?.proposalCreated === true &&
+    input.runEventSummary.proposalId === undefined
+    ? { ...input.runEventSummary, proposalId }
+    : input.runEventSummary;
   const baseProposal: Proposal = {
     ...input,
+    ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
     ...(owner !== undefined ? { owner } : {}),
     id: proposalId,
     status: initialStatus,

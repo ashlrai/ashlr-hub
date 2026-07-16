@@ -41,7 +41,12 @@ import {
   repairHandoffJournalPath,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
-import { _setProposalReadRaceHookForTest, inboxDir } from '../src/core/inbox/store.js';
+import {
+  _setProposalReadRaceHookForTest,
+  createProposal,
+  inboxDir,
+  loadProposal,
+} from '../src/core/inbox/store.js';
 import {
   acquireProposalStoreMutationLock,
   releaseProposalStoreMutationLock,
@@ -121,10 +126,12 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
 });
 
 let fx: H1Fixture;
+const durableProposalIds = new Map<string, string>();
 const MAX_LIFECYCLE_TEST_RSS_KIB = 768 * 1024;
 
 beforeEach(() => {
   expect.hasAssertions();
+  durableProposalIds.clear();
   privateStorageHarness.realInvocations.length = 0;
   _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   if (process.platform === 'win32') useSemanticPrivateStorageRunner();
@@ -508,11 +515,10 @@ function persistDurableProposal(item: WorkItem, event: DispatchProductionEvent):
   expect(event.proposalId).toBeTruthy();
   expect(event.runId).toBeTruthy();
   expect(event.trajectoryId).toBe(`run:${event.runId}`);
-  const dir = inboxDir();
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const diff = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
-  writeFileSync(join(dir, `${event.proposalId}.json`), `${JSON.stringify({
-    id: event.proposalId,
+  const requestedProposalId = event.proposalId!;
+  const diff = `diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old ${requestedProposalId}\n+new ${requestedProposalId}\n`;
+  const { proposalId: _unboundProposalId, ...runEventSummary } = event.runEventSummary!;
+  const created = createProposal({
     repo: item.repo,
     origin: 'agent',
     kind: 'patch',
@@ -525,10 +531,41 @@ function persistDurableProposal(item: WorkItem, event: DispatchProductionEvent):
     workSource: 'self',
     runId: event.runId,
     trajectoryId: event.trajectoryId,
-    runEventSummary: event.runEventSummary,
+    routeSnapshot: event.routeSnapshot,
+    runEventSummary,
+    learningSource: event.learningSource,
+    labelBasis: event.labelBasis,
+    routerPolicyVersion: event.routerPolicyVersion,
+    repairRootId: item.repairRootId,
+    repairDepth: item.repairDepth,
+  });
+  expect(created.status).toBe('pending');
+  expect(created.id).not.toBe(requestedProposalId);
+  const durable = loadProposal(created.id);
+  expect(durable).toMatchObject({
+    id: created.id,
     status: 'pending',
-    createdAt: event.ts,
-  })}\n`, { mode: 0o600 });
+    workItemId: item.id,
+    workItemGenerationId: generatedRepairGenerationId(item),
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+    runEventSummary: {
+      runId: event.runId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: created.id,
+    },
+  });
+  durableProposalIds.set(requestedProposalId, created.id);
+  event.proposalId = created.id;
+  event.runEventSummary = { ...event.runEventSummary!, proposalId: created.id };
+}
+
+function durableProposalId(requestedProposalId: string): string {
+  const id = durableProposalIds.get(requestedProposalId);
+  if (!id) throw new Error(`Missing durable proposal fixture for ${requestedProposalId}`);
+  return id;
 }
 
 function ordinaryProposalEvent(
@@ -595,7 +632,7 @@ function recordOrdinaryProposal(
   return recordGeneratedRepairLifecycle(item, {
     kind: 'proposal-created',
     attemptId: event.trajectoryId!,
-    proposalId,
+    proposalId: event.proposalId!,
     ts,
   });
 }
@@ -672,7 +709,7 @@ function recordDiagnosticProposal(
   const transition = recordGeneratedRepairLifecycle(item, {
     kind: 'proposal-created',
     attemptId: event.trajectoryId!,
-    proposalId,
+    proposalId: event.proposalId!,
     ts,
   });
   expect(transition).toMatchObject({
@@ -1994,7 +2031,7 @@ describe('generated repair lifecycle store', () => {
     expect(stored.records[0]!.terminalAttemptProofReceipt.publication).toMatchObject({
       itemId: item.id,
       repo: item.repo,
-      proposalId: 'prop-first-attempt-conversion',
+      proposalId: durableProposalId('prop-first-attempt-conversion'),
       trajectoryId: `run:${ATTEMPT_TWO}`,
     });
     for (const rawText of [
@@ -2098,7 +2135,7 @@ describe('generated repair lifecycle store', () => {
     expect(readDispatchProductionEvents()).toContainEqual(expect.objectContaining({
       basis: 'repair-lifecycle-outcome',
       repairTreatmentOutcome: 'converted',
-      proposalId: 'prop-treatment-outbox',
+      proposalId: durableProposalId('prop-treatment-outbox'),
     }));
     const treatmentReceipt = join(
       dispatchProductionDir(),
@@ -2127,7 +2164,7 @@ describe('generated repair lifecycle store', () => {
       'mid',
       1,
     );
-    const proposalPath = join(inboxDir(), `${proposalId}.json`);
+    const proposalPath = join(inboxDir(), `${durableProposalId(proposalId)}.json`);
     const receiptPath = join(
       dispatchProductionDir(),
       'repair-treatment-outcomes',
@@ -2921,7 +2958,7 @@ describe('generated repair lifecycle store', () => {
       const transition = recordGeneratedRepairLifecycle(item, {
         kind: 'proposal-created',
         attemptId: event.trajectoryId!,
-        proposalId: 'prop-publication-private-storage',
+        proposalId: event.proposalId!,
         ts: event.ts,
       });
       expect(transition.recorded).toBe(true);
@@ -3362,7 +3399,7 @@ describe('generated repair lifecycle store', () => {
     const recovery = recordGeneratedRepairLifecycle(item, {
       kind: 'proposal-created',
       attemptId: proposal.trajectoryId!,
-      proposalId: 'prop-proofless-recovery',
+      proposalId: proposal.proposalId!,
       ts: proposal.ts,
     });
     expect(recovery).toEqual({
@@ -3411,7 +3448,7 @@ describe('generated repair lifecycle store', () => {
     const item = repairItem();
     expect(recordOrdinaryProposal(item, ATTEMPT_ONE, 'prop-content-bound'))
       .toMatchObject({ disposition: 'retired', recorded: true });
-    const proposalPath = join(inboxDir(), 'prop-content-bound.json');
+    const proposalPath = join(inboxDir(), `${durableProposalId('prop-content-bound')}.json`);
     const proposal = JSON.parse(readFileSync(proposalPath, 'utf8')) as Record<string, unknown>;
     proposal['summary'] = 'mutated after lifecycle retirement';
     writeFileSync(proposalPath, `${JSON.stringify(proposal)}\n`, { mode: 0o600 });
@@ -3426,9 +3463,10 @@ describe('generated repair lifecycle store', () => {
 
   it('keeps exact retired proposal authority beyond the default 512-file inbox bound', () => {
     const item = repairItem();
-    const proposalId = 'zzz-authoritative-proposal';
-    expect(recordOrdinaryProposal(item, ATTEMPT_ONE, proposalId))
+    const requestedProposalId = 'zzz-authoritative-proposal';
+    expect(recordOrdinaryProposal(item, ATTEMPT_ONE, requestedProposalId))
       .toMatchObject({ available: true, disposition: 'retired', recorded: true });
+    const proposalId = durableProposalId(requestedProposalId);
     const dir = inboxDir();
     const template = JSON.parse(readFileSync(join(dir, `${proposalId}.json`), 'utf8')) as {
       id: string;
@@ -3776,7 +3814,7 @@ describe('generated repair lifecycle store', () => {
     expect(raw).not.toContain(item.title);
     expect(raw).not.toContain(item.detail);
     expect(raw).not.toContain(ATTEMPT_ONE);
-    expect(raw).not.toContain('prop-generated-repair');
+    expect(raw).not.toContain(durableProposalId('prop-generated-repair'));
     expect(statSync(path).mode & 0o077).toBe(0);
   });
 

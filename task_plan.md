@@ -2475,6 +2475,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove the M403 correction in both protected Windows 1/3 hermetic runs; the child now returns the expected authoritative `unenrolled` result.
 - [x] Classify the remaining duplicate native-step failure as one M310 identity fixture exceeding its unchanged five-second body during repeated exact proposal-lock assurances.
 - [x] Scope the authenticated semantic private-storage adapter to M310's physical alias/canonicalization behavior and restore native mode in `finally`; no production code, assertion, timeout, or exact-DACL proof changes.
+- [x] Isolate the six remaining native M360 failures to its hand-written proposal JSON bypassing production persistence; do not relax locks, DACLs, lifecycle admission, assertions, or deadlines.
+- [x] File M360 authority fixtures through `createProposal()`, reload exact causal bindings through `loadProposal()`, and let production-generated proposal IDs flow into dispatch and lifecycle evidence.
+- [x] Pass full M360 at 111 assertions with two platform skips, H2 proposal persistence at 10/10, typecheck, scoped lint, and diff checks.
 - [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
