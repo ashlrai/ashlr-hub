@@ -2430,6 +2430,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make M342's crash attempt ordinal two of the already-admitted generation, route only its exact intent and dot-delimited stage path through the real native adapter, assert the exact two native call tuples, remove retries, and restore full native mode before later DACL proofs.
 - [x] Give H7 one explicit real outward-fence authority proof and use the Windows semantic adapter only for its repeated rollback-behavior cases; preserve every assertion and the existing 5/15-second deadlines.
 - [x] Pass M342/H7/M30 at 156 assertions with four platform skips, full quiet lint, typecheck, build, zero-vulnerability audit, diff checks, and independent SHIP with no P0/P1 findings.
+- [x] Classify `2cd75e1`: H7 passes both native 2/3 duplicates and M342's exact intent stage/final proof passes both native 1/3 jobs; only the later retention recovery trigger still fails after repeated unrelated ACL assurances. Both Ubuntu, macOS, and 3/3 duplicates pass; one PR-only M407 overflow timeout is duplicate-asymmetric.
+- [x] Route only the retention marker's atomic stage rewrite and final canonical path through the real native adapter, assert the exact two calls, restore full native mode, and retain the final real readback inspection.
+- [x] Repass M342/H7/M30 at 156 assertions with four platform skips plus typecheck, focused lint, and diff checks after the retention correction.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

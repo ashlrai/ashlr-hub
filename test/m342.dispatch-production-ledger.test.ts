@@ -273,6 +273,19 @@ function useNativePrivateStorageFixture(): void {
   privateStorageHarness.nativeExactPath = undefined;
 }
 
+function expectSelectiveNativeFileRewrite(path: string, callsBefore: number): void {
+  expect(privateStorageHarness.realInvocations.slice(callsBefore)).toEqual([
+    {
+      path: expect.stringMatching(new RegExp(
+        `^${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[a-f0-9]{32}\\.stage$`,
+      )),
+      kind: 'file',
+      mode: 'secure-created',
+    },
+    { path, kind: 'file', mode: 'inspect-existing' },
+  ]);
+}
+
 function establishNativePrivateStorageFixtureRoot(): void {
   useNativePrivateStorageFixture();
   process.env.HOME = home;
@@ -2056,16 +2069,7 @@ describe('M342 dispatch production ledger', () => {
       _setDispatchProductionLedgerRetentionHooksForTest(undefined);
     }
     useNativePrivateStorageFixture();
-    expect(privateStorageHarness.realInvocations.slice(intentNativeCallsBefore)).toEqual([
-      {
-        path: expect.stringMatching(new RegExp(
-          `^${expectedIntentPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[a-f0-9]{32}\\.stage$`,
-        )),
-        kind: 'file',
-        mode: 'secure-created',
-      },
-      { path: expectedIntentPath, kind: 'file', mode: 'inspect-existing' },
-    ]);
+    expectSelectiveNativeFileRewrite(expectedIntentPath, intentNativeCallsBefore);
     expect(assuredIntentPath).toBe(expectedIntentPath);
     expect(intentExistedWhenAssured).toBe(true);
     expect(existsSync(expectedIntentPath)).toBe(true);
@@ -2095,6 +2099,8 @@ describe('M342 dispatch production ledger', () => {
     expect(assurePrivateStoragePath(
       retentionPath, 'file', 'secure-created', { anchorPath: dispatchProductionDir() },
     ).ok).toBe(true);
+    useWindowsSelectiveNativePrivateStorageFixture(retentionPath);
+    const retentionNativeCallsBefore = privateStorageHarness.realInvocations.length;
 
     const recoveryHandoffId = 'f'.repeat(63) + 'a';
     const recoveryTrigger = makeProofEvent({
@@ -2104,6 +2110,8 @@ describe('M342 dispatch production ledger', () => {
       trajectoryId: 'run:attempt-windows-retention-recovery-trigger',
     });
     expect(recordDispatchProduction(recoveryTrigger)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    useNativePrivateStorageFixture();
+    expectSelectiveNativeFileRewrite(retentionPath, retentionNativeCallsBefore);
     expect(existsSync(retentionPath)).toBe(true);
     expect(JSON.parse(readFileSync(retentionPath, 'utf8'))).toMatchObject({
       schemaVersion: 5,
