@@ -270,6 +270,13 @@ export interface AgentWorkspaceRecentAction {
   model?: string | null;
 }
 
+export interface AgentWorkspaceRunSignal {
+  runId: string;
+  terminal: 'completed' | 'blocked' | 'unknown';
+  proposal: 'created' | 'not-created' | 'unknown';
+  latestAt: string;
+}
+
 export interface AgentWorkspaceStatus {
   generatedAt: string;
   windowHours: number;
@@ -298,6 +305,9 @@ export interface AgentWorkspaceStatus {
     repo: number;
   };
   recentActions: AgentWorkspaceRecentAction[];
+  /** Advisory closed work-state projection. Never grants dispatch or merge authority. */
+  runSignals?: AgentWorkspaceRunSignal[];
+  runSignalsState?: 'available' | 'withheld';
   sourceQuality?: AgentActionSourceQuality;
 }
 
@@ -1107,6 +1117,63 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
   };
 }
 
+function agentWorkspaceRunSignals(events: AgentActionEvent[]): AgentWorkspaceRunSignal[] {
+  const byRun = new Map<string, {
+    terminal: Set<'completed' | 'blocked'>;
+    proposal: Set<'created' | 'not-created'>;
+    latestAt: string;
+  }>();
+  for (const event of events) {
+    if (!event.runId || !event.semanticEvents) continue;
+    const expectedSubject = `run:${event.runId}`;
+    const subject = agentSemanticBoundSubjectRef(event.semanticEvents, {
+      proposalId: event.proposalId,
+      runId: event.runId,
+      trajectoryId: event.trajectoryId,
+    });
+    if (subject !== expectedSubject) continue;
+    const semanticEvents = sanitizeAgentSemanticEvents(
+      event.semanticEvents,
+      expectedSubject,
+      agentSemanticModelFamily(event.model ?? event.backend),
+      expectedAgentActionSemanticProducer(event.actor),
+    );
+    if (!semanticEvents) continue;
+    const state = byRun.get(event.runId) ?? {
+      terminal: new Set<'completed' | 'blocked'>(),
+      proposal: new Set<'created' | 'not-created'>(),
+      latestAt: event.ts,
+    };
+    let observed = false;
+    for (const semanticEvent of semanticEvents) {
+      if (semanticEvent.kind === 'action' && semanticEvent.actionCode === 'agent.run') {
+        if (semanticEvent.status === 'completed' || semanticEvent.status === 'blocked') {
+          state.terminal.add(semanticEvent.status);
+          observed = true;
+        }
+      }
+      if (semanticEvent.kind === 'observation' &&
+        semanticEvent.metricCode === 'agent.proposal.created') {
+        state.proposal.add(semanticEvent.value === 1 ? 'created' : 'not-created');
+        observed = true;
+      }
+    }
+    if (!observed) continue;
+    if (Date.parse(event.ts) > Date.parse(state.latestAt)) state.latestAt = event.ts;
+    byRun.set(event.runId, state);
+  }
+  return [...byRun.entries()]
+    .map(([runId, state]): AgentWorkspaceRunSignal => ({
+      runId,
+      terminal: state.terminal.size === 1 ? [...state.terminal][0]! : 'unknown',
+      proposal: state.proposal.size === 1 ? [...state.proposal][0]! : 'unknown',
+      latestAt: state.latestAt,
+    }))
+    .sort((left, right) => Date.parse(right.latestAt) - Date.parse(left.latestAt) ||
+      left.runId.localeCompare(right.runId))
+    .slice(0, 50);
+}
+
 function isAgentWorkspaceProductionEvent(event: AgentActionEvent): boolean {
   if (event.outcome === 'started') return false;
   if (event.counts?.dispatched === 0) return false;
@@ -1276,6 +1343,8 @@ export function summarizeAgentWorkspace(
       repo: entropy(repoRows),
     },
     recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
+    runSignals: agentWorkspaceRunSignals(semanticEvents),
+    runSignalsState: 'available',
   };
 }
 
@@ -1322,6 +1391,10 @@ export function readAgentWorkspaceDetailed(opts?: {
     unreadableFiles: read.unreadableFiles,
   };
   workspace.sourceQuality = sourceQuality;
+  if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
+    workspace.runSignals = [];
+    workspace.runSignalsState = 'withheld';
+  }
   return { workspace, events, sourceQuality };
 }
 

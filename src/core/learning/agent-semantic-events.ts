@@ -267,6 +267,14 @@ function sanitizeOne(value: unknown): AgentSemanticEventV1 | undefined {
           (typeof event['targetEventId'] !== 'string' || !EVENT_ID_RE.test(event['targetEventId'])))) return undefined;
       break;
   }
+  if ((event['predicate'] === 'agent.run.terminal' || event['actionCode'] === 'agent.run') && (
+    event['predicate'] !== 'agent.run.terminal' || event['actionCode'] !== 'agent.run' ||
+    !['completed', 'blocked'].includes(String(event['status']))
+  )) return undefined;
+  if ((event['predicate'] === 'agent.proposal.created' || event['metricCode'] === 'agent.proposal.created') && (
+    event['predicate'] !== 'agent.proposal.created' ||
+    event['metricCode'] !== 'agent.proposal.created' || event['unit'] !== 'boolean'
+  )) return undefined;
   const typed = event as unknown as AgentSemanticEventV1;
   const { eventId: _eventId, ...unsigned } = typed;
   return agentSemanticEventId(unsigned) === typed.eventId ? typed : undefined;
