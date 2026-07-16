@@ -1884,7 +1884,7 @@ type AttemptReceiptRetentionArtifacts =
   | AttemptReceiptRetentionArtifactSet;
 
 interface DispatchProductionLedgerRetentionHooksForTest {
-  afterAttemptReceiptIntent?: () => void;
+  afterAttemptReceiptIntentAssured?: (path: string) => void;
   afterAttemptRetentionMarker?: () => void;
   afterFailureAttemptAppend?: () => void;
   afterTreatmentCompactedMarkers?: () => void;
@@ -2867,7 +2867,7 @@ function recordAttemptProductionWithReceipt(
       tmp = null;
       inspectExactReceiptAuthorityFile(intentPath);
       fsyncDirectory(dir);
-      dispatchProductionLedgerRetentionHooksForTest?.afterAttemptReceiptIntent?.();
+      dispatchProductionLedgerRetentionHooksForTest?.afterAttemptReceiptIntentAssured?.(intentPath);
     } finally {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
     }

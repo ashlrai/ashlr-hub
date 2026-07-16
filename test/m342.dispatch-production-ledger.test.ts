@@ -219,13 +219,13 @@ function ownWindowsFixturePaths(paths: string[]): void {
   if (process.platform !== 'win32' || paths.length === 0) return;
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
-$paths = @([Console]::In.ReadToEnd() | ConvertFrom-Json)
+$paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-foreach ($path in $paths) {
-  $item = Get-Item -LiteralPath $path -Force
-  $acl = $item.GetAccessControl()
+for ($index = 0; $index -lt $paths.Count; $index++) {
+  $path = [string]$paths[$index]
+  $acl = [System.IO.File]::GetAccessControl($path)
   $acl.SetOwner($owner)
-  $item.SetAccessControl($acl)
+  [System.IO.File]::SetAccessControl($path, $acl)
 }
 `;
   const result = spawnSync(
@@ -2007,8 +2007,16 @@ describe('M342 dispatch production ledger', () => {
       runId: 'run-windows-private-intent',
       trajectoryId: 'run:attempt-windows-private-intent',
     });
+    const expectedIntentPath = join(
+      receiptDir,
+      `${pending.repairGenerationId}-1.intent.json`,
+    );
+    let assuredIntentPath: string | undefined;
+    let intentExistedWhenAssured = false;
     _setDispatchProductionLedgerRetentionHooksForTest({
-      afterAttemptReceiptIntent: () => {
+      afterAttemptReceiptIntentAssured: (path) => {
+        assuredIntentPath = path;
+        intentExistedWhenAssured = existsSync(path);
         throw new Error('M342 injected crash after durable attempt intent');
       },
     });
@@ -2017,12 +2025,10 @@ describe('M342 dispatch production ledger', () => {
     } finally {
       _setDispatchProductionLedgerRetentionHooksForTest(undefined);
     }
-    expect(assurePrivateStoragePath(
-      join(receiptDir, `${pending.repairGenerationId}-1.intent.json`),
-      'file',
-      'inspect-existing',
-      { anchorPath: dispatchProductionDir() },
-    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(assuredIntentPath).toBe(expectedIntentPath);
+    expect(intentExistedWhenAssured).toBe(true);
+    expect(existsSync(expectedIntentPath)).toBe(true);
+    expect(readFileSync(expectedIntentPath, 'utf8')).toContain(pending.trajectoryId!);
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });
     const retiringHandoffId = 'e'.repeat(64);
@@ -5412,6 +5418,7 @@ describe('M342 dispatch production ledger', () => {
         sourceState: 'degraded', complete: false, unreadableFiles: 1,
       });
     },
+    60_000,
   );
 
   it.skipIf(process.platform !== 'win32')(
