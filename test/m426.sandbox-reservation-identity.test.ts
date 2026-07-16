@@ -19,6 +19,7 @@ import { delimiter, dirname, join, relative, resolve, win32 } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  _setSandboxGitRunFaultHookForTest,
   canonicalPathIdentity,
   createSandbox,
   listSandboxes,
@@ -37,26 +38,6 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 vi.setConfig({ testTimeout: 15_000 });
 
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
-const gitCleanupHarness = vi.hoisted(() => ({
-  fail: false,
-  calls: [] as string[][],
-}));
-
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
-  return {
-    ...actual,
-    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
-      const commandArgs = Array.isArray(args[1]) ? args[1].map(String) : [];
-      if (gitCleanupHarness.fail && args[0] === 'git' && commandArgs[0] === 'worktree' &&
-        (commandArgs[1] === 'remove' || commandArgs[1] === 'prune')) {
-        gitCleanupHarness.calls.push(commandArgs);
-        throw new Error(`M426 injected git ${commandArgs.slice(0, 2).join(' ')} failure`);
-      }
-      return actual.execFileSync(...args);
-    },
-  };
-});
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -376,8 +357,7 @@ afterEach(() => {
   delete process.env.M426_SOURCE_GIT_DIR;
   delete process.env.M426_SOURCE_GIT_BACKUP;
   delete process.env.M426_REPLACEMENT_GIT_DIR;
-  gitCleanupHarness.fail = false;
-  gitCleanupHarness.calls = [];
+  _setSandboxGitRunFaultHookForTest(undefined);
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
   try {
@@ -558,8 +538,13 @@ describe('M426 sandbox reservation and path identity', () => {
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
     expect(retainedBefore).toContain(aliasWorktree);
     expect(retainedBefore).toContain('locked M426 retained registration');
-    gitCleanupHarness.fail = true;
-    gitCleanupHarness.calls = [];
+    const attemptedCleanup: string[][] = [];
+    _setSandboxGitRunFaultHookForTest((_cwd, args) => {
+      if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) {
+        attemptedCleanup.push([...args]);
+        throw new Error(`M426 injected git ${args.slice(0, 2).join(' ')} failure`);
+      }
+    });
     try {
       const result = removeSandbox(sandbox);
       expect(result).toMatchObject({
@@ -570,14 +555,14 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
       expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
-      expect(gitCleanupHarness.calls.some((args) => (
+      expect(attemptedCleanup.some((args) => (
         args[0] === 'worktree' && args[1] === 'remove'
       ))).toBe(true);
-      expect(gitCleanupHarness.calls.some((args) => (
+      expect(attemptedCleanup.some((args) => (
         args[0] === 'worktree' && args[1] === 'prune'
       ))).toBe(true);
     } finally {
-      gitCleanupHarness.fail = false;
+      _setSandboxGitRunFaultHookForTest(undefined);
       process.env.PATH = originalPath;
       writeFileSync(registrationGitdir, physicalRegistration, 'utf8');
       try { git(repo.dir, ['worktree', 'unlock', sandbox.worktreePath]); } catch { /* best effort */ }

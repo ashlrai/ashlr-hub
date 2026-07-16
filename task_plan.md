@@ -2416,6 +2416,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the remaining M342 failures to its three deliberate real-DACL cases, grant only that native test adapter the existing 15-second bounded ceiling, and keep production's five-second default unchanged.
 - [x] Remove unrelated Windows ACL startup from M413 cancellation/finalization semantics while retaining the real mutation fence, kill-switch, cancellation, and cleanup authority.
 - [x] Pass the checked-in native lifecycle command (52 selected assertions), full M342 (137 passed, four skipped), full M426 (19/19), exact 2/3 (213/213), M413 (1/1), M30 (7/7), typecheck, full lint at the unchanged baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
+- [x] Classify `c4fe878`: M413 is green in both 2/3 duplicates, while setup-time module caching bypasses the M426 child-process mock and M342's same three exact native assertions remain unresolved despite the test-only 15-second ceiling.
+- [x] Replace M426 injection with a fault-only `gitRun` pre-execution hook that cannot mutate argv, suppress a permitted command, or fabricate Git output; reset in both `finally` and `afterEach`.
+- [x] Add authenticated native diagnostics for M342 intent DACL, broadened directory reasons, and the 512-file retention batch preflight without weakening any expected authority outcome.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

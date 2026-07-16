@@ -91,7 +91,10 @@ import {
   repairTreatmentUnitId,
 } from '../src/core/fleet/generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
-import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import {
+  assurePrivateStoragePath,
+  assurePrivateStoragePaths,
+} from '../src/core/util/private-storage.js';
 import { assureStableRegularFiles } from '../src/core/util/stable-file-read.js';
 
 let prevAshlrHome: string | undefined;
@@ -1987,7 +1990,7 @@ describe('M342 dispatch production ledger', () => {
       'file',
       'inspect-existing',
       { anchorPath: dispatchProductionDir() },
-    ).ok).toBe(true);
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });
     const retiringHandoffId = 'e'.repeat(64);
@@ -5344,20 +5347,32 @@ describe('M342 dispatch production ledger', () => {
       const treatmentDir = join(dispatchProductionDir(), 'repair-treatment-outcomes');
       grantWindowsWorldRead(attemptDir);
       grantWindowsWorldRead(treatmentDir);
+      const broadenedAuthority = [];
       for (const dir of [attemptDir, treatmentDir]) {
         expect(assurePrivateStoragePath(
           dir, 'directory', 'inspect-owned', { anchorPath: dispatchProductionDir() },
         ).ok).toBe(true);
-        expect(assurePrivateStoragePath(
+        const exact = assurePrivateStoragePath(
           dir, 'directory', 'inspect-existing', { anchorPath: dispatchProductionDir() },
-        ).ok).toBe(false);
+        );
+        broadenedAuthority.push(exact);
+        expect(exact.ok).toBe(false);
       }
 
-      expect(resolveDispatchProductionAttemptReceiptWitnesses([{
-        repairGenerationId: attempt.repairGenerationId!, repairAttemptOrdinal: 1,
-      }])).toEqual({
-        status: 'resolved',
-        resolutions: [{ status: 'degraded', reason: 'source-unsafe' }],
+      expect({
+        broadenedAuthority,
+        resolution: resolveDispatchProductionAttemptReceiptWitnesses([{
+          repairGenerationId: attempt.repairGenerationId!, repairAttemptOrdinal: 1,
+        }]),
+      }).toEqual({
+        broadenedAuthority: [
+          expect.objectContaining({ ok: false }),
+          expect.objectContaining({ ok: false }),
+        ],
+        resolution: {
+          status: 'resolved',
+          resolutions: [{ status: 'degraded', reason: 'source-unsafe' }],
+        },
       });
       expect(readDispatchProductionAttemptProtocolQuality()).toMatchObject({ status: 'degraded' });
       expect(hasExactDispatchProductionTreatmentOutcomeReceipt(treatment)).toBe(false);
@@ -5473,7 +5488,17 @@ describe('M342 dispatch production ledger', () => {
       }
       protectWindowsFixtureTree(receiptDir);
 
-      expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const receiptPaths = readdirSync(receiptDir)
+        .filter((name) => name.endsWith('.json'))
+        .slice(0, 512)
+        .map((name) => join(receiptDir, name));
+      const batchPreflight = assurePrivateStoragePaths(receiptPaths, {
+        anchorPath: dispatchProductionDir(),
+      });
+      expect({ batchPreflight, write: recordDispatchProduction(witness) }).toEqual({
+        batchPreflight: { ok: true, reason: 'owned-safe-paths' },
+        write: { attempted: 1, recorded: 1, failed: 0 },
+      });
       expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
 
       const receiptPath = join(
