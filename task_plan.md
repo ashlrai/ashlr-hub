@@ -2667,3 +2667,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Rebase on the final PR #49 head and rerun the complete local evidence matrix.
 - [x] Publish protected stacked draft PR #50 on PR #49.
 - [ ] Replace remaining durable free-form decision rationale with closed reason codes in a separate compatibility-scoped slice.
+
+## Closed Judge Decision Metadata (2026-07-16)
+- [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.
+- [x] Version new judged decision rows as metadata-only v2 with finite verdict and reason-code registries.
+- [x] Omit model rationale and arbitrary detail at the generic ledger boundary; degrade v2 rows that smuggle raw rationale fields.
+- [x] Preserve legacy judged history through a redacted v1 read model without returning historical reason or detail text.
+- [x] Replace rejected-proposal and Gate 7 persistence with fixed code-derived text while preserving immediate ephemeral Manager rationale.
+- [x] Stop proposal titles and judge reasoning from entering anti-playbook genome entries; retain finite negative observations only.
+- [x] Pass 1,759 direct-consumer assertions across 65 suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
+- [ ] Publish a protected stacked draft PR on PR #50 and require the complete duplicate protected matrix.
