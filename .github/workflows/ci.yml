@@ -124,7 +124,7 @@ jobs:
       - name: Test native path and lifecycle authority (hermetic)
         if: matrix.label == 'windows, portability 1/3'
         run: >-
-          npm run test:ci --
+          node scripts/test-native-path-lifecycle.mjs --
           test/h1.fixture.test.ts test/h4.sandbox-enrollment-kill.test.ts
           test/m165.self-heal.test.ts test/m201.daemon-loop.test.ts
           test/m22.backlog.test.ts test/m229.goal-engine-trio.test.ts

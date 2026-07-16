@@ -424,6 +424,12 @@ describe('M30 CI workflow', () => {
       /^ {6}- name: Test native path and lifecycle authority \(hermetic\)[\s\S]*?(?=^ {6}- name: |^ {6}#)/m,
     )?.[0] ?? '';
     expect(nativePathStep).not.toBe('');
+    expect(nativePathStep).toContain('node scripts/test-native-path-lifecycle.mjs --');
+    const nativePathRunner = resolve(repoRoot, 'scripts/test-native-path-lifecycle.mjs');
+    expect(existsSync(nativePathRunner)).toBe(true);
+    const nativePathRunnerSource = readFileSync(nativePathRunner, 'utf8');
+    expect(nativePathRunnerSource).toContain("'ASHLR_TEST_CI_TIMEOUT_MS'");
+    expect(nativePathRunnerSource).toContain('deadline - Date.now()');
     const nativePathFiles = nativePathStep.match(
       /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
     ) ?? [];

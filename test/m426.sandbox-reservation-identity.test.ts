@@ -520,6 +520,9 @@ describe('M426 sandbox reservation and path identity', () => {
 
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
     const repo = fx.makeRepo();
+    const cleanupMarker = join(fx.home, 'failed-worktree-cleanup.txt');
+    installGitShim('fail-worktree-cleanup');
+    process.env.M426_MARKER = cleanupMarker;
     prepareSandboxAuthorityRoot();
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
     const aliasHome = makeDirectoryAlias(fx.home);
@@ -543,10 +546,6 @@ describe('M426 sandbox reservation and path identity', () => {
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
     expect(retainedBefore).toContain(aliasWorktree);
     expect(retainedBefore).toContain('locked M426 retained registration');
-    const cleanupMarker = join(fx.home, 'failed-worktree-cleanup.txt');
-    installGitShim('fail-worktree-cleanup');
-    process.env.M426_MARKER = cleanupMarker;
-
     try {
       const result = removeSandbox(sandbox);
       expect(result).toMatchObject({

@@ -2410,6 +2410,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fault-inject only worktree remove/prune after a real alias registration, prove residual inventory and attempted cleanup, and keep M426 path semantics behind the real mutation fence with dedicated ACL proofs elsewhere.
 - [x] Pass full M426 (19/19), M23+M426 integration (49/49), typecheck, changed-file lint, and diff checks.
 - [x] Pass full lint at the existing warning baseline, build, zero-vulnerability audit, and independent final SHIP review with no P0/P1 findings.
+- [x] Classify `a5ce1a7`: Ubuntu exhaustive, macOS shared-queue authority, Windows overflow, and Windows 3/3 passed in both duplicate runs; native 1/3 retained 24 lifecycle failures and native 2/3 retained one cleanup-injection failure.
+- [x] Isolate M342/M360/M362 into independent hermetic Vitest processes while preserving the exact manifest, selector set, five-minute idle watchdog, and one aggregate 15-minute hard cap.
+- [x] Install the M426 cleanup fault-injection shim before sandbox creation caches the pinned Git executable; preserve real Git inventory and fail only remove/prune.
+- [x] Pass the checked-in native lifecycle command (52 selected assertions), full M426 (19/19), M30 (7/7), typecheck, scoped lint, build, zero-vulnerability audit, and diff checks.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth
