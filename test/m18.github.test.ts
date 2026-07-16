@@ -155,6 +155,84 @@ const VALID_CLASSIC_PROTECTION = {
   allow_fork_syncing: { enabled: false },
 };
 
+function classicAuthorityFor(
+  classic: typeof VALID_CLASSIC_PROTECTION = VALID_CLASSIC_PROTECTION,
+): Record<string, unknown> {
+  const reviews = classic.required_pull_request_reviews;
+  const allowance = (actors: {
+    users: Array<{ id: number; login: string }>;
+    teams: Array<{ id: number; slug: string }>;
+    apps: Array<{ id: number; slug: string }>;
+  }) => {
+    const nodes = [
+      ...actors.users.map((actor) => ({ actor: {
+        __typename: 'User', databaseId: actor.id, login: actor.login,
+      } })),
+      ...actors.teams.map((actor) => ({ actor: {
+        __typename: 'Team', databaseId: actor.id, slug: actor.slug,
+      } })),
+      ...actors.apps.map((actor) => ({ actor: {
+        __typename: 'App', databaseId: actor.id, slug: actor.slug,
+      } })),
+    ];
+    return { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes };
+  };
+  return {
+    id: 'BPR_test',
+    pattern: 'main',
+    allowsDeletions: classic.allow_deletions.enabled,
+    allowsForcePushes: classic.allow_force_pushes.enabled,
+    blocksCreations: classic.block_creations.enabled,
+    dismissesStaleReviews: reviews.dismiss_stale_reviews,
+    isAdminEnforced: classic.enforce_admins.enabled,
+    lockAllowsFetchAndMerge: classic.allow_fork_syncing.enabled,
+    lockBranch: classic.lock_branch.enabled,
+    requireLastPushApproval: reviews.require_last_push_approval,
+    requiredApprovingReviewCount: reviews.required_approving_review_count,
+    requiresApprovingReviews: true,
+    requiresCodeOwnerReviews: reviews.require_code_owner_reviews,
+    requiresCommitSignatures: classic.required_signatures.enabled,
+    requiresConversationResolution: classic.required_conversation_resolution.enabled,
+    requiresDeployments: true,
+    requiresLinearHistory: classic.required_linear_history.enabled,
+    requiresStatusChecks: true,
+    requiresStrictStatusChecks: classic.required_status_checks.strict,
+    restrictsPushes: true,
+    restrictsReviewDismissals: true,
+    requiredDeploymentEnvironments: ['staging', 'production'],
+    requiredStatusChecks: [
+      ...classic.required_status_checks.contexts.map((context) => ({ context, app: null })),
+      ...classic.required_status_checks.checks.map((check) => ({
+        context: check.context,
+        app: check.app_id === null ? null : { databaseId: check.app_id },
+      })),
+    ],
+    bypassForcePushAllowances: allowance({
+      users: [], teams: [], apps: [{ id: 99, slug: 'force-push-app' }],
+    }),
+    bypassPullRequestAllowances: allowance(reviews.bypass_pull_request_allowances),
+    pushAllowances: allowance(classic.restrictions),
+    reviewDismissalAllowances: allowance(reviews.dismissal_restrictions),
+  };
+}
+
+function exactAuthorityJson(classic: Record<string, unknown> | null): string {
+  return JSON.stringify({
+    data: {
+      repository: {
+        id: 'R_test',
+        nameWithOwner: 'acme/my-repo',
+        defaultBranchRef: { name: 'main' },
+        ref: {
+          name: 'main',
+          target: { oid: 'a'.repeat(40) },
+          branchProtectionRule: classic,
+        },
+      },
+    },
+  });
+}
+
 const VALID_EFFECTIVE_RULE = {
   type: 'required_status_checks',
   ruleset_source_type: 'Repository',
@@ -194,15 +272,38 @@ function cloneFixture<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function enterpriseRulesetFixtures() {
+  const effective = cloneFixture(VALID_EFFECTIVE_RULE);
+  effective.ruleset_id = 900;
+  effective.ruleset_source_type = 'Enterprise';
+  effective.ruleset_source = 'Acme-Enterprise';
+
+  const detail = cloneFixture(VALID_RULESET_DETAIL);
+  detail.id = 900;
+  detail.source_type = 'Enterprise';
+  detail.source = 'Acme-Enterprise';
+  detail.bypass_actors = [
+    { actor_id: null, actor_type: 'EnterpriseOwner', bypass_mode: 'always' },
+    { actor_id: null, actor_type: 'EnterpriseRole', bypass_mode: 'pull_request' },
+  ];
+  return { effective, detail };
+}
+
 let protectionRead = 0;
 
-async function readClassicProtection(classic: unknown) {
+async function readClassicProtection(
+  classic: unknown,
+  authority: Record<string, unknown> = classicAuthorityFor(),
+) {
   protectionRead++;
   setSpawnSequence([
     makeSpawn(PROTECTION_REPO_JSON),
+    makeSpawn(exactAuthorityJson(authority)),
     makeSpawn(PROTECTION_BRANCH_JSON),
     makeSpawn(JSON.stringify(classic)),
     makeSpawn('[]'),
+    makeSpawn('[]'),
+    makeSpawn(exactAuthorityJson(authority)),
   ]);
   return readBranchProtectionAttestation(`/fake/protection-${protectionRead}`, 'main', {
     expectedNameWithOwner: 'acme/my-repo',
@@ -213,14 +314,19 @@ async function readClassicProtection(classic: unknown) {
 async function readRulesetProtection(
   effective: unknown = [VALID_EFFECTIVE_RULE],
   detail: unknown = VALID_RULESET_DETAIL,
+  finalDetail: unknown = detail,
 ) {
   protectionRead++;
   setSpawnSequence([
     makeSpawn(PROTECTION_REPO_JSON),
+    makeSpawn(exactAuthorityJson(null)),
     makeSpawn(PROTECTION_BRANCH_JSON),
     makeSpawn('', 1, undefined, 'HTTP 404: Not Found'),
     makeSpawn(JSON.stringify(effective)),
     makeSpawn(JSON.stringify(detail)),
+    makeSpawn(JSON.stringify(effective)),
+    makeSpawn(JSON.stringify(finalDetail)),
+    makeSpawn(exactAuthorityJson(null)),
   ]);
   return readBranchProtectionAttestation(`/fake/ruleset-${protectionRead}`, 'main', {
     expectedNameWithOwner: 'acme/my-repo',
@@ -1010,8 +1116,17 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
 
     expect(attestation.ok).toBe(true);
     expect(attestation.policySnapshot).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       classic: {
+        ruleId: 'BPR_test',
+        pattern: 'main',
+        bypassForcePushAllowanceCount: 1,
+        bypassForcePushAllowances: {
+          users: [],
+          teams: [],
+          apps: [{ id: '99', name: 'force-push-app' }],
+        },
+        requiredDeployments: { environments: ['production', 'staging'] },
         requiredStatusChecks: {
           strict: true,
           enforcementLevel: 'non_admins',
@@ -1026,6 +1141,7 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
           requireCodeOwnerReviews: true,
           requiredApprovingReviewCount: 1,
           requireLastPushApproval: true,
+          restrictReviewDismissals: true,
           dismissalRestrictions: {
             users: [{ id: '10', name: 'releaseadmin' }],
             teams: [{ id: '20', name: 'maintainers' }],
@@ -1071,7 +1187,7 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
     for (const mutate of mutations) {
       const fixture = cloneFixture(VALID_CLASSIC_PROTECTION);
       mutate(fixture);
-      const changed = await readClassicProtection(fixture);
+      const changed = await readClassicProtection(fixture, classicAuthorityFor(fixture));
       expect(changed.available).toBe(true);
       expect(JSON.stringify(changed.policySnapshot)).not.toBe(baselineJson);
     }
@@ -1094,10 +1210,14 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
     const calls: string[][] = [];
     const responses = [
       makeSpawn(PROTECTION_REPO_JSON),
+      makeSpawn(exactAuthorityJson(null)),
       makeSpawn(PROTECTION_BRANCH_JSON),
       makeSpawn('', 1, undefined, 'HTTP 404: Not Found'),
       makeSpawn(JSON.stringify([VALID_EFFECTIVE_RULE])),
       makeSpawn(JSON.stringify(VALID_RULESET_DETAIL)),
+      makeSpawn(JSON.stringify([VALID_EFFECTIVE_RULE])),
+      makeSpawn(JSON.stringify(VALID_RULESET_DETAIL)),
+      makeSpawn(exactAuthorityJson(null)),
     ];
     let index = 0;
     _spawnSyncImpl = (_cmd: unknown, args: unknown) => {
@@ -1114,6 +1234,14 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
 
     expect(attestation.ok).toBe(true);
     expect(calls[4]).toEqual([
+      'api',
+      'repos/acme/my-repo/rules/branches/main?per_page=100&page=1',
+    ]);
+    expect(calls[5]).toEqual([
+      'api',
+      'repos/acme/my-repo/rulesets/700?includes_parents=true',
+    ]);
+    expect(calls[7]).toEqual([
       'api',
       'repos/acme/my-repo/rulesets/700?includes_parents=true',
     ]);
@@ -1141,7 +1269,67 @@ describe('readBranchProtectionAttestation — canonical policy snapshot', () => 
           strict_required_status_checks_policy: true,
         },
       }],
+      requiredCheckBindings: [{ context: 'verify', appId: '42' }],
     }]);
+  });
+
+  it.each([
+    ['Enterprise', 'Acme-Enterprise'],
+    ['Organization', 'Acme'],
+  ] as const)('accepts canonical owner and role bypass actors from %s rulesets', async (
+    sourceType,
+    source,
+  ) => {
+    const { effective, detail } = enterpriseRulesetFixtures();
+    effective.ruleset_source_type = sourceType;
+    effective.ruleset_source = source;
+    detail.source_type = sourceType;
+    detail.source = source;
+
+    const attestation = await readRulesetProtection([effective], detail);
+
+    expect(attestation).toMatchObject({ ok: true, available: true, sources: ['ruleset'] });
+    expect(attestation.policySnapshot?.rulesets).toEqual([expect.objectContaining({
+      id: '900',
+      sourceType,
+      source: source.toLowerCase(),
+      bypassActors: [
+        { actorId: null, actorType: 'EnterpriseOwner', bypassMode: 'always' },
+        { actorId: null, actorType: 'EnterpriseRole', bypassMode: 'pull_request' },
+      ],
+    })]);
+  });
+
+  it('rejects malformed or source-misused Enterprise bypass actors', async () => {
+    const ownerWithId = enterpriseRulesetFixtures();
+    ownerWithId.detail.bypass_actors[0]!.actor_id = 3;
+
+    const roleWithId = enterpriseRulesetFixtures();
+    roleWithId.detail.bypass_actors[1]!.actor_id = 17;
+
+    const malformedId = enterpriseRulesetFixtures();
+    (malformedId.detail.bypass_actors[0] as unknown as Record<string, unknown>)['actor_id'] = 'bad';
+
+    const repositoryMisuse = enterpriseRulesetFixtures();
+    repositoryMisuse.effective.ruleset_source_type = 'Repository';
+    repositoryMisuse.effective.ruleset_source = 'acme/my-repo';
+    repositoryMisuse.detail.source_type = 'Repository';
+    repositoryMisuse.detail.source = 'acme/my-repo';
+
+    for (const [label, fixture] of [
+      ['owner id', ownerWithId],
+      ['role id', roleWithId],
+      ['malformed id', malformedId],
+      ['repository source misuse', repositoryMisuse],
+    ] as const) {
+      const attestation = await readRulesetProtection([fixture.effective], fixture.detail);
+      expect(attestation, label).toMatchObject({
+        ok: false,
+        available: false,
+        protected: false,
+        policySnapshot: null,
+      });
+    }
   });
 
   it('changes the snapshot for critical effective rule, bypass, and condition changes', async () => {
