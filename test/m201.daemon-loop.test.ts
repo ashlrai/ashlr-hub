@@ -1229,7 +1229,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('A0b: a temporarily missing exact canonical enrollment degrades the tick', async () => {
     const repo = fx.makeRepo();
@@ -1243,7 +1243,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();

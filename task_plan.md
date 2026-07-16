@@ -2419,6 +2419,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Classify `c4fe878`: M413 is green in both 2/3 duplicates, while setup-time module caching bypasses the M426 child-process mock and M342's same three exact native assertions remain unresolved despite the test-only 15-second ceiling.
 - [x] Replace M426 injection with a fault-only `gitRun` pre-execution hook that cannot mutate argv, suppress a permitted command, or fabricate Git output; reset in both `finally` and `afterEach`.
 - [x] Add authenticated native diagnostics for M342 intent DACL, broadened directory reasons, and the 512-file retention batch preflight without weakening any expected authority outcome.
+- [x] Classify `21e1a57`: both 2/3 jobs exposed a Git-format separator defect in the alias backlink; native M342 exposed an imprecise unsafe-source projection, a timing-dependent durable-intent fixture, and Administrator-owned manually seeded receipts. One PR-native run also exceeded two five-second M201 junction cases.
+- [x] Write alias backlinks in Git `/` syntax with exact porcelain assertions, inject the attempt crash after the durable intent fsync, preserve `source-unsafe` in the batch resolver, normalize only the manually seeded receipt owners, and grant the two real junction cases bounded 15-second bodies.
+- [x] Pass combined M201/M342/M426 verification at 373 passed with four platform skips, full M426 at 19/19, M30 at 7/7, typecheck, quiet full lint, and diff checks; receive independent agreement on all three native root causes.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

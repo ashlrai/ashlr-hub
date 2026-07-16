@@ -718,10 +718,25 @@ function inspectExactReceiptAuthorityFile(path: string): void {
   ).ok) throw new Error('unsafe Windows receipt authority file');
 }
 
+class ReceiptDirectoryAuthorityError extends Error {
+  constructor(readonly reason: string) {
+    super(`unsafe Windows receipt authority directory: ${reason}`);
+  }
+}
+
+const UNSAFE_RECEIPT_DIRECTORY_REASONS = new Set([
+  'anchor-not-reached', 'dacl-not-protected', 'deny-ace', 'inherited-ace',
+  'missing-or-duplicate-principal', 'reparse-ancestor', 'reparse-point',
+  'unexpected-ace-count', 'untrusted-ancestor-delete', 'untrusted-ancestor-owner',
+  'untrusted-item-write', 'wrong-flags', 'wrong-kind', 'wrong-owner', 'wrong-rights',
+]);
+
 function inspectExactReceiptAuthorityDirectory(path: string): void {
-  if (process.platform === 'win32' && !assurePrivateStoragePath(
+  if (process.platform !== 'win32') return;
+  const assurance = assurePrivateStoragePath(
     path, 'directory', 'inspect-existing', { anchorPath: dispatchProductionDir() },
-  ).ok) throw new Error('unsafe Windows receipt authority directory');
+  );
+  if (!assurance.ok) throw new ReceiptDirectoryAuthorityError(assurance.reason);
 }
 
 function treatmentOutcomeReceiptName(event: DispatchProductionEvent): string | null {
@@ -1869,6 +1884,7 @@ type AttemptReceiptRetentionArtifacts =
   | AttemptReceiptRetentionArtifactSet;
 
 interface DispatchProductionLedgerRetentionHooksForTest {
+  afterAttemptReceiptIntent?: () => void;
   afterAttemptRetentionMarker?: () => void;
   afterFailureAttemptAppend?: () => void;
   afterTreatmentCompactedMarkers?: () => void;
@@ -2110,10 +2126,11 @@ function addAttemptGenerationMembershipPersistingQuality(
 
 function readAttemptReceiptProtocolActivation(
   context?: AttemptReceiptBatchReadContext,
+  directoryAlreadyInspected = false,
 ): AttemptReceiptProtocolActivation | null {
   const path = join(attemptProofReceiptDir(), ATTEMPT_RECEIPT_PROTOCOL_FILE);
   if (!existsSync(path)) return null;
-  inspectExactReceiptAuthorityDirectory(attemptProofReceiptDir());
+  if (!directoryAlreadyInspected) inspectExactReceiptAuthorityDirectory(attemptProofReceiptDir());
   inspectExactReceiptAuthorityFile(path);
   const remainingBytes = context ? HARD_READ_MAX_BYTES - context.bytesRead : MAX_ATTEMPT_PROTOCOL_BYTES;
   if (remainingBytes <= 0) throw new Error('attempt receipt protocol byte limit');
@@ -2850,6 +2867,7 @@ function recordAttemptProductionWithReceipt(
       tmp = null;
       inspectExactReceiptAuthorityFile(intentPath);
       fsyncDirectory(dir);
+      dispatchProductionLedgerRetentionHooksForTest?.afterAttemptReceiptIntent?.();
     } finally {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
     }
@@ -5717,7 +5735,22 @@ export function resolveDispatchProductionAttemptReceiptWitnesses(
   };
   let activation: AttemptReceiptProtocolActivation | null = null;
   if (byGeneration.size > 0) {
-    try { activation = readAttemptReceiptProtocolActivation(context); } catch {
+    const receiptDir = attemptProofReceiptDir();
+    if (existsSync(receiptDir)) {
+      try { inspectExactReceiptAuthorityDirectory(receiptDir); } catch (error) {
+        const reason = error instanceof ReceiptDirectoryAuthorityError &&
+          UNSAFE_RECEIPT_DIRECTORY_REASONS.has(error.reason)
+          ? 'source-unsafe' as const
+          : 'source-unavailable' as const;
+        for (const indexes of byGeneration.values()) {
+          for (const index of indexes) {
+            resolutions[index] = { status: 'degraded', reason };
+          }
+        }
+        return { status: 'resolved', resolutions };
+      }
+    }
+    try { activation = readAttemptReceiptProtocolActivation(context, true); } catch {
       for (const indexes of byGeneration.values()) {
         for (const index of indexes) {
           resolutions[index] = { status: 'degraded', reason: 'source-unavailable' };

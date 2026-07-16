@@ -528,7 +528,10 @@ describe('M426 sandbox reservation and path identity', () => {
     );
     const registrationGitdir = join(worktreeAdminDir, 'gitdir');
     const physicalRegistration = readFileSync(registrationGitdir, 'utf8');
-    const aliasRegistration = `${join(aliasWorktree, '.git')}\n`;
+    const gitAliasWorktree = process.platform === 'win32'
+      ? aliasWorktree.replaceAll('\\', '/')
+      : aliasWorktree;
+    const aliasRegistration = `${gitAliasWorktree}/.git\n`;
     git(repo.dir, [
       'worktree', 'lock', '--reason', 'M426 retained registration', sandbox.worktreePath,
     ]);
@@ -536,12 +539,14 @@ describe('M426 sandbox reservation and path identity', () => {
     writeFileSync(registrationGitdir, aliasRegistration, 'utf8');
     expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
     const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
-    expect(retainedBefore).toContain(aliasWorktree);
+    expect(retainedBefore.split(/\r?\n/u).filter((line) => line.startsWith('worktree ')))
+      .toContain(`worktree ${gitAliasWorktree}`);
+    expect(retainedBefore).not.toContain(`worktree ${gitAliasWorktree}/.git`);
     expect(retainedBefore).toContain('locked M426 retained registration');
-    const attemptedCleanup: string[][] = [];
-    _setSandboxGitRunFaultHookForTest((_cwd, args) => {
+    const attemptedCleanup: Array<{ cwd: string; args: string[] }> = [];
+    _setSandboxGitRunFaultHookForTest((cwd, args) => {
       if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) {
-        attemptedCleanup.push([...args]);
+        attemptedCleanup.push({ cwd, args: [...args] });
         throw new Error(`M426 injected git ${args.slice(0, 2).join(' ')} failure`);
       }
     });
@@ -554,13 +559,14 @@ describe('M426 sandbox reservation and path identity', () => {
       expect(result.failureClasses).toContain('worktree-remaining');
       expect(existsSync(sandbox.worktreePath)).toBe(true);
       expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
-      expect(git(repo.dir, ['worktree', 'list', '--porcelain'])).toContain(aliasWorktree);
-      expect(attemptedCleanup.some((args) => (
-        args[0] === 'worktree' && args[1] === 'remove'
-      ))).toBe(true);
-      expect(attemptedCleanup.some((args) => (
-        args[0] === 'worktree' && args[1] === 'prune'
-      ))).toBe(true);
+      const retainedAfter = git(repo.dir, ['worktree', 'list', '--porcelain']);
+      expect(retainedAfter.split(/\r?\n/u).filter((line) => line.startsWith('worktree ')))
+        .toContain(`worktree ${gitAliasWorktree}`);
+      expect(branches(repo.dir)).not.toContain(sandbox.branch);
+      expect(attemptedCleanup).toEqual([
+        { cwd: repo.dir, args: ['worktree', 'remove', '--force', sandbox.worktreePath] },
+        { cwd: repo.dir, args: ['worktree', 'prune'] },
+      ]);
     } finally {
       _setSandboxGitRunFaultHookForTest(undefined);
       process.env.PATH = originalPath;

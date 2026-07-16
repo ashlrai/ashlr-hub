@@ -215,6 +215,36 @@ function protectWindowsFixtureTree(path: string): void {
   }
 }
 
+function ownWindowsFixturePaths(paths: string[]): void {
+  if (process.platform !== 'win32' || paths.length === 0) return;
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$paths = @([Console]::In.ReadToEnd() | ConvertFrom-Json)
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+foreach ($path in $paths) {
+  $item = Get-Item -LiteralPath $path -Force
+  $acl = $item.GetAccessControl()
+  $acl.SetOwner($owner)
+  $item.SetAccessControl($acl)
+}
+`;
+  const result = spawnSync(
+    'powershell.exe',
+    [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+    ],
+    {
+      input: JSON.stringify(paths),
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 60_000,
+      maxBuffer: 16 * 1024,
+    },
+  );
+  if (result.status !== 0) throw new Error(`failed to own Windows fixtures: ${result.stderr}`);
+}
+
 // Lifecycle selectors use this after native DACL behavior has been separated
 // into the explicit Windows authority tests below.
 function useWindowsSemanticPrivateStorageFixture(): void {
@@ -1977,13 +2007,15 @@ describe('M342 dispatch production ledger', () => {
       runId: 'run-windows-private-intent',
       trajectoryId: 'run:attempt-windows-private-intent',
     });
-    const partition = join(dispatchProductionDir(), `${pending.ts.slice(0, 10)}.jsonl`);
-    const appendLock = acquireLocalStoreLock(`${partition}.lock`);
-    expect(appendLock).not.toBeNull();
+    _setDispatchProductionLedgerRetentionHooksForTest({
+      afterAttemptReceiptIntent: () => {
+        throw new Error('M342 injected crash after durable attempt intent');
+      },
+    });
     try {
       expect(recordDispatchProduction(pending)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
     } finally {
-      if (appendLock) releaseLocalStoreLock(appendLock);
+      _setDispatchProductionLedgerRetentionHooksForTest(undefined);
     }
     expect(assurePrivateStoragePath(
       join(receiptDir, `${pending.repairGenerationId}-1.intent.json`),
@@ -5366,8 +5398,8 @@ describe('M342 dispatch production ledger', () => {
         }]),
       }).toEqual({
         broadenedAuthority: [
-          expect.objectContaining({ ok: false }),
-          expect.objectContaining({ ok: false }),
+          { ok: false, reason: 'unexpected-ace-count' },
+          { ok: false, reason: 'unexpected-ace-count' },
         ],
         resolution: {
           status: 'resolved',
@@ -5465,6 +5497,7 @@ describe('M342 dispatch production ledger', () => {
         ),
       }, { materializeLearningLabel: true });
       expect(recordDispatchProduction(seed)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const manualReceiptPaths: string[] = [];
       for (let index = 1; index < 2_048; index++) {
         const handoffId = (100_000 + index).toString(16).padStart(64, '0');
         const fixture = sanitizeDispatchProductionEvent({
@@ -5477,15 +5510,18 @@ describe('M342 dispatch production ledger', () => {
             `run-treatment-retention-${index}`,
           ),
         }, { materializeLearningLabel: true });
+        const manualReceiptPath = join(
+          receiptDir,
+          `${fixture.repairGenerationId}-${fixture.repairTreatmentAttemptHash}.json`,
+        );
         writeFileSync(
-          join(
-            receiptDir,
-            `${fixture.repairGenerationId}-${fixture.repairTreatmentAttemptHash}.json`,
-          ),
+          manualReceiptPath,
           `${JSON.stringify(fixture)}\n`,
           { mode: 0o600 },
         );
+        manualReceiptPaths.push(manualReceiptPath);
       }
+      ownWindowsFixturePaths(manualReceiptPaths);
       protectWindowsFixtureTree(receiptDir);
 
       const receiptPaths = readdirSync(receiptDir)
