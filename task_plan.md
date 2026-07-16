@@ -2606,4 +2606,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Route and cache frontier judges per producer family so mixed queues can use independent reviewers without per-proposal resolver churn.
 - [x] Expose the exact independence blocker through existing readiness/status authority explanations.
 - [x] Pass focused resolver, attestation, verification-gate, manager-gate, automerge, status, static, build, audit, and adversarial review gates.
-- [ ] Publish protected draft PR #47 stacked on PR #46 without activating merge or deployment authority.
+- [x] Publish protected draft PR #47 stacked on PR #46 without activating merge or deployment authority.
