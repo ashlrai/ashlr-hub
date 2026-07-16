@@ -2645,3 +2645,4 @@
   - Non-dedup persistence failures also force `proposalCreated:false` and remove proposal identity, so rejected non-persisted returns cannot masquerade as durable production.
   - Forced-false paths also remove both creation outcomes (`proposal-created` and the producer-native `filed`) plus `actionCounts.proposalCreated`; independent adversarial re-review returns SHIP with all creation aliases and return paths normalized.
   - Store, generated-repair lifecycle, and swarm-resume coverage passes 188 assertions with two platform skips; typecheck, scoped lint, build, zero-vulnerability audit, and diff checks pass.
+  - Published commit `02bc44a` as protected stacked PR #42 on fully protected-green PR #41. No merge, deployment, host automerge, learning-policy activation, or production mutation was performed.

@@ -2551,4 +2551,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Neutralize proposal-created identity on diff-hash dedup returns without mutating the durable duplicate owner.
 - [x] Pass 188 focused assertions with two platform skips, typecheck, scoped lint, build, audit, and diff checks.
 - [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
-- [ ] Publish a stacked protected PR on fully protected-green #41.
+- [x] Publish protected stacked PR #42 on fully protected-green #41; require duplicate protected CI before merge consideration.
