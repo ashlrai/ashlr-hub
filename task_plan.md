@@ -2424,6 +2424,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass combined M201/M342/M426 verification at 373 passed with four platform skips, full M426 at 19/19, M30 at 7/7, typecheck, quiet full lint, and diff checks; receive independent agreement on all three native root causes.
 - [x] Classify `cedb906`: M426 passes both its main and native-alias executions, closing the Git backlink defect. M342 still launches one redundant post-crash PowerShell inspection, its broadened-directory proof retains a five-second body, and its JSON path array is treated as one PowerShell object. Single-duplicate M405/M408/H7 timeout clusters are unrelated runner-load variance.
 - [x] Bind the intent crash hook to the exact path only after production exact inspection and directory fsync, prove existence and bytes without a redundant adapter process, iterate owner paths as scalar static file ACL calls, and grant the multi-adapter directory proof a bounded 60-second native body.
+- [x] Classify `b698317`: both native 1/3 runs now pass every M342 case except the durable-intent setup, which fails before reaching the assured hook on its first attempt. Both directory/owner corrections pass, and macOS, 3/3, and overflow pass in both duplicate runs.
+- [x] Bound durable-intent setup recovery to three attempts and accept only the attempt that reaches the post-exact-inspection/fsync hook with the canonical path, live file, and expected bytes; deterministic authority failures still exhaust the bound and fail.
 - [ ] Push the final native reliability correction and require all duplicate protected Windows, macOS, and Ubuntu jobs to pass before merge consideration.
 
 ### Remaining Defense In Depth

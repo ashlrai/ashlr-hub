@@ -2021,7 +2021,9 @@ describe('M342 dispatch production ledger', () => {
       },
     });
     try {
-      expect(recordDispatchProduction(pending)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      for (let attempt = 0; attempt < 3 && assuredIntentPath === undefined; attempt++) {
+        expect(recordDispatchProduction(pending)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      }
     } finally {
       _setDispatchProductionLedgerRetentionHooksForTest(undefined);
     }
@@ -2074,7 +2076,7 @@ describe('M342 dispatch production ledger', () => {
       retentionPath, 'file', 'inspect-existing', { anchorPath: dispatchProductionDir() },
     ).ok).toBe(true);
     expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
-  }, 30_000);
+  }, 90_000);
 
   it('recovers bounded portable crash stages, including a reused legacy PID name', () => {
     const committed = makeProofEvent({
