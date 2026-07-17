@@ -8,8 +8,8 @@
 - PR #56 passed 10/10 exact-head checks and merged normally as `e5e98334193f4ea5af7de7380a7ecfd57d97d7a2`; its merge tree exactly equals checked head `2219961f695fde8939a547cba862564ba0579182`. Post-merge run `29548614683` passed Ubuntu, macOS, and all three Windows partitions.
 - PR #31 passed 10/10 exact-head checks, merged normally as `d981ade50ca7ae8bc6c4edbe5b5043b1fdb9fccf`, preserved the checked tree, and passed post-merge run `29549623351` across Ubuntu, macOS, and all Windows partitions.
 - PR #32 passed 10/10 exact-head checks, merged normally as `2240638fb0b660009b96122bd543f0c2b1b61b21`, preserved the checked tree, and passed post-merge run `29550691792` across Ubuntu, macOS, and all Windows partitions.
-- PR #33 now includes that exact green master through a normal merge. M402 retains its 24-hour observation budget while deriving all active clocks from the persisted activation, and M49 binds queued work plus daemon evidence to one frozen clock. The combined tree passes 272 focused tests, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks locally.
-- PR #34 is confirmed as one timeout-only line with no date drift or post-#33 conflict; its smallest gate is the named reservation-cleanup test under `npm run test:ci`.
+- PR #33 passed 12/12 exact-head checks, merged normally as `da1f2285900b071f3e516d963ea8cea31d6d1c6d`, preserved the checked tree, and passed post-merge run `29552082438` across Ubuntu, macOS, Windows overflow, and all three Windows partitions.
+- PR #34 now includes that exact green master through a normal merge. It is one timeout-only line with no date drift or content conflict, and its exact combined tree passes the named reservation-cleanup test under the hermetic `npm run test:ci` wrapper.
 - The conflict-minimizing continuation is #34, #36, #38-#53, #35, then #37. This preserves the long #36 chain; #35 later requires one `verify-commands.ts` resolution and #37 one notes resolution.
 - Production remains unchanged with auto-merge, self-merge, canary enforcement, and positive learning disabled.
 

@@ -8,7 +8,8 @@
 - [x] Land protected fixture hotfix PR #56 and require a green five-job post-merge master run.
 - [x] Merge master into PR #31, retarget it, require fresh exact-head and post-merge CI, and merge it normally.
 - [x] Retarget and merge PR #32 with fresh exact-head and post-merge CI.
-- [ ] Retarget and merge PR #33 with the verified M402/M49 resolution and fresh exact-head/post-merge CI.
+- [x] Retarget and merge PR #33 with the verified M402/M49 resolution and fresh exact-head/post-merge CI.
+- [ ] Retarget and merge timeout-only PR #34 with fresh exact-head/post-merge CI.
 - [ ] Continue in conflict-minimizing order: #34, #36, #38-#53, #35, then #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 

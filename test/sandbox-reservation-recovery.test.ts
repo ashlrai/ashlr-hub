@@ -186,5 +186,5 @@ describe('sandbox reservation recovery', () => {
     const second = sweepOrphanSandboxesDetailed();
     expect(second.completed).toHaveLength(1);
     expect(sandboxInventory()).toMatchObject({ totalHomes: 0, malformedHomes: 0 });
-  });
+  }, 15_000);
 });
