@@ -143,6 +143,10 @@ describe('M349 secret safety invariants', () => {
   });
 
   it('keeps action, dispatch, decision, audit, judge, and genome stores metadata-only for fake secrets', () => {
+    const eventBaseMs = Date.now() - 60_000;
+    const eventTs = (offsetMs: number): string => new Date(eventBaseMs + offsetMs).toISOString();
+    const learningEpoch = eventTs(0).slice(0, 10);
+
     audit({
       action: 'm349:audit-canary',
       repo: '/tmp/repo',
@@ -152,7 +156,7 @@ describe('M349 secret safety invariants', () => {
     });
 
     recordDecision({
-      ts: '2026-07-09T06:00:00.000Z',
+      ts: eventTs(0),
       proposalId: 'prop-m349',
       action: 'judged',
       verdict: `ship ${SECRET_BUNDLE}`,
@@ -190,7 +194,7 @@ describe('M349 secret safety invariants', () => {
 
     recordDispatchProduction({
       schemaVersion: 1,
-      ts: '2026-07-09T06:00:01.000Z',
+      ts: eventTs(1_000),
       itemId: `item token=${SECRET_VALUES[0]}`,
       source: 'test',
       repo: `/tmp/repo token=${SECRET_VALUES[1]}`,
@@ -216,7 +220,7 @@ describe('M349 secret safety invariants', () => {
 
     recordAgentAction({
       schemaVersion: 1,
-      ts: '2026-07-09T06:00:02.000Z',
+      ts: eventTs(2_000),
       actor: 'daemon',
       kind: 'dispatch',
       outcome: 'proposal-created',
@@ -311,7 +315,7 @@ describe('M349 secret safety invariants', () => {
       learningSource: 'decision-ledger',
       labelBasis: 'judge-verdict',
       routerPolicyVersion: 'fleet-router-v1',
-      learningEpoch: '2026-07-09',
+      learningEpoch,
     });
     expect(readBack.decisions[0]?.runEventSummary?.actionCounts).toEqual({ proposalCreated: 1 });
     expect(readBack.actions[0]?.runEventSummary?.actionCounts).toEqual({
