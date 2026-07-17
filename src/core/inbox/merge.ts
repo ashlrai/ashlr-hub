@@ -162,6 +162,12 @@ import {
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
+import {
+  acquireProposalRepairParentAuthority,
+  isProposalRepairChild,
+  releaseProposalRepairParentAuthority,
+  type ProposalRepairParentAuthority,
+} from '../fleet/proposal-repair-parent.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 
 function auditAutoMergeCanaryFailure(repo: string, sandboxId: string): void {
@@ -2501,6 +2507,21 @@ export async function autoMergeProposal(
       return refuse(err instanceof Error ? err.message : String(err), repo);
     }
 
+    // Fence repair-parent authority before verification because browser
+    // verification may use a visual-grounding model. Keep it through the final
+    // outcome so stale work consumes no model tokens and cannot race mutation.
+    let repairParentAuthority: ProposalRepairParentAuthority | undefined;
+    if (isProposalRepairChild(proposal)) {
+      repairParentAuthority = acquireProposalRepairParentAuthority(proposal, loadProposal);
+      if (!repairParentAuthority.authorized) {
+        return refuse(
+          `generated proposal-repair parent authority denied: ${repairParentAuthority.reason}`,
+          repo,
+        );
+      }
+    }
+    try {
+
     // ── Gate 4: merge authority ───────────────────────────────────────────────
     // M153: two trust bases, selected by cfg.foundry.autoMerge.trustBasis.
     //
@@ -3799,6 +3820,9 @@ export async function autoMergeProposal(
         // Await only to guarantee the shadow evidence is not dropped on CLI exit.
         await completeAutoMergeCanaryShadowObservation(shadowObservation, id);
       }
+    }
+    } finally {
+      releaseProposalRepairParentAuthority(repairParentAuthority);
     }
   } catch (err) {
     // Belt-and-suspenders: the orchestrator must never throw out.

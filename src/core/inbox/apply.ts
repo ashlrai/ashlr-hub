@@ -33,6 +33,10 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { openInEditor, openInFinder, openInTerminal } from '../../cli/open.js';
+import {
+  acquireProposalRepairParentAuthority,
+  releaseProposalRepairParentAuthority,
+} from '../fleet/proposal-repair-parent.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -342,6 +346,24 @@ export async function applyProposal(
   }
 
   // ── Gate 4: 'note' kind — no-op, record and return ───────────────────────
+  // Generated proposal-repair children derive mutation authority from the
+  // exact parent revision that produced them. Hold that parent fence through
+  // outward work and durable outcome persistence. Ordinary proposals receive
+  // a non-required authority and retain their existing path.
+  const repairParentAuthority = acquireProposalRepairParentAuthority(proposal, loadProposal);
+  if (repairParentAuthority.applies && !repairParentAuthority.authorized) {
+    const detail = `proposal-repair parent authority denied: ${repairParentAuthority.reason}`;
+    audit({
+      action: 'inbox:apply',
+      repo: proposal.repo,
+      sandboxId: id,
+      summary: `refused: proposal ${id}: ${detail}`,
+      result: 'refused',
+    });
+    return { ok: false, status: 'approved', detail };
+  }
+
+  try {
   if (proposal.kind === 'note') {
     setStatus(id, 'applied', 'note recorded (no-op)');
     audit({
@@ -671,4 +693,7 @@ export async function applyProposal(
     status: finalStatus,
     detail: result.detail,
   };
+  } finally {
+    releaseProposalRepairParentAuthority(repairParentAuthority);
+  }
 }

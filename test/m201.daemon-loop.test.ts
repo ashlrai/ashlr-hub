@@ -495,6 +495,11 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+const TEST_PROPOSAL_REPAIR_PARENT = {
+  repairParentProposalId: 'prop-parent-authority',
+  repairParentProposalRevision: 'a'.repeat(64),
+} as const;
+
 /** Seed daemon state with a given spent amount for today. */
 function seedSpend(spentUsd: number): void {
   saveDaemonState({
@@ -1170,6 +1175,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     generic.score = 1;
     const repair = (suffix: string, score: number): WorkItem => ({
       ...generic,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:${suffix}`,
       source: 'self',
       title: `Repair proposal prop-${suffix}: test failure in src/app.ts:12`,
@@ -1204,6 +1210,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const [firstOrdinary, secondOrdinary] = makeItems(repo.dir, 2);
     const repair: WorkItem = {
       ...firstOrdinary!,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:abcdef123456`,
       source: 'self',
       title: 'Proposal repair: restore a complete scheduler change',
@@ -1292,6 +1299,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const base = makeItems(repo.dir, 1)[0]!;
     const repairs = Array.from({ length: 21 }, (_, index): WorkItem => ({
       ...base,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:${index.toString(16).padStart(12, '0')}`,
       source: 'self',
       title: `Proposal repair ${index}`,
@@ -1331,6 +1339,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const reslice = makeDiagnosticResliceItem(repo.dir, 'cabfeed12345', 10);
     const unrelatedRepair: WorkItem = {
       ...makeItems(repo.dir, 1)[0]!,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:fedcba654321`,
       source: 'self',
       title: 'Proposal repair: unrelated capture recovery',
@@ -2007,6 +2016,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const repairItems = makeItems(repo.dir, 1).map((item) => ({
       ...item,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:abc123def456`,
       source: 'self' as const,
       title: 'Repair proposal prop-partial: test failure in src/app.ts:12',
@@ -2072,6 +2082,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const [repair] = makeItems(repo.dir, 1).map((item) => ({
       ...item,
+      ...TEST_PROPOSAL_REPAIR_PARENT,
       id: `${basename(repo.dir)}:proposal-repair:abc123def457`,
       source: 'self' as const,
       title: 'Repair proposal prop-revoked: persistence mismatch',

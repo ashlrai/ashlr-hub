@@ -154,4 +154,34 @@ describe('M345 delegation scope contract', () => {
       backend: { engine: 'codex', model: 'gpt-5.5' },
     });
   });
+
+  it('persists exact repair-parent authority without rendering it into prompts', () => {
+    const revision = 'a'.repeat(64);
+    const item: WorkItem = {
+      id: 'repo:proposal-repair:abcdef123456',
+      repo: '/tmp/repo',
+      source: 'self',
+      title: 'Repair proposal prop-parent',
+      detail: 'Complete the repair.',
+      value: 5,
+      effort: 1,
+      score: 5,
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+      ts: '2026-07-16T00:00:00.000Z',
+      repairParentProposalId: 'prop-parent',
+      repairParentProposalRevision: revision,
+    };
+
+    const scope = scopeFromWorkItem(item);
+    expect(summarizeDelegationScope(scope)).toMatchObject({
+      repairParentProposalId: 'prop-parent',
+      repairParentProposalRevision: revision,
+    });
+    expect(renderDelegationScopeForPrompt(scope)).not.toContain('prop-parent');
+    expect(renderDelegationScopeForPrompt(scope)).not.toContain(revision);
+    expect(normalizeDelegationScope({
+      repairParentProposalId: '../invalid',
+      repairParentProposalRevision: 'not-a-hash',
+    })).not.toHaveProperty('repairParentProposalId');
+  });
 });

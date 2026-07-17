@@ -341,6 +341,10 @@ export interface DelegationScope {
   executionRoot?: string;
   workItemId?: string;
   workSource?: WorkSource;
+  /** Exact parent proposal authority for generated proposal-repair work. */
+  repairParentProposalId?: string;
+  /** SHA-256 witness of the parent state that authorized the repair. */
+  repairParentProposalRevision?: string;
   runId?: string;
   swarmId?: string;
   taskId?: string;
@@ -361,6 +365,8 @@ export interface DelegationScopeSummary {
   executionRoot?: string;
   workItemId?: string;
   workSource?: WorkSource;
+  repairParentProposalId?: string;
+  repairParentProposalRevision?: string;
   runId?: string;
   swarmId?: string;
   taskId?: string;
@@ -3544,6 +3550,10 @@ export interface WorkItem {
   repairParentTier?: EngineTier | null;
   /** Scrubbed metadata-only hash binding a repair generation to parent meaning. */
   repairParentObjectiveHash?: string;
+  /** Exact proposal whose current repair-relevant state authorizes this repair. */
+  repairParentProposalId?: string;
+  /** SHA-256 witness over the repair-relevant parent proposal state. */
+  repairParentProposalRevision?: string;
 }
 
 /** Metadata-only scanner evidence. Observations never grant lifecycle authority. */

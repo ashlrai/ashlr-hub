@@ -23,6 +23,7 @@ import {
   isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from './self-heal-trust.js';
 import type { EngineId, EngineTier, RepairTreatment, WorkItem } from '../types.js';
 import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
@@ -37,6 +38,7 @@ import {
   repairTreatmentUnitId,
 } from './generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { proposalRepairGenerationId } from './proposal-repair-parent.js';
 
 const MAX_RECORDS = 100_000;
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024;
@@ -291,6 +293,21 @@ function generatedRepairGenerationIdFromAuthority(
     isTrustedCaptureRepairItem(item) &&
     (item.repairParentSource === 'issue' || item.repairParentSource === 'goal')
   ) return null;
+  if (isTrustedProposalRepairItem(item)) {
+    if (
+      typeof item.repairParentProposalId !== 'string' || !item.repairParentProposalId ||
+      typeof item.repairParentProposalRevision !== 'string' ||
+      !SHA256_RE.test(item.repairParentProposalRevision)
+    ) return null;
+    return proposalRepairGenerationId({
+      repo: item.repo,
+      itemId: item.id,
+      source: item.source,
+      ts: item.ts,
+      parentProposalId: item.repairParentProposalId,
+      parentProposalRevision: item.repairParentProposalRevision,
+    });
+  }
   let repo: string;
   try {
     repo = resolve(item.repo);

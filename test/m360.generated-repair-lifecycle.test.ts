@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
+  generatedRepairGenerationId,
   generatedRepairLifecyclePath,
   generatedRepairDispatchLineage,
   generatedRepairRetryPolicy,
@@ -56,6 +57,8 @@ function repairItem(overrides: Partial<WorkItem> = {}): WorkItem {
     score: 4,
     tags: ['self-heal', 'proposal-repair', 'verify'],
     ts: '2026-07-10T12:00:00.000Z',
+    repairParentProposalId: 'prop-stalled',
+    repairParentProposalRevision: 'b'.repeat(64),
     ...overrides,
   };
 }
@@ -143,6 +146,31 @@ const ATTEMPT_TWO = 'attempt-22345678-1234-4123-8123-123456789abc';
 const ATTEMPT_THREE = 'attempt-32345678-1234-4123-8123-123456789abc';
 
 describe('generated repair lifecycle store', () => {
+  it('fails closed for legacy proposal repair items without an exact parent witness', () => {
+    const legacy = repairItem({
+      repairParentProposalId: undefined,
+      repairParentProposalRevision: undefined,
+    });
+
+    expect(generatedRepairGenerationId(legacy)).toBeNull();
+    expect(readGeneratedRepairLifecycle(legacy)).toEqual({
+      available: false,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+    expect(recordGeneratedRepairLifecycle(legacy, {
+      kind: 'empty-diff',
+      attemptId: ATTEMPT_ONE,
+      backend: 'local-coder',
+      tier: 'mid',
+    })).toEqual({
+      available: false,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+      recorded: false,
+    });
+  });
+
   it('propagates deterministic treatment through lifecycle and dispatch lineage metadata', () => {
     const item = diagnosticRepairItem();
     const expected = repairTreatmentForUnitId(item.repairTreatmentUnitId!)!;

@@ -135,7 +135,13 @@ import {
 } from '../fleet/monitoring-cursor.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
-import { pendingCount, listProposals, listProposalsDetailed } from '../inbox/store.js';
+import {
+  loadProposal,
+  pendingCount,
+  listProposals,
+  listProposalsDetailed,
+  setStatus,
+} from '../inbox/store.js';
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   recordDispatchProduction,
@@ -210,7 +216,17 @@ import {
   isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from '../fleet/self-heal-trust.js';
+import {
+  acquireProposalRepairParentAuthority,
+  proposalRepairChildParentCurrent,
+  releaseProposalRepairParentAuthority,
+} from '../fleet/proposal-repair-parent.js';
+import {
+  acquireProposalMutationLock,
+  releaseProposalMutationLock,
+} from '../inbox/proposal-mutation-lock.js';
 import {
   generatedRepairBackendAllowed,
   generatedRepairDispatchState,
@@ -237,6 +253,73 @@ import {
 } from './cutoff-checkpoint-scheduler.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const STALE_REPAIR_PARENT_RESULT = 'generated repair parent authority unavailable';
+const STALE_REPAIR_PARENT_REASON = 'stale-repair-parent-authority';
+
+/**
+ * Reload and validate a generated repair child immediately before lifecycle
+ * conversion. Ordinary proposal repairs are fail-closed against their current
+ * parent; other generated repair families have no proposal parent authority.
+ */
+export function withGeneratedRepairChildLifecycleAuthority<T>(
+  item: WorkItem,
+  proposalId: string,
+  admitted: (child: Proposal) => T,
+): T | null {
+  const child = loadProposal(proposalId);
+  if (!child) return null;
+  const authority = acquireProposalRepairParentAuthority(child, loadProposal);
+  const authorized = authority.authorized &&
+    (!isTrustedProposalRepairItem(item) || authority.applies);
+  if (authorized) {
+    const childLock = acquireProposalMutationLock(child.id);
+    if (!childLock) {
+      releaseProposalRepairParentAuthority(authority);
+      return null;
+    }
+    let currentChild: Proposal | null = null;
+    let staleAuthority = false;
+    try {
+      currentChild = loadProposal(child.id);
+      if (!currentChild) return null;
+      if (isTrustedProposalRepairItem(item)) {
+        staleAuthority =
+          currentChild.delegationScope?.repairParentProposalId !== child.delegationScope?.repairParentProposalId ||
+          currentChild.delegationScope?.repairParentProposalRevision !== child.delegationScope?.repairParentProposalRevision ||
+          !proposalRepairChildParentCurrent(currentChild, loadProposal);
+        if (staleAuthority) return null;
+      }
+      return admitted(currentChild);
+    } finally {
+      releaseProposalMutationLock(childLock);
+      releaseProposalRepairParentAuthority(authority);
+      if (staleAuthority && currentChild?.status === 'pending') {
+        setStatus(
+          currentChild.id,
+          'rejected',
+          STALE_REPAIR_PARENT_RESULT,
+          STALE_REPAIR_PARENT_REASON,
+          undefined,
+          {},
+          'pending',
+        );
+      }
+    }
+  }
+
+  if (child.status === 'pending') {
+    setStatus(
+      child.id,
+      'rejected',
+      STALE_REPAIR_PARENT_RESULT,
+      STALE_REPAIR_PARENT_REASON,
+      undefined,
+      {},
+      'pending',
+    );
+  }
+  return null;
+}
 
 function flushPendingRepairTreatmentOutcomes(): void {
   try {
@@ -5475,37 +5558,46 @@ export async function tick(
           continue;
         }
         if (production.outcome !== 'proposal-created') continue;
-        const proposal = newPendingProposalsByItemId.get(outcome.value.item.id);
+        const observedProposal = newPendingProposalsByItemId.get(outcome.value.item.id);
         if (
-          !proposal ||
-          proposal.status !== 'pending' ||
-          proposal.workItemId !== outcome.value.item.id ||
-          proposal.workItemGenerationId !== generatedRepairGenerationId(outcome.value.item) ||
-          !proposal.repo ||
-          resolve(proposal.repo) !== resolve(outcome.value.item.repo) ||
+          !observedProposal ||
           !production.proposalId ||
-          production.proposalId !== proposal.id ||
-          !production.runId ||
-          !proposal.runId ||
-          production.runId !== proposal.runId ||
-          proposal.runEventSummary?.status !== 'done' ||
-          proposal.isPartial === true ||
-          !trace?.trajectoryId ||
-          !proposal.trajectoryId ||
-          trace.trajectoryId !== proposal.trajectoryId
+          production.proposalId !== observedProposal.id
         ) continue;
-        const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
-          kind: 'proposal-created',
-          attemptId,
-          proposalId: proposal.id,
-          ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
-            ? { treatmentCandidate: {
-              ...productionEvent,
-              basis: 'repair-lifecycle-candidate',
-              repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
-            } satisfies DispatchProductionEvent }
-            : {}),
-        });
+        const transition = withGeneratedRepairChildLifecycleAuthority(
+          outcome.value.item,
+          production.proposalId,
+          (proposal) => {
+            if (
+              proposal.status !== 'pending' ||
+              proposal.workItemId !== outcome.value.item.id ||
+              proposal.workItemGenerationId !== generatedRepairGenerationId(outcome.value.item) ||
+              !proposal.repo ||
+              resolve(proposal.repo) !== resolve(outcome.value.item.repo) ||
+              !production.runId ||
+              !proposal.runId ||
+              production.runId !== proposal.runId ||
+              proposal.runEventSummary?.status !== 'done' ||
+              proposal.isPartial === true ||
+              !trace?.trajectoryId ||
+              !proposal.trajectoryId ||
+              trace.trajectoryId !== proposal.trajectoryId
+            ) return null;
+            return recordGeneratedRepairLifecycle(outcome.value.item, {
+              kind: 'proposal-created',
+              attemptId,
+              proposalId: proposal.id,
+              ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
+                ? { treatmentCandidate: {
+                  ...productionEvent,
+                  basis: 'repair-lifecycle-candidate',
+                  repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
+                } satisfies DispatchProductionEvent }
+                : {}),
+            });
+          },
+        );
+        if (!transition) continue;
         const witness = transition.treatmentOutcomeWitness;
         if (witness && productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
           repairTreatmentOutcomeWitnesses.push({

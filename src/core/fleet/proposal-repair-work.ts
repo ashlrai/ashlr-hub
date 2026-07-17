@@ -10,6 +10,7 @@ import {
   isActionableSelfHealItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from './self-heal-trust.js';
 import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
 import { listEnrolled } from '../sandbox/policy.js';
@@ -38,6 +39,15 @@ import {
   releaseProposalMutationLock,
 } from '../inbox/proposal-mutation-lock.js';
 import { proposalRepairId } from './proposal-repair-identity.js';
+import {
+  acquireProposalRepairParentAuthority,
+  isProposalRepairChild,
+  proposalRepairChildParentCurrent,
+  proposalRepairParentRevision,
+  releaseProposalRepairParentAuthority,
+} from './proposal-repair-parent.js';
+
+export { proposalRepairParentRevision } from './proposal-repair-parent.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
@@ -334,6 +344,9 @@ function proposalNeedsRepair(
   now: Date,
   decisionProof?: CaptureDecisionProof,
 ): boolean {
+  // Generated repair children use their bounded retry lifecycle. Recursively
+  // repairing a failed repair would detach authority from the original parent.
+  if (isProposalRepairChild(proposal)) return false;
   if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now, decisionProof)) return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.repo) return false;
@@ -407,6 +420,8 @@ export function proposalRepairWorkItem(
   const value = 5;
   const effort = 1;
   const repairKind = proposal.isPartial === true ? 'partial' : 'verify';
+  const parentRevision = proposalRepairParentRevision(proposal);
+  if (!parentRevision) return null;
 
   return {
     id: proposalRepairId(repo, proposal.id),
@@ -431,14 +446,12 @@ export function proposalRepairWorkItem(
       ...(proposal.status === 'rejected' ? ['rejected-capture-recovery'] : []),
     ],
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
+    repairParentProposalId: proposal.id,
+    repairParentProposalRevision: parentRevision,
   };
 }
 
-/**
- * Revalidate a rejected-capture queue projection against its authoritative
- * proposal and decision ledger immediately before dispatch. Queue cleanup is
- * best-effort, so a stale row must never grant execution authority by itself.
- */
+/** Revalidate a proposal-repair queue projection against its exact parent. */
 export function isRejectedCaptureRecoveryAuthorized(
   item: WorkItem,
   now = new Date(),
@@ -447,42 +460,65 @@ export function isRejectedCaptureRecoveryAuthorized(
   return result.authorized && result.value;
 }
 
-/** Begin producer execution while the parent proposal authority is fenced. */
+/**
+ * Begin producer execution while the parent proposal authority is fenced.
+ * Promise-producing launches retain the mutation lock through settlement so
+ * no cooperating writer can change the parent between admission and spend.
+ */
 export function beginRejectedCaptureRecoveryDispatch<T>(
   item: WorkItem,
   begin: () => T,
   now = new Date(),
 ): { authorized: true; value: T } | { authorized: false } {
-  if (!item.tags.includes('rejected-capture-recovery')) {
+  if (!isTrustedProposalRepairItem(item)) {
     return { authorized: true, value: begin() };
   }
-  let candidate: Proposal | undefined;
-  try {
-    candidate = listProposals({ status: 'rejected' }).find((proposal) =>
-      typeof proposal.repo === 'string' && proposalRepairId(proposal.repo, proposal.id) === item.id);
-  } catch {
-    return { authorized: false };
-  }
-  if (!candidate) return { authorized: false };
+  if (
+    typeof item.repairParentProposalId !== 'string' || !item.repairParentProposalId ||
+    typeof item.repairParentProposalRevision !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(item.repairParentProposalRevision)
+  ) return { authorized: false };
 
-  const mutationLock = acquireProposalMutationLock(candidate.id);
+  const mutationLock = acquireProposalMutationLock(item.repairParentProposalId);
   if (!mutationLock) return { authorized: false };
   let began = false;
+  let releaseOnReturn = true;
   try {
-    const current = loadProposal(candidate.id);
+    const current = loadProposal(item.repairParentProposalId);
     if (!current) return { authorized: false };
     const currentItem = proposalRepairWorkItem(current, now, readCaptureDecisionProof(now));
-    if (currentItem?.id !== item.id || currentItem.repo !== resolve(item.repo)) {
+    if (
+      currentItem?.id !== item.id ||
+      currentItem.repo !== resolve(item.repo) ||
+      currentItem.repairParentProposalId !== item.repairParentProposalId ||
+      currentItem.repairParentProposalRevision !== item.repairParentProposalRevision ||
+      workItemObjectiveHash(currentItem) !== workItemObjectiveHash(item)
+    ) {
       return { authorized: false };
     }
     began = true;
-    return { authorized: true, value: begin() };
+    const value = begin();
+    if (
+      value !== null &&
+      (typeof value === 'object' || typeof value === 'function') &&
+      typeof (value as { then?: unknown }).then === 'function'
+    ) {
+      releaseOnReturn = false;
+      const guarded = Promise.resolve(value).finally(() => releaseProposalMutationLock(mutationLock));
+      return { authorized: true, value: guarded as T };
+    }
+    return { authorized: true, value };
   } catch (error) {
     if (began) throw error;
     return { authorized: false };
   } finally {
-    releaseProposalMutationLock(mutationLock);
+    if (releaseOnReturn) releaseProposalMutationLock(mutationLock);
   }
+}
+
+export function isProposalRepairParentCurrent(item: WorkItem, now = new Date()): boolean {
+  const result = beginRejectedCaptureRecoveryDispatch(item, () => true, now);
+  return result.authorized && result.value;
 }
 
 export function captureGateRepairWorkItem(
@@ -774,16 +810,36 @@ export function queueProposalRepairWorkForPendingProposals(
     } catch {
       return 'unavailable';
     }
-    const durableProposal = lifecycleProposals
+    const durableProposals = lifecycleProposals
       .filter((proposal) => durableGeneratedRepairProposal(item, proposal))
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
-    if (durableProposal?.trajectoryId) {
-      recordGeneratedRepairLifecycle(item, {
-        kind: 'proposal-created',
-        attemptId: durableProposal.trajectoryId,
-        proposalId: durableProposal.id,
-        ts: durableProposal.createdAt,
-      });
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    for (const durableProposal of durableProposals) {
+      if (!durableProposal.trajectoryId) continue;
+      const authority = acquireProposalRepairParentAuthority(durableProposal, loadProposal);
+      if (authority.applies && !authority.authorized) continue;
+      const childLock = acquireProposalMutationLock(durableProposal.id);
+      if (!childLock) {
+        releaseProposalRepairParentAuthority(authority);
+        continue;
+      }
+      try {
+        const currentChild = loadProposal(durableProposal.id);
+        if (
+          !currentChild ||
+          !durableGeneratedRepairProposal(item, currentChild) ||
+          !proposalRepairChildParentCurrent(currentChild, loadProposal)
+        ) continue;
+        recordGeneratedRepairLifecycle(item, {
+          kind: 'proposal-created',
+          attemptId: currentChild.trajectoryId!,
+          proposalId: currentChild.id,
+          ts: currentChild.createdAt,
+        });
+        break;
+      } finally {
+        releaseProposalMutationLock(childLock);
+        releaseProposalRepairParentAuthority(authority);
+      }
     }
     const lifecycle = readGeneratedRepairLifecycle(item);
     if (!lifecycle.available) {
@@ -933,6 +989,10 @@ function durableGeneratedRepairProposal(item: WorkItem, proposal: Proposal): boo
   if (proposal.trajectoryId !== `run:${proposal.runId}`) return false;
   if (proposal.runEventSummary?.runId !== proposal.runId) return false;
   if (proposal.runEventSummary.status !== 'done' || proposal.isPartial === true) return false;
+  if (
+    proposal.delegationScope?.repairParentProposalId !== item.repairParentProposalId ||
+    proposal.delegationScope?.repairParentProposalRevision !== item.repairParentProposalRevision
+  ) return false;
   const itemMs = Date.parse(item.ts);
   const proposalMs = Date.parse(proposal.createdAt);
   if (!Number.isFinite(itemMs) || !Number.isFinite(proposalMs)) return false;

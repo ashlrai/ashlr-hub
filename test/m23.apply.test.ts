@@ -52,8 +52,21 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/core/fleet/proposal-repair-parent.js', () => ({
+  acquireProposalRepairParentAuthority: (...args: unknown[]) =>
+    _acquireRepairParentAuthority(...args),
+  releaseProposalRepairParentAuthority: (...args: unknown[]) =>
+    _releaseRepairParentAuthority(...args),
+}));
+
 // Mutable spawnSync impl — tests override as needed
 let _spawnSyncImpl: (...args: unknown[]) => unknown;
+let _acquireRepairParentAuthority: (...args: unknown[]) => {
+  applies: boolean;
+  authorized: boolean;
+  reason?: string;
+};
+let _releaseRepairParentAuthority: (...args: unknown[]) => void;
 
 function makeSpawnSyncFail() {
   return vi.fn(() => ({
@@ -171,6 +184,11 @@ beforeEach(() => {
 
   // Default: spawnSync fails (no real gh calls)
   _spawnSyncImpl = makeSpawnSyncFail();
+  _acquireRepairParentAuthority = vi.fn(() => ({
+    applies: false,
+    authorized: true,
+  }));
+  _releaseRepairParentAuthority = vi.fn();
 
   // Ensure kill switch is off
   setKill(false);
@@ -525,6 +543,101 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
     expect(result.ok).toBe(false);
     const loaded = loadProposal(p.id);
     expect(loaded!.status).toBe('failed');
+  });
+});
+
+// ===========================================================================
+// Generated proposal-repair parent authority
+// ===========================================================================
+
+describe('M23 applyProposal — generated proposal-repair parent authority', () => {
+  it('refuses stale repair children before outward mutation and preserves approved status', async () => {
+    initRealGitRepo(tmpRepo);
+    enroll(tmpRepo);
+    const branchesBefore = listBranches(tmpRepo);
+    const p = createProposal(makeInput({
+      diff: makeSimpleDiff('stale-repair-child.txt', 'must not apply\n'),
+      workSource: 'self',
+      workItemId: 'repo:proposal-repair:abcdef123456',
+    }));
+    setStatus(p.id, 'approved');
+    _acquireRepairParentAuthority = vi.fn(() => ({
+      applies: true,
+      authorized: false,
+      reason: 'parent-changed',
+    }));
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 'approved',
+      detail: expect.stringMatching(/parent authority denied: parent-changed/i),
+    });
+    expect(loadProposal(p.id)?.status).toBe('approved');
+    expect(listBranches(tmpRepo)).toEqual(branchesBefore);
+    expect(_releaseRepairParentAuthority).not.toHaveBeenCalled();
+  });
+
+  it('does not impose repair-parent authority on ordinary proposals', async () => {
+    initRealGitRepo(tmpRepo);
+    enroll(tmpRepo);
+    const p = createProposal(makeInput({
+      diff: makeSimpleDiff('ordinary-proposal.txt', 'ordinary apply\n'),
+    }));
+    setStatus(p.id, 'approved');
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result.ok).toBe(true);
+    expect(_acquireRepairParentAuthority).toHaveBeenCalledOnce();
+    expect(_releaseRepairParentAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('holds repair-parent authority through successful outcome persistence', async () => {
+    initRealGitRepo(tmpRepo);
+    enroll(tmpRepo);
+    const p = createProposal(makeInput({
+      diff: makeSimpleDiff('current-repair-child.txt', 'apply under fence\n'),
+      workSource: 'self',
+      workItemId: 'repo:proposal-repair:abcdef123456',
+    }));
+    setStatus(p.id, 'approved');
+    const authority = { applies: true, authorized: true };
+    _acquireRepairParentAuthority = vi.fn(() => authority);
+    let statusAtRelease: string | undefined;
+    _releaseRepairParentAuthority = vi.fn(() => {
+      statusAtRelease = loadProposal(p.id)?.status;
+    });
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result.ok).toBe(true);
+    expect(statusAtRelease).toBe('applied');
+    expect(_releaseRepairParentAuthority).toHaveBeenCalledWith(authority);
+  });
+
+  it('releases repair-parent authority after a failed operation is persisted', async () => {
+    initRealGitRepo(tmpRepo);
+    enroll(tmpRepo);
+    const p = createProposal(makeInput({
+      diff: 'INVALID DIFF CONTENT',
+      workSource: 'self',
+      workItemId: 'repo:proposal-repair:abcdef123456',
+    }));
+    setStatus(p.id, 'approved');
+    const authority = { applies: true, authorized: true };
+    _acquireRepairParentAuthority = vi.fn(() => authority);
+    let statusAtRelease: string | undefined;
+    _releaseRepairParentAuthority = vi.fn(() => {
+      statusAtRelease = loadProposal(p.id)?.status;
+    });
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result.ok).toBe(false);
+    expect(statusAtRelease).toBe('failed');
+    expect(_releaseRepairParentAuthority).toHaveBeenCalledWith(authority);
   });
 });
 

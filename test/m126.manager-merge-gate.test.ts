@@ -109,9 +109,14 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { autoMergeProposal, classifyRisk } from '../src/core/inbox/merge.js';
-import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
+import { createProposal, setStatus, loadProposal, updateProposalField } from '../src/core/inbox/store.js';
+import { acquireProposalMutationLock, releaseProposalMutationLock } from '../src/core/inbox/proposal-mutation-lock.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
 import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  proposalRepairGenerationId,
+  proposalRepairParentRevision,
+} from '../src/core/fleet/proposal-repair-parent.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 
@@ -176,6 +181,51 @@ function frontierPatch(diff: string): Proposal {
     engineModel: 'codex:gpt-5.5',
     engineTier: 'frontier',
   });
+  setStatus(p.id, 'approved');
+  return loadProposal(p.id)!;
+}
+
+function generatedRepairChild(diff: string, parent?: Proposal): Proposal {
+  const diffHash = hashDiff(diff);
+  const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
+  const workItemId = `${path.basename(tmpRepo)}:proposal-repair:abcdef123456`;
+  const parentRevision = parent ? proposalRepairParentRevision(parent) : null;
+  const generationId = parent && parentRevision
+    ? proposalRepairGenerationId({
+        repo: parent.repo,
+        itemId: workItemId,
+        source: 'self',
+        ts: parent.createdAt,
+        parentProposalId: parent.id,
+        parentProposalRevision: parentRevision,
+      })
+    : null;
+  const p = createProposal({
+    repo: tmpRepo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'm126 generated proposal-repair child',
+    summary: 'generated repair child merge gate test',
+    diff,
+    diffHash,
+    provenanceSig,
+    engineModel: 'codex:gpt-5.5',
+    engineTier: 'frontier',
+    workSource: 'self',
+    workItemId,
+    ...(generationId ? { workItemGenerationId: generationId } : {}),
+    delegationScope: {
+      schemaVersion: 1,
+      memoryMode: 'none',
+      ...(parent && parentRevision
+        ? {
+            repairParentProposalId: parent.id,
+            repairParentProposalRevision: parentRevision,
+          }
+        : {}),
+    } as unknown as Proposal['delegationScope'],
+  });
+  if (parent) expect(generationId).not.toBeNull();
   setStatus(p.id, 'approved');
   return loadProposal(p.id)!;
 }
@@ -1062,6 +1112,134 @@ describe('M126 status invariants', () => {
       return decision.action === 'merged' && decision.verdict === 'merged' &&
         decision.labelBasis === 'realized-merge-v1';
     })).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Generated proposal-repair parent authority
+// ===========================================================================
+
+describe('M126 generated proposal-repair parent authority', () => {
+  it('fails closed when a generated repair child has no parent witness', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = generatedRepairChild(docsDiff('docs/repair-no-parent.md'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/parent authority denied: witness-missing/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+    expect(loadProposal(p.id)!.verifyResult).toBeUndefined();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+  });
+
+  it('refuses a child whose parent changed after its witness was issued', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const parent = frontierPatch(docsDiff('docs/repair-parent-stale.md'));
+    const p = generatedRepairChild(docsDiff('docs/repair-stale-parent.md'), parent);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    expect(updateProposalField(parent.id, { decisionReason: 'parent changed after child capture' })).toBe(true);
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/parent authority denied: parent-changed/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+    expect(loadProposal(p.id)!.verifyResult).toBeUndefined();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects nested proposal-repair ancestry before verification or judging', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const root = frontierPatch(docsDiff('docs/repair-root.md'));
+    const firstChild = generatedRepairChild(docsDiff('docs/repair-first-child.md'), root);
+    const nestedChild = generatedRepairChild(docsDiff('docs/repair-nested-child.md'), firstChild);
+
+    const r = await autoMergeProposal(nestedChild.id, baseCfg());
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/parent authority denied: nested-parent/i);
+    expect(loadProposal(nestedChild.id)?.verifyResult).toBeUndefined();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the current parent fence cannot be acquired', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const parent = frontierPatch(docsDiff('docs/repair-parent-locked.md'));
+    const p = generatedRepairChild(docsDiff('docs/repair-locked-parent.md'), parent);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const competingParentFence = acquireProposalMutationLock(parent.id, 0);
+    expect(competingParentFence).not.toBeNull();
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+    releaseProposalMutationLock(competingParentFence);
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/parent authority denied: lock-unavailable/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('holds parent authority through terminal merge recording and releases it afterward', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const parent = frontierPatch(docsDiff('docs/repair-parent-current.md'));
+    const p = generatedRepairChild(docsDiff('docs/repair-current-parent.md'), parent);
+    let parentFenceObservedAtMerge = false;
+    mockRecordDecision.mockImplementation((entry: { action?: string }) => {
+      if (entry.action !== 'merged') return;
+      const competingFence = acquireProposalMutationLock(parent.id, 0);
+      parentFenceObservedAtMerge = competingFence === null;
+      releaseProposalMutationLock(competingFence);
+    });
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+
+    expect(r).toMatchObject({ ok: true, merged: true });
+    expect(parentFenceObservedAtMerge).toBe(true);
+    const fenceAfterMerge = acquireProposalMutationLock(parent.id, 0);
+    expect(fenceAfterMerge).not.toBeNull();
+    releaseProposalMutationLock(fenceAfterMerge);
+  });
+
+  it('does not consult or acquire repair-parent authority for ordinary proposals', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(docsDiff('docs/ordinary-parent-parity.md'));
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+
+    const r = await autoMergeProposal(p.id, baseCfg());
+
+    expect(r).toMatchObject({ ok: true, merged: true });
   });
 });
 

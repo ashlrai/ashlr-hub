@@ -2195,3 +2195,22 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Source-revision refusal spends no additional model call, files no draft or partial proposal, and grants no repair or positive-learning authority.
 - Caller-owned sandboxes are never removed by a refused delegated run; newly created sandboxes retain existing deterministic cleanup ownership.
 - Direct engineer cleanup is authoritative: non-complete postconditions fail the run and retain explicit orphan-sweep recovery evidence.
+
+## Current Overnight Cycle - Proposal Repair Parent Authority
+- [x] Rehydrate exact PR #54 source in a stacked isolated worktree without touching canonical user edits.
+- [x] Audit proposal queueing, dispatch spend, child persistence, lifecycle credit, manual apply, and automerge with revision-pinned parallel agents.
+- [x] Bind every ordinary proposal-repair generation to a SHA-256 witness of the exact repair-relevant parent proposal state.
+- [x] Persist the parent identity and revision through bounded delegation metadata without adding raw prompts, diffs, output, or environment data.
+- [x] Hold the parent mutation fence across producer promises, daemon lifecycle conversion, manual apply, and automerge terminal persistence.
+- [x] Reject stale or legacy repair children before optional manager judging so invalid work consumes no judge/model tokens.
+- [x] Add mutation, deletion, missing witness, generation mismatch, lock contention/lifetime, ordinary-proposal parity, and lifecycle regressions.
+- [x] Pass focused and adjacent tests, typecheck, zero-error lint, production build, and diff checks.
+- [x] Resolve final independent adversarial audit with no remaining correctness or security findings.
+- [ ] Commit/push the stacked branch, open a protected draft PR, and observe CI.
+
+### Proposal Repair Parent Invariants
+- A queued proposal repair authorizes execution only while its exact parent identity, canonical repository, repair eligibility, objective, and revision remain unchanged.
+- Cooperative parent mutation is fenced from dispatch admission through provider settlement; stale or deleted parents invoke no producer.
+- A child proposal is authoritative only when its persisted delegation witness and generation hash both reconstruct from the current parent.
+- Lifecycle conversion holds parent and child authority in that order through its durable outcome; apply and automerge hold parent authority through terminal persistence.
+- Legacy repair children without an exact witness remain readable but cannot dispatch, retire work, apply, merge, or create positive learning.

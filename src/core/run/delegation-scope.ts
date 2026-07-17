@@ -19,6 +19,8 @@ const MAX_PATH = 220;
 const MAX_FILE_HINTS = 32;
 const MAX_FILE_SAMPLES = 6;
 const MAX_BUDGET_VALUE = 10_000_000;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const PROPOSAL_ID_RE = /^[\w.-]{1,160}$/;
 
 const MEMORY_MODES: readonly DelegationMemoryMode[] = ['inherit', 'none', 'bounded', 'repo-only', 'full'];
 const RESULT_KINDS: readonly DelegationResultKind[] = [
@@ -40,6 +42,14 @@ function boundedText(value: unknown, max = MAX_TEXT): string | undefined {
 function boundedInteger(value: unknown, max = MAX_BUDGET_VALUE): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
   return Math.min(Math.floor(value), max);
+}
+
+function normalizeProposalId(value: unknown): string | undefined {
+  return typeof value === 'string' && PROPOSAL_ID_RE.test(value) ? value : undefined;
+}
+
+function normalizeSha256(value: unknown): string | undefined {
+  return typeof value === 'string' && SHA256_RE.test(value) ? value : undefined;
 }
 
 function boundedRatio(value: unknown): number | undefined {
@@ -229,6 +239,12 @@ export function normalizeDelegationScope(
     ...(executionRoot ? { executionRoot } : {}),
     ...(boundedText(merged.workItemId, 160) ? { workItemId: boundedText(merged.workItemId, 160) } : {}),
     ...(boundedText(merged.workSource, 80) ? { workSource: boundedText(merged.workSource, 80) as DelegationScope['workSource'] } : {}),
+    ...(normalizeProposalId(merged.repairParentProposalId)
+      ? { repairParentProposalId: normalizeProposalId(merged.repairParentProposalId) }
+      : {}),
+    ...(normalizeSha256(merged.repairParentProposalRevision)
+      ? { repairParentProposalRevision: normalizeSha256(merged.repairParentProposalRevision) }
+      : {}),
     ...(boundedText(merged.runId, 160) ? { runId: boundedText(merged.runId, 160) } : {}),
     ...(boundedText(merged.swarmId, 160) ? { swarmId: boundedText(merged.swarmId, 160) } : {}),
     ...(boundedText(merged.taskId, 160) ? { taskId: boundedText(merged.taskId, 160) } : {}),
@@ -267,6 +283,12 @@ export function summarizeDelegationScope(
     ...(scope.executionRoot ? { executionRoot: scope.executionRoot } : {}),
     ...(scope.workItemId ? { workItemId: scope.workItemId } : {}),
     ...(scope.workSource ? { workSource: scope.workSource } : {}),
+    ...(scope.repairParentProposalId
+      ? { repairParentProposalId: scope.repairParentProposalId }
+      : {}),
+    ...(scope.repairParentProposalRevision
+      ? { repairParentProposalRevision: scope.repairParentProposalRevision }
+      : {}),
     ...(scope.runId ? { runId: scope.runId } : {}),
     ...(scope.swarmId ? { swarmId: scope.swarmId } : {}),
     ...(scope.taskId ? { taskId: scope.taskId } : {}),
@@ -339,6 +361,8 @@ export function scopeFromWorkItem(
     sourceRepo: item.repo,
     workItemId: item.id,
     workSource: item.source,
+    repairParentProposalId: item.repairParentProposalId,
+    repairParentProposalRevision: item.repairParentProposalRevision,
     objective: item.title,
     resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
   });
