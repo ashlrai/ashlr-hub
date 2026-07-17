@@ -234,6 +234,8 @@ describe('m141 judge-trace — round-trip', () => {
   });
 
   it('distinguishes missing, healthy, and degraded bounded sources', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-02T12:00:00.000Z'));
     const { judgeTracesDir, readJudgeTraces, readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
 
     expect(readJudgeTracesDetailed()).toMatchObject({
@@ -268,6 +270,8 @@ describe('m141 judge-trace — round-trip', () => {
   });
 
   it('deduplicates exact trace rows and degrades on a conflicting trace id', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-02T12:00:00.000Z'));
     const { judgeTracesDir, readJudgeTracesDetailed } =
       await import('../src/core/fleet/judge-trace.js');
     const dir = judgeTracesDir();
