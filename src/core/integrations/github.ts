@@ -24,6 +24,8 @@ const BRANCH_PROTECTION_CACHE_MAX = 128;
 const BRANCH_PROTECTION_POSITIVE_TTL_MS = 30_000;
 const BRANCH_PROTECTION_NEGATIVE_TTL_MS = 5_000;
 const MAX_BRANCH_RULES = 100;
+const EFFECTIVE_RULES_PER_PAGE = 100;
+const MAX_EFFECTIVE_RULES = 1_000;
 const MAX_REQUIRED_CHECKS = 100;
 const MAX_POLICY_ACTORS = 100;
 const MAX_POLICY_DEPTH = 10;
@@ -33,6 +35,83 @@ const MAX_POLICY_STRING_LENGTH = 8_192;
 const MAX_PR_VIEW_JSON_LENGTH = 64 * 1024;
 const MAX_PR_SELECTOR_LENGTH = 2_048;
 const MAX_PR_REF_LENGTH = 1_024;
+
+const EXACT_BRANCH_AUTHORITY_QUERY = `
+  query ExactBranchAuthority($owner: String!, $name: String!, $qualifiedName: String!) {
+    repository(owner: $owner, name: $name) {
+      id
+      nameWithOwner
+      defaultBranchRef { name }
+      ref(qualifiedName: $qualifiedName) {
+        name
+        target { oid }
+        branchProtectionRule {
+          id
+          pattern
+          allowsDeletions
+          allowsForcePushes
+          blocksCreations
+          dismissesStaleReviews
+          isAdminEnforced
+          lockAllowsFetchAndMerge
+          lockBranch
+          requireLastPushApproval
+          requiredApprovingReviewCount
+          requiresApprovingReviews
+          requiresCodeOwnerReviews
+          requiresCommitSignatures
+          requiresConversationResolution
+          requiresDeployments
+          requiresLinearHistory
+          requiresStatusChecks
+          requiresStrictStatusChecks
+          restrictsPushes
+          restrictsReviewDismissals
+          requiredDeploymentEnvironments
+          requiredStatusChecks { context app { databaseId } }
+          bypassForcePushAllowances(first: 100) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes { actor { ...BypassAllowanceActor } }
+          }
+          bypassPullRequestAllowances(first: 100) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes { actor { ...BypassAllowanceActor } }
+          }
+          pushAllowances(first: 100) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes { actor { ...PushAllowanceActor } }
+          }
+          reviewDismissalAllowances(first: 100) {
+            totalCount
+            pageInfo { hasNextPage }
+            nodes { actor { ...ReviewAllowanceActor } }
+          }
+        }
+      }
+    }
+  }
+  fragment BypassAllowanceActor on BranchActorAllowanceActor {
+    __typename
+    ... on App { databaseId slug }
+    ... on Team { databaseId slug }
+    ... on User { databaseId login }
+  }
+  fragment PushAllowanceActor on PushAllowanceActor {
+    __typename
+    ... on App { databaseId slug }
+    ... on Team { databaseId slug }
+    ... on User { databaseId login }
+  }
+  fragment ReviewAllowanceActor on ReviewDismissalAllowanceActor {
+    __typename
+    ... on App { databaseId slug }
+    ... on Team { databaseId slug }
+    ... on User { databaseId login }
+  }
+`;
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -145,6 +224,11 @@ export interface CanonicalClassicActorSet {
 }
 
 export interface CanonicalClassicProtection {
+  ruleId: string;
+  pattern: string;
+  bypassForcePushAllowanceCount: number;
+  bypassForcePushAllowances: CanonicalClassicActorSet;
+  requiredDeployments: { environments: string[] } | null;
   requiredStatusChecks: {
     strict: boolean;
     enforcementLevel: string | null;
@@ -156,6 +240,7 @@ export interface CanonicalClassicProtection {
     requireCodeOwnerReviews: boolean;
     requiredApprovingReviewCount: number;
     requireLastPushApproval: boolean;
+    restrictReviewDismissals: boolean;
     dismissalRestrictions: CanonicalClassicActorSet;
     bypassPullRequestAllowances: CanonicalClassicActorSet;
   } | null;
@@ -172,7 +257,8 @@ export interface CanonicalClassicProtection {
 
 export interface CanonicalRulesetBypassActor {
   actorId: string | null;
-  actorType: 'Integration' | 'OrganizationAdmin' | 'RepositoryRole' | 'Team' | 'DeployKey' | 'User';
+  actorType: 'Integration' | 'OrganizationAdmin' | 'RepositoryRole' | 'Team' | 'DeployKey' |
+    'EnterpriseOwner' | 'EnterpriseRole' | 'User';
   bypassMode: 'always' | 'pull_request' | 'exempt';
 }
 
@@ -190,10 +276,11 @@ export interface CanonicalRulesetProtection {
   bypassActors: CanonicalRulesetBypassActor[];
   conditions: { [key: string]: CanonicalPolicyValue };
   rules: CanonicalRulesetRule[];
+  requiredCheckBindings: RequiredCheckBinding[];
 }
 
 export interface BranchProtectionPolicySnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   classic: CanonicalClassicProtection | null;
   rulesets: CanonicalRulesetProtection[];
 }
@@ -627,6 +714,49 @@ type AttestationGhResult =
   | { kind: 'ok'; stdout: string }
   | { kind: 'not-found' | 'unavailable' };
 
+interface ExactClassicAuthority {
+  ruleId: string;
+  pattern: string;
+  allowsDeletions: boolean;
+  allowsForcePushes: boolean;
+  blocksCreations: boolean;
+  dismissesStaleReviews: boolean;
+  isAdminEnforced: boolean;
+  lockAllowsFetchAndMerge: boolean;
+  lockBranch: boolean;
+  requireLastPushApproval: boolean;
+  requiredApprovingReviewCount: number | null;
+  requiresApprovingReviews: boolean;
+  requiresCodeOwnerReviews: boolean;
+  requiresCommitSignatures: boolean;
+  requiresConversationResolution: boolean;
+  requiresDeployments: boolean;
+  requiresLinearHistory: boolean;
+  requiresStatusChecks: boolean;
+  requiresStrictStatusChecks: boolean;
+  restrictsPushes: boolean;
+  restrictsReviewDismissals: boolean;
+  requiredDeploymentEnvironments: string[];
+  requiredStatusChecks: RequiredCheckBinding[];
+  bypassForcePushAllowanceCount: number;
+  bypassPullRequestAllowanceCount: number;
+  pushAllowanceCount: number;
+  reviewDismissalAllowanceCount: number;
+  bypassForcePushAllowances: CanonicalClassicActorSet;
+  bypassPullRequestAllowances: CanonicalClassicActorSet;
+  pushAllowances: CanonicalClassicActorSet;
+  reviewDismissalAllowances: CanonicalClassicActorSet;
+}
+
+interface ExactBranchAuthority {
+  repositoryId: string;
+  nameWithOwner: string;
+  defaultBranch: string;
+  branch: string;
+  headOid: string;
+  classic: ExactClassicAuthority | null;
+}
+
 function runAttestationGh(cwd: string, args: string[]): AttestationGhResult {
   try {
     const res = spawnSync(GH_BIN, args, {
@@ -655,6 +785,222 @@ function runAttestationGh(cwd: string, args: string[]): AttestationGhResult {
   } catch {
     return { kind: 'unavailable' };
   }
+}
+
+function parseBoundedCount(value: unknown, max: number): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
+    ? value
+    : null;
+}
+
+function parseGraphqlRequiredChecks(value: unknown): RequiredCheckBinding[] | null {
+  if (!Array.isArray(value) || value.length > MAX_REQUIRED_CHECKS) return null;
+  const checks: RequiredCheckBinding[] = [];
+  for (const item of value) {
+    const check = objectRecord(item);
+    const context = boundedNonEmptyString(check?.['context'], 256);
+    if (!check || !context || !Object.prototype.hasOwnProperty.call(check, 'app')) return null;
+    const rawApp = check['app'];
+    let appId: string | null = null;
+    if (rawApp !== null) {
+      const app = objectRecord(rawApp);
+      const parsedAppId = parseAppId(app?.['databaseId']);
+      if (!app || parsedAppId === null || parsedAppId === undefined) return null;
+      appId = parsedAppId;
+    }
+    checks.push({ context, appId });
+  }
+  const sorted = sortedBindings(checks);
+  return sorted.length === checks.length ? sorted : null;
+}
+
+interface ParsedAllowanceConnection {
+  totalCount: number;
+  actors: CanonicalClassicActorSet;
+}
+
+function parseAllowanceConnection(value: unknown): ParsedAllowanceConnection | null {
+  const connection = objectRecord(value);
+  const pageInfo = objectRecord(connection?.['pageInfo']);
+  const nodes = connection?.['nodes'];
+  const totalCount = parseBoundedCount(connection?.['totalCount'], MAX_POLICY_ACTORS);
+  if (!connection || !pageInfo || pageInfo['hasNextPage'] !== false || totalCount === null ||
+      !Array.isArray(nodes) || nodes.length !== totalCount || nodes.length > MAX_POLICY_ACTORS) {
+    return null;
+  }
+  const actors: CanonicalClassicActorSet = { users: [], teams: [], apps: [] };
+  for (const item of nodes) {
+    const allowance = objectRecord(item);
+    const actor = objectRecord(allowance?.['actor']);
+    const type = actor?.['__typename'];
+    const id = policyId(actor?.['databaseId']);
+    const nameField = type === 'User' ? 'login' : 'slug';
+    const name = boundedNonEmptyString(actor?.[nameField], 256);
+    if (!allowance || !actor || !id || !name ||
+        (type !== 'User' && type !== 'Team' && type !== 'App')) return null;
+    const canonical = { id, name: name.toLowerCase() };
+    if (type === 'User') actors.users.push(canonical);
+    else if (type === 'Team') actors.teams.push(canonical);
+    else actors.apps.push(canonical);
+  }
+  const sortActors = (items: CanonicalNamedActor[]): void => {
+    items.sort((a, b) => a.id.localeCompare(b.id) || a.name.localeCompare(b.name));
+  };
+  sortActors(actors.users);
+  sortActors(actors.teams);
+  sortActors(actors.apps);
+  return { totalCount, actors };
+}
+
+function parseDeploymentEnvironments(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_POLICY_ARRAY_ITEMS) return null;
+  const environments: string[] = [];
+  for (const item of value) {
+    const environment = boundedNonEmptyString(item, 256);
+    if (!environment) return null;
+    environments.push(environment);
+  }
+  return new Set(environments).size === environments.length ? environments.sort() : null;
+}
+
+function parseExactClassicAuthority(value: unknown): ExactClassicAuthority | null {
+  const rule = objectRecord(value);
+  const ruleId = boundedNonEmptyString(rule?.['id'], 256);
+  const pattern = boundedNonEmptyString(rule?.['pattern'], 1_024);
+  const bypassForcePush = parseAllowanceConnection(rule?.['bypassForcePushAllowances']);
+  const bypassPullRequest = parseAllowanceConnection(rule?.['bypassPullRequestAllowances']);
+  const push = parseAllowanceConnection(rule?.['pushAllowances']);
+  const reviewDismissal = parseAllowanceConnection(rule?.['reviewDismissalAllowances']);
+  const approvingCount = rule?.['requiredApprovingReviewCount'];
+  const requiredApprovingReviewCount = approvingCount === null
+    ? null
+    : parseBoundedCount(approvingCount, 6);
+  const booleanFields = [
+    'allowsDeletions',
+    'allowsForcePushes',
+    'blocksCreations',
+    'dismissesStaleReviews',
+    'isAdminEnforced',
+    'lockAllowsFetchAndMerge',
+    'lockBranch',
+    'requireLastPushApproval',
+    'requiresApprovingReviews',
+    'requiresCodeOwnerReviews',
+    'requiresCommitSignatures',
+    'requiresConversationResolution',
+    'requiresDeployments',
+    'requiresLinearHistory',
+    'requiresStatusChecks',
+    'requiresStrictStatusChecks',
+    'restrictsPushes',
+    'restrictsReviewDismissals',
+  ];
+  if (!rule || !ruleId || !pattern || !bypassForcePush || !bypassPullRequest || !push ||
+      !reviewDismissal ||
+      (approvingCount !== null && requiredApprovingReviewCount === null) ||
+      !booleanFields.every((field) => typeof rule[field] === 'boolean')) return null;
+
+  const requiresStatusChecks = rule['requiresStatusChecks'] as boolean;
+  const rawRequiredStatusChecks = rule['requiredStatusChecks'];
+  const requiredStatusChecks = rawRequiredStatusChecks === null
+    ? []
+    : parseGraphqlRequiredChecks(rawRequiredStatusChecks);
+  if (!requiredStatusChecks || (rawRequiredStatusChecks === null && requiresStatusChecks) ||
+      (!requiresStatusChecks && requiredStatusChecks.length > 0)) return null;
+
+  const requiresDeployments = rule['requiresDeployments'] as boolean;
+  const rawEnvironments = rule['requiredDeploymentEnvironments'];
+  const requiredDeploymentEnvironments = rawEnvironments === null
+    ? []
+    : parseDeploymentEnvironments(rawEnvironments);
+  if (!requiredDeploymentEnvironments || (rawEnvironments === null && requiresDeployments) ||
+      (requiresDeployments && requiredDeploymentEnvironments.length === 0) ||
+      (!requiresDeployments && requiredDeploymentEnvironments.length > 0)) return null;
+  return {
+    ruleId,
+    pattern,
+    allowsDeletions: rule['allowsDeletions'] as boolean,
+    allowsForcePushes: rule['allowsForcePushes'] as boolean,
+    blocksCreations: rule['blocksCreations'] as boolean,
+    dismissesStaleReviews: rule['dismissesStaleReviews'] as boolean,
+    isAdminEnforced: rule['isAdminEnforced'] as boolean,
+    lockAllowsFetchAndMerge: rule['lockAllowsFetchAndMerge'] as boolean,
+    lockBranch: rule['lockBranch'] as boolean,
+    requireLastPushApproval: rule['requireLastPushApproval'] as boolean,
+    requiredApprovingReviewCount,
+    requiresApprovingReviews: rule['requiresApprovingReviews'] as boolean,
+    requiresCodeOwnerReviews: rule['requiresCodeOwnerReviews'] as boolean,
+    requiresCommitSignatures: rule['requiresCommitSignatures'] as boolean,
+    requiresConversationResolution: rule['requiresConversationResolution'] as boolean,
+    requiresDeployments,
+    requiresLinearHistory: rule['requiresLinearHistory'] as boolean,
+    requiresStatusChecks: rule['requiresStatusChecks'] as boolean,
+    requiresStrictStatusChecks: rule['requiresStrictStatusChecks'] as boolean,
+    restrictsPushes: rule['restrictsPushes'] as boolean,
+    restrictsReviewDismissals: rule['restrictsReviewDismissals'] as boolean,
+    requiredDeploymentEnvironments,
+    requiredStatusChecks,
+    bypassForcePushAllowanceCount: bypassForcePush.totalCount,
+    bypassPullRequestAllowanceCount: bypassPullRequest.totalCount,
+    pushAllowanceCount: push.totalCount,
+    reviewDismissalAllowanceCount: reviewDismissal.totalCount,
+    bypassForcePushAllowances: bypassForcePush.actors,
+    bypassPullRequestAllowances: bypassPullRequest.actors,
+    pushAllowances: push.actors,
+    reviewDismissalAllowances: reviewDismissal.actors,
+  };
+}
+
+function parseExactBranchAuthority(
+  value: unknown,
+  expectedBranch: string,
+): ExactBranchAuthority | null {
+  const envelope = objectRecord(value);
+  if (envelope && Object.prototype.hasOwnProperty.call(envelope, 'errors')) {
+    const errors = envelope['errors'];
+    if (!Array.isArray(errors) || errors.length > 0) return null;
+  }
+  const data = objectRecord(envelope?.['data']);
+  const repository = objectRecord(data?.['repository']);
+  const defaultBranchRef = objectRecord(repository?.['defaultBranchRef']);
+  const ref = objectRecord(repository?.['ref']);
+  const target = objectRecord(ref?.['target']);
+  const repositoryId = boundedNonEmptyString(repository?.['id'], 256);
+  const nameWithOwner = boundedNonEmptyString(repository?.['nameWithOwner'], 512);
+  const defaultBranch = boundedNonEmptyString(defaultBranchRef?.['name'], 256);
+  const branch = boundedNonEmptyString(ref?.['name'], 256);
+  const headOid = boundedNonEmptyString(target?.['oid'], 64);
+  if (!envelope || !data || !repository || !ref || !repositoryId || !nameWithOwner || !defaultBranch ||
+      !branch || branch !== expectedBranch || !headOid || !/^[0-9a-f]{40}$/i.test(headOid) ||
+      !Object.prototype.hasOwnProperty.call(ref, 'branchProtectionRule')) return null;
+  const rawClassic = ref['branchProtectionRule'];
+  const classic = rawClassic === null ? null : parseExactClassicAuthority(rawClassic);
+  if (rawClassic !== null && !classic) return null;
+  return { repositoryId, nameWithOwner, defaultBranch, branch, headOid, classic };
+}
+
+function readExactBranchAuthority(
+  cwd: string,
+  nameWithOwner: string,
+  branch: string,
+): ExactBranchAuthority | null {
+  const [owner, name, extra] = nameWithOwner.split('/');
+  if (!owner || !name || extra !== undefined) return null;
+  const result = runAttestationGh(cwd, [
+    'api',
+    'graphql',
+    '-F',
+    `owner=${owner}`,
+    '-F',
+    `name=${name}`,
+    '-F',
+    `qualifiedName=refs/heads/${branch}`,
+    '-f',
+    `query=${EXACT_BRANCH_AUTHORITY_QUERY}`,
+  ]);
+  return result.kind === 'ok'
+    ? parseExactBranchAuthority(safeJson(result.stdout), branch)
+    : null;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
@@ -709,9 +1055,12 @@ function unavailableAttestation(
 }
 
 function parseAppId(value: unknown): string | null | undefined {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value);
-  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
+  if (value === null) return null;
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && (value === -1 || value > 0)) {
+    return String(value);
+  }
+  if (typeof value === 'string' && /^(?:-1|[1-9]\d*)$/.test(value)) return value;
   return undefined;
 }
 
@@ -802,7 +1151,6 @@ function recordBindings(
 }
 
 function parseEnabledWrapper(value: unknown): boolean | null {
-  if (value === null || value === undefined) return false;
   const record = objectRecord(value);
   return record && typeof record['enabled'] === 'boolean' ? record['enabled'] : null;
 }
@@ -831,8 +1179,36 @@ function parseClassicActorSet(value: unknown): CanonicalClassicActorSet | null {
   return users && teams && apps ? { users, teams, apps } : null;
 }
 
+function classicActorCount(value: CanonicalClassicActorSet): number {
+  return value.users.length + value.teams.length + value.apps.length;
+}
+
+function classicBindingsMatchAuthority(
+  observed: RequiredCheckBinding[],
+  authority: RequiredCheckBinding[],
+): boolean {
+  const remaining = observed.map((binding) => ({ ...binding }));
+  for (const expected of authority) {
+    const index = remaining.findIndex((candidate) =>
+      candidate.context === expected.context &&
+      (candidate.appId === expected.appId ||
+        (expected.appId === null && (candidate.appId === null || candidate.appId === '-1'))));
+    if (index === -1) return false;
+    remaining.splice(index, 1);
+  }
+  return remaining.length === 0;
+}
+
+function classicActorSetsEqual(
+  observed: CanonicalClassicActorSet,
+  authority: CanonicalClassicActorSet,
+): boolean {
+  return JSON.stringify(observed) === JSON.stringify(authority);
+}
+
 function parseClassicProtection(
   value: unknown,
+  authority: ExactClassicAuthority,
   requirements: Set<string>,
   checks: Set<string>,
   bindings: Map<string, RequiredCheckBinding>,
@@ -845,15 +1221,17 @@ function parseClassicProtection(
   if (rawStatus !== null && rawStatus !== undefined) {
     const status = objectRecord(rawStatus);
     if (!status || typeof status['strict'] !== 'boolean') return null;
-    const contexts = parseRequiredChecks(status['contexts'] ?? []);
-    const appChecks = parseRequiredChecks(status['checks'] ?? [], 'app_id');
+    const contexts = parseRequiredChecks(status['contexts']);
+    const appChecks = parseRequiredChecks(status['checks'], 'app_id');
     const enforcementLevel = status['enforcement_level'] === null || status['enforcement_level'] === undefined
       ? null
       : boundedNonEmptyString(status['enforcement_level'], 100);
     if (!contexts || !appChecks ||
         (status['enforcement_level'] !== null && status['enforcement_level'] !== undefined &&
           enforcementLevel === null)) return null;
-    const parsedChecks = sortedBindings([...contexts, ...appChecks]);
+    const structuredContexts = new Set(appChecks.map((binding) => binding.context));
+    const legacyOnlyContexts = contexts.filter((binding) => !structuredContexts.has(binding.context));
+    const parsedChecks = sortedBindings([...appChecks, ...legacyOnlyContexts]);
     requiredStatusChecks = { strict: status['strict'], enforcementLevel, checks: parsedChecks };
     requirements.add('required_status_checks');
     recordBindings(parsedChecks, checks, bindings);
@@ -903,6 +1281,7 @@ function parseClassicProtection(
       requireCodeOwnerReviews: reviews['require_code_owner_reviews'],
       requiredApprovingReviewCount: count,
       requireLastPushApproval: reviews['require_last_push_approval'],
+      restrictReviewDismissals: authority.restrictsReviewDismissals,
       dismissalRestrictions,
       bypassPullRequestAllowances,
     };
@@ -916,14 +1295,65 @@ function parseClassicProtection(
   if (rawRestrictions !== null && rawRestrictions !== undefined && !pushRestrictions) return null;
   if (pushRestrictions) requirements.add('push_restrictions');
 
+  const requiredStatusBindings = requiredStatusChecks?.checks ?? [];
+  const reviewDismissalCount = requiredPullRequestReviews
+    ? classicActorCount(requiredPullRequestReviews.dismissalRestrictions)
+    : 0;
+  const bypassPullRequestCount = requiredPullRequestReviews
+    ? classicActorCount(requiredPullRequestReviews.bypassPullRequestAllowances)
+    : 0;
+  const pushAllowanceCount = pushRestrictions ? classicActorCount(pushRestrictions) : 0;
+  if ((requiredStatusChecks !== null) !== authority.requiresStatusChecks ||
+      (requiredPullRequestReviews !== null) !== authority.requiresApprovingReviews ||
+      (pushRestrictions !== null) !== authority.restrictsPushes ||
+      (requiredStatusChecks !== null &&
+        requiredStatusChecks.strict !== authority.requiresStrictStatusChecks) ||
+      !classicBindingsMatchAuthority(requiredStatusBindings, authority.requiredStatusChecks) ||
+      (requiredPullRequestReviews !== null &&
+        (requiredPullRequestReviews.dismissStaleReviews !== authority.dismissesStaleReviews ||
+          requiredPullRequestReviews.requireCodeOwnerReviews !== authority.requiresCodeOwnerReviews ||
+          requiredPullRequestReviews.requireLastPushApproval !== authority.requireLastPushApproval ||
+          requiredPullRequestReviews.requiredApprovingReviewCount !==
+            authority.requiredApprovingReviewCount)) ||
+      reviewDismissalCount !== authority.reviewDismissalAllowanceCount ||
+      bypassPullRequestCount !== authority.bypassPullRequestAllowanceCount ||
+      pushAllowanceCount !== authority.pushAllowanceCount ||
+      (requiredPullRequestReviews !== null &&
+        (!classicActorSetsEqual(
+          requiredPullRequestReviews.dismissalRestrictions,
+          authority.reviewDismissalAllowances,
+        ) || !classicActorSetsEqual(
+          requiredPullRequestReviews.bypassPullRequestAllowances,
+          authority.bypassPullRequestAllowances,
+        ))) ||
+      (pushRestrictions !== null &&
+        !classicActorSetsEqual(pushRestrictions, authority.pushAllowances)) ||
+      enforceAdmins !== authority.isAdminEnforced ||
+      requiredSignatures !== authority.requiresCommitSignatures ||
+      requiredLinearHistory !== authority.requiresLinearHistory ||
+      allowForcePushes !== authority.allowsForcePushes ||
+      allowDeletions !== authority.allowsDeletions ||
+      blockCreations !== authority.blocksCreations ||
+      requiredConversationResolution !== authority.requiresConversationResolution ||
+      lockBranch !== authority.lockBranch ||
+      allowForkSyncing !== authority.lockAllowsFetchAndMerge) return null;
+
   if (enforceAdmins) requirements.add('enforce_admins');
   if (requiredSignatures) requirements.add('required_signatures');
   if (requiredLinearHistory) requirements.add('required_linear_history');
   if (blockCreations) requirements.add('block_creations');
   if (requiredConversationResolution) requirements.add('required_conversation_resolution');
   if (lockBranch) requirements.add('lock_branch');
+  if (authority.requiresDeployments) requirements.add('required_deployments');
 
   return {
+    ruleId: authority.ruleId,
+    pattern: authority.pattern,
+    bypassForcePushAllowanceCount: authority.bypassForcePushAllowanceCount,
+    bypassForcePushAllowances: authority.bypassForcePushAllowances,
+    requiredDeployments: authority.requiresDeployments
+      ? { environments: authority.requiredDeploymentEnvironments }
+      : null,
     requiredStatusChecks,
     enforceAdmins: enforceAdmins as boolean,
     requiredPullRequestReviews,
@@ -1076,7 +1506,7 @@ function parseEffectiveRules(
   checks: Set<string>,
   bindings: Map<string, RequiredCheckBinding>,
 ): ParsedEffectiveRule[] | null {
-  if (!Array.isArray(value) || value.length > MAX_BRANCH_RULES) return null;
+  if (!Array.isArray(value) || value.length > MAX_EFFECTIVE_RULES) return null;
   const parsed: ParsedEffectiveRule[] = [];
   for (const item of value) {
     const effective = objectRecord(item);
@@ -1098,7 +1528,43 @@ function parseEffectiveRules(
   return parsed;
 }
 
-function parseRulesetBypassActors(value: unknown): CanonicalRulesetBypassActor[] | null {
+function effectiveRulesFingerprint(value: ParsedEffectiveRule[]): string {
+  return JSON.stringify(value.map((item) => ({
+    rulesetId: item.rulesetId,
+    sourceType: item.sourceType,
+    source: item.source,
+    rule: item.rule,
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+}
+
+function readEffectiveRules(
+  cwd: string,
+  nameWithOwner: string,
+  branch: string,
+): unknown[] | null {
+  const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
+  const maxPages = Math.floor(MAX_EFFECTIVE_RULES / EFFECTIVE_RULES_PER_PAGE) + 1;
+  const collected: unknown[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const result = runAttestationGh(cwd, [
+      'api',
+      `repos/${nameWithOwner}/rules/branches/${encodedBranch}` +
+        `?per_page=${EFFECTIVE_RULES_PER_PAGE}&page=${page}`,
+    ]);
+    if (result.kind !== 'ok') return null;
+    const parsed = safeJson(result.stdout);
+    if (!Array.isArray(parsed) || parsed.length > EFFECTIVE_RULES_PER_PAGE ||
+        collected.length + parsed.length > MAX_EFFECTIVE_RULES) return null;
+    collected.push(...parsed);
+    if (parsed.length < EFFECTIVE_RULES_PER_PAGE) return collected;
+  }
+  return null;
+}
+
+function parseRulesetBypassActors(
+  value: unknown,
+  sourceType: CanonicalRulesetProtection['sourceType'],
+): CanonicalRulesetBypassActor[] | null {
   if (!Array.isArray(value) || value.length > MAX_POLICY_ACTORS) return null;
   const actors: CanonicalRulesetBypassActor[] = [];
   for (const item of value) {
@@ -1107,14 +1573,18 @@ function parseRulesetBypassActors(value: unknown): CanonicalRulesetBypassActor[]
     const bypassMode = actor?.['bypass_mode'];
     const nullableId = actor?.['actor_id'];
     const actorId = nullableId === null ? null : policyId(nullableId);
+    const enterpriseActor = actorType === 'EnterpriseOwner' || actorType === 'EnterpriseRole';
+    const idlessActor = actorType === 'OrganizationAdmin' || actorType === 'DeployKey' ||
+      enterpriseActor;
     if (!actor ||
         (actorType !== 'Integration' && actorType !== 'OrganizationAdmin' &&
           actorType !== 'RepositoryRole' && actorType !== 'Team' &&
-          actorType !== 'DeployKey' && actorType !== 'User') ||
+          actorType !== 'DeployKey' && actorType !== 'User' &&
+          !((sourceType === 'Enterprise' || sourceType === 'Organization') && enterpriseActor)) ||
         (bypassMode !== 'always' && bypassMode !== 'pull_request' && bypassMode !== 'exempt') ||
         (nullableId !== null && !actorId) ||
-        ((actorType === 'OrganizationAdmin' || actorType === 'DeployKey') && nullableId !== null) ||
-        ((actorType !== 'OrganizationAdmin' && actorType !== 'DeployKey') && actorId === null)) {
+        (idlessActor && nullableId !== null) ||
+        (!idlessActor && actorId === null)) {
       return null;
     }
     actors.push({ actorId, actorType, bypassMode });
@@ -1136,6 +1606,22 @@ function parseRulesetConditions(value: unknown): Record<string, CanonicalPolicyV
   return canonicalPolicyObject(conditions);
 }
 
+function rulesetRequiredCheckBindings(
+  rules: CanonicalRulesetRule[],
+): RequiredCheckBinding[] | null {
+  const bindings: RequiredCheckBinding[] = [];
+  for (const rule of rules) {
+    if (rule.type !== 'required_status_checks') continue;
+    const parsed = parseRequiredChecks(
+      rule.parameters?.['required_status_checks'],
+      'integration_id',
+    );
+    if (!parsed) return null;
+    bindings.push(...parsed);
+  }
+  return sortedBindings(bindings);
+}
+
 function parseRulesetProtection(
   value: unknown,
   expected: ParsedEffectiveRule[],
@@ -1150,7 +1636,7 @@ function parseRulesetProtection(
       !source || source.toLowerCase() !== first.source || detail['target'] !== 'branch' ||
       detail['enforcement'] !== 'active' ||
       !Object.prototype.hasOwnProperty.call(detail, 'bypass_actors')) return null;
-  const bypassActors = parseRulesetBypassActors(detail['bypass_actors']);
+  const bypassActors = parseRulesetBypassActors(detail['bypass_actors'], first.sourceType);
   const conditions = parseRulesetConditions(detail['conditions']);
   const rawRules = detail['rules'];
   if (!bypassActors || !conditions || !Array.isArray(rawRules) || rawRules.length > MAX_BRANCH_RULES) {
@@ -1164,7 +1650,9 @@ function parseRulesetProtection(
   }
   const sortedRules = sortRules(rules);
   const effectiveRules = sortRules(expected.map((item) => item.rule));
-  if (JSON.stringify(sortedRules) !== JSON.stringify(effectiveRules)) return null;
+  const requiredCheckBindings = rulesetRequiredCheckBindings(sortedRules);
+  if (!requiredCheckBindings ||
+      JSON.stringify(sortedRules) !== JSON.stringify(effectiveRules)) return null;
   return {
     id,
     sourceType: first.sourceType,
@@ -1174,7 +1662,38 @@ function parseRulesetProtection(
     bypassActors,
     conditions,
     rules: sortedRules,
+    requiredCheckBindings,
   };
+}
+
+function readRulesetProtections(
+  cwd: string,
+  nameWithOwner: string,
+  effectiveRules: ParsedEffectiveRule[],
+): CanonicalRulesetProtection[] | null {
+  const grouped = new Map<string, ParsedEffectiveRule[]>();
+  for (const effectiveRule of effectiveRules) {
+    const key = `${effectiveRule.sourceType}\0${effectiveRule.source}\0${effectiveRule.rulesetId}`;
+    const group = grouped.get(key) ?? [];
+    group.push(effectiveRule);
+    grouped.set(key, group);
+  }
+  const rulesets: CanonicalRulesetProtection[] = [];
+  for (const group of grouped.values()) {
+    const first = group[0];
+    if (!first) return null;
+    const detailResult = runAttestationGh(cwd, [
+      'api',
+      `repos/${nameWithOwner}/rulesets/${first.rulesetId}?includes_parents=true`,
+    ]);
+    if (detailResult.kind !== 'ok') return null;
+    const ruleset = parseRulesetProtection(safeJson(detailResult.stdout), group);
+    if (!ruleset) return null;
+    rulesets.push(ruleset);
+  }
+  return rulesets.sort((a, b) =>
+    a.sourceType.localeCompare(b.sourceType) || a.source.localeCompare(b.source) ||
+      a.id.localeCompare(b.id));
 }
 
 function apiPath(nameWithOwner: string, branch: string, suffix = ''): string {
@@ -1215,6 +1734,16 @@ function readBranchProtectionUncached(
   const identity = { nameWithOwner, repositoryId, defaultBranch };
   if (!branch) return unavailableAttestation('GitHub branch name was invalid', null, identity);
 
+  const initialAuthority = readExactBranchAuthority(repo, nameWithOwner, branch);
+  if (!initialAuthority) {
+    return unavailableAttestation('Exact GitHub branch authority is unavailable', branch, identity);
+  }
+  if (initialAuthority.nameWithOwner.toLowerCase() !== nameWithOwner.toLowerCase() ||
+      initialAuthority.repositoryId !== repositoryId ||
+      initialAuthority.defaultBranch !== defaultBranch) {
+    return unavailableAttestation('REST and GraphQL repository identity disagree', branch, identity);
+  }
+
   const branchResult = runAttestationGh(repo, ['api', apiPath(nameWithOwner, branch)]);
   if (branchResult.kind !== 'ok') {
     return unavailableAttestation('GitHub branch head is unavailable', branch, identity);
@@ -1225,6 +1754,9 @@ function readBranchProtectionUncached(
   const baseHead = boundedNonEmptyString(commit?.['sha'], 64);
   if (!branchObject || returnedBranch !== branch || !baseHead || !/^[0-9a-f]{40}$/i.test(baseHead)) {
     return unavailableAttestation('GitHub branch head was malformed', branch, identity);
+  }
+  if (baseHead.toLowerCase() !== initialAuthority.headOid.toLowerCase()) {
+    return unavailableAttestation('REST and GraphQL branch heads disagree', branch, identity);
   }
   const boundIdentity = { ...identity, baseHead };
 
@@ -1241,8 +1773,12 @@ function readBranchProtectionUncached(
     return unavailableAttestation('Classic branch protection is unavailable', branch, boundIdentity);
   }
   if (classic.kind === 'ok') {
+    if (!initialAuthority.classic) {
+      return unavailableAttestation('REST and GraphQL classic protection disagree', branch, boundIdentity);
+    }
     classicProtection = parseClassicProtection(
       safeJson(classic.stdout),
+      initialAuthority.classic,
       requirements,
       checks,
       bindings,
@@ -1251,52 +1787,40 @@ function readBranchProtectionUncached(
       return unavailableAttestation('Classic branch protection was malformed', branch, boundIdentity);
     }
     sources.push('classic');
+  } else if (initialAuthority.classic) {
+    return unavailableAttestation('REST and GraphQL classic protection disagree', branch, boundIdentity);
   }
 
-  const rules = runAttestationGh(repo, [
-    'api',
-    `repos/${nameWithOwner}/rules/branches/${branch.split('/').map(encodeURIComponent).join('/')}`,
-  ]);
-  if (rules.kind !== 'ok') {
+  const parsedRules = readEffectiveRules(repo, nameWithOwner, branch);
+  if (!parsedRules) {
     return unavailableAttestation('Effective branch rules are unavailable or malformed', branch, boundIdentity);
   }
-  const parsedRules = safeJson(rules.stdout);
   const effectiveRules = parseEffectiveRules(parsedRules, requirements, checks, bindings);
   if (!effectiveRules) {
     return unavailableAttestation('Effective branch rules are unavailable or malformed', branch, boundIdentity);
   }
-  const rulesets: CanonicalRulesetProtection[] = [];
-  if (effectiveRules.length > 0) {
-    sources.push('ruleset');
-    const grouped = new Map<string, ParsedEffectiveRule[]>();
-    for (const effectiveRule of effectiveRules) {
-      const key = `${effectiveRule.sourceType}\0${effectiveRule.source}\0${effectiveRule.rulesetId}`;
-      const group = grouped.get(key) ?? [];
-      group.push(effectiveRule);
-      grouped.set(key, group);
-    }
-    for (const group of grouped.values()) {
-      const first = group[0];
-      if (!first) {
-        return unavailableAttestation('Active ruleset policy was malformed', branch, boundIdentity);
-      }
-      const detailResult = runAttestationGh(repo, [
-        'api',
-        `repos/${nameWithOwner}/rulesets/${first.rulesetId}?includes_parents=true`,
-      ]);
-      if (detailResult.kind !== 'ok') {
-        return unavailableAttestation('Active ruleset policy is unavailable', branch, boundIdentity);
-      }
-      const ruleset = parseRulesetProtection(safeJson(detailResult.stdout), group);
-      if (!ruleset) {
-        return unavailableAttestation('Active ruleset policy was malformed', branch, boundIdentity);
-      }
-      rulesets.push(ruleset);
-    }
+  const rulesets = readRulesetProtections(repo, nameWithOwner, effectiveRules);
+  if (!rulesets) {
+    return unavailableAttestation('Active ruleset policy is unavailable or malformed', branch, boundIdentity);
   }
-  rulesets.sort((a, b) =>
-    a.sourceType.localeCompare(b.sourceType) || a.source.localeCompare(b.source) ||
-      a.id.localeCompare(b.id));
+  if (rulesets.length > 0) sources.push('ruleset');
+
+  const finalRulesValue = readEffectiveRules(repo, nameWithOwner, branch);
+  const finalRules = finalRulesValue === null
+    ? null
+    : parseEffectiveRules(finalRulesValue, new Set(), new Set(), new Map());
+  if (!finalRules ||
+      effectiveRulesFingerprint(finalRules) !== effectiveRulesFingerprint(effectiveRules)) {
+    return unavailableAttestation('Effective branch rules changed during observation', branch, boundIdentity);
+  }
+  const finalRulesets = readRulesetProtections(repo, nameWithOwner, finalRules);
+  if (!finalRulesets || JSON.stringify(finalRulesets) !== JSON.stringify(rulesets)) {
+    return unavailableAttestation('Active ruleset policy changed during observation', branch, boundIdentity);
+  }
+  const finalAuthority = readExactBranchAuthority(repo, nameWithOwner, branch);
+  if (!finalAuthority || JSON.stringify(finalAuthority) !== JSON.stringify(initialAuthority)) {
+    return unavailableAttestation('Exact GitHub branch authority changed during observation', branch, boundIdentity);
+  }
 
   const normalizedRequirements = [...requirements].sort();
   const requiredChecks = [...checks].sort();
@@ -1319,7 +1843,7 @@ function readBranchProtectionUncached(
     requiredCheckBindings,
     sources,
     policySnapshot: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       classic: classicProtection,
       rulesets,
     },
