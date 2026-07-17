@@ -380,6 +380,8 @@ function makeTrustedProposalRepairItem(repo: string, id = 'repo:proposal-repair:
     score: 4,
     tags: ['self-heal', 'proposal-repair', 'verify'],
     ts: '2026-07-03T00:00:00.000Z',
+    repairParentProposalId: 'prop-stalled',
+    repairParentProposalRevision: 'b'.repeat(64),
   };
 }
 

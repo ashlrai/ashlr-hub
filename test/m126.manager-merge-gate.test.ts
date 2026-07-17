@@ -264,6 +264,7 @@ function shipVerdict(proposalId: string): ManagerVerdict {
 }
 
 beforeEach(() => {
+  vi.resetAllMocks();
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m126-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m126-repo-'));
   process.env.HOME = tmpHome;
@@ -1128,7 +1129,6 @@ describe('M126 generated proposal-repair parent authority', () => {
 
     const p = generatedRepairChild(docsDiff('docs/repair-no-parent.md'));
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
-    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
 
     const r = await autoMergeProposal(p.id, baseCfg());
 
@@ -1150,7 +1150,6 @@ describe('M126 generated proposal-repair parent authority', () => {
     const p = generatedRepairChild(docsDiff('docs/repair-stale-parent.md'), parent);
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
     expect(updateProposalField(parent.id, { decisionReason: 'parent changed after child capture' })).toBe(true);
-    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
 
     const r = await autoMergeProposal(p.id, baseCfg());
 
@@ -1189,17 +1188,19 @@ describe('M126 generated proposal-repair parent authority', () => {
     const parent = frontierPatch(docsDiff('docs/repair-parent-locked.md'));
     const p = generatedRepairChild(docsDiff('docs/repair-locked-parent.md'), parent);
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    // Parent authority is acquired before judging, so contention must not queue a verdict.
     const competingParentFence = acquireProposalMutationLock(parent.id, 0);
     expect(competingParentFence).not.toBeNull();
-    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
 
-    const r = await autoMergeProposal(p.id, baseCfg());
-    releaseProposalMutationLock(competingParentFence);
+    const r = await autoMergeProposal(p.id, baseCfg()).finally(() => {
+      releaseProposalMutationLock(competingParentFence);
+    });
 
     expect(r).toMatchObject({ ok: false, merged: false });
     expect(r.reason).toMatch(/parent authority denied: lock-unavailable/i);
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
     expect(loadProposal(p.id)!.status).toBe('approved');
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
   });
 
   it('holds parent authority through terminal merge recording and releases it afterward', async () => {

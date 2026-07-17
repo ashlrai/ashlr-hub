@@ -34,7 +34,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-import type { AshlrConfig, RunState, RunUsage, SwarmRun, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, RunState, RunUsage, SwarmRun } from '../src/core/types.js';
 import type { StreamSink } from '../src/core/run/streaming.js';
 import {
   makeFixture,
@@ -52,7 +52,7 @@ import {
   sweepOrphanSandboxes,
 } from '../src/core/sandbox/worktree.js';
 import { nullSink } from '../src/core/run/streaming.js';
-import { loadProposal, pendingCount } from '../src/core/inbox/store.js';
+import { createProposal, loadProposal, pendingCount } from '../src/core/inbox/store.js';
 import { saveSwarm } from '../src/core/swarm/store.js';
 import {
   generatedRepairGenerationId,
@@ -410,27 +410,40 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     await ensureImported();
     repo = fx.makeRepo({ files: { 'src/value.ts': 'export const value = 1;\n' } });
     repo.enroll();
+    const { proposalRepairWorkItem } = await import('../src/core/fleet/proposal-repair-work.js');
     const treeBefore = repo.shasumTree();
     const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
-    const pendingBefore = pendingCount();
     const id = 'attempt-42345678-1234-4123-8123-123456789abc';
-    const repair: WorkItem = {
-      id: `${basename(repo.dir)}:proposal-repair:abcdef123456`,
+    const parent = createProposal({
       repo: repo.dir,
-      source: 'self',
-      title: `Proposal repair for ${basename(repo.dir)} item repo:goal:resume-generation`,
-      detail:
-        'Proposal repair: recover a complete proposal from a prior attempt.\n' +
-        'Proposal: prop-resume-generation\n' +
-        'Original work item: repo:goal:resume-generation\n' +
-        'Produce a fresh complete fix and run merge-grade verification.',
-      value: 5,
-      effort: 1,
-      score: 5,
-      tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
-      ts: '2026-07-10T16:00:00.000Z',
-    };
-    const workItemGenerationId = generatedRepairGenerationId(repair)!;
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Incomplete value update',
+      summary: 'The captured value update needs a complete verified replacement.',
+      diff:
+        'diff --git a/src/value.ts b/src/value.ts\n' +
+        '--- a/src/value.ts\n' +
+        '+++ b/src/value.ts\n' +
+        '@@ -1 +1 @@\n' +
+        '-export const value = 1;\n' +
+        '+export const value = 2;\n',
+      workItemId: `${basename(repo.dir)}:goal:resume-generation`,
+      isPartial: true,
+      verifyResult: {
+        passed: false,
+        detail: 'The prior capture was incomplete.',
+        source: 'capture-gate',
+      },
+    });
+    const repair = proposalRepairWorkItem(parent);
+    if (!repair) throw new Error('expected an exact repair projection for the parent proposal');
+    const workItemGenerationId = generatedRepairGenerationId(repair);
+    if (!workItemGenerationId) throw new Error('expected an exact repair generation');
+    expect(repair.repairParentProposalId).toBe(parent.id);
+    expect(repair.repairParentProposalRevision).toMatch(/^[a-f0-9]{64}$/);
+    expect(workItemGenerationId).toMatch(/^[a-f0-9]{64}$/);
+    const pendingBefore = pendingCount();
+    const callerGenerationId = 'c'.repeat(64);
     const fakeSecret = 'sk-' + 'testvalueverysecret00000000';
     crashMidSwarm({
       id,
@@ -464,8 +477,14 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
         resumeId: id,
         parallel: 1,
         workItemId: 'caller-must-not-replace-durable-item',
-        workItemGenerationId: 'c'.repeat(64),
+        workItemGenerationId: callerGenerationId,
         workSource: 'manual',
+        delegationScope: {
+          schemaVersion: 1,
+          memoryMode: 'none',
+          repairParentProposalId: repair.repairParentProposalId,
+          repairParentProposalRevision: repair.repairParentProposalRevision,
+        },
         sandbox: false,
         requireSandbox: false,
         propose: false,
@@ -486,10 +505,15 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       workItemId: repair.id,
       workItemGenerationId,
       workSource: 'self',
+      delegationScope: {
+        repairParentProposalId: parent.id,
+        repairParentProposalRevision: repair.repairParentProposalRevision,
+      },
       runId: id,
       trajectoryId: `run:${id}`,
       runEventSummary: { runId: id, proposalCreated: true },
     });
+    expect(proposal.workItemGenerationId).not.toBe(callerGenerationId);
     const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
     const { queueProposalRepairWorkForPendingProposals } = await import(
       '../src/core/fleet/proposal-repair-work.js'

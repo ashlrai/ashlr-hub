@@ -2206,7 +2206,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add mutation, deletion, missing witness, generation mismatch, lock contention/lifetime, ordinary-proposal parity, and lifecycle regressions.
 - [x] Pass focused and adjacent tests, typecheck, zero-error lint, production build, and diff checks.
 - [x] Resolve final independent adversarial audit with no remaining correctness or security findings.
-- [ ] Commit/push the stacked branch, open a protected draft PR, and observe CI.
+- [x] Commit/push the stacked branch and open protected draft PR #55.
+- [ ] Push the CI-fixture repair and observe duplicate Ubuntu, macOS, and Windows checks green on the exact stacked head.
 
 ### Proposal Repair Parent Invariants
 - A queued proposal repair authorizes execution only while its exact parent identity, canonical repository, repair eligibility, objective, and revision remain unchanged.

@@ -107,6 +107,18 @@ function partialProposal(repo: string, overrides: Partial<Proposal> = {}): Propo
   };
 }
 
+function persistExactProposal(
+  input: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
+  status: Proposal['status'] = 'pending',
+): Proposal {
+  const created = createProposal(input);
+  expect(loadProposal(created.id)).toEqual(created);
+  if (status !== 'pending') expect(setStatus(created.id, status)).toBe(true);
+  const persisted = loadProposal(created.id);
+  expect(persisted).toMatchObject({ id: created.id, status });
+  return persisted!;
+}
+
 function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   const value: DispatchProductionEvent = {
     schemaVersion: 1,
@@ -1469,8 +1481,7 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const attemptId = 'attempt-12345678-1234-4123-8123-123456789abc';
-    const durableProposal: Proposal = {
-      id: 'prop-crash-reconcile',
+    const durableProposal = persistExactProposal({
       repo: repo.dir,
       origin: 'agent',
       kind: 'patch',
@@ -1483,11 +1494,9 @@ describe('queued autonomy work scanner', () => {
       runId: attemptId,
       trajectoryId: `run:${attemptId}`,
       runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
-      status: 'pending',
-      createdAt: '2026-07-10T15:00:00.000Z',
-    };
+    });
 
-    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+    const result = queueProposalRepairWorkForPendingProposals([], now, {
       dispatchEvents: [sourceEvent],
       lifecycleProposals: [durableProposal],
     });
@@ -1524,8 +1533,7 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals(undefined, now);
     const legacyRepair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const attemptId = 'attempt-62345678-1234-4123-8123-123456789abc';
-    const pendingProposal: Proposal = {
-      id: 'prop-v1-applied-v2-reconcile',
+    const appliedProposal = persistExactProposal({
       repo: repo.dir,
       origin: 'agent',
       kind: 'patch',
@@ -1538,9 +1546,7 @@ describe('queued autonomy work scanner', () => {
       runId: attemptId,
       trajectoryId: `run:${attemptId}`,
       runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
-      status: 'pending',
-      createdAt: '2026-07-10T15:00:00.000Z',
-    };
+    }, 'applied');
 
     writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), []);
     writeJson(join(fx.ashlrDir, 'backlog.json'), { generatedAt: now.toISOString(), repos: [repo.dir], items: [] });
@@ -1553,8 +1559,7 @@ describe('queued autonomy work scanner', () => {
       schemaVersion: 2,
       activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
     });
-    const appliedProposal: Proposal = { ...pendingProposal, status: 'applied' };
-    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+    const result = queueProposalRepairWorkForPendingProposals([], now, {
       dispatchEvents: [recurrence],
       lifecycleProposals: [appliedProposal],
     });
@@ -1579,8 +1584,7 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const attemptId = 'attempt-32345678-1234-4123-8123-123456789abc';
-    const partial: Proposal = {
-      id: 'prop-partial-reconcile',
+    const childInput: Omit<Proposal, 'id' | 'status' | 'createdAt'> = {
       repo: repo.dir,
       origin: 'swarm',
       kind: 'patch',
@@ -1592,13 +1596,14 @@ describe('queued autonomy work scanner', () => {
       workSource: 'self',
       runId: attemptId,
       trajectoryId: `run:${attemptId}`,
+    };
+    const partial = persistExactProposal({
+      ...childInput,
       runEventSummary: { runId: attemptId, status: 'failed', outcome: 'proposal-created', proposalCreated: true },
       isPartial: true,
-      status: 'pending',
-      createdAt: '2026-07-10T15:00:00.000Z',
-    };
+    });
 
-    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+    const result = queueProposalRepairWorkForPendingProposals([], now, {
       dispatchEvents: [sourceEvent],
       lifecycleProposals: [partial],
     });
@@ -1607,30 +1612,36 @@ describe('queued autonomy work scanner', () => {
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'active' });
     expect((await scanQueuedAutonomyWork(repo.dir)).some((candidate) => candidate.id === repair.id)).toBe(true);
 
-    const rejected: Proposal = {
-      ...partial,
-      id: 'prop-rejected-reconcile',
-      isPartial: false,
-      status: 'rejected',
+    const rejected = persistExactProposal({
+      ...childInput,
       runEventSummary: {
         runId: attemptId,
         status: 'done',
         outcome: 'proposal-created',
         proposalCreated: true,
       },
-    };
-    expect(queueProposalRepairWorkForPendingProposals(undefined, now, {
+    }, 'rejected');
+    expect(queueProposalRepairWorkForPendingProposals([], now, {
       dispatchEvents: [sourceEvent],
       lifecycleProposals: [rejected],
     }).dispatchRepairRetired).toBe(0);
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'active' });
 
-    const applied: Proposal = { ...rejected, id: 'prop-applied-reconcile', status: 'applied' };
-    expect(queueProposalRepairWorkForPendingProposals(undefined, now, {
+    const applied = persistExactProposal({
+      ...childInput,
+      runEventSummary: {
+        runId: attemptId,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+      },
+    }, 'applied');
+    expect(queueProposalRepairWorkForPendingProposals([], now, {
       dispatchEvents: [sourceEvent],
       lifecycleProposals: [applied],
     })).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'retired' });
+    expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
   });
 
   it('does not reconcile an older or causally mismatched proposal to a newer generation', async () => {

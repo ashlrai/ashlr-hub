@@ -20,8 +20,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import type { AshlrConfig, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig } from '../src/core/types.js';
 import { generatedRepairGenerationId } from '../src/core/fleet/generated-repair-lifecycle.js';
+import {
+  beginRejectedCaptureRecoveryDispatch,
+  proposalRepairWorkItem,
+} from '../src/core/fleet/proposal-repair-work.js';
+import { createProposal } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared BEFORE lazy imports so the daemon module binds to them.
@@ -383,22 +388,36 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
   it('binds editing-backend options to the exact generated repair generation', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const repair: WorkItem = {
-      id: 'repo:proposal-repair:abcdef123456',
+    const parent = createProposal({
       repo: repo.dir,
-      source: 'self',
-      title: 'Proposal repair for repo item repo:goal:stalled',
-      detail:
-        'Proposal repair: recover a complete proposal from a prior attempt.\n' +
-        'Proposal: prop-stalled\n' +
-        'Original work item: repo:goal:stalled\n' +
-        'Produce a fresh complete fix and run merge-grade verification.',
-      value: 5,
-      effort: 1,
-      score: 5,
-      tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
-      ts: new Date().toISOString(),
-    };
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Incomplete daemon repair',
+      summary: 'The captured daemon repair needs a complete verified replacement.',
+      diff:
+        'diff --git a/src/daemon.ts b/src/daemon.ts\n' +
+        '--- a/src/daemon.ts\n' +
+        '+++ b/src/daemon.ts\n' +
+        '@@ -1 +1 @@\n' +
+        '-export const ready = false;\n' +
+        '+export const ready = true;\n',
+      workItemId: 'repo:goal:stalled',
+      isPartial: true,
+      verifyResult: {
+        passed: false,
+        detail: 'The prior capture was incomplete.',
+        source: 'capture-gate',
+      },
+    });
+    const repair = proposalRepairWorkItem(parent);
+    if (!repair) throw new Error('expected an exact repair projection for the parent proposal');
+    const expectedGenerationId = generatedRepairGenerationId(repair);
+    if (!expectedGenerationId) throw new Error('expected an exact repair generation');
+    expect(expectedGenerationId).toMatch(/^[a-f0-9]{64}$/);
+    expect(beginRejectedCaptureRecoveryDispatch(repair, () => 'authorized')).toEqual({
+      authorized: true,
+      value: 'authorized',
+    });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: repair.ts,
       repos: [repo.dir],
@@ -406,10 +425,27 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock editing route' });
 
-    await tick(makeCfg({ foundry: { allowedBackends: ['local-coder'] } }), { dryRun: false });
+    await tick(makeCfg({
+      foundry: {
+        allowedBackends: ['local-coder'],
+        autonomyControlLoop: false,
+      },
+    }), { dryRun: false });
 
-    const runOpts = mockRunGoal.mock.calls[0]?.[2] as { workItemGenerationId?: string } | undefined;
-    expect(runOpts?.workItemGenerationId).toBe(generatedRepairGenerationId(repair));
+    const runOpts = mockRunGoal.mock.calls[0]?.[2] as {
+      workItemGenerationId?: string;
+      delegationScope?: {
+        repairParentProposalId?: string;
+        repairParentProposalRevision?: string;
+      };
+    } | undefined;
+    expect(runOpts).toMatchObject({
+      workItemGenerationId: expectedGenerationId,
+      delegationScope: {
+        repairParentProposalId: parent.id,
+        repairParentProposalRevision: repair.repairParentProposalRevision,
+      },
+    });
   });
 });
 
