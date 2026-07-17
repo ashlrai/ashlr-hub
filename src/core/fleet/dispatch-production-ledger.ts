@@ -6,6 +6,7 @@
  * cooldown ledger: never truncate, never rewrite, never throw.
  */
 
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -18,9 +19,11 @@ import {
   openSync,
   opendirSync,
   readSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -39,7 +42,11 @@ import type {
   RunEventSummary,
   WorkItem,
 } from '../types.js';
-import { causalMetadata } from '../learning/causal.js';
+import {
+  causalMetadata,
+  routeSnapshot as normalizeRouteSnapshot,
+  runEventSummary as normalizeRunEventSummary,
+} from '../learning/causal.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import {
   addProductionAttemptShape,
@@ -56,12 +63,19 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
+import { isSafeExecutionIdentity } from './attempt-identity.js';
 import {
   generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
   repairGenerationIdFromHandoffId,
   repairTreatmentForUnitId,
 } from './generated-repair-identity.js';
+import {
+  openStableDirectoryGuard,
+  readStableRegularFile,
+  type StableFileReadFailureReason,
+} from '../util/stable-file-read.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_READ_LIMIT = 2_000;
@@ -71,6 +85,7 @@ const DEFAULT_READ_MAX_ROWS = 10_000;
 const HARD_READ_MAX_FILES = 32;
 const HARD_READ_MAX_BYTES = 32 * 1024 * 1024;
 const HARD_READ_MAX_ROWS = 50_000;
+const HARD_ATTEMPT_PROOF_TARGETS = 256;
 const MAX_LOOSE_FILES = 3;
 const MAX_DIRECTORY_ENTRIES = 2_048;
 const MAX_READ_ROW_BYTES = 128 * 1024;
@@ -82,6 +97,30 @@ const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
   'kimi', 'nim', 'opencode', 'grok',
+]);
+const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
+const WORK_SOURCES = new Set<WorkItem['source']>([
+  'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint',
+  'goal', 'hygiene', 'invent',
+]);
+const DISPATCH_PRODUCTION_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
+  'proposal-created', 'cancelled', 'empty-diff', 'gate-blocked', 'engine-failed',
+  'sandbox-failed', 'proposal-capture-error', 'proposal-disabled', 'unknown',
+]);
+const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
+  'run-proposal-outcome', 'pending-proposal-delta', 'best-of-n-summary',
+  'repair-lifecycle-candidate', 'repair-lifecycle-outcome', 'unknown',
+]);
+const DISPATCH_PRODUCTION_EVENT_KEYS = new Set([
+  'schemaVersion', 'ts', 'machineId', 'itemId', 'source', 'repo', 'title', 'backend',
+  'tier', 'model', 'assignedBy', 'routeReason', 'outcome', 'proposalCreated',
+  'proposalId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
+  'evidenceOutcome', 'learningSource', 'labelBasis', 'routerPolicyVersion',
+  'learningEpoch', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
+  'diffLines', 'reason', 'basis', 'repairHandoffId', 'repairGenerationId',
+  'repairTreatmentUnitId', 'repairTreatment', 'repairTreatmentOutcome',
+  'repairTreatmentAttemptHash', 'repairAttemptOrdinal', 'repairPreviousBackend',
+  'repairLineageInvalid',
 ]);
 const MIN_REPAIR_TREATMENT_ATTEMPTS = 3;
 
@@ -163,6 +202,63 @@ export interface DispatchProductionParentIdentity {
 }
 
 export type DispatchProductionParentStatus = 'found' | 'missing' | 'degraded';
+
+export interface DispatchProductionAttemptProofTarget {
+  ts: string;
+  itemId: string;
+  repo: string;
+  source: WorkItem['source'];
+  outcome: 'empty-diff';
+  objectiveHash: string;
+  repairHandoffId: string;
+  repairGenerationId: string;
+  repairTreatmentUnitId: string;
+  repairTreatment: RepairTreatment;
+  repairAttemptOrdinal: 1 | 2;
+}
+
+export interface DispatchProductionAttemptProof {
+  schemaVersion: 1;
+  integrityClass: 'owner-writable-local';
+  cryptographicallyTrusted: false;
+  rollbackProtected: false;
+  eventTs: string;
+  eventDigest: string;
+  attemptHash: string;
+  backend: Exclude<EngineId, 'builtin'>;
+  tier: EngineTier;
+  model: string | null;
+  previousBackend: Exclude<EngineId, 'builtin'> | null;
+  repairHandoffId: string;
+  repairGenerationId: string;
+  repairTreatmentUnitId: string;
+  repairTreatment: RepairTreatment;
+  repairAttemptOrdinal: 1 | 2;
+}
+
+export type DispatchProductionAttemptProofDegradedReason =
+  | 'target-invalid'
+  | 'target-limit'
+  | 'date-limit'
+  | 'source-unavailable'
+  | 'source-unsafe'
+  | 'source-mutated'
+  | 'partition-unreadable'
+  | 'partition-byte-limit'
+  | 'partition-row-limit'
+  | 'partition-invalid'
+  | 'partition-conflict';
+
+export type DispatchProductionAttemptProofResolution =
+  | { status: 'proven'; proof: DispatchProductionAttemptProof }
+  | { status: 'missing'; reason: 'partition-missing' | 'event-missing' }
+  | { status: 'unproven'; reason: 'event-ineligible' | 'target-mismatch' |
+      'attempt-sequence-missing' | 'attempt-sequence-mismatch' }
+  | { status: 'degraded'; reason: DispatchProductionAttemptProofDegradedReason };
+
+export type DispatchProductionAttemptProofBatchResolution =
+  | { status: 'resolved'; resolutions: DispatchProductionAttemptProofResolution[] }
+  | { status: 'degraded'; reason: 'target-limit' };
 
 export type DispatchProductionReadStopReason =
   | 'event-limit'
@@ -1009,6 +1105,538 @@ export function readDispatchProductionParents(
     return statuses.map((status) => status === 'found' ? 'degraded' : status);
   }
   return statuses;
+}
+
+interface ParsedDispatchProductionAttemptAuthority {
+  event: DispatchProductionEvent;
+  proof: DispatchProductionAttemptProof;
+}
+
+interface ParsedDispatchProductionPartitionMatch {
+  row: ParsedDispatchProductionAttemptAuthority | null;
+  event: DispatchProductionEvent;
+  eventDigest: string;
+  conflict: boolean;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function canonicalUtcTimestamp(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  return canonical === value ? canonical : null;
+}
+
+function boundedStoredText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max &&
+    value.trim() === value && scrubSecrets(value) === value &&
+    ![...value].some((char) => char.charCodeAt(0) < 32);
+}
+
+function validRunTrajectory(value: unknown): value is string {
+  return boundedStoredText(value, 240) && value.startsWith('run:') &&
+    isSafeExecutionIdentity(value.slice('run:'.length));
+}
+
+function canonicalStoredDispatchProductionEvent(
+  value: unknown,
+  line: string,
+  partitionDate: string,
+): value is DispatchProductionEvent {
+  if (!isPlainRecord(value) || JSON.stringify(value) !== line || !isDispatchProductionEvent(value)) return false;
+  try {
+    if (JSON.stringify(sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true })) !== line) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  const ts = canonicalUtcTimestamp(value['ts']);
+  if (ts === null || ts.slice(0, 10) !== partitionDate) return false;
+  if (!WORK_SOURCES.has(value['source'] as WorkItem['source'])) return false;
+  if (!DISPATCH_PRODUCTION_OUTCOMES.has(value['outcome'] as DaemonDispatchProductionOutcome)) return false;
+  if (!DISPATCH_PRODUCTION_BASES.has(value['basis'] as DispatchProductionBasis)) return false;
+  if (value['backend'] !== null && !ENGINE_IDS.has(value['backend'] as EngineId)) return false;
+  if (value['tier'] !== null && !ENGINE_TIERS.has(value['tier'] as EngineTier)) return false;
+  if (hasOwn(value, 'model') && value['model'] !== null && !boundedStoredText(value['model'], 160)) return false;
+  return true;
+}
+
+function parseDispatchProductionAttemptAuthority(
+  event: DispatchProductionEvent,
+  line: string,
+): ParsedDispatchProductionAttemptAuthority | null {
+  const raw = event as unknown as Record<string, unknown>;
+  if (
+    !hasOnlyKeys(raw, DISPATCH_PRODUCTION_EVENT_KEYS) ||
+    event.basis !== 'run-proposal-outcome' ||
+    event.outcome !== 'empty-diff' ||
+    event.proposalCreated ||
+    hasOwn(raw, 'proposalId') ||
+    hasOwn(raw, 'repairLineageInvalid') ||
+    hasOwn(raw, 'repairTreatmentOutcome') ||
+    hasOwn(raw, 'repairTreatmentAttemptHash') ||
+    !boundedStoredText(event.itemId, 240) ||
+    !/:proposal-repair-nodiff:[0-9a-f]{12}$/.test(event.itemId) ||
+    !boundedStoredText(event.title, 160) ||
+    !boundedStoredText(event.assignedBy, 80) ||
+    !boundedStoredText(event.routeReason, 240) ||
+    event.source !== 'self' ||
+    !ENGINE_IDS.has(event.backend as EngineId) ||
+    event.backend === null || event.backend === 'builtin' ||
+    !ENGINE_TIERS.has(event.tier as EngineTier) ||
+    event.tier === null ||
+    (hasOwn(raw, 'model') && event.model !== null && !boundedStoredText(event.model, 160)) ||
+    !isSafeExecutionIdentity(event.runId) ||
+    !validRunTrajectory(event.trajectoryId) ||
+    !SHA256_RE.test(event.objectiveHash ?? '') ||
+    event.learningSource !== 'daemon-dispatch' ||
+    event.labelBasis !== 'dispatch-outcome' ||
+    !boundedStoredText(event.routerPolicyVersion, 80) ||
+    !SHA256_RE.test(event.repairHandoffId ?? '') ||
+    !SHA256_RE.test(event.repairGenerationId ?? '') ||
+    repairGenerationIdFromHandoffId(event.repairHandoffId!) !== event.repairGenerationId ||
+    !SHA256_RE.test(event.repairTreatmentUnitId ?? '') ||
+    !REPAIR_TREATMENTS.includes(event.repairTreatment as RepairTreatment) ||
+    repairTreatmentForUnitId(event.repairTreatmentUnitId!) !== event.repairTreatment ||
+    (event.repairAttemptOrdinal !== 1 && event.repairAttemptOrdinal !== 2) ||
+    !Number.isFinite(event.spentUsd) || event.spentUsd < 0 ||
+    (event.diffFiles !== undefined && event.diffFiles !== 0) ||
+    (event.diffLines !== undefined && event.diffLines !== 0)
+  ) return null;
+
+  if (event.repairAttemptOrdinal === 1) {
+    if (hasOwn(raw, 'repairPreviousBackend')) return null;
+  } else if (
+    !ENGINE_IDS.has(event.repairPreviousBackend as EngineId) ||
+    event.repairPreviousBackend === 'builtin' ||
+    event.repairPreviousBackend === event.backend
+  ) return null;
+
+  const route = event.routeSnapshot;
+  if (!isPlainRecord(route) ||
+    JSON.stringify(normalizeRouteSnapshot(route)) !== JSON.stringify(route) ||
+    route['backend'] !== event.backend ||
+    route['tier'] !== event.tier ||
+    hasOwn(route, 'model') !== hasOwn(raw, 'model') ||
+    (hasOwn(route, 'model') && route['model'] !== event.model) ||
+    route['assignedBy'] !== event.assignedBy ||
+    route['routerPolicyVersion'] !== event.routerPolicyVersion) return null;
+
+  const summary = event.runEventSummary;
+  if (!isPlainRecord(summary) ||
+    JSON.stringify(normalizeRunEventSummary(summary)) !== JSON.stringify(summary) ||
+    summary['runId'] !== event.runId ||
+    summary['status'] !== 'done' ||
+    summary['outcome'] !== 'empty-diff' ||
+    summary['proposalCreated'] !== false ||
+    hasOwn(summary, 'proposalId') ||
+    summary['costUsd'] !== event.spentUsd ||
+    (hasOwn(summary, 'diffFiles') && summary['diffFiles'] !== 0) ||
+    (hasOwn(summary, 'diffLines') && summary['diffLines'] !== 0)) return null;
+
+  const actionCounts = summary['actionCounts'];
+  if (actionCounts !== undefined && (!isPlainRecord(actionCounts) ||
+    (hasOwn(actionCounts, 'diffFiles') && actionCounts['diffFiles'] !== 0) ||
+    (hasOwn(actionCounts, 'diffLines') && actionCounts['diffLines'] !== 0) ||
+    (hasOwn(actionCounts, 'proposalCreated') && actionCounts['proposalCreated'] !== 0))) return null;
+
+  return {
+    event,
+    proof: {
+      schemaVersion: 1,
+      integrityClass: 'owner-writable-local',
+      cryptographicallyTrusted: false,
+      rollbackProtected: false,
+      eventTs: event.ts,
+      eventDigest: createHash('sha256').update(line, 'utf8').digest('hex'),
+      attemptHash: generatedRepairLifecycleAttemptHash(event.trajectoryId),
+      backend: event.backend,
+      tier: event.tier,
+      model: event.model ?? null,
+      previousBackend: event.repairAttemptOrdinal === 2
+        ? event.repairPreviousBackend as Exclude<EngineId, 'builtin'>
+        : null,
+      repairHandoffId: event.repairHandoffId!,
+      repairGenerationId: event.repairGenerationId!,
+      repairTreatmentUnitId: event.repairTreatmentUnitId!,
+      repairTreatment: event.repairTreatment!,
+      repairAttemptOrdinal: event.repairAttemptOrdinal,
+    },
+  };
+}
+
+function validDispatchProductionAttemptProofTarget(
+  target: DispatchProductionAttemptProofTarget,
+): { date: string; repo: string } | null {
+  if (!isPlainRecord(target)) return null;
+  const ts = canonicalUtcTimestamp(target.ts);
+  const repo = canonicalDispatchRepoIdentity(target.repo);
+  if (
+    ts === null || repo === null ||
+    !boundedStoredText(target.itemId, 240) ||
+    !/:proposal-repair-nodiff:[0-9a-f]{12}$/.test(target.itemId) ||
+    target.source !== 'self' ||
+    target.outcome !== 'empty-diff' ||
+    !SHA256_RE.test(target.objectiveHash) ||
+    !SHA256_RE.test(target.repairHandoffId) ||
+    !SHA256_RE.test(target.repairGenerationId) ||
+    repairGenerationIdFromHandoffId(target.repairHandoffId) !== target.repairGenerationId ||
+    !SHA256_RE.test(target.repairTreatmentUnitId) ||
+    !REPAIR_TREATMENTS.includes(target.repairTreatment) ||
+    repairTreatmentForUnitId(target.repairTreatmentUnitId) !== target.repairTreatment ||
+    (target.repairAttemptOrdinal !== 1 && target.repairAttemptOrdinal !== 2)
+  ) return null;
+  return { date: ts.slice(0, 10), repo };
+}
+
+function sameBigIntSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function safeBigIntDirectory(stat: BigIntStats): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() &&
+    (process.platform === 'win32' || typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid())) &&
+    (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
+}
+
+function stablyMissingDispatchProductionDirectory(dir: string): boolean {
+  const root = dirname(dir);
+  try {
+    const before = lstatSync(root, { bigint: true });
+    if (!safeBigIntDirectory(before)) return false;
+    const realBefore = realpathSync(root);
+    if (process.platform === 'win32' && !assurePrivateStoragePath(
+      root,
+      'directory',
+      'inspect-owned',
+      { anchorPath: root },
+    ).ok) return false;
+    try {
+      lstatSync(dir);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
+    const after = lstatSync(root, { bigint: true });
+    try {
+      lstatSync(dir);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
+    return safeBigIntDirectory(after) && sameBigIntSnapshot(before, after) && realBefore === realpathSync(root);
+  } catch {
+    return false;
+  }
+}
+
+function attemptProofReadReason(reason: StableFileReadFailureReason): DispatchProductionAttemptProofDegradedReason {
+  switch (reason) {
+    case 'unsafe-path':
+    case 'unsafe-file':
+      return 'source-unsafe';
+    case 'changed-during-read':
+      return 'source-mutated';
+    case 'per-file-byte-limit':
+    case 'byte-limit':
+      return 'partition-byte-limit';
+    default:
+      return 'partition-unreadable';
+  }
+}
+
+function attemptProofLookupKey(ts: string, itemId: string, repo: string): string {
+  return JSON.stringify([ts, itemId, repo]);
+}
+
+function stablyMissingAttemptProofPartition(
+  dir: string,
+  path: string,
+  root: string,
+): DispatchProductionAttemptProofResolution {
+  const guard = openStableDirectoryGuard(dir, { anchorPath: root });
+  if (!guard.ok) {
+    const reason = guard.reason === 'unsafe-path' || guard.reason === 'unsafe-file'
+      ? 'source-unsafe'
+      : guard.reason === 'missing'
+        ? 'source-mutated'
+        : attemptProofReadReason(guard.reason);
+    return { status: 'degraded', reason };
+  }
+  let missing = false;
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing = true;
+  }
+  const guardFailure = guard.finish();
+  if (guardFailure !== null || !missing) return { status: 'degraded', reason: 'source-mutated' };
+  return { status: 'missing', reason: 'partition-missing' };
+}
+
+function attemptSequenceKey(target: DispatchProductionAttemptProofTarget, repo: string): string {
+  return JSON.stringify([
+    target.itemId,
+    repo,
+    target.objectiveHash,
+    target.repairHandoffId,
+    target.repairGenerationId,
+    target.repairTreatmentUnitId,
+    target.repairTreatment,
+  ]);
+}
+
+function parseAttemptProofPartition(
+  text: string,
+  bytesRead: number,
+  date: string,
+  remainingRows: number,
+  wantedKeys: ReadonlySet<string>,
+): { ok: true; matches: Map<string, ParsedDispatchProductionPartitionMatch>; rowsRead: number } |
+  { ok: false; reason: 'partition-invalid' | 'partition-row-limit'; rowsRead: number } {
+  if (text.length === 0 || Buffer.byteLength(text, 'utf8') !== bytesRead || !text.endsWith('\n')) {
+    return { ok: false, reason: 'partition-invalid', rowsRead: 0 };
+  }
+  const matches = new Map<string, ParsedDispatchProductionPartitionMatch>();
+  let rowsRead = 0;
+  let offset = 0;
+  while (offset < text.length) {
+    const end = text.indexOf('\n', offset);
+    if (end < 0) return { ok: false, reason: 'partition-invalid', rowsRead };
+    const line = text.slice(offset, end);
+    offset = end + 1;
+    rowsRead++;
+    if (rowsRead > remainingRows) return { ok: false, reason: 'partition-row-limit', rowsRead };
+    if (line.length === 0 || Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
+      return { ok: false, reason: 'partition-invalid', rowsRead };
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { return { ok: false, reason: 'partition-invalid', rowsRead }; }
+    if (!canonicalStoredDispatchProductionEvent(parsed, line, date)) {
+      return { ok: false, reason: 'partition-invalid', rowsRead };
+    }
+    const key = attemptProofLookupKey(parsed.ts, parsed.itemId, parsed.repo);
+    if (!wantedKeys.has(key)) continue;
+    const eventDigest = createHash('sha256').update(line, 'utf8').digest('hex');
+    const previous = matches.get(key);
+    if (previous) {
+      if (previous.eventDigest !== eventDigest) previous.conflict = true;
+      continue;
+    }
+    matches.set(key, {
+      event: parsed,
+      eventDigest,
+      row: parseDispatchProductionAttemptAuthority(parsed, line),
+      conflict: false,
+    });
+  }
+  return { ok: true, matches, rowsRead };
+}
+
+/**
+ * Resolve metadata-only generated-repair attempt proof from complete, stable
+ * dispatch-production partitions. Routing and attempt identity are derived from
+ * persisted bytes rather than trusted from the caller.
+ */
+export function resolveDispatchProductionAttemptProofs(
+  targets: readonly DispatchProductionAttemptProofTarget[],
+): DispatchProductionAttemptProofBatchResolution {
+  if (targets.length > HARD_ATTEMPT_PROOF_TARGETS) {
+    return { status: 'degraded', reason: 'target-limit' };
+  }
+  return { status: 'resolved', resolutions: resolveBoundedDispatchProductionAttemptProofs(targets) };
+}
+
+function resolveBoundedDispatchProductionAttemptProofs(
+  targets: readonly DispatchProductionAttemptProofTarget[],
+): DispatchProductionAttemptProofResolution[] {
+  const resolutions: DispatchProductionAttemptProofResolution[] = Array.from({ length: targets.length }, () => ({
+    status: 'degraded', reason: 'target-invalid',
+  }));
+  const byDate = new Map<string, Array<{ index: number; repo: string; key: string }>>();
+  const sequences = new Map<string, { first: number[]; second: number[] }>();
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index]!;
+    const valid = validDispatchProductionAttemptProofTarget(target);
+    if (!valid) continue;
+    const entries = byDate.get(valid.date) ?? [];
+    entries.push({
+      index,
+      repo: valid.repo,
+      key: attemptProofLookupKey(target.ts, target.itemId, valid.repo),
+    });
+    byDate.set(valid.date, entries);
+    const sequence = sequences.get(attemptSequenceKey(target, valid.repo)) ?? { first: [], second: [] };
+    sequence[target.repairAttemptOrdinal === 1 ? 'first' : 'second'].push(index);
+    sequences.set(attemptSequenceKey(target, valid.repo), sequence);
+  }
+  if (byDate.size === 0) return resolutions;
+  if (byDate.size > HARD_READ_MAX_FILES) {
+    for (const entries of byDate.values()) {
+      for (const entry of entries) resolutions[entry.index] = { status: 'degraded', reason: 'date-limit' };
+    }
+    return resolutions;
+  }
+
+  const dir = dispatchProductionDir();
+  const root = dirname(dir);
+  if (!existsSync(dir)) {
+    const stableMissing = stablyMissingDispatchProductionDirectory(dir);
+    for (const entries of byDate.values()) {
+      for (const entry of entries) resolutions[entry.index] = stableMissing
+        ? { status: 'missing', reason: 'partition-missing' }
+        : { status: 'degraded', reason: 'source-unavailable' };
+    }
+    return resolutions;
+  }
+
+  let totalBytes = 0;
+  let totalRows = 0;
+  for (const [date, entries] of byDate) {
+    if (totalBytes >= HARD_READ_MAX_BYTES) {
+      for (const entry of entries) resolutions[entry.index] = {
+        status: 'degraded', reason: 'partition-byte-limit',
+      };
+      continue;
+    }
+    if (totalRows >= HARD_READ_MAX_ROWS) {
+      for (const entry of entries) resolutions[entry.index] = {
+        status: 'degraded', reason: 'partition-row-limit',
+      };
+      continue;
+    }
+    const path = join(dir, `${date}.jsonl`);
+    let dateResolutions: DispatchProductionAttemptProofResolution[];
+    try {
+      let partitionMissing = false;
+      try { lstatSync(path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') partitionMissing = true;
+        else throw error;
+      }
+      if (partitionMissing) {
+        const missing = stablyMissingAttemptProofPartition(dir, path, root);
+        dateResolutions = entries.map(() => missing);
+      } else {
+        const loaded = readStableRegularFile(path, {
+          anchorPath: root,
+          maxFileBytes: HARD_READ_MAX_BYTES,
+          remainingBytes: Math.max(0, HARD_READ_MAX_BYTES - totalBytes),
+        });
+        if (!loaded.ok) {
+          dateResolutions = entries.map(() => ({
+            status: 'degraded', reason: attemptProofReadReason(loaded.reason),
+          }));
+        } else {
+          totalBytes += loaded.bytesRead;
+          const parsed = parseAttemptProofPartition(
+            loaded.text,
+            loaded.bytesRead,
+            date,
+            Math.max(0, HARD_READ_MAX_ROWS - totalRows),
+            new Set(entries.map((entry) => entry.key)),
+          );
+          totalRows += parsed.rowsRead;
+          if (!parsed.ok) {
+            dateResolutions = entries.map(() => ({ status: 'degraded', reason: parsed.reason }));
+          } else {
+            dateResolutions = entries.map((entry) => {
+              const target = targets[entry.index]!;
+              const match = parsed.matches.get(entry.key);
+              if (!match) return { status: 'missing', reason: 'event-missing' };
+              if (match.conflict) return { status: 'degraded', reason: 'partition-conflict' };
+              if (match.row === null) return { status: 'unproven', reason: 'event-ineligible' };
+              if (
+                match.event.source !== target.source ||
+                match.event.outcome !== target.outcome ||
+                match.event.objectiveHash !== target.objectiveHash ||
+                match.event.repairHandoffId !== target.repairHandoffId ||
+                match.event.repairGenerationId !== target.repairGenerationId ||
+                match.event.repairTreatmentUnitId !== target.repairTreatmentUnitId ||
+                match.event.repairTreatment !== target.repairTreatment ||
+                match.event.repairAttemptOrdinal !== target.repairAttemptOrdinal
+              ) return { status: 'unproven', reason: 'target-mismatch' };
+              return { status: 'proven', proof: match.row.proof };
+            });
+          }
+        }
+      }
+    } catch {
+      dateResolutions = entries.map(() => ({ status: 'degraded', reason: 'partition-unreadable' }));
+    }
+    for (let offset = 0; offset < entries.length; offset++) {
+      resolutions[entries[offset]!.index] = dateResolutions[offset]!;
+    }
+  }
+
+  for (const sequence of sequences.values()) {
+    const degradedFirst = sequence.first.map((index) => resolutions[index])
+      .find((resolution): resolution is Extract<DispatchProductionAttemptProofResolution, { status: 'degraded' }> =>
+        resolution?.status === 'degraded');
+    const firstProofs = sequence.first.flatMap((index) => {
+      const resolution = resolutions[index];
+      return resolution?.status === 'proven' ? [resolution.proof] : [];
+    });
+    const secondProofs = sequence.second.flatMap((index) => {
+      const resolution = resolutions[index];
+      return resolution?.status === 'proven' ? [resolution.proof] : [];
+    });
+    const firstAttemptHashes = new Set(firstProofs.map((proof) => proof.attemptHash));
+    const secondAttemptHashes = new Set(secondProofs.map((proof) => proof.attemptHash));
+    if (firstAttemptHashes.size > 1) {
+      for (const index of [...sequence.first, ...sequence.second]) {
+        if (resolutions[index]?.status === 'proven') {
+          resolutions[index] = { status: 'unproven', reason: 'attempt-sequence-mismatch' };
+        }
+      }
+      continue;
+    }
+    if (secondAttemptHashes.size > 1) {
+      for (const index of sequence.second) {
+        if (resolutions[index]?.status === 'proven') {
+          resolutions[index] = { status: 'unproven', reason: 'attempt-sequence-mismatch' };
+        }
+      }
+      continue;
+    }
+    for (const index of sequence.second) {
+      const resolution = resolutions[index];
+      if (resolution?.status !== 'proven') continue;
+      if (degradedFirst) {
+        resolutions[index] = { status: 'degraded', reason: degradedFirst.reason };
+        continue;
+      }
+      if (firstProofs.length === 0) {
+        resolutions[index] = { status: 'unproven', reason: 'attempt-sequence-missing' };
+        continue;
+      }
+      const firstBackends = new Set(firstProofs.map((proof) => proof.backend));
+      const firstTiers = new Set(firstProofs.map((proof) => proof.tier));
+      if (firstBackends.size !== 1 || firstTiers.size !== 1 ||
+        resolution.proof.attemptHash === firstProofs[0]!.attemptHash ||
+        resolution.proof.previousBackend !== firstProofs[0]!.backend ||
+        resolution.proof.tier !== firstProofs[0]!.tier) {
+        resolutions[index] = { status: 'unproven', reason: 'attempt-sequence-mismatch' };
+      }
+    }
+  }
+  return resolutions;
 }
 
 function mergeTreatmentOutcomeReceipts(

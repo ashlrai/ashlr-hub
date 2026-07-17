@@ -3,7 +3,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,9 +25,11 @@ import {
   readDispatchProductionYield,
   readDispatchProductionYieldDetailed,
   recordDispatchProduction,
+  resolveDispatchProductionAttemptProofs as resolveDispatchProductionAttemptProofBatch,
   sanitizeDispatchProductionEvent,
   summarizeDispatchProductionYield,
   type DispatchProductionEvent,
+  type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
@@ -52,6 +65,100 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
     basis: 'run-proposal-outcome',
     ...overrides,
   };
+}
+
+const PROOF_HANDOFF_ID = 'a'.repeat(64);
+const PROOF_OBJECTIVE_HASH = 'b'.repeat(64);
+const PROOF_PARENT_OBJECTIVE_HASH = 'c'.repeat(64);
+
+function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  const repo = overrides.repo ?? join(home, 'proof-repo');
+  mkdirSync(repo, { recursive: true });
+  const runId = overrides.runId ?? 'run-proof-1';
+  const backend = overrides.backend ?? 'local-coder';
+  const tier = overrides.tier ?? 'mid';
+  const model = Object.prototype.hasOwnProperty.call(overrides, 'model') ? overrides.model : 'qwen-2.5-coder';
+  const assignedBy = overrides.assignedBy ?? 'daemon';
+  const routeReason = overrides.routeReason ?? 'generated repair proof route';
+  const itemId = overrides.itemId ?? 'ashlr-hub:proposal-repair-nodiff:abcdef123456';
+  const unitId = overrides.repairTreatmentUnitId ?? repairTreatmentUnitId({
+    kind: 'no-diff-reslice',
+    repo,
+    parentItemId: 'ashlr-hub:goal:proof-parent',
+    parentObjectiveHash: PROOF_PARENT_OBJECTIVE_HASH,
+  })!;
+  const treatment = overrides.repairTreatment ?? repairTreatmentForUnitId(unitId)!;
+  const spentUsd = overrides.spentUsd ?? 0.002;
+  return makeEvent({
+    ts: '2026-07-08T12:00:00.000Z',
+    itemId,
+    source: 'self',
+    repo,
+    backend,
+    tier,
+    model,
+    assignedBy,
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    proposalId: undefined,
+    runId,
+    trajectoryId: overrides.trajectoryId ?? `run:attempt-proof-${runId}`,
+    routeSnapshot: overrides.routeSnapshot ?? {
+      backend,
+      tier,
+      ...(model !== undefined ? { model } : {}),
+      assignedBy,
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: overrides.runEventSummary ?? {
+      runId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: spentUsd,
+    },
+    objectiveHash: PROOF_OBJECTIVE_HASH,
+    repairHandoffId: PROOF_HANDOFF_ID,
+    repairGenerationId: repairGenerationIdFromHandoffId(PROOF_HANDOFF_ID)!,
+    repairTreatmentUnitId: unitId,
+    repairTreatment: treatment,
+    repairAttemptOrdinal: 1,
+    repairPreviousBackend: undefined,
+    spentUsd,
+    basis: 'run-proposal-outcome',
+    ...overrides,
+  });
+}
+
+function proofTarget(
+  event: DispatchProductionEvent,
+  overrides: Partial<DispatchProductionAttemptProofTarget> = {},
+): DispatchProductionAttemptProofTarget {
+  return {
+    ts: event.ts,
+    itemId: event.itemId,
+    repo: event.repo,
+    source: event.source,
+    outcome: 'empty-diff',
+    objectiveHash: event.objectiveHash!,
+    repairHandoffId: event.repairHandoffId!,
+    repairGenerationId: event.repairGenerationId!,
+    repairTreatmentUnitId: event.repairTreatmentUnitId!,
+    repairTreatment: event.repairTreatment!,
+    repairAttemptOrdinal: event.repairAttemptOrdinal!,
+    ...overrides,
+  };
+}
+
+function resolveDispatchProductionAttemptProofs(
+  targets: readonly DispatchProductionAttemptProofTarget[],
+) {
+  const result = resolveDispatchProductionAttemptProofBatch(targets);
+  expect(result.status).toBe('resolved');
+  if (result.status !== 'resolved') throw new Error(`unexpected batch degradation: ${result.reason}`);
+  return result.resolutions;
 }
 
 beforeEach(() => {
@@ -127,6 +234,455 @@ describe('M342 dispatch production ledger', () => {
     const rawAfter = readFileSync(ledgerPath, 'utf8').trim().split('\n')
       .map((line) => JSON.parse(line) as DispatchProductionEvent);
     expect(rawAfter.at(-1)?.repo).toBe(linkedAlias);
+  });
+
+  it('derives exact attempt proofs across UTC partitions without trusting caller routing claims', () => {
+    const physicalRepo = join(home, 'proof-physical-repo');
+    const linkedAlias = join(home, 'proof-repo-alias');
+    mkdirSync(physicalRepo, { recursive: true });
+    symlinkSync(physicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    const first = makeProofEvent({
+      repo: physicalRepo,
+      ts: '2026-07-08T23:59:59.999Z',
+      runId: 'run-proof-first',
+      trajectoryId: 'run:attempt-proof-first',
+    });
+    const second = makeProofEvent({
+      repo: physicalRepo,
+      ts: '2026-07-09T00:00:00.000Z',
+      runId: 'run-proof-second',
+      trajectoryId: 'run:attempt-proof-second',
+      backend: 'codex',
+      model: undefined,
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    const results = resolveDispatchProductionAttemptProofs([
+      proofTarget(second, { repo: linkedAlias }),
+      proofTarget(first, { repo: linkedAlias }),
+    ]);
+
+    expect(results).toEqual([
+      {
+        status: 'proven',
+        proof: expect.objectContaining({
+          schemaVersion: 1,
+          integrityClass: 'owner-writable-local',
+          cryptographicallyTrusted: false,
+          rollbackProtected: false,
+          eventTs: second.ts,
+          attemptHash: generatedRepairLifecycleAttemptHash(second.trajectoryId!),
+          backend: 'codex',
+          tier: 'mid',
+          model: null,
+          repairAttemptOrdinal: 2,
+          eventDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }),
+      },
+      {
+        status: 'proven',
+        proof: expect.objectContaining({
+          eventTs: first.ts,
+          attemptHash: generatedRepairLifecycleAttemptHash(first.trajectoryId!),
+          backend: 'local-coder',
+          tier: 'mid',
+          model: 'qwen-2.5-coder',
+          repairAttemptOrdinal: 1,
+          eventDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }),
+      },
+    ]);
+  });
+
+  it('distinguishes stable missing partitions and events from unproven related evidence', () => {
+    const wanted = makeProofEvent();
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(wanted)])).toEqual([
+      { status: 'missing', reason: 'partition-missing' },
+    ]);
+
+    const unrelated = makeProofEvent({ itemId: 'ashlr-hub:proposal-repair-nodiff:111111111111' });
+    expect(recordDispatchProduction(unrelated)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(wanted)])).toEqual([
+      { status: 'missing', reason: 'event-missing' },
+    ]);
+
+    expect(recordDispatchProduction(wanted)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([
+      proofTarget(wanted, { objectiveHash: 'd'.repeat(64) }),
+    ])).toEqual([{ status: 'unproven', reason: 'target-mismatch' }]);
+
+    const routeMismatch = makeProofEvent({
+      itemId: 'ashlr-hub:proposal-repair-nodiff:222222222222',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        model: 'qwen-2.5-coder',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+    });
+    expect(recordDispatchProduction(routeMismatch)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(routeMismatch)])).toEqual([
+      { status: 'unproven', reason: 'event-ineligible' },
+    ]);
+  });
+
+  it('collapses byte-identical replay and rejects distinct attempts for one exact target', () => {
+    const event = makeProofEvent();
+    expect(recordDispatchProduction([event, event])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])[0]).toMatchObject({
+      status: 'proven',
+      proof: { attemptHash: generatedRepairLifecycleAttemptHash(event.trajectoryId!) },
+    });
+
+    const conflicting = makeProofEvent({
+      runId: 'run-proof-conflict',
+      trajectoryId: 'run:attempt-proof-conflict',
+      backend: 'codex',
+      model: 'gpt-5.5',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      runEventSummary: {
+        runId: 'run-proof-conflict',
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        costUsd: 0.002,
+      },
+    });
+    expect(recordDispatchProduction(conflicting)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])).toEqual([
+      { status: 'degraded', reason: 'partition-conflict' },
+    ]);
+  });
+
+  it('never proves from malformed, torn, or over-bound partitions even when the target row is visible', () => {
+    const event = makeProofEvent();
+    const target = proofTarget(event);
+    const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+
+    recordDispatchProduction(event);
+    appendFileSync(path, 'not-json\n', 'utf8');
+    expect(resolveDispatchProductionAttemptProofs([target])).toEqual([
+      { status: 'degraded', reason: 'partition-invalid' },
+    ]);
+
+    rmSync(dispatchProductionDir(), { recursive: true, force: true });
+    recordDispatchProduction(event);
+    const complete = readFileSync(path, 'utf8');
+    writeFileSync(path, complete.slice(0, -1), 'utf8');
+    expect(resolveDispatchProductionAttemptProofs([target])).toEqual([
+      { status: 'degraded', reason: 'partition-invalid' },
+    ]);
+
+    rmSync(dispatchProductionDir(), { recursive: true, force: true });
+    recordDispatchProduction(event);
+    const exactRow = readFileSync(path, 'utf8');
+    writeFileSync(path, '', 'utf8');
+    truncateSync(path, 32 * 1024 * 1024 + 1);
+    appendFileSync(path, `\n${exactRow}`, 'utf8');
+    expect(resolveDispatchProductionAttemptProofs([target])).toEqual([
+      { status: 'degraded', reason: 'partition-byte-limit' },
+    ]);
+  });
+
+  it('rejects a partition containing a row larger than the physical row bound', () => {
+    const event = makeProofEvent();
+    const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+    expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    appendFileSync(path, `${JSON.stringify({ padding: 'x'.repeat(128 * 1024) })}\n`, 'utf8');
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])).toEqual([
+      { status: 'degraded', reason: 'partition-invalid' },
+    ]);
+  });
+
+  it('enforces the aggregate byte bound across individually valid selected partitions', () => {
+    const first = makeProofEvent({
+      ts: '2026-07-07T12:00:00.000Z',
+      itemId: 'ashlr-hub:proposal-repair-nodiff:000000000071',
+      runId: 'run-byte-first',
+      trajectoryId: 'run:attempt-byte-first',
+    });
+    const second = makeProofEvent({
+      ts: '2026-07-08T12:00:00.000Z',
+      itemId: 'ashlr-hub:proposal-repair-nodiff:000000000072',
+      runId: 'run-byte-second',
+      trajectoryId: 'run:attempt-byte-second',
+    });
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    const desiredBytes = 17 * 1024 * 1024;
+    for (const date of ['2026-07-07', '2026-07-08']) {
+      const path = join(dispatchProductionDir(), `${date}.jsonl`);
+      const line = readFileSync(path, 'utf8');
+      writeFileSync(path, line.repeat(Math.ceil(desiredBytes / Buffer.byteLength(line))), 'utf8');
+    }
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(first), proofTarget(second)])).toEqual([
+      { status: 'proven', proof: expect.objectContaining({ eventTs: first.ts }) },
+      { status: 'degraded', reason: 'partition-byte-limit' },
+    ]);
+  });
+
+  it('bounds one proof-resolution invocation to thirty-two UTC partitions', () => {
+    const event = makeProofEvent();
+    const targets = Array.from({ length: 33 }, (_, index) => proofTarget(event, {
+      ts: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+    }));
+
+    expect(resolveDispatchProductionAttemptProofs(targets)).toEqual(
+      targets.map(() => ({ status: 'degraded', reason: 'date-limit' })),
+    );
+  });
+
+  it('bounds target cardinality before touching storage', () => {
+    const event = makeProofEvent();
+    const targets = Array.from({ length: 257 }, () => proofTarget(event));
+
+    expect(resolveDispatchProductionAttemptProofBatch(targets)).toEqual({
+      status: 'degraded', reason: 'target-limit',
+    });
+    expect(existsSync(dispatchProductionDir())).toBe(false);
+  });
+
+  it('fails runtime-invalid and sparse targets closed without hiding valid neighbors', () => {
+    const event = makeProofEvent();
+    expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const targets = new Array<DispatchProductionAttemptProofTarget>(4);
+    targets[0] = null as never;
+    targets[2] = proofTarget(event);
+    targets[3] = 7 as never;
+
+    expect(resolveDispatchProductionAttemptProofs(targets)).toEqual([
+      { status: 'degraded', reason: 'target-invalid' },
+      { status: 'degraded', reason: 'target-invalid' },
+      { status: 'proven', proof: expect.objectContaining({ eventTs: event.ts }) },
+      { status: 'degraded', reason: 'target-invalid' },
+    ]);
+  });
+
+  it('rejects existing zero-byte partitions as incomplete rather than authoritative absence', () => {
+    const event = makeProofEvent();
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    writeFileSync(join(dispatchProductionDir(), '2026-07-08.jsonl'), '', 'utf8');
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])).toEqual([
+      { status: 'degraded', reason: 'partition-invalid' },
+    ]);
+  });
+
+  it('rejects every contradictory persisted no-diff signal', () => {
+    const events = Array.from({ length: 6 }, (_, index) => {
+      const event = makeProofEvent({
+        itemId: `ashlr-hub:proposal-repair-nodiff:${String(index + 10).padStart(12, '0')}`,
+        runId: `run-contradiction-${index}`,
+        trajectoryId: `run:attempt-contradiction-${index}`,
+      });
+      const summary = { ...event.runEventSummary! };
+      if (index === 0) event.diffFiles = 1;
+      if (index === 1) event.diffLines = 1;
+      if (index === 2) summary.diffFiles = 1;
+      if (index === 3) summary.diffLines = 1;
+      if (index === 4) summary.actionCounts = { diffFiles: 1 };
+      if (index === 5) summary.actionCounts = { proposalCreated: 1 };
+      event.runEventSummary = summary;
+      return event;
+    });
+    expect(recordDispatchProduction(events)).toEqual({ attempted: 6, recorded: 6, failed: 0 });
+
+    expect(resolveDispatchProductionAttemptProofs(events.map((event) => proofTarget(event)))).toEqual(
+      events.map(() => ({ status: 'unproven', reason: 'event-ineligible' })),
+    );
+  });
+
+  it('rejects writer-impossible lineage flags and unknown raw metadata', () => {
+    const cases: Array<(row: Record<string, unknown>) => void> = [
+      (row) => { row['repairLineageInvalid'] = false; },
+      (row) => { (row['routeSnapshot'] as Record<string, unknown>)['rawPrompt'] = 'canary'; },
+      (row) => { row['rawStdout'] = 'canary'; },
+    ];
+    for (const mutate of cases) {
+      rmSync(dispatchProductionDir(), { recursive: true, force: true });
+      const event = makeProofEvent();
+      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+      const row = JSON.parse(readFileSync(path, 'utf8').trim()) as Record<string, unknown>;
+      mutate(row);
+      writeFileSync(path, `${JSON.stringify(row)}\n`, 'utf8');
+      expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])).toEqual([
+        { status: 'degraded', reason: 'partition-invalid' },
+      ]);
+    }
+  });
+
+  it('binds ordinal two to the proven ordinal-one backend and tier', () => {
+    const first = makeProofEvent({
+      runId: 'run-sequence-first',
+      trajectoryId: 'run:attempt-sequence-first',
+    });
+    const second = makeProofEvent({
+      ts: '2026-07-08T12:01:00.000Z',
+      runId: 'run-sequence-second',
+      trajectoryId: 'run:attempt-sequence-second',
+      backend: 'codex',
+      model: 'gpt-5.5',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'claude',
+    });
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(first), proofTarget(second)])).toEqual([
+      { status: 'proven', proof: expect.objectContaining({ backend: 'local-coder' }) },
+      { status: 'unproven', reason: 'attempt-sequence-mismatch' },
+    ]);
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(second)])).toEqual([
+      { status: 'unproven', reason: 'attempt-sequence-missing' },
+    ]);
+  });
+
+  it('propagates degraded first-attempt authority to its dependent second attempt', () => {
+    const first = makeProofEvent({
+      ts: '2026-07-07T12:00:00.000Z',
+      runId: 'run-degraded-first',
+      trajectoryId: 'run:attempt-degraded-first',
+    });
+    const second = makeProofEvent({
+      ts: '2026-07-08T12:00:00.000Z',
+      runId: 'run-dependent-second',
+      trajectoryId: 'run:attempt-dependent-second',
+      backend: 'codex',
+      model: 'gpt-5.5',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    appendFileSync(join(dispatchProductionDir(), '2026-07-07.jsonl'), 'not-json\n', 'utf8');
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(first), proofTarget(second)])).toEqual([
+      { status: 'degraded', reason: 'partition-invalid' },
+      { status: 'degraded', reason: 'partition-invalid' },
+    ]);
+  });
+
+  it('rejects a same-lineage second attempt that changes tier', () => {
+    const first = makeProofEvent();
+    const second = makeProofEvent({
+      ts: '2026-07-08T12:02:00.000Z',
+      runId: 'run-tier-second',
+      trajectoryId: 'run:attempt-tier-second',
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(first), proofTarget(second)])[1]).toEqual(
+      { status: 'unproven', reason: 'attempt-sequence-mismatch' },
+    );
+  });
+
+  it('requires one unique first identity and a distinct second identity per sequence', () => {
+    const first = makeProofEvent({
+      runId: 'run-identity-first',
+      trajectoryId: 'run:shared-attempt-identity',
+    });
+    const second = makeProofEvent({
+      ts: '2026-07-08T12:03:00.000Z',
+      runId: 'run-identity-second',
+      trajectoryId: 'run:shared-attempt-identity',
+      backend: 'codex',
+      model: 'gpt-5.5',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'mid',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'generated repair proof route',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+    expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(first), proofTarget(second)])[1]).toEqual(
+      { status: 'unproven', reason: 'attempt-sequence-mismatch' },
+    );
+
+    rmSync(dispatchProductionDir(), { recursive: true, force: true });
+    const duplicateFirst = makeProofEvent({
+      ts: '2026-07-08T12:04:00.000Z',
+      runId: 'run-identity-extra-first',
+      trajectoryId: 'run:extra-first-attempt-identity',
+    });
+    expect(recordDispatchProduction([first, duplicateFirst])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    expect(resolveDispatchProductionAttemptProofs([
+      proofTarget(first), proofTarget(duplicateFirst),
+    ])).toEqual([
+      { status: 'unproven', reason: 'attempt-sequence-mismatch' },
+      { status: 'unproven', reason: 'attempt-sequence-mismatch' },
+    ]);
+  });
+
+  it('accepts producer-compatible route reason normalization without trusting it as identity', () => {
+    const event = makeProofEvent({
+      routeReason: 'short normalized route reason',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen-2.5-coder',
+        assignedBy: 'daemon',
+        reason: 'longer producer route reason retained in the causal snapshot',
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+    });
+    expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+
+    expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])[0]).toMatchObject({
+      status: 'proven',
+      proof: { backend: 'local-coder', tier: 'mid' },
+    });
   });
 
   it('idempotently rejects relative and secret-shaped raw repo identities without fallback rows', () => {

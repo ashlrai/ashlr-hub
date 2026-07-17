@@ -6,8 +6,8 @@
 - [x] Port only the five time-stability fixture repairs from the already-green source-revision branch.
 - [x] Verify 261 focused tests, typecheck, scoped lint, build, dependency audit, and diff checks locally.
 - [x] Land protected fixture hotfix PR #56 and require a green five-job post-merge master run.
-- [ ] Merge master into PR #31, retarget it, require fresh exact-head CI, and merge it normally.
-- [ ] Advance PR #32, then apply the pre-tested M402/M49 conflict resolution to PR #33.
+- [x] Merge master into PR #31, retarget it, require fresh exact-head and post-merge CI, and merge it normally.
+- [ ] Retarget and merge PR #32 with fresh exact-head and post-merge CI, then apply the pre-tested M402/M49 resolution to PR #33.
 - [ ] Continue in conflict-minimizing order: #34, #36, #38-#53, #35, then #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
@@ -2243,3 +2243,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Older host auto-merge requests are not automatically revoked; this production installation has never enabled auto-merge.
 - Cooperative locks cannot stop an uncooperative same-user process, and external engines remain outside a filesystem jail beyond the cooperative sandbox protocol.
 - Host-local evidence cannot prove freshness after coherent state/key rollback; an external monotonic anchor remains required for enforcement.
+
+## Dispatch Attempt Proof Cycle (2026-07-14)
+- [x] Rehydrate exact green release-native authority SHA `080f8b9`, protected PR #31, production NO-GO state, canonical user edits, and Entire status.
+- [x] Define an observational, metadata-only, owner-writable-local dispatch-attempt proof contract without claiming cryptographic trust, rollback protection, or cross-ledger atomicity.
+- [x] Implement bounded writer-canonical partition reads, exact target matching, derived route/model/backend identity, and strict generated-repair lineage checks.
+- [x] Remove proof-reader writer-lock contention, bound target/date/byte/row work, and make matching linear in partition rows plus targets.
+- [x] Bind ordinal two to exactly one distinct ordinal-one attempt on the same tier and declared previous backend; propagate degraded predecessor authority.
+- [x] Add adversarial M342 coverage for malformed/torn/empty/oversized storage, replay/conflict, runtime-invalid targets, allocation bounds, contradictory no-diff evidence, impossible metadata, producer normalization, and sequence ambiguity.
+- [x] Pass focused and adjacent tests, daemon-producer compatibility, typecheck, lint, build, dependency audit, diff checks, and four independent final SHIP reviews.
+- [x] Repair two M141 fixtures exposed by the first exhaustive pass that constructed future `01:00Z` rows during the UTC-midnight hour.
+- [x] Pass the exhaustive hermetic suite on the exact candidate: 534 files, 11,238 tests green, and 9 intentional skips in 600.68 seconds.
+- [ ] Commit, push, open a stacked protected PR against `codex/release-native-authority`, and observe the exact-SHA ten-check matrix without merging or deploying.
