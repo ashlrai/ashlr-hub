@@ -2186,7 +2186,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Map stale revision refusals to existing failed sandbox authority so they cannot create positive learning or generated repair spend.
 - [x] Add real-Git alias, mismatch, stale-HEAD, retry-race, zero-model-call, partial/draft, post-create quarantine, pre-tool authority, and phased-swarm regressions.
 - [x] Pass focused and adjacent tests, typecheck, scoped lint, production build, zero-vulnerability dependency audit, and diff checks.
-- [ ] Push the isolated branch, open a protected draft PR, and observe exact-SHA CI without activating production.
+- [x] Push the isolated branch and open protected draft PR #54 without activating production; exact-SHA CI observation continues on the published head.
 
 ### Source Revision Invariants
 - A sandbox is executable only while its worktree and expected source resolve to the same physical Git common directory and the source HEAD still equals the immutable sandbox base.
