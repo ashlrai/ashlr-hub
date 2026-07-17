@@ -104,14 +104,14 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
     updateProposalField: (...args: Parameters<typeof actual.updateProposalField>) => {
       const persisted = actual.updateProposalField(...args);
       const fields = args[1] as Record<string, unknown> | undefined;
-      if (persisted && fields && 'localMergeIntent' in fields) localIntentPersistedHookMock();
+      if (persisted && fields && 'localMergeIntent' in fields) localIntentPersistedHookMock(args[0]);
       return persisted;
     },
   };
 });
 
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
-import { readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { evidencePath, readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
 import { canonicalRealizedMergeIdentity } from '../src/core/inbox/realized-merge.js';
 import {
@@ -507,7 +507,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     branchProtectionMock.mockImplementation(async (...args: unknown[]) => {
       const result = await readProtection(...args);
       protectionReads++;
-      if (protectionReads === 2) setKill(true);
+      if (protectionReads === 3) setKill(true);
       return result;
     });
 
@@ -521,11 +521,75 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(git(tmpRepo, ['rev-parse', '--verify', `refs/heads/${branch}`])).toMatch(/^[a-f0-9]{40}$/);
   }, 60_000);
 
+  it('refuses staging push when signed evidence disappears after intent persistence', async () => {
+    localIntentPersistedHookMock.mockImplementationOnce((proposalId: string) => {
+      fs.unlinkSync(evidencePath(proposalId));
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/signed evidence seal is no longer live; staging push not started/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', branch])).toBe('');
+  }, 60_000);
+
+  it('atomically refuses staging push when the verified remote base advances at push time', async () => {
+    localIntentPersistedHookMock.mockImplementationOnce(() => {
+      advanceRemoteMainWithoutFetching('REMOTE-RACE.md', 'advanced at push boundary\n');
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/staging push outcome is unknown/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', branch])).toBe('');
+  }, 60_000);
+
+  it('atomically refuses staging push when the verified remote base rewinds at push time', async () => {
+    fs.writeFileSync(path.join(tmpRepo, 'BASE-RACE.md'), 'second base commit\n', 'utf8');
+    git(tmpRepo, ['add', 'BASE-RACE.md']);
+    git(tmpRepo, ['commit', '-m', 'second base commit']);
+    git(tmpRepo, ['push', 'origin', 'main']);
+    const verifiedBase = git(tmpRepo, ['rev-parse', 'main']);
+    const priorBase = git(tmpRepo, ['rev-parse', 'main^']);
+    localIntentPersistedHookMock.mockImplementationOnce(() => {
+      git(bareRepo, ['update-ref', 'refs/heads/main', priorBase, verifiedBase]);
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/staging push outcome is unknown/);
+    expect(git(bareRepo, ['rev-parse', 'main'])).toBe(priorBase);
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', branch])).toBe('');
+  }, 60_000);
+
+  it('atomically refuses staging push when the verified remote base is deleted at push time', async () => {
+    const verifiedBase = git(tmpRepo, ['rev-parse', 'main']);
+    localIntentPersistedHookMock.mockImplementationOnce(() => {
+      git(bareRepo, ['update-ref', '-d', 'refs/heads/main', verifiedBase]);
+    });
+
+    const { proposal, result } = await createRemoteHandoffProposal();
+    const branch = `ashlr/merge/${proposal.id}`;
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/staging push outcome is unknown/);
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', 'main'])).toBe('');
+    expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', branch])).toBe('');
+  }, 60_000);
+
   it.each([
     ['initial evidence capture', 1, false, false, false],
-    ['pre-push authority check', 2, false, false, false],
-    ['post-push authority check', 3, true, false, false],
-    ['post-PR authority check', 4, true, true, true],
+    ['post-persistence authority check', 2, false, false, false],
+    ['pre-push authority check', 3, false, false, false],
+    ['post-push authority check', 4, true, false, false],
+    ['post-PR authority check', 5, true, true, true],
   ] as const)(
     'refuses unsafe protected-remote policy drift at the %s',
     async (_checkpoint, unsafeRead, remoteBranchExists, prExists, handoffExists) => {
@@ -717,6 +781,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     branchProtectionMock
       .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce({
         ...protectedEvidence,
         ok: false,
@@ -734,7 +799,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ ok: false, merged: false });
     expect(result.reason).toMatch(/live branch protection changed after push; PR creation not started/);
     expect(createPrMock).not.toHaveBeenCalled();
-    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(4);
     expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toContain(`ashlr/merge/${proposal.id}`);
     expect(git(tmpRepo, ['ls-remote', '--heads', 'origin', `ashlr/merge/${proposal.id}`]))
       .toContain(`ashlr/merge/${proposal.id}`);
@@ -765,6 +830,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       detail: 'Live branch protection confirmed with required checks',
     };
     branchProtectionMock
+      .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce(protectedEvidence)
       .mockResolvedValueOnce({
@@ -1102,7 +1168,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       policySources: ['classic'],
       policyHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(branchProtectionMock).toHaveBeenCalledTimes(4);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(5);
   });
 
   it('evidence mode refuses static protection claims when live GitHub is unprotected', async () => {
@@ -1230,7 +1296,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
   it('evidence mode aborts before push when live protection changes after capture', async () => {
     const baseHead = git(tmpRepo, ['rev-parse', 'main']);
     branchProtectionMock
-      .mockResolvedValueOnce({
+      .mockImplementationOnce(async () => ({
         ok: true,
         available: true,
         protected: true,
@@ -1247,7 +1313,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
         sources: ['classic'],
         policySnapshot: TEST_POLICY_SNAPSHOT,
         detail: 'Live branch protection confirmed with required checks',
-      })
+      }))
       .mockResolvedValueOnce({
         ok: false,
         available: true,
@@ -1283,7 +1349,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     const result = await autoMergeProposal(proposal.id, evidenceCfg());
 
     expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/live branch protection changed before remote handoff/);
+    expect(result.reason).toMatch(/live branch protection changed after signed evidence persistence/);
     expect(branchProtectionMock).toHaveBeenCalledTimes(2);
     expect(createPrMock).not.toHaveBeenCalled();
   }, 30_000);
@@ -1309,9 +1375,10 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       detail: 'Live branch protection confirmed with required checks',
     };
     branchProtectionMock
-      .mockResolvedValueOnce(protectedEvidence)
-      .mockResolvedValueOnce(protectedEvidence)
-      .mockResolvedValueOnce(protectedEvidence)
+      .mockImplementationOnce(async () => ({ ...protectedEvidence, observedAt: new Date().toISOString() }))
+      .mockImplementationOnce(async () => ({ ...protectedEvidence, observedAt: new Date().toISOString() }))
+      .mockImplementationOnce(async () => ({ ...protectedEvidence, observedAt: new Date().toISOString() }))
+      .mockImplementationOnce(async () => ({ ...protectedEvidence, observedAt: new Date().toISOString() }))
       .mockResolvedValueOnce({
         ...protectedEvidence,
         ok: false,
@@ -1342,7 +1409,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
 
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
     expect(result.reason).toMatch(/host auto-merge refused because live protection changed/);
-    expect(branchProtectionMock).toHaveBeenCalledTimes(4);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(5);
     expect(createPrMock).toHaveBeenCalledTimes(1);
   });
 

@@ -258,7 +258,9 @@ function remoteAuthorizationId(
   const authority = intent.remoteAuthority;
   if (!authority || !exactAuthority(authority, authority)) return '';
   return createHash('sha256').update(JSON.stringify([
-    'ashlr.remote-handoff-authorization.v1',
+    intent.evidenceProtocol === 'sealed-v3'
+      ? 'ashlr.remote-handoff-authorization.sealed-v3.v1'
+      : 'ashlr.remote-handoff-authorization.v1',
     phase,
     authority.provider,
     authority.nameWithOwner,
@@ -272,6 +274,7 @@ function remoteAuthorizationId(
     intent.evidencePackDigest,
     intent.authorizedAt,
     phase === 'recovery' ? REMOTE_HANDOFF_RECOVERY_MARKER : '',
+    ...(intent.evidenceProtocol === 'sealed-v3' ? [intent.evidenceProtocol] : []),
   ]), 'utf8').digest('hex').slice(0, 32);
 }
 

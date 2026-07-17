@@ -12,7 +12,8 @@
 - [x] Finish timeout-only PR #34 with 12/12 exact-head checks, verified merge-tree authority, and green six-job post-merge run `29553196281`.
 - [x] Retarget and merge source-complete policy PR #36 with exact-head and post-merge authority.
 - [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
-- [ ] Retarget and merge signed evidence-pack PR #39, then continue #40-#53, #35, and #37.
+- [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
+- [ ] Retarget and merge signed-evidence activation PR #40, then continue #41-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2526,12 +2527,22 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Require verified signed v3 T4 evidence-mode merge authority before positive skill distillation; reject proposal-only, mismatched branch-lane, policyless-outcome, and legacy downgrade claims.
 - [x] Pass the focused authority matrix, typecheck, scoped lint, production build, dependency audit, and diff checks; close protocol/policy review findings.
 - [x] Close exact Windows signing-key DACL, durable parent/key installation, BigInt file identity, safe-home, ambiguous post-rename evidence, dedicated ready-reader, skill identity, and ready-window findings; rerun 395 focused assertions plus static gates.
-- [ ] Commit, push, and open a protected PR stacked on `codex/safe-minimum-policy-v1` without merging or deploying.
-- [ ] Follow immediately with a separate activation PR that persists, rereads, verifies, and binds v3 before any staging push or PR mutation.
+- [x] Commit, push, and open protected PR #39 stacked on `codex/safe-minimum-policy-v1` without merging or deploying.
+- [x] Implement and locally verify the separate activation PR that persists, rereads, verifies, and binds v3 before any staging push or PR mutation.
 
 ## Protected Stack Status (2026-07-16)
 - [x] Keep PR #33 immutable at `e4ffbd4`; every required protected job is green.
 - [x] Refresh and prove PR #34 `1c243b7`, PR #35 `52463d2`, and PR #36 `cc57322` with preserved patch identities and complete protected-green matrices.
 - [x] Publish PR #37 generalized safety-test guard at `b12108a` after 75 focused tests and independent SHIP review, then publish assertion-preserving Windows fixture budgets as `d679c87`.
-- [ ] Prove PR #37 head `d679c87` across both protected matrices; one Windows 2/3 copy is currently red while its duplicate and remaining long jobs are still running, so no waiver or merge.
+- [x] Prove PR #37 head `d679c87` across both protected matrices after the exact failed-job rerun; all 12 protected jobs are green.
 - [x] Publish PR #38 safe-minimum policy at `48d8ea0` and observe all duplicate protected jobs green.
+
+## Signed Evidence V3 Activation Cycle (2026-07-16)
+- [x] Seal the final Gate 8 verdict as v3, publish and reread it under proposal authority, verify its exact seal, and bind live proposal/diff/verification/action state.
+- [x] Put the exact `sealedPackDigest` into domain-separated local and remote mutation intents while retaining legacy receipt compatibility.
+- [x] Require active v3 for URL-less recovery authority and support coherent main/tier/verification/evidence plus branch-review tuples.
+- [x] Revalidate evidence at staging, push, PR, and local-merge boundaries; remove unsigned summary text from the PR body.
+- [x] Make protected staging push atomic with the verified remote base and make local default-branch advancement an exact compare-and-swap.
+- [x] Pass 265 focused assertions with one intentional skip, typecheck, scoped lint, build, zero-vulnerability audit, and diff checks on the rebased PR #39 head.
+- [x] Commit, push, and open protected activation PR #40 on PR #39 without merging or deploying.
+- [ ] Observe the complete PR #39 and PR #40 protected matrices before any merge or deployment.

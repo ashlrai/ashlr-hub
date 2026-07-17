@@ -417,9 +417,6 @@ describe('M430 v3 tamper and schema rejection', () => {
     }],
     ['policy tier', (pack: AutonomyEvidencePackLegacy) => { pack.policy!.tier = 'T99'; }],
     ['policy action', (pack: AutonomyEvidencePackLegacy) => { pack.policy!.action = 'ship-anyway'; }],
-    ['merge command evidence', (pack: AutonomyEvidencePackLegacy) => {
-      pack.verification.commandKinds = [];
-    }],
     ['evidence remote binding', (pack: AutonomyEvidencePackLegacy) => {
       pack.trustBasis = 'evidence';
       pack.remotePreferred = true;
@@ -428,6 +425,32 @@ describe('M430 v3 tamper and schema rejection', () => {
     const pack = legacy(`prop-semantic-${_name.replaceAll(' ', '-')}`);
     mutate(pack);
     expect(sealAutonomyEvidencePackV3(pack)).toBeNull();
+  });
+
+  it('permits configured tier no-command evidence but rejects it for judge-free evidence authority', () => {
+    const tierPack = legacy('prop-tier-no-command');
+    tierPack.verification.commandKinds = [];
+    expect(sealAutonomyEvidencePackV3(tierPack)).not.toBeNull();
+
+    const evidencePack = legacy('prop-evidence-no-command');
+    evidencePack.trustBasis = 'evidence';
+    evidencePack.verification.commandKinds = [];
+    evidencePack.gates.remoteProtection = {
+      ok: true,
+      live: true,
+      detail: 'exact protected remote fixture',
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead: 'b'.repeat(40),
+      observedAt: '2026-07-16T12:01:30.000Z',
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: 'e'.repeat(64),
+    };
+    expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
   });
 
   it('derives the signed builder diff hash and refuses stored hash disagreement', () => {

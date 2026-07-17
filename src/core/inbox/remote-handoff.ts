@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   listProposalsDetailed,
   loadProposal,
@@ -25,7 +26,11 @@ import type {
 import type { PrView } from '../integrations/github.js';
 import { resolveGitHubOriginAuthorityDetails } from '../git.js';
 import type { GitHubOriginAuthority } from '../git.js';
-import { signLocalMergeIntent, verifyLocalMergeIntent } from '../foundry/provenance.js';
+import { hashDiff, signLocalMergeIntent, verifyLocalMergeIntent } from '../foundry/provenance.js';
+import {
+  readAutonomyEvidencePack,
+  verifyAutonomyEvidencePackV3,
+} from '../autonomy/evidence-pack.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import {
   acquireProposalMutationLock,
@@ -145,7 +150,9 @@ export function remoteIntentAuthorizationId(
   if (!authority || !sameAuthority(authority, authority)) return '';
   const recoveryMarker = phase === 'recovery' ? REMOTE_HANDOFF_RECOVERY_MARKER : '';
   return createHash('sha256').update(JSON.stringify([
-    'ashlr.remote-handoff-authorization.v1',
+    intent.evidenceProtocol === 'sealed-v3'
+      ? 'ashlr.remote-handoff-authorization.sealed-v3.v1'
+      : 'ashlr.remote-handoff-authorization.v1',
     phase,
     authority.provider,
     authority.nameWithOwner,
@@ -159,6 +166,7 @@ export function remoteIntentAuthorizationId(
     intent.evidencePackDigest,
     intent.authorizedAt,
     recoveryMarker,
+    ...(intent.evidenceProtocol === 'sealed-v3' ? [intent.evidenceProtocol] : []),
   ]), 'utf8').digest('hex').slice(0, 32);
 }
 
@@ -172,14 +180,55 @@ function intentPhase(handoff: ProposalRemoteHandoff): RemoteIntentPhase {
   return handoff.recovery === undefined ? 'pre-effect' : 'recovery';
 }
 
-function verifyStandaloneRemoteIntent(proposal: Proposal, phase: RemoteIntentPhase): boolean {
+/** New outward authority must resolve the exact signed v3 evidence it names. */
+function activeV3EvidenceMatches(proposal: Proposal): boolean {
+  try {
+    const intent = proposal.localMergeIntent;
+    const verification = proposal.verifyResult;
+    if (intent?.evidenceProtocol !== 'sealed-v3' || !proposal.repo ||
+      !proposal.diffHash || !verification) return false;
+    const pack = readAutonomyEvidencePack(proposal.id);
+    if (!pack || pack.version !== 3 || !verifyAutonomyEvidencePackV3(pack).ok) return false;
+    const diffHash = hashDiff(proposal.diff ?? '');
+    return pack.sealedPackDigest === intent.evidencePackDigest &&
+      intent.diffHash === diffHash && proposal.diffHash === diffHash &&
+      pack.proposal.id === proposal.id && pack.proposal.repo === proposal.repo &&
+      pack.proposal.kind === proposal.kind && pack.proposal.origin === proposal.origin &&
+      pack.proposal.title === proposal.title && pack.proposal.createdAt === proposal.createdAt &&
+      pack.producer.engineModel === proposal.engineModel &&
+      pack.producer.engineTier === proposal.engineTier && pack.diff.hash === diffHash &&
+      pack.remotePreferred === true && pack.policy?.allowed === true &&
+      ((pack.target === 'main' && pack.policy.action === 'merge-main') ||
+        (pack.target === 'branch' && pack.policy.action === 'open-ready-pr')) &&
+      pack.verification.passed === verification.passed &&
+      isDeepStrictEqual(
+        pack.verification.commandKinds,
+        (verification.ran ?? []).map((command) => command.kind),
+      ) &&
+      pack.verification.baseBranch === verification.baseBranch &&
+      pack.verification.baseHead === verification.baseHead &&
+      pack.verification.diffHash === verification.diffHash &&
+      pack.verification.verifiedAt === verification.verifiedAt &&
+      pack.verification.source === verification.source &&
+      isDeepStrictEqual(pack.verification.browser, verification.browser);
+  } catch {
+    return false;
+  }
+}
+
+function verifyStandaloneRemoteIntent(
+  proposal: Proposal,
+  phase: RemoteIntentPhase,
+  requireActiveV3 = false,
+): boolean {
   try {
     const intent = proposal.localMergeIntent;
     if (!proposal.repo || !intent?.remoteAuthority ||
       !verifyLocalMergeIntent(proposal.id, proposal.repo, intent)) return false;
     const { attestation: _attestation, authorizationId: _authorizationId, ...unsigned } = intent;
     return HEX32_RE.test(intent.authorizationId) &&
-      intent.authorizationId === remoteIntentAuthorizationId(phase, unsigned);
+      intent.authorizationId === remoteIntentAuthorizationId(phase, unsigned) &&
+      (!requireActiveV3 || activeV3EvidenceMatches(proposal));
   } catch {
     return false;
   }
@@ -189,6 +238,7 @@ function verifyBoundRemoteIntent(
   proposal: Proposal,
   handoff: ProposalRemoteHandoff,
   phase: RemoteIntentPhase,
+  requireActiveV3 = false,
 ): boolean {
   try {
     const intent = proposal.localMergeIntent;
@@ -200,7 +250,8 @@ function verifyBoundRemoteIntent(
       !verifyLocalMergeIntent(proposal.id, proposal.repo, intent)) return false;
     const { attestation: _attestation, authorizationId: _authorizationId, ...unsigned } = intent;
     const expectedAuthorizationId = remoteIntentAuthorizationId(phase, unsigned);
-    return HEX32_RE.test(intent.authorizationId) && intent.authorizationId === expectedAuthorizationId;
+    return HEX32_RE.test(intent.authorizationId) && intent.authorizationId === expectedAuthorizationId &&
+      (!requireActiveV3 || activeV3EvidenceMatches(proposal));
   } catch {
     return false;
   }
@@ -213,13 +264,13 @@ export function isApprovedRemoteHandoffRetryCandidate(proposal: Proposal): boole
     if (proposal.status !== 'approved' || !proposal.repo) return false;
     if (!handoff) {
       const authority = proposal.localMergeIntent?.remoteAuthority;
-      return Boolean(authority && verifyStandaloneRemoteIntent(proposal, 'pre-effect') &&
+      return Boolean(authority && verifyStandaloneRemoteIntent(proposal, 'pre-effect', true) &&
         remoteAuthorityMatchesRepo(proposal.repo, authority));
     }
     return Boolean(handoff.provider === 'github' && handoff.state === 'unknown' &&
       !handoff.prUrl && validRecoveryMarker(handoff) && handoff.authority &&
       sameAuthority(proposal.localMergeIntent?.remoteAuthority, handoff.authority) &&
-      verifyStandaloneRemoteIntent(proposal, 'recovery') &&
+      verifyStandaloneRemoteIntent(proposal, 'recovery', true) &&
       remoteAuthorityMatchesRepo(proposal.repo, handoff.authority));
   } catch {
     return false;
@@ -241,7 +292,9 @@ function outwardAuthorityStillValid(
   if (!proposal.repo || !handoff.authority || !ownsOutwardMutationFence(fence) ||
     killSwitchOn() || !isEnrolled(proposal.repo) ||
     !remoteAuthorityMatchesRepo(proposal.repo, handoff.authority) ||
-    !verifyBoundRemoteIntent(proposal, handoff, intentPhase(handoff))) return false;
+    !verifyBoundRemoteIntent(proposal, handoff, intentPhase(handoff), handoff.prUrl === undefined)) {
+    return false;
+  }
   return handoff.prUrl === undefined ||
     prUrlMatchesAuthority(handoff.prUrl, handoff.authority.nameWithOwner);
 }
@@ -405,7 +458,7 @@ function recoverProvenUrlLessIntent(
     const capturedBinding = remoteAuthorityBinding(authority);
     if (!current.repo || !currentBinding || !capturedBinding ||
       !sameAuthority(currentBinding, capturedBinding) || !remoteAuthorityMatchesRepo(current.repo, currentBinding) ||
-      !verifyBoundRemoteIntent(current, current.remoteHandoff, intentPhase(current.remoteHandoff))) {
+      !verifyBoundRemoteIntent(current, current.remoteHandoff, intentPhase(current.remoteHandoff), true)) {
       return 'unknown';
     }
     if (branchEvidence.kind === 'mismatch') {
@@ -483,7 +536,7 @@ function completeInterruptedRecoveryTransition(
     !handoff.authority || !sameAuthority(intent.remoteAuthority, handoff.authority) ||
     intent.branch !== handoff.branch || intent.base !== handoff.base ||
     intent.proposalHeadOid.toLowerCase() !== handoff.expectedHeadOid?.toLowerCase() ||
-    !verifyStandaloneRemoteIntent(proposal, 'recovery') || !ownsOutwardMutationFence(fence) ||
+    !verifyStandaloneRemoteIntent(proposal, 'recovery', true) || !ownsOutwardMutationFence(fence) ||
     killSwitchOn() || !isEnrolled(proposal.repo) ||
     !remoteAuthorityMatchesRepo(proposal.repo, handoff.authority)) return false;
   const detail = `completed interrupted remote handoff recovery; one gated retry allowed ` +

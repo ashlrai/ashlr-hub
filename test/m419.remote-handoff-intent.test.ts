@@ -15,16 +15,34 @@ import { execFileSync } from 'node:child_process';
 const {
   branchProtectionMock,
   createPrMock,
+  evidencePersistHookMock,
+  hostAutoMergeMock,
   originAuthorityMock,
   stagingPushHookMock,
   viewPrMock,
 } = vi.hoisted(() => ({
   branchProtectionMock: vi.fn(),
   createPrMock: vi.fn(),
+  evidencePersistHookMock: vi.fn(),
+  hostAutoMergeMock: vi.fn(),
   originAuthorityMock: vi.fn(),
   stagingPushHookMock: vi.fn(),
   viewPrMock: vi.fn(),
 }));
+
+vi.mock('../src/core/autonomy/evidence-pack.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/autonomy/evidence-pack.js')>();
+  return {
+    ...actual,
+    persistAutonomyEvidencePack(
+      pack: Parameters<typeof actual.persistAutonomyEvidencePack>[0],
+    ) {
+      const persisted = actual.persistAutonomyEvidencePack(pack);
+      if (persisted) evidencePersistHookMock(pack.proposal.id, actual.evidencePath(pack.proposal.id));
+      return persisted;
+    },
+  };
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -32,6 +50,9 @@ vi.mock('node:child_process', async (importOriginal) => {
     ...actual,
     execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
       const commandArgs = Array.isArray(args[1]) ? args[1].map(String) : [];
+      if (args[0] === 'gh' && commandArgs[0] === 'pr' && commandArgs[1] === 'merge') {
+        hostAutoMergeMock(commandArgs);
+      }
       if (args[0] === 'git' && commandArgs.includes('push') && commandArgs.some((arg) => (
         arg.includes('refs/heads/ashlr/merge/')
       ))) {
@@ -63,8 +84,19 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
 });
 
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
-import { createProposal, loadProposal, setStatus } from '../src/core/inbox/store.js';
-import { hashDiff, signProvenance, verifyLocalMergeIntent } from '../src/core/foundry/provenance.js';
+import {
+  readAutonomyEvidencePack,
+  sealAutonomyEvidencePackV3,
+  verifyAutonomyEvidencePackV3,
+  type AutonomyEvidencePackLegacy,
+} from '../src/core/autonomy/evidence-pack.js';
+import { createProposal, inboxDir, loadProposal, setStatus } from '../src/core/inbox/store.js';
+import {
+  canonicalEvidencePackJsonV3,
+  hashDiff,
+  signProvenance,
+  verifyLocalMergeIntent,
+} from '../src/core/foundry/provenance.js';
 import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
 import {
   PRIVATE_STORAGE_TEST_CONTROL,
@@ -198,6 +230,30 @@ function config(): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
+function protectionAttestation(branch = 'main', ruleId = 'BPR_fixture') {
+  return {
+    ok: true,
+    available: true,
+    protected: true,
+    branchProtection: true,
+    nameWithOwner: 'ashlrai/fixture',
+    repositoryId: 'R_fixture',
+    defaultBranch: 'main',
+    branch,
+    baseHead: git(tmpRepo, ['rev-parse', branch]),
+    observedAt: new Date().toISOString(),
+    requirements: ['required_status_checks'],
+    requiredChecks: ['ci/test'],
+    requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+    sources: ['classic'],
+    policySnapshot: {
+      ...TEST_POLICY_SNAPSHOT,
+      classic: { ...TEST_POLICY_SNAPSHOT.classic, ruleId },
+    },
+    detail: 'Live branch protection confirmed with required checks',
+  };
+}
+
 function makeProposal(tier: EngineTier, filename: string): Proposal {
   const diff = diffFor(filename);
   const diffHash = hashDiff(diff);
@@ -220,6 +276,10 @@ function makeProposal(tier: EngineTier, filename: string): Proposal {
 
 function expectDurableIntentAtPush(proposal: Proposal): void {
   const persisted = loadProposal(proposal.id);
+  const evidence = readAutonomyEvidencePack(proposal.id);
+  expect(evidence?.version).toBe(3);
+  if (!evidence || evidence.version !== 3) throw new Error('expected persisted evidence pack v3');
+  expect(verifyAutonomyEvidencePackV3(evidence)).toMatchObject({ ok: true });
   expect(persisted).toMatchObject({
     status: 'awaiting-host-merge',
     remoteHandoff: {
@@ -250,8 +310,13 @@ function expectDurableIntentAtPush(proposal: Proposal): void {
   expect(persisted?.repo && persisted.localMergeIntent &&
     verifyLocalMergeIntent(proposal.id, persisted.repo, persisted.localMergeIntent)).toBe(true);
   expect(persisted?.localMergeIntent?.proposalHeadOid).toBe(persisted?.remoteHandoff?.expectedHeadOid);
+  expect(persisted?.localMergeIntent?.evidencePackDigest).toBe(evidence.sealedPackDigest);
   expect(persisted?.localMergeIntent?.remoteAuthority).toEqual(persisted?.remoteHandoff?.authority);
   expect(persisted?.localMergeIntent?.attestation).toBe(persisted?.remoteHandoff?.intentAttestation);
+}
+
+function afterEvidencePersist(mutate: (id: string, file: string) => void): void {
+  evidencePersistHookMock.mockImplementationOnce(mutate);
 }
 
 beforeEach(() => {
@@ -274,6 +339,8 @@ beforeEach(() => {
   if (process.platform === 'win32') useSemanticPrivateStorageRunner();
 
   stagingPushHookMock.mockReset();
+  evidencePersistHookMock.mockReset();
+  hostAutoMergeMock.mockReset();
   originAuthorityMock.mockReset();
   originAuthorityMock.mockReturnValue({
     nameWithOwner: 'ashlrai/fixture',
@@ -282,24 +349,8 @@ beforeEach(() => {
     pushUrl: bareRepo,
   });
   branchProtectionMock.mockReset();
-  branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
-    ok: true,
-    available: true,
-    protected: true,
-    branchProtection: true,
-    nameWithOwner: 'ashlrai/fixture',
-    repositoryId: 'R_fixture',
-    defaultBranch: 'main',
-    branch,
-    baseHead: git(tmpRepo, ['rev-parse', branch]),
-    observedAt: new Date().toISOString(),
-    requirements: ['required_status_checks'],
-    requiredChecks: ['ci/test'],
-    requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
-    sources: ['classic'],
-    policySnapshot: TEST_POLICY_SNAPSHOT,
-    detail: 'Live branch protection confirmed with required checks',
-  }));
+  branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') =>
+    protectionAttestation(branch));
   viewPrMock.mockReset();
   viewPrMock.mockReturnValue(null);
   createPrMock.mockReset();
@@ -345,6 +396,8 @@ describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
     expect(result.ok, result.reason).toBe(true);
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
     expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
+    expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
   });
 
   it('persists authenticated mid-tier handoff intent before staging push', async () => {
@@ -357,6 +410,102 @@ describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ ok: true, merged: false, handoff: true, branched: true });
     expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
     expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+  });
+
+  it.each([
+    ['missing', (_id: string, file: string) => fs.unlinkSync(file)],
+    ['tampered seal', (_id: string, file: string) => {
+      const pack = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      pack['sealedPackDigest'] = '0'.repeat(64);
+      fs.writeFileSync(file, `${canonicalEvidencePackJsonV3(pack)}\n`, { mode: 0o600 });
+    }],
+    ['different valid seal', (_id: string, file: string) => {
+      const pack = readAutonomyEvidencePack(path.basename(file, '.json'));
+      if (!pack || pack.version !== 3) throw new Error('expected signed v3 fixture');
+      const {
+        payloadDigest: _payloadDigest,
+        signatureAlgorithm: _signatureAlgorithm,
+        signingKeyId: _signingKeyId,
+        signature: _signature,
+        sealedPackDigest: _sealedPackDigest,
+        ...payload
+      } = pack;
+      const replacement = sealAutonomyEvidencePackV3({
+        ...payload,
+        version: 2,
+        generatedAt: new Date(Date.parse(pack.generatedAt) + 1_000).toISOString(),
+      } as AutonomyEvidencePackLegacy);
+      if (!replacement) throw new Error('expected replacement signed v3 fixture');
+      fs.writeFileSync(file, `${canonicalEvidencePackJsonV3(replacement)}\n`, { mode: 0o600 });
+    }],
+  ] as const)('refuses before staging when persisted v3 evidence is %s', async (_label, mutate) => {
+    const proposal = makeProposal('frontier', `docs/${_label.replaceAll(' ', '-')}-v3-evidence.md`);
+    afterEvidencePersist(mutate);
+
+    const result = await autoMergeProposal(proposal.id, config());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/evidence pack (could not be reread|changed after persistence)/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.localMergeIntent).toBeUndefined();
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
+  });
+
+  it('refuses before staging when the live proposal identity changes after evidence persistence', async () => {
+    const proposal = makeProposal('frontier', 'docs/proposal-identity-drift.md');
+    afterEvidencePersist((id) => {
+      const file = path.join(inboxDir(), `${id}.json`);
+      const row = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      row['origin'] = 'manual';
+      fs.writeFileSync(file, `${JSON.stringify(row, null, 2)}\n`, { mode: 0o600 });
+    });
+
+    const result = await autoMergeProposal(proposal.id, config());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/no longer matches the live proposal/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
+  });
+
+  it('refuses before staging when the safe remote policy digest changes after persistence', async () => {
+    const proposal = makeProposal('frontier', 'docs/remote-policy-drift.md');
+    afterEvidencePersist(() => {
+      branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') =>
+        protectionAttestation(branch, 'BPR_drifted'));
+    });
+
+    const result = await autoMergeProposal(proposal.id, config());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/branch protection changed after signed evidence persistence/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
+  });
+
+  it('refuses before staging when the protected remote base moves after persistence', async () => {
+    const proposal = makeProposal('frontier', 'docs/remote-base-drift.md');
+    afterEvidencePersist(() => {
+      const clone = path.join(tmpHome, 'remote-advance');
+      execFileSync('git', ['clone', '--branch', 'main', bareRepo, clone], { stdio: 'pipe' });
+      git(clone, ['config', 'user.email', 'test@ashlr.test']);
+      git(clone, ['config', 'user.name', 'Ashlr Test']);
+      fs.writeFileSync(path.join(clone, 'REMOTE.md'), '# advanced\n', 'utf8');
+      git(clone, ['add', 'REMOTE.md']);
+      git(clone, ['commit', '-m', 'advance remote']);
+      git(clone, ['push', 'origin', 'main']);
+    });
+
+    const result = await autoMergeProposal(proposal.id, config());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/protected remote branch 'main' moved after signed evidence persistence/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['branch', '--list', `ashlr/merge/${proposal.id}`])).toBe('');
   });
 
   it('reports non-quiescence while PR creation is in flight and persists the receipt before release', async () => {

@@ -730,7 +730,6 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
     return false;
   }
   if (verification['passed'] === true && (
-    (verification['commandKinds'] as unknown[]).length === 0 ||
     verification['baseBranch'] === undefined || verification['baseHead'] === undefined ||
     verification['diffHash'] === undefined || verification['verifiedAt'] === undefined ||
     verification['source'] === undefined || diff['hash'] !== verification['diffHash'] ||
@@ -800,7 +799,8 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
         (proposal['status'] !== 'pending' && proposal['status'] !== 'approved') ||
         diff['hash'] === undefined ||
         (diff['files'] as string[]).length === 0 || diff['changedLines'] === 0 ||
-        verification['passed'] !== true || (verification['commandKinds'] as string[]).length === 0 ||
+        verification['passed'] !== true ||
+        (record['trustBasis'] === 'evidence' && (verification['commandKinds'] as string[]).length === 0) ||
         verification['baseBranch'] === undefined || verification['baseHead'] === undefined ||
         verification['diffHash'] !== diff['hash'] || verification['verifiedAt'] === undefined ||
         verification['source'] === undefined ||
