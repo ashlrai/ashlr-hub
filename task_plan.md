@@ -2177,3 +2177,20 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Missing state is inactive; malformed, unsigned, conflicting, future-dated, rollback-suspect, or over-cap state is critical/degraded.
 - Local HMAC protects visible integrity but cannot prove freshness after coherent state-and-key rollback.
 - Production remains on immutable `f178db34fa6e47eb44df9f3db855943db602ef76` with auto-merge disabled until the complete enforce controller is proven.
+
+## Current Overnight Cycle - Source Revision Admission
+- [x] Rehydrate exact `origin/master` `92457b350e2ca85a12687a94fda3fec5620f952f` in an isolated worktree without touching canonical user edits.
+- [x] Audit CLI, API-model, direct engineer, swarm, retry, draft, partial, and final proposal boundaries with revision-pinned parallel agents.
+- [x] Add one read-only physical-repository and exact-HEAD admission primitive with finite fail-closed outcomes.
+- [x] Recheck before every paid execution attempt, every direct-engineer tool call, and before/after durable proposal capture; verify quarantine of a newly created pending proposal if the source races persistence.
+- [x] Map stale revision refusals to existing failed sandbox authority so they cannot create positive learning or generated repair spend.
+- [x] Add real-Git alias, mismatch, stale-HEAD, retry-race, zero-model-call, partial/draft, post-create quarantine, pre-tool authority, and phased-swarm regressions.
+- [x] Pass focused and adjacent tests, typecheck, scoped lint, production build, zero-vulnerability dependency audit, and diff checks.
+- [ ] Push the isolated branch, open a protected draft PR, and observe exact-SHA CI without activating production.
+
+### Source Revision Invariants
+- A sandbox is executable only while its worktree and expected source resolve to the same physical Git common directory and the source HEAD still equals the immutable sandbox base.
+- Admission is sampled around identity resolution; a concurrent source ref move is a refusal, never an implicit rebase.
+- Source-revision refusal spends no additional model call, files no draft or partial proposal, and grants no repair or positive-learning authority.
+- Caller-owned sandboxes are never removed by a refused delegated run; newly created sandboxes retain existing deterministic cleanup ownership.
+- Direct engineer cleanup is authoritative: non-complete postconditions fail the run and retain explicit orphan-sweep recovery evidence.
