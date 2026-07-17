@@ -6396,6 +6396,54 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('projects an unsafe safe-minimum policy as unavailable protected-remote authority', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+        },
+      },
+    });
+    const remoteHeadSpy = vi.spyOn(inboxMerge, 'resolveRemoteBranchHead')
+      .mockReturnValue('0123456789abcdef0123456789abcdef01234567');
+    const protectionSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority')
+      .mockResolvedValue({
+        authorized: false,
+        reason: 'live safe-minimum protected-remote policy unavailable (classic-admin-enforcement-missing): fixture',
+      });
+
+    try {
+      const status = await buildFleetStatus(cfg);
+
+      expect(status.autoMergeReadiness?.remoteProtection).toMatchObject({
+        required: true,
+        configured: 'exact',
+        live: 'unavailable',
+        coverage: 'complete',
+        observedAt: null,
+      });
+      expect(status.autoMergeReadiness?.remoteProtection?.detail)
+        .toContain('classic-admin-enforcement-missing');
+      expect(status.autonomousShipReadiness?.topBlocker).toMatchObject({
+        id: 'protected-remote-unavailable',
+        source: 'auto-merge',
+      });
+      expect(status.nextActions?.map((action) => action.id)).toContain('inspect-protected-remote');
+      expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    } finally {
+      remoteHeadSpy.mockRestore();
+      protectionSpy.mockRestore();
+    }
+  });
+
   it('fails closed on an unknown auto-merge trust basis even with an empty inbox', async () => {
     const repo = join(tmpHome, 'repo');
     writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
