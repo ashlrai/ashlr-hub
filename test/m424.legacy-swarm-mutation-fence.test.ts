@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createProposal: vi.fn(),
   runGoal: vi.fn(),
   planSwarm: vi.fn(),
+  assurePrivateStorage: vi.fn(() => ({ ok: true, reason: 'exact-private-dacl' })),
   snapshotProject: vi.fn((project: string | null) => ({
     project,
     isRepo: false,
@@ -21,6 +22,10 @@ const mocks = vi.hoisted(() => ({
     stashRef: null,
     ts: new Date().toISOString(),
   })),
+}));
+
+vi.mock('../src/core/util/private-storage.js', () => ({
+  assurePrivateStoragePath: mocks.assurePrivateStorage,
 }));
 
 vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {

@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve, win32 } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   canonicalPathIdentity,
@@ -51,6 +51,33 @@ let originalPath: string | undefined;
 let originalNodeOptions: string | undefined;
 let originalAllowAnyRepo: string | undefined;
 const cleanupPaths = new Set<string>();
+const transientWindowsCleanupErrors = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
+
+function cleanupTrackedPaths(options: {
+  deferTransientWindowsLocks: boolean;
+  maxRetries: number;
+}): void {
+  const failures: unknown[] = [];
+  for (const path of [...cleanupPaths]) {
+    try {
+      rmSync(path, {
+        recursive: true,
+        force: true,
+        maxRetries: options.maxRetries,
+        retryDelay: 100,
+      });
+      cleanupPaths.delete(path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (options.deferTransientWindowsLocks && process.platform === 'win32' &&
+        code !== undefined && transientWindowsCleanupErrors.has(code)) continue;
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'M426 temporary cleanup failed');
+  }
+}
 
 function git(repo: string, args: string[]): string {
   return execFileSync('git', args, {
@@ -312,16 +339,12 @@ afterEach(() => {
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
   fx.cleanup();
-  for (const path of cleanupPaths) {
-    rmSync(path, {
-      recursive: true,
-      force: true,
-      maxRetries: 10,
-      retryDelay: 100,
-    });
-  }
-  cleanupPaths.clear();
+  cleanupTrackedPaths({ deferTransientWindowsLocks: true, maxRetries: 10 });
 });
+
+afterAll(() => {
+  cleanupTrackedPaths({ deferTransientWindowsLocks: false, maxRetries: 15 });
+}, 30_000);
 
 describe('M426 sandbox reservation and path identity', () => {
   it('publishes durable owner metadata before the Git worktree effect', () => {

@@ -23,6 +23,14 @@ const pkg = JSON.parse(
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
 
 describe('M30 CI workflow', () => {
+  it('is reusable as the canonical release verification authority', () => {
+    expect(ciYml).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
+    expect(ciYml.match(/^permissions:\n[\s\S]*?(?=^jobs:)/m)?.[0]).toBe(
+      'permissions:\n  contents: read\n\n',
+    );
+    expect(ciYml.match(/^\s{2,}permissions:/gm) ?? []).toHaveLength(0);
+  });
+
   it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {
     // The CI uses a single node-version: "22" (not a matrix array).
     // A Node-20 entry would be wrong — install.sh rejects it at runtime.

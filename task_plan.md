@@ -5,8 +5,10 @@
 - [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.
 - [x] Port only the five time-stability fixture repairs from the already-green source-revision branch.
 - [x] Verify 261 focused tests, typecheck, scoped lint, build, dependency audit, and diff checks locally.
-- [ ] Land the protected master fixture hotfix and require a green post-merge master run.
-- [ ] Rebase-by-merge and retarget PR #31 only after master is green; continue the dependency stack sequentially.
+- [x] Land protected fixture hotfix PR #56 and require a green five-job post-merge master run.
+- [ ] Merge master into PR #31, retarget it, require fresh exact-head CI, and merge it normally.
+- [ ] Advance PR #32, then apply the pre-tested M402/M49 conflict resolution to PR #33.
+- [ ] Continue in conflict-minimizing order: #34, #36, #38-#53, #35, then #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -232,7 +234,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make real machine-persisted capture mismatches eligible under exact lineage, timing, and non-human predicates.
 - [x] Bound derived goal display titles and refuse invalid outgoing backlog snapshots without dropping authoritative goal data.
 - [x] Run exhaustive verification and independent review; commit, push, reload production, and prove all eligible mismatch repairs materialize with a complete queue source.
-- [ ] Next lane: design and implement evidence-only objective-saturation quarantine after three unique empty attempts across two same-tier editing backends.
+- [x] Next lane: design and implement evidence-only objective-saturation quarantine after three unique empty attempts across two same-tier editing backends.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
@@ -2199,8 +2201,28 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Re-prove the expanded physical-identity tree with a final exhaustive suite after closing all legacy fixture and mock-contract fallout.
 - [x] Re-run typecheck, build, lint, dependency audit, and diff checks on the exact commit candidate.
 - [x] Commit, push, and open protected PR #30.
-- [ ] Observe the final exact-SHA cross-platform CI matrix.
-- [ ] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+- [x] Observe the final exact-SHA cross-platform CI matrix.
+- [x] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+
+## Current Overnight Cycle - Release Native Authority
+- [x] Rehydrate the exact green mutation-fence SHA, protected PR state, production NO-GO boundary, persistent roadmap, and canonical user edits.
+- [x] Confirm the recorded objective-saturation lane already shipped with three unique attempts across two same-tier editing backends and fail-closed lifecycle proof.
+- [x] Make the canonical Ubuntu, three-part Windows, and macOS CI matrix reusable by tag-triggered releases.
+- [x] Constrain the reusable verification workflow to read-only repository contents and pass no publish secrets into it.
+- [x] Add drift-resistant workflow contract tests and run focused tests, typecheck, lint, build, YAML syntax validation, and dependency audit.
+- [x] Run exhaustive verification and independent review on the exact commit candidate.
+- [ ] Commit, push, and observe GitHub's exact workflow parse without publishing or deploying.
+
+## Current Overnight Cycle Errors
+- Parallel explorer deployment was attempted twice but the collaboration service reported `agent thread limit reached`; the critical path continued locally without duplicating unowned edits.
+- The first quiet lint run rejected a counted-space regex in `m33.release-meta`; replacing it with an explicit `{2}` quantifier restored a zero-error lint gate.
+- Exact SHA `c304772` passed nine of ten duplicate checks; the push Windows 2/3 runner completed the synchronous sandbox-preservation assertions and cleanup in 7.030 seconds but Vitest applied the default five-second ceiling. Its exact PR twin passed in 3.321 seconds. Only that Git-heavy test now uses the established 15-second integration ceiling.
+- Exact SHA `1c4f8d4` exposed the same hosted-runner variance in the PR Windows 1/3 job: the synchronous 201-file goal-source bound fixture completed both assertions in 8.911 seconds, while the exact-tree push twin passed the entire file in 390 milliseconds. Only that fixture-heavy test now uses a 15-second ceiling; production read bounds are unchanged.
+- Exact SHA `ead4579` exposed three more duplicate-run asymmetries under severe hosted Windows slowdown. The PR Windows 1/3 runner timed out two filesystem-heavy M113 coordinator ticks at 8.421 and 9.774 seconds while the exact push twin passed all 17 tests in 2.131 seconds; only those tests now use 15-second ceilings. The push Windows 3/3 runner took 192.316 seconds for M315 and observed one fail-closed `unknown` terminal reconciliation while its exact PR twin passed; the test permits one daemon-equivalent retry only when the dedicated key diagnostic is exactly `adapter-failed`, and proves the proposal remains `awaiting-host-merge` with its exact PR URL between attempts. Push Windows 2/3 took 84.564 seconds for the five serial M424 tests and crossed two existing 30-second integration ceilings while the exact PR twin passed them in 13.820 and 9.767 seconds; only those two bounded lifecycle tests now use 60-second ceilings. Production ACL, swarm, and merge-authority deadlines are unchanged.
+- The first definitive local suite attempt on the corrected candidate emitted no per-file output under Vitest 4 and reached `test-ci`'s default 300-second idle watchdog before its final summary. The harness correctly classified this as a silent run rather than a test failure or leaked handle. The same exact candidate then passed all 534 files with 11,221 tests green and 9 intentional skips in 623.84 seconds using a one-off 12-minute idle bound inside the unchanged 15-minute hard-runtime cap.
+- Exact SHA `63364ca` passed nine of ten initial checks. Push Windows 2/3 exhausted both 60-second M424 ceilings while its exact PR twin passed at 10.136 and 11.110 seconds; four audits traced the cost to repeated synchronous Windows DACL probes across thirteen real swarm checkpoints, not an authority deadlock. M424 now mocks only that separately covered adapter, preserves every lifecycle primitive, and restores 30-second ceilings. The rerun passed all 210 main-roster assertions, then its separate M426/H7 step passed the authority body but exhausted the existing 5.5-second `EBUSY` cleanup envelope for a dead temporary `git.exe`. Cleanup now defers only transient Windows executable locks, retries every retained path, and fails strictly at the bounded final pass.
+- Vitest 4 rejects the attempted `--repeat` convenience flag. The unsupported command changed no files; focused M424, M425, M379, M426, and H7 coverage plus the exhaustive suite remain the verification authority.
+- The final combined M424/M426 candidate passes all 534 files with 11,221 tests green and 9 intentional skips in 608.09 seconds under the unchanged 900-second hard cap.
 
 ### Final Verification Recovery
 - The first serial exhaustive pass after physical identity hardening found 95 failures across 18 files; focused repairs reduced the fast discovery pass to 73 failures across 14 files.
