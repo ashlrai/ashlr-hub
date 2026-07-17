@@ -9,8 +9,10 @@
 - PR #31 passed 10/10 exact-head checks, merged normally as `d981ade50ca7ae8bc6c4edbe5b5043b1fdb9fccf`, preserved the checked tree, and passed post-merge run `29549623351` across Ubuntu, macOS, and all Windows partitions.
 - PR #32 passed 10/10 exact-head checks, merged normally as `2240638fb0b660009b96122bd543f0c2b1b61b21`, preserved the checked tree, and passed post-merge run `29550691792` across Ubuntu, macOS, and all Windows partitions.
 - PR #33 passed 12/12 exact-head checks, merged normally as `da1f2285900b071f3e516d963ea8cea31d6d1c6d`, preserved the checked tree, and passed post-merge run `29552082438` across Ubuntu, macOS, Windows overflow, and all three Windows partitions.
-- PR #34 now includes that exact green master through a normal merge. It is one timeout-only line with no date drift or content conflict, and its exact combined tree passes the named reservation-cleanup test under the hermetic `npm run test:ci` wrapper.
-- The conflict-minimizing continuation is #34, #36, #38-#53, #35, then #37. This preserves the long #36 chain; #35 later requires one `verify-commands.ts` resolution and #37 one notes resolution.
+- PR #34 passed 12/12 fresh checks at exact head `39afbb852c3255b1d8cb56283682565ab6d99bba` and merged normally as `edf314741fda067c26c3bbcacb997fad9390f693`. Its merge parents are exact green master plus that checked head, its merge tree `60931de317b2b00762852b370dc26eddb986a855` exactly matches the checked candidate, and post-merge run `29553196281` passed all six jobs.
+- PR #36 now includes merge `edf314741fda067c26c3bbcacb997fad9390f693` without conflicts. Its combined tree passes 410 focused assertions across source-complete policy, branch attestation, lifecycle fixtures, fleet status, secret invariants, and reservation recovery; typecheck, scoped lint, build, and diff checks also pass.
+- The conflict-minimizing continuation is #36, #38-#53, #35, then #37. This preserves the long #36 chain; #35 later requires one `verify-commands.ts` resolution and #37 one notes resolution.
+- PR #38 is one commit directly atop #36 at `48d8ea07301d1cd869f7a04537ab5380245c758f`. A synthetic master-plus-#36-plus-#38 merge is clean and equals the direct cumulative tree; `test/m49.fleet-status.test.ts` is the only automatic textual merge hotspot. Its focused gate is M429 plus M370 and the named M315/M419/M49 policy assertions, with no new stale date fixture.
 - Production remains unchanged with auto-merge, self-merge, canary enforcement, and positive learning disabled.
 
 ## Current Protected Remote Authority Cycle
