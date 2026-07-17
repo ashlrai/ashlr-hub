@@ -5163,6 +5163,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
+    const now = new Date('2026-07-16T00:30:00.000Z');
+    const queuedAt = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+    const staleSnapshotAt = new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     mkdirSync(ashlrDir, { recursive: true });
@@ -5178,21 +5181,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       effort: 1,
       score: 5,
       tags: ['self-heal', 'test'],
-      ts: new Date().toISOString(),
+      ts: queuedAt,
     };
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
       JSON.stringify({
-        generatedAt: '2026-07-01T00:00:00.000Z',
+        generatedAt: staleSnapshotAt,
         repos: ['/tmp/deleted-fixture'],
         items: [{ ...queued, id: 'stale-temp-item', repo: '/tmp/deleted-fixture' }],
       }),
       'utf8',
     );
     writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([queued]), 'utf8');
-    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], now.toISOString());
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await withFakeNow(now, () => buildFleetStatus(baseConfig()));
 
     expect(s.queue.backlogItems).toBe(1);
     expect(s.queue.generatedWork).toMatchObject({
