@@ -173,7 +173,7 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
     decisions: [],
     judgeTraces: [],
     evidencePacks: [{
-      version: 2,
+      version: 3,
       generatedAt: '2026-07-01T00:09:00.000Z',
       proposalId: 'prop-1',
       diffHash,
@@ -216,10 +216,14 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
 }
 
 function deps(overrides: Partial<ResourceStrategyReadDeps> = {}): ResourceStrategyReadDeps {
+  const listOutcomeRecords = overrides.listOutcomeRecords ?? (() => []);
+  const listReadyEvidenceOutcomeRecords =
+    overrides.listReadyEvidenceOutcomeRecords ?? listOutcomeRecords;
   return {
     buildFleetStatus: async () => fleet(),
     getResourceSnapshot: async () => resources([backend('claude', 'open'), backend('builtin', 'open')]),
-    listOutcomeRecords: () => [],
+    listOutcomeRecords,
+    listReadyEvidenceOutcomeRecords,
     runEcosystemDoctor: async () => doctor(),
     diagnoseGuardHealth: () => guard(false),
     ...overrides,
@@ -266,6 +270,47 @@ describe('buildResourceStrategyReport', () => {
     expect(report.mode).toBe('auto-merge-ready');
     expect(report.outcomes.readyEvidence).toBe(1);
     expect(report.recommendedActions.join(' ')).toContain('existing merge gates');
+  });
+
+  it('does not derive readiness from general outcome snapshots', async () => {
+    const report = await buildResourceStrategyReport(
+      cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
+      {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({
+          listOutcomeRecords: () => [outcome()],
+          listReadyEvidenceOutcomeRecords: () => [],
+        }),
+      },
+    );
+
+    expect(report.outcomes.readyEvidence).toBe(0);
+    expect(report.mode).not.toBe('auto-merge-ready');
+  });
+
+  it('does not truncate dedicated ready records behind the general outcome window', async () => {
+    const general = [
+      outcome({ proposal: { ...outcome().proposal, id: 'general-1' } }),
+      outcome({ proposal: { ...outcome().proposal, id: 'general-2' } }),
+    ];
+    const ready = outcome({ proposal: { ...outcome().proposal, id: 'ready-outside-window' } });
+    ready.evidencePacks[0]!.proposalId = ready.proposal.id;
+
+    const report = await buildResourceStrategyReport(
+      cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
+      {
+        maxOutcomes: 2,
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({
+          listOutcomeRecords: () => general,
+          listReadyEvidenceOutcomeRecords: () => [ready],
+        }),
+      },
+    );
+
+    expect(report.outcomes.records).toBe(2);
+    expect(report.outcomes.readyEvidence).toBe(1);
+    expect(report.mode).toBe('auto-merge-ready');
   });
 
   it.each([
@@ -397,11 +442,13 @@ describe('buildResourceStrategyReport', () => {
     expect(report.outcomes.readyEvidence).toBe(0);
   });
 
-  it('does not treat a readable legacy static-protection pack as auto-merge-ready', async () => {
+  it.each([1, 2] as const)(
+    'does not treat a readable legacy v%s static-protection pack as auto-merge-ready',
+    async (version) => {
     const legacy = outcome();
     legacy.evidencePacks[0] = {
       ...legacy.evidencePacks[0]!,
-      version: 1,
+      version,
       trustBasis: 'evidence',
       remotePreferred: true,
       gates: {
@@ -424,7 +471,8 @@ describe('buildResourceStrategyReport', () => {
 
     expect(report.outcomes.readyEvidence).toBe(0);
     expect(report.mode).not.toBe('auto-merge-ready');
-  });
+    },
+  );
 
   it('recommends verify-only for pending proposals and verification failures', async () => {
     const failed = outcome({

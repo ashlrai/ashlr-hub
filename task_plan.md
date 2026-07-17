@@ -11,7 +11,8 @@
 - [x] Retarget and merge PR #33 with the verified M402/M49 resolution and fresh exact-head/post-merge CI.
 - [x] Finish timeout-only PR #34 with 12/12 exact-head checks, verified merge-tree authority, and green six-job post-merge run `29553196281`.
 - [x] Retarget and merge source-complete policy PR #36 with exact-head and post-merge authority.
-- [ ] Retarget and merge safe-minimum policy PR #38, then continue #39-#53, #35, and #37.
+- [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
+- [ ] Retarget and merge signed evidence-pack PR #39, then continue #40-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -84,6 +85,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add selection-phase global workspace telemetry for recursive repair learning
 - [x] Follow-up: Add prompt-trackr explicit merge-grade verification contract
 - [ ] Follow-up: Set valid Raycast author account for publish validation
+- [x] Follow-up: Repair signed-evidence v3 protected CI fixture and verifier-runtime failures
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -2511,7 +2513,25 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 
 ## Next P0 - Safe-Minimum Protected-Remote Policy V1
 - [x] Select a pure versioned policy evaluator as the next authority slice after PR #36 source-complete observation.
-- [ ] Require strict App-bound checks, admin enforcement, zero bypass actors, force-push/deletion prohibition, and explicit signature policy across source-local classic/ruleset evidence.
-- [ ] Re-evaluate at every force-fresh remote checkpoint and project unsafe or unknown policy as unavailable.
-- [ ] Publish as a stacked PR on #36 only after exhaustive policy, drift, status, static, and protected verification.
-- [ ] Add signed evidence-pack v3 only after the evaluator is authoritative.
+- [x] Require strict App-bound checks, admin enforcement, zero bypass actors, force-push/deletion prohibition, and explicit signature policy across source-local classic/ruleset evidence.
+- [x] Re-evaluate at every force-fresh remote checkpoint and project unsafe or unknown policy as unavailable.
+- [x] Publish as stacked PR #38 on #36 after exhaustive policy, drift, status, static, and protected verification.
+- [x] Observe all 12 protected PR/push jobs green on immutable PR #38 head `48d8ea0`.
+
+## Signed Evidence Pack V3 Cycle (2026-07-16)
+- [x] Add bounded canonical JSON, domain-separated payload digest, dedicated derived signing key, HMAC signature, signing-key identity, and self-excluding sealed-pack digest.
+- [x] Add strict closed v3 schema validation for proposal, verification, gate, remote-policy, visual, policy, causal, and outcome metadata while keeping v1/v2 readable as observational evidence.
+- [x] Add race-safe private persistence with no-follow exclusive temporaries, short-write handling, inode/owner/mode/link checks, directory identity bracketing, canonical UTF-8 transport, duplicate-key rejection, and Windows private-storage assurance.
+- [x] Bind live remote evidence to the canonical safe-minimum evaluator digest instead of an ad hoc snapshot hash.
+- [x] Require verified signed v3 T4 evidence-mode merge authority before positive skill distillation; reject proposal-only, mismatched branch-lane, policyless-outcome, and legacy downgrade claims.
+- [x] Pass the focused authority matrix, typecheck, scoped lint, production build, dependency audit, and diff checks; close protocol/policy review findings.
+- [x] Close exact Windows signing-key DACL, durable parent/key installation, BigInt file identity, safe-home, ambiguous post-rename evidence, dedicated ready-reader, skill identity, and ready-window findings; rerun 395 focused assertions plus static gates.
+- [ ] Commit, push, and open a protected PR stacked on `codex/safe-minimum-policy-v1` without merging or deploying.
+- [ ] Follow immediately with a separate activation PR that persists, rereads, verifies, and binds v3 before any staging push or PR mutation.
+
+## Protected Stack Status (2026-07-16)
+- [x] Keep PR #33 immutable at `e4ffbd4`; every required protected job is green.
+- [x] Refresh and prove PR #34 `1c243b7`, PR #35 `52463d2`, and PR #36 `cc57322` with preserved patch identities and complete protected-green matrices.
+- [x] Publish PR #37 generalized safety-test guard at `b12108a` after 75 focused tests and independent SHIP review, then publish assertion-preserving Windows fixture budgets as `d679c87`.
+- [ ] Prove PR #37 head `d679c87` across both protected matrices; one Windows 2/3 copy is currently red while its duplicate and remaining long jobs are still running, so no waiver or merge.
+- [x] Publish PR #38 safe-minimum policy at `48d8ea0` and observe all duplicate protected jobs green.

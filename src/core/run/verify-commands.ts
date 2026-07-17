@@ -333,7 +333,9 @@ export function spawnOptionsFor(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: buildToolPath({
-      prepend: localBins,
+      // Keep package-manager shims on the Node runtime that launched Ashlr.
+      // Isolating HOME must not promote an unrelated system Node ahead of it.
+      prepend: [...localBins, dirname(process.execPath)],
       // M341b: explicit for BOTH branches — 'undefined' fell back to the
       // HOST delimiter, so simulating linux on a win32 host joined with ';'.
       separator: isWin ? ';' : ':',

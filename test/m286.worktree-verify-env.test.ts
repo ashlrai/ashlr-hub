@@ -226,6 +226,17 @@ describe('M286 worktree — node_modules symlink', { timeout: 15_000 }, () => {
 // ---------------------------------------------------------------------------
 
 describe('M286 spawnOptionsFor — PATH injection', () => {
+  it('anchors package-manager resolution to the running Node runtime', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm286-node-runtime-'));
+    try {
+      const opts = spawnOptionsFor(dir, 30_000, 'npm', process.platform);
+      const entries = String(opts.env?.PATH ?? '').split(path.delimiter);
+      expect(entries[0]).toBe(path.dirname(process.execPath));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('prepends node_modules/.bin to PATH when it exists', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm286-spawn-'));
     try {

@@ -12,6 +12,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { GithubStatus } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -290,7 +291,14 @@ export interface BranchProtectionPolicySnapshot {
   rulesets: CanonicalRulesetProtection[];
 }
 
-export const SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_VERSION = 1 as const;
+export const SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_ID =
+  'ashlr:github:safe-minimum-protected-remote-policy' as const;
+export const SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION = 1 as const;
+export const SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_VERSION =
+  SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION;
+
+const PROTECTED_REMOTE_POLICY_AUTHORITY_DIGEST_DOMAIN =
+  'ashlr:github:protected-remote-policy-authority-digest:v1' as const;
 
 export type SafeMinimumProtectedRemotePolicyRefusalReason =
   | 'snapshot-schema-unsupported'
@@ -1166,6 +1174,12 @@ function policyId(value: unknown): string | null {
   return null;
 }
 
+function compareCanonicalPolicyValues(left: CanonicalPolicyValue, right: CanonicalPolicyValue): number {
+  const leftJson = JSON.stringify(left);
+  const rightJson = JSON.stringify(right);
+  return leftJson < rightJson ? -1 : leftJson > rightJson ? 1 : 0;
+}
+
 function canonicalPolicyValue(value: unknown, depth = 0): CanonicalPolicyValue | undefined {
   if (depth > MAX_POLICY_DEPTH) return undefined;
   if (value === null || typeof value === 'boolean') return value;
@@ -1178,18 +1192,25 @@ function canonicalPolicyValue(value: unknown, depth = 0): CanonicalPolicyValue |
   if (Array.isArray(value)) {
     if (value.length > MAX_POLICY_ARRAY_ITEMS) return undefined;
     const normalized: CanonicalPolicyValue[] = [];
+    const members = new Set<string>();
     for (const item of value) {
       const parsed = canonicalPolicyValue(item, depth + 1);
       if (parsed === undefined) return undefined;
+      const member = JSON.stringify(parsed);
+      if (members.has(member)) return undefined;
+      members.add(member);
       normalized.push(parsed);
     }
-    return normalized.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return normalized.sort(compareCanonicalPolicyValues);
   }
   const record = objectRecord(value);
   if (!record) return undefined;
   const keys = boundedOwnEnumerableKeys(record, MAX_POLICY_OBJECT_KEYS);
   if (!keys || keys.some((key) => key.length === 0 || key.length > 256)) return undefined;
-  const normalized: Record<string, CanonicalPolicyValue> = {};
+  const normalized: Record<string, CanonicalPolicyValue> = Object.create(null) as Record<
+    string,
+    CanonicalPolicyValue
+  >;
   for (const key of keys.sort()) {
     const parsed = canonicalPolicyValue(record[key], depth + 1);
     if (parsed === undefined) return undefined;
@@ -2091,12 +2112,14 @@ function canonicalClassicActorCount(value: unknown): number | null {
   for (const field of ['users', 'teams', 'apps']) {
     const entries = actors[field];
     if (!Array.isArray(entries) || entries.length > MAX_POLICY_ACTORS) return null;
+    const actorIds = new Set<string>();
     for (const item of entries) {
       const actor = objectRecord(item);
       const id = policyId(actor?.['id']);
       const name = boundedNonEmptyString(actor?.['name'], 256);
       if (!actor || !hasExactKeys(actor, ['id', 'name']) || !id || !name ||
-          name !== name.toLowerCase()) return null;
+          name !== name.toLowerCase() || actorIds.has(id)) return null;
+      actorIds.add(id);
     }
     count += entries.length;
   }
@@ -2218,6 +2241,7 @@ function isCanonicalRulesetBypassActors(
   sourceType: unknown,
 ): boolean {
   if (!Array.isArray(value) || value.length > MAX_POLICY_ACTORS) return false;
+  const actorIds = new Set<string>();
   return value.every((item) => {
     const actor = objectRecord(item);
     const actorId = actor?.['actorId'];
@@ -2229,10 +2253,15 @@ function isCanonicalRulesetBypassActors(
       actorType === 'RepositoryRole' || actorType === 'Team' || actorType === 'DeployKey' ||
       actorType === 'User' ||
       ((sourceType === 'Enterprise' || sourceType === 'Organization') && enterpriseActor);
-    return Boolean(actor && hasExactKeys(actor, ['actorId', 'actorType', 'bypassMode']) && validType &&
+    const valid = Boolean(actor && hasExactKeys(actor, ['actorId', 'actorType', 'bypassMode']) && validType &&
       (bypassMode === 'always' || bypassMode === 'pull_request' || bypassMode === 'exempt') &&
       (actorId === null || (typeof actorId === 'string' && policyId(actorId) === actorId)) &&
       (idlessActor ? actorId === null : actorId !== null));
+    if (!valid) return false;
+    const identity = `${actorType as string}\0${actorId ?? ''}`;
+    if (actorIds.has(identity)) return false;
+    actorIds.add(identity);
+    return true;
   });
 }
 
@@ -2356,6 +2385,62 @@ function validateCanonicalRulesetSource(
     }
   }
   return null;
+}
+
+function canonicalDigestValue(value: CanonicalPolicyValue): CanonicalPolicyValue {
+  if (Array.isArray(value)) {
+    return value.map(canonicalDigestValue).sort(compareCanonicalPolicyValues);
+  }
+  if (value !== null && typeof value === 'object') {
+    const canonical: Record<string, CanonicalPolicyValue> = Object.create(null) as Record<
+      string,
+      CanonicalPolicyValue
+    >;
+    for (const key of Object.keys(value).sort()) {
+      canonical[key] = canonicalDigestValue(value[key]!);
+    }
+    return canonical;
+  }
+  return value;
+}
+
+/** Canonical plain policy value; policy arrays are unordered sets and reject duplicates. */
+function canonicalProtectedRemotePolicySnapshot(value: unknown): CanonicalPolicyValue | null {
+  const snapshot = objectRecord(value);
+  if (!snapshot || !consumePolicySnapshotShape(value, { nodes: 0, bytes: 0 })) return null;
+
+  const canonical = canonicalPolicyValue(value);
+  return canonical === undefined ? null : canonicalDigestValue(canonical);
+}
+
+/**
+ * Stable identity for one exact schema-v2 policy evaluation input. Collection
+ * order is non-semantic, while every source-complete policy value remains bound.
+ */
+export function buildCanonicalProtectedRemotePolicyDigestV1(
+  policySnapshot: unknown,
+  configuredBindings: readonly RequiredCheckBinding[],
+): string | null {
+  const configured = validateExactAppBindings(configuredBindings);
+  if (!configured.ok) return null;
+  if (!evaluateSafeMinimumProtectedRemotePolicyV1(policySnapshot, configuredBindings).ok) return null;
+  const normalizedBindings = configured.keys.map((key) => {
+    const separator = key.indexOf('\0');
+    return {
+      context: key.slice(0, separator),
+      appId: key.slice(separator + 1),
+    };
+  });
+  const snapshot = canonicalProtectedRemotePolicySnapshot(policySnapshot);
+  if (snapshot === null) return null;
+
+  return createHash('sha256').update(JSON.stringify([
+    PROTECTED_REMOTE_POLICY_AUTHORITY_DIGEST_DOMAIN,
+    SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_ID,
+    SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION,
+    snapshot,
+    normalizedBindings,
+  ]), 'utf8').digest('hex');
 }
 
 /**
@@ -2638,6 +2723,12 @@ export function evaluateSafeMinimumProtectedRemotePolicyV1(
       'effective policy does not prove branch-deletion prohibition',
     );
   }
+  if (canonicalProtectedRemotePolicySnapshot(policySnapshot) === null) {
+    return policyRefusal(
+      'snapshot-schema-unsupported',
+      'schema-v2 policy snapshot contains a duplicate policy collection member',
+    );
+  }
   const signaturePolicy = signaturesRequired ? 'required' : 'not-required';
   return {
     ok: true,
@@ -2822,10 +2913,11 @@ function validateRuleParameters(type: string, parameters: Record<string, unknown
       parameters['workflows'].every(isCanonicalWorkflowReference);
   }
   if (type === 'code_scanning') {
-    return hasExactKeys(parameters, ['code_scanning_tools']) &&
-      Array.isArray(parameters['code_scanning_tools']) &&
-      parameters['code_scanning_tools'].length <= MAX_POLICY_ARRAY_ITEMS &&
-      parameters['code_scanning_tools'].every(isCanonicalCodeScanningTool);
+    const tools = parameters['code_scanning_tools'];
+    if (!hasExactKeys(parameters, ['code_scanning_tools']) || !Array.isArray(tools) ||
+        tools.length > MAX_POLICY_ARRAY_ITEMS || !tools.every(isCanonicalCodeScanningTool)) return false;
+    const toolNames = tools.map((tool) => objectRecord(tool)!['tool'] as string);
+    return new Set(toolNames).size === toolNames.length;
   }
   if (type === 'copilot_code_review') {
     return hasExactKeys(parameters, ['review_draft_pull_requests', 'review_on_push'], []) &&

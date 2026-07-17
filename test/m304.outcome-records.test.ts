@@ -6,8 +6,16 @@
  * adding writes or failing on missing/corrupt optional inputs.
  */
 
-import { describe, expect, it } from 'vitest';
-import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  sealAutonomyEvidencePackV3,
+  type AutonomyEvidencePack,
+  type AutonomyEvidencePackLegacy,
+  type SignedAutonomyEvidencePackV3,
+} from '../src/core/autonomy/evidence-pack.js';
 import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
@@ -18,6 +26,26 @@ import type { DecisionEntry, Proposal } from '../src/core/types.js';
 
 const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const TEST_DIFF_HASH = hashDiff(TEST_DIFF);
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+let tmpHome: string;
+
+function restoreEnvironment(name: 'HOME' | 'USERPROFILE', value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+beforeAll(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m304-home-'));
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+});
+
+afterAll(() => {
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  restoreEnvironment('HOME', originalHome);
+  restoreEnvironment('USERPROFILE', originalUserProfile);
+});
 
 function proposal(overrides: Partial<Proposal> & Pick<Proposal, 'id' | 'createdAt'>): Proposal {
   return {
@@ -54,7 +82,7 @@ function trace(proposalId: string, ts: string, overrides: Partial<JudgeTrace> = 
   };
 }
 
-function evidence(proposalId: string, generatedAt: string): AutonomyEvidencePack {
+function legacyEvidence(proposalId: string, generatedAt: string): AutonomyEvidencePackLegacy {
   return {
     version: 1,
     generatedAt,
@@ -97,6 +125,31 @@ function evidence(proposalId: string, generatedAt: string): AutonomyEvidencePack
       reason: 'full evidence',
     },
   };
+}
+
+function evidence(proposalId: string, generatedAt: string): SignedAutonomyEvidencePackV3 {
+  const draft = legacyEvidence(proposalId, generatedAt);
+  draft.proposal.createdAt = '2026-07-02T23:59:00.000Z';
+  draft.trustBasis = 'evidence';
+  draft.remotePreferred = true;
+  draft.gates.remoteProtection = {
+    ok: true,
+    detail: 'safe protected remote policy',
+    live: true,
+    nameWithOwner: 'ashlrai/alpha',
+    repositoryId: 'R_alpha',
+    branch: 'main',
+    baseHead: 'a'.repeat(40),
+    observedAt: generatedAt,
+    requirements: ['pull-request-reviews', 'required-status-checks'],
+    requiredChecks: ['CI'],
+    requiredCheckBindings: [{ context: 'CI', appId: '15368' }],
+    policySources: ['classic'],
+    policyHash: 'b'.repeat(64),
+  };
+  const sealed = sealAutonomyEvidencePackV3(draft);
+  if (!sealed) throw new Error('failed to seal M304 evidence fixture');
+  return sealed;
 }
 
 function deps(overrides: Partial<OutcomeRecordReadDeps> = {}): OutcomeRecordReadDeps {
@@ -166,7 +219,7 @@ describe('m302 listOutcomeRecords', () => {
           }),
         ],
         loadWorkedLedger: () => ({ events: [worked] }),
-        listAutonomyEvidencePacks: () => [evidence('prop-new', '2026-07-03T01:40:00.000Z')],
+        listAutonomyEvidencePacks: () => [legacyEvidence('prop-new', '2026-07-03T01:40:00.000Z')],
         racingStats: () => ({ races: 3, frontierWinRate: 2 / 3, avgScoreDelta: 4, localWins: 1 }),
       }),
     });
@@ -336,10 +389,12 @@ describe('m302 listOutcomeRecords', () => {
           if (id === 'prop-ready') {
             return proposal({
               id,
-              createdAt: '2026-07-03T00:10:00.000Z',
+              createdAt: '2026-07-02T23:59:00.000Z',
               status: 'pending',
               diff: TEST_DIFF,
               diffHash: TEST_DIFF_HASH,
+              engineModel: 'codex:gpt-5.5',
+              engineTier: 'frontier',
               verifyResult: {
                 passed: true,
                 baseBranch: 'main',
@@ -378,10 +433,12 @@ describe('m302 listOutcomeRecords', () => {
     });
     const live = proposal({
       id: 'prop-ready',
-      createdAt: '2026-07-03T00:10:00.000Z',
+      createdAt: '2026-07-02T23:59:00.000Z',
       status: 'pending',
       diff: TEST_DIFF,
       diffHash: TEST_DIFF_HASH,
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
       verifyResult: {
         passed: true,
         baseBranch: 'main',
@@ -401,6 +458,30 @@ describe('m302 listOutcomeRecords', () => {
     expect(listReadyEvidenceOutcomeRecords({
       now: new Date('2026-07-03T03:30:00.000Z'),
       deps: { listAutonomyEvidencePacks: () => [replayed], loadProposal: () => live },
+    })).toEqual([]);
+  });
+
+  it('never promotes unsigned legacy evidence into daemon readiness', () => {
+    const legacy = legacyEvidence('prop-ready', '2026-07-03T03:00:00.000Z');
+    const live = proposal({
+      id: 'prop-ready',
+      createdAt: '2026-07-03T00:10:00.000Z',
+      status: 'pending',
+      diff: TEST_DIFF,
+      diffHash: TEST_DIFF_HASH,
+      verifyResult: {
+        passed: true,
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-03T03:00:00.000Z',
+        source: 'auto-merge',
+      },
+    });
+
+    expect(listReadyEvidenceOutcomeRecords({
+      now: new Date('2026-07-03T03:30:00.000Z'),
+      deps: { listAutonomyEvidencePacks: () => [legacy], loadProposal: () => live },
     })).toEqual([]);
   });
 });

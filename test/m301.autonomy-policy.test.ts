@@ -18,11 +18,15 @@ import {
   listAutonomyEvidencePacks,
   persistAutonomyEvidencePack,
   readAutonomyEvidencePack,
+  sealAutonomyEvidencePackV3,
+  verifyAutonomyEvidencePackV3,
 } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
 let tmpHome: string;
 
 function diff(): string {
@@ -37,6 +41,8 @@ function diff(): string {
   ].join('\n');
 }
 
+const TEST_DIFF_HASH = hashDiff(diff());
+
 function proposal(over: Partial<Proposal> = {}): Proposal {
   return {
     id: 'prop-m301',
@@ -46,7 +52,7 @@ function proposal(over: Partial<Proposal> = {}): Proposal {
     title: 'autonomy test',
     summary: 'autonomy evidence pack test',
     diff: diff(),
-    diffHash: 'sha256:test',
+    diffHash: TEST_DIFF_HASH,
     engineModel: 'codex:gpt-5.5',
     engineTier: 'frontier',
     status: 'pending',
@@ -83,7 +89,7 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
       commandKinds: ['test', 'typecheck'],
       baseBranch: 'main',
       baseHead: 'a'.repeat(40),
-      diffHash: 'sha256:test',
+      diffHash: TEST_DIFF_HASH,
       verifiedAt: '2026-07-01T00:01:00.000Z',
       source: 'auto-merge',
     },
@@ -102,7 +108,7 @@ function liveRemoteProtection() {
     repositoryId: 'R_fixture',
     branch: 'main',
     baseHead: 'a'.repeat(40),
-    observedAt: '2026-07-01T00:00:30.000Z',
+    observedAt: '2026-07-01T00:01:30.000Z',
     requirements: ['required_status_checks'],
     requiredChecks: ['ci/test'],
     requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
@@ -121,11 +127,14 @@ function packFor(id: string, generatedAt: string) {
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m301-home-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
 });
 
 describe('M301 evaluateAutonomyPolicy', () => {
@@ -212,7 +221,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
           commandKinds: [],
           baseBranch: 'main',
           baseHead: 'a'.repeat(40),
-          diffHash: 'sha256:test',
+          diffHash: TEST_DIFF_HASH,
         },
       }),
       cfg(),
@@ -231,7 +240,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
           passed: true,
           detail: 'green but legacy pack omitted base metadata',
           commandKinds: ['test'],
-          diffHash: 'sha256:test',
+          diffHash: TEST_DIFF_HASH,
         },
       }),
       cfg(),
@@ -274,7 +283,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
           commandKinds: ['test'],
           baseBranch: 'main',
           baseHead: 'a'.repeat(40),
-          diffHash: 'sha256:stale',
+          diffHash: '0'.repeat(64),
         },
       }),
       cfg(),
@@ -296,7 +305,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
           commandKinds: ['test'],
           baseBranch: 'main',
           baseHead: 'a'.repeat(40),
-          diffHash: 'sha256:test',
+          diffHash: TEST_DIFF_HASH,
           verifiedAt: '2026-07-01T00:01:00.000Z',
         },
       }),
@@ -316,7 +325,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
           commandKinds: ['test'],
           baseBranch: 'main',
           baseHead: 'a'.repeat(40),
-          diffHash: 'sha256:test',
+          diffHash: TEST_DIFF_HASH,
           verifiedAt: 'not-a-date',
           source: 'auto-merge',
         },
@@ -342,6 +351,32 @@ describe('M301 evaluateAutonomyPolicy', () => {
       action: 'merge-main',
       allowed: true,
     });
+  });
+
+  it('recognizes signed v3 evidence while legacy v1 remains non-authoritative', () => {
+    const legacy = goodPack({
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      remoteProtection: liveRemoteProtection(),
+    });
+    legacy.policy = evaluateAutonomyPolicy(legacy, cfg());
+    if (legacy.evidenceOutcome) {
+      legacy.evidenceOutcome.policyAllowed = legacy.policy.allowed;
+      legacy.evidenceOutcome.policyAction = legacy.policy.action;
+      legacy.evidenceOutcome.policyTier = legacy.policy.tier;
+    }
+    const signed = sealAutonomyEvidencePackV3(legacy);
+
+    expect(signed).not.toBeNull();
+    expect(verifyAutonomyEvidencePackV3(signed).ok).toBe(true);
+    expect(evaluateAutonomyPolicy(signed!, cfg())).toMatchObject({
+      tier: 'T4',
+      action: 'merge-main',
+      allowed: true,
+    });
+
+    legacy.version = 1;
+    expect(evaluateAutonomyPolicy(legacy, cfg()).allowed).toBe(false);
   });
 });
 

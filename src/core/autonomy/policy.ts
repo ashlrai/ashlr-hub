@@ -130,8 +130,10 @@ export function evaluateAutonomyPolicy(
       if (!pack.remotePreferred) {
         return refuse('evidence main merge requires protected remote PR handoff; local merge fallback is not permitted');
       }
-      if (pack.version !== 2 || !isLiveRemoteProtectionEvidence(pack.gates.remoteProtection)) {
-        return refuse(`remote protection gate failed: ${pack.gates.remoteProtection?.detail ?? 'missing protected remote evidence'}`);
+      const remoteProtection = pack.gates.remoteProtection;
+      const remoteProtectionDetail = remoteProtection?.detail ?? 'missing protected remote evidence';
+      if (pack.version === 1 || !isLiveRemoteProtectionEvidence(remoteProtection)) {
+        return refuse(`remote protection gate failed: ${remoteProtectionDetail}`);
       }
       if (!Array.isArray(pack.verification.commandKinds) || pack.verification.commandKinds.length === 0) {
         return refuse('evidence main merge requires at least one real verification command');

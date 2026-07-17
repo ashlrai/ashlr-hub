@@ -38,7 +38,12 @@
  */
 
 import { appendHubEntry } from '../genome/store.js';
-import { readAutonomyEvidencePack, type AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
+import {
+  readAutonomyEvidencePack,
+  verifyAutonomyEvidencePackV3,
+  type AutonomyEvidencePack,
+  type SignedAutonomyEvidencePackV3,
+} from '../autonomy/evidence-pack.js';
 import { hashDiff, verifyProvenance } from '../foundry/provenance.js';
 import { loadProposal } from '../inbox/store.js';
 import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
@@ -119,7 +124,7 @@ export function distillWorkflow(proposal: Proposal): string {
 
 interface VerifiedSkillInput {
   proposal: Proposal;
-  evidence: AutonomyEvidencePack;
+  evidence: SignedAutonomyEvidencePackV3;
   diffHash: string;
   commandKinds: string[];
 }
@@ -178,16 +183,26 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     ) return null;
 
     const evidence = readAutonomyEvidencePack(proposalId);
-    if (!evidence || evidence.proposal.id !== proposalId) return null;
+    if (!evidence || evidence.version !== 3 || !verifyAutonomyEvidencePackV3(evidence).ok ||
+      evidence.proposal.id !== proposalId) return null;
     if (
+      evidence.proposal.repo !== proposal.repo ||
+      evidence.proposal.createdAt !== proposal.createdAt ||
+      evidence.proposal.origin !== proposal.origin ||
+      evidence.proposal.kind !== proposal.kind ||
+      evidence.producer.engineModel !== proposal.engineModel ||
+      evidence.producer.engineTier !== proposal.engineTier ||
       evidence.diff.hash !== currentDiffHash ||
       evidence.verification.diffHash !== currentDiffHash ||
       evidence.verification.passed !== true ||
       !Array.isArray(evidence.verification.commandKinds) ||
       !evidence.verification.commandKinds.some((kind) => typeof kind === 'string' && kind.trim() !== '')
     ) return null;
-    if (!evidenceGatesPassed(evidence) || evidence.policy?.allowed !== true) return null;
-    if (!proposal.engineTier || evidence.producer.engineTier !== proposal.engineTier) return null;
+    if (!evidenceGatesPassed(evidence) || evidence.target !== 'main' ||
+      evidence.trustBasis !== 'evidence' || evidence.remotePreferred !== true ||
+      evidence.policy?.allowed !== true || evidence.policy.tier !== 'T4' ||
+      evidence.policy.action !== 'merge-main') return null;
+    if (!proposal.engineTier) return null;
     if (routeHasSkillSelection(proposal.routeSnapshot) || routeHasSkillSelection(evidence.routeSnapshot)) return null;
 
     return { proposal, evidence, diffHash: currentDiffHash, commandKinds };

@@ -138,6 +138,7 @@ export interface ResourceStrategyReadDeps {
   buildFleetStatus?: (cfg: AshlrConfig) => Promise<FleetStatus>;
   getResourceSnapshot?: (cfg: AshlrConfig) => Promise<ResourceSnapshot>;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
+  listReadyEvidenceOutcomeRecords?: (opts?: { limit?: number; now?: Date }) => OutcomeRecord[];
   runEcosystemDoctor?: (opts?: { root?: string; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
   diagnoseGuardHealth?: () => GuardHealthDiagnosis;
 }
@@ -320,6 +321,7 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
 
   return (
     record.proposal.status === 'pending' &&
+    evidence.version === 3 &&
     evidence.proposalId === record.proposal.id &&
     evidence.target === 'main' &&
     evidence.trustBasis === currentTrustBasis &&
@@ -343,7 +345,7 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
     RISK_ORDER[risk] <= RISK_ORDER[currentMaxRisk] &&
     (record.proposal.riskClass === undefined || record.proposal.riskClass === risk) &&
     (currentTrustBasis !== 'evidence' || (
-      evidence.version === 2 && evidence.remotePreferred === true &&
+      evidence.remotePreferred === true &&
       isLiveRemoteProtectionEvidence(gates.remoteProtection)
     ))
   );
@@ -355,10 +357,12 @@ function summarizeOutcomes(
   max: number,
   now: Date,
   stalePendingTtlHours: number,
+  readyRecords: readonly OutcomeRecord[],
 ): ResourceStrategyReport['outcomes'] {
   let pendingRecords = 0;
   let stalePending = 0;
-  let readyEvidence = 0;
+  const readyEvidence = readyRecords.filter((record) =>
+    isCurrentReadyEvidence(record, cfg, now)).length;
   let verificationFailures = 0;
   const recent = records.slice(0, max).map((record): ResourceStrategyOutcome => {
     const latestEvidence = record.evidencePacks[0];
@@ -373,7 +377,6 @@ function summarizeOutcomes(
       ageHours >= stalePendingTtlHours;
     if (record.proposal.status === 'pending') pendingRecords++;
     if (isStalePending) stalePending++;
-    if (isCurrentReadyEvidence(record, cfg, now)) readyEvidence++;
     if (
       record.proposal.status === 'pending' &&
       (verificationPassed === false || record.proposal.verifyResult?.passed === false)
@@ -565,6 +568,14 @@ async function defaultOutcomeRecordsAsync(limit: number): Promise<OutcomeRecord[
   });
 }
 
+async function defaultReadyEvidenceOutcomeRecordsAsync(
+  limit: number,
+  now: Date,
+): Promise<OutcomeRecord[]> {
+  const { listReadyEvidenceOutcomeRecords } = await import('./outcome-records.js');
+  return listReadyEvidenceOutcomeRecords({ limit, now });
+}
+
 async function defaultEcosystemDoctor(options: { root?: string; deep?: boolean; now?: Date }): Promise<EcosystemDoctorReport> {
   const { runEcosystemDoctor } = await import('../ecosystem/doctor.js');
   return runEcosystemDoctor(options);
@@ -602,6 +613,9 @@ export async function buildResourceStrategyReport(
   const records = deps.listOutcomeRecords
     ? deps.listOutcomeRecords({ limit: maxOutcomes })
     : await defaultOutcomeRecordsAsync(maxOutcomes);
+  const readyRecords = deps.listReadyEvidenceOutcomeRecords
+    ? deps.listReadyEvidenceOutcomeRecords({ limit: maxOutcomes, now })
+    : await defaultReadyEvidenceOutcomeRecordsAsync(maxOutcomes, now);
   const doctor = deps.runEcosystemDoctor
     ? await deps.runEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now })
     : await defaultEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now }).catch(() =>
@@ -613,7 +627,14 @@ export async function buildResourceStrategyReport(
   const joinedBackends = joinBackends(fleet, resources, 12);
   const resourceSummary = resourcePosture(joinedBackends);
   const productionVelocity = resolveProductionVelocityProfile(cfg);
-  const outcomeSummary = summarizeOutcomes(cfg, records, maxOutcomes, now, productionVelocity.stalePendingTtlHours);
+  const outcomeSummary = summarizeOutcomes(
+    cfg,
+    records,
+    maxOutcomes,
+    now,
+    productionVelocity.stalePendingTtlHours,
+    readyRecords,
+  );
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);
   const proposalSource = proposalSourceAuthority(fleet);
