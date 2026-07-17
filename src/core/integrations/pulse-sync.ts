@@ -41,6 +41,10 @@
  *     gates elsewhere are never weakened from here.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { lstatSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import {
   exportFleetEvents,
@@ -55,9 +59,20 @@ import {
 import { parseRepoDeps } from './dep-parser.js';
 import { createGoal } from '../goals/store.js';
 import { setStatus, loadProposal } from '../inbox/store.js';
+import {
+  acquireProposalMutationLock,
+  releaseProposalMutationLock,
+  type ProposalMutationLock,
+} from '../inbox/proposal-mutation-lock.js';
 import { enroll, listEnrolled } from '../sandbox/policy.js';
 import { githubStatus } from '../integrations/github.js';
 import { audit } from '../sandbox/audit.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Env bridge — let the spec's PULSE_URL / PULSE_FLEET_PAT gate this module
@@ -75,6 +90,8 @@ const ASHLR_PULSE_READ_PAT_ENV = 'ASHLR_PULSE_READ_PAT';
 
 /** Per-call cap so a flooded queue can't monopolise a tick. */
 const MAX_COMMANDS_PER_TICK = 25;
+/** A crashed/paused claimant cannot strand a command beyond this default lease. */
+const DEFAULT_COMMAND_CLAIM_LEASE_MS = 5 * 60_000;
 /** Per-tick cap on repos whose deps we ship (bounds local file I/O per tick). */
 const MAX_DEP_REPOS_PER_TICK = 50;
 
@@ -127,9 +144,23 @@ function patOpt(): { pat: string } | undefined {
   return pat ? { pat } : undefined;
 }
 
+function requestOpts(
+  authority: OutwardMutationFence,
+  signal?: AbortSignal,
+): { pat?: string; signal?: AbortSignal; authority: OutwardMutationFence } {
+  return { ...patOpt(), ...(signal ? { signal } : {}), authority };
+}
+
 /** A stable per-machine claimant id for command claims + writebacks. */
 function claimantId(cfg: AshlrConfig): string {
   return cfg.user?.id ?? cfg.user?.name ?? 'ashlr-fleet';
+}
+
+function commandClaimLeaseMs(cfg: AshlrConfig): number {
+  const configured = cfg.fleet?.sharedQueue?.leaseMs;
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? Math.min(24 * 60 * 60_000, Math.max(1_000, Math.trunc(configured)))
+    : DEFAULT_COMMAND_CLAIM_LEASE_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +200,98 @@ function aborted(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
 }
 
+export type PulseAuthorityFailure = 'aborted' | 'kill-switch' | 'fence-unavailable' | 'fence-lost';
+
+export interface PulseAuthority {
+  fence: OutwardMutationFence;
+  signal?: AbortSignal;
+  pending: Set<Promise<unknown>>;
+}
+
+const pulseAuthorityStorage = new AsyncLocalStorage<PulseAuthority>();
+
+/** Match policy.killSwitchOn(): only a proven ENOENT is permissive. */
+function globalKillSwitchOn(): boolean {
+  try {
+    lstatSync(join(homedir(), '.ashlr', 'KILL'));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+function combineSignals(first?: AbortSignal, second?: AbortSignal): AbortSignal | undefined {
+  if (!first) return second;
+  if (!second || first === second) return first;
+  return AbortSignal.any([first, second]);
+}
+
+function authorityFailure(
+  authority: PulseAuthority,
+  signal?: AbortSignal,
+): PulseAuthorityFailure | null {
+  if (!ownsOutwardMutationFence(authority.fence)) return 'fence-lost';
+  if (globalKillSwitchOn()) return 'kill-switch';
+  if (aborted(authority.signal) || aborted(signal)) return 'aborted';
+  return null;
+}
+
+async function drainNestedPulseEffects(authority: PulseAuthority): Promise<void> {
+  while (authority.pending.size > 0) {
+    await Promise.allSettled([...authority.pending]);
+  }
+}
+
+export async function withPulseAuthority<T>(
+  signal: AbortSignal | undefined,
+  blocked: (reason: PulseAuthorityFailure) => T,
+  operation: (authority: PulseAuthority, signal?: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const inherited = pulseAuthorityStorage.getStore();
+  if (inherited) {
+    const effectiveSignal = combineSignals(inherited.signal, signal);
+    const failure = authorityFailure(inherited, effectiveSignal);
+    if (failure) return blocked(failure);
+
+    // Proposal lifecycle writes can start detached Pulse events. Register nested
+    // work synchronously so the outer authority drains it before releasing.
+    const pending = operation(inherited, effectiveSignal);
+    inherited.pending.add(pending);
+    try {
+      return await pending;
+    } finally {
+      inherited.pending.delete(pending);
+    }
+  }
+
+  if (aborted(signal)) return blocked('aborted');
+
+  let fence: OutwardMutationFence | null = null;
+  let authority: PulseAuthority | undefined;
+  try {
+    fence = acquireOutwardMutationFence();
+    if (!fence || !ownsOutwardMutationFence(fence)) return blocked('fence-unavailable');
+
+    // KILL is checked only after entering the global serialization boundary so
+    // a concurrent resume/pause cannot race this decision.
+    if (globalKillSwitchOn()) return blocked('kill-switch');
+    if (aborted(signal)) return blocked('aborted');
+
+    const activeAuthority: PulseAuthority = { fence, signal, pending: new Set() };
+    authority = activeAuthority;
+    const result = await pulseAuthorityStorage.run(
+      activeAuthority,
+      () => operation(activeAuthority, signal),
+    );
+    return result;
+  } catch {
+    return blocked(fence ? 'fence-lost' : 'fence-unavailable');
+  } finally {
+    if (authority) await drainNestedPulseEffects(authority);
+    releaseOutwardMutationFence(fence);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // (a) tick / event spans
 // ---------------------------------------------------------------------------
@@ -184,10 +307,24 @@ export async function emitFleetEvent(
   opts?: Pick<PulseSyncOptions, 'signal'>,
 ): Promise<boolean> {
   if (aborted(opts?.signal) || !pulseSyncEnabled(cfg)) return false;
+  return withPulseAuthority(opts?.signal, () => false, (authority, signal) =>
+    emitFleetEventWithAuthority(cfg, event, authority, signal));
+}
+
+async function emitFleetEventWithAuthority(
+  cfg: AshlrConfig,
+  event: FleetSpanInput,
+  authority: PulseAuthority,
+  signal?: AbortSignal,
+): Promise<boolean> {
   try {
-    if (aborted(opts?.signal)) return false;
-    const res = await exportFleetEvents(exporterConfig(cfg), [event], patOpt());
-    if (aborted(opts?.signal)) return false;
+    if (authorityFailure(authority, signal)) return false;
+    const res = await exportFleetEvents(
+      exporterConfig(cfg),
+      [event],
+      requestOpts(authority.fence, signal),
+    );
+    if (authorityFailure(authority, signal)) return false;
     return res.ok && !res.skipped;
   } catch {
     return false;
@@ -216,7 +353,11 @@ export async function emitTick(
  * metadata-only outcome; NEVER throws. Performs no outward git action — see the
  * module-level safety note for why each kind is proposal-/registry-only.
  */
-function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
+function applyNonProposalCommand(
+  cfg: AshlrConfig,
+  cmd: FleetCommand,
+  outwardFence: OutwardMutationFence,
+): CommandApplyResult {
   const base = { id: cmd.id, kind: cmd.kind } as const;
   try {
     switch (cmd.kind) {
@@ -239,32 +380,6 @@ function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
         return { ...base, outcome: 'done', detail: `goal ${goal.id} created (planning)` };
       }
 
-      case 'approve_proposal':
-      case 'reject_proposal': {
-        const proposalId =
-          (typeof cmd.target === 'string' && cmd.target) ||
-          (typeof cmd.payload['proposalId'] === 'string' && cmd.payload['proposalId']) ||
-          '';
-        if (!proposalId) {
-          return { ...base, outcome: 'failed', detail: `${cmd.kind}: missing proposalId` };
-        }
-        const existing = loadProposal(proposalId);
-        if (existing === null) {
-          return { ...base, outcome: 'failed', detail: `proposal ${proposalId} not found` };
-        }
-        const status = cmd.kind === 'approve_proposal' ? 'approved' : 'rejected';
-        // setStatus only flips the lifecycle status — it does NOT apply the
-        // diff. An explicit apply pass is still required (proposal-only floor).
-        if (setStatus(proposalId, status, 'resolved via pulse fleet command') === false) {
-          return {
-            ...base,
-            outcome: 'failed',
-            detail: `proposal ${proposalId} could not transition to ${status}`,
-          };
-        }
-        return { ...base, outcome: 'done', detail: `proposal ${proposalId} → ${status}` };
-      }
-
       case 'enroll_repo': {
         const repoPath =
           (typeof cmd.payload['path'] === 'string' && cmd.payload['path']) ||
@@ -275,7 +390,16 @@ function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
         }
         // Enrollment add only — does NOT mutate the repo. The daemon's existing
         // enrollment gate still governs every later sandbox mutation.
-        enroll(repoPath);
+        const enrollment = enroll(repoPath, { borrowedFence: outwardFence });
+        // Production policy always returns a result; `undefined` only preserves
+        // compatibility with older void-returning test doubles.
+        if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
+          return {
+            ...base,
+            outcome: 'failed',
+            detail: `could not enroll ${repoPath}: ${enrollment.reason}`,
+          };
+        }
         return { ...base, outcome: 'done', detail: `enrolled ${repoPath}` };
       }
 
@@ -286,6 +410,188 @@ function applyCommand(cfg: AshlrConfig, cmd: FleetCommand): CommandApplyResult {
     }
   } catch {
     return { ...base, outcome: 'failed', detail: 'unexpected error applying command' };
+  }
+}
+
+interface ClaimedCommandExecution {
+  result: CommandApplyResult;
+  /** Retryable commands retain their claimed cloud state and receive no terminal PATCH. */
+  retryable: boolean;
+}
+
+interface AuthorityAttempt<T> {
+  granted: boolean;
+  value?: T;
+  reason?: PulseAuthorityFailure;
+}
+
+function retryableClaimedCommand(
+  cmd: FleetCommand,
+  reason: PulseAuthorityFailure | 'proposal-lock-unavailable',
+): ClaimedCommandExecution {
+  return {
+    result: {
+      id: cmd.id,
+      kind: cmd.kind,
+      outcome: 'skipped',
+      detail: `claimed command remains retryable: ${reason}`,
+    },
+    retryable: true,
+  };
+}
+
+async function underPulseAuthority<T>(
+  signal: AbortSignal | undefined,
+  operation: (authority: PulseAuthority, effectiveSignal?: AbortSignal) => Promise<T>,
+): Promise<AuthorityAttempt<T>> {
+  return withPulseAuthority<AuthorityAttempt<T>>(
+    signal,
+    (reason) => ({ granted: false, reason }),
+    async (authority, effectiveSignal) => ({
+      granted: true,
+      value: await operation(authority, effectiveSignal),
+    }),
+  );
+}
+
+function proposalIdForCommand(cmd: FleetCommand): string {
+  return (
+    (typeof cmd.target === 'string' && cmd.target) ||
+    (typeof cmd.payload['proposalId'] === 'string' && cmd.payload['proposalId']) ||
+    ''
+  );
+}
+
+function setPulseProposalStatus(
+  proposalId: string,
+  status: 'approved' | 'rejected',
+  proposalLock: ProposalMutationLock,
+): boolean {
+  // Keep compatibility with legacy injected stores/test doubles that predate
+  // the owner-capability parameter. The production store advertises and receives
+  // the lock, preserving proposal -> outward order without a nested acquisition.
+  return setStatus.length >= 5
+    ? setStatus(
+        proposalId,
+        status,
+        'resolved via pulse fleet command',
+        undefined,
+        proposalLock,
+      ) !== false
+    : setStatus(proposalId, status, 'resolved via pulse fleet command') !== false;
+}
+
+async function applyClaimedProposalCommand(
+  cmd: FleetCommand,
+  signal?: AbortSignal,
+): Promise<ClaimedCommandExecution> {
+  const base = { id: cmd.id, kind: cmd.kind } as const;
+  const proposalId = proposalIdForCommand(cmd);
+  if (!proposalId) {
+    return {
+      result: { ...base, outcome: 'failed', detail: `${cmd.kind}: missing proposalId` },
+      retryable: false,
+    };
+  }
+
+  let proposalLock: ProposalMutationLock | null = null;
+  try {
+    // Global order: proposal mutation lock, then outward authority. Never wait
+    // for a proposal lock while excluding pause/resume from the outward fence.
+    proposalLock = acquireProposalMutationLock(proposalId);
+    if (!proposalLock) return retryableClaimedCommand(cmd, 'proposal-lock-unavailable');
+
+    const mutation = await underPulseAuthority(signal, async () => {
+      const existing = loadProposal(proposalId);
+      if (existing === null) {
+        return {
+          result: { ...base, outcome: 'failed', detail: `proposal ${proposalId} not found` },
+          retryable: false,
+        } satisfies ClaimedCommandExecution;
+      }
+
+      const status = cmd.kind === 'approve_proposal' ? 'approved' : 'rejected';
+      // This is status-only Pulse authority. Manual desktop apply remains on its
+      // existing path and is deliberately not broadened here.
+      if (!setPulseProposalStatus(proposalId, status, proposalLock!)) {
+        return {
+          result: {
+            ...base,
+            outcome: 'failed',
+            detail: `proposal ${proposalId} could not transition to ${status}`,
+          },
+          retryable: false,
+        } satisfies ClaimedCommandExecution;
+      }
+      return {
+        result: { ...base, outcome: 'done', detail: `proposal ${proposalId} → ${status}` },
+        retryable: false,
+      } satisfies ClaimedCommandExecution;
+    });
+
+    return mutation.granted
+      ? mutation.value!
+      : retryableClaimedCommand(cmd, mutation.reason ?? 'fence-lost');
+  } catch {
+    return retryableClaimedCommand(cmd, 'fence-lost');
+  } finally {
+    releaseProposalMutationLock(proposalLock);
+  }
+}
+
+async function applyClaimedCommand(
+  cfg: AshlrConfig,
+  cmd: FleetCommand,
+  signal?: AbortSignal,
+): Promise<ClaimedCommandExecution> {
+  if (cmd.kind === 'approve_proposal' || cmd.kind === 'reject_proposal') {
+    return applyClaimedProposalCommand(cmd, signal);
+  }
+
+  const applied = await underPulseAuthority(signal, async (authority) => ({
+    result: applyNonProposalCommand(cfg, cmd, authority.fence),
+    retryable: false,
+  } satisfies ClaimedCommandExecution));
+  return applied.granted
+    ? applied.value!
+    : retryableClaimedCommand(cmd, applied.reason ?? 'fence-lost');
+}
+
+function claimExpired(cmd: FleetCommand, nowMs: number, leaseMs: number): boolean {
+  if (!cmd.claimedAt) return false;
+  const claimedAtMs = Date.parse(cmd.claimedAt);
+  return Number.isFinite(claimedAtMs) && claimedAtMs <= nowMs - leaseMs;
+}
+
+async function recoverExpiredClaimedCommands(
+  cfg: AshlrConfig,
+  xcfg: PulseExporterConfig,
+  claimant: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const claimed = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+    pollFleetCommands(xcfg, {
+      ...requestOpts(authority.fence, effectiveSignal),
+      status: 'claimed',
+      limit: MAX_COMMANDS_PER_TICK,
+    }));
+  if (!claimed.granted || !claimed.value?.ok) return;
+
+  const nowMs = Date.now();
+  const leaseMs = commandClaimLeaseMs(cfg);
+  for (const cmd of claimed.value.commands.slice(0, MAX_COMMANDS_PER_TICK)) {
+    if (aborted(signal) || globalKillSwitchOn()) return;
+    if (cmd.status !== 'claimed' || cmd.claimedBy !== claimant ||
+      !claimExpired(cmd, nowMs, leaseMs)) continue;
+
+    const recovered = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+      patchFleetCommand(
+        xcfg,
+        cmd.id,
+        { status: 'pending', claimedBy: claimant },
+        requestOpts(authority.fence, effectiveSignal),
+      ));
+    if (!recovered.granted) return;
   }
 }
 
@@ -303,62 +609,79 @@ export async function pollAndApplyCommands(
 ): Promise<CommandApplyResult[]> {
   const signal = opts?.signal;
   if (aborted(signal) || !pulseSyncEnabled(cfg)) return [];
+  return pollAndApplyCommandsWithAuthority(cfg, signal);
+}
+
+async function pollAndApplyCommandsWithAuthority(
+  cfg: AshlrConfig,
+  signal?: AbortSignal,
+): Promise<CommandApplyResult[]> {
   const out: CommandApplyResult[] = [];
   try {
     const xcfg = exporterConfig(cfg);
     const claimant = claimantId(cfg);
-    if (aborted(signal)) return out;
-    const poll = await pollFleetCommands(xcfg, {
-      ...patOpt(),
-      status: 'pending',
-      limit: MAX_COMMANDS_PER_TICK,
-    });
-    if (aborted(signal)) return out;
+    // Recovery is bounded by both the queue limit and a time lease. It runs
+    // before pending polling so a command abandoned when pause won can be
+    // re-claimed on the same resumed/restarted pass without a false failure.
+    await recoverExpiredClaimedCommands(cfg, xcfg, claimant, signal);
+    if (aborted(signal) || globalKillSwitchOn()) return out;
+    const polled = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+      pollFleetCommands(xcfg, {
+        ...requestOpts(authority.fence, effectiveSignal),
+        status: 'pending',
+        limit: MAX_COMMANDS_PER_TICK,
+      }));
+    if (!polled.granted || !polled.value) return out;
+    const poll = polled.value;
     if (!poll.ok || poll.commands.length === 0) return out;
 
     for (const cmd of poll.commands.slice(0, MAX_COMMANDS_PER_TICK)) {
-      if (aborted(signal)) break;
+      if (aborted(signal) || globalKillSwitchOn()) break;
       // 1. Atomically claim — skip if another machine got it first.
-      if (aborted(signal)) break;
-      const claim = await claimFleetCommand(xcfg, cmd.id, claimant, patOpt());
-      if (aborted(signal)) break;
+      const claimed = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+        claimFleetCommand(
+          xcfg,
+          cmd.id,
+          claimant,
+          requestOpts(authority.fence, effectiveSignal),
+        ));
+      if (!claimed.granted || !claimed.value) break;
+      const claim = claimed.value;
       if (!claim.ok) {
         out.push({ id: cmd.id, kind: cmd.kind, outcome: 'skipped', detail: claim.detail });
         continue;
       }
 
       // 2. Execute locally (never throws).
-      if (aborted(signal)) break;
-      const applied = applyCommand(cfg, cmd);
+      const execution = await applyClaimedCommand(cfg, cmd, signal);
+      const applied = execution.result;
       out.push(applied);
-      if (aborted(signal)) break;
+      if (execution.retryable) continue;
 
       // 3. Write the outcome back (metadata-only result / error).
       try {
-        if (aborted(signal)) break;
-        if (applied.outcome === 'done') {
-          await patchFleetCommand(
-            xcfg,
-            cmd.id,
-            { status: 'done', claimedBy: claimant, result: { detail: applied.detail } },
-            patOpt(),
-          );
-        } else {
-          await patchFleetCommand(
-            xcfg,
-            cmd.id,
-            { status: 'failed', claimedBy: claimant, error: applied.detail },
-            patOpt(),
-          );
-        }
-        if (aborted(signal)) break;
+        const written = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+          applied.outcome === 'done'
+            ? patchFleetCommand(
+                xcfg,
+                cmd.id,
+                { status: 'done', claimedBy: claimant, result: { detail: applied.detail } },
+                requestOpts(authority.fence, effectiveSignal),
+              )
+            : patchFleetCommand(
+                xcfg,
+                cmd.id,
+                { status: 'failed', claimedBy: claimant, error: applied.detail },
+                requestOpts(authority.fence, effectiveSignal),
+              ));
+        if (!written.granted) break;
       } catch {
         // Writeback best-effort — the local action already happened; the cloud
         // can re-derive state from the next tick's spans.
       }
 
       // 4. Audit every applied command (metadata-only summary).
-      if (aborted(signal)) break;
+      if (aborted(signal) || globalKillSwitchOn()) break;
       try {
         audit({
           action: 'pulse:command',
@@ -392,13 +715,22 @@ export async function shipEnrolledRepoDeps(
 ): Promise<number> {
   const signal = opts?.signal;
   if (aborted(signal) || !pulseSyncEnabled(cfg)) return 0;
+  return withPulseAuthority(signal, () => 0, (authority, effectiveSignal) =>
+    shipEnrolledRepoDepsWithAuthority(cfg, authority, effectiveSignal));
+}
+
+async function shipEnrolledRepoDepsWithAuthority(
+  cfg: AshlrConfig,
+  authority: PulseAuthority,
+  signal?: AbortSignal,
+): Promise<number> {
   let shipped = 0;
   try {
     const xcfg = exporterConfig(cfg);
-    if (aborted(signal)) return shipped;
+    if (authorityFailure(authority, signal)) return shipped;
     const repos = listEnrolled().slice(0, MAX_DEP_REPOS_PER_TICK);
     for (const repoPath of repos) {
-      if (aborted(signal)) break;
+      if (authorityFailure(authority, signal)) break;
       try {
         // Resolve a full owner/name when gh is available; dep-parser falls back
         // to the directory basename otherwise (no network dependency).
@@ -408,18 +740,18 @@ export async function shipEnrolledRepoDeps(
         } catch {
           repoFullName = null;
         }
-        if (aborted(signal)) break;
+        if (authorityFailure(authority, signal)) break;
         const parsed = parseRepoDeps(repoPath, repoFullName);
-        if (aborted(signal)) break;
+        if (authorityFailure(authority, signal)) break;
         if (parsed.edges.length === 0) continue;
-        if (aborted(signal)) break;
+        if (authorityFailure(authority, signal)) break;
         const res = await shipDepEdges(
           xcfg,
           repoFullName ?? parsed.repoRef,
           parsed.edges,
-          patOpt(),
+          requestOpts(authority.fence, signal),
         );
-        if (aborted(signal)) break;
+        if (authorityFailure(authority, signal)) break;
         if (res.ok && !res.skipped) shipped += res.spanCount;
       } catch {
         // One bad repo never aborts the rest.
@@ -464,14 +796,35 @@ export async function runPulseSync(
   if (!pulseSyncEnabled(cfg)) return disabled;
 
   const tickTs = opts?.tickTs ?? new Date().toISOString();
+  const gate = await underPulseAuthority(opts?.signal, async () => true);
+  if (!gate.granted) {
+    const reason = gate.reason ?? 'fence-unavailable';
+    return {
+      ...disabled,
+      enabled: true,
+      detail: reason === 'aborted'
+        ? 'pulse-sync aborted before remote effect'
+        : reason === 'kill-switch'
+          ? 'pulse-sync blocked by global KILL'
+          : `pulse-sync blocked: outward mutation authority ${reason === 'fence-lost' ? 'was lost' : 'unavailable'}`,
+    };
+  }
+
   try {
-    // (a) heartbeat — best-effort, independent of the rest.
-    const tickEmitted = await emitTick(cfg, tickTs, 'tick', { signal: opts?.signal });
+    // Each phase obtains only the authority it needs. In particular, command
+    // polling never carries outward authority into a proposal-lock acquisition.
+    const tickEmitted = await emitFleetEvent(
+      cfg,
+      { event: 'tick', refId: tickTs, outcome: 'tick' },
+      { signal: opts?.signal },
+    );
     if (aborted(opts?.signal)) {
       return { ...disabled, enabled: true, detail: 'pulse-sync aborted after tick export' };
     }
+    if (globalKillSwitchOn()) {
+      return { ...disabled, enabled: true, tickEmitted, detail: 'pulse-sync blocked by global KILL' };
+    }
 
-    // (b) command round-trip.
     const commands = await pollAndApplyCommands(cfg, { signal: opts?.signal });
     if (aborted(opts?.signal)) {
       return {
@@ -482,11 +835,19 @@ export async function runPulseSync(
         detail: 'pulse-sync aborted during command sync',
       };
     }
+    if (globalKillSwitchOn()) {
+      return {
+        ...disabled,
+        enabled: true,
+        tickEmitted,
+        commands,
+        detail: 'pulse-sync blocked by global KILL during command sync',
+      };
+    }
 
-    // (c) dependency edges (opt-out via shipDeps:false for cheap ticks).
-    const depEdgesShipped =
-      opts?.shipDeps === false ? 0 : await shipEnrolledRepoDeps(cfg, { signal: opts?.signal });
-
+    const depEdgesShipped = opts?.shipDeps === false
+      ? 0
+      : await shipEnrolledRepoDeps(cfg, { signal: opts?.signal });
     if (aborted(opts?.signal)) {
       return {
         enabled: true,
@@ -494,6 +855,15 @@ export async function runPulseSync(
         commands,
         depEdgesShipped,
         detail: 'pulse-sync aborted during dependency shipping',
+      };
+    }
+    if (globalKillSwitchOn()) {
+      return {
+        enabled: true,
+        tickEmitted,
+        commands,
+        depEdgesShipped,
+        detail: 'pulse-sync blocked by global KILL during dependency shipping',
       };
     }
 
@@ -506,7 +876,6 @@ export async function runPulseSync(
       detail: `pulse-sync: tick ${tickEmitted ? 'sent' : 'skipped'}, ${applied}/${commands.length} command(s) applied, ${depEdgesShipped} dep edge(s) shipped`,
     };
   } catch {
-    // Should be unreachable (each sub-step is wrapped) — final belt-and-suspenders.
     return { ...disabled, enabled: true, detail: 'pulse-sync: unexpected error (no-op)' };
   }
 }

@@ -871,6 +871,7 @@ describe('M47 autoMergeProposal — local happy path', () => {
         detail: 'verified before base advanced',
         baseBranch: 'main',
         baseHead: verifiedBaseHead,
+        diffHash: staleHash,
       },
     });
     setStatus(p.id, 'pending');
@@ -916,15 +917,24 @@ describe('M47 autoMergeProposal — local happy path', () => {
     expect(r.reason).toMatch(/moved since verification|reverify/i);
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(movedMain);
     expect(listBranches(tmpRepo).some((b) => b.startsWith('ashlr/merge/'))).toBe(false);
-    expect(loadProposal(p.id)!.status).toBe('pending');
+    expect(loadProposal(p.id)).toMatchObject({
+      status: 'pending',
+      verifyResult: {
+        passed: true,
+        baseBranch: 'main',
+        baseHead: verifiedBaseHead,
+        diffHash: staleHash,
+      },
+    });
   });
 });
 
 describe('M47 remote merge safety', () => {
-  it('does not request privileged GitHub merge bypass', () => {
+  it('does not delegate deferred merge or privileged bypass authority to GitHub', () => {
     const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
     expect(source).not.toContain('--admin');
-    expect(source).toContain("'--auto'");
+    expect(source).not.toContain("'--auto'");
+    expect(source).toContain('host auto-merge is disabled until durable revocation is available');
   });
 
   it('evidence mode refuses local main-merge fallback before mutation', () => {

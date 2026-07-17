@@ -53,6 +53,7 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: () => true,
 }));
 
 const mockListProposals = vi.fn();
@@ -62,6 +63,7 @@ vi.mock('../src/core/inbox/store.js', () => ({
     sourceState: 'healthy',
     complete: true,
   }),
+  replayRealizedMergeFanout: vi.fn(() => true),
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);
@@ -143,6 +145,7 @@ describe('[A1] emitMerge called on successful merge', () => {
       proposal.id,
       proposal.repo,
       proposal.engineTier,
+      { authority: expect.any(Object) },
     );
   });
 
@@ -174,6 +177,7 @@ describe('[A2] emitJudgeVerdict called for every inline judge call', () => {
       'ship',
       proposal.repo,
       proposal.engineTier,
+      { authority: expect.any(Object) },
     );
   });
 
@@ -191,6 +195,7 @@ describe('[A2] emitJudgeVerdict called for every inline judge call', () => {
       'review',
       proposal.repo,
       proposal.engineTier,
+      { authority: expect.any(Object) },
     );
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
@@ -207,6 +212,7 @@ describe('[A2] emitJudgeVerdict called for every inline judge call', () => {
       'noise',
       proposal.repo,
       proposal.engineTier,
+      { authority: expect.any(Object) },
     );
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });

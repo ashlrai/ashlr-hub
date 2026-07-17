@@ -77,6 +77,13 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -142,6 +149,15 @@ async function loadM17(): Promise<void> {
 type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
 type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult | void;
+type BorrowedSandboxCleanupAuthority =
+  import('../sandbox/worktree.js').BorrowedSandboxCleanupAuthority;
+type BorrowSandboxCleanupAuthorityFn = (
+  fence: OutwardMutationFence | null | undefined,
+) => BorrowedSandboxCleanupAuthority | null;
+type RemoveSandboxWithBorrowedAuthorityFn = (
+  sb: Sandbox,
+  authority: BorrowedSandboxCleanupAuthority | null,
+) => SandboxCleanupResult | void;
 type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => void;
 // M24: lazy proposal sink — when opts.propose is set the captured sandbox diff
 // is recorded as a PENDING inbox proposal (applied LATER only by a human).
@@ -159,6 +175,8 @@ type SetProposalStatusFn = (
 let _createSandbox:  CreateSandboxFn  | null = null;
 let _sandboxDiff:    SandboxDiffFn    | null = null;
 let _removeSandbox:  RemoveSandboxFn  | null = null;
+let _borrowSandboxCleanupAuthority: BorrowSandboxCleanupAuthorityFn | null = null;
+let _removeSandboxWithBorrowedAuthority: RemoveSandboxWithBorrowedAuthorityFn | null = null;
 let _audit:          AuditFn          | null = null;
 let _createProposal: CreateProposalFn | null = null;
 let _loadProposal:   LoadProposalFn   | null = null;
@@ -177,10 +195,14 @@ async function loadM21(): Promise<void> {
       createSandbox: CreateSandboxFn;
       sandboxDiff: SandboxDiffFn;
       removeSandbox: RemoveSandboxFn;
+      borrowSandboxCleanupAuthority?: BorrowSandboxCleanupAuthorityFn;
+      removeSandboxWithBorrowedAuthority?: RemoveSandboxWithBorrowedAuthorityFn;
     };
     _createSandbox = wt.createSandbox;
     _sandboxDiff   = wt.sandboxDiff;
     _removeSandbox = wt.removeSandbox;
+    _borrowSandboxCleanupAuthority = wt.borrowSandboxCleanupAuthority ?? null;
+    _removeSandboxWithBorrowedAuthority = wt.removeSandboxWithBorrowedAuthority ?? null;
   } catch {
     // worktree.ts not built yet — sandbox mode degrades to no-op (default behavior)
   }
@@ -454,6 +476,8 @@ async function executeTask(
    * run.project. Null (default) = exactly today's behavior (use run.project).
    */
   sandboxCwd: string | null = null,
+  /** Strict autonomous callers stop launching work once the global kill state is armed. */
+  enforceKillState = false,
 ): Promise<'continue' | 'escalate'> {
   // Find the SwarmTaskRun slot.
   const taskRun = run.tasks.find((t) => t.id === taskId);
@@ -463,9 +487,11 @@ async function executeTask(
   // remain terminal; owner-cancelled tasks are reset to pending on resume.
   if (taskRun.status !== 'pending') return 'continue';
 
-  if (opts.signal?.aborted) {
+  if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
     taskRun.status = 'cancelled';
-    taskRun.error = 'Cancelled by the swarm owner.';
+    taskRun.error = opts.signal?.aborted
+      ? 'Cancelled by the swarm owner.'
+      : 'Cancelled because the autonomy kill switch is ON.';
     persist(run);
     return 'continue';
   }
@@ -735,6 +761,7 @@ async function executePhase(
   parallelCap: number,
   /** M21 SANDBOX SEAM: worktree path to run tasks in. Null = today's behavior. */
   sandboxCwd: string | null = null,
+  enforceKillState = false,
 ): Promise<boolean | 'escalate'> {
   const phaseTasks = run.plan.tasks.filter((t) => t.phase === phase);
   if (phaseTasks.length === 0) return true; // nothing to do
@@ -752,7 +779,7 @@ async function executePhase(
     );
 
     for (let i = 0; i < pending.length; i += parallelCap) {
-      if (opts.signal?.aborted) return false;
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
       // Abort entire phase if budget is already blown.
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
@@ -768,7 +795,7 @@ async function executePhase(
       const reserved = { tokens: 0, steps: 0 };
       const launches: Promise<'continue' | 'escalate'>[] = [];
       for (let b = 0; b < batch.length; b++) {
-        if (opts.signal?.aborted) break;
+        if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) break;
         const t = batch[b]!;
         const remainingInBatch = batch.length - b;
         // Snapshot the per-task slice this task will be authorized so we can
@@ -795,11 +822,12 @@ async function executePhase(
             snapshot,
             remainingInBatch,
             sandboxCwd,
+            enforceKillState,
           ),
         );
       }
       const results = await Promise.all(launches);
-      if (opts.signal?.aborted) return false;
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
 
       // If any task in the batch triggered an escalation gate, stop the phase.
       if (results.includes('escalate')) {
@@ -820,7 +848,7 @@ async function executePhase(
   } else {
     // All other phases: sequential execution respecting deps.
     for (const taskSpec of phaseTasks) {
-      if (opts.signal?.aborted) return false;
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
         return false;
@@ -843,7 +871,19 @@ async function executePhase(
         continue;
       }
 
-      const result = await executeTask(taskSpec.id, taskSpec.goal, phase, run, cfg, opts, sink, { tokens: 0, steps: 0 }, 1, sandboxCwd);
+      const result = await executeTask(
+        taskSpec.id,
+        taskSpec.goal,
+        phase,
+        run,
+        cfg,
+        opts,
+        sink,
+        { tokens: 0, steps: 0 },
+        1,
+        sandboxCwd,
+        enforceKillState,
+      );
       if (result === 'escalate') {
         return 'escalate';
       }
@@ -1059,6 +1099,8 @@ function captureSandboxAndCleanup(
     delegationScope?: DelegationScope;
   },
   persistOutcome = true,
+  cleanupAuthority: BorrowedSandboxCleanupAuthority | null = null,
+  enforceKillState = false,
 ): RunProposalOutcome {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -1136,7 +1178,14 @@ function captureSandboxAndCleanup(
     // The proposal-only gate line below is canonical (the H4 safety grep checks
     // for it), so the empty-skip is a NESTED guard, not inlined into the condition.
     if (propose && _createProposal !== null) {
-      if (diff.files === 0 || diff.patch.trim().length === 0) {
+      if (enforceKillState && killSwitchOn()) {
+        emitLog(sink, `[M24] swarm ${run.id} paused before proposal capture`);
+        outcome = {
+          kind: 'proposal-capture-error',
+          reason: 'autonomy kill switch engaged before proposal capture',
+          ...diffCounts,
+        };
+      } else if (diff.files === 0 || diff.patch.trim().length === 0) {
         emitLog(sink, `[M87] swarm ${run.id} produced no diff — no proposal filed`);
       } else try {
         // M107 (P0): scrub secrets from the diff BEFORE storing. Mirrors the
@@ -1314,7 +1363,17 @@ function captureSandboxAndCleanup(
   }
 
   // Always remove sandbox (worktree + scratch branch). Never touches source tree.
-  if (_removeSandbox !== null) {
+  if (cleanupAuthority !== null && _removeSandboxWithBorrowedAuthority !== null) {
+    try {
+      const cleanup = _removeSandboxWithBorrowedAuthority(sb, cleanupAuthority);
+      if (cleanup && cleanup.status !== 'complete') {
+        emitLog(sink, `[M21] Sandbox cleanup incomplete: ${cleanup.status}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitLog(sink, `[M21] Sandbox cleanup failed: ${msg}`);
+    }
+  } else if (cleanupAuthority === null && _removeSandbox !== null) {
     try {
       const cleanup = _removeSandbox(sb);
       const cleanupComplete = cleanup?.status === 'complete';
@@ -1346,6 +1405,8 @@ function captureSandboxAndCleanup(
         });
       } catch { /* audit best-effort */ }
     }
+  } else if (cleanupAuthority !== null) {
+    emitLog(sink, '[M21] Sandbox cleanup unavailable: borrowed authority handler missing');
   }
   if (persistenceError) throw persistenceError;
   return outcome;
@@ -1531,6 +1592,8 @@ async function runSwarmInternal(
   let activeSandbox: Sandbox | null = null;
   // The cwd that tasks should run in. null = use run.project (unchanged behavior).
   let sandboxCwd: string | null = null;
+  let mutationFence: OutwardMutationFence | null = null;
+  let cleanupAuthority: BorrowedSandboxCleanupAuthority | null = null;
 
   // M24 STRICT SANDBOX: when the caller demands a mandatory sandbox
   // (opts.requireSandbox, ALWAYS set by the autonomous daemon), the sandbox is
@@ -1575,7 +1638,10 @@ async function runSwarmInternal(
     } catch { /* audit is best-effort */ }
     // A resume refusal leaves the prior crash checkpoint untouched so it can
     // be retried after policy recovers. Fresh attempts persist their refusal.
-    if (!opts.dryRun && !opts.resumeId) persist(aborted);
+    if (
+      !opts.dryRun && !opts.resumeId &&
+      (!requireSandbox || ownsOutwardMutationFence(mutationFence))
+    ) persist(aborted);
     return aborted;
   };
 
@@ -1741,6 +1807,102 @@ async function runSwarmInternal(
     persist(r);
   };
 
+  let enforceKillState = false;
+  const finalizeSandbox = (propose: boolean): void => {
+    if (activeSandbox === null) return;
+    const sandbox = activeSandbox;
+    activeSandbox = null;
+    sandboxCwd = null;
+    captureSandboxAndCleanup(
+      sandbox,
+      run,
+      sink,
+      propose && !(enforceKillState && killSwitchOn()),
+      cfg,
+      causal,
+      !opts.dryRun,
+      cleanupAuthority,
+      enforceKillState,
+    );
+  };
+
+  const createRunSandbox = (): string | null => {
+    if (opts.sandbox !== true) return null;
+    if (project === null) {
+      return requireSandbox ? 'no project specified for a mandatory sandbox' : null;
+    }
+    if (_createSandbox === null) {
+      return requireSandbox ? 'sandbox worktree module unavailable' : null;
+    }
+    try {
+      activeSandbox = _createSandbox(project);
+      sandboxCwd = activeSandbox.worktreePath;
+      emitLog(sink, `[M21] Sandbox created: ${activeSandbox.id} at ${sandboxCwd}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: activeSandbox.id,
+          summary: `Sandbox created for goal: ${input.goal.slice(0, 120)}`,
+          result: 'ok',
+        });
+      } catch { /* audit is best-effort */ }
+      return null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (requireSandbox) return `createSandbox failed: ${msg}`;
+      emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: null,
+          summary: `Sandbox creation failed: ${msg.slice(0, 120)}`,
+          result: 'error',
+        });
+      } catch { /* audit is best-effort */ }
+      activeSandbox = null;
+      sandboxCwd = null;
+      return null;
+    }
+  };
+
+  try {
+    // Strict autonomous planning is part of the same retained lifecycle as
+    // execution. Sandbox creation owns its own short fence, so it must finish
+    // before this retained fence is acquired; otherwise creation would recurse
+    // on the process-wide authority lock.
+    if (requireSandbox && !opts.dryRun) {
+      const sandboxFailure = createRunSandbox();
+      if (sandboxFailure) return abortNoSandbox(sandboxFailure);
+
+      mutationFence = acquireOutwardMutationFence();
+      let authorityReady = ownsOutwardMutationFence(mutationFence) && !killSwitchOn();
+      if (authorityReady && project !== null) {
+        try {
+          assertMayMutate(project);
+        } catch {
+          authorityReady = false;
+        }
+      }
+      cleanupAuthority = authorityReady
+        ? _borrowSandboxCleanupAuthority?.(mutationFence) ?? null
+        : null;
+      if (!authorityReady || cleanupAuthority === null ||
+        _removeSandboxWithBorrowedAuthority === null) {
+        releaseOutwardMutationFence(mutationFence);
+        mutationFence = null;
+        activeSandbox = null;
+        sandboxCwd = null;
+        return abortNoSandbox(
+          killSwitchOn()
+            ? 'autonomy kill switch is ON'
+            : 'outward mutation lifecycle authority unavailable',
+        );
+      }
+      enforceKillState = true;
+    }
+
   // -------------------------------------------------------------------------
   // PLAN (skip if resuming — plan is already in the persisted record).
   // -------------------------------------------------------------------------
@@ -1759,14 +1921,6 @@ async function runSwarmInternal(
       if (plan.usage !== undefined) {
         run.usage = addUsage(run.usage, plan.usage);
       }
-      if (opts.signal?.aborted) {
-        run.status = 'aborted';
-        run.result = 'Swarm cancelled during planning.';
-        maybePersist(run);
-        emitLog(sink, run.result);
-        await fireEmitSwarm(run, cfg);
-        return run;
-      }
       run.plan = plan;
       // Initialise task run records from the plan (preserve any from resume).
       const existingIds = new Set(run.tasks.map((t) => t.id));
@@ -1775,12 +1929,24 @@ async function runSwarmInternal(
           run.tasks.push({ id: t.id, phase: t.phase, status: 'pending' });
         }
       }
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+        run.status = 'aborted';
+        run.result = opts.signal?.aborted
+          ? 'Swarm cancelled during planning.'
+          : 'Swarm paused by the autonomy kill switch during planning.';
+        maybePersist(run);
+        emitLog(sink, run.result);
+        await fireEmitSwarm(run, cfg);
+        return run;
+      }
       maybePersist(run);
       emitLog(sink, `Plan ready: ${plan.tasks.length} task(s) across phases`);
     } catch (err) {
-      if (opts.signal?.aborted) {
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = 'Swarm cancelled during planning.';
+        run.result = opts.signal?.aborted
+          ? 'Swarm cancelled during planning.'
+          : 'Swarm paused by the autonomy kill switch during planning.';
         maybePersist(run);
         emitLog(sink, run.result);
         await fireEmitSwarm(run, cfg);
@@ -1791,16 +1957,18 @@ async function runSwarmInternal(
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
-      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+      finalizeSandbox(opts.propose === true);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
     }
   }
 
-  if (opts.signal?.aborted) {
+  if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
     run.status = 'aborted';
-    run.result = 'Swarm cancelled after planning.';
+    run.result = opts.signal?.aborted
+      ? 'Swarm cancelled after planning.'
+      : 'Swarm paused by the autonomy kill switch after planning.';
     maybePersist(run);
     emitLog(sink, run.result);
     await fireEmitSwarm(run, cfg);
@@ -1819,42 +1987,10 @@ async function runSwarmInternal(
     return run;
   }
 
-  // Acquire the sandbox only once the run will execute. Governance, resume,
-  // background, planning-failure, and dry-run exits above create no worktree.
-  if (opts.sandbox === true && project !== null && _createSandbox !== null) {
-    try {
-      activeSandbox = _createSandbox(project);
-      sandboxCwd = activeSandbox.worktreePath;
-      emitLog(sink, `[M21] Sandbox created: ${activeSandbox.id} at ${sandboxCwd}`);
-      try {
-        _audit?.({
-          action: 'sandbox:create',
-          repo: project,
-          sandboxId: activeSandbox.id,
-          summary: `Sandbox created for goal: ${input.goal.slice(0, 120)}`,
-          result: 'ok',
-        });
-      } catch { /* audit is best-effort */ }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (requireSandbox) return abortNoSandbox(`createSandbox failed: ${msg}`);
-      emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
-      try {
-        _audit?.({
-          action: 'sandbox:create',
-          repo: project,
-          sandboxId: null,
-          summary: `Sandbox creation failed: ${msg.slice(0, 120)}`,
-          result: 'error',
-        });
-      } catch { /* audit is best-effort */ }
-      activeSandbox = null;
-      sandboxCwd = null;
-    }
-  } else if (requireSandbox) {
-    if (project === null) return abortNoSandbox('no project specified for a mandatory sandbox');
-    return abortNoSandbox('sandbox worktree module unavailable');
-  }
+  // Optional/manual sandboxes retain the historical post-plan timing. Strict
+  // sandboxes were already created above so planning and its checkpoint could
+  // run inside their retained lifecycle authority.
+  if (!requireSandbox) createRunSandbox();
 
   // -------------------------------------------------------------------------
   // M17: snapshot the project git state at swarm start (read-only, never throws).
@@ -1876,13 +2012,15 @@ async function runSwarmInternal(
 
   try {
     for (const phase of PHASE_ORDER) {
-      if (opts.signal?.aborted) {
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = `Swarm cancelled before phase ${phase}.`;
+        run.result = opts.signal?.aborted
+          ? `Swarm cancelled before phase ${phase}.`
+          : `Swarm paused by the autonomy kill switch before phase ${phase}.`;
         persist(run);
         emitLog(sink, run.result);
         if (activeSandbox !== null) {
-          captureSandboxAndCleanup(activeSandbox, run, sink, false, cfg, causal, !opts.dryRun);
+          finalizeSandbox(false);
         }
         await fireEmitSwarm(run, cfg);
         return run;
@@ -1895,21 +2033,32 @@ async function runSwarmInternal(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of work done so far, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+        finalizeSandbox(opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
 
-      const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel, sandboxCwd);
+      const phaseResult = await executePhase(
+        phase,
+        run,
+        cfg,
+        opts,
+        sink,
+        parallel,
+        sandboxCwd,
+        enforceKillState,
+      );
 
-      if (opts.signal?.aborted) {
+      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = `Swarm cancelled during phase ${phase}.`;
+        run.result = opts.signal?.aborted
+          ? `Swarm cancelled during phase ${phase}.`
+          : `Swarm paused by the autonomy kill switch during phase ${phase}.`;
         persist(run);
         emitLog(sink, run.result);
         if (activeSandbox !== null) {
-          captureSandboxAndCleanup(activeSandbox, run, sink, false, cfg, causal, !opts.dryRun);
+          finalizeSandbox(false);
         }
         await fireEmitSwarm(run, cfg);
         return run;
@@ -1920,7 +2069,7 @@ async function runSwarmInternal(
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+        finalizeSandbox(opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1933,7 +2082,7 @@ async function runSwarmInternal(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+        finalizeSandbox(opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1946,7 +2095,7 @@ async function runSwarmInternal(
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
-    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+    finalizeSandbox(opts.propose === true);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1986,7 +2135,7 @@ async function runSwarmInternal(
   persist(run);
 
   // M21: capture full sandbox diff proposal, then remove sandbox.
-  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
+  finalizeSandbox(opts.propose === true);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 
@@ -1997,6 +2146,15 @@ async function runSwarmInternal(
   if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
 
   return run;
+  } finally {
+    try {
+      finalizeSandbox(false);
+    } finally {
+      releaseOutwardMutationFence(mutationFence);
+      mutationFence = null;
+      cleanupAuthority = null;
+    }
+  }
 }
 
 export async function runSwarm(

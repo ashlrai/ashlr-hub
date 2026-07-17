@@ -162,6 +162,8 @@ vi.mock('../src/core/run/learned-router.js', () => ({
 
 import { tick } from '../src/core/daemon/loop.js';
 import { saveDaemonState } from '../src/core/daemon/state.js';
+import { onFleetEvent } from '../src/core/fleet/event-bus.js';
+import { setKill } from '../src/core/sandbox/policy.js';
 import {
   makeFixture,
   makeCfg,
@@ -681,6 +683,54 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
 
     expect(mockDetectRegression).toHaveBeenCalledTimes(1);
     expect(mockBisectAndRevert).toHaveBeenCalledTimes(1);
+  });
+
+  it('drains a held regression event handler before pause can report quiescence', async () => {
+    enrollBuiltinRepo();
+    mockDetectRegression.mockResolvedValue({ regressed: true, signal: 'held regression' });
+    mockBisectAndRevert.mockResolvedValue({ reason: 'no isolated culprit' });
+    let releaseHandler!: () => void;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    let handlerFinished = false;
+    const off = onFleetEvent('regression:detected', async () => {
+      markEntered();
+      await release;
+      handlerFinished = true;
+    });
+
+    try {
+      let tickSettled = false;
+      const running = tick(makeFlagCfg('regressionSentinel'), { dryRun: false })
+        .then((result) => {
+          tickSettled = true;
+          return result;
+        });
+      await entered;
+
+      expect(setKill(true, { waitMs: 25 })).toEqual({
+        ok: false,
+        changed: true,
+        quiesced: false,
+        reason: 'kill armed; an outward mutation has not quiesced',
+      });
+      expect(tickSettled).toBe(false);
+      expect(handlerFinished).toBe(false);
+
+      releaseHandler();
+      await running;
+      expect(handlerFinished).toBe(true);
+      expect(tickSettled).toBe(true);
+      expect(setKill(true, { waitMs: 500 })).toMatchObject({
+        ok: true,
+        changed: false,
+        quiesced: true,
+      });
+    } finally {
+      releaseHandler?.();
+      off();
+    }
   });
 
   it('accepts an explicit sentinel config object and records its causal first-bad merge', async () => {

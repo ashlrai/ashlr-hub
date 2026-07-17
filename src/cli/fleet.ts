@@ -1576,7 +1576,21 @@ async function setKillSwitch(on: boolean): Promise<number> {
   let serviceState: string | null = null;
   try {
     const { setKill } = await import('../core/sandbox/policy.js');
-    setKill(on);
+    const result = setKill(on);
+    // Keep older void-returning test doubles working while requiring the real
+    // structured result to confirm both persistence and quiescence.
+    if (result !== undefined && (!result.ok || !result.quiesced)) {
+      const action = on ? 'fleet pause' : 'fleet resume';
+      const retryable = !result.quiesced && (result.ok ||
+        /fence unavailable|has not quiesced|outward mutation.*active|\bbusy\b/i.test(result.reason));
+      const detail = /unsafe/i.test(result.reason)
+        ? `${action} refused: unsafe policy storage (${result.reason}); operator repair is required.`
+        : retryable
+          ? `${action} is busy and has not quiesced (${result.reason}); retry the command.`
+          : `${action} refused: policy storage is degraded (${result.reason}); operator repair is required.`;
+      process.stderr.write(red('error: ') + detail + '\n');
+      return 1;
+    }
   } catch (err) {
     process.stderr.write(
       red('error: ') + 'failed to toggle kill switch: ' +

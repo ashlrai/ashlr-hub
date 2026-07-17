@@ -18,6 +18,7 @@
  * the already-gated goals flow.
  */
 
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { makeColors } from './ui.js';
 import type { AshlrConfig, RunBudget, WorkItem } from '../core/types.js';
@@ -73,6 +74,14 @@ const DIRECT_BUDGET: RunBudget = {
   allowCloud: false,
 };
 
+function canonicalGoalCorrelationRepo(repo: string): string {
+  try {
+    return realpathSync.native(repo);
+  } catch {
+    return repo;
+  }
+}
+
 async function runDirect(
   objective: string,
   project: string,
@@ -80,6 +89,7 @@ async function runDirect(
   col: ReturnType<typeof makeColors>,
 ): Promise<number> {
   const repo = resolve(project);
+  const correlationRepo = canonicalGoalCorrelationRepo(repo);
 
   // Lazy-import the same frontier sandboxed path the daemon uses for non-builtin
   // backends (loop.ts:467): runGoal(..., { engine, sandboxEngine:true,
@@ -192,7 +202,7 @@ async function runDirect(
   try {
     const beforeIds = new Set(pendingBefore.map((p) => p.id));
     const candidates = listProposals({ status: 'pending' }).filter(
-      (p) => !beforeIds.has(p.id) && p.origin === 'agent' && p.repo === repo,
+      (p) => !beforeIds.has(p.id) && p.origin === 'agent' && p.repo === correlationRepo,
     );
     proposalId = candidates[0]?.id ?? null;
   } catch {

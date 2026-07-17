@@ -28,7 +28,17 @@ import { join, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { ApplyResult, McpRegistry } from '../types.js';
 import { loadProposal, setStatus } from './store.js';
+import {
+  acquireProposalMutationLock,
+  ownsProposalMutationLock,
+  releaseProposalMutationLock,
+} from './proposal-mutation-lock.js';
 import { assertMayMutate, listEnrolled } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import { audit } from '../sandbox/audit.js';
 import { isRepo } from '../git.js';
 import { createPr } from '../integrations/github.js';
@@ -278,7 +288,7 @@ export async function applyProposal(
   opts: { confirmed: boolean },
 ): Promise<ApplyResult> {
   // ── Gate 1: proposal must exist ──────────────────────────────────────────
-  const proposal = loadProposal(id);
+  let proposal = loadProposal(id);
   if (!proposal) {
     audit({
       action: 'inbox:apply',
@@ -341,58 +351,121 @@ export async function applyProposal(
     };
   }
 
-  // ── Gate 4: 'note' kind — no-op, record and return ───────────────────────
-  if (proposal.kind === 'note') {
-    setStatus(id, 'applied', 'note recorded (no-op)');
+  // Serialize the proposal lifecycle before entering the global outward fence.
+  // Policy writers acquire only the outward fence, so this order cannot deadlock
+  // with kill/unenrollment while preventing concurrent apply attempts.
+  const acquiredProposalFence = acquireProposalMutationLock(id);
+  if (!ownsProposalMutationLock(id, acquiredProposalFence)) {
+    releaseProposalMutationLock(acquiredProposalFence);
+    const detail = 'proposal mutation fence unavailable; another lifecycle action may be in progress';
     audit({
       action: 'inbox:apply',
       repo: proposal.repo,
       sandboxId: id,
-      summary: `note proposal ${id} applied (no-op)`,
-      result: 'ok',
-    });
-    return { ok: true, status: 'applied', detail: 'note recorded (no-op)' };
-  }
-
-  // ── Gate 5: enrollment + kill switch ─────────────────────────────────────
-  // 'note' is exempt (never mutates). All other kinds require enrollment.
-  const repo = proposal.repo;
-  if (!repo) {
-    const detail = 'proposal has no repo; cannot apply a mutating kind without a target repo';
-    setStatus(id, 'failed', detail);
-    audit({
-      action: 'inbox:apply',
-      repo: null,
-      sandboxId: id,
-      summary: `failed: ${detail}`,
-      result: 'error',
-    });
-    return { ok: false, status: 'failed', detail };
-  }
-
-  try {
-    assertMayMutate(repo);
-  } catch (err) {
-    const detail =
-      err instanceof Error ? err.message : String(err);
-    // REFUSAL — not a failure. Nothing was mutated and the proposal remains
-    // 'approved' so it can be retried after enrolling / clearing the kill switch.
-    // Advancing to 'failed' here would wrongly burn an approved proposal.
-    audit({
-      action: 'inbox:apply',
-      repo,
-      sandboxId: id,
-      summary: `refused by policy gate: ${detail}`,
+      summary: `refused: ${detail}`,
       result: 'refused',
     });
     return { ok: false, status: 'approved', detail };
   }
+  const proposalFence = acquiredProposalFence!;
 
-  // ── Dispatch by kind ─────────────────────────────────────────────────────
-  let result: { ok: boolean; detail: string };
-
+  let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
   try {
-    switch (proposal.kind) {
+    // Re-read under the proposal lock. Approval, content, target, and partial
+    // status can all change between the optimistic gates above and lock entry.
+    const lockedProposal = loadProposal(id);
+    if (!lockedProposal || lockedProposal.status !== 'approved' || lockedProposal.isPartial === true) {
+      const status = lockedProposal?.status ?? 'failed';
+      const detail = !lockedProposal
+        ? `proposal disappeared before apply: ${id}`
+        : lockedProposal.isPartial === true
+          ? 'partial proposals are review evidence and cannot be applied'
+          : `proposal status changed to '${lockedProposal.status}' before apply`;
+      audit({
+        action: 'inbox:apply',
+        repo: lockedProposal?.repo ?? proposal.repo,
+        sandboxId: id,
+        summary: `refused after proposal revalidation: ${detail}`,
+        result: 'refused',
+      });
+      return { ok: false, status, detail };
+    }
+    proposal = lockedProposal;
+
+    // Notes have no outward effect, but their lifecycle transition still needs
+    // the proposal fence and an approved-state CAS so rejection cannot be lost.
+    if (proposal.kind === 'note') {
+      const detail = 'note recorded (no-op)';
+      const persisted = setStatus(id, 'applied', detail, undefined, proposalFence, {}, 'approved');
+      audit({
+        action: 'inbox:apply',
+        repo: proposal.repo,
+        sandboxId: id,
+        summary: persisted
+          ? `note proposal ${id} applied (no-op)`
+          : `note proposal ${id} lifecycle persistence failed`,
+        result: persisted ? 'ok' : 'error',
+      });
+      return persisted
+        ? { ok: true, status: 'applied', detail }
+        : {
+            ok: false,
+            status: 'approved',
+            detail: `${detail}; proposal outcome persistence failed, so do not retry without operator reconciliation`,
+          };
+    }
+
+    // ── Gate 5: enrollment + kill switch ───────────────────────────────────
+    // 'note' was handled under the proposal lock. All remaining kinds require
+    // a target repo and the global outward-mutation fence.
+    const repo = proposal.repo;
+    if (!repo) {
+      const detail = 'proposal has no repo; cannot apply a mutating kind without a target repo';
+      const persisted = setStatus(id, 'failed', detail, undefined, proposalFence, {}, 'approved');
+      audit({
+        action: 'inbox:apply',
+        repo: null,
+        sandboxId: id,
+        summary: `failed: ${detail}`,
+        result: 'error',
+      });
+      return { ok: false, status: persisted ? 'failed' : 'approved', detail };
+    }
+
+    outwardFence = acquireOutwardMutationFence();
+    if (!ownsOutwardMutationFence(outwardFence)) {
+      const detail = 'outward mutation fence unavailable; apply did not start';
+      audit({
+        action: 'inbox:apply',
+        repo,
+        sandboxId: id,
+        summary: `refused: ${detail}`,
+        result: 'refused',
+      });
+      return { ok: false, status: 'approved', detail };
+    }
+
+    try {
+      assertMayMutate(repo);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // REFUSAL — not a failure. Nothing was mutated and the proposal remains
+      // approved so it can be retried after enrolling / clearing the switch.
+      audit({
+        action: 'inbox:apply',
+        repo,
+        sandboxId: id,
+        summary: `refused by policy gate: ${detail}`,
+        result: 'refused',
+      });
+      return { ok: false, status: 'approved', detail };
+    }
+
+    // ── Dispatch by kind ───────────────────────────────────────────────────
+    let result: { ok: boolean; detail: string };
+
+    try {
+      switch (proposal.kind) {
       case 'patch': {
         if (!proposal.diff) {
           result = { ok: false, detail: 'proposal has no diff to apply' };
@@ -645,30 +718,67 @@ export async function applyProposal(
           detail: `unknown proposal kind: ${String((proposal as { kind: string }).kind)}`,
         };
       }
+      }
+    } catch (err) {
+      // Belt-and-suspenders: the dispatch must never throw out.
+      result = {
+        ok: false,
+        detail: `unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
-  } catch (err) {
-    // Belt-and-suspenders: the dispatch must never throw out.
-    result = {
-      ok: false,
-      detail: `unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+
+    // Lock ownership is part of the evidence boundary. If ownership was lost,
+    // the external outcome is unknown and must not be reported as successful.
+    if (!ownsOutwardMutationFence(outwardFence)) {
+      const detail = `${result.detail}; outward mutation fence ownership was lost, so outcome requires operator reconciliation`;
+      audit({
+        action: 'inbox:apply',
+        repo,
+        sandboxId: id,
+        summary: `apply outcome unknown: ${detail}`,
+        result: 'error',
+      });
+      return { ok: false, status: 'approved', detail };
+    }
+
+    // ── Persist outcome + audit ─────────────────────────────────────────────
+    const finalStatus = result.ok ? 'applied' : 'failed';
+    const persisted = setStatus(
+      id,
+      finalStatus,
+      result.detail,
+      undefined,
+      proposalFence,
+      {},
+      'approved',
+    );
+    if (!persisted) {
+      const detail = `${result.detail}; proposal outcome persistence failed, so do not retry without operator reconciliation`;
+      audit({
+        action: 'inbox:apply',
+        repo,
+        sandboxId: id,
+        summary: `apply outcome persistence failed: ${detail}`,
+        result: 'error',
+      });
+      return { ok: false, status: 'approved', detail };
+    }
+
+    audit({
+      action: 'inbox:apply',
+      repo,
+      sandboxId: id,
+      summary: `proposal ${id} (${proposal.kind}) ${finalStatus}: ${result.detail}`,
+      result: result.ok ? 'ok' : 'error',
+    });
+
+    return {
+      ok: result.ok,
+      status: finalStatus,
+      detail: result.detail,
     };
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+    releaseProposalMutationLock(proposalFence);
   }
-
-  // ── Persist outcome + audit ───────────────────────────────────────────────
-  const finalStatus = result.ok ? 'applied' : 'failed';
-  setStatus(id, finalStatus, result.detail);
-
-  audit({
-    action: 'inbox:apply',
-    repo,
-    sandboxId: id,
-    summary: `proposal ${id} (${proposal.kind}) ${finalStatus}: ${result.detail}`,
-    result: result.ok ? 'ok' : 'error',
-  });
-
-  return {
-    ok: result.ok,
-    status: finalStatus,
-    detail: result.detail,
-  };
 }

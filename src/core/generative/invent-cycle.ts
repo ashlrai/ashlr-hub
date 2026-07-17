@@ -29,13 +29,19 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
 import { enqueueBacklogItemsDetailed } from '../portfolio/backlog.js';
 import { listGoals } from '../goals/store.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
-import { listEnrolled } from '../sandbox/policy.js';
+import { isEnrolled, killSwitchOn, listEnrolled } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import { inventWorkItems } from './invent.js';
 
 // ---------------------------------------------------------------------------
@@ -200,7 +206,11 @@ async function buildRepoState(repo: string): Promise<string> {
 // Returns the number of items actually enqueued (existing ids are skipped).
 // ---------------------------------------------------------------------------
 
-function enqueueToBacklog(items: WorkItem[]): { ok: boolean; enqueued: number } {
+function enqueueToBacklog(
+  items: WorkItem[],
+  canPersist: () => boolean,
+): { ok: boolean; enqueued: number } {
+  if (!canPersist()) return { ok: false, enqueued: 0 };
   return enqueueBacklogItemsDetailed(items);
 }
 
@@ -225,6 +235,26 @@ export interface InventCycleResult {
 export interface InventCycleOptions {
   /** Test seam: bypass the cycle dedup ledger entirely. */
   skipDedup?: boolean;
+  /** Borrow authority from a caller that already owns the outward fence. */
+  authority?: OutwardMutationFence;
+}
+
+function inventCycleAuthority(
+  opts: InventCycleOptions,
+): { authority: OutwardMutationFence | null | undefined; borrowed: boolean } {
+  const borrowed = Object.prototype.hasOwnProperty.call(opts, 'authority');
+  return {
+    authority: borrowed ? opts.authority : acquireOutwardMutationFence(),
+    borrowed,
+  };
+}
+
+function sameRepo(left: string, right: string): boolean {
+  try {
+    return resolve(left) === resolve(right);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -242,6 +272,7 @@ export async function runInventCycle(
   cfg: AshlrConfig,
   opts: InventCycleOptions = {},
 ): Promise<InventCycleResult> {
+  let lifecycle: ReturnType<typeof inventCycleAuthority> | undefined;
   try {
     const foundry = (cfg.foundry as Record<string, unknown> | undefined) ?? {};
 
@@ -249,6 +280,13 @@ export async function runInventCycle(
     if (foundry['generative'] !== true) {
       return { invented: 0, enqueued: 0 };
     }
+
+    lifecycle = inventCycleAuthority(opts);
+    const authorizedCycle = (): boolean =>
+      ownsOutwardMutationFence(lifecycle?.authority) && !killSwitchOn();
+    const authorizedRepo = (repo: string): boolean =>
+      authorizedCycle() && isEnrolled(repo);
+    if (!authorizedCycle()) return { invented: 0, enqueued: 0 };
 
     // Per-cycle cap (items enqueued across all repos this cycle).
     const rawCap = foundry['inventPerCycle'];
@@ -284,12 +322,15 @@ export async function runInventCycle(
     let invented = 0;
     let enqueued = 0;
     let ledgerChanged = false;
+    const ledgerRepos = new Set<string>();
 
     for (const repo of repos) {
       if (enqueued >= cap) break;
       try {
+        if (!authorizedRepo(repo)) continue;
         const remaining = cap - enqueued;
         const repoState = await buildRepoState(repo);
+        if (!authorizedRepo(repo)) continue;
 
         // Ask invent for a little extra so cycle-ledger dedup still leaves
         // enough to hit the cap; invent has its own dedup + maintenance filter.
@@ -298,21 +339,27 @@ export async function runInventCycle(
           { cfg },
           { n: Math.max(remaining + 2, 3) },
         );
+        if (!authorizedRepo(repo)) continue;
 
         // Cycle-ledger dedup + accumulate toward the global cap.
         const fresh: WorkItem[] = [];
         for (const item of items) {
           if (enqueued + fresh.length >= cap) break;
+          if (!sameRepo(item.repo, repo) || !authorizedRepo(item.repo)) continue;
           const hash = cycleHash(repo, item.title);
           if (!opts.skipDedup && isRecentlyEnqueued(ledger, hash)) continue;
           fresh.push(item);
         }
 
         invented += fresh.length;
-        const persisted = enqueueToBacklog(fresh);
+        const persisted = enqueueToBacklog(fresh, () =>
+          authorizedRepo(repo) && fresh.every((item) => authorizedRepo(item.repo)));
         enqueued += persisted.enqueued;
         if (persisted.ok && !opts.skipDedup) {
-          for (const item of fresh) recordEnqueued(ledger, repo, item.title);
+          for (const item of fresh) {
+            recordEnqueued(ledger, repo, item.title);
+            ledgerRepos.add(item.repo);
+          }
           ledgerChanged ||= fresh.length > 0;
         }
       } catch {
@@ -320,12 +367,17 @@ export async function runInventCycle(
       }
     }
 
-    if (!opts.skipDedup && ledgerChanged) {
+    if (
+      !opts.skipDedup && ledgerChanged && authorizedCycle() &&
+      [...ledgerRepos].every((repo) => isEnrolled(repo))
+    ) {
       saveLedger(ledger);
     }
 
     return { invented, enqueued };
   } catch {
     return { invented: 0, enqueued: 0 };
+  } finally {
+    if (lifecycle && !lifecycle.borrowed) releaseOutwardMutationFence(lifecycle.authority);
   }
 }

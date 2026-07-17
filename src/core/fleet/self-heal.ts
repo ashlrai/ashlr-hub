@@ -27,7 +27,18 @@ import {
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
-import { listEnrolled } from '../sandbox/policy.js';
+import {
+  canonicalEnrollmentPath,
+  isEnrolled,
+  killSwitchOn,
+  listEnrolled,
+} from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import {
   detectVerifyCommands,
   runVerifyCommandAsync,
@@ -306,7 +317,11 @@ function invalidSelfHealItem(value: unknown, enrolledRepoKeys: ReadonlySet<strin
   }
 }
 
-function pruneSelfHealItemsFromQueue(repoDir: string, kinds?: ReadonlySet<'build' | 'test'>): number {
+function pruneSelfHealItemsFromQueue(
+  repoDir: string,
+  kinds?: ReadonlySet<'build' | 'test'>,
+  canPersist: () => boolean = () => true,
+): number {
   try {
     const qPath = selfHealQueuePath();
     const read = readWorkItemsArrayStrict(qPath);
@@ -316,14 +331,21 @@ function pruneSelfHealItemsFromQueue(repoDir: string, kinds?: ReadonlySet<'build
     const repoKey = resolve(repoDir);
     const filtered = existing.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
     const removed = existing.length - filtered.length;
-    if (removed > 0) writeJsonAtomic(qPath, filtered);
+    if (removed > 0) {
+      if (!canPersist()) return 0;
+      writeJsonAtomic(qPath, filtered);
+    }
     return removed;
   } catch {
     return 0;
   }
 }
 
-function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'build' | 'test'>): number {
+function pruneSelfHealItemsFromBacklog(
+  repoDir: string,
+  kinds?: ReadonlySet<'build' | 'test'>,
+  canPersist: () => boolean = () => true,
+): number {
   try {
     const bPath = backlogPath();
     if (!existsSync(bPath)) return 0;
@@ -333,7 +355,10 @@ function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'bui
     if (Array.isArray(parsed)) {
       const filtered = parsed.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
       const removed = parsed.length - filtered.length;
-      if (removed > 0) writeJsonAtomic(bPath, filtered);
+      if (removed > 0) {
+        if (!canPersist()) return 0;
+        writeJsonAtomic(bPath, filtered);
+      }
       return removed;
     }
 
@@ -345,7 +370,10 @@ function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'bui
       const envelope = parsed as { items: unknown[] };
       const filtered = envelope.items.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
       const removed = envelope.items.length - filtered.length;
-      if (removed > 0) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+      if (removed > 0) {
+        if (!canPersist()) return 0;
+        writeJsonAtomic(bPath, { ...parsed, items: filtered });
+      }
       return removed;
     }
 
@@ -355,14 +383,22 @@ function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'bui
   }
 }
 
-function pruneStaleSelfHealItems(repoDir: string, kinds?: Array<'build' | 'test'>): number {
+function pruneStaleSelfHealItems(
+  repoDir: string,
+  kinds?: Array<'build' | 'test'>,
+  canPersist: () => boolean = () => true,
+): number {
   const kindSet = kinds && kinds.length > 0 ? new Set(kinds) : undefined;
   const locked = withSelfHealQueueLock(() =>
-    pruneSelfHealItemsFromQueue(repoDir, kindSet) + pruneSelfHealItemsFromBacklog(repoDir, kindSet));
+    pruneSelfHealItemsFromQueue(repoDir, kindSet, canPersist) +
+    pruneSelfHealItemsFromBacklog(repoDir, kindSet, canPersist));
   return locked.ok ? locked.value : 0;
 }
 
-function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
+function pruneInvalidSelfHealItemsUnlocked(
+  repos: string[],
+  canPersist: () => boolean = () => true,
+): number {
   const enrolledRepoKeys = new Set<string>();
   for (const repo of repos) {
     try { enrolledRepoKeys.add(resolve(repo)); } catch { /* ignore invalid registry entries */ }
@@ -376,8 +412,12 @@ function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
     const existing = read.items;
     if (existing.length > 0) {
       const filtered = existing.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
-      removed += existing.length - filtered.length;
-      if (filtered.length !== existing.length) writeJsonAtomic(qPath, filtered);
+      const removedFromQueue = existing.length - filtered.length;
+      if (filtered.length !== existing.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(qPath, filtered);
+        removed += removedFromQueue;
+      }
     }
   } catch {
     // Best-effort only.
@@ -389,8 +429,12 @@ function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
     const parsed = JSON.parse(readFileSync(bPath, 'utf8')) as unknown;
     if (Array.isArray(parsed)) {
       const filtered = parsed.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
-      removed += parsed.length - filtered.length;
-      if (filtered.length !== parsed.length) writeJsonAtomic(bPath, filtered);
+      const removedFromBacklog = parsed.length - filtered.length;
+      if (filtered.length !== parsed.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(bPath, filtered);
+        removed += removedFromBacklog;
+      }
     } else if (
       parsed &&
       typeof parsed === 'object' &&
@@ -398,8 +442,12 @@ function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
     ) {
       const envelope = parsed as { items: unknown[] };
       const filtered = envelope.items.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
-      removed += envelope.items.length - filtered.length;
-      if (filtered.length !== envelope.items.length) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+      const removedFromBacklog = envelope.items.length - filtered.length;
+      if (filtered.length !== envelope.items.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(bPath, { ...parsed, items: filtered });
+        removed += removedFromBacklog;
+      }
     }
   } catch {
     // Best-effort only.
@@ -408,8 +456,11 @@ function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
   return removed;
 }
 
-function pruneInvalidSelfHealItems(repos: string[]): number {
-  const locked = withSelfHealQueueLock(() => pruneInvalidSelfHealItemsUnlocked(repos));
+function pruneInvalidSelfHealItems(
+  repos: string[],
+  canPersist: () => boolean = () => true,
+): number {
+  const locked = withSelfHealQueueLock(() => pruneInvalidSelfHealItemsUnlocked(repos, canPersist));
   return locked.ok ? locked.value : 0;
 }
 
@@ -430,7 +481,11 @@ function targetedInvalidSelfHealItem(
   }
 }
 
-function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enrolled: string[]): number {
+function pruneInvalidSelfHealItemsForReposUnlocked(
+  targetRepos: string[],
+  enrolled: string[],
+  canPersist: () => boolean = () => true,
+): number {
   const targetRepoKeys = new Set<string>();
   for (const repo of targetRepos) {
     try { targetRepoKeys.add(resolve(repo)); } catch { /* ignore malformed target rows */ }
@@ -450,8 +505,12 @@ function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enroll
     const existing = read.items;
     if (existing.length > 0) {
       const filtered = existing.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
-      removed += existing.length - filtered.length;
-      if (filtered.length !== existing.length) writeJsonAtomic(qPath, filtered);
+      const removedFromQueue = existing.length - filtered.length;
+      if (filtered.length !== existing.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(qPath, filtered);
+        removed += removedFromQueue;
+      }
     }
   } catch {
     // Best-effort only.
@@ -463,8 +522,12 @@ function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enroll
     const parsed = JSON.parse(readFileSync(bPath, 'utf8')) as unknown;
     if (Array.isArray(parsed)) {
       const filtered = parsed.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
-      removed += parsed.length - filtered.length;
-      if (filtered.length !== parsed.length) writeJsonAtomic(bPath, filtered);
+      const removedFromBacklog = parsed.length - filtered.length;
+      if (filtered.length !== parsed.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(bPath, filtered);
+        removed += removedFromBacklog;
+      }
     } else if (
       parsed &&
       typeof parsed === 'object' &&
@@ -472,8 +535,12 @@ function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enroll
     ) {
       const envelope = parsed as { items: unknown[] };
       const filtered = envelope.items.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
-      removed += envelope.items.length - filtered.length;
-      if (filtered.length !== envelope.items.length) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+      const removedFromBacklog = envelope.items.length - filtered.length;
+      if (filtered.length !== envelope.items.length) {
+        if (!canPersist()) return removed;
+        writeJsonAtomic(bPath, { ...parsed, items: filtered });
+        removed += removedFromBacklog;
+      }
     }
   } catch {
     // Best-effort only.
@@ -482,8 +549,13 @@ function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enroll
   return removed;
 }
 
-function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: string[]): number {
-  const locked = withSelfHealQueueLock(() => pruneInvalidSelfHealItemsForReposUnlocked(targetRepos, enrolled));
+function pruneInvalidSelfHealItemsForRepos(
+  targetRepos: string[],
+  enrolled: string[],
+  canPersist: () => boolean = () => true,
+): number {
+  const locked = withSelfHealQueueLock(() =>
+    pruneInvalidSelfHealItemsForReposUnlocked(targetRepos, enrolled, canPersist));
   return locked.ok ? locked.value : 0;
 }
 
@@ -500,10 +572,14 @@ export interface QueueSelfHealItemResult {
   changed: boolean;
 }
 
-export function queueSelfHealItemDetailed(item: WorkItem): QueueSelfHealItemResult {
+export function queueSelfHealItemDetailed(
+  item: WorkItem,
+  opts: { beforeWrite?: () => boolean } = {},
+): QueueSelfHealItemResult {
   const lock = acquireLocalStoreLock(queueLockPath());
   if (!lock) return { ok: false, changed: false };
   try {
+    if (opts.beforeWrite && !opts.beforeWrite()) return { ok: false, changed: false };
     const qPath = selfHealQueuePath();
     const dir = join(homedir(), '.ashlr');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -520,6 +596,7 @@ export function queueSelfHealItemDetailed(item: WorkItem): QueueSelfHealItemResu
     const filtered = existing.filter(i => i.id !== item.id);
     filtered.unshift(item); // high-priority: front of queue
 
+    if (opts.beforeWrite && !opts.beforeWrite()) return { ok: false, changed: false };
     writeJsonAtomic(qPath, filtered);
     return { ok: true, changed: true };
   } catch {
@@ -530,27 +607,27 @@ export function queueSelfHealItemDetailed(item: WorkItem): QueueSelfHealItemResu
   }
 }
 
-function persistHealItem(item: WorkItem): void {
-  queueSelfHealItem(item);
+function persistHealItem(item: WorkItem, canPersist: () => boolean): void {
+  queueSelfHealItemDetailed(item, { beforeWrite: canPersist });
 }
 
 function uniqueEnrolledTargets(repos: string[], enrolled: string[]): string[] {
   const enrolledByKey = new Map<string, string>();
   for (const repo of enrolled) {
-    try { enrolledByKey.set(resolve(repo), repo); } catch { /* ignore invalid enrollment rows */ }
+    const key = canonicalEnrollmentPath(repo);
+    // Canonicalize only the caller's current target. A legacy registry alias
+    // must not be promoted into enrollment authority by resolving it here.
+    if (key === repo) enrolledByKey.set(key, repo);
   }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const repo of repos) {
-    try {
-      const key = resolve(repo);
-      const enrolledRepo = enrolledByKey.get(key);
-      if (!enrolledRepo || seen.has(key)) continue;
-      seen.add(key);
-      out.push(enrolledRepo);
-    } catch {
-      // Ignore malformed repo paths.
-    }
+    const key = canonicalEnrollmentPath(repo);
+    if (!key) continue;
+    const enrolledRepo = enrolledByKey.get(key);
+    if (!enrolledRepo || seen.has(key)) continue;
+    seen.add(key);
+    out.push(enrolledRepo);
   }
   return out;
 }
@@ -558,23 +635,29 @@ function uniqueEnrolledTargets(repos: string[], enrolled: string[]): string[] {
 async function runSelfHealCycleForRepoList(
   repos: string[],
   cfg?: Pick<AshlrConfig, 'foundry'>,
+  authority?: OutwardMutationFence,
 ): Promise<SelfHealCycleResult> {
   const broken: string[] = [];
   const healItems: WorkItem[] = [];
+  const authorized = (repo: string): boolean =>
+    ownsOutwardMutationFence(authority) && !killSwitchOn() && isEnrolled(repo);
 
   for (const repo of repos) {
     try {
+      if (!authorized(repo)) continue;
       const result = await detectBreakage(repo, cfg);
+      if (!authorized(repo)) continue;
       if (result.broken) {
-        pruneStaleSelfHealItems(repo);
+        pruneStaleSelfHealItems(repo, undefined, () => authorized(repo));
+        if (!authorized(repo)) continue;
         broken.push(repo);
         const item = proposeHeal(repo, result, cfg);
         healItems.push(item);
-        persistHealItem(item);
+        persistHealItem(item, () => authorized(repo));
       } else if (result.verified === true) {
-        pruneStaleSelfHealItems(repo);
+        pruneStaleSelfHealItems(repo, undefined, () => authorized(repo));
       } else if (result.clearedKinds && result.clearedKinds.length > 0) {
-        pruneStaleSelfHealItems(repo, result.clearedKinds);
+        pruneStaleSelfHealItems(repo, result.clearedKinds, () => authorized(repo));
       }
     } catch {
       // Per-repo errors never abort the cycle.
@@ -584,21 +667,49 @@ async function runSelfHealCycleForRepoList(
   return { checked: repos.length, broken, healItems };
 }
 
+export interface SelfHealCycleOptions {
+  /** Borrow authority from a caller that already owns the outward fence. */
+  authority?: OutwardMutationFence;
+}
+
+function selfHealAuthority(
+  opts: SelfHealCycleOptions,
+): { authority: OutwardMutationFence | null | undefined; borrowed: boolean } {
+  const borrowed = Object.prototype.hasOwnProperty.call(opts, 'authority');
+  return {
+    authority: borrowed ? opts.authority : acquireOutwardMutationFence(),
+    borrowed,
+  };
+}
+
 export async function runSelfHealCycleForRepos(
   repos: string[],
   cfg?: Pick<AshlrConfig, 'foundry'>,
+  opts: SelfHealCycleOptions = {},
 ): Promise<SelfHealCycleResult> {
+  let lifecycle: ReturnType<typeof selfHealAuthority> | undefined;
   try {
     const enabled = (cfg?.foundry as Record<string, unknown> | undefined)?.selfHeal !== false;
     if (!enabled) return { checked: 0, broken: [], healItems: [] };
 
+    lifecycle = selfHealAuthority(opts);
+    const authority = lifecycle.authority;
+    if (!authority || !ownsOutwardMutationFence(authority) || killSwitchOn()) {
+      return { checked: 0, broken: [], healItems: [] };
+    }
     const enrolled = listEnrolled();
     const targets = uniqueEnrolledTargets(repos, enrolled);
     if (targets.length === 0) return { checked: 0, broken: [], healItems: [] };
-    pruneInvalidSelfHealItemsForRepos(targets, enrolled);
-    return await runSelfHealCycleForRepoList(targets, cfg);
+    const authorizedTargets = (): boolean =>
+      ownsOutwardMutationFence(lifecycle?.authority) && !killSwitchOn() &&
+      targets.every((repo) => isEnrolled(repo));
+    pruneInvalidSelfHealItemsForRepos(targets, enrolled, authorizedTargets);
+    if (!authorizedTargets()) return { checked: 0, broken: [], healItems: [] };
+    return await runSelfHealCycleForRepoList(targets, cfg, authority);
   } catch {
     return { checked: 0, broken: [], healItems: [] };
+  } finally {
+    if (lifecycle && !lifecycle.borrowed) releaseOutwardMutationFence(lifecycle.authority);
   }
 }
 
@@ -613,7 +724,9 @@ export async function runSelfHealCycleForRepos(
  */
 export async function runSelfHealCycle(
   cfg?: Pick<AshlrConfig, 'foundry'>,
+  opts: SelfHealCycleOptions = {},
 ): Promise<SelfHealCycleResult> {
+  let lifecycle: ReturnType<typeof selfHealAuthority> | undefined;
   try {
     // Flag gate — default TRUE
     const enabled = (cfg?.foundry as Record<string, unknown> | undefined)?.selfHeal !== false;
@@ -621,10 +734,20 @@ export async function runSelfHealCycle(
       return { checked: 0, broken: [], healItems: [] };
     }
 
+    lifecycle = selfHealAuthority(opts);
+    const authority = lifecycle.authority;
+    if (!authority || !ownsOutwardMutationFence(authority) || killSwitchOn()) {
+      return { checked: 0, broken: [], healItems: [] };
+    }
     const repos = listEnrolled();
-    pruneInvalidSelfHealItems(repos);
-    return await runSelfHealCycleForRepoList(repos, cfg);
+    const authorizedCycle = (): boolean =>
+      ownsOutwardMutationFence(lifecycle?.authority) && !killSwitchOn();
+    pruneInvalidSelfHealItems(repos, authorizedCycle);
+    if (!authorizedCycle()) return { checked: 0, broken: [], healItems: [] };
+    return await runSelfHealCycleForRepoList(repos, cfg, authority);
   } catch {
     return { checked: 0, broken: [], healItems: [] };
+  } finally {
+    if (lifecycle && !lifecycle.borrowed) releaseOutwardMutationFence(lifecycle.authority);
   }
 }

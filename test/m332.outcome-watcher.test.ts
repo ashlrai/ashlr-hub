@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -170,7 +170,11 @@ import { outcomeToIntent } from '../src/core/fleet/judge-calibration.js';
 import { buildProducerScores } from '../src/core/run/learned-router.js';
 import { readJudgeTraces } from '../src/core/fleet/judge-trace.js';
 import { recordPostMergeObservation } from '../src/core/fleet/post-merge-observations.js';
-import { loadMonitoringCursor, saveMonitoringCursor } from '../src/core/fleet/monitoring-cursor.js';
+import {
+  buildMonitoringCursor,
+  loadMonitoringCursor,
+  saveMonitoringCursor,
+} from '../src/core/fleet/monitoring-cursor.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { sanitizeSkillCard } from '../src/core/fleet/skill-records.js';
 
@@ -198,7 +202,7 @@ const dirs: string[] = [];
 
 /** Repo with an initial commit + an auto-merge commit for `pid` touching file.ts. */
 function repoWithMerge(pid: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'ashlr-m332-'));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m332-')));
   dirs.push(dir);
   execFileSync('git', ['init', '--quiet', dir], { stdio: 'pipe' });
   writeFileSync(join(dir, 'base.txt'), 'base\n');
@@ -623,6 +627,8 @@ describe('M332 scanRealWorldOutcomes', () => {
 
   it('production enrollment scope excludes an existing but unenrolled proposal repo', async () => {
     proposalRepo = repoWithMerge('p-unenrolled');
+    const enrolledRepo = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m332-enrolled-')));
+    dirs.push(enrolledRepo);
     traces = [mergedTrace('p-unenrolled')];
     appliedProposals = [{
       id: 'p-unenrolled', status: 'applied', createdAt: new Date().toISOString(),
@@ -632,12 +638,69 @@ describe('M332 scanRealWorldOutcomes', () => {
     const scan = await scanRealWorldOutcomes(cfg, {
       force: true,
       stateFile,
-      enrolledRepos: [join(proposalRepo, 'different-repo')],
+      enrolledRepos: [enrolledRepo],
     });
 
-    expect(scan.scanned).toBe(1);
-    expect(scan.skipped).toBe(1);
+    expect(scan.scanned).toBe(0);
+    expect(scan.skipped).toBe(0);
     expect(recordedObservations).toEqual([]);
+  }, 30_000);
+
+  it('fails closed before paging or inspection when a legacy enrollment alias is retargeted', async () => {
+    const firstTarget = repoWithMerge('p-legacy-alias');
+    const secondTarget = repoWithMerge('p-retarget');
+    const alias = join(realpathSync.native(tmpdir()), `ashlr-m332-legacy-${process.pid}-${Date.now()}`);
+    symlinkSync(firstTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    dirs.push(alias);
+    unlinkSync(alias);
+    symlinkSync(secondTarget, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    appliedProposals = appliedProposals
+      .filter((proposal) => proposal['id'] === 'p-legacy-alias')
+      .map((proposal) => ({ ...proposal, repo: alias }));
+    traces = [mergedTrace('p-legacy-alias')];
+
+    const scan = await scanRealWorldOutcomes(cfg, {
+      force: true,
+      stateFile,
+      enrolledRepos: [alias],
+    });
+
+    expect(scan).toMatchObject({ scanned: 0, skipped: 1, sourceComplete: false });
+    expect(inspectWindowMock).not.toHaveBeenCalled();
+    expect(recordedObservations).toEqual([]);
+    expect(loadMonitoringCursor([]).cursor).toBeNull();
+  }, 30_000);
+
+  it('keeps production observation incomplete when an exact canonical enrollment is temporarily missing', async () => {
+    const monitoredRepo = repoWithMerge('p-temporarily-missing');
+    const priorCursor = buildMonitoringCursor([monitoredRepo], {
+      outcome: {
+        candidateAfter: {
+          proposalId: 'p-prior-observation',
+          mergeCommitOid: 'a'.repeat(40),
+        },
+        sweepComplete: false,
+        hadIncomplete: false,
+        candidateSetDigest: null,
+      },
+    });
+    expect(priorCursor).not.toBeNull();
+    expect(saveMonitoringCursor(priorCursor!, {
+      enrolledRepos: [monitoredRepo],
+      expectedCursor: null,
+    })).toBe(true);
+    rmSync(monitoredRepo, { recursive: true, force: true });
+
+    const scan = await scanRealWorldOutcomes(cfg, {
+      force: true,
+      stateFile,
+      enrolledRepos: [monitoredRepo],
+    });
+
+    expect(scan).toMatchObject({ scanned: 0, skipped: 1, sourceComplete: false, throttled: false });
+    expect(inspectWindowMock).not.toHaveBeenCalled();
+    expect(recordedObservations).toEqual([]);
+    expect(loadMonitoringCursor([monitoredRepo]).cursor).toEqual(priorCursor);
   }, 30_000);
 
   it('production observation aborts when strict proposal provenance is incomplete', async () => {
@@ -730,17 +793,17 @@ describe('M332 scanRealWorldOutcomes', () => {
 
   it('does not forget an incomplete early page when a later page reaches the sweep end', async () => {
     useFastWindowInspection();
+    inspectWindowMock.mockImplementationOnce(() => ({ state: 'inconclusive', reason: 'git-error' }));
     const monitoredRepo = repoWithMerge('p-incomplete-base');
-    const missingRepo = join(monitoredRepo, 'missing-repo');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
       id: `p-incomplete-${String(index).padStart(2, '0')}`,
       status: 'applied',
       createdAt: new Date().toISOString(),
-      repo: index === 0 ? missingRepo : monitoredRepo,
+      repo: monitoredRepo,
       remoteHandoff: { mergeCommitOid },
     }));
-    const enrolledRepos = [monitoredRepo, missingRepo];
+    const enrolledRepos = [monitoredRepo];
 
     const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
     const second = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
@@ -810,17 +873,17 @@ describe('M332 scanRealWorldOutcomes', () => {
 
   it('preserves incompleteness when every remaining candidate disappears', async () => {
     useFastWindowInspection();
+    inspectWindowMock.mockImplementationOnce(() => ({ state: 'inconclusive', reason: 'git-error' }));
     const monitoredRepo = repoWithMerge('p-empty-tail-base');
-    const missingRepo = join(monitoredRepo, 'missing-repo');
     const mergeCommitOid = g(monitoredRepo, ['rev-parse', 'HEAD']).trim();
     appliedProposals = Array.from({ length: 30 }, (_, index) => ({
       id: `p-empty-tail-${String(index).padStart(2, '0')}`,
       status: 'applied',
       createdAt: new Date().toISOString(),
-      repo: index === 0 ? missingRepo : monitoredRepo,
+      repo: monitoredRepo,
       remoteHandoff: { mergeCommitOid },
     }));
-    const enrolledRepos = [monitoredRepo, missingRepo];
+    const enrolledRepos = [monitoredRepo];
 
     const first = await scanRealWorldOutcomes(cfg, { stateFile, enrolledRepos });
     appliedProposals = [];

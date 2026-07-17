@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Backlog, Proposal, ScannerDescriptor, ScannerObservation, WorkItem } from '../types.js';
-import { listEnrolled } from '../sandbox/policy.js';
+import { canonicalEnrollmentPath, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
@@ -432,6 +432,29 @@ function sameRepoSet(a: string[], b: string[]): boolean {
   return true;
 }
 
+interface CanonicalRepoSelection {
+  repos: string[];
+  missingExact: boolean;
+}
+
+/** Reject aliases while retaining incompleteness when an exact enrolled path is missing. */
+function exactCanonicalRepos(repos: readonly string[]): CanonicalRepoSelection {
+  const exact = new Set<string>();
+  let missingExact = false;
+  for (const repo of repos) {
+    if (canonicalEnrollmentPath(repo) !== repo) {
+      missingExact = true;
+      continue;
+    }
+    if (!existsSync(repo)) {
+      missingExact = true;
+      continue;
+    }
+    exact.add(repo);
+  }
+  return { repos: [...exact], missingExact };
+}
+
 // ---------------------------------------------------------------------------
 // buildBacklog
 // ---------------------------------------------------------------------------
@@ -507,8 +530,10 @@ export async function buildBacklog(opts?: {
   /** Override the loaded config (tests / programmatic scanner-flag control, e.g. scanTodos). */
   cfg?: Pick<AshlrConfig, "foundry">;
 }): Promise<Backlog> {
-  const enrolledSnapshot = listEnrolled();
-  const repos: string[] = opts?.repos ?? enrolledSnapshot;
+  const enrolledSnapshot = exactCanonicalRepos(listEnrolled());
+  const requestedSnapshot = exactCanonicalRepos(opts?.repos ?? enrolledSnapshot.repos);
+  const repos = requestedSnapshot.repos;
+  const sourceIncomplete = enrolledSnapshot.missingExact || requestedSnapshot.missingExact;
   const scanners = await getScanners();
   const now = new Date().toISOString();
 
@@ -718,12 +743,12 @@ export async function buildBacklog(opts?: {
     repos,
     items: finalItems,
     observations: completeObservations.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS),
-    observationSourceState: observationsTruncated ? 'degraded' : 'healthy',
+    observationSourceState: observationsTruncated || sourceIncomplete ? 'degraded' : 'healthy',
     ...(observationsTruncated ? { observationsTruncated: true } : {}),
   };
 
-  const fullSnapshot = sameRepoSet(repos, enrolledSnapshot);
-  const shouldPersist = opts?.persist ?? (opts?.repos === undefined || fullSnapshot);
+  const fullSnapshot = !sourceIncomplete && sameRepoSet(repos, enrolledSnapshot.repos);
+  const shouldPersist = !sourceIncomplete && (opts?.persist ?? (opts?.repos === undefined || fullSnapshot));
   if (shouldPersist) {
     // Persist; never throw on persistence failure.
     try {

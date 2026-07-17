@@ -34,17 +34,15 @@ import {
   openSync,
   readSync,
   readdirSync,
-  readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
-  symlinkSync,
-  appendFileSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type {
   Sandbox,
@@ -57,8 +55,18 @@ import type {
   SandboxSweepResult,
 } from '../types.js';
 import { isRepo } from '../git.js';
-import { assertMayMutate } from './policy.js';
+import {
+  assertMayMutate,
+  canonicalFilesystemPathIdentity,
+  killSwitchOn,
+} from './policy.js';
 import { audit } from './audit.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from './mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -69,7 +77,95 @@ const BRANCH_PREFIX = 'ashlr/sandbox/';
 const META_FILE = 'sandbox.json';
 const CLEANUP_LOCK_WAIT_MS = 2_000;
 const CLEANUP_LOCK_INIT_MS = 1_000;
+const RESERVATION_RECOVERY_MIN_AGE_MS = 60_000;
+const MAX_RESERVATION_RECOVERIES_PER_SWEEP = 16;
+const SANDBOX_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const META_TEMP_RE = /^\.sandbox\.json\.\d+\.[a-f0-9]{12}\.tmp$/;
 const cleanupLockSleep = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Cleanup may borrow authority only from an operation that already crossed the
+ * policy gate while holding this exact fence. Supplying an invalid borrowed
+ * token fails closed; it never falls back to recursively acquiring the lock.
+ */
+const sandboxCleanupAuthorityBrand: unique symbol = Symbol('sandbox-cleanup-authority');
+
+export interface BorrowedSandboxCleanupAuthority {
+  readonly outwardFence: OutwardMutationFence;
+  readonly [sandboxCleanupAuthorityBrand]: true;
+}
+
+export interface SandboxCleanupAuthorityOptions {
+  borrowedAuthority?: BorrowedSandboxCleanupAuthority | null;
+  authorityWaitMs?: number;
+}
+
+interface SandboxCleanupAuthorityLease {
+  fence: OutwardMutationFence | null;
+  token: BorrowedSandboxCleanupAuthority | null;
+  borrowed: boolean;
+  allowed: boolean;
+  reason?: 'authority-unavailable' | 'paused';
+}
+
+function mintSandboxCleanupAuthority(
+  outwardFence: OutwardMutationFence | null | undefined,
+): BorrowedSandboxCleanupAuthority | null {
+  if (!outwardFence || !ownsOutwardMutationFence(outwardFence) || killSwitchOn()) return null;
+  const authority: BorrowedSandboxCleanupAuthority = {
+    outwardFence,
+    [sandboxCleanupAuthorityBrand]: true,
+  };
+  return Object.freeze(authority);
+}
+
+/**
+ * Borrow cleanup authority from an operation that has crossed its policy gate.
+ * Mint immediately after that gate and retain the outward fence until cleanup
+ * returns. KILL may be armed later while pause waits on the retained fence.
+ */
+export function borrowSandboxCleanupAuthority(
+  outwardFence: OutwardMutationFence | null | undefined,
+): BorrowedSandboxCleanupAuthority | null {
+  return mintSandboxCleanupAuthority(outwardFence);
+}
+
+function acquireSandboxCleanupAuthority(
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxCleanupAuthorityLease {
+  const borrowed = opts !== undefined &&
+    Object.prototype.hasOwnProperty.call(opts, 'borrowedAuthority');
+  if (borrowed) {
+    const token = opts?.borrowedAuthority ?? null;
+    const fence = token?.outwardFence ?? null;
+    const valid = token?.[sandboxCleanupAuthorityBrand] === true && ownsOutwardMutationFence(fence);
+    return valid
+      ? { fence, token, borrowed: true, allowed: true }
+      : { fence, token: null, borrowed: true, allowed: false, reason: 'authority-unavailable' };
+  }
+
+  const fence = acquireOutwardMutationFence(opts?.authorityWaitMs);
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'authority-unavailable' };
+  }
+  // KILL is installed before pause waits on the fence. Rechecking only after
+  // acquisition ensures no cleanup can begin after pause reports quiescence.
+  if (killSwitchOn()) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'paused' };
+  }
+  const token = mintSandboxCleanupAuthority(fence);
+  if (!token) {
+    releaseOutwardMutationFence(fence);
+    return { fence: null, token: null, borrowed: false, allowed: false, reason: 'paused' };
+  }
+  return { fence, token, borrowed: false, allowed: true };
+}
+
+function releaseSandboxCleanupAuthority(lease: SandboxCleanupAuthorityLease): void {
+  if (!lease.borrowed) releaseOutwardMutationFence(lease.fence);
+}
 
 // ---------------------------------------------------------------------------
 // H5 — bounded sandbox lifecycle (LOCAL-ONLY resource guards)
@@ -142,8 +238,7 @@ export const ORPHAN_STALE_MS = 6 * 60 * 60_000;
  * false, falling back to the conservative createdAt-age staleMs guard. NEVER
  * throws and NEVER sends a real signal (signal 0 is error-check-only).
  */
-function ownerAlive(sb: Sandbox): boolean {
-  const pid = sb.ownerPid;
+function pidAlive(pid: unknown): boolean {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
     return false;
   }
@@ -153,6 +248,10 @@ function ownerAlive(sb: Sandbox): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+function ownerAlive(sb: Sandbox): boolean {
+  return pidAlive(sb.ownerPid);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,8 +287,13 @@ function worktreePathFor(id: string): string {
  * to tolerate). Always uses an arg array — never a shell string.
  */
 function gitRun(cwd: string, args: string[]): string {
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_COMMON_DIR;
   return execFileSync('git', args, {
     cwd,
+    env,
     timeout: GIT_TIMEOUT,
     stdio: 'pipe',
     encoding: 'utf8',
@@ -205,74 +309,750 @@ function gitTry(cwd: string, args: string[]): string | null {
   }
 }
 
-// ---------------------------------------------------------------------------
-// M286: node_modules symlink for worktree verify environment
-// ---------------------------------------------------------------------------
+interface PinnedWorktreeCreationResult {
+  ok: boolean;
+  cleanupComplete: boolean;
+  error?: string;
+  worktreeDev?: string;
+  worktreeIno?: string;
+}
 
-/**
- * Symlink the source repo's node_modules into the worktree so that verify
- * commands (typecheck/test) can resolve the local toolchain (tsc, vitest, etc.)
- * without a separate install.
- *
- * Rules (SAFETY — never throws, never mutates source repo):
- *  - Only attempted when sourceRepo/node_modules exists (real install present).
- *  - Only attempted when worktreePath/node_modules does NOT already exist (no
- *    clobber; a future install in the worktree would pre-empt the symlink).
- *  - node_modules is gitignored — the symlink is never staged or captured in
- *    the proposal diff (M283 layer 1 would need to exclude it, but gitignore
- *    handles it; layer 2 is not needed for an ignored path).
- *  - Any failure (EPERM, EXDEV, etc.) is swallowed — the worktree creation
- *    succeeds regardless; verify commands will fail gracefully if they still
- *    can't find the toolchain (safe fallback).
- */
-function symlinkNodeModules(sourceRepo: string, worktreePath: string): void {
+const PINNED_GIT_SUPERVISOR = String.raw`
+const { spawn } = require('node:child_process');
+const { lstatSync } = require('node:fs');
+
+const [cwd, repositoryContext, sourceRepo, ...gitArgs] = process.argv.slice(1);
+const gitEnv = { ...process.env };
+if (gitEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS) {
+  gitEnv.NODE_OPTIONS = gitEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS;
+} else {
+  delete gitEnv.NODE_OPTIONS;
+}
+delete gitEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS;
+delete gitEnv.GIT_DIR;
+delete gitEnv.GIT_WORK_TREE;
+delete gitEnv.GIT_COMMON_DIR;
+if (repositoryContext === 'pinned') {
+  gitEnv.GIT_DIR = '.';
+}
+
+const destinationPin = gitEnv.ASHLR_PINNED_DESTINATION === '1' ? {
+  parentPath: gitEnv.ASHLR_PINNED_DESTINATION_PARENT_PATH,
+  parentDev: gitEnv.ASHLR_PINNED_DESTINATION_PARENT_DEV,
+  parentIno: gitEnv.ASHLR_PINNED_DESTINATION_PARENT_INO,
+  homePath: gitEnv.ASHLR_PINNED_DESTINATION_HOME_PATH,
+  homeDev: gitEnv.ASHLR_PINNED_DESTINATION_HOME_DEV,
+  homeIno: gitEnv.ASHLR_PINNED_DESTINATION_HOME_INO,
+  metadataPath: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH,
+  metadataDev: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV,
+  metadataIno: gitEnv.ASHLR_PINNED_DESTINATION_METADATA_INO,
+  worktreePath: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_PATH,
+  worktreeDev: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_DEV,
+  worktreeIno: gitEnv.ASHLR_PINNED_DESTINATION_WORKTREE_INO,
+  allowWorktreeAbsence: gitEnv.ASHLR_PINNED_DESTINATION_ALLOW_WORKTREE_ABSENCE === '1',
+  requireWorktreeAbsence: gitEnv.ASHLR_PINNED_DESTINATION_REQUIRE_WORKTREE_ABSENCE === '1',
+} : null;
+for (const key of Object.keys(gitEnv)) {
+  if (key.startsWith('ASHLR_PINNED_DESTINATION')) delete gitEnv[key];
+}
+
+let sent = false;
+let stdout = '';
+let stderr = '';
+const maxCapture = 64 * 1024;
+function send(result) {
+  if (sent) return;
+  sent = true;
+  if (typeof process.send === 'function') process.send(result);
+}
+function capture(current, chunk) {
+  const next = current + chunk.toString('utf8');
+  if (Buffer.byteLength(next, 'utf8') > maxCapture) {
+    send({ status: null, stdout: '', stderr: '', error: 'git command output limit exceeded' });
+    return current;
+  }
+  return next;
+}
+
+function samePinnedDirectory(path, dev, ino) {
   try {
-    const src = join(sourceRepo, 'node_modules');
-    const dst = join(worktreePath, 'node_modules');
-    if (!existsSync(src)) return; // source has no install — nothing to link
-    if (existsSync(dst)) return;  // already present — don't clobber
-    symlinkSync(src, dst, 'dir');
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isDirectory() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
 
-    // Register node_modules in the worktree's .git/info/exclude so that
-    // `git add -A` (called by sandboxDiff) never stages the symlink. Without
-    // this, git treats the symlink as a new tracked entry (mode 120000) and it
-    // appears in the proposal diff — which is wrong and confusing for reviewers.
-    //
-    // The worktree's gitdir is NOT the source repo's .git — it has its own
-    // .git FILE (a gitfile) pointing at the worktree's entry under the source
-    // repo's .git/worktrees/<id>/. The info/exclude for a worktree lives at
-    // <worktreePath>/.git (which is a FILE, not a dir, for a worktree) and
-    // git resolves info/exclude via the gitdir. We resolve it by reading the
-    // .git file to find the actual gitdir, then appending to info/exclude there.
-    // Best-effort: any failure is silently suppressed (sandboxDiff layer 2 is
-    // an independent fallback via SANDBOX_INFRA_FILES).
+function samePinnedFile(path, dev, ino) {
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
+
+function pathAbsent(path) {
+  try {
+    lstatSync(path, { bigint: true });
+    return false;
+  } catch (error) {
+    return Boolean(error && error.code === 'ENOENT');
+  }
+}
+
+function destinationStillPinned() {
+  if (destinationPin === null) return true;
+  const worktreePinned = !destinationPin.worktreePath ||
+    (destinationPin.requireWorktreeAbsence
+      ? pathAbsent(destinationPin.worktreePath)
+      : samePinnedDirectory(
+          destinationPin.worktreePath,
+          destinationPin.worktreeDev,
+          destinationPin.worktreeIno,
+        ) || (destinationPin.allowWorktreeAbsence && pathAbsent(destinationPin.worktreePath)));
+  return (
+    samePinnedDirectory(destinationPin.parentPath, destinationPin.parentDev, destinationPin.parentIno) &&
+    samePinnedDirectory(destinationPin.homePath, destinationPin.homeDev, destinationPin.homeIno) &&
+    samePinnedFile(destinationPin.metadataPath, destinationPin.metadataDev, destinationPin.metadataIno) &&
+    worktreePinned
+  );
+}
+
+let git;
+try {
+  if (!destinationStillPinned()) {
+    send({ status: null, stdout: '', stderr: '', error: 'sandbox reservation identity changed before git command' });
+  } else {
+    git = spawn('git', gitArgs, {
+      cwd,
+      env: gitEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  }
+} catch (error) {
+  send({ status: null, stdout: '', stderr: '', error: String(error) });
+}
+if (git) {
+  const destinationMonitor = destinationPin === null ? null : setInterval(() => {
+    if (!destinationStillPinned()) {
+      send({ status: null, stdout, stderr, error: 'sandbox reservation identity changed during git command' });
+    }
+  }, 1);
+  git.stdout.on('data', (chunk) => { stdout = capture(stdout, chunk); });
+  git.stderr.on('data', (chunk) => { stderr = capture(stderr, chunk); });
+  git.on('error', (error) => {
+    if (destinationMonitor !== null) clearInterval(destinationMonitor);
+    send({ status: null, stdout, stderr, error: error instanceof Error ? error.message : String(error) });
+  });
+  git.on('close', (status, signal) => {
+    if (destinationMonitor !== null) clearInterval(destinationMonitor);
+    send(destinationStillPinned()
+      ? { status, stdout, stderr, ...(signal ? { error: 'git exited on ' + signal } : {}) }
+      : { status: null, stdout, stderr, error: 'sandbox reservation identity changed during git command' });
+  });
+}
+
+// The command runner owns this supervisor's process group/tree and kills it
+// only after receiving a result or reaching its deadline.
+setInterval(() => {}, 60_000);
+`;
+
+const PINNED_POST_CREATE_WRITER = String.raw`
+const fs = require('node:fs');
+const path = require('node:path');
+
+const [sourceDev, sourceIno, sourceRepo, parentDev, parentIno, sandboxParent,
+  homeDev, homeIno, sandboxHome, metadataDev, metadataIno, metadataPath,
+  worktreeDev, worktreeIno, worktreePath,
+  commonDev, commonIno, commonPath] = process.argv.slice(1);
+
+function sameDirectory(value, dev, ino) {
+  try {
+    const stat = fs.lstatSync(value, { bigint: true });
+    return stat.isDirectory() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
+
+function sameFile(value, dev, ino) {
+  try {
+    const stat = fs.lstatSync(value, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
+      String(stat.dev) === dev && String(stat.ino) === ino;
+  } catch {
+    return false;
+  }
+}
+
+function destinationStillExact() {
+  return sameDirectory(sandboxParent, parentDev, parentIno) &&
+    sameDirectory(sandboxHome, homeDev, homeIno) &&
+    sameFile(metadataPath, metadataDev, metadataIno) &&
+    sameDirectory(worktreePath, worktreeDev, worktreeIno);
+}
+
+function safeRegularFile(value) {
+  try {
+    const stat = fs.lstatSync(value);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch (error) {
+    return error && error.code === 'ENOENT';
+  }
+}
+
+try {
+  if (!destinationStillExact() || !sameDirectory('.', worktreeDev, worktreeIno) ||
+      !sameDirectory(sourceRepo, sourceDev, sourceIno)) process.exit(0);
+  const sourceModules = path.join(sourceRepo, 'node_modules');
+  if (sameDirectory(sourceModules, String(fs.lstatSync(sourceModules, { bigint: true }).dev),
+      String(fs.lstatSync(sourceModules, { bigint: true }).ino)) && !fs.existsSync('node_modules') &&
+      destinationStillExact() && sameDirectory('.', worktreeDev, worktreeIno) &&
+      sameDirectory(sourceRepo, sourceDev, sourceIno)) {
+    fs.symlinkSync(sourceModules, 'node_modules', 'dir');
+  }
+} catch { /* node_modules linking is best effort */ }
+
+try {
+  if (!destinationStillExact() || !sameDirectory('.', worktreeDev, worktreeIno)) process.exit(0);
+  const raw = fs.readFileSync('.git', 'utf8').trim();
+  if (!raw.startsWith('gitdir: ')) process.exit(0);
+  const rawGitdir = raw.slice('gitdir: '.length).trim();
+  const gitdir = fs.realpathSync.native(path.resolve(worktreePath, rawGitdir));
+  const relative = path.relative(commonPath, gitdir);
+  if (relative === '' || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+    process.exit(0);
+  }
+  const gitdirStat = fs.lstatSync(gitdir, { bigint: true });
+  if (!gitdirStat.isDirectory() || gitdirStat.isSymbolicLink() ||
+      !sameDirectory(commonPath, commonDev, commonIno)) process.exit(0);
+  process.chdir(gitdir);
+  const gitdirDev = String(gitdirStat.dev);
+  const gitdirIno = String(gitdirStat.ino);
+  const authorityStillExact = () => destinationStillExact() &&
+    sameDirectory(gitdir, gitdirDev, gitdirIno) && sameDirectory(commonPath, commonDev, commonIno);
+  if (!authorityStillExact()) process.exit(0);
+  if (!fs.existsSync('info')) fs.mkdirSync('info', { mode: 0o700 });
+  const infoStat = fs.lstatSync('info', { bigint: true });
+  if (!infoStat.isDirectory() || infoStat.isSymbolicLink() || !authorityStillExact()) process.exit(0);
+  process.chdir('info');
+  const infoDev = String(infoStat.dev);
+  const infoIno = String(infoStat.ino);
+  const writerAuthorityStillExact = () => authorityStillExact() && sameDirectory('.', infoDev, infoIno);
+  if (!writerAuthorityStillExact() || !safeRegularFile('exclude')) process.exit(0);
+  const exclude = 'exclude';
+  const existing = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+  if (!existing.includes('node_modules') && writerAuthorityStillExact() && safeRegularFile(exclude)) {
+    const fd = fs.openSync(exclude,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
+      0o600);
     try {
-      // The worktree's .git is a FILE containing "gitdir: <path>"
-      const gitFile = join(worktreePath, '.git');
-      if (!existsSync(gitFile)) return;
-      const raw = readFileSync(gitFile, 'utf8').trim();
-      const prefix = 'gitdir: ';
-      if (!raw.startsWith(prefix)) return;
-      const gitdir = raw.slice(prefix.length).trim();
-      // gitdir is absolute or relative to the worktree
-      const absGitdir = gitdir.startsWith('/') ? gitdir : join(worktreePath, gitdir);
-      const excludeDir = join(absGitdir, 'info');
-      const excludeFile = join(excludeDir, 'exclude');
-      if (!existsSync(excludeDir)) mkdirSync(excludeDir, { recursive: true });
-      // Append only if node_modules isn't already excluded there
-      const existing = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
-      if (!existing.includes('node_modules')) {
-        appendFileSync(excludeFile, '\n# M286: fleet-symlinked node_modules — never stage\nnode_modules\n', 'utf8');
+      if (writerAuthorityStillExact()) {
+        fs.writeSync(fd, '\n# M286: fleet-symlinked node_modules - never stage\nnode_modules\n');
       }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+} catch { /* exclude registration is best effort */ }
+`;
+
+const PINNED_WORKTREE_RUNNER = String.raw`
+const { spawn, spawnSync } = require('node:child_process');
+const { lstatSync, realpathSync } = require('node:fs');
+const path = require('node:path');
+const supervisorSource = ${JSON.stringify(PINNED_GIT_SUPERVISOR)};
+const postCreateWriterSource = ${JSON.stringify(PINNED_POST_CREATE_WRITER)};
+
+const [commonDev, commonIno, expectedCommonPath, sourceDev, sourceIno, sourceRepo,
+  parentDev, parentIno, sandboxParent, homeDev, homeIno, sandboxHome,
+  metadataDev, metadataIno, metadataPath, worktreePath, branch, baseHead] = process.argv.slice(1);
+const childEnv = { ...process.env };
+if (childEnv.ASHLR_PINNED_GIT_NODE_OPTIONS) {
+  childEnv.NODE_OPTIONS = childEnv.ASHLR_PINNED_GIT_NODE_OPTIONS;
+} else {
+  delete childEnv.NODE_OPTIONS;
+}
+delete childEnv.ASHLR_PINNED_GIT_NODE_OPTIONS;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function taskkillOnce(pid) {
+  return new Promise((resolve) => {
+    let killer;
+    try {
+      killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
     } catch {
-      // info/exclude registration is best-effort; a failure here does NOT
-      // break the worktree — sandboxDiff's layer-2 pathspec exclusion handles it.
+      resolve();
+      return;
+    }
+    killer.once('error', () => resolve());
+    killer.once('close', () => resolve());
+  });
+}
+
+async function joinOwnedTree(supervisor, closed) {
+  const pid = supervisor.pid;
+  if (typeof pid !== 'number' || pid < 1) {
+    await closed;
+    return;
+  }
+  if (process.platform === 'win32') {
+    while (supervisor.exitCode === null && supervisor.signalCode === null) {
+      await taskkillOnce(pid);
+      if (supervisor.exitCode === null && supervisor.signalCode === null) await delay(10);
+    }
+    await closed;
+    return;
+  }
+
+  while (true) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+      break;
+    } catch (error) {
+      if (error && error.code === 'ESRCH') return;
+      await delay(10);
+    }
+  }
+  await closed;
+  while (true) {
+    try {
+      process.kill(-pid, 0);
+      await delay(10);
+    } catch (error) {
+      if (error && error.code === 'ESRCH') return;
+      await delay(10);
+    }
+  }
+}
+
+function run(cwd, args, options = {}) {
+  return new Promise((resolve) => {
+    const supervisorEnv = { ...childEnv };
+    if (supervisorEnv.NODE_OPTIONS) {
+      supervisorEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS = supervisorEnv.NODE_OPTIONS;
+    } else {
+      delete supervisorEnv.ASHLR_SUPERVISED_GIT_NODE_OPTIONS;
+    }
+    delete supervisorEnv.NODE_OPTIONS;
+    if (options.monitorDestination) {
+      supervisorEnv.ASHLR_PINNED_DESTINATION = '1';
+      supervisorEnv.ASHLR_PINNED_DESTINATION_PARENT_PATH = sandboxParent;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_PARENT_DEV = parentDev;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_PARENT_INO = parentIno;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_PATH = sandboxHome;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_DEV = homeDev;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_HOME_INO = homeIno;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_PATH = metadataPath;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_DEV = metadataDev;
+      supervisorEnv.ASHLR_PINNED_DESTINATION_METADATA_INO = metadataIno;
+      if (options.worktreePin || options.requireWorktreeAbsence) {
+        supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_PATH = worktreePath;
+        if (options.worktreePin) {
+          supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_DEV = options.worktreePin.dev;
+          supervisorEnv.ASHLR_PINNED_DESTINATION_WORKTREE_INO = options.worktreePin.ino;
+        }
+        supervisorEnv.ASHLR_PINNED_DESTINATION_ALLOW_WORKTREE_ABSENCE =
+          options.allowWorktreeAbsence ? '1' : '0';
+        supervisorEnv.ASHLR_PINNED_DESTINATION_REQUIRE_WORKTREE_ABSENCE =
+          options.requireWorktreeAbsence ? '1' : '0';
+      }
+    }
+
+    let supervisor;
+    try {
+      supervisor = spawn(process.execPath, [
+        '-e', supervisorSource, '--', cwd,
+        options.pinnedRepository ? 'pinned' : 'plain', sourceRepo, ...args,
+      ], {
+        cwd,
+        env: supervisorEnv,
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        windowsHide: true,
+        ...(process.platform === 'win32' ? {} : { detached: true }),
+      });
+    } catch (error) {
+      resolve({ status: null, stdout: '', stderr: '', error: String(error) });
+      return;
+    }
+
+    let finishing = false;
+    const closed = new Promise((resolveClosed) => supervisor.once('close', resolveClosed));
+    const finish = async (result) => {
+      if (finishing) return;
+      finishing = true;
+      clearTimeout(timer);
+      await joinOwnedTree(supervisor, closed);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      void finish({ status: null, stdout: '', stderr: '', error: 'git command timed out' });
+    }, ${GIT_TIMEOUT});
+    supervisor.once('message', (message) => {
+      const result = message && typeof message === 'object'
+        ? message
+        : { status: null, stdout: '', stderr: '', error: 'invalid git supervisor result' };
+      void finish(result);
+    });
+    supervisor.once('error', (error) => {
+      void finish({ status: null, stdout: '', stderr: '', error: error.message });
+    });
+    supervisor.once('close', () => {
+      if (!finishing) {
+        void finish({ status: null, stdout: '', stderr: '', error: 'git supervisor exited without a result' });
+      }
+    });
+  });
+}
+
+function sameDirectoryIdentity(stat, dev, ino) {
+  return stat.isDirectory() && !stat.isSymbolicLink() &&
+    String(stat.dev) === dev && String(stat.ino) === ino;
+}
+
+function sameFileIdentity(stat, dev, ino) {
+  return stat.isFile() && !stat.isSymbolicLink() &&
+    String(stat.dev) === dev && String(stat.ino) === ino;
+}
+
+function sameCanonicalPath(left, right) {
+  const fold = process.platform === 'win32' ? (value) => value.toLowerCase() : (value) => value;
+  return fold(path.resolve(left)) === fold(path.resolve(right));
+}
+
+function runPinned(args, options = {}) {
+  return run('.', args, { ...options, pinnedRepository: true });
+}
+
+async function registrationPresent() {
+  const listed = await runPinned(['worktree', 'list', '--porcelain']);
+  if (listed.status !== 0 || typeof listed.stdout !== 'string') return null;
+  const target = path.resolve(worktreePath);
+  const fold = process.platform === 'win32' ? (value) => value.toLowerCase() : (value) => value;
+  return listed.stdout.split(/\r?\n/)
+    .filter((line) => line.startsWith('worktree '))
+    .some((line) => fold(path.resolve(line.slice('worktree '.length).trimEnd())) === fold(target));
+}
+
+async function branchPresent() {
+  const shown = await runPinned(['show-ref', '--verify', '--quiet', 'refs/heads/' + branch]);
+  return shown.status === 0 ? true : shown.status === 1 ? false : null;
+}
+
+async function rollback() {
+  if (!currentDestinationIsPinned()) return false;
+  let worktreePin = null;
+  try {
+    const stat = lstatSync(worktreePath, { bigint: true });
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      worktreePin = { dev: String(stat.dev), ino: String(stat.ino) };
+    }
+  } catch { /* an incomplete add may not have created the worktree */ }
+
+  const runRollbackMutation = async (args, options = {}) => {
+    if (!currentDestinationIsPinned()) return false;
+    const mutation = await runPinned(args, { monitorDestination: true, ...options });
+    return currentDestinationIsPinned() &&
+      !(mutation.error && mutation.error.includes('sandbox reservation identity changed'));
+  };
+
+  if (!await runRollbackMutation(
+    ['worktree', 'remove', '--force', worktreePath],
+    worktreePin
+      ? { worktreePin, allowWorktreeAbsence: true }
+      : { requireWorktreeAbsence: true },
+  )) return false;
+  if (!await runRollbackMutation(['worktree', 'prune'])) return false;
+  if (!await runRollbackMutation(['branch', '-D', branch])) return false;
+  if (!currentDestinationIsPinned()) return false;
+  const registrationAbsent = await registrationPresent() === false;
+  if (!currentDestinationIsPinned()) return false;
+  const branchAbsent = await branchPresent() === false;
+  return currentDestinationIsPinned() && registrationAbsent && branchAbsent;
+}
+
+function currentDestinationIsPinned() {
+  try {
+    return sameDirectoryIdentity(lstatSync(sandboxParent, { bigint: true }), parentDev, parentIno) &&
+      sameDirectoryIdentity(lstatSync(sandboxHome, { bigint: true }), homeDev, homeIno) &&
+      sameFileIdentity(lstatSync(metadataPath, { bigint: true }), metadataDev, metadataIno) &&
+      sameCanonicalPath(path.dirname(sandboxHome), sandboxParent) &&
+      sameCanonicalPath(path.dirname(metadataPath), sandboxHome) &&
+      path.basename(worktreePath) === 'worktree' &&
+      sameCanonicalPath(realpathSync.native(path.dirname(worktreePath)), sandboxHome);
+  } catch {
+    return false;
+  }
+}
+
+async function currentSourceIsPinned() {
+  try {
+    if (!sameDirectoryIdentity(lstatSync(sourceRepo, { bigint: true }), sourceDev, sourceIno)) return false;
+    const common = await run(sourceRepo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    if (common.status !== 0 || typeof common.stdout !== 'string' || !common.stdout.trim()) return false;
+    const commonPath = realpathSync.native(common.stdout.trim());
+    return sameCanonicalPath(commonPath, expectedCommonPath) &&
+      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno);
+  } catch {
+    return false;
+  }
+}
+
+async function retainedSourceMatchesDiscovery() {
+  try {
+    if (!sameDirectoryIdentity(lstatSync('.', { bigint: true }), sourceDev, sourceIno) ||
+        !sameCanonicalPath(realpathSync.native('.'), sourceRepo)) return false;
+    const common = await run('.', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const head = await run('.', ['rev-parse', 'HEAD']);
+    if (common.status !== 0 || !common.stdout.trim() ||
+        head.status !== 0 || head.stdout.trim() !== baseHead) return false;
+    const commonPath = realpathSync.native(common.stdout.trim());
+    return sameCanonicalPath(commonPath, expectedCommonPath) &&
+      sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno) &&
+      sameDirectoryIdentity(lstatSync('.', { bigint: true }), sourceDev, sourceIno);
+  } catch {
+    return false;
+  }
+}
+
+function runPinnedPostCreateWriter() {
+  try {
+    const worktree = lstatSync(worktreePath, { bigint: true });
+    if (!worktree.isDirectory() || worktree.isSymbolicLink() || !currentDestinationIsPinned()) return;
+    const writerEnv = { ...childEnv };
+    delete writerEnv.NODE_OPTIONS;
+    const result = spawnSync(process.execPath, [
+      '-e', postCreateWriterSource, '--', sourceDev, sourceIno, sourceRepo,
+      parentDev, parentIno, sandboxParent, homeDev, homeIno, sandboxHome,
+      metadataDev, metadataIno, metadataPath,
+      String(worktree.dev), String(worktree.ino), worktreePath,
+      commonDev, commonIno, expectedCommonPath,
+    ], {
+      cwd: worktreePath,
+      env: writerEnv,
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: ${GIT_TIMEOUT},
+    });
+    void result;
+  } catch { /* post-create writes are best effort */ }
+}
+
+async function validateCreatedWorktree() {
+  let worktreePin;
+  try {
+    const stat = lstatSync(worktreePath, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      return { exact: false, reservationChanged: true };
+    }
+    worktreePin = { dev: String(stat.dev), ino: String(stat.ino) };
+  } catch {
+    return { exact: false, reservationChanged: true };
+  }
+  const monitor = { monitorDestination: true, worktreePin };
+  const head = await run(worktreePath, ['rev-parse', 'HEAD'], monitor);
+  const currentBranch = await run(worktreePath, ['branch', '--show-current'], monitor);
+  const common = await run(
+    worktreePath,
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    monitor,
+  );
+  const reservationChanged = [head, currentBranch, common].some((entry) =>
+    entry.error && entry.error.includes('sandbox reservation identity changed'));
+  if (head.status !== 0 || head.stdout.trim() !== baseHead ||
+      currentBranch.status !== 0 || currentBranch.stdout.trim() !== branch ||
+      common.status !== 0 || !common.stdout.trim()) return { exact: false, reservationChanged };
+  try {
+    const commonPath = realpathSync.native(common.stdout.trim());
+    return {
+      exact: sameCanonicalPath(commonPath, expectedCommonPath) &&
+        sameDirectoryIdentity(lstatSync(commonPath, { bigint: true }), commonDev, commonIno),
+      reservationChanged,
+    };
+  } catch {
+    return { exact: false, reservationChanged };
+  }
+}
+
+(async () => {
+  let result;
+  try {
+    if (!await retainedSourceMatchesDiscovery()) {
+      result = { ok: false, cleanupComplete: true, error: 'source repository discovery identity changed before worktree creation' };
+    } else if (!currentDestinationIsPinned()) {
+      result = { ok: false, cleanupComplete: false, error: 'sandbox reservation identity changed before worktree creation' };
+    } else {
+      process.chdir(expectedCommonPath);
+      if (!sameCanonicalPath(realpathSync.native('.'), expectedCommonPath) ||
+          !sameDirectoryIdentity(lstatSync('.', { bigint: true }), commonDev, commonIno) ||
+          !await currentSourceIsPinned()) {
+        result = { ok: false, cleanupComplete: true, error: 'repository association changed before worktree creation' };
+      } else {
+      const added = await runPinned([
+        'worktree', 'add', '-b', branch, worktreePath, baseHead,
+      ], { monitorDestination: true });
+      if (added.status !== 0) {
+        result = {
+          ok: false,
+          cleanupComplete: await rollback(),
+          error: added.error && added.error.includes('sandbox reservation identity changed')
+            ? added.error
+            : 'git worktree add failed',
+        };
+      } else {
+        const destinationPinnedBeforeValidation = currentDestinationIsPinned();
+        const worktreeValidation = destinationPinnedBeforeValidation
+          ? await validateCreatedWorktree()
+          : { exact: false, reservationChanged: true };
+        const worktreeExact = destinationPinnedBeforeValidation && worktreeValidation.exact;
+        const destinationPinnedAfterValidation = currentDestinationIsPinned();
+        if (!destinationPinnedBeforeValidation || !worktreeExact ||
+            !destinationPinnedAfterValidation) {
+          const reservationChanged = !destinationPinnedBeforeValidation ||
+            !destinationPinnedAfterValidation || worktreeValidation.reservationChanged;
+          result = {
+            ok: false,
+            cleanupComplete: await rollback(),
+            error: reservationChanged
+              ? 'sandbox reservation identity changed during worktree creation'
+              : 'sandbox reservation or repository/Git common directory identity changed during worktree creation',
+          };
+        } else {
+          runPinnedPostCreateWriter();
+          const destinationPinnedBeforePostValidation = currentDestinationIsPinned();
+          const postValidation = destinationPinnedBeforePostValidation
+            ? await validateCreatedWorktree()
+            : { exact: false, reservationChanged: true };
+          const postWorktreeExact = destinationPinnedBeforePostValidation && postValidation.exact;
+          const destinationPinnedAfterPostValidation = currentDestinationIsPinned();
+          if (!destinationPinnedBeforePostValidation || !postWorktreeExact ||
+              !destinationPinnedAfterPostValidation) {
+            const reservationChanged = !destinationPinnedBeforePostValidation ||
+              !destinationPinnedAfterPostValidation || postValidation.reservationChanged;
+            result = {
+              ok: false,
+              cleanupComplete: await rollback(),
+              error: reservationChanged
+                ? 'sandbox reservation identity changed after worktree creation'
+                : 'sandbox reservation or repository/Git common directory identity changed after worktree creation',
+            };
+          } else {
+            try {
+              const worktree = lstatSync(worktreePath, { bigint: true });
+              result = worktree.isDirectory() && !worktree.isSymbolicLink()
+                ? {
+                    ok: true,
+                    cleanupComplete: false,
+                    worktreeDev: String(worktree.dev),
+                    worktreeIno: String(worktree.ino),
+                  }
+                : {
+                    ok: false,
+                    cleanupComplete: false,
+                    error: 'worktree identity unavailable after creation',
+                  };
+            } catch {
+              result = {
+                ok: false,
+                cleanupComplete: false,
+                error: 'worktree identity unavailable after creation',
+              };
+            }
+          }
+        }
+      }
+      }
     }
   } catch {
-    // Graceful fallback: symlink failure (cross-device, permissions, etc.)
-    // must never crash the sandbox creation. Verify may still fail if the
-    // toolchain is absent, but that is a deterministic, audited failure — not
-    // an infrastructure crash.
+    let cleanupComplete = false;
+    try { cleanupComplete = await rollback(); } catch { /* retain recovery metadata */ }
+    result = { ok: false, cleanupComplete, error: 'pinned worktree creation failed' };
+  }
+  process.stdout.write(JSON.stringify(result));
+})().catch(() => {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    cleanupComplete: false,
+    error: 'pinned worktree runner failed',
+  }));
+});
+`;
+
+/**
+ * Bind the child to the pinned common-directory inode before Git starts. The
+ * child retains that cwd through add, validation, and rollback, so pathname
+ * retargeting cannot redirect any repository mutation during the Git effect.
+ */
+function createPinnedWorktree(
+  identity: PinnedRepositoryIdentity,
+  destination: PinnedSandboxDestinationIdentity,
+  sb: Sandbox,
+): PinnedWorktreeCreationResult {
+  const env = { ...process.env };
+  if (env.NODE_OPTIONS) env.ASHLR_PINNED_GIT_NODE_OPTIONS = env.NODE_OPTIONS;
+  else delete env.ASHLR_PINNED_GIT_NODE_OPTIONS;
+  delete env.NODE_OPTIONS;
+  const result = spawnSync(process.execPath, [
+    '-e',
+    PINNED_WORKTREE_RUNNER,
+    '--',
+    String(identity.commonDirectory.dev),
+    String(identity.commonDirectory.ino),
+    identity.commonDirectory.path,
+    String(identity.source.dev),
+    String(identity.source.ino),
+    identity.source.path,
+    String(destination.parent.dev),
+    String(destination.parent.ino),
+    destination.parent.path,
+    String(destination.home.dev),
+    String(destination.home.ino),
+    destination.home.path,
+    String(destination.metadata.dev),
+    String(destination.metadata.ino),
+    destination.metadata.path,
+    sb.worktreePath,
+    sb.branch,
+    sb.baseHead,
+  ], {
+    cwd: identity.source.path,
+    encoding: 'utf8',
+    env,
+    maxBuffer: 64 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== 'string') {
+    return { ok: false, cleanupComplete: false, error: 'pinned worktree runner failed' };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as Partial<PinnedWorktreeCreationResult>;
+    if (typeof parsed.ok !== 'boolean' || typeof parsed.cleanupComplete !== 'boolean') {
+      throw new Error('invalid pinned worktree result');
+    }
+    if (parsed.ok && (
+      typeof parsed.worktreeDev !== 'string' || !/^\d+$/u.test(parsed.worktreeDev) ||
+      typeof parsed.worktreeIno !== 'string' || !/^\d+$/u.test(parsed.worktreeIno)
+    )) throw new Error('invalid pinned worktree identity');
+    return {
+      ok: parsed.ok,
+      cleanupComplete: parsed.cleanupComplete,
+      ...(typeof parsed.error === 'string' ? { error: parsed.error } : {}),
+      ...(typeof parsed.worktreeDev === 'string' ? { worktreeDev: parsed.worktreeDev } : {}),
+      ...(typeof parsed.worktreeIno === 'string' ? { worktreeIno: parsed.worktreeIno } : {}),
+    };
+  } catch {
+    return { ok: false, cleanupComplete: false, error: 'invalid pinned worktree result' };
   }
 }
 
@@ -286,11 +1066,11 @@ function writeMeta(sb: Sandbox): void {
   if (!existsSync(home)) {
     mkdirSync(home, { recursive: true, mode: 0o700 });
   }
-  const expectedDirs = new Map<string, { dev: number; ino: number }>();
+  const expectedDirs = new Map<string, { dev: bigint; ino: bigint }>();
   for (const dir of [root, home]) {
-    const stat = lstatSync(dir);
+    const stat = lstatSync(dir, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isDirectory() ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid()))) {
       throw new Error('unsafe sandbox metadata directory');
     }
     chmodSync(dir, 0o700);
@@ -298,20 +1078,24 @@ function writeMeta(sb: Sandbox): void {
   }
   const target = metaPath(sb.id);
   if (existsSync(target)) {
-    const current = lstatSync(target);
+    const current = lstatSync(target, { bigint: true });
     if (current.isSymbolicLink() || !current.isFile() ||
-      (typeof process.getuid === 'function' && current.uid !== process.getuid())) {
+      (typeof process.getuid === 'function' && current.uid !== BigInt(process.getuid()))) {
       throw new Error('unsafe sandbox metadata file');
     }
   }
   const temp = join(home, `.sandbox.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
   let fd: number | undefined;
+  let tempIdentity: { dev: bigint; ino: bigint } | null = null;
   try {
     fd = openSync(
       temp,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o600,
     );
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile()) throw new Error('invalid sandbox metadata temporary file');
+    tempIdentity = { dev: opened.dev, ino: opened.ino };
     const bytes = Buffer.from(JSON.stringify(sb, null, 2) + '\n', 'utf8');
     if (writeSync(fd, bytes) !== bytes.length) throw new Error('short sandbox metadata write');
     fchmodSync(fd, 0o600);
@@ -320,15 +1104,18 @@ function writeMeta(sb: Sandbox): void {
     fd = undefined;
     for (const dir of [root, home]) {
       const expected = expectedDirs.get(dir)!;
-      const current = lstatSync(dir);
+      const current = lstatSync(dir, { bigint: true });
       if (current.isSymbolicLink() || !current.isDirectory() ||
         current.dev !== expected.dev || current.ino !== expected.ino) {
         throw new Error('sandbox metadata directory changed during write');
       }
     }
     renameSync(temp, target);
-    const persisted = lstatSync(target);
-    if (persisted.isSymbolicLink() || !persisted.isFile()) throw new Error('invalid sandbox metadata replacement');
+    const persisted = lstatSync(target, { bigint: true });
+    if (persisted.isSymbolicLink() || !persisted.isFile() || tempIdentity === null ||
+        persisted.dev !== tempIdentity.dev || persisted.ino !== tempIdentity.ino) {
+      throw new Error('invalid sandbox metadata replacement');
+    }
     chmodSync(target, 0o600);
     let dirFd: number | undefined;
     try {
@@ -345,29 +1132,6 @@ function writeMeta(sb: Sandbox): void {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
     try { unlinkSync(temp); } catch { /* renamed or absent */ }
   }
-}
-
-function rollbackUnpersistedSandbox(sb: Sandbox): void {
-  const safeBranch = `${BRANCH_PREFIX}${sb.id}`;
-  const safeWorktree = worktreePathFor(sb.id);
-  if (sb.branch !== safeBranch || resolve(sb.worktreePath) !== resolve(safeWorktree) || !isRepo(sb.sourceRepo)) return;
-  gitTry(sb.sourceRepo, ['worktree', 'remove', '--force', safeWorktree]);
-  gitTry(sb.sourceRepo, ['worktree', 'prune']);
-  gitTry(sb.sourceRepo, ['branch', '-D', safeBranch]);
-  const registration = registrationState(sb.sourceRepo, safeWorktree);
-  const branch = branchState(sb.sourceRepo, safeBranch);
-  if (registration === 'absent' && branch === 'absent') {
-    try { rmSync(sandboxHome(sb.id), { recursive: true, force: true }); } catch { /* surfaced by inventory */ }
-  }
-  const home = sandboxHomeState(sandboxHome(sb.id));
-  const complete = registration === 'absent' && branch === 'absent' && home === 'absent';
-  audit({
-    action: 'sandbox:remove',
-    repo: sb.sourceRepo,
-    sandboxId: sb.id,
-    summary: `creation rollback registration=${registration} branch=${branch} home=${home}`,
-    result: complete ? 'ok' : 'error',
-  });
 }
 
 function parseCleanupEvidence(value: unknown): SandboxCleanupEvidence | undefined {
@@ -415,7 +1179,7 @@ function parseCleanupEvidence(value: unknown): SandboxCleanupEvidence | undefine
 
 /** Read + validate one sandbox's metadata. Returns null on missing/malformed. */
 function readMeta(id: string): Sandbox | null {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
+  if (!SANDBOX_ID_RE.test(id)) return null;
   const p = metaPath(id);
   if (!existsSync(p)) return null;
   let fd: number | undefined;
@@ -477,13 +1241,168 @@ function readMeta(id: string): Sandbox | null {
 // createSandbox
 // ---------------------------------------------------------------------------
 
+interface PinnedDirectoryIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+interface PinnedRepositoryIdentity {
+  source: PinnedDirectoryIdentity;
+  commonDirectory: PinnedDirectoryIdentity;
+}
+
+interface PinnedSandboxDestinationIdentity {
+  parent: PinnedDirectoryIdentity;
+  home: PinnedDirectoryIdentity;
+  metadata: PinnedFileIdentity;
+}
+
+interface PinnedFileIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+function pinDirectoryIdentity(value: string): PinnedDirectoryIdentity | null {
+  const path = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  if (!path) return null;
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isDirectory() && !stat.isSymbolicLink()
+      ? { path, dev: stat.dev, ino: stat.ino }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function directoryIdentityStillPinned(identity: PinnedDirectoryIdentity): boolean {
+  try {
+    const stat = lstatSync(identity.path, { bigint: true });
+    return stat.isDirectory() && !stat.isSymbolicLink() &&
+      stat.dev === identity.dev && stat.ino === identity.ino;
+  } catch {
+    return false;
+  }
+}
+
+function pinFileIdentity(value: string): PinnedFileIdentity | null {
+  const path = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  if (!path) return null;
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink()
+      ? { path, dev: stat.dev, ino: stat.ino }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function fileIdentityStillPinned(identity: PinnedFileIdentity): boolean {
+  try {
+    const stat = lstatSync(identity.path, { bigint: true });
+    return stat.isFile() && !stat.isSymbolicLink() &&
+      stat.dev === identity.dev && stat.ino === identity.ino;
+  } catch {
+    return false;
+  }
+}
+
+function pinGitCommonDirectory(sourceRepo: string): PinnedDirectoryIdentity | null {
+  const commonDirectory = gitTry(sourceRepo, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  return commonDirectory ? pinDirectoryIdentity(commonDirectory) : null;
+}
+
+function repositoryIdentityStillPinned(identity: PinnedRepositoryIdentity): boolean {
+  if (!directoryIdentityStillPinned(identity.source) ||
+      !directoryIdentityStillPinned(identity.commonDirectory)) return false;
+  const currentCommonDirectory = pinGitCommonDirectory(identity.source.path);
+  return currentCommonDirectory !== null &&
+    currentCommonDirectory.path === identity.commonDirectory.path &&
+    currentCommonDirectory.dev === identity.commonDirectory.dev &&
+    currentCommonDirectory.ino === identity.commonDirectory.ino;
+}
+
+function sandboxDestinationStillPinned(identity: PinnedSandboxDestinationIdentity): boolean {
+  return directoryIdentityStillPinned(identity.parent) &&
+    directoryIdentityStillPinned(identity.home) &&
+    fileIdentityStillPinned(identity.metadata) &&
+    dirname(identity.home.path) === identity.parent.path &&
+    dirname(identity.metadata.path) === identity.home.path;
+}
+
+function createdWorktreeStillExact(
+  sb: Sandbox,
+  worktree: PinnedDirectoryIdentity,
+  repository: PinnedRepositoryIdentity,
+  destination: PinnedSandboxDestinationIdentity,
+): boolean {
+  const authorityStillExact = (): boolean =>
+    directoryIdentityStillPinned(repository.source) &&
+    directoryIdentityStillPinned(repository.commonDirectory) &&
+    sandboxDestinationStillPinned(destination) &&
+    directoryIdentityStillPinned(worktree) &&
+    canonicalFilesystemPathIdentity(dirname(sb.worktreePath), { foldWindowsCase: false }) ===
+      destination.home.path;
+  if (!authorityStillExact()) return false;
+
+  const head = gitTry(sb.worktreePath, ['rev-parse', 'HEAD']);
+  if (!authorityStillExact()) return false;
+  const branch = gitTry(sb.worktreePath, ['branch', '--show-current']);
+  if (!authorityStillExact()) return false;
+  const commonPath = gitTry(sb.worktreePath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (!authorityStillExact() || !head || !branch || !commonPath) return false;
+  const currentCommon = pinDirectoryIdentity(commonPath);
+  return head === sb.baseHead && branch === sb.branch && currentCommon !== null &&
+    currentCommon.path === repository.commonDirectory.path &&
+    currentCommon.dev === repository.commonDirectory.dev &&
+    currentCommon.ino === repository.commonDirectory.ino &&
+    authorityStillExact();
+}
+
+function removePinnedSandboxHomeReservation(
+  parent: PinnedDirectoryIdentity,
+  home: PinnedDirectoryIdentity,
+): boolean {
+  if (!directoryIdentityStillPinned(parent) || !directoryIdentityStillPinned(home) ||
+      dirname(home.path) !== parent.path) return false;
+  try {
+    rmSync(home.path, { recursive: true, force: true });
+    return !existsSync(home.path);
+  } catch {
+    return false;
+  }
+}
+
+function removePinnedSandboxReservation(identity: PinnedSandboxDestinationIdentity): boolean {
+  if (!sandboxDestinationStillPinned(identity)) return false;
+  try {
+    rmSync(identity.home.path, { recursive: true, force: true });
+    return !existsSync(identity.home.path);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Create an isolated git-worktree sandbox of `sourceRepo` on a NEW scratch
  * branch under ~/.ashlr/sandboxes/<id>/.
  *
- * FIRST calls assertMayMutate(sourceRepo, opts) — refuses (throws + audits
- * result:'refused') if the kill switch is on OR the repo is not enrolled and
- * opts.allowAnyRepo is not set. Verifies sourceRepo is a git repo. Reads the
+ * Pins the physical repository and Git common directory, then calls
+ * assertMayMutate with that canonical physical repository.
+ * Refuses (throws + audits result:'refused') if the kill switch is on OR the
+ * repo is not enrolled and opts.allowAnyRepo is not set. Verifies sourceRepo
+ * is a git repo. Reads the
  * source HEAD WITHOUT mutating it. Adds the worktree via
  * `git worktree add -b <branch> <path> <baseHead>` run in sourceRepo — this
  * MUST NOT modify the source working tree, index, HEAD, or any user branch.
@@ -492,50 +1411,107 @@ export function createSandbox(
   sourceRepo: string,
   opts?: { allowAnyRepo?: boolean },
 ): Sandbox {
-  // Gate FIRST — kill switch / enrollment. Audit refusals.
-  //
-  // H5 CHANGE 3 (env-gate allowAnyRepo) EDIT SITE — integration applies the real
-  // edit. The env-gate lives in assertMayMutate (policy.ts) as the single source
-  // of truth: `opts.allowAnyRepo` is honored ONLY when ASHLR_TEST_ALLOW_ANY_REPO
-  // ==='1' (mirrors advance.ts:156). createSandbox passes opts straight through,
-  // so it inherits the gate transitively — NO separate env check is needed here.
-  // The kill switch ALWAYS wins (assertMayMutate checks it first, unconditional).
-  try {
-    assertMayMutate(sourceRepo, opts);
-  } catch (err) {
+  const outwardFence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(outwardFence)) {
+    releaseOutwardMutationFence(outwardFence);
     audit({
       action: 'sandbox:create',
       repo: sourceRepo,
+      sandboxId: null,
+      summary: 'refused: outward mutation fence unavailable',
+      result: 'refused',
+    });
+    throw new Error('outward mutation fence unavailable; sandbox creation did not start');
+  }
+  try {
+    return createSandboxWhileFenced(sourceRepo, outwardFence, opts);
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+  }
+}
+
+function createSandboxWhileFenced(
+  sourceRepo: string,
+  outwardFence: OutwardMutationFence | null,
+  opts?: { allowAnyRepo?: boolean },
+): Sandbox {
+  const sourceIdentity = pinDirectoryIdentity(sourceRepo);
+  if (!sourceIdentity) {
+    audit({
+      action: 'sandbox:create',
+      repo: sourceRepo,
+      sandboxId: null,
+      summary: 'source repository identity is unavailable',
+      result: 'error',
+    });
+    throw new Error(`could not pin repository identity: ${sourceRepo}`);
+  }
+  const canonicalSourceRepo = sourceIdentity.path;
+
+  // Gate the pinned physical pathname before Git discovery. The retained
+  // runner independently verifies this source inode before using its cwd, so
+  // a pathname replacement cannot carry policy authority into Git effects.
+  try {
+    assertMayMutate(canonicalSourceRepo, opts);
+  } catch (err) {
+    audit({
+      action: 'sandbox:create',
+      repo: canonicalSourceRepo,
       sandboxId: null,
       summary: 'refused by policy gate',
       result: 'refused',
     });
     throw err;
   }
+  if (!directoryIdentityStillPinned(sourceIdentity)) {
+    throw new Error('source repository identity changed during policy gate');
+  }
 
-  // Must be a real git repo.
-  if (!isRepo(sourceRepo)) {
+  if (!isRepo(canonicalSourceRepo)) {
     audit({
       action: 'sandbox:create',
-      repo: sourceRepo,
+      repo: canonicalSourceRepo,
       sandboxId: null,
       summary: 'sourceRepo is not a git repository',
       result: 'error',
     });
-    throw new Error(`not a git repository: ${sourceRepo}`);
+    throw new Error(`not a git repository: ${canonicalSourceRepo}`);
+  }
+  const commonDirectoryIdentity = pinGitCommonDirectory(canonicalSourceRepo);
+  if (!commonDirectoryIdentity) {
+    audit({
+      action: 'sandbox:create',
+      repo: canonicalSourceRepo,
+      sandboxId: null,
+      summary: 'Git common directory identity is unavailable',
+      result: 'error',
+    });
+    throw new Error(`could not pin Git common directory identity: ${canonicalSourceRepo}`);
+  }
+  const repositoryIdentity: PinnedRepositoryIdentity = {
+    source: sourceIdentity,
+    commonDirectory: commonDirectoryIdentity,
+  };
+
+  const cleanupAuthority = borrowSandboxCleanupAuthority(outwardFence);
+  if (!cleanupAuthority) {
+    throw new Error('outward mutation authority became invalid before sandbox creation');
   }
 
   // Read the source HEAD commit WITHOUT mutating it.
-  const baseHead = gitTry(sourceRepo, ['rev-parse', 'HEAD']);
+  const baseHead = gitTry(canonicalSourceRepo, ['rev-parse', 'HEAD']);
   if (!baseHead) {
     audit({
       action: 'sandbox:create',
-      repo: sourceRepo,
+      repo: canonicalSourceRepo,
       sandboxId: null,
       summary: 'could not resolve source HEAD',
       result: 'error',
     });
-    throw new Error(`could not resolve HEAD in repo: ${sourceRepo}`);
+    throw new Error(`could not resolve HEAD in repo: ${canonicalSourceRepo}`);
+  }
+  if (!repositoryIdentityStillPinned(repositoryIdentity)) {
+    throw new Error('repository or Git common directory identity changed while reading source HEAD');
   }
 
   // -------------------------------------------------------------------------
@@ -556,13 +1532,18 @@ export function createSandbox(
   let branch: string;
   let worktreePath: string;
   let home: string;
+  let sb: Sandbox;
+  let destinationIdentity: PinnedSandboxDestinationIdentity;
   try {
     const cap = maxSandboxes();
     if (sandboxInventory().totalHomes >= cap) {
-      sweepOrphanSandboxes({ staleMs: ORPHAN_STALE_MS });
+      sweepOrphanSandboxesWhileCreationLocked({
+        staleMs: ORPHAN_STALE_MS,
+        borrowedAuthority: cleanupAuthority,
+      });
       if (sandboxInventory().totalHomes >= cap) {
         audit({
-          action: 'sandbox:create', repo: sourceRepo, sandboxId: null,
+          action: 'sandbox:create', repo: canonicalSourceRepo, sandboxId: null,
           summary: `sandbox cap reached (MAX_SANDBOXES=${cap})`, result: 'refused',
         });
         throw new Error(`sandbox cap reached (MAX_SANDBOXES=${cap})`);
@@ -575,7 +1556,51 @@ export function createSandbox(
     branch = `${BRANCH_PREFIX}${id}`;
     worktreePath = worktreePathFor(id);
     home = sandboxHome(id);
+    const parentIdentity = pinDirectoryIdentity(sandboxesDir());
+    if (!parentIdentity ||
+        canonicalFilesystemPathIdentity(dirname(home), { foldWindowsCase: false }) !== parentIdentity.path) {
+      throw new Error('could not pin sandbox destination parent identity');
+    }
     mkdirSync(home, { recursive: false, mode: 0o700 });
+    const homeIdentity = pinDirectoryIdentity(home);
+    if (!homeIdentity || dirname(homeIdentity.path) !== parentIdentity.path) {
+      throw new Error('could not pin sandbox destination home identity');
+    }
+    sb = {
+      id,
+      sourceRepo: canonicalSourceRepo,
+      worktreePath,
+      branch,
+      baseHead,
+      createdAt: new Date().toISOString(),
+      ownerPid: process.pid,
+    };
+
+    // Publish durable owner-bearing recovery authority before another creator
+    // or reservation sweep can observe this home outside creation serialization.
+    // A crash after this point is handled by normal dead-owner recovery; a crash
+    // during the atomic write leaves only a metadata-free pre-effect home.
+    try {
+      writeMeta(sb);
+    } catch (err) {
+      removePinnedSandboxHomeReservation(parentIdentity, homeIdentity);
+      throw err;
+    }
+    const metadataIdentity = pinFileIdentity(metaPath(id));
+    if (!metadataIdentity || dirname(metadataIdentity.path) !== homeIdentity.path) {
+      removePinnedSandboxHomeReservation(parentIdentity, homeIdentity);
+      throw new Error('could not pin sandbox reservation metadata identity');
+    }
+    destinationIdentity = {
+      parent: parentIdentity,
+      home: homeIdentity,
+      metadata: metadataIdentity,
+    };
+    if (!repositoryIdentityStillPinned(repositoryIdentity) ||
+        !sandboxDestinationStillPinned(destinationIdentity)) {
+      removePinnedSandboxReservation(destinationIdentity);
+      throw new Error('repository or sandbox destination identity changed before sandbox publication');
+    }
   } finally {
     releaseCleanupLock(creationLock);
   }
@@ -583,61 +1608,51 @@ export function createSandbox(
   // Add the isolated worktree on a NEW scratch branch off baseHead, run IN the
   // source repo. This does NOT touch the source working tree, index, HEAD, or
   // any user branch — it only creates a new ref + a separate checkout.
-  try {
-    gitRun(sourceRepo, [
-      'worktree',
-      'add',
-      '-b',
-      branch,
-      worktreePath,
-      baseHead,
-    ]);
-  } catch (err) {
-    // A partial add can leave either registration or branch behind. The same
-    // narrowly scoped rollback used for metadata failures verifies all three
-    // postconditions and retains a malformed home if operator recovery is needed.
-    rollbackUnpersistedSandbox({
-      id, sourceRepo, worktreePath, branch, baseHead,
-      createdAt: new Date().toISOString(), ownerPid: process.pid,
-    });
+  if (!repositoryIdentityStillPinned(repositoryIdentity) ||
+      !sandboxDestinationStillPinned(destinationIdentity)) {
+    removePinnedSandboxReservation(destinationIdentity);
+    throw new Error('repository or sandbox destination identity changed before worktree creation');
+  }
+  const creation = createPinnedWorktree(repositoryIdentity, destinationIdentity, sb);
+  if (!creation.ok) {
+    if (creation.cleanupComplete) {
+      removePinnedSandboxReservation(destinationIdentity);
+    }
     audit({
       action: 'sandbox:create',
-      repo: sourceRepo,
+      repo: canonicalSourceRepo,
       sandboxId: id,
-      summary: 'git worktree add failed',
+      summary: creation.error ?? 'pinned worktree creation failed',
       result: 'error',
     });
-    throw err instanceof Error ? err : new Error(String(err));
+    throw new Error(creation.error ?? 'pinned worktree creation failed');
   }
-
-  // M286 — symlink source node_modules into the worktree so verify commands
-  // (npm run typecheck, npm run test) can resolve the local toolchain without
-  // a separate install. Graceful: never throws; never mutates source repo.
-  symlinkNodeModules(sourceRepo, worktreePath);
-
-  const sb: Sandbox = {
-    id,
-    sourceRepo,
-    worktreePath,
-    branch,
-    baseHead,
-    createdAt: new Date().toISOString(),
-    // H5 — stamp the OWNING process pid as a positive liveness marker so the
-    // orphan sweep / disk-cap pre-sweep never force-remove this worktree while
-    // this process (or any process holding the same pid) is still alive.
-    ownerPid: process.pid,
-  };
-
-  try {
-    writeMeta(sb);
-  } catch (err) {
-    rollbackUnpersistedSandbox(sb);
-    throw err;
+  const worktreeIdentity = creation.worktreeDev !== undefined && creation.worktreeIno !== undefined
+    ? {
+        path: sb.worktreePath,
+        dev: BigInt(creation.worktreeDev),
+        ino: BigInt(creation.worktreeIno),
+      }
+    : null;
+  if (!worktreeIdentity || !createdWorktreeStillExact(
+    sb,
+    worktreeIdentity,
+    repositoryIdentity,
+    destinationIdentity,
+  )) {
+    audit({
+      action: 'sandbox:create',
+      repo: canonicalSourceRepo,
+      sandboxId: id,
+      summary: 'repository or sandbox identity changed after worktree creation',
+      result: 'error',
+    });
+    throw new Error('repository or sandbox identity changed after worktree creation');
   }
 
   audit({
     action: 'sandbox:create',
-    repo: sourceRepo,
+    repo: canonicalSourceRepo,
     sandboxId: id,
     summary: `worktree on ${branch} @ ${baseHead.slice(0, 8)}`,
     result: 'ok',
@@ -771,13 +1786,24 @@ function sandboxHomeState(home: string): SandboxCleanupPostcondition {
   }
 }
 
+/**
+ * Resolve aliases for the longest existing prefix, then append the normalized
+ * missing suffix. This keeps cleanup identity stable after a worktree vanishes
+ * and across Windows long/8.3 path spellings. Windows path identity is
+ * case-insensitive; other platforms retain their native case semantics.
+ */
+export function canonicalPathIdentity(value: string): string | null {
+  return canonicalFilesystemPathIdentity(value);
+}
+
 function registrationState(repo: string, worktreePath: string): SandboxCleanupPostcondition {
   const raw = gitTry(repo, ['worktree', 'list', '--porcelain']);
   if (raw === null) return 'unknown';
+  const target = canonicalPathIdentity(worktreePath);
+  if (target === null) return 'unknown';
   const registered = raw.split('\n')
     .filter((line) => line.startsWith('worktree '))
-    .map((line) => resolve(line.slice('worktree '.length)))
-    .includes(resolve(worktreePath));
+    .some((line) => canonicalPathIdentity(line.slice('worktree '.length).trimEnd()) === target);
   return registered ? 'present' : 'absent';
 }
 
@@ -794,7 +1820,10 @@ function worktreeBelongsToRepo(repo: string, worktreePath: string): boolean {
   if (!existsSync(worktreePath)) return false;
   const worktreeCommon = gitTry(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const repoCommon = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return worktreeCommon !== null && repoCommon !== null && resolve(worktreeCommon) === resolve(repoCommon);
+  if (worktreeCommon === null || repoCommon === null) return false;
+  const worktreeIdentity = canonicalPathIdentity(worktreeCommon);
+  const repoIdentity = canonicalPathIdentity(repoCommon);
+  return worktreeIdentity !== null && repoIdentity !== null && worktreeIdentity === repoIdentity;
 }
 
 function processStartRef(pid: number): string | undefined {
@@ -946,7 +1975,52 @@ function persistCleanupEvidence(sb: Sandbox, evidence: SandboxCleanupEvidence): 
   }
 }
 
-export function removeSandbox(sb: Sandbox): SandboxCleanupResult {
+function cleanupAuthorityUnavailableResult(
+  sb: Sandbox,
+  reason: SandboxCleanupAuthorityLease['reason'],
+): SandboxCleanupResult {
+  const home = sandboxHomeState(sandboxHome(sb.id));
+  const result: SandboxCleanupResult = {
+    status: 'unavailable',
+    postconditions: { registration: 'unknown', branch: 'unknown', home },
+    failureClasses: ['cleanup-locked'],
+    retryable: true,
+    attempt: Math.min(1_000, (sb.cleanup?.attempt ?? 0) + 1),
+    evidencePersisted: false,
+  };
+  audit({
+    action: 'sandbox:remove',
+    repo: sb.sourceRepo,
+    sandboxId: sb.id,
+    summary: reason === 'paused'
+      ? 'cleanup deferred: autonomy kill switch is ON'
+      : 'cleanup deferred: outward mutation authority unavailable',
+    result: 'refused',
+  });
+  return result;
+}
+
+export function removeSandbox(
+  sb: Sandbox,
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxCleanupResult {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  if (!authority.allowed) return cleanupAuthorityUnavailableResult(sb, authority.reason);
+  try {
+    return removeSandboxWhileFenced(sb);
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
+  }
+}
+
+export function removeSandboxWithBorrowedAuthority(
+  sb: Sandbox,
+  borrowedAuthority: BorrowedSandboxCleanupAuthority | null,
+): SandboxCleanupResult {
+  return removeSandbox(sb, { borrowedAuthority });
+}
+
+function removeSandboxWhileFenced(sb: Sandbox): SandboxCleanupResult {
   const home = sandboxHome(sb.id);
   const attempt = Math.min(1_000, (sb.cleanup?.attempt ?? 0) + 1);
 
@@ -989,9 +2063,11 @@ export function removeSandbox(sb: Sandbox): SandboxCleanupResult {
   const repoAuthority = existsSync(safeWorktree)
     ? worktreeBelongsToRepo(sb.sourceRepo, safeWorktree)
     : registrationBefore === 'present';
+  const recoverableReservation = canonicalMatches && sourceRepoAvailable &&
+    !existsSync(safeWorktree) && registrationBefore === 'absent' && branchBefore === 'absent';
   const guardsPass = branchInNamespace && branchMatches && worktreeContained &&
     rootState === 'present' && homeBefore === 'present' && canonicalMatches &&
-    !worktreeSymlink && (!sourceRepoAvailable || repoAuthority);
+    !worktreeSymlink && (!sourceRepoAvailable || repoAuthority || recoverableReservation);
   const lock = guardsPass ? acquireCleanupLock(sb.id) : undefined;
   let result: SandboxCleanupResult;
 
@@ -1120,6 +2196,201 @@ export function sandboxInventory(): SandboxInventory {
   return inventory;
 }
 
+interface OwnedPathIdentity {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+}
+
+interface ReservationFile {
+  path: string;
+  identity: OwnedPathIdentity;
+}
+
+type ReservationRecoveryStatus = 'complete' | 'skipped' | 'refused' | 'unavailable' | 'error';
+
+function ownedDirectoryIdentity(path: string): OwnedPathIdentity | null {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isDirectory() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return null;
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function samePathIdentity(path: string, expected: OwnedPathIdentity, directory: boolean): boolean {
+  try {
+    const stat = lstatSync(path);
+    return !stat.isSymbolicLink() &&
+      (directory ? stat.isDirectory() : stat.isFile()) &&
+      stat.dev === expected.dev && stat.ino === expected.ino &&
+      (typeof process.getuid !== 'function' || stat.uid === process.getuid());
+  } catch {
+    return false;
+  }
+}
+
+function readReservationJson(file: ReservationFile): Record<string, unknown> | null | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== file.identity.dev || opened.ino !== file.identity.ino ||
+      opened.size > 64 * 1024 ||
+      (typeof process.getuid === 'function' && opened.uid !== process.getuid())) return undefined;
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return undefined;
+    try {
+      const value = JSON.parse(bytes.toString('utf8')) as unknown;
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+  }
+}
+
+function partialIdentitySafe(id: string, value: Record<string, unknown>): boolean {
+  const canonicalWorktree = worktreePathFor(id);
+  const canonicalBranch = `${BRANCH_PREFIX}${id}`;
+  if (Object.prototype.hasOwnProperty.call(value, 'id') && value['id'] !== id) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'worktreePath') &&
+    (typeof value['worktreePath'] !== 'string' || resolve(value['worktreePath']) !== resolve(canonicalWorktree))) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'branch') && value['branch'] !== canonicalBranch) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'ownerPid') &&
+    (typeof value['ownerPid'] !== 'number' || !Number.isInteger(value['ownerPid']) || value['ownerPid'] <= 0)) {
+    return false;
+  }
+  return true;
+}
+
+function safelyUnlinkReservationFile(file: ReservationFile): boolean {
+  if (!samePathIdentity(file.path, file.identity, false)) return false;
+  try {
+    unlinkSync(file.path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reclaim one reservation that crashed before any Git effect. This deliberately
+ * refuses homes containing a worktree or any unrecognized entry: incomplete
+ * metadata is never promoted into authority to mutate a repository.
+ */
+function recoverReservationHome(id: string, staleMs: number | undefined, now: number): ReservationRecoveryStatus {
+  if (!SANDBOX_ID_RE.test(id)) return 'refused';
+  const root = sandboxesDir();
+  const home = sandboxHome(id);
+  const rootIdentity = ownedDirectoryIdentity(root);
+  const homeIdentity = ownedDirectoryIdentity(home);
+  if (!rootIdentity || !homeIdentity) return 'refused';
+
+  const lock = acquireCleanupLock(id);
+  if (!lock) return 'unavailable';
+  try {
+    if (!samePathIdentity(root, rootIdentity, true) || !samePathIdentity(home, homeIdentity, true)) {
+      return 'refused';
+    }
+    // A creator may have completed metadata before this candidate acquired its
+    // lock. Valid metadata always wins and is handled by the normal sweep path.
+    if (readMeta(id)) return 'skipped';
+
+    const entries = readdirSync(home, { withFileTypes: true });
+    if (entries.length > 4) return 'refused';
+    const files: ReservationFile[] = [];
+    let freshestMs = homeIdentity.mtimeMs;
+    for (const entry of entries) {
+      if (entry.name === 'worktree') return 'refused';
+      if (entry.name !== META_FILE && !META_TEMP_RE.test(entry.name)) return 'refused';
+      const path = join(home, entry.name);
+      let stat: ReturnType<typeof lstatSync>;
+      try { stat = lstatSync(path); } catch { return 'refused'; }
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024 ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return 'refused';
+      const file = { path, identity: { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs } };
+      const partial = readReservationJson(file);
+      if (partial === undefined) return 'refused';
+      if (partial && !partialIdentitySafe(id, partial)) return 'refused';
+      if (partial && pidAlive(partial['ownerPid'])) return 'skipped';
+      if (partial && typeof partial['createdAt'] === 'string') {
+        const createdMs = Date.parse(partial['createdAt']);
+        if (!Number.isNaN(createdMs)) freshestMs = Math.max(freshestMs, createdMs);
+      }
+      freshestMs = Math.max(freshestMs, stat.mtimeMs);
+      files.push(file);
+    }
+
+    const recoveryAgeMs = Math.max(staleMs ?? 0, RESERVATION_RECOVERY_MIN_AGE_MS);
+    if (now - freshestMs < recoveryAgeMs) return 'skipped';
+    if (!samePathIdentity(root, rootIdentity, true) || !samePathIdentity(home, homeIdentity, true) || readMeta(id)) {
+      return 'refused';
+    }
+    for (const file of files) {
+      if (!safelyUnlinkReservationFile(file)) return 'refused';
+    }
+    if (readdirSync(home).length !== 0 || !samePathIdentity(home, homeIdentity, true)) return 'refused';
+    rmdirSync(home);
+    if (existsSync(home)) return 'error';
+    audit({
+      action: 'sandbox:remove',
+      repo: home,
+      sandboxId: id,
+      summary: 'reclaimed incomplete pre-effect sandbox reservation',
+      result: 'ok',
+    });
+    return 'complete';
+  } catch {
+    return 'error';
+  } finally {
+    releaseCleanupLock(lock);
+  }
+}
+
+function recoverReservationHomes(
+  staleMs: number | undefined,
+  now: number,
+  result: SandboxSweepResult,
+  creationLockHeld: boolean,
+): void {
+  const root = sandboxesDir();
+  if (!ownedDirectoryIdentity(root)) return;
+  const creationLock = creationLockHeld ? undefined : acquireCleanupLock('creation');
+  if (!creationLockHeld && !creationLock) return;
+  let ids: string[];
+  try {
+    ids = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && SANDBOX_ID_RE.test(entry.name) && readMeta(entry.name) === null)
+      .map((entry) => entry.name)
+      .sort()
+      .slice(0, MAX_RESERVATION_RECOVERIES_PER_SWEEP);
+  } catch {
+    releaseCleanupLock(creationLock);
+    return;
+  }
+  try {
+    for (const id of ids) {
+      const status = recoverReservationHome(id, staleMs, now);
+      if (status === 'complete') result.completed.push(id);
+      else if (status === 'refused') result.refused.push(id);
+      else if (status === 'unavailable') result.unavailable.push(id);
+      else if (status === 'error') result.unexpectedErrors.push(id);
+    }
+  } finally {
+    releaseCleanupLock(creationLock);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // listSandboxes
 // ---------------------------------------------------------------------------
@@ -1209,14 +2480,20 @@ export function listSandboxes(): Sandbox[] {
  *   is younger than this — a conservative liveness proxy so a concurrently-live
  *   sandbox is never force-removed. Omit to sweep all listed sandboxes.
  */
-export function sweepOrphanSandboxesDetailed(opts?: { staleMs?: number }): SandboxSweepResult {
+function sweepOrphanSandboxesDetailedInternal(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+  creationLockHeld = false,
+): SandboxSweepResult {
   const staleMs = opts?.staleMs;
   const now = Date.now();
   const result: SandboxSweepResult = {
     completed: [], residual: [], refused: [], unavailable: [],
     inventory: sandboxInventory(), unexpectedErrors: [],
   };
-  for (const sb of listSandboxes()) {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  try {
+    if (authority.allowed) recoverReservationHomes(staleMs, now, result, creationLockHeld);
+    for (const sb of listSandboxes()) {
     // GUARD 1 — POSITIVE liveness (age-independent): never reclaim a worktree
     // whose owning process is still alive, even if it is older than staleMs.
     // This is what makes the sweep safe despite the absence of a swarm
@@ -1237,19 +2514,40 @@ export function sweepOrphanSandboxesDetailed(opts?: { staleMs?: number }): Sandb
         continue;
       }
     }
-    try {
-      const cleanup = removeSandbox(sb);
-      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
-    } catch {
-      // removeSandbox is already best-effort/idempotent and should not throw;
-      // guard anyway so one bad entry never aborts the whole restart sweep.
-      result.unexpectedErrors.push(sb.id);
+      if (!authority.allowed) {
+        result.unavailable.push(sb.id);
+        continue;
+      }
+      try {
+        const cleanup = removeSandbox(sb, { borrowedAuthority: authority.token });
+        result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
+      } catch {
+        // removeSandbox is already best-effort/idempotent and should not throw;
+        // guard anyway so one bad entry never aborts the whole restart sweep.
+        result.unexpectedErrors.push(sb.id);
+      }
     }
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
   }
   return result;
 }
 
-export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
+export function sweepOrphanSandboxesDetailed(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): SandboxSweepResult {
+  return sweepOrphanSandboxesDetailedInternal(opts);
+}
+
+function sweepOrphanSandboxesWhileCreationLocked(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): string[] {
+  return sweepOrphanSandboxesDetailedInternal(opts, true).completed;
+}
+
+export function sweepOrphanSandboxes(
+  opts?: { staleMs?: number } & SandboxCleanupAuthorityOptions,
+): string[] {
   return sweepOrphanSandboxesDetailed(opts).completed;
 }
 
@@ -1286,13 +2584,18 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
  *
  * @param repo The source repo whose sandboxes to reclaim (resolved internally).
  */
-export function sweepRepoSandboxesDetailed(repo: string): SandboxSweepResult {
+export function sweepRepoSandboxesDetailed(
+  repo: string,
+  opts?: SandboxCleanupAuthorityOptions,
+): SandboxSweepResult {
   const target = resolve(repo);
   const result: SandboxSweepResult = {
     completed: [], residual: [], refused: [], unavailable: [],
     inventory: sandboxInventory(), unexpectedErrors: [],
   };
-  for (const sb of listSandboxes()) {
+  const authority = acquireSandboxCleanupAuthority(opts);
+  try {
+    for (const sb of listSandboxes()) {
     // SCOPE: only this repo's sandboxes.
     if (resolve(sb.sourceRepo) !== target) {
       continue;
@@ -1305,18 +2608,25 @@ export function sweepRepoSandboxesDetailed(repo: string): SandboxSweepResult {
     if (ownerAlive(sb)) {
       continue;
     }
-    try {
-      const cleanup = removeSandbox(sb);
-      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
-    } catch {
-      // removeSandbox is best-effort/idempotent; guard so one bad entry never
-      // aborts the whole scoped sweep.
-      result.unexpectedErrors.push(sb.id);
+      if (!authority.allowed) {
+        result.unavailable.push(sb.id);
+        continue;
+      }
+      try {
+        const cleanup = removeSandbox(sb, { borrowedAuthority: authority.token });
+        result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
+      } catch {
+        // removeSandbox is best-effort/idempotent; guard so one bad entry never
+        // aborts the whole scoped sweep.
+        result.unexpectedErrors.push(sb.id);
+      }
     }
+  } finally {
+    releaseSandboxCleanupAuthority(authority);
   }
   return result;
 }
 
-export function sweepRepoSandboxes(repo: string): string[] {
-  return sweepRepoSandboxesDetailed(repo).completed;
+export function sweepRepoSandboxes(repo: string, opts?: SandboxCleanupAuthorityOptions): string[] {
+  return sweepRepoSandboxesDetailed(repo, opts).completed;
 }

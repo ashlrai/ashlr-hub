@@ -911,7 +911,28 @@ export async function handleApi(
       }
 
       const paused = path.endsWith('/pause');
-      setKill(paused);
+      const mutation = setKill(paused);
+      // `undefined` preserves compatibility with older test doubles. Production
+      // policy mutators always return a structured result.
+      if (mutation !== undefined && (!mutation.ok || !mutation.quiesced)) {
+        const unsafeStorage = /unsafe/i.test(mutation.reason);
+        const retryable = !unsafeStorage && !mutation.quiesced && (mutation.ok ||
+          /fence unavailable|has not quiesced|outward mutation.*active|\bbusy\b/i.test(mutation.reason));
+        const fleet = await buildFleetStatus(cfg);
+        sendJson(res, retryable ? 409 : 500, {
+          ok: false,
+          action: paused ? 'pause' : 'resume',
+          error: unsafeStorage
+            ? `unsafe policy storage: ${mutation.reason}`
+            : retryable
+              ? `policy mutation busy: ${mutation.reason}`
+              : `policy storage degraded: ${mutation.reason}`,
+          retryable,
+          mutation,
+          fleet,
+        });
+        return true;
+      }
       let service: ReturnType<typeof serviceStatus> | undefined;
       if (!paused) {
         try {
@@ -924,6 +945,7 @@ export async function handleApi(
       sendJson(res, 200, {
         ok: true,
         action: paused ? 'pause' : 'resume',
+        ...(mutation ? { mutation } : {}),
         ...(service ? { service } : {}),
         fleet,
       });

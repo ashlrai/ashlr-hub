@@ -143,8 +143,8 @@ function enroll(repo: string): void {
   } catch {
     /* fresh */
   }
-  const abs = path.resolve(repo);
-  if (!repos.includes(abs)) repos.push(abs);
+  const physical = fs.realpathSync.native(repo);
+  if (!repos.includes(physical)) repos.push(physical);
   fs.writeFileSync(p, JSON.stringify({ repos }, null, 2) + '\n', 'utf8');
 }
 
@@ -173,7 +173,7 @@ beforeEach(async () => {
   fs.mkdirSync(ashlrDir(), { recursive: true });
 
   // A tmp "repo" working tree we can enroll + assert is left untouched.
-  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m27-repo-'));
+  tmpRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m27-repo-')));
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), '{"name":"tmp","version":"1.0.0"}\n', 'utf8');
   fs.writeFileSync(path.join(tmpRepo, 'README.md'), '# tmp\n'.repeat(60), 'utf8');
 
@@ -206,7 +206,7 @@ afterEach(() => {
 describe('health — default ranked report', () => {
   it('prints a ranked report over enrolled repos (exit 0)', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 64);
+    scoreByRepo.set(tmpRepo, 64);
 
     const { code, out } = await capture(() => cmdHealth([]));
 
@@ -225,7 +225,7 @@ describe('health — default ranked report', () => {
 
   it('--json emits a HealthReport with the documented shape + no narrative', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 72);
+    scoreByRepo.set(tmpRepo, 72);
 
     const { code, out } = await capture(() => cmdHealth(['--json']));
     expect(code).toBe(0);
@@ -244,7 +244,7 @@ describe('health — default ranked report', () => {
 
   it('persists a snapshot under ~/.ashlr/quality/reports on each full run', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 80);
+    scoreByRepo.set(tmpRepo, 80);
 
     await capture(() => cmdHealth([]));
 
@@ -256,7 +256,7 @@ describe('health — default ranked report', () => {
 
   it('computes a per-repo delta vs the previous snapshot on the second run', async () => {
     enroll(tmpRepo);
-    const abs = path.resolve(tmpRepo);
+    const abs = tmpRepo;
 
     // First run: score 60.
     scoreByRepo.set(abs, 60);
@@ -280,7 +280,7 @@ describe('health — default ranked report', () => {
 describe('health <repo> — single-repo detail', () => {
   it('prints the per-dimension breakdown for an ENROLLED repo (exit 0)', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 55);
+    scoreByRepo.set(tmpRepo, 55);
 
     const { code, out } = await capture(() => cmdHealth([tmpRepo]));
     expect(code).toBe(0);
@@ -293,12 +293,12 @@ describe('health <repo> — single-repo detail', () => {
 
   it('--json emits a HealthScore for an enrolled repo', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 88);
+    scoreByRepo.set(tmpRepo, 88);
 
     const { code, out } = await capture(() => cmdHealth([tmpRepo, '--json']));
     expect(code).toBe(0);
     const score = JSON.parse(out.trim()) as HealthScore;
-    expect(score.repo).toBe(path.resolve(tmpRepo));
+    expect(score.repo).toBe(tmpRepo);
     expect(score.score).toBe(88);
     expect(score.grade).toBe('B');
   });
@@ -323,7 +323,7 @@ describe('health — ENROLLMENT-SCOPED (non-enrolled repo hard-errors)', () => {
 
   it('the same repo, once enrolled, succeeds (exit 0)', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 70);
+    scoreByRepo.set(tmpRepo, 70);
     const { code } = await capture(() => cmdHealth([tmpRepo]));
     expect(code).toBe(0);
   });
@@ -341,7 +341,7 @@ describe('health — ENROLLMENT-SCOPED (non-enrolled repo hard-errors)', () => {
 describe('health propose — proposals are PENDING notes', () => {
   it('creates PENDING inbox proposals of kind note, origin manual', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 40);
+    scoreByRepo.set(tmpRepo, 40);
 
     const { code, out } = await capture(() => cmdHealth(['propose']));
     expect(code).toBe(0);
@@ -357,13 +357,13 @@ describe('health propose — proposals are PENDING notes', () => {
       expect(p.status).toBe('pending'); // NEVER auto-applied
       expect(p.kind).toBe('note'); // advisory, mutates nothing
       expect(p.origin).toBe('manual');
-      expect(p.repo).toBe(path.resolve(tmpRepo));
+      expect(p.repo).toBe(tmpRepo);
     }
   });
 
   it('propose --json reports the created proposals (all pending notes)', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 40);
+    scoreByRepo.set(tmpRepo, 40);
 
     const { code, out } = await capture(() => cmdHealth(['propose', '--json']));
     expect(code).toBe(0);
@@ -384,7 +384,7 @@ describe('health — LOCAL-FIRST (no cloud on default path)', () => {
   it('default run never calls fetch, even with an API key present', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-api03-FAKEKEY0000000000000000000000000000000000';
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 70);
+    scoreByRepo.set(tmpRepo, 70);
 
     const fetchSpy = vi.fn().mockRejectedValue(new Error('no network on default path'));
     vi.stubGlobal('fetch', fetchSpy);
@@ -397,7 +397,7 @@ describe('health — LOCAL-FIRST (no cloud on default path)', () => {
   it('--allow-cloud OFF (default): propose makes no cloud call', async () => {
     process.env['OPENAI_API_KEY'] = 'sk-FAKEOPENAIKEY0000000000000000000000000000000';
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 40);
+    scoreByRepo.set(tmpRepo, 40);
 
     const fetchSpy = vi.fn().mockRejectedValue(new Error('no network'));
     vi.stubGlobal('fetch', fetchSpy);
@@ -415,7 +415,7 @@ describe('health — LOCAL-FIRST (no cloud on default path)', () => {
 describe('health — READ-ONLY over the enrolled repo', () => {
   it('a default run leaves the enrolled repo working tree byte-identical', async () => {
     enroll(tmpRepo);
-    scoreByRepo.set(path.resolve(tmpRepo), 70);
+    scoreByRepo.set(tmpRepo, 70);
 
     const pkgPath = path.join(tmpRepo, 'package.json');
     const readmePath = path.join(tmpRepo, 'README.md');

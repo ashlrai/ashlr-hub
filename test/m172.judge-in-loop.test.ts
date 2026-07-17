@@ -59,12 +59,35 @@ const mockAutoMergeProposal = vi.fn();
 const mockVerifyProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  hasCurrentVerificationBinding: (candidate: { verifyResult?: { passed?: boolean } }) =>
+    typeof candidate.verifyResult?.passed === 'boolean',
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
   isFrontierJudge: (engine: string | undefined) => {
     const value = String(engine ?? '').toLowerCase();
     return value.startsWith('claude') || value.includes('claude') || value.startsWith('gpt-5');
   },
   verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
+  verifyAndPersistProposal: async (...args: unknown[]) => {
+    const candidate = args[0] as { diffHash?: string };
+    const verify = await mockVerifyProposal(...args);
+    return {
+      verify,
+      verifyResult: {
+        passed: verify.ok,
+        ...(verify.ok ? {} : { failed: [verify.detail] }),
+        detail: verify.detail,
+        ran: verify.ran,
+        baseBranch: 'main',
+        baseHead: '0'.repeat(40),
+        diffHash: candidate.diffHash,
+        verifiedAt: '2026-01-01T00:00:00.000Z',
+        source: 'auto-merge-preflight',
+      },
+      persisted: true,
+      authorityLive: true,
+      reason: 'verification evidence persisted under live authority',
+    };
+  },
   verifyResultFromProposalResult: (result: { ok: boolean; ran: unknown[]; detail: string }) => ({
     passed: result.ok,
     ...(result.ok ? {} : { failed: [result.detail] }),
@@ -90,6 +113,7 @@ vi.mock('../src/core/inbox/store.js', () => ({
 const mockKillSwitchOn = vi.fn(() => false);
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
+  isEnrolled: () => true,
 }));
 
 const mockReadDecisions = vi.fn(() => []);

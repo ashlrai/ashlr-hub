@@ -49,7 +49,7 @@ function sharedQueueLabel(sharedQueue: unknown, dim: (s: string) => string): str
 
 async function cmdWorkerSetup(args: string[]): Promise<number> {
   const colors = makeColors(isTty());
-  const { bold, green, cyan, yellow, dim } = colors;
+  const { bold, green, cyan, yellow, dim, red } = colors;
 
   const yesMode = args.includes('--yes') || !process.stdin.isTTY;
 
@@ -83,12 +83,24 @@ async function cmdWorkerSetup(args: string[]): Promise<number> {
 
   // ── 2. Explicitly enroll any repos specified via --repos ──────────────────
   if (repos.length > 0) {
+    const enrollmentFailures: string[] = [];
     for (const repo of repos) {
       try {
-        enroll(repo);
+        const enrollment = enroll(repo);
+        // Production policy always returns a result; `undefined` only preserves
+        // compatibility with older void-returning test doubles.
+        if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
+          enrollmentFailures.push(`${repo}: ${enrollment.reason}`);
+        }
       } catch (err) {
-        console.warn(yellow(`  warn: could not enroll ${repo}: ${err instanceof Error ? err.message : String(err)}`));
+        enrollmentFailures.push(`${repo}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+    if (enrollmentFailures.length > 0) {
+      for (const failure of enrollmentFailures) {
+        console.error(red(`  error: could not confirm enrollment for ${failure}`));
+      }
+      return 1;
     }
   }
 

@@ -338,13 +338,28 @@ export async function stepEnroll(cfg: AshlrConfig, opts: { yes: boolean }): Prom
 
     // --yes: enroll all discovered repos (idempotent).
     let enrolled = 0;
+    const failures: string[] = [];
     for (const repo of discovered) {
       if (!already.includes(repo)) {
-        enroll(repo);
-        enrolled++;
+        const result = enroll(repo);
+        // Production policy always returns a result; `undefined` only preserves
+        // compatibility with older void-returning test doubles.
+        if (result === undefined || (result.ok && result.quiesced)) {
+          enrolled++;
+        } else {
+          failures.push(`${repo}: ${result.reason}`);
+        }
       }
     }
     const total = listEnrolled().length;
+    if (failures.length > 0) {
+      return step(
+        'enroll',
+        'manual',
+        `${enrolled} repo(s) newly enrolled; ${failures.length} failed: ${failures.join('; ')}. ` +
+          'Retry with: ashlr enroll <path>',
+      );
+    }
     return step(
       'enroll',
       'ok',

@@ -29,6 +29,7 @@ import {
 } from '../src/core/daemon/cutoff-checkpoint-scheduler.js';
 import { runCutoffCheckpointWorker } from '../src/core/daemon/cutoff-checkpoint-worker.js';
 import { runCutoffCheckpointSupervisor } from '../src/core/daemon/cutoff-checkpoint-child.js';
+import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import {
   cancelDaemonPostTickChildren,
   scheduleCutoffCheckpointAfterTick,
@@ -36,6 +37,7 @@ import {
 import type { DaemonTick } from '../src/core/types.js';
 
 const NOW = Date.parse('2026-07-12T12:00:00.000Z');
+const posixIt = it.skipIf(process.platform === 'win32');
 let home = '';
 let oldHome: string | undefined;
 let oldAshlrHome: string | undefined;
@@ -82,9 +84,11 @@ beforeEach(() => {
   home = resolve(mkdtempSync(join(tmpdir(), 'ashlr-m385-')));
   process.env['HOME'] = home;
   process.env['ASHLR_HOME'] = join(home, '.ashlr');
+  expect(setKill(false, { waitMs: 500 }).ok).toBe(true);
 });
 
 afterEach(() => {
+  try { setKill(false, { waitMs: 500 }); } catch { /* best effort */ }
   if (oldHome === undefined) delete process.env['HOME']; else process.env['HOME'] = oldHome;
   if (oldAshlrHome === undefined) delete process.env['ASHLR_HOME']; else process.env['ASHLR_HOME'] = oldAshlrHome;
   try { chmodSync(join(home, '.ashlr', 'fleet'), 0o700); } catch { /* absent */ }
@@ -93,8 +97,12 @@ afterEach(() => {
 
 describe('M385 cutoff checkpoint cadence state', () => {
   it('uses exact success/failure cadence boundaries and fails closed on bad time/state', () => {
-    expect(decideCutoffCaptureSchedule({ sourceState: 'missing', state: null, stopReasons: [] }, NOW).due).toBe(true);
-    expect(decideCutoffCaptureSchedule({ sourceState: 'degraded', state: null, stopReasons: ['io-error'] }, NOW))
+    expect(decideCutoffCaptureSchedule(
+      { sourceState: 'missing', state: null, stopReasons: [] }, NOW, 'linux',
+    ).due).toBe(true);
+    expect(decideCutoffCaptureSchedule(
+      { sourceState: 'degraded', state: null, stopReasons: ['io-error'] }, NOW, 'linux',
+    ))
       .toMatchObject({ due: false, reason: 'state-degraded' });
     expect(decideCutoffCaptureSchedule({ sourceState: 'unsupported', state: null, stopReasons: [] }, NOW, 'win32'))
       .toMatchObject({ due: false, reason: 'platform-unsupported' });
@@ -105,23 +113,31 @@ describe('M385 cutoff checkpoint cadence state', () => {
       lastAttemptAt: successAt, lastSuccessAt: successAt, nextEligibleAt: successDue,
       lastOutcome: 'success', lastReason: 'recorded',
     }));
-    expect(decideCutoffCaptureSchedule(successful, NOW + CUTOFF_CAPTURE_SUCCESS_CADENCE_MS - 1).due).toBe(false);
-    expect(decideCutoffCaptureSchedule(successful, NOW + CUTOFF_CAPTURE_SUCCESS_CADENCE_MS).due).toBe(true);
+    expect(decideCutoffCaptureSchedule(
+      successful, NOW + CUTOFF_CAPTURE_SUCCESS_CADENCE_MS - 1, 'linux',
+    ).due).toBe(false);
+    expect(decideCutoffCaptureSchedule(
+      successful, NOW + CUTOFF_CAPTURE_SUCCESS_CADENCE_MS, 'linux',
+    ).due).toBe(true);
 
     const failureDue = new Date(NOW + CUTOFF_CAPTURE_FAILURE_RETRY_MS).toISOString();
     const failed = healthy(state({
       lastAttemptAt: successAt, lastFailureAt: successAt, nextEligibleAt: failureDue,
       lastOutcome: 'failure', lastReason: 'worker-failed',
     }));
-    expect(decideCutoffCaptureSchedule(failed, NOW + CUTOFF_CAPTURE_FAILURE_RETRY_MS - 1).due).toBe(false);
-    expect(decideCutoffCaptureSchedule(failed, NOW + CUTOFF_CAPTURE_FAILURE_RETRY_MS).due).toBe(true);
-    expect(decideCutoffCaptureSchedule(successful, Number.NaN).reason).toBe('invalid-time');
+    expect(decideCutoffCaptureSchedule(
+      failed, NOW + CUTOFF_CAPTURE_FAILURE_RETRY_MS - 1, 'linux',
+    ).due).toBe(false);
+    expect(decideCutoffCaptureSchedule(
+      failed, NOW + CUTOFF_CAPTURE_FAILURE_RETRY_MS, 'linux',
+    ).due).toBe(true);
+    expect(decideCutoffCaptureSchedule(successful, Number.NaN, 'linux').reason).toBe('invalid-time');
     expect(decideCutoffCaptureSchedule(healthy(state({
       lastAttemptAt: new Date(NOW + 6_000).toISOString(), lastOutcome: 'failure', lastReason: 'timeout',
-    })), NOW).reason).toBe('state-degraded');
+    })), NOW, 'linux').reason).toBe('state-degraded');
   });
 
-  it('persists a private reservation and token-CAS terminal outcome across restart', () => {
+  posixIt('persists a private reservation and token-CAS terminal outcome across restart', () => {
     const reservation = reserveCutoffCaptureAttempt(NOW);
     expect(reservation.reserved).toBe(true);
     if (!reservation.reserved) return;
@@ -140,7 +156,7 @@ describe('M385 cutoff checkpoint cadence state', () => {
     });
   });
 
-  it('does not recover an expired attempt while its bound process group is alive', () => {
+  posixIt('does not recover an expired attempt while its bound process group is alive', () => {
     const reservation = reserveCutoffCaptureAttempt(NOW);
     expect(reservation.reserved).toBe(true);
     if (!reservation.reserved) return;
@@ -155,7 +171,7 @@ describe('M385 cutoff checkpoint cadence state', () => {
     }
   });
 
-  it('suppresses malformed, hardlinked, and unsafe scheduler state', () => {
+  posixIt('suppresses malformed, hardlinked, and unsafe scheduler state', () => {
     mkdirSync(join(home, '.ashlr', 'fleet'), { recursive: true, mode: 0o700 });
     writeFileSync(cutoffCaptureSchedulerStatePath(), '{broken', { mode: 0o600 });
     expect(readCutoffCaptureSchedulerState().sourceState).toBe('degraded');
@@ -173,6 +189,7 @@ describe('M385 detached supervisor scheduling', () => {
     const complete = vi.fn(() => true);
     const attemptId = '11111111-1111-4111-8111-111111111111';
     const scheduled = scheduleCutoffCheckpointCapture({
+      platform: 'linux',
       deps: {
         now: () => NOW,
         killSwitchOn: () => false,
@@ -190,7 +207,7 @@ describe('M385 detached supervisor scheduling', () => {
     expect(options.env).not.toHaveProperty('OPENAI_API_KEY');
     expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
     expect(options.env).not.toHaveProperty('NODE_OPTIONS');
-    const overlap = scheduleCutoffCheckpointCapture({ deps: { killSwitchOn: () => false } });
+    const overlap = scheduleCutoffCheckpointCapture({ platform: 'linux', deps: { killSwitchOn: () => false } });
     expect(overlap.disposition).toBe('overlap-suppressed');
     scheduled.cancel();
     child.emit('close', null, 'SIGKILL');
@@ -200,6 +217,7 @@ describe('M385 detached supervisor scheduling', () => {
   it('does not revoke or kill an attempt after it has claimed the commit phase', async () => {
     const child = new FakeChild();
     const scheduled = scheduleCutoffCheckpointCapture({
+      platform: 'linux',
       deps: {
         now: () => NOW,
         killSwitchOn: () => false,
@@ -226,6 +244,7 @@ describe('M385 detached supervisor scheduling', () => {
     const complete = vi.fn(() => true);
     const cancelAttempt = vi.fn(() => 'cancelled' as const);
     const scheduled = scheduleCutoffCheckpointCapture({
+      platform: 'linux',
       deps: {
         now: () => NOW,
         killSwitchOn: () => false,
@@ -257,6 +276,7 @@ describe('M385 detached supervisor scheduling', () => {
     const processKill = vi.fn();
     const complete = vi.fn(() => true);
     const scheduled = scheduleCutoffCheckpointCapture({
+      platform: 'linux',
       deps: {
         now: () => NOW,
         killSwitchOn: () => false,
@@ -285,6 +305,7 @@ describe('M385 detached supervisor scheduling', () => {
   it('does not claim cancellation when durable revocation fails', async () => {
     const child = new FakeChild();
     const scheduled = scheduleCutoffCheckpointCapture({
+      platform: 'linux',
       deps: {
         now: () => NOW,
         killSwitchOn: () => false,
@@ -306,7 +327,8 @@ describe('M385 detached supervisor scheduling', () => {
 
   it('refuses Windows, kill state, and unsafe inherited home values before spawn', () => {
     expect(scheduleCutoffCheckpointCapture({ platform: 'win32' }).disposition).toBe('unsupported');
-    expect(scheduleCutoffCheckpointCapture({ deps: { killSwitchOn: () => true } }).reason).toBe('kill-switch');
+    expect(scheduleCutoffCheckpointCapture({ platform: 'linux', deps: { killSwitchOn: () => true } }).reason)
+      .toBe('kill-switch');
     expect(cutoffCaptureChildEnvironment({
       HOME: 'relative', ASHLR_HOME: '../unsafe', PATH: '/bin', OPENAI_API_KEY: 'secret', NODE_OPTIONS: '--import=x',
     })).toEqual({ PATH: '/bin' });
@@ -314,6 +336,35 @@ describe('M385 detached supervisor scheduling', () => {
 });
 
 describe('M385 supervisor and worker commands', () => {
+  it('refuses capture when child authority is unavailable or KILL is armed after acquisition', () => {
+    const capture = vi.fn();
+    const releaseFence = vi.fn();
+    expect(runCutoffCheckpointWorker('ignored', new Date(NOW + 30_000).toISOString(), {
+      acquireFence: () => null,
+      ownsFence: () => false,
+      releaseFence,
+      capture,
+    })).toBe(1);
+    expect(capture).not.toHaveBeenCalled();
+    expect(releaseFence).toHaveBeenCalledWith(null);
+
+    const fence = {} as never;
+    const authorityEvents: string[] = [];
+    const killAfterAcquire = vi.fn(() => { authorityEvents.push('kill'); return true; });
+    releaseFence.mockClear();
+    expect(runCutoffCheckpointWorker('ignored', new Date(NOW + 30_000).toISOString(), {
+      acquireFence: () => { authorityEvents.push('acquire'); return fence; },
+      ownsFence: (candidate) => { authorityEvents.push('owns'); return candidate === fence; },
+      releaseFence: (candidate) => { authorityEvents.push('release'); releaseFence(candidate); },
+      killSwitchOn: killAfterAcquire,
+      capture,
+    })).toBe(1);
+    expect(authorityEvents).toEqual(['acquire', 'owns', 'kill', 'release']);
+    expect(killAfterAcquire).toHaveBeenCalledOnce();
+    expect(capture).not.toHaveBeenCalled();
+    expect(releaseFence).toHaveBeenCalledWith(fence);
+  });
+
   it('worker succeeds only after durable record/replay and rechecks kill state', () => {
     const attemptId = '33333333-3333-4333-8333-333333333333';
     const deadlineAt = new Date(NOW + 30_000).toISOString();
@@ -337,6 +388,43 @@ describe('M385 supervisor and worker commands', () => {
     expect(runCutoffCheckpointWorker(attemptId, deadlineAt, {
       now: () => NOW, killSwitchOn: () => true, readState,
     })).toBe(1);
+  });
+
+  it('keeps pause non-quiesced from beginCommit through the final worker commit', () => {
+    const attemptId = '99999999-9999-4999-8999-999999999999';
+    const deadlineAt = new Date(NOW + 30_000).toISOString();
+    const readState = () => healthy(state({
+      active: { attemptId, startedAt: new Date(NOW).toISOString(), deadlineAt, phase: 'capturing' },
+      lastAttemptAt: new Date(NOW).toISOString(), lastOutcome: 'running',
+    }));
+    let commitClaimed = false;
+    let pauseDuringCommit: ReturnType<typeof setKill> | undefined;
+
+    const exitCode = runCutoffCheckpointWorker(attemptId, deadlineAt, {
+      now: () => NOW,
+      readState,
+      capture: () => ({ ok: true, snapshot: {} as never }),
+      beginCommit: () => { commitClaimed = true; return true; },
+      record: () => {
+        expect(commitClaimed).toBe(true);
+        pauseDuringCommit = setKill(true, { waitMs: 25 });
+        return { attempted: 1, recorded: 1, replayed: 0, recoveredRows: 0, invalid: 0, failed: 0 };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(pauseDuringCommit).toEqual({
+      ok: false,
+      changed: true,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    });
+    expect(killSwitchOn()).toBe(true);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({
+      ok: true,
+      changed: false,
+      quiesced: true,
+    });
   });
 
   it('supervisor commits success only for a zero worker exit', async () => {

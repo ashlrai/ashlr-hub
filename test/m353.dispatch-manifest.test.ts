@@ -15,6 +15,7 @@ import {
   readDispatchManifestEvents,
   readDispatchManifestEventsDetailed,
   recordDispatchManifest,
+  sanitizeDispatchManifestEvent,
   type DispatchManifestEvent,
 } from '../src/core/fleet/dispatch-manifest.js';
 
@@ -34,12 +35,16 @@ afterEach(() => {
 });
 
 let seq = 0;
+function defaultRepoPath(): string {
+  return path.join(fs.realpathSync.native(os.tmpdir()), 'repo');
+}
+
 function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
   const id = `item-${++seq}`;
   return {
     id,
     title: `Task ${id}`,
-    repo: '/tmp/repo',
+    repo: defaultRepoPath(),
     effort: 2,
     source: 'backlog' as WorkSource,
     tags: [],
@@ -102,7 +107,7 @@ describe('dispatch manifest ledger', () => {
       makeItem({
         id: `item-${secret}`,
         title: `Investigate token=${secret}`,
-        repo: `/tmp/repo?api_key=${secret}`,
+        repo: defaultRepoPath(),
       }),
       makeItem({ id: 'item-two', title: 'Second task' }),
     ];
@@ -144,6 +149,70 @@ describe('dispatch manifest ledger', () => {
     expect(raw).not.toContain(secret);
     expect(raw).not.toContain('Authorization sk-');
     expect(raw).not.toContain('api_key=sk-');
+  });
+
+  it('idempotently rejects relative and secret-shaped repo identities without unknown or cwd rows', () => {
+    const valid = makeEvent('2026-07-10T00:02:00.000Z', 'invalid-repo-seed');
+    const secret = 'github_pat_1234567890abcdefghijklmnop';
+    const invalidRepos = ['relative/repo', path.join(tmpDir, `token=${secret}`)];
+
+    for (const repo of invalidRepos) {
+      const invalid: DispatchManifestEvent = {
+        ...valid,
+        assignments: valid.assignments.map((assignment) => ({ ...assignment, repo })),
+      };
+      expect(() => sanitizeDispatchManifestEvent(invalid)).toThrow(/repository identity/);
+      expect(() => sanitizeDispatchManifestEvent(invalid)).toThrow(/repository identity/);
+      expect(recordDispatchManifest(invalid)).toMatchObject({ recorded: false });
+      expect(recordDispatchManifest(invalid)).toMatchObject({ recorded: false });
+    }
+
+    expect(fs.existsSync(path.join(dispatchManifestDir(), '2026-07-10.jsonl'))).toBe(false);
+  });
+
+  it('persists physical assignment repo identity and rejects legacy alias authority', () => {
+    const physicalRepo = path.join(tmpDir, 'physical-repo');
+    const nested = path.join(physicalRepo, 'identity-probe');
+    const linkedAlias = path.join(tmpDir, 'repo-alias');
+    fs.mkdirSync(nested, { recursive: true });
+    const canonicalRepo = fs.realpathSync.native(physicalRepo);
+    const lexicalAlias = path.join(nested, '..');
+    fs.symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+
+    const snapshot = makeSnapshot([{ backend: 'codex', availability: 'open' }]);
+    const plan = planConcurrentDispatch(
+      [makeItem({ id: 'lexical-alias', repo: lexicalAlias }), makeItem({ id: 'linked-alias', repo: linkedAlias })],
+      snapshot,
+      { maxSlotsPerBackend: 2 },
+      () => 'codex',
+    );
+    const event = buildDispatchManifestEvent({ ts: '2026-07-10T00:03:00.000Z', plan });
+    expect(event.assignments.map((assignment) => assignment.repo)).toEqual([canonicalRepo, canonicalRepo]);
+
+    event.assignments[0]!.repo = lexicalAlias;
+    event.assignments[1]!.repo = linkedAlias;
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: true });
+
+    const ledgerPath = path.join(dispatchManifestDir(), '2026-07-10.jsonl');
+    const raw = fs.readFileSync(ledgerPath, 'utf8');
+    const persisted = JSON.parse(raw) as DispatchManifestEvent;
+    expect(persisted.assignments.map((assignment) => assignment.repo)).toEqual([canonicalRepo, canonicalRepo]);
+    expect(readDispatchManifestEvents()[0]?.assignments.map((assignment) => assignment.repo))
+      .toEqual([canonicalRepo, canonicalRepo]);
+
+    const legacy = {
+      ...persisted,
+      manifestId: `${persisted.manifestId}-legacy`,
+      assignments: persisted.assignments.map((assignment, index) =>
+        index === 0 ? { ...assignment, repo: linkedAlias } : assignment),
+    };
+    fs.writeFileSync(ledgerPath, `${raw}${JSON.stringify(legacy)}\n`, 'utf8');
+    const detailed = readDispatchManifestEventsDetailed();
+    expect(detailed.events).toHaveLength(1);
+    expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    const rawAfter = fs.readFileSync(ledgerPath, 'utf8').trim().split('\n')
+      .map((line) => JSON.parse(line) as DispatchManifestEvent);
+    expect(rawAfter.at(-1)?.assignments[0]?.repo).toBe(linkedAlias);
   });
 
   it('bounds assignment and claim samples while preserving full counts', () => {

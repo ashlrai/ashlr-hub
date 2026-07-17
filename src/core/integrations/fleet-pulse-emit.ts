@@ -32,6 +32,7 @@ import {
   type FleetSpanInput,
   type ExportResult,
 } from './pulse-exporter.js';
+import type { OutwardMutationFence } from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Internal config bridge
@@ -88,13 +89,17 @@ function resolveEmitPat(): string | undefined {
 async function emitFleetPulseSpan(
   cfg: AshlrConfig,
   event: FleetSpanInput,
+  authority?: OutwardMutationFence,
 ): Promise<ExportResult> {
   if (!fleetPulseEnabled(cfg)) {
     return { ok: false, skipped: true, status: null, spanCount: 0, detail: 'fleet-pulse emit disabled (cfg.foundry.pulseEmit is falsy)' };
   }
   try {
     const pat = resolveEmitPat();
-    return await exportFleetEvents(exporterCfg(cfg), [event], pat ? { pat } : undefined);
+    return await exportFleetEvents(exporterCfg(cfg), [event], {
+      ...(pat ? { pat } : {}),
+      ...(authority ? { authority } : {}),
+    });
   } catch {
     return { ok: false, skipped: false, status: null, spanCount: 1, detail: 'fleet-pulse: unexpected error' };
   }
@@ -142,6 +147,7 @@ export async function emitMerge(
   proposalId: string,
   repo?: string | null,
   engine?: string | null,
+  opts?: { authority?: OutwardMutationFence },
 ): Promise<ExportResult> {
   return emitFleetPulseSpan(cfg, {
     event: 'merge',
@@ -149,7 +155,7 @@ export async function emitMerge(
     outcome: 'merged',
     ...(repo ? { repo } : {}),
     ...(engine ? { engine } : {}),
-  });
+  }, opts?.authority);
 }
 
 /**
@@ -169,6 +175,7 @@ export async function emitJudgeVerdict(
   verdict: string,
   repo?: string | null,
   engine?: string | null,
+  opts?: { authority?: OutwardMutationFence },
 ): Promise<ExportResult> {
   // 'ship' verdicts are covered by emitMerge when the merge actually fires.
   // Here we emit a span for every verdict so the Pulse dashboard has full coverage.
@@ -179,7 +186,7 @@ export async function emitJudgeVerdict(
     outcome: `judge:${verdict}`,
     ...(repo ? { repo } : {}),
     ...(engine ? { engine } : {}),
-  });
+  }, opts?.authority);
 }
 
 /**

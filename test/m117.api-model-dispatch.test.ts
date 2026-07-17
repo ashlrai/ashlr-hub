@@ -205,12 +205,26 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     tmpRepo = mkdtempSync(join(tmpdir(), 'ashlr-m117-'));
     mkdirSync(join(tmpRepo, '.git'), { recursive: true });
     writeFileSync(join(tmpRepo, 'hello.ts'), 'const x = 1;\n');
+
+    vi.doMock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
+      assertMayMutate: () => {},
+      killSwitchOn: () => false,
+    }));
+
+    vi.doMock('../src/core/sandbox/mutation-fence.js', () => ({
+      acquireOutwardMutationFence: () => ({}),
+      ownsOutwardMutationFence: (fence: unknown) => fence !== null,
+      releaseOutwardMutationFence: () => {},
+    }));
   });
 
   afterEach(() => {
     try { rmSync(tmpRepo, { recursive: true, force: true }); } catch { /* ok */ }
     vi.restoreAllMocks();
     vi.resetModules();
+    vi.doUnmock('../src/core/sandbox/policy.js');
+    vi.doUnmock('../src/core/sandbox/mutation-fence.js');
   });
 
   it('builds ProviderClient with correct baseUrl/model, calls runTask with engineer tools, files proposal', async () => {
@@ -227,7 +241,9 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         sourceRepo: repo,
         branch: 'ashlr-sandbox-test',
       }),
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -379,7 +395,9 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         sourceRepo: repo,
         branch: 'ashlr-sandbox-test',
       }),
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -587,7 +605,9 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         sourceRepo: repo,
         branch: 'ashlr-sandbox-test',
       }),
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
       sandboxDiff: () => ({
         files: 1,
         patch: [

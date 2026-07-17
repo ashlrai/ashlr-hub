@@ -75,7 +75,12 @@ import {
 } from '../mcp-native-engineer.js';
 import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
-import { killSwitchOn } from '../sandbox/policy.js';
+import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
@@ -1455,6 +1460,41 @@ export async function runEngineSandboxed(
     };
   }
 
+  // Hold authority through the complete agent lifecycle. Creation has its own
+  // short fence; this second acquisition closes the gap before agent writes and
+  // makes kill/unenroll wait for execution, proposal capture, and cleanup.
+  const executionFence = acquireOutwardMutationFence();
+  let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
+  let executionAuthorityFailure: string | undefined;
+  if (!ownsOutwardMutationFence(executionFence)) {
+    executionAuthorityFailure = 'outward mutation fence unavailable before engine execution';
+  } else {
+    try {
+      assertMayMutate(opts.sourceRepo, {
+        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+      });
+      cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
+      if (!cleanupAuthority) throw new Error('outward mutation authority became invalid before engine execution');
+    }
+    catch (err) { executionAuthorityFailure = err instanceof Error ? err.message : String(err); }
+  }
+  if (executionAuthorityFailure) {
+    releaseOutwardMutationFence(executionFence);
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', executionAuthorityFailure);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
+    };
+  }
+
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
   let sandboxRetention: SandboxRetentionEvidence | undefined;
@@ -2142,11 +2182,12 @@ export async function runEngineSandboxed(
     }
     if (createdHere && !sandboxRetention) {
       try {
-        wt.removeSandbox(sb);
+        wt.removeSandboxWithBorrowedAuthority(sb, cleanupAuthority);
       } catch {
         // removal is idempotent
       }
     }
+    releaseOutwardMutationFence(executionFence);
   }
 }
 
@@ -2362,6 +2403,38 @@ export async function runApiModelSandboxed(
         undefined,
         actionCounts,
       ),
+    };
+  }
+
+  const executionFence = acquireOutwardMutationFence();
+  let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
+  let executionAuthorityFailure: string | undefined;
+  if (!ownsOutwardMutationFence(executionFence)) {
+    executionAuthorityFailure = 'outward mutation fence unavailable before api-model execution';
+  } else {
+    try {
+      assertMayMutate(opts.sourceRepo, {
+        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+      });
+      cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
+      if (!cleanupAuthority) throw new Error('outward mutation authority became invalid before api-model execution');
+    }
+    catch (err) { executionAuthorityFailure = err instanceof Error ? err.message : String(err); }
+  }
+  if (executionAuthorityFailure) {
+    releaseOutwardMutationFence(executionFence);
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', executionAuthorityFailure);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
     };
   }
 
@@ -2658,10 +2731,11 @@ export async function runApiModelSandboxed(
   } finally {
     if (createdHere) {
       try {
-        wt.removeSandbox(sb!);
+        wt.removeSandboxWithBorrowedAuthority(sb!, cleanupAuthority);
       } catch {
         // removal is idempotent
       }
     }
+    releaseOutwardMutationFence(executionFence);
   }
 }

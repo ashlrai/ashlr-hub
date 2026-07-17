@@ -721,6 +721,48 @@ function recordM201ShadowSkill(overrides: { skillId?: string; summary?: string }
 // ===========================================================================
 
 describe('M201 — Group A: backlog build + top-K selection', () => {
+  it('A0a: retargeted legacy enrollment aliases are not counted, scanned, or dispatched', async () => {
+    const firstTarget = fx.makeRepo();
+    const secondTarget = fx.makeRepo();
+    const alias = join(fx.home, 'legacy-enrolled-repo');
+    fs.symlinkSync(firstTarget.dir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    fs.mkdirSync(fx.ashlrDir, { recursive: true });
+    fs.writeFileSync(
+      join(fx.ashlrDir, 'enrollment.json'),
+      JSON.stringify({ repos: [alias] }),
+      'utf8',
+    );
+    fs.unlinkSync(alias);
+    fs.symlinkSync(secondTarget.dir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    mockLoadBacklog.mockReturnValue({
+      generatedAt: new Date().toISOString(),
+      repos: [alias],
+      items: makeItems(alias, 1),
+    });
+
+    const result = await tick(cfgBuiltin(), { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(result.itemsConsidered).toBe(0);
+    expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A0b: a temporarily missing exact canonical enrollment degrades the tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+
+    const result = await tick(cfgBuiltin(), { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(result.itemsConsidered).toBe(0);
+    expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
     expect(workedOutcomeFromDispatchProduction({

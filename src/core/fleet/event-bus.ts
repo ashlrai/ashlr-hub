@@ -6,9 +6,8 @@
  * automation without editing the daemon tick.
  *
  * DESIGN
- *   emit(kind, payload, cfg) — synchronously calls all registered handlers
- *   for `kind`.  Fire-and-forget, best-effort: a handler that throws is
- *   silently swallowed; no handler may affect control flow in the caller.
+ *   emit(kind, payload, cfg) — calls all registered handlers in order and
+ *   resolves after their async tails settle. Failures remain best-effort.
  *
  *   onFleetEvent(kind, handler) — register a handler.  Returns a deregister
  *   function.  Handlers are called in registration order.
@@ -22,7 +21,7 @@
  *   - NO handler may call merge/push/apply or any destructive primitive.
  *   - The gate at the merge/push path (autoMergeProposal, merge.ts, M47,
  *     kill-switch) is NEVER touched from here.
- *   - emit() never throws regardless of handler behaviour.
+ *   - emit() never rejects regardless of handler behaviour.
  *   - Flag-off (eventBus:false) is byte-identical to pre-M241 — no new
  *     control-flow, no imports triggered.
  *
@@ -115,19 +114,18 @@ export function onFleetEvent<K extends FleetBusEventKind>(
 // ---------------------------------------------------------------------------
 
 /**
- * Emit a fleet lifecycle event.  All registered handlers for `kind` are
- * called synchronously (fire-and-forget async tails are detached).
+ * Emit a fleet lifecycle event and drain every registered handler in order.
  *
  * Gate: when cfg.foundry.eventBus === false, no handlers fire and the
  * function returns immediately — byte-identical to pre-M241.
  *
  * Never throws.
  */
-export function emit<K extends FleetBusEventKind>(
+export async function emit<K extends FleetBusEventKind>(
   kind: K,
   payload: FleetBusPayload<K>,
   cfg: AshlrConfig,
-): void {
+): Promise<void> {
   try {
     // Gate: flag-off = no-op (default ON when key is absent / true).
     const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -138,11 +136,7 @@ export function emit<K extends FleetBusEventKind>(
 
     for (const handler of handlers) {
       try {
-        const result = handler(payload as FleetBusPayloadMap[FleetBusEventKind], cfg);
-        // Swallow async tails — never let a rejected promise propagate.
-        if (result && typeof (result as Promise<void>).catch === 'function') {
-          (result as Promise<void>).catch(() => {});
-        }
+        await handler(payload as FleetBusPayloadMap[FleetBusEventKind], cfg);
       } catch {
         // Handler throws are silently swallowed — fire-and-forget.
       }
@@ -278,7 +272,7 @@ async function _handleMergeShipped(
   try {
     // Reuse M212 notification (merge kind).
     const { notifyFleetEvent } = await import('../comms/events.js');
-    void notifyFleetEvent(
+    await notifyFleetEvent(
       'merge',
       {
         repo: payload.repo,
@@ -287,7 +281,7 @@ async function _handleMergeShipped(
         proposalId: payload.proposalId,
       },
       cfg,
-    ).catch(() => {});
+    );
   } catch {
     // Best-effort.
   }
@@ -317,7 +311,7 @@ async function _handleGoalDone(
     const foundry = cfg.foundry as Record<string, unknown> | undefined;
     if (foundry?.['generative'] === true) {
       const { runInventCycle } = await import('../generative/invent-cycle.js');
-      void (runInventCycle(cfg) as Promise<unknown>).catch(() => {});
+      await runInventCycle(cfg);
     }
   } catch {
     // Best-effort.

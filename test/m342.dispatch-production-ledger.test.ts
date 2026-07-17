@@ -3,13 +3,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   dispatchProductionDir,
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
+  readDispatchProductionParents,
   readDispatchProductionYield,
   readDispatchProductionYieldDetailed,
   recordDispatchProduction,
@@ -36,7 +37,7 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
     machineId: 'machine-a',
     itemId: 'item-a',
     source: 'todo',
-    repo: '/tmp/repo',
+    repo: join(realpathSync.native(tmpdir()), 'repo'),
     title: 'Implement a thing',
     backend: 'local-coder',
     tier: 'mid',
@@ -89,6 +90,58 @@ describe('M342 dispatch production ledger', () => {
       proposalId: 'prop-new',
       basis: 'run-proposal-outcome',
     });
+  });
+
+  it('persists physical repo identity and rejects legacy lexical or linked aliases', () => {
+    const physicalRepo = join(home, 'physical-repo');
+    const nested = join(physicalRepo, 'identity-probe');
+    const linkedAlias = join(home, 'repo-alias');
+    mkdirSync(nested, { recursive: true });
+    const canonicalRepo = realpathSync.native(physicalRepo);
+    const lexicalAlias = join(nested, '..');
+    symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(recordDispatchProduction([
+      makeEvent({ itemId: 'lexical-alias', repo: lexicalAlias }),
+      makeEvent({ itemId: 'linked-alias', repo: linkedAlias }),
+    ])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+
+    const ledgerPath = join(dispatchProductionDir(), '2026-07-08.jsonl');
+    const raw = readFileSync(ledgerPath, 'utf8');
+    const rows = raw.trim().split('\n').map((line) => JSON.parse(line) as DispatchProductionEvent);
+    expect(rows.map((row) => row.repo)).toEqual([canonicalRepo, canonicalRepo]);
+    expect(readDispatchProductionEvents().map((event) => event.repo)).toEqual([canonicalRepo, canonicalRepo]);
+    expect(readDispatchProductionParents([{
+      ts: '2026-07-08T12:00:00.000Z',
+      itemId: 'linked-alias',
+      repo: linkedAlias,
+      outcome: 'empty-diff',
+      attemptId: rows[1]!.trajectoryId ?? rows[1]!.runId!,
+    }])).toEqual(['found']);
+
+    const legacyAlias = makeEvent({ itemId: 'legacy-alias', repo: linkedAlias });
+    writeFileSync(ledgerPath, `${raw}${JSON.stringify(legacyAlias)}\n`, 'utf8');
+    const detailed = readDispatchProductionEventsDetailed();
+    expect(detailed.events.map((event) => event.itemId)).toEqual(['linked-alias', 'lexical-alias']);
+    expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    const rawAfter = readFileSync(ledgerPath, 'utf8').trim().split('\n')
+      .map((line) => JSON.parse(line) as DispatchProductionEvent);
+    expect(rawAfter.at(-1)?.repo).toBe(linkedAlias);
+  });
+
+  it('idempotently rejects relative and secret-shaped raw repo identities without fallback rows', () => {
+    const secret = 'github_pat_1234567890abcdefghijklmnop';
+    const invalidRepos = ['relative/repo', join(home, `token=${secret}`)];
+
+    for (const [index, repo] of invalidRepos.entries()) {
+      const event = makeEvent({ itemId: `invalid-repo-${index}`, repo });
+      expect(() => sanitizeDispatchProductionEvent(event)).toThrow(/repository identity/);
+      expect(() => sanitizeDispatchProductionEvent(event)).toThrow(/repository identity/);
+      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    }
+
+    expect(existsSync(join(dispatchProductionDir(), '2026-07-08.jsonl'))).toBe(false);
   });
 
   it('preserves complete repair transition lineage and marks partial or inconsistent tuples invalid', () => {

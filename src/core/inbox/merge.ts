@@ -60,9 +60,10 @@
  * ║      M54 guards (Gate 6.5) remain regardless of this flag.                 ║
  * ║                                                                            ║
  * ║ Only after ALL gates pass do we mutate. Mutation paths:                    ║
- * ║   - REMOTE (preferred): open a PR to the default branch and best-effort    ║
- * ║     `gh pr merge --auto --squash` so branch protection / required checks   ║
- * ║     remain the outer safety net. gh failures NEVER throw.                  ║
+ * ║   - REMOTE (preferred): open a protected PR to the default branch and      ║
+ * ║     persist an awaiting-host-merge handoff. Deferred host auto-merge stays ║
+ * ║     disabled until kill/unenroll can durably revoke it and confirm that    ║
+ * ║     revocation against host truth.                                         ║
  * ║   - LOCAL (fallback): merge the branch into the default branch via a       ║
  * ║     dedicated temp worktree (`git merge --no-ff`). We REFUSE the local     ║
  * ║     path when the default branch is the one checked out in the user's      ║
@@ -163,6 +164,19 @@ import {
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
+import {
+  isApprovedRemoteHandoffRetryCandidate,
+  remoteAuthorityBinding,
+  remoteAuthorityMatchesRepo,
+  remoteIntentAuthorizationId,
+  REMOTE_HANDOFF_RECOVERY_MARKER,
+} from './remote-handoff.js';
+import { findLocalRealizedMergeDescendant } from './realized-merge.js';
 
 function auditAutoMergeCanaryFailure(repo: string, sandboxId: string): void {
   try {
@@ -256,13 +270,13 @@ function cleanupOwnedMergeBranch(
 ): void {
   if (!branch.startsWith(MERGE_BRANCH_PREFIX)) return;
   const remoteRef = `refs/heads/${branch}`;
-  const currentOrigin = options.origin ? resolveGitHubOriginAuthorityDetails(repo) : null;
-  if (
-    options.remote && options.origin && currentOrigin &&
-    currentOrigin.nameWithOwner === options.origin.nameWithOwner &&
-    currentOrigin.pushUrl === options.origin.pushUrl
-  ) {
-    if (!killSwitchOn()) {
+  runFencedMutationSync(repo, 'owned staging cleanup', () => {
+    const currentOrigin = options.origin ? resolveGitHubOriginAuthorityDetails(repo) : null;
+    if (
+      options.remote && options.origin && currentOrigin &&
+      currentOrigin.nameWithOwner === options.origin.nameWithOwner &&
+      currentOrigin.pushUrl === options.origin.pushUrl
+    ) {
       gitTry(repo, [
         'push',
         `--force-with-lease=${remoteRef}:${expectedHead}`,
@@ -270,8 +284,8 @@ function cleanupOwnedMergeBranch(
         `:${remoteRef}`,
       ]);
     }
-  }
-  if (!killSwitchOn()) gitTry(repo, ['update-ref', '-d', remoteRef, expectedHead]);
+    gitTry(repo, ['update-ref', '-d', remoteRef, expectedHead]);
+  });
 }
 
 function finalMutationAuthorityFailure(repo: string): string | null {
@@ -281,6 +295,64 @@ function finalMutationAuthorityFailure(repo: string): string | null {
     return null;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
+  }
+}
+
+type FencedMutationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: string };
+
+function runFencedMutationSync<T>(
+  repo: string,
+  effect: string,
+  mutate: (stillOwnsFence: () => boolean) => T,
+): FencedMutationResult<T> {
+  const fence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return { ok: false, reason: `${effect} fence unavailable` };
+  }
+  try {
+    const authorityFailure = finalMutationAuthorityFailure(repo);
+    if (authorityFailure) return { ok: false, reason: authorityFailure };
+    const stillOwnsFence = (): boolean => ownsOutwardMutationFence(fence);
+    const value = mutate(stillOwnsFence);
+    if (!stillOwnsFence()) {
+      return {
+        ok: false,
+        reason: `${effect} fence ownership was lost; outcome is unknown and requires reconciliation`,
+      };
+    }
+    return { ok: true, value };
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
+}
+
+async function runFencedMutation<T>(
+  repo: string,
+  effect: string,
+  mutate: (stillOwnsFence: () => boolean) => Promise<T>,
+): Promise<FencedMutationResult<T>> {
+  const fence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return { ok: false, reason: `${effect} fence unavailable` };
+  }
+  try {
+    const authorityFailure = finalMutationAuthorityFailure(repo);
+    if (authorityFailure) return { ok: false, reason: authorityFailure };
+    const stillOwnsFence = (): boolean => ownsOutwardMutationFence(fence);
+    const value = await mutate(stillOwnsFence);
+    if (!stillOwnsFence()) {
+      return {
+        ok: false,
+        reason: `${effect} fence ownership was lost; outcome is unknown and requires reconciliation`,
+      };
+    }
+    return { ok: true, value };
+  } finally {
+    releaseOutwardMutationFence(fence);
   }
 }
 
@@ -1848,6 +1920,30 @@ function currentProposalDiffHash(proposal: Proposal): string {
   return hashDiff(proposal.diff ?? '');
 }
 
+function hasVerificationDiffBinding(
+  proposal: Proposal,
+): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: boolean; baseBranch: string; baseHead: string; diffHash: string } } {
+  const result = proposal.verifyResult;
+  return (
+    typeof result?.passed === 'boolean' &&
+    typeof result.baseBranch === 'string' &&
+    result.baseBranch.length > 0 &&
+    typeof result.baseHead === 'string' &&
+    result.baseHead.length > 0 &&
+    result.diffHash === currentProposalDiffHash(proposal)
+  );
+}
+
+export function hasCurrentVerificationBinding(
+  proposal: Proposal,
+): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: boolean; baseBranch: string; baseHead: string; diffHash: string } } {
+  if (!hasVerificationDiffBinding(proposal) || !proposal.repo) return false;
+
+  const base = defaultBranch(proposal.repo);
+  return proposal.verifyResult.baseBranch === base &&
+    resolveDefaultBranchHead(proposal.repo, base) === proposal.verifyResult.baseHead;
+}
+
 function hasVerifiedDiffBinding(
   proposal: Proposal,
 ): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: true; baseBranch: string; baseHead: string; diffHash: string } } {
@@ -2182,6 +2278,112 @@ export async function verifyProposal(
   }
 }
 
+export interface VerifyAndPersistProposalResult {
+  verify: VerifyProposalResult;
+  verifyResult?: ProposalVerifyResult;
+  persisted: boolean;
+  authorityLive: boolean;
+  reason: string;
+}
+
+function verificationProposalConflict(expected: Proposal, current: Proposal | null): string | null {
+  if (!current) return 'proposal no longer exists';
+  if (current.isPartial === true) return 'proposal became partial';
+  if (current.repo !== expected.repo) return 'proposal repository changed';
+  if (current.kind !== expected.kind) return 'proposal kind changed';
+  if (current.status !== expected.status) return `proposal status changed to '${current.status}'`;
+  if (current.diff !== expected.diff || currentProposalDiffHash(current) !== currentProposalDiffHash(expected)) {
+    return 'proposal diff changed';
+  }
+  if (current.status !== 'pending' && current.status !== 'approved') {
+    return `proposal status '${current.status}' is not mergeable`;
+  }
+  return null;
+}
+
+/**
+ * Run verification and durably bind its evidence to the exact proposal state.
+ * Lock order is proposal -> outward fence; evidence is persisted before either
+ * capability is released so pause/kill cannot observe a verified-but-unrecorded
+ * transaction or let a stale diff inherit fresh verification.
+ */
+export async function verifyAndPersistProposal(
+  expected: Proposal,
+  cfg: AshlrConfig,
+  source: ProposalVerifyResult['source'] = 'auto-merge',
+): Promise<VerifyAndPersistProposalResult> {
+  const refused = (
+    reason: string,
+    verify: VerifyProposalResult = { ok: false, ran: [], detail: `verification authority refused: ${reason}` },
+  ): VerifyAndPersistProposalResult => ({
+    verify,
+    persisted: false,
+    authorityLive: false,
+    reason,
+  });
+  const repo = expected.repo;
+  if (!repo) return refused('proposal has no repository');
+
+  const proposalLock = acquireProposalMutationLock(expected.id);
+  if (!proposalLock) return refused('proposal mutation lock unavailable');
+  let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
+  try {
+    let current = loadProposal(expected.id);
+    const initialConflict = verificationProposalConflict(expected, current);
+    if (initialConflict) return refused(initialConflict);
+
+    outwardFence = acquireOutwardMutationFence();
+    if (!outwardFence || !ownsOutwardMutationFence(outwardFence)) {
+      return refused('outward mutation fence unavailable');
+    }
+    const initialAuthorityFailure = finalMutationAuthorityFailure(repo);
+    if (initialAuthorityFailure) return refused(initialAuthorityFailure);
+
+    const verify = await verifyProposal(current!, cfg);
+
+    current = loadProposal(expected.id);
+    const finalConflict = verificationProposalConflict(expected, current);
+    if (finalConflict) return refused(finalConflict, verify);
+    if (!ownsOutwardMutationFence(outwardFence)) {
+      return refused('outward mutation fence was revoked', verify);
+    }
+    const finalAuthorityFailure = finalMutationAuthorityFailure(repo);
+    if (finalAuthorityFailure) return refused(finalAuthorityFailure, verify);
+
+    const verifyResult = verifyResultFromProposalResult(
+      verify,
+      source,
+      new Date().toISOString(),
+      currentProposalDiffHash(current!),
+    );
+    if (!updateProposalField(expected.id, { verifyResult }, proposalLock)) {
+      return {
+        verify,
+        persisted: false,
+        authorityLive: ownsOutwardMutationFence(outwardFence) && finalMutationAuthorityFailure(repo) === null,
+        reason: 'verification evidence could not be persisted',
+      };
+    }
+
+    const authorityLive = ownsOutwardMutationFence(outwardFence) &&
+      finalMutationAuthorityFailure(repo) === null;
+    return {
+      verify,
+      verifyResult,
+      persisted: true,
+      authorityLive,
+      reason: authorityLive
+        ? 'verification evidence persisted under live authority'
+        : 'verification evidence persisted before authority revocation completed',
+    };
+  } catch (err) {
+    return refused(`verification transaction failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+    releaseProposalMutationLock(proposalLock);
+  }
+}
+
 // ===========================================================================
 // 5) autoMergeProposal — the orchestrator
 // ===========================================================================
@@ -2195,6 +2397,52 @@ export interface AutoMergeResult {
   handoff?: boolean;
   reason: string;
   prUrl?: string;
+}
+
+/** Repair the narrow crash window between a proven local merge and its receipt. */
+function reconcileLocalMergeIntent(id: string, cfg: AshlrConfig): AutoMergeResult | null {
+  const proposal = loadProposal(id);
+  const intent = proposal?.localMergeIntent;
+  if (!proposal || !intent || !proposal.repo ||
+    (proposal.status !== 'pending' && proposal.status !== 'approved')) return null;
+  const repo = proposal.repo;
+  const mergeCommitOid = findLocalRealizedMergeDescendant(
+    repo,
+    intent.base,
+    intent.baseBeforeOid,
+    intent.proposalHeadOid,
+  );
+  if (!mergeCommitOid) return null;
+  const evidence: LocalDefaultBranchMergeObservation = {
+    schemaVersion: 1,
+    source: 'local-default-branch',
+    base: intent.base,
+    baseBeforeOid: intent.baseBeforeOid.toLowerCase(),
+    proposalHeadOid: intent.proposalHeadOid.toLowerCase(),
+    mergeCommitOid: mergeCommitOid.toLowerCase(),
+    observedAt: new Date().toISOString(),
+  };
+  const outwardFence = cfg.foundry?.autoMerge?.enabled === true
+    ? acquireOutwardMutationFence()
+    : null;
+  try {
+    const stillAuthorized = (): boolean =>
+      cfg.foundry?.autoMerge?.enabled === true &&
+      ownsOutwardMutationFence(outwardFence) &&
+      finalMutationAuthorityFailure(repo) === null;
+    if (!recordRealizedMerge(id, evidence, undefined, stillAuthorized)) return null;
+  } finally {
+    releaseOutwardMutationFence(outwardFence);
+  }
+  const reason = `reconciled realized local merge at ${mergeCommitOid.slice(0, 8)} from durable intent`;
+  audit({
+    action: 'inbox:auto-merge-reconcile',
+    repo,
+    sandboxId: id,
+    summary: reason,
+    result: 'ok',
+  });
+  return { ok: true, merged: true, reason };
 }
 
 /** Build the staging branch holding the proposal's diff, off the default branch.
@@ -2231,7 +2479,9 @@ function buildMergeBranch(
     if (linkAuthorityFailure) throw new Error(linkAuthorityFailure);
     linkNodeModules(repo, tmpDir);
   } catch (err) {
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
+    // Cleanup belongs to the already-authorized fenced operation. KILL may be
+    // armed while waiting for this fence and must not strand its temp worktree.
+    gitTry(repo, ['worktree', 'prune']);
     return {
       branch: null,
       head: null,
@@ -2277,15 +2527,15 @@ function buildMergeBranch(
       detail = `apply/commit failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   } finally {
-    if (patchFile && !killSwitchOn()) {
+    if (patchFile) {
       try {
         unlinkSync(patchFile);
       } catch {
         /* ignore */
       }
     }
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
+    gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+    gitTry(repo, ['worktree', 'prune']);
   }
   if (ok && !head) {
     return { branch: null, head: null, detail: 'staged branch head could not be resolved' };
@@ -2386,8 +2636,8 @@ function mergeLocally(
     if (expectedBaseHead) {
       const checkedOutHead = gitTry(tmpDir, ['rev-parse', 'HEAD']);
       if (checkedOutHead !== expectedBaseHead) {
-        if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-        if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
+        gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+        gitTry(repo, ['worktree', 'prune']);
         return {
           ok: false,
           detail: `default branch '${base}' moved while preparing local merge (verified ${expectedBaseHead.slice(0, 8)}, checked out ${checkedOutHead?.slice(0, 8) ?? 'unknown'}) — branch '${branch}' left for manual reverify`,
@@ -2395,7 +2645,7 @@ function mergeLocally(
       }
     }
   } catch (err) {
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
+    gitTry(repo, ['worktree', 'prune']);
     return {
       ok: false,
       detail: `git worktree add for '${base}' failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2428,10 +2678,10 @@ function mergeLocally(
   } catch (err) {
     detail = `git merge --no-ff failed: ${err instanceof Error ? err.message : String(err)}`;
     // Abort any partial merge so the default branch is left clean.
-    if (!killSwitchOn()) gitTry(tmpDir, ['merge', '--abort']);
+    gitTry(tmpDir, ['merge', '--abort']);
   } finally {
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-    if (!killSwitchOn()) gitTry(repo, ['worktree', 'prune']);
+    gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+    gitTry(repo, ['worktree', 'prune']);
   }
   return { ok: false, detail };
 }
@@ -2457,6 +2707,12 @@ export async function autoMergeProposal(
   };
 
   try {
+    // Reconciliation records an effect that already happened. It must run
+    // before current feature/policy gates so a crash cannot strand a proven
+    // default-branch merge as an approved proposal.
+    const reconciledLocalMerge = reconcileLocalMergeIntent(id, cfg);
+    if (reconciledLocalMerge) return reconciledLocalMerge;
+
     // ── Gate 1: feature must be enabled (DEFAULT DISABLED) ───────────────────
     if (cfg.foundry?.autoMerge?.enabled !== true) {
       return refuse('auto-merge disabled (cfg.foundry.autoMerge.enabled !== true)');
@@ -2480,6 +2736,10 @@ export async function autoMergeProposal(
     if (!proposal) return refuse(`proposal not found: ${id}`);
     if (proposal.status !== 'pending' && proposal.status !== 'approved') {
       return refuse(`proposal status '${proposal.status}' has no active merge authority`, proposal.repo);
+    }
+    if (proposal.status === 'approved' && proposal.remoteHandoff?.recovery !== undefined &&
+      !isApprovedRemoteHandoffRetryCandidate(proposal)) {
+      return refuse('approved remote retry lacks a valid bounded recovery marker, signed intent, or live origin authority', proposal.repo);
     }
     if (proposal.kind !== 'patch' && proposal.kind !== 'pr') {
       return refuse(`proposal kind '${proposal.kind}' is not mergeable (need patch|pr)`, proposal.repo);
@@ -2583,39 +2843,49 @@ export async function autoMergeProposal(
       // observational only: proposal provenance does not authenticate that
       // mutable field. Every mutating evidence-mode invocation therefore
       // establishes fresh verification authority in an isolated worktree.
-      // Verification mode retains its judge-attested cached-result behavior.
-      const verifiedForCurrentDiff = trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult);
-      const shouldVerify = trustBasis === 'evidence' || (
-        proposal.verifyResult?.passed !== false && !verifiedForCurrentDiff
-      );
-      if (shouldVerify) {
-        const preVerify = await verifyProposal(proposal, cfg);
-        const preVerifyResult = verifyResultFromProposalResult(
-          preVerify,
-          'auto-merge',
-          new Date().toISOString(),
-          currentProposalDiffHash(proposal),
-        );
-        let persisted = false;
-        try {
-          persisted = updateProposalField(proposal.id, {
-            verifyResult: preVerifyResult,
-          });
-        } catch {
-          persisted = false;
-        }
-        if (!persisted) {
+      // Verification mode may reuse either outcome only while it is bound to
+      // the current default-branch head and exact diff. A stale failure must be
+      // refreshed so it cannot remain a rejection/archive signal for a changed
+      // proposal. Evidence mode still establishes fresh authority every time.
+      if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
+        const verifiedBase = proposal.verifyResult;
+        const liveBase = defaultBranch(repo);
+        if (verifiedBase.baseBranch !== liveBase) {
           return refuse(
-            preVerify.ok
-              ? 'verification result could not be persisted — refusing merge authority'
-              : `verification failed: ${preVerify.detail}; result could not be persisted`,
+            `default branch changed since verification (verified '${verifiedBase.baseBranch}', current '${liveBase}') — reverify required`,
             repo,
           );
+        }
+        const liveBaseHead = resolveDefaultBranchHead(repo, liveBase);
+        if (liveBaseHead !== verifiedBase.baseHead) {
+          const current = liveBaseHead ? liveBaseHead.slice(0, 8) : 'unresolved';
+          return refuse(
+            `default branch '${liveBase}' moved since verification (verified ${verifiedBase.baseHead.slice(0, 8)}, current ${current}) — reverify required`,
+            repo,
+          );
+        }
+      }
+      const verificationBoundToCurrentProposal = trustBasis === 'verification' &&
+        hasCurrentVerificationBinding(proposal);
+      const shouldVerify = trustBasis === 'evidence' || !verificationBoundToCurrentProposal;
+      if (shouldVerify) {
+        const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+        const preVerify = transaction.verify;
+        if (!transaction.persisted || !transaction.verifyResult) {
+          return refuse(
+            preVerify.ok
+              ? `${transaction.reason} — refusing merge authority`
+              : `verification failed: ${preVerify.detail}; ${transaction.reason}`,
+            repo,
+          );
+        }
+        if (!transaction.authorityLive) {
+          return refuse(`verification authority revoked: ${transaction.reason}`, repo);
         }
         if (!preVerify.ok) {
           return refuse(`verification failed: ${preVerify.detail}`, repo);
         }
-        proposal.verifyResult = preVerifyResult;
+        proposal.verifyResult = transaction.verifyResult;
         verifiedThisInvocation = preVerify;
       }
 
@@ -2765,25 +3035,18 @@ export async function autoMergeProposal(
     let verify: VerifyProposalResult;
     if ((trustBasis === 'verification' || trustBasis === 'evidence') && verifiedThisInvocation) {
       verify = verifiedThisInvocation;
-    } else if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
+    } else if (trustBasis === 'verification' && hasVerifiedDiffBinding(proposal)) {
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
-      verify = await verifyProposal(proposal, cfg);
-      // Persist the result for the non-verification-mode path (best-effort).
-      // In verification mode this branch only runs if verifyResult was absent
-      // AND the pre-Gate-4 path somehow did not set it — fail-closed by design.
-      try {
-        updateProposalField(proposal.id, {
-	          verifyResult: verifyResultFromProposalResult(
-	            verify,
-	            'auto-merge',
-	            new Date().toISOString(),
-	            currentProposalDiffHash(proposal),
-	          ),
-        });
-      } catch {
-        // Persistence failure — swallow; the verify outcome still drives the gate.
+      const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+      verify = transaction.verify;
+      if (!transaction.persisted || !transaction.verifyResult) {
+        return refuse(`${transaction.reason} — refusing merge authority`, repo);
       }
+      if (!transaction.authorityLive) {
+        return refuse(`verification authority revoked: ${transaction.reason}`, repo);
+      }
+      proposal.verifyResult = transaction.verifyResult;
     }
     if (!verify.ok) {
       return refuse(`verification failed: ${verify.detail}`, repo);
@@ -3287,7 +3550,10 @@ export async function autoMergeProposal(
     }
     const preStageAuthority = finalAuthorityConflict() ?? currentProposalConflict();
     if (preStageAuthority) return refuse(preStageAuthority, repo);
-    const staged = buildMergeBranch(repo, id, diff, base, verify.baseHead, finalAuthorityConflict);
+    const stagedMutation = runFencedMutationSync(repo, 'staging branch creation', () =>
+      buildMergeBranch(repo, id, diff, base, verify.baseHead, finalAuthorityConflict));
+    if (!stagedMutation.ok) return refuse(stagedMutation.reason, repo);
+    const staged = stagedMutation.value;
     if (!staged.branch || !staged.head) {
       return refuse(`could not stage merge branch: ${staged.detail}`, repo);
     }
@@ -3300,7 +3566,7 @@ export async function autoMergeProposal(
       headOid: stagedHead,
       cfg,
     };
-    let pushedOwnedBranch = false;
+    const pushedOwnedBranch = false;
     const refuseStaged = (reason: string): AutoMergeResult => {
       cleanupOwnedMergeBranch(repo, branch, stagedHead, {
         remote: pushedOwnedBranch,
@@ -3311,10 +3577,11 @@ export async function autoMergeProposal(
 
     let merged = false;
     let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)
-    let remoteHandoff = false; // Remote PR created; host gates own the actual merge.
-    let remoteHandoffPersisted = false;
+    const remoteHandoff = false; // Remote PR creation returns from its fenced handoff path.
+    const remoteHandoffPersisted = false;
     let remoteHandoffCreatedAt: string | undefined;
     let localRealizedMerge: LocalDefaultBranchMergeObservation | undefined;
+    let localRealizedMergePersisted = false;
     let reason = '';
     let prUrl: string | undefined;
 
@@ -3360,69 +3627,6 @@ export async function autoMergeProposal(
           return refuseStaged('live branch protection policy changed after evidence capture — re-evaluate required');
         }
       }
-      // H4: PUSH the staging branch to origin BEFORE opening the PR. createPr
-      // points the PR head at `branch`, which the host cannot see unless we push
-      // it first. Wrapped never-throw + audited; if the push fails we DO NOT
-      // claim merged — we refuse so no PR is opened against a missing head.
-      const remoteStagingRef = `refs/heads/${branch}`;
-      const priorRemoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
-      const reusedExactRemoteHead = priorRemoteStagedHead === stagedHead;
-      const originStableBeforePush = githubOriginAuthorityMatches(repo, githubOrigin);
-      const prePushAuthority = finalAuthorityConflict();
-      if (prePushAuthority) return refuseStaged(prePushAuthority);
-      const pushed = originStableBeforePush && (reusedExactRemoteHead || (
-        priorRemoteStagedHead === null &&
-        gitTry(repo, [
-          'push',
-          '--porcelain',
-          `--force-with-lease=${remoteStagingRef}:`,
-          githubOrigin.pushUrl,
-          `${stagedHead}:${remoteStagingRef}`,
-        ]) !== null
-      ));
-      pushedOwnedBranch = pushed && !reusedExactRemoteHead;
-      audit({
-        action: 'inbox:auto-merge',
-        repo,
-        sandboxId: id,
-        summary: `${reusedExactRemoteHead ? 'reuse' : 'push'} staging branch '${branch}' on origin: ${pushed ? 'ok' : 'failed'}`,
-        result: pushed ? 'ok' : 'error',
-      });
-      if (!pushed) {
-        cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
-        return {
-          ok: false,
-          merged: false,
-          reason: 'failed to push staging branch',
-        };
-      }
-
-      const remoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
-      if (remoteStagedHead !== stagedHead) {
-        return refuseStaged(
-          `remote staging branch '${branch}' does not match verified commit ${stagedHead.slice(0, 8)} — refusing PR creation`,
-        );
-      }
-
-      if (!githubOriginAuthorityMatches(repo, githubOrigin)) {
-        return refuseStaged('canonical GitHub origin changed after push; refusing PR creation');
-      }
-
-      if (toMain) {
-        const postPushProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
-        if (
-          !postPushProtection.authorized ||
-          remoteProtectionEvidence === undefined ||
-          postPushProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash
-        ) {
-          return refuseStaged(
-            `live branch protection changed after push; refusing PR creation${
-              postPushProtection.authorized ? '' : `: ${postPushProtection.reason}`
-            }`,
-          );
-        }
-      }
-
       // H5: scrub secret-shaped tokens from the PR title/body before they leave
       // the host, and cap length (title ≤120, body ≤4000) to avoid leaking or
       // bloating the outward PR payload.
@@ -3433,207 +3637,285 @@ export async function autoMergeProposal(
           `Verified: ${verify.detail}.`,
       ).slice(0, 4000);
 
-      // PREFERRED path — open a PR to the default branch; branch protection / CI
-      // on the host remain the outer safety net.
-      const existingPr = viewPr(repo, branch, { repo: githubOrigin.nameWithOwner });
-      const existingPrIdentityMatches = Boolean(existingPr?.url &&
-        prUrlMatchesAuthority(existingPr.url, githubOrigin.nameWithOwner) &&
-        existingPr.headRefName === branch &&
-        existingPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase() &&
-        existingPr.baseRefName === base);
-      const matchingExistingPr = Boolean(existingPrIdentityMatches &&
-        existingPr?.state === 'OPEN');
+      // The signed authorization and exact handoff selector must be durable
+      // before push. One outward fence then stays held through push, PR creation,
+      // and the durable host outcome so pause cannot report quiescence in the
+      // middle of a handoff.
+      const remoteMutation = await runFencedMutation(repo, 'remote protected handoff', async (stillOwnsFence) => {
+        if (!proposal.diffHash || !verify.baseHead) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'remote handoff intent requires verified base and signed diff identity',
+          } satisfies AutoMergeResult;
+        }
+        const boundRemoteAuthority = remoteAuthorityBinding(githubOrigin);
+        if (!boundRemoteAuthority) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'remote handoff push authority could not be bound; push not started',
+          } satisfies AutoMergeResult;
+        }
+        if (!remoteAuthorityMatchesRepo(repo, boundRemoteAuthority)) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'canonical GitHub origin changed before signed handoff persistence; push not started',
+          } satisfies AutoMergeResult;
+        }
+        const authorizedAt = new Date().toISOString();
+        const intentWithoutAuthorization: Omit<
+          ProposalLocalMergeIntent,
+          'attestation' | 'authorizationId'
+        > = {
+          schemaVersion: 1,
+          branch,
+          base,
+          baseBeforeOid: verify.baseHead,
+          proposalHeadOid: stagedHead,
+          diffHash: proposal.diffHash,
+          evidencePackDigest,
+          authorizedAt,
+          remoteAuthority: boundRemoteAuthority,
+        };
+        const authorizationId = remoteIntentAuthorizationId(
+          proposal.remoteHandoff?.recovery ? 'recovery' : 'pre-effect',
+          intentWithoutAuthorization,
+        );
+        const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
+          ...intentWithoutAuthorization,
+          authorizationId,
+        };
+        const intentAttestation = signLocalMergeIntent(id, repo, unsignedIntent);
+        const signedIntent: ProposalLocalMergeIntent | null = intentAttestation
+          ? { ...unsignedIntent, attestation: intentAttestation }
+          : null;
+        if (!signedIntent || !updateProposalField(id, { localMergeIntent: signedIntent }, authorityFence)) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'remote handoff intent could not be authenticated and persisted; push not started',
+          } satisfies AutoMergeResult;
+        }
 
-      // Persist the exact branch/base/head intent before the first outward PR
-      // mutation. A crash or ambiguous host response can then be reconciled by
-      // branch, while a discovered exact PR URL is retained immediately.
-      if (toMain) {
-        const preIntentAuthority = finalAuthorityConflict();
-        if (preIntentAuthority) return refuseStaged(preIntentAuthority);
-        remoteHandoffCreatedAt = new Date().toISOString();
-        const discoveredPrUrl = existingPrIdentityMatches ? existingPr?.url : undefined;
-        const intentReason = discoveredPrUrl
-          ? `remote PR intent persisted with discovered exact PR: ${discoveredPrUrl}`
-          : `remote PR creation intent persisted for ${branch}@${stagedHead}`;
-        remoteHandoffPersisted = setStatus(
+        const createdAt = new Date().toISOString();
+        const recovery = proposal.remoteHandoff?.recovery;
+        const recoveryMarker = recovery?.marker === REMOTE_HANDOFF_RECOVERY_MARKER
+          ? ` ${REMOTE_HANDOFF_RECOVERY_MARKER}`
+          : '';
+        const intentReason = `signed remote handoff intent persisted for ${branch}@${stagedHead} ` +
+          `on ${boundRemoteAuthority.nameWithOwner}${recoveryMarker}`;
+        const handoffRecord = (detail: string, url?: string) => ({
+          provider: 'github' as const,
+          state: 'awaiting-host-merge' as const,
+          ...(url ? { prUrl: url } : {}),
+          branch,
+          base,
+          expectedHeadOid: stagedHead,
+          authority: boundRemoteAuthority,
+          intentAttestation,
+          ...(recovery ? { recovery } : {}),
+          createdAt,
+          updatedAt: new Date().toISOString(),
+          detail: recoveryMarker && !detail.includes(REMOTE_HANDOFF_RECOVERY_MARKER)
+            ? `${detail}${recoveryMarker}`
+            : detail,
+        });
+        if (!setStatus(
           id,
           'awaiting-host-merge',
           intentReason,
           intentReason,
           authorityFence,
-          {
-            remoteHandoff: {
-              provider: 'github',
-              state: 'awaiting-host-merge',
-              ...(discoveredPrUrl ? { prUrl: discoveredPrUrl } : {}),
-              branch,
-              base,
-              expectedHeadOid: stagedHead,
-              createdAt: remoteHandoffCreatedAt,
-              updatedAt: remoteHandoffCreatedAt,
-              detail: intentReason,
-            },
-          },
-        );
-        if (!remoteHandoffPersisted) {
-          return refuseStaged('remote PR creation intent could not be persisted; PR not created');
+          { remoteHandoff: handoffRecord(intentReason) },
+        )) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'signed remote handoff intent could not be durably attached; push not started',
+          } satisfies AutoMergeResult;
         }
-      }
 
-      let rawPr: CreatePrResult;
-      if (matchingExistingPr) {
-        rawPr = { ok: true, url: existingPr?.url ?? null, detail: 'existing matching PR adopted' };
-      } else {
-        const preCreatePrAuthority = finalAuthorityConflict();
-        if (preCreatePrAuthority) return refuseStaged(preCreatePrAuthority);
-        rawPr = await createPr(repo, {
-          title: safeTitle,
-          body: safeBody,
-          base,
-          head: branch,
-          repo: githubOrigin.nameWithOwner,
+        const persistOutcome = (detail: string, url?: string): boolean =>
+          updateProposalField(id, { remoteHandoff: handoffRecord(detail, url) }, authorityFence);
+        const uncertain = (detail: string, url?: string): AutoMergeResult => {
+          const persisted = persistOutcome(detail, url);
+          return {
+            ok: false,
+            merged: false,
+            reason: persisted
+              ? detail
+              : `${detail}; durable outcome update failed, pre-effect intent retained for reconciliation`,
+            ...(url ? { prUrl: url } : {}),
+          };
+        };
+
+        const remoteStagingRef = `refs/heads/${branch}`;
+        if (!remoteAuthorityMatchesRepo(repo, boundRemoteAuthority)) {
+          return uncertain('canonical GitHub origin changed after signed intent; staging push not started');
+        }
+        const priorRemoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+        const reusedExactRemoteHead = priorRemoteStagedHead === stagedHead;
+        let pushed = reusedExactRemoteHead;
+        if (!reusedExactRemoteHead && priorRemoteStagedHead === null) {
+          pushed = gitTry(repo, [
+            'push',
+            '--porcelain',
+            `--force-with-lease=${remoteStagingRef}:`,
+            githubOrigin.pushUrl,
+            `${stagedHead}:${remoteStagingRef}`,
+          ]) !== null;
+        }
+        audit({
+          action: 'inbox:auto-merge',
+          repo,
+          sandboxId: id,
+          summary: `${reusedExactRemoteHead ? 'reuse' : 'push'} staging branch '${branch}' on origin: ${pushed ? 'ok' : 'uncertain'}`,
+          result: pushed ? 'ok' : 'error',
         });
-      }
-      const pr: CreatePrResult = rawPr.ok &&
-        !prUrlMatchesAuthority(rawPr.url ?? undefined, githubOrigin.nameWithOwner)
-        ? { ok: false, url: null, detail: 'PR creation returned no canonical URL for the authorized repository' }
-        : rawPr;
-      const observedPr = pr.ok && pr.url
-        ? (matchingExistingPr ? existingPr : viewPr(repo, pr.url, { repo: githubOrigin.nameWithOwner }))
-        : null;
-      const prIdentityConfirmed = Boolean(
-        pr.ok && pr.url && observedPr?.url === pr.url &&
-        observedPr.state === 'OPEN' && observedPr.headRefName === branch &&
-        observedPr.baseRefName === base && observedPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase(),
-      );
-      if (!pr.ok) {
-        reason = `staged on ${branch} but PR creation outcome is unknown: ${pr.detail}; remote branch retained for reconciliation`;
-        cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
-      } else {
-        prUrl = pr.url ?? undefined;
-        // Best-effort host auto-merge. Never request privileged bypass:
-        // branch protection / required checks must remain the outer safety net.
-        // M56: only a frontier (toMain) proposal is ever squash-merged to main.
-        // A mid-tier proposal opens a PR and STOPS — a human merges it.
-        remoteHandoff = true;
-        let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
-        if (toMain && prUrl) {
-          const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
-          const latestRemoteHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
-          const remoteHeadMatches = latestRemoteHead === stagedHead;
-          const originStableForAutoMerge = githubOriginAuthorityMatches(repo, githubOrigin);
-          const mayEnableHostAutoMerge = latestProtection.authorized &&
-            remoteProtectionEvidence !== undefined &&
-            latestProtection.evidence.policyHash === remoteProtectionEvidence.policyHash &&
-            remoteHeadMatches &&
-            originStableForAutoMerge &&
-            prIdentityConfirmed;
-          if (!mayEnableHostAutoMerge) {
-            mergeNote = !remoteHeadMatches
-              ? 'PR opened; remote PR head mismatch; host auto-merge refused because the remote PR head changed'
-              : !prIdentityConfirmed
-                ? 'PR opened; host auto-merge refused because post-create PR identity was not confirmed'
-                : remoteHeadMatches && originStableForAutoMerge
-              ? 'PR opened; host auto-merge refused because live protection changed'
-              : !originStableForAutoMerge
-                ? 'PR opened; host auto-merge refused because canonical GitHub origin changed'
-                : 'PR opened; host auto-merge refused';
-          }
-          if (remoteHandoff) {
-            const preHandoffAuthority = finalAuthorityConflict();
-            if (preHandoffAuthority) {
-              return {
-                ok: false,
-                merged: false,
-                reason: `remote PR exists but final mutation authority was revoked: ${preHandoffAuthority}`,
-                prUrl,
-              };
-            }
-            remoteHandoffCreatedAt = new Date().toISOString();
-            const durableReason = remoteHeadMatches
-              ? prIdentityConfirmed
-                ? `PR opened: ${prUrl} (remote handoff; awaiting host merge)`
-                : `PR opened: ${prUrl}; post-create PR identity was not confirmed; quarantined awaiting host reconciliation; host auto-merge not enabled`
-              : `PR opened: ${prUrl}; remote PR head mismatch (expected ${stagedHead}, observed ${latestRemoteHead ?? 'unavailable'}); quarantined awaiting host reconciliation; host auto-merge not enabled`;
-            remoteHandoffPersisted = setStatus(
-              id,
-              'awaiting-host-merge',
-              durableReason,
-              durableReason,
-              authorityFence,
-              {
-                remoteHandoff: {
-                  provider: 'github',
-                  state: 'awaiting-host-merge',
-                  prUrl,
-                  branch,
-                  base,
-                  expectedHeadOid: stagedHead,
-                  createdAt: remoteHandoffCreatedAt,
-                  updatedAt: remoteHandoffCreatedAt,
-                  detail: durableReason,
-                },
-              },
+        if (!pushed) {
+          return uncertain(
+            `staging push outcome is unknown for ${branch}@${stagedHead}; signed intent retained for reconciliation`,
+          );
+        }
+        if (!stillOwnsFence()) {
+          return uncertain('outward mutation fence ownership was lost after staging push; outcome requires reconciliation');
+        }
+
+        const remoteStagedHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+        if (remoteStagedHead !== stagedHead) {
+          return uncertain(
+            `remote staging branch '${branch}' does not match verified commit ${stagedHead.slice(0, 8)}; PR creation not started`,
+          );
+        }
+        if (!githubOriginAuthorityMatches(repo, githubOrigin) ||
+          !remoteAuthorityMatchesRepo(repo, boundRemoteAuthority)) {
+          return uncertain('canonical GitHub origin changed after push; PR creation not started');
+        }
+        if (toMain) {
+          const postPushProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+          if (
+            !postPushProtection.authorized ||
+            remoteProtectionEvidence === undefined ||
+            postPushProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash
+          ) {
+            return uncertain(
+              `live branch protection changed after push; PR creation not started${
+                postPushProtection.authorized ? '' : `: ${postPushProtection.reason}`
+              }`,
             );
-            if (!remoteHandoffPersisted) {
-              cleanupOwnedMergeBranch(repo, branch, stagedHead, { remote: false });
-              return {
-                ok: false,
-                merged: false,
-                reason: 'remote PR exists but atomic handoff persistence failed; host auto-merge not enabled',
-                prUrl,
-              };
-            }
           }
-          if (mayEnableHostAutoMerge) {
-            const preHostMergeAuthority = finalAuthorityConflict();
-            if (preHostMergeAuthority) {
-              return {
-                ok: false,
-                merged: false,
-                reason: `remote PR exists but host auto-merge authority was revoked: ${preHostMergeAuthority}`,
-                prUrl,
-              };
-            }
-            try {
-              execFileSync('gh', [
-                'pr', 'merge', '--auto', '--squash',
-                '--match-head-commit', stagedHead,
-                '--repo', githubOrigin.nameWithOwner,
-                prUrl,
-              ], {
-                cwd: repo,
-                timeout: GIT_TIMEOUT,
-                stdio: 'pipe',
-                encoding: 'utf8',
-                env: {
-                  ...process.env,
-                  GH_HOST: 'github.com',
-                  GH_NO_UPDATE_NOTIFIER: '1',
-                  GH_PROMPT_DISABLED: '1',
-                  NO_COLOR: '1',
-                },
-              });
-              mergeNote = 'PR opened with host auto-merge enabled';
-            } catch {
-              mergeNote = 'PR opened; host auto-merge not enabled';
-            }
+        }
+        if (!stillOwnsFence()) {
+          return uncertain('outward mutation fence ownership was lost before PR creation; outcome requires reconciliation');
+        }
+        if (!remoteAuthorityMatchesRepo(repo, boundRemoteAuthority)) {
+          return uncertain('canonical GitHub origin changed before PR creation; outcome requires reconciliation');
+        }
+
+        // PREFERRED path — open a PR to the default branch; branch protection /
+        // CI on the host remain the outer safety net.
+        const existingPr = viewPr(repo, branch, { repo: githubOrigin.nameWithOwner });
+        const existingPrIdentityMatches = Boolean(existingPr?.url &&
+          prUrlMatchesAuthority(existingPr.url, githubOrigin.nameWithOwner) &&
+          existingPr.headRefName === branch &&
+          existingPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase() &&
+          existingPr.baseRefName === base);
+        const matchingExistingPr = Boolean(existingPrIdentityMatches && existingPr?.state === 'OPEN');
+        let rawPr: CreatePrResult;
+        if (matchingExistingPr) {
+          rawPr = { ok: true, url: existingPr?.url ?? null, detail: 'existing matching PR adopted' };
+        } else {
+          rawPr = await createPr(repo, {
+            title: safeTitle,
+            body: safeBody,
+            base,
+            head: branch,
+            repo: githubOrigin.nameWithOwner,
+          });
+        }
+        if (!stillOwnsFence()) {
+          return uncertain(
+            'outward mutation fence ownership was lost during PR creation; host outcome requires reconciliation',
+            rawPr.ok && prUrlMatchesAuthority(rawPr.url ?? undefined, githubOrigin.nameWithOwner)
+              ? rawPr.url ?? undefined
+              : undefined,
+          );
+        }
+        const pr: CreatePrResult = rawPr.ok &&
+          !prUrlMatchesAuthority(rawPr.url ?? undefined, githubOrigin.nameWithOwner)
+          ? { ok: false, url: null, detail: 'PR creation returned no canonical URL for the authorized repository' }
+          : rawPr;
+        if (!pr.ok) {
+          return uncertain(
+            `staged on ${branch} but PR creation outcome is unknown: ${pr.detail}; remote branch retained for reconciliation`,
+          );
+        }
+
+        const url = pr.url ?? undefined;
+        const observedPr = url
+          ? (matchingExistingPr ? existingPr : viewPr(repo, url, { repo: githubOrigin.nameWithOwner }))
+          : null;
+        const prIdentityConfirmed = Boolean(
+          url && observedPr?.url === url && observedPr.state === 'OPEN' &&
+          observedPr.headRefName === branch && observedPr.baseRefName === base &&
+          observedPr.headRefOid?.toLowerCase() === stagedHead.toLowerCase(),
+        );
+        const latestRemoteHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
+        const remoteHeadMatches = latestRemoteHead === stagedHead;
+        let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
+        if (toMain) {
+          const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, verify.baseHead, cfg);
+          const originStable = githubOriginAuthorityMatches(repo, githubOrigin) &&
+            remoteAuthorityMatchesRepo(repo, boundRemoteAuthority);
+          if (!remoteHeadMatches) {
+            mergeNote = 'PR opened; remote PR head mismatch; host auto-merge refused because the remote PR head changed';
+          } else if (!prIdentityConfirmed) {
+            mergeNote = 'PR opened; host auto-merge refused because post-create PR identity was not confirmed';
+          } else if (!latestProtection.authorized || remoteProtectionEvidence === undefined ||
+            latestProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash) {
+            mergeNote = 'PR opened; host auto-merge refused because live protection changed';
+          } else if (!originStable) {
+            mergeNote = 'PR opened; host auto-merge refused because canonical GitHub origin changed';
+          } else {
+            mergeNote = 'PR opened; host auto-merge is disabled until durable revocation is available';
           }
-        } else if (!toMain && prUrl) {
-          branchApplied = true;
-          remoteHandoff = false;
         }
-        reason = `${mergeNote}${prUrl ? `: ${prUrl}` : ''}`;
-        if (remoteHandoff && !merged) {
-          branchApplied = false;
+        const durableReason = `${mergeNote}${url ? `: ${url}` : ''} (remote handoff; awaiting host merge)`;
+        if (!persistOutcome(durableReason, url)) {
+          return {
+            ok: false,
+            merged: false,
+            reason: 'remote PR exists but durable handoff outcome persistence failed; signed pre-effect intent retained for reconciliation',
+            ...(url ? { prUrl: url } : {}),
+          } satisfies AutoMergeResult;
         }
-        // A created remote PR is a successful handoff, but not a merge. Keep it
-        // out of pending without claiming the work landed; a later reconciler can
-        // prove the host merged it and advance to applied.
-        if (remoteHandoff) {
-          reason = `${reason} (remote handoff; awaiting host merge)`;
-        }
+        return {
+          ok: true,
+          merged: false,
+          handoff: true,
+          ...(!toMain ? { branched: true } : {}),
+          reason: durableReason,
+          ...(url ? { prUrl: url } : {}),
+        } satisfies AutoMergeResult;
+      });
+      if (!remoteMutation.ok) {
+        return {
+          ok: false,
+          merged: false,
+          reason: remoteMutation.reason,
+        };
       }
+      const remoteResult = remoteMutation.value;
+      audit({
+        action: 'inbox:auto-merge',
+        repo,
+        sandboxId: id,
+        summary: `proposal ${id} remote handoff: ${remoteResult.reason}`,
+        result: remoteResult.ok ? 'ok' : 'error',
+      });
+      return remoteResult;
     } else if (toMain) {
       // LOCAL fallback — conservative; refuses if default branch is checked out.
       const preMergeConflict = currentProposalConflict();
@@ -3663,10 +3945,33 @@ export async function autoMergeProposal(
       }
       const preLocalMergeAuthority = finalAuthorityConflict();
       if (preLocalMergeAuthority) return refuse(preLocalMergeAuthority, repo);
-      const local = mergeLocally(repo, branch, base, verify.baseHead, finalAuthorityConflict);
-      merged = local.ok;
-      if (local.ok) localRealizedMerge = local.evidence;
-      reason = local.detail;
+      const localMutation = runFencedMutationSync(repo, 'local default-branch merge', (stillOwnsFence) => {
+        const local = mergeLocally(repo, branch, base, verify.baseHead, finalAuthorityConflict);
+        if (!local.ok) return { local, receiptPersisted: false };
+        if (!stillOwnsFence()) return { local, receiptPersisted: false };
+        // Keep the fence through the durable receipt. Revocation that loses this
+        // race must observe a fully recorded merge, never an advanced ref with a
+        // policy-denied receipt gap.
+        return {
+          local,
+          receiptPersisted: recordRealizedMerge(
+            id,
+            local.evidence,
+            authorityFence,
+            () => stillOwnsFence() && finalMutationAuthorityFailure(repo) === null,
+          ),
+        };
+      });
+      if (!localMutation.ok) return refuseStaged(localMutation.reason);
+      const { local, receiptPersisted } = localMutation.value;
+      merged = local.ok && receiptPersisted;
+      if (local.ok) {
+        localRealizedMerge = local.evidence;
+        localRealizedMergePersisted = receiptPersisted;
+      }
+      reason = local.ok && !receiptPersisted
+        ? `${local.detail}; realized-merge receipt persistence failed`
+        : local.detail;
     } else {
       // M56: mid-tier with no PR host — leave the staged branch for review;
       // NEVER merge to main locally.
@@ -3742,7 +4047,9 @@ export async function autoMergeProposal(
           }
         }
       } else {
-        const preAppliedPersistenceAuthority = finalAuthorityConflict();
+        const preAppliedPersistenceAuthority = localRealizedMergePersisted
+          ? null
+          : finalAuthorityConflict();
         if (preAppliedPersistenceAuthority) {
           return {
             ok: false,
@@ -3752,7 +4059,9 @@ export async function autoMergeProposal(
             ...(prUrl ? { prUrl } : {}),
           };
         }
-        const appliedPersisted = localRealizedMerge
+        const appliedPersisted = localRealizedMergePersisted
+          ? true
+          : localRealizedMerge
           ? recordRealizedMerge(id, localRealizedMerge, authorityFence)
           : setStatus(id, 'applied', reason, undefined, authorityFence);
         if (!appliedPersisted) {

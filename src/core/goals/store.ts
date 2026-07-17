@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { AshlrConfig, Goal, GoalStatus, Milestone, MilestoneStatus } from '../types.js';
 import { goalsDir } from '../config.js';
 
@@ -65,6 +65,27 @@ export interface RecoverStaleGoalLanesResult {
   eligible: number;
   recovered: number;
   lanes: RecoveredStaleGoalLane[];
+}
+
+export interface ListGoalsDetailedResult {
+  goals: Goal[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  scannedFiles: number;
+  unreadableFiles: number;
+  limitExceeded: boolean;
+}
+
+export interface GoalPersistenceOptions {
+  now?: string;
+  stillAuthorized?: () => boolean;
+}
+
+export interface UpdateMilestoneStatusOptions extends GoalPersistenceOptions {
+  swarmId?: string | null;
+  proposalId?: string | null;
+  specId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +127,16 @@ function staleMilestoneAgeMs(nowMs: number, goal: Goal, milestone: Milestone): n
 function goalPath(dir: string, id: string): string {
   if (!/^[\w.-]+$/.test(id)) throw new Error(`Invalid goal id: ${id}`);
   return join(dir, `${id}.json`);
+}
+
+function goalIdIdentity(id: string): string {
+  // Win32 resolves goal paths case-insensitively; other platforms retain the
+  // exact persisted spelling so distinct case-sensitive records stay distinct.
+  return process.platform === 'win32' ? id.toLowerCase() : id;
+}
+
+function goalIdsMatch(left: string, right: string): boolean {
+  return goalIdIdentity(left) === goalIdIdentity(right);
 }
 
 /** Ensure the goals directory exists, silently creating it if needed. */
@@ -156,16 +187,89 @@ function generateMilestoneId(goalId: string, order: number): string {
 // Structural validation
 // ---------------------------------------------------------------------------
 
-/** Light type-guard so we never return garbage from the store. */
-function isValidGoal(parsed: unknown): parsed is Goal {
-  if (typeof parsed !== 'object' || parsed === null) return false;
-  const g = parsed as Record<string, unknown>;
+const GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
+  'planning',
+  'active',
+  'paused',
+  'done',
+  'archived',
+]);
+
+const MILESTONE_STATUSES: ReadonlySet<MilestoneStatus> = new Set([
+  'pending',
+  'in-progress',
+  'proposed',
+  'paused',
+  'skipped',
+  'blocked',
+  'done',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+}
+
+function timestampsAreOrdered(createdAt: string, updatedAt: string): boolean {
+  return Date.parse(updatedAt) >= Date.parse(createdAt);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isValidMilestone(parsed: unknown): parsed is Milestone {
+  if (!isRecord(parsed)) return false;
+  const createdAt = parsed['createdAt'];
+  const updatedAt = parsed['updatedAt'];
   return (
-    typeof g['id'] === 'string' &&
-    typeof g['objective'] === 'string' &&
-    typeof g['status'] === 'string' &&
-    Array.isArray(g['milestones'])
+    typeof parsed['id'] === 'string' && /^[\w.-]+$/.test(parsed['id']) &&
+    typeof parsed['title'] === 'string' &&
+    typeof parsed['detail'] === 'string' &&
+    Number.isSafeInteger(parsed['order']) && (parsed['order'] as number) >= 0 &&
+    typeof parsed['status'] === 'string' &&
+    MILESTONE_STATUSES.has(parsed['status'] as MilestoneStatus) &&
+    isNullableString(parsed['specId']) &&
+    isNullableString(parsed['swarmId']) &&
+    isNullableString(parsed['proposalId']) &&
+    isValidTimestamp(createdAt) &&
+    isValidTimestamp(updatedAt) &&
+    timestampsAreOrdered(createdAt, updatedAt)
   );
+}
+
+/** Full persisted-record guard so parseable corruption cannot look authoritative. */
+function isValidGoal(parsed: unknown): parsed is Goal {
+  if (!isRecord(parsed)) return false;
+  const project = parsed['project'];
+  const createdAt = parsed['createdAt'];
+  const updatedAt = parsed['updatedAt'];
+  const milestones = parsed['milestones'];
+  if (
+    typeof parsed['id'] !== 'string' || !/^[\w.-]+$/.test(parsed['id']) ||
+    typeof parsed['objective'] !== 'string' ||
+    (parsed['owner'] !== undefined && typeof parsed['owner'] !== 'string') ||
+    !(project === null || (typeof project === 'string' && isAbsolute(project))) ||
+    typeof parsed['status'] !== 'string' ||
+    !GOAL_STATUSES.has(parsed['status'] as GoalStatus) ||
+    !Array.isArray(milestones) ||
+    !isValidTimestamp(createdAt) ||
+    !isValidTimestamp(updatedAt) ||
+    !timestampsAreOrdered(createdAt, updatedAt)
+  ) return false;
+
+  const milestoneIds = new Set<string>();
+  const milestoneOrders = new Set<number>();
+  for (const milestone of milestones) {
+    if (!isValidMilestone(milestone) ||
+      milestoneIds.has(milestone.id) || milestoneOrders.has(milestone.order)) return false;
+    milestoneIds.add(milestone.id);
+    milestoneOrders.add(milestone.order);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +343,7 @@ export function loadGoal(id: string): Goal | null {
     const file = goalPath(goalsDir(), id);
     if (!existsSync(file)) return null;
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    if (!isValidGoal(parsed)) return null;
+    if (!isValidGoal(parsed) || !goalIdsMatch(parsed.id, id)) return null;
     sortMilestones(parsed);
     return parsed;
   } catch {
@@ -247,28 +351,61 @@ export function loadGoal(id: string): Goal | null {
   }
 }
 
+function emptyGoalRead(
+  sourceState: ListGoalsDetailedResult['sourceState'],
+  overrides: Partial<ListGoalsDetailedResult> = {},
+): ListGoalsDetailedResult {
+  return {
+    goals: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    scannedFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+    ...overrides,
+  };
+}
+
 /**
- * List all persisted Goals, most-recent first by updatedAt (bounded MAX_LIST).
- * Skips .tmp sidecars and unreadable/corrupt files. Read-only. Never throws.
+ * List persisted Goals with explicit source-quality diagnostics. A missing
+ * directory is an authoritative empty source; unreadable, malformed, or
+ * truncated sources are degraded and incomplete.
  */
-export function listGoals(filter?: { status?: GoalStatus }): Goal[] {
+export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDetailedResult {
   try {
     const dir = goalsDir();
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir)
-      .filter((f) => f.endsWith('.json') && !f.endsWith('.tmp'))
-      .slice(0, MAX_LIST);
-    const goals: Goal[] = [];
+    if (!existsSync(dir)) return emptyGoalRead('missing');
+    const allFiles = readdirSync(dir)
+      .filter((f) => f.endsWith('.json') && !f.endsWith('.tmp'));
+    const limitExceeded = allFiles.length > MAX_LIST;
+    const files = allFiles.slice(0, MAX_LIST);
+    const candidates: Array<{ file: string; goal: Goal; identity: string }> = [];
+    const identityCounts = new Map<string, number>();
+    let unreadableFiles = 0;
     for (const f of files) {
       try {
         const parsed: unknown = JSON.parse(readFileSync(join(dir, f), 'utf8'));
         if (isValidGoal(parsed)) {
-          sortMilestones(parsed);
-          goals.push(parsed);
+          const identity = goalIdIdentity(parsed.id);
+          candidates.push({ file: f, goal: parsed, identity });
+          identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
+        } else {
+          unreadableFiles += 1;
         }
       } catch {
-        /* skip corrupt file */
+        unreadableFiles += 1;
       }
+    }
+    const goals: Goal[] = [];
+    for (const candidate of candidates) {
+      const expectedFile = `${candidate.goal.id}.json`;
+      if (!goalIdsMatch(candidate.file, expectedFile) || identityCounts.get(candidate.identity) !== 1) {
+        unreadableFiles += 1;
+        continue;
+      }
+      sortMilestones(candidate.goal);
+      goals.push(candidate.goal);
     }
     const filtered =
       filter?.status !== undefined ? goals.filter((g) => g.status === filter.status) : goals;
@@ -280,17 +417,38 @@ export function listGoals(filter?: { status?: GoalStatus }): Goal[] {
       if (a.id > b.id) return -1;
       return 0;
     });
-    return filtered;
+    const complete = unreadableFiles === 0 && !limitExceeded;
+    return {
+      goals: filtered,
+      sourceState: complete ? 'healthy' : 'degraded',
+      sourcePresent: true,
+      complete,
+      scannedFiles: files.length,
+      unreadableFiles,
+      limitExceeded,
+    };
   } catch {
-    return [];
+    return emptyGoalRead('degraded');
   }
 }
 
 /**
- * Persist a Goal record atomically (tmp-write + rename). Bumps updatedAt.
- * Best-effort; never throws (mirrors the swarm/inbox stores).
+ * List all persisted Goals, most-recent first by updatedAt (bounded MAX_LIST).
+ * Skips .tmp sidecars and unreadable/corrupt files. Read-only. Never throws.
  */
-export function saveGoal(goal: Goal, opts?: { now?: string }): void {
+export function listGoals(filter?: { status?: GoalStatus }): Goal[] {
+  return listGoalsDetailed(filter).goals;
+}
+
+/**
+ * Persist a Goal record atomically (tmp-write + rename). Bumps updatedAt.
+ * Best-effort; returns false on revocation or I/O failure and never throws.
+ */
+export function saveGoal(
+  goal: Goal,
+  opts?: GoalPersistenceOptions,
+  stillAuthorized: () => boolean = opts?.stillAuthorized ?? (() => true),
+): boolean {
   try {
     const dir = goalsDir();
     ensureDir(dir);
@@ -298,10 +456,14 @@ export function saveGoal(goal: Goal, opts?: { now?: string }): void {
     sortMilestones(goal);
     const target = goalPath(dir, goal.id);
     const tmp = `${target}.tmp`;
+    if (!stillAuthorized()) return false;
     writeFileSync(tmp, JSON.stringify(goal, null, 2), 'utf8');
+    if (!stillAuthorized()) return false;
     renameSync(tmp, target);
+    return true;
   } catch {
     /* best-effort persistence */
+    return false;
   }
 }
 
@@ -372,12 +534,8 @@ export function updateMilestoneStatus(
   goalId: string,
   milestoneId: string,
   status: MilestoneStatus,
-  link?: {
-    swarmId?: string | null;
-    proposalId?: string | null;
-    specId?: string | null;
-    now?: string;
-  },
+  link?: UpdateMilestoneStatusOptions,
+  stillAuthorized: () => boolean = link?.stillAuthorized ?? (() => true),
 ): Goal | null {
   const goal = loadGoal(goalId);
   if (!goal) return null;
@@ -392,7 +550,7 @@ export function updateMilestoneStatus(
   }
   m.updatedAt = now;
   goal.status = rollGoalStatus(goal);
-  saveGoal(goal, { now });
+  if (!saveGoal(goal, { now }, stillAuthorized)) return null;
   return goal;
 }
 

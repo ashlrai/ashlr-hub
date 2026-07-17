@@ -48,6 +48,13 @@ import { detectVerifyCommands, runVerifyCommandAsync } from '../run/verify-comma
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { createProposal } from '../inbox/store.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
+import { killSwitchOn } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -132,6 +139,30 @@ export interface SentinelOpts {
    * with that string as the signal — e.g. an external monitor dropping a file.
    */
   failSignal?: (repoDir: string) => string | undefined;
+  /** Borrow a caller-retained fence; invalid borrowed authority fails closed. */
+  authority?: OutwardMutationFence;
+}
+
+interface SentinelAuthorityLease {
+  fence: OutwardMutationFence | null;
+  borrowed: boolean;
+}
+
+function acquireSentinelAuthority(opts?: SentinelOpts): SentinelAuthorityLease {
+  const borrowed = opts !== undefined && Object.prototype.hasOwnProperty.call(opts, 'authority');
+  if (borrowed) {
+    const fence = opts?.authority ?? null;
+    return {
+      fence: ownsOutwardMutationFence(fence) ? fence : null,
+      borrowed: true,
+    };
+  }
+  const fence = acquireOutwardMutationFence();
+  return { fence: ownsOutwardMutationFence(fence) ? fence : null, borrowed: false };
+}
+
+function releaseSentinelAuthority(lease: SentinelAuthorityLease | null): void {
+  if (lease && !lease.borrowed) releaseOutwardMutationFence(lease.fence);
 }
 
 /** Build a real git runner confined to repoDir. Never throws (returns null). */
@@ -315,6 +346,7 @@ export async function detectRegression(
   repoDir: string = process.cwd(),
   opts?: SentinelOpts,
 ): Promise<RegressionResult> {
+  let authority: SentinelAuthorityLease | null = null;
   try {
     const sc = resolveCfg(cfg);
     if (!sc.enabled) return { regressed: false };
@@ -331,6 +363,11 @@ export async function detectRegression(
       }
     }
 
+    authority = acquireSentinelAuthority(opts);
+    if (!ownsOutwardMutationFence(authority.fence) || killSwitchOn()) {
+      return { regressed: false };
+    }
+
     const git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
     const headBefore = git(['rev-parse', 'HEAD']) ?? '';
     if (!headBefore) return { regressed: false };
@@ -338,6 +375,9 @@ export async function detectRegression(
     // (3) Built-in signal: bind one suite run to an immutable HEAD.
     const runSuite = opts?.runSuite ?? defaultRunSuite;
     const run = await runSuite(repoDir, sc.timeoutMs);
+    if (!ownsOutwardMutationFence(authority.fence) || killSwitchOn()) {
+      return { regressed: false };
+    }
     const headAfter = git(['rev-parse', 'HEAD']) ?? '';
     if (!headAfter || headAfter !== headBefore) return { regressed: false };
     const head = headAfter;
@@ -384,6 +424,8 @@ export async function detectRegression(
     };
   } catch {
     return { regressed: false };
+  } finally {
+    releaseSentinelAuthority(authority);
   }
 }
 
@@ -481,9 +523,28 @@ export async function bisectAndRevert(
 ): Promise<BisectResult> {
   let restoreSha: string | null = null;
   let git: GitRunner | undefined;
+  let mutationFence: OutwardMutationFence | null = null;
+  let authority: SentinelAuthorityLease | null = null;
+  let revertStarted = false;
   try {
     const sc = resolveCfg(cfg);
     if (!sc.enabled) return { reason: 'regression sentinel disabled' };
+
+    authority = acquireSentinelAuthority(opts);
+    mutationFence = authority.fence;
+    if (!ownsOutwardMutationFence(mutationFence)) {
+      return { reason: 'outward mutation fence unavailable; regression bisect did not start' };
+    }
+    if (killSwitchOn()) {
+      return { reason: 'autonomy kill switch is ON; regression bisect did not start' };
+    }
+    const forwardAuthorityFailure = (): string | null => {
+      if (!ownsOutwardMutationFence(mutationFence)) {
+        return 'outward mutation authority lost during regression bisect';
+      }
+      if (killSwitchOn()) return 'autonomy kill switch engaged during regression bisect';
+      return null;
+    };
 
     git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
     const runSuite = opts?.runSuite ?? ((repo, timeout) => defaultRunSuite(repo, timeout, true));
@@ -523,9 +584,13 @@ export async function bisectAndRevert(
     let culpritRed = false;
     let culpritRun: SuiteRun | undefined;
     for (const sha of oldestFirst) {
+      const authorityFailure = forwardAuthorityFailure();
+      if (authorityFailure) return { reason: authorityFailure };
       const ok = git(['checkout', '--quiet', sha]) !== null;
       if (!ok) continue;
       const run = await runSuite(repoDir, sc.timeoutMs);
+      const postRunAuthorityFailure = forwardAuthorityFailure();
+      if (postRunAuthorityFailure) return { reason: postRunAuthorityFailure };
       if (run.red) {
         culprit = sha;
         culpritRed = true;
@@ -542,6 +607,8 @@ export async function bisectAndRevert(
     let parentGreen = false;
     let parentRun: SuiteRun | undefined;
     if (culprit && culpritRed) {
+      const authorityFailure = forwardAuthorityFailure();
+      if (authorityFailure) return { reason: authorityFailure };
       const resolvedParent = git(['rev-parse', `${culprit}^`]);
       if (resolvedParent && git(['checkout', '--quiet', resolvedParent]) !== null) {
         parentHead = resolvedParent;
@@ -551,6 +618,8 @@ export async function bisectAndRevert(
         } catch {
           parentGreen = false;
         }
+        const postRunAuthorityFailure = forwardAuthorityFailure();
+        if (postRunAuthorityFailure) return { reason: postRunAuthorityFailure };
       }
     }
 
@@ -568,16 +637,27 @@ export async function bisectAndRevert(
 
     const culpritProposalId = proposalIdFromCommit(git, culprit);
 
+    const preRevertAuthorityFailure = forwardAuthorityFailure();
+    if (preRevertAuthorityFailure) return { reason: preRevertAuthorityFailure };
+
     // Build the revert diff WITHOUT committing: stage a revert, capture the
     // diff, then unstage/restore so the working tree is left clean.
     let revertDiff = '';
+    restoreSha = originalHead;
+    revertStarted = true;
     const reverted = git(['revert', '--no-commit', culprit]) !== null;
     if (reverted) {
       revertDiff = git(['diff', '--cached']) ?? '';
-      // Abort the in-progress revert + restore the tree.
-      git(['revert', '--abort']);
-      git(['reset', '--hard', originalHead]);
     }
+    // Abort any full or partial revert and restore the tree before persistence.
+    git(['revert', '--abort']);
+    if (git(['reset', '--hard', originalHead]) === null) {
+      return { reason: 'failed to restore worktree after revert capture' };
+    }
+    revertStarted = false;
+    restoreSha = null;
+    const postRevertAuthorityFailure = forwardAuthorityFailure();
+    if (postRevertAuthorityFailure) return { reason: postRevertAuthorityFailure };
     if (!revertDiff) {
       // Fall back to a descriptive diff-less proposal pointing at the culprit;
       // the approval flow / human can still act. Synthesize a minimal marker.
@@ -593,6 +673,8 @@ export async function bisectAndRevert(
 
     const shortSha = culprit.slice(0, 8);
     const repoName = basename(repoDir);
+    const preProposalAuthorityFailure = forwardAuthorityFailure();
+    if (preProposalAuthorityFailure) return { reason: preProposalAuthorityFailure };
     const proposal = createProposal(
       {
         repo: repoDir,
@@ -638,9 +720,17 @@ export async function bisectAndRevert(
   } finally {
     // Defensive restore in case an early return left a checkout dangling.
     try {
-      if (restoreSha && git) git(['checkout', '--quiet', restoreSha]);
+      if (git && ownsOutwardMutationFence(mutationFence)) {
+        if (revertStarted) {
+          git(['revert', '--abort']);
+          if (restoreSha) git(['reset', '--hard', restoreSha]);
+        }
+        if (restoreSha) git(['checkout', '--quiet', restoreSha]);
+      }
     } catch {
       // never throw from finally
+    } finally {
+      releaseSentinelAuthority(authority);
     }
   }
 }

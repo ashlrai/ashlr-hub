@@ -83,6 +83,8 @@ function installHarness(opts: {
       sourceRepo,
       branch: 'ashlr-sandbox-cancellation',
     }),
+    borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
+    removeSandboxWithBorrowedAuthority: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
     removeSandbox: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
     sandboxDiff: () => ({
       files: 1,
@@ -133,6 +135,7 @@ function installHarness(opts: {
 
   vi.doMock('../src/core/sandbox/policy.js', () => ({
     killSwitchOn: () => false,
+    assertMayMutate: () => {},
   }));
 
   vi.doMock('../src/core/run/agent-loop.js', () => ({

@@ -452,7 +452,7 @@ async function flush(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m245-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m245-')));
   process.env['HOME'] = tmpHome;
   process.env['ASHLR_HOME'] = path.join(tmpHome, '.ashlr');
   fs.mkdirSync(path.join(tmpHome, 'test-repo'), { recursive: true, mode: 0o700 });

@@ -39,6 +39,7 @@
  *     nothing; they only read the Goal record + swarm/inbox state.
  */
 
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
   AdvanceOptions,
@@ -70,6 +71,14 @@ const DEFAULT_ADVANCE_BUDGET: RunBudget = {
   maxSteps: 40,
   allowCloud: false,
 };
+
+function canonicalGoalCorrelationRepo(repo: string): string {
+  try {
+    return realpathSync.native(repo);
+  } catch {
+    return repo;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // nextActionableMilestone — pure READ seam (no mutation, no swarm).
@@ -464,6 +473,7 @@ export async function advanceGoal(
     throw new Error('goal has no enrolled project; cannot advance');
   }
   const repo = resolve(goal.project);
+  const correlationRepo = canonicalGoalCorrelationRepo(repo);
 
   // GATE — enrollment + kill switch. Throws BEFORE any swarm starts.
   //
@@ -534,7 +544,7 @@ export async function advanceGoal(
 
     // Correlate the PENDING proposal filed by runEngineSandboxed.
     // origin:'agent' (not 'swarm') — use the pre-run snapshot diff.
-    const proposalId = findProposalForFrontierRun(repo, beforeIds);
+    const proposalId = findProposalForFrontierRun(correlationRepo, beforeIds);
 
     if (run.status === 'done' && proposalId) {
       updateMilestoneStatus(goalId, milestone.id, 'proposed', {
@@ -576,7 +586,7 @@ export async function advanceGoal(
 
     // Correlate the PENDING proposal the swarm emitted (its ONLY sink). We do NOT
     // create it here — runSwarm's propose path did. We only READ to link the id.
-    const proposalId = findProposalForSwarm(run.id, repo);
+    const proposalId = findProposalForSwarm(run.id, correlationRepo);
 
     if ((run.status === 'done' || run.status === 'needs-approval') && proposalId) {
       updateMilestoneStatus(goalId, milestone.id, 'proposed', {

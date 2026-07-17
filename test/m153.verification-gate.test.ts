@@ -1056,7 +1056,13 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     const a4diff = docsDiff('docs/a4.md');
     const p = makePatch(a4diff, {
       engineTier: 'local',
-      verifyResult: { passed: false, failed: ['vitest'] },
+      verifyResult: {
+        passed: false,
+        failed: ['vitest'],
+        baseBranch: 'main',
+        baseHead: git(tmpRepo, ['rev-parse', 'main']),
+        diffHash: hashDiff(a4diff),
+      },
     });
     mockReadDecisions.mockReturnValue([
       frontierShipDecision(p.id, a4diff),
@@ -1178,7 +1184,13 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
       title: 'a7', summary: 'edv fail',
       diff, diffHash, provenanceSig: sig,
       engineModel: 'local:qwen3-coder', engineTier: 'local',
-      verifyResult: { passed: false, failed: ['vitest'] },
+      verifyResult: {
+        passed: false,
+        failed: ['vitest'],
+        baseBranch: 'main',
+        baseHead: git(tmpRepo, ['rev-parse', 'main']),
+        diffHash,
+      },
     });
     setStatus(p.id, 'pending');
     const loaded = loadProposal(p.id)!;

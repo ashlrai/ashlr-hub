@@ -398,13 +398,13 @@ describe('M21 worktree — createSandbox returns correct Sandbox shape', () => {
     }
   });
 
-  it('sourceRepo field matches the path passed to createSandbox', async () => {
+  it('sourceRepo field records the canonical physical repository identity', async () => {
     const wt = await worktree();
     const repo = makeTmpRepo('sourcerepo');
     let sb: Sandbox | null = null;
     try {
       sb = wt.createSandbox(repo, { allowAnyRepo: true });
-      expect(sb.sourceRepo).toBe(repo);
+      expect(sb.sourceRepo).toBe(fs.realpathSync.native(repo));
     } finally {
       if (sb) {
         try { wt.removeSandbox(sb); } catch { /* ok */ }
@@ -793,8 +793,6 @@ describe('M21 worktree — removeSandbox cleanup', () => {
       const retained = wt.listSandboxes().find((entry) => entry.id === sb!.id);
       expect(wt.removeSandbox(retained!).status).toBe('refused');
       execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
-      expect(wt.removeSandbox(retained!).status).toBe('refused');
-      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
       expect(wt.removeSandbox(retained!).status).toBe('complete');
       sb = null;
     } finally {
@@ -953,8 +951,6 @@ describe('M21 worktree — removeSandbox refuses tampered metadata', () => {
       expect(wt.removeSandbox(sb).status).toBe('refused');
       expect(listBranches(repo)).toContain(sb.branch);
       execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
-      expect(wt.removeSandbox(sb).status).toBe('refused');
-      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
       expect(wt.removeSandbox(sb).status).toBe('complete');
       sb = null;
     } finally {

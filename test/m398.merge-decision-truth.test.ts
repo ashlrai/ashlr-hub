@@ -37,7 +37,16 @@ import {
 } from '../src/core/autonomy/trajectory-records.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
+import { judgeTracesDir, recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
 import { hashDiff, signLocalMergeIntent, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  addMilestone,
+  createGoal,
+  listGoalsDetailed,
+  loadGoal,
+  updateMilestoneStatus,
+} from '../src/core/goals/store.js';
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import {
   canonicalRealizedMergeIdentity,
@@ -49,6 +58,7 @@ import {
   createProposal,
   loadProposal,
   recordRealizedMerge,
+  replayRealizedMergeFanout,
   setStatus,
   updateProposalField,
 } from '../src/core/inbox/store.js';
@@ -500,8 +510,19 @@ describe('M398 merge decision truth', () => {
     const interrupted = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
     delete interrupted['realizedMergeFanoutVersion'];
     fs.writeFileSync(file, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
-    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+    let authorityChecks = 0;
+    expect(replayRealizedMergeFanout(
+      proposal.id,
+      undefined,
+      () => ++authorityChecks <= 4,
+    )).toBe(true);
+    expect(authorityChecks).toBeGreaterThan(4);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(replayRealizedMergeFanout(proposal.id)).toBe(false);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
 
     const decisions = readDecisions({ proposalId: proposal.id, requireComplete: true });
     expect(decisions.filter((decision) => decision.action === 'merge-authorized')).toHaveLength(1);
@@ -525,7 +546,7 @@ describe('M398 merge decision truth', () => {
     expect(result).toMatchObject({ ok: true, merged: true });
 
     const applied = loadProposal(proposal.id)!;
-    expect(applied.realizedMergeFanoutVersion).toBe(2);
+    expect(applied.realizedMergeFanoutVersion).toBe(3);
     const proposalFile = path.join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`);
     const interrupted = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
     delete interrupted['realizedMergeFanoutVersion'];
@@ -536,14 +557,271 @@ describe('M398 merge decision truth', () => {
     fs.renameSync(decisionsDirectory, decisionsBackup);
     fs.writeFileSync(decisionsDirectory, 'not a directory\n', { mode: 0o600 });
 
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
 
     fs.unlinkSync(decisionsDirectory);
     fs.renameSync(decisionsBackup, decisionsDirectory);
-    expect(recordRealizedMerge(proposal.id, applied.realizedMerge!)).toBe(true);
-    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
     expect(readDecisions({ proposalId: proposal.id, requireComplete: true })
       .filter((decision) => decision.action === 'merged')).toHaveLength(1);
+  });
+
+  it('repairs historical markers with absent or disabled auto-merge without progressing new merges', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const appliedProposal = createFrontierProposal('trajectory-m398-disabled-fanout');
+    expect(await autoMergeProposal(appliedProposal.id, config())).toMatchObject({ ok: true, merged: true });
+    const mainAfterMerge = git(tmpRepo, ['rev-parse', 'main']);
+
+    const proposalFile = path.join(tmpHome, '.ashlr', 'inbox', `${appliedProposal.id}.json`);
+    const interrupted = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
+    interrupted['realizedMergeFanoutVersion'] = 2;
+    fs.writeFileSync(proposalFile, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
+    const pendingProposal = createFrontierProposal('trajectory-m398-disabled-pending');
+    mocks.judgeProposal.mockClear();
+
+    const absentResult = await runAutoMergePass({} as AshlrConfig);
+    expect(absentResult).toMatchObject({ attempted: 0, merged: 0, judged: 0 });
+    expect(loadProposal(appliedProposal.id)?.realizedMergeFanoutVersion).toBe(3);
+
+    const historicalV1 = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
+    historicalV1['realizedMergeFanoutVersion'] = 1;
+    fs.writeFileSync(proposalFile, `${JSON.stringify(historicalV1)}\n`, { mode: 0o600 });
+    const disabled = config();
+    disabled.foundry!.autoMerge!.enabled = false;
+    const result = await runAutoMergePass(disabled);
+
+    expect(result).toMatchObject({ attempted: 0, merged: 0, judged: 0 });
+    expect(loadProposal(appliedProposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadProposal(pendingProposal.id)?.status).toBe('pending');
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainAfterMerge);
+    expect(mocks.judgeProposal).not.toHaveBeenCalled();
+  });
+
+  it('leaves outcome projection unacknowledged on degraded trace reads and repairs it once healthy', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-degraded-outcome-retry');
+    recordJudgeTrace({
+      traceId: 'm398-degraded-outcome',
+      proposalId: proposal.id,
+      judgeEngine: 'codex:gpt-5.5',
+      verdict: 'ship',
+      scores: { value: 4, correctness: 4, scope: 1, alignment: 4 },
+      fullReasoning: 'qualified merge fixture',
+      promptContext: 'm398 outcome projection',
+    });
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+
+    const proposalFile = path.join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`);
+    const interrupted = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
+    delete interrupted['realizedMergeFanoutVersion'];
+    fs.writeFileSync(proposalFile, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
+
+    const traceFile = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const healthyTraceSource = fs.readFileSync(traceFile, 'utf8');
+    fs.appendFileSync(traceFile, '{"torn":', 'utf8');
+
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+
+    fs.writeFileSync(traceFile, healthyTraceSource, 'utf8');
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+  });
+
+  it('leaves milestone projection unacknowledged until its linked goal write is durable', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-milestone-write-retry');
+    expect(updateProposalField(proposal.id, {
+      verifyResult: {
+        passed: true,
+        diffHash: proposal.diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'm398-test',
+      },
+    })).toBe(true);
+    const goal = createGoal('M398 durable milestone projection', { project: tmpRepo });
+    const milestone = addMilestone(goal.id, { title: 'Land proposal', detail: 'Exercise fanout durability.' })!
+      .milestones[0]!;
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed', { proposalId: proposal.id })).not.toBeNull();
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
+
+    const proposalFile = path.join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`);
+    const interrupted = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
+    interrupted['realizedMergeFanoutVersion'] = 2;
+    fs.writeFileSync(proposalFile, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed')).not.toBeNull();
+
+    const blockedTemp = path.join(tmpHome, '.ashlr', 'goals', `${goal.id}.json.tmp`);
+    fs.mkdirSync(blockedTemp);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('proposed');
+
+    fs.rmdirSync(blockedTemp);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
+  });
+
+  it('does not write a milestone or version 3 marker when authority revokes at goal persistence', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-milestone-authority-retry');
+    expect(updateProposalField(proposal.id, {
+      verifyResult: {
+        passed: true,
+        diffHash: proposal.diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'm398-test',
+      },
+    })).toBe(true);
+    const goal = createGoal('M398 milestone authority boundary', { project: tmpRepo });
+    const milestone = addMilestone(goal.id, {
+      title: 'Fence projected completion',
+      detail: 'Revoke authority at the goal persistence boundary.',
+    })!.milestones[0]!;
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed', {
+      proposalId: proposal.id,
+    })).not.toBeNull();
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+
+    const proposalFile = path.join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`);
+    const interrupted = JSON.parse(fs.readFileSync(proposalFile, 'utf8')) as Record<string, unknown>;
+    interrupted['realizedMergeFanoutVersion'] = 2;
+    fs.writeFileSync(proposalFile, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed')).not.toBeNull();
+
+    const goalFile = path.join(tmpHome, '.ashlr', 'goals', `${goal.id}.json`);
+    const goalBeforeReplay = fs.readFileSync(goalFile, 'utf8');
+    let revokedAtPersistenceBoundary = false;
+    const stillAuthorized = vi.fn(() => {
+      if (new Error().stack?.includes('saveGoal')) {
+        revokedAtPersistenceBoundary = true;
+        return false;
+      }
+      return true;
+    });
+
+    expect(replayRealizedMergeFanout(proposal.id, undefined, stillAuthorized)).toBe(true);
+    expect(revokedAtPersistenceBoundary).toBe(true);
+    expect(fs.readFileSync(goalFile, 'utf8')).toBe(goalBeforeReplay);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('proposed');
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(2);
+
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+  });
+
+  it('revalidates a durable version 3 marker and repairs later milestone projection loss', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-current-marker-repair');
+    expect(updateProposalField(proposal.id, {
+      verifyResult: {
+        passed: true,
+        diffHash: proposal.diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'm398-test',
+      },
+    })).toBe(true);
+    const goal = createGoal('M398 current marker validation', { project: tmpRepo });
+    const milestone = addMilestone(goal.id, {
+      title: 'Repair projected completion',
+      detail: 'Exercise bounded validation after projection loss.',
+    })!.milestones[0]!;
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed', { proposalId: proposal.id })).not.toBeNull();
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
+
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed')).not.toBeNull();
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
+  });
+
+  it('does not acknowledge multiple milestone links until every projection is durable', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-multiple-milestones');
+    expect(updateProposalField(proposal.id, {
+      verifyResult: {
+        passed: true,
+        diffHash: proposal.diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'm398-test',
+      },
+    })).toBe(true);
+
+    for (const title of ['M398 linked goal one', 'M398 linked goal two']) {
+      const goal = createGoal(title, { project: tmpRepo });
+      const milestone = addMilestone(goal.id, {
+        title: `Land ${title}`,
+        detail: 'Every linked milestone must be durably projected.',
+      })!.milestones[0]!;
+      expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed', {
+        proposalId: proposal.id,
+      })).not.toBeNull();
+    }
+
+    const linkedGoals = listGoalsDetailed().goals.filter((goal) =>
+      goal.milestones.some((milestone) => milestone.proposalId === proposal.id));
+    expect(linkedGoals).toHaveLength(2);
+    const first = linkedGoals[0]!;
+    const blocked = linkedGoals[1]!;
+    const blockedTemp = path.join(tmpHome, '.ashlr', 'goals', `${blocked.id}.json.tmp`);
+    fs.mkdirSync(blockedTemp);
+
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+    expect(loadGoal(first.id)?.milestones[0]?.status).toBe('done');
+    expect(loadGoal(blocked.id)?.milestones[0]?.status).toBe('proposed');
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+
+    fs.rmdirSync(blockedTemp);
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadGoal(first.id)?.milestones[0]?.status).toBe('done');
+    expect(loadGoal(blocked.id)?.milestones[0]?.status).toBe('done');
+  });
+
+  it('leaves milestone projection unacknowledged while its linked goal is corrupt and recovers', async () => {
+    mocks.persistEvidencePack.mockReturnValue(true);
+    const proposal = createFrontierProposal('trajectory-m398-corrupt-goal-retry');
+    expect(updateProposalField(proposal.id, {
+      verifyResult: {
+        passed: true,
+        diffHash: proposal.diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'm398-test',
+      },
+    })).toBe(true);
+    const goal = createGoal('M398 corrupt goal projection recovery', { project: tmpRepo });
+    const milestone = addMilestone(goal.id, {
+      title: 'Recover linked goal',
+      detail: 'Keep fanout unacknowledged until the goal source is healthy.',
+    })!.milestones[0]!;
+    expect(updateMilestoneStatus(goal.id, milestone.id, 'proposed', { proposalId: proposal.id })).not.toBeNull();
+
+    const goalFile = path.join(tmpHome, '.ashlr', 'goals', `${goal.id}.json`);
+    const healthyGoalSource = fs.readFileSync(goalFile, 'utf8');
+    fs.writeFileSync(goalFile, '{"corrupt":', { mode: 0o600 });
+    expect(listGoalsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      unreadableFiles: 1,
+    });
+
+    expect(await autoMergeProposal(proposal.id, config())).toMatchObject({ ok: true, merged: true });
+    expect(loadProposal(proposal.id)?.status).toBe('applied');
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(loadGoal(goal.id)).toBeNull();
+
+    fs.writeFileSync(goalFile, healthyGoalSource, { mode: 0o600 });
+    expect(listGoalsDetailed()).toMatchObject({ sourceState: 'healthy', complete: true });
+    expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    expect(loadGoal(goal.id)?.milestones[0]?.status).toBe('done');
   });
 });

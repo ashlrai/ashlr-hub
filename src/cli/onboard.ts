@@ -26,7 +26,13 @@ import { resolve } from 'node:path';
 import { loadConfig } from '../core/config.js';
 import { buildReadiness } from '../core/readiness.js';
 import type { ReadinessReport } from '../core/readiness.js';
-import { enroll, unenroll, setKill, listEnrolled } from '../core/sandbox/policy.js';
+import {
+  canonicalEnrollmentPath,
+  enroll,
+  unenroll,
+  setKill,
+  listEnrolled,
+} from '../core/sandbox/policy.js';
 import { tick } from '../core/daemon/loop.js';
 import { loadBacklog, buildBacklog } from '../core/portfolio/backlog.js';
 import { sweepRepoSandboxesDetailed } from '../core/sandbox/worktree.js';
@@ -168,38 +174,71 @@ export async function renderDryRunPlan(cfg: AshlrConfig): Promise<string> {
  *                                       the very activation being undone IS
  *                                       reclaimed — true one-command undo)
  *   3. opts.kill ⇒ setKill(true)       (opt-in; H6-audited kill:on)
- * Returns 0. NEVER widens access; NEVER an outward action.
+ * Returns 0 only when every requested narrowing action is confirmed. NEVER
+ * widens access; NEVER an outward action.
  */
 export async function rollback(repo: string, opts: { kill: boolean }): Promise<number> {
-  const abs = resolve(repo);
+  const lexical = resolve(repo);
+  const authorityRepo = canonicalEnrollmentPath(repo);
+  const abs = authorityRepo ?? lexical;
+  const rollbackIdentities = authorityRepo !== null && authorityRepo !== lexical
+    ? [authorityRepo, lexical]
+    : [lexical];
 
-  // 1. Narrow the enrollment gate. Idempotent; H6-audited enroll:remove.
-  unenroll(abs);
+  // 1. Narrow both current physical authority and exact legacy lexical
+  // authority. Older registries persisted alias spellings before enrollment
+  // canonicalization; each idempotent removal is H6-audited.
+  const unenrollResults = rollbackIdentities.map((identity) => ({
+    identity,
+    result: unenroll(identity),
+  }));
+  const failedUnenrollments = unenrollResults.filter(
+    ({ result }) => !result.ok || !result.quiesced,
+  );
 
   // 2. Reclaim THIS repo's crash-leftover sandboxes (scoped). The scoped sweep
   //    drops the 6h age guard (so a FRESH leftover from the activation being
   //    undone is reclaimed too) but KEEPS the ownerAlive guard, so it NEVER
   //    force-removes a LIVE in-flight worktree; each removal inherits
   //    removeSandbox's full containment guards.
-  let swept: string[] = [];
-  let incomplete = 0;
-  try {
-    const sweep = sweepRepoSandboxesDetailed(abs);
-    swept = sweep.completed;
-    incomplete = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
-      sweep.unexpectedErrors.length + sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
-  } catch {
-    swept = [];
-    incomplete = 1;
+  const sweptIds = new Set<string>();
+  const incompleteIds = new Set<string>();
+  let malformedHomes = 0;
+  let unsafeEntries = 0;
+  let sweepErrors = 0;
+  for (const identity of rollbackIdentities) {
+    try {
+      const sweep = sweepRepoSandboxesDetailed(identity);
+      for (const id of sweep.completed) sweptIds.add(id);
+      for (const id of [
+        ...sweep.residual,
+        ...sweep.refused,
+        ...sweep.unavailable,
+        ...sweep.unexpectedErrors,
+      ]) incompleteIds.add(id);
+      malformedHomes = Math.max(malformedHomes, sweep.inventory.malformedHomes);
+      unsafeEntries = Math.max(unsafeEntries, sweep.inventory.unsafeEntries);
+    } catch {
+      sweepErrors += 1;
+    }
   }
+  const swept = [...sweptIds];
+  const incomplete = incompleteIds.size + malformedHomes + unsafeEntries + sweepErrors;
 
   // 3. Opt-in: pause ALL autonomy in the same step (H6-audited kill:on).
-  if (opts.kill) setKill(true);
+  const killResult = opts.kill ? setKill(true) : null;
 
   console.log('');
   console.log(bold('  ashlr onboard --rollback'));
   console.log('');
-  console.log(`  ${green('✓')} unenrolled ${dim(abs)}`);
+  if (failedUnenrollments.length === 0) {
+    console.log(`  ${green('✓')} unenrolled ${dim(abs)}`);
+  } else {
+    const failures = failedUnenrollments
+      .map(({ identity, result }) => `${identity}: ${result.reason}`)
+      .join('; ');
+    console.log(`  ${red('x')} could not confirm unenrollment: ${failures}`);
+  }
   console.log(
     `  ${green('✓')} swept ${swept.length} leftover sandbox(es) for this repo ` +
       dim('(a live in-flight worktree is never reclaimed)'),
@@ -207,13 +246,16 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
   if (incomplete > 0) {
     console.log(`  ${yellow('!')} ${incomplete} sandbox cleanup(s) remain incomplete`);
   }
-  if (opts.kill) {
+  if (killResult?.ok && killResult.quiesced) {
     console.log(`  ${yellow('!')} kill switch ON ${dim('— all autonomy paused')}`);
+  } else if (killResult) {
+    console.log(`  ${red('x')} stop could not be confirmed: ${killResult.reason}`);
   }
   console.log('');
   console.log(`  ${dim('Re-enable any time with')} ${cyan('ashlr onboard')}.`);
   console.log('');
-  return incomplete > 0 ? 1 : 0;
+  return incomplete > 0 || failedUnenrollments.length > 0 ||
+    (killResult !== null && (!killResult.ok || !killResult.quiesced)) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +442,13 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     console.log('');
     return 0;
   }
-  enroll(candidate); // idempotent; the ONLY mutating call in the whole flow
+  const enrollment = enroll(candidate); // idempotent; the ONLY mutating call in the whole flow
+  if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
+    console.log('');
+    console.log(`  ${red('x')} enrollment failed: ${enrollment.reason}`);
+    console.log('');
+    return 1;
+  }
   const after = listEnrolled();
   console.log('');
   console.log(

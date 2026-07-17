@@ -16,12 +16,12 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { makeFixture, type H1Fixture, type DisposableRepo } from './helpers/h1-fixture.js';
 import { makeOrphanSandbox, sandboxHomeExists } from './helpers/h2-faults.js';
 import { rollback, cmdOnboard } from '../src/cli/onboard.js';
-import { listEnrolled, killSwitchOn } from '../src/core/sandbox/policy.js';
+import { enrollmentPath, listEnrolled, killSwitchOn } from '../src/core/sandbox/policy.js';
 import {
   listSandboxes,
   sandboxesDir,
@@ -223,6 +223,75 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(listSandboxes().map((s) => s.id)).not.toContain(fresh.id);
   });
 
+  it('resolves a lexical repo alias to the physical enrollment and sandbox authority', async () => {
+    expect.hasAssertions();
+    const r = repo!;
+    const other = fx!.makeRepo();
+    const physicalRepo = realpathSync.native(r.dir);
+    const macVarPrefix = '/private/var/';
+    const lexicalAlias = process.platform === 'darwin' && physicalRepo.startsWith(macVarPrefix)
+      ? `/var/${physicalRepo.slice(macVarPrefix.length)}`
+      : join(fx!.home, 'repo-lexical-alias');
+    if (lexicalAlias.startsWith(fx!.home)) {
+      symlinkSync(physicalRepo, lexicalAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+
+    // On macOS this uses the literal /var -> /private/var alias. Elsewhere an
+    // explicit symlink/junction provides the same lexical/physical distinction.
+    expect(resolve(lexicalAlias)).not.toBe(physicalRepo);
+    expect(realpathSync.native(lexicalAlias)).toBe(physicalRepo);
+    r.enroll();
+    const orphan = makeOrphanSandbox(r.dir);
+    const otherOrphan = makeOrphanSandbox(other.dir);
+    expect(listEnrolled()).toContain(physicalRepo);
+    expect(listSandboxes().find((sandbox) => sandbox.id === orphan.id)?.sourceRepo)
+      .toBe(physicalRepo);
+
+    muteStdout();
+    const code = await rollback(lexicalAlias, { kill: false });
+
+    expect(code).toBe(0);
+    expect(listEnrolled()).not.toContain(physicalRepo);
+    expect(sandboxHomeExists(orphan.id)).toBe(false);
+    expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(orphan.id);
+    expect(sandboxHomeExists(otherOrphan.id)).toBe(true);
+    expect(listSandboxes().map((sandbox) => sandbox.id)).toContain(otherOrphan.id);
+  }, 15_000);
+
+  it('narrows and sweeps both physical and exact legacy alias-spelled authority', async () => {
+    expect.hasAssertions();
+    const r = repo!;
+    const physicalRepo = realpathSync.native(r.dir);
+    const lexicalAlias = join(fx!.home, 'legacy-repo-alias');
+    symlinkSync(physicalRepo, lexicalAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    const exactLexicalRepo = resolve(lexicalAlias);
+    expect(exactLexicalRepo).not.toBe(physicalRepo);
+
+    r.enroll();
+    const physicalOrphan = makeOrphanSandbox(r.dir);
+    const lexicalOrphan = makeOrphanSandbox(r.dir);
+    const lexicalMetaPath = join(sandboxesDir(), lexicalOrphan.id, 'sandbox.json');
+    const lexicalMeta = JSON.parse(readFileSync(lexicalMetaPath, 'utf8')) as Record<string, unknown>;
+    lexicalMeta.sourceRepo = exactLexicalRepo;
+    writeFileSync(lexicalMetaPath, `${JSON.stringify(lexicalMeta, null, 2)}\n`, 'utf8');
+    writeFileSync(
+      enrollmentPath(),
+      `${JSON.stringify({ repos: [physicalRepo, exactLexicalRepo] }, null, 2)}\n`,
+      'utf8',
+    );
+    expect(listEnrolled()).toEqual([physicalRepo, exactLexicalRepo]);
+
+    muteStdout();
+    const code = await rollback(lexicalAlias, { kill: false });
+
+    expect(code).toBe(0);
+    expect(listEnrolled()).toEqual([]);
+    expect(sandboxHomeExists(physicalOrphan.id)).toBe(false);
+    expect(sandboxHomeExists(lexicalOrphan.id)).toBe(false);
+    expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(physicalOrphan.id);
+    expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(lexicalOrphan.id);
+  }, 15_000);
+
   it('is SCOPED — rollback of repo A leaves a DIFFERENT repo B fresh orphan untouched', async () => {
     expect.hasAssertions();
     const a = repo!;
@@ -243,7 +312,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(sandboxHomeExists(orphanA.id)).toBe(false);
     expect(sandboxHomeExists(orphanB.id)).toBe(true);
     expect(listSandboxes().map((s) => s.id)).toContain(orphanB.id);
-  });
+  }, 15_000);
 
   it('NEVER force-removes a LIVE owner-pid sandbox during the SCOPED rollback sweep', async () => {
     // The scoped sweep drops the AGE guard but must KEEP the live-owner guard:

@@ -27,6 +27,12 @@ import { buildDirectorContext } from './director-context.js';
 import { DIRECTOR_SYSTEM_PROMPT, renderDirectorPrompt } from './director-prompt.js';
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
 import { postRequest } from './requests.js';
+import { killSwitchOn } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,6 +63,10 @@ export interface DirectorDecision {
   confidence: 'high' | 'medium' | 'low';
 }
 
+export interface DirectorCycleOptions {
+  signal?: AbortSignal;
+}
+
 // ---------------------------------------------------------------------------
 // LLM caller (mirrors buildComplete from elon-dialogue.ts)
 // ---------------------------------------------------------------------------
@@ -66,6 +76,7 @@ export interface DirectorDecision {
 
 async function buildComplete(
   cfg: AshlrConfig,
+  signal?: AbortSignal,
 ): Promise<(system: string, user: string) => Promise<string>> {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const managerJudgeEngine =
@@ -90,7 +101,7 @@ async function buildComplete(
             const combined = `${system}\n\n${user}`;
             const cmd = buildEngineCommand('claude', combined, cfg, { model });
             if (!cmd) return '';
-            const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000 });
+            const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000, signal });
             if (!result.ok || !result.output) return '';
             try {
               const parsed = JSON.parse(result.output) as Record<string, unknown>;
@@ -125,32 +136,30 @@ async function buildComplete(
   return async (system: string, user: string): Promise<string> => {
     try {
       const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 120_000);
-      try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: localModel,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: user },
-            ],
-            stream: false,
-            temperature: 0.3,
-            max_tokens: 2048,
-          }),
-          signal: controller.signal,
-        });
-        if (!response.ok) return '';
-        const data = (await response.json()) as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        return data.choices?.[0]?.message?.content ?? '';
-      } finally {
-        clearTimeout(timer);
-      }
+      const timeoutSignal = AbortSignal.timeout(120_000);
+      const requestSignal = signal
+        ? AbortSignal.any([signal, timeoutSignal])
+        : timeoutSignal;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: localModel,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          stream: false,
+          temperature: 0.3,
+          max_tokens: 2048,
+        }),
+        signal: requestSignal,
+      });
+      if (!response.ok) return '';
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      return data.choices?.[0]?.message?.content ?? '';
     } catch {
       return '';
     }
@@ -366,49 +375,65 @@ export function formatDryRun(
  *
  * Never throws — fire-and-forget by design.
  */
-export async function runDirectorCycle(cfg: AshlrConfig): Promise<void> {
+export async function runDirectorCycle(
+  cfg: AshlrConfig,
+  opts: DirectorCycleOptions = {},
+): Promise<void> {
   try {
     // Gate: cfg.comms.director must be explicitly true
     const directorEnabled =
       (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
     if (!directorEnabled) return;
+    if (opts.signal?.aborted) return;
 
-    // Build god-view snapshot
-    const ctx = await buildDirectorContext(cfg);
+    let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
+    try {
+      outwardFence = acquireOutwardMutationFence();
+      if (!ownsOutwardMutationFence(outwardFence)) return;
+      if (opts.signal?.aborted || killSwitchOn()) return;
 
-    // Render user prompt
-    const userPrompt = renderDirectorPrompt(ctx);
+      // Context and LLM work can lead directly to Telegram/local publication,
+      // so they share one authority epoch with those effects. Pause can arm KILL
+      // while this awaits, but cannot report quiescence until the cycle drains.
+      const ctx = await buildDirectorContext(cfg);
+      if (opts.signal?.aborted || killSwitchOn()) return;
+      const userPrompt = renderDirectorPrompt(ctx);
+      const complete = await buildComplete(cfg, opts.signal);
+      const raw = await complete(DIRECTOR_SYSTEM_PROMPT, userPrompt);
+      if (opts.signal?.aborted || killSwitchOn()) return;
+      const decision = parseDecision(raw);
+      if (!decision) return;
 
-    // Call strategist LLM
-    const complete = await buildComplete(cfg);
-    const raw = await complete(DIRECTOR_SYSTEM_PROMPT, userPrompt);
-
-    // Parse decision
-    const decision = parseDecision(raw);
-    if (!decision) return;
-
-    // Send Telegram digest
-    if (telegramEnabled(cfg) && decision.telegramDigest) {
-      await sendTelegramMessage(decision.telegramDigest, undefined, cfg);
-    }
-
-    // Post escalations as decision-needed requests
-    for (const esc of decision.escalations) {
-      try {
-        postRequest({
-          kind: 'decision-needed',
-          type: 'question',
-          text: `[${esc.stakes.toUpperCase()}] ${esc.topic}\n\n${esc.context}`,
-          options: esc.options.length > 0 ? esc.options : ['Acknowledge'],
-          meta: {
-            source: 'director',
-            stakes: esc.stakes,
-            topic: esc.topic,
-          },
-        });
-      } catch {
-        // best-effort — individual escalation failure must not block others
+      if (telegramEnabled(cfg) && decision.telegramDigest) {
+        try {
+          await sendTelegramMessage(decision.telegramDigest, undefined, cfg);
+        } catch {
+          // Telegram is best-effort; escalations still retain their local effect.
+        }
       }
+      if (opts.signal?.aborted || killSwitchOn()) return;
+
+      // Post escalations as decision-needed requests under the same authority as
+      // the digest so pause cannot linearize between the related effects.
+      for (const esc of decision.escalations) {
+        try {
+          postRequest({
+            kind: 'decision-needed',
+            type: 'question',
+            text: `[${esc.stakes.toUpperCase()}] ${esc.topic}\n\n${esc.context}`,
+            options: esc.options.length > 0 ? esc.options : ['Acknowledge'],
+            meta: {
+              source: 'director',
+              stakes: esc.stakes,
+              topic: esc.topic,
+            },
+          });
+        } catch {
+          // best-effort — individual escalation failure must not block others
+        }
+      }
+    } finally {
+      releaseOutwardMutationFence(outwardFence);
     }
   } catch {
     // Fire-and-forget — errors must never propagate

@@ -17,7 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import {
@@ -148,6 +148,7 @@ function seedAuthenticatedRealizedProposal(
 beforeEach(() => {
   tmpHome = join(tmpdir(), `m89-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tmpHome, { recursive: true });
+  tmpHome = realpathSync.native(tmpHome);
   origHome = process.env['HOME'] ?? '';
   process.env['HOME'] = tmpHome;
   // Ensure ASHLR_PULSE_PAT is unset by default

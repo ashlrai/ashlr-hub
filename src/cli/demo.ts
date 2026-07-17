@@ -83,6 +83,8 @@ interface DemoTranscript {
   repoDir: string;
   /** Whether the tmp dir was kept (--no-cleanup). */
   kept: boolean;
+  /** Present when best-effort policy teardown could not confirm unenrollment. */
+  cleanupError?: string;
   /** Ordered step records. */
   steps: DemoStep[];
 }
@@ -199,6 +201,7 @@ export async function cmdDemo(
 
   let liveModel = false;
   let ok = false;
+  let cleanupError: string | undefined;
 
   try {
     // Narrate the first two (already-completed) steps + install the signal
@@ -214,7 +217,10 @@ export async function cmdDemo(
     // ── Step 3: enroll the DISPOSABLE repo (the explicit gate). Resolves state
     //    via homedir() at call time, so it writes ONLY into the isolated tmp
     //    ~/.ashlr and targets ONLY the throwaway repo — never a real path.
-    enroll(ctx.repoDir);
+    const enrollment = enroll(ctx.repoDir);
+    if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
+      throw new Error(`ashlr demo: disposable repo enrollment failed: ${enrollment.reason}`);
+    }
     step(
       'enroll',
       'Enroll',
@@ -324,9 +330,14 @@ export async function cmdDemo(
     process.removeListener('SIGTERM', onSignal);
     if (!signalled) {
       try {
-        ctx.dispose();
-      } catch {
-        /* dispose is best-effort + idempotent */
+        const disposed = ctx.dispose();
+        if (!disposed.unenrolled) {
+          cleanupError = disposed.reason;
+          ok = false;
+        }
+      } catch (err) {
+        cleanupError = err instanceof Error ? err.message : String(err);
+        ok = false;
       }
     }
   }
@@ -338,12 +349,15 @@ export async function cmdDemo(
       liveModel,
       repoDir: ctx.repoDir,
       kept: noCleanup,
+      ...(cleanupError ? { cleanupError } : {}),
       steps,
     };
     console.log(JSON.stringify(transcript, null, 2));
   } else {
     console.log('');
-    if (noCleanup) {
+    if (cleanupError) {
+      console.error(`  ${red('cleanup incomplete:')} ${cleanupError}`);
+    } else if (noCleanup) {
       console.log(
         '  ' +
           yellow('--no-cleanup:') +

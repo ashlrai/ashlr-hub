@@ -125,6 +125,7 @@ vi.mock('../src/core/fleet/self.js', () => ({
 // kill-switch + enrollment.
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => false,
+  isEnrolled: () => true,
   assertMayMutate: () => { /* bypass */ },
 }));
 

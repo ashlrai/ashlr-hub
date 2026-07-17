@@ -87,9 +87,9 @@ describe('M56 — executor keeps merge-to-main frontier-only (structural source 
     expect(merge).toMatch(/toMain = target === 'main'/);
   });
 
-  it('the host auto-merge to main is guarded by toMain', () => {
-    // The `gh pr merge --auto --squash` step only runs for a frontier (toMain) proposal.
-    expect(merge).toMatch(/if \(toMain && prUrl\)/);
+  it('does not delegate deferred merge authority to the host without durable revocation', () => {
+    expect(merge).not.toMatch(/'pr', 'merge', '--auto'/);
+    expect(merge).toMatch(/host auto-merge is disabled until durable revocation is available/);
   });
 
   it('the local merge-to-main is guarded by toMain (mid leaves a staged branch)', () => {

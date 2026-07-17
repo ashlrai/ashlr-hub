@@ -54,7 +54,7 @@ import type {
 // Seed helpers
 // ---------------------------------------------------------------------------
 
-const REPO = '/tmp/unhealthy-repo';
+const REPO = path.join(fs.realpathSync.native(os.tmpdir()), 'unhealthy-repo');
 
 function conv(key: string, label: string, ok: boolean, weight = 3): ConventionFinding {
   return { key, label, ok, weight, detail: `${label} probe (${ok ? 'ok' : 'missing'})` };

@@ -31,6 +31,7 @@ import { listProposals, listProposalsDetailed } from '../inbox/store.js';
 import { realizedMergeOf } from '../inbox/realized-merge.js';
 import { recordPostMergeObservation, type PostMergeOutcome } from './post-merge-observations.js';
 import { inspectPostMergeWindow } from './post-merge-window.js';
+import { canonicalEnrollmentPath } from '../sandbox/policy.js';
 import {
   buildMonitoringCursor,
   loadMonitoringCursor,
@@ -59,6 +60,29 @@ const DEFAULT_LOOKBACK_DAYS = 30;
 const DEFAULT_FOLLOWUP_WINDOW_DAYS = 7;
 const MAX_OUTCOME_PROPOSALS = 200;
 const MAX_OUTCOME_CANDIDATES_PER_PASS = 25;
+
+interface CanonicalEnrollmentSelection {
+  repos: string[];
+  missingExact: boolean;
+}
+
+/** Reject aliases while retaining incompleteness when an exact enrolled path is missing. */
+function exactCanonicalEnrolledRepos(repos: readonly string[]): CanonicalEnrollmentSelection {
+  const exact = new Set<string>();
+  let missingExact = false;
+  for (const repo of repos) {
+    if (canonicalEnrollmentPath(repo) !== repo) {
+      missingExact = true;
+      continue;
+    }
+    if (!existsSync(repo)) {
+      missingExact = true;
+      continue;
+    }
+    exact.add(repo);
+  }
+  return { repos: [...exact], missingExact };
+}
 
 function defaultStateFile(): string {
   return join(homedir(), '.ashlr', 'outcome-watcher.json');
@@ -146,7 +170,17 @@ export async function scanRealWorldOutcomes(
   try {
     const now = opts?.nowMs ?? Date.now();
     const stateFile = opts?.stateFile ?? defaultStateFile();
-    const productionCursorMode = opts?.enrolledRepos !== undefined;
+    const enrollmentSelection = opts?.enrolledRepos === undefined
+      ? undefined
+      : exactCanonicalEnrolledRepos(opts.enrolledRepos);
+    if (enrollmentSelection?.missingExact) {
+      scan.skipped++;
+      scan.sourceComplete = false;
+      return scan;
+    }
+    const enrollment = enrollmentSelection?.repos;
+    const enrolled = enrollment === undefined ? null : new Set(enrollment);
+    const productionCursorMode = enrollment !== undefined;
 
     // Throttle (best-effort state file; a corrupt file simply re-runs).
     if (opts?.force !== true) {
@@ -156,7 +190,7 @@ export async function scanRealWorldOutcomes(
           const last = typeof raw['lastScanAt'] === 'number' ? raw['lastScanAt'] : 0;
           const cursorToken = typeof raw['cursorToken'] === 'string' ? raw['cursorToken'] : null;
           const cursorRead = productionCursorMode
-            ? loadMonitoringCursor(opts?.enrolledRepos ?? [])
+            ? loadMonitoringCursor(enrollment ?? [])
             : null;
           const productionThrottleValid = !productionCursorMode || (
             cursorRead?.sourceState !== 'degraded' &&
@@ -244,6 +278,7 @@ export async function scanRealWorldOutcomes(
     for (const trace of traces) {
       const proposal = strictProposals.get(trace.proposalId);
       if (!proposal) continue;
+      if (enrolled !== null && (typeof proposal.repo !== 'string' || !enrolled.has(proposal.repo))) continue;
       if (!productionCursorMode && candidates.size >= MAX_OUTCOME_PROPOSALS) {
         scan.candidateLimitReached = true;
         scan.sourceComplete = false;
@@ -258,6 +293,7 @@ export async function scanRealWorldOutcomes(
     }
     for (const proposal of appliedProposals) {
       if (proposal.status !== 'applied') continue;
+      if (enrolled !== null && (typeof proposal.repo !== 'string' || !enrolled.has(proposal.repo))) continue;
       const merge = realizedMergeOf(proposal);
       if (!merge) continue;
       const candidateAt = merge.source === 'github-host' ? merge.mergedAt : merge.observedAt;
@@ -278,14 +314,13 @@ export async function scanRealWorldOutcomes(
         if (scan.skipped === 0 && scan.sourceComplete) recordCompletedScan(stateFile, now);
         return scan;
       }
-      const enrollment = opts?.enrolledRepos ?? [];
-      const cursorRead = loadMonitoringCursor(enrollment);
+      const cursorRead = loadMonitoringCursor(enrollment ?? []);
       if (cursorRead.sourceState === 'degraded') {
         scan.skipped++;
         scan.sourceComplete = false;
         return scan;
       }
-      const current = cursorRead.cursor ?? buildMonitoringCursor(enrollment);
+      const current = cursorRead.cursor ?? buildMonitoringCursor(enrollment ?? []);
       if (!current) return scan;
       const completed: MonitoringCursorV1 = {
         ...current,
@@ -297,7 +332,7 @@ export async function scanRealWorldOutcomes(
         },
       };
       if (!saveMonitoringCursor(completed, {
-        enrolledRepos: enrollment,
+        enrolledRepos: enrollment ?? [],
         expectedCursor: cursorRead.storedCursor,
       })) {
         scan.skipped++;
@@ -307,23 +342,19 @@ export async function scanRealWorldOutcomes(
       if (!completed.outcome.hadIncomplete) recordCompletedScan(stateFile, now, completed);
       return scan;
     }
-    const enrolled = opts?.enrolledRepos === undefined
-      ? null
-      : new Set(opts.enrolledRepos.map((repo) => resolve(repo)));
     let monitoringCursor: MonitoringCursorV1 | null = null;
     let monitoringCursorExpected: MonitoringCursorV1 | null = null;
     let selectedCandidates = [...candidates.values()];
     let finalCandidateKey: string | null = null;
     const sweepSourceIncomplete = !scan.sourceComplete;
     if (productionCursorMode) {
-      const enrollment = opts.enrolledRepos ?? [];
-      const cursorRead = loadMonitoringCursor(enrollment);
+      const cursorRead = loadMonitoringCursor(enrollment ?? []);
       if (cursorRead.sourceState === 'degraded') {
         scan.sourceComplete = false;
         scan.skipped++;
         return scan;
       }
-      monitoringCursor = cursorRead.cursor ?? buildMonitoringCursor(enrollment);
+      monitoringCursor = cursorRead.cursor ?? buildMonitoringCursor(enrollment ?? []);
       monitoringCursorExpected = cursorRead.storedCursor;
       if (!monitoringCursor) return scan;
       const cursorCandidates = [...candidates.values()].map((candidate) => candidate.cursor);
@@ -372,7 +403,7 @@ export async function scanRealWorldOutcomes(
           },
         };
         if (!saveMonitoringCursor(monitoringCursor, {
-          enrolledRepos: enrollment,
+          enrolledRepos: enrollment ?? [],
           expectedCursor: monitoringCursorExpected,
         })) {
           scan.skipped++;
@@ -386,14 +417,15 @@ export async function scanRealWorldOutcomes(
     for (const candidate of selectedCandidates) {
       let cursorPersistFailed = false;
       const skippedBeforeCandidate = scan.skipped;
-      scan.scanned++;
       try {
         const proposal = candidate.proposal;
         const repo = proposal.repo;
-        if (!repo || !existsSync(repo) || (enrolled !== null && !enrolled.has(resolve(repo)))) {
+        if (enrolled === null) scan.scanned++;
+        if (!repo || !existsSync(repo) || (enrolled !== null && !enrolled.has(repo))) {
           scan.skipped++;
           continue;
         }
+        if (enrolled !== null) scan.scanned++;
 
         const merge = realizedMergeOf(proposal);
         if (!merge) {
@@ -464,7 +496,7 @@ export async function scanRealWorldOutcomes(
             },
           };
           if (!saveMonitoringCursor(monitoringCursor, {
-            enrolledRepos: opts?.enrolledRepos ?? [],
+            enrolledRepos: enrollment ?? [],
             expectedCursor: monitoringCursorExpected,
           })) {
             scan.skipped++;

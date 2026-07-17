@@ -43,9 +43,12 @@ vi.mock('../src/core/generative/invent.js', () => ({
 }));
 
 const mockListEnrolled = vi.fn();
+const mockIsEnrolled = vi.fn(() => true);
+const mockKillSwitchOn = vi.fn(() => false);
 vi.mock('../src/core/sandbox/policy.js', () => ({
   listEnrolled: () => mockListEnrolled(),
-  isEnrolled: vi.fn(() => true),
+  isEnrolled: (...args: unknown[]) => mockIsEnrolled(...args),
+  killSwitchOn: () => mockKillSwitchOn(),
 }));
 
 const mockLoadLatestBriefing = vi.fn(() => null);
@@ -68,6 +71,11 @@ vi.mock('../src/core/inbox/store.js', () => ({
 // ---------------------------------------------------------------------------
 
 const { runInventCycle } = await import('../src/core/generative/invent-cycle.js');
+const {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} = await import('../src/core/sandbox/mutation-fence.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -152,6 +160,8 @@ beforeEach(() => {
   mockLoadLatestBriefing.mockReturnValue(null);
   mockListGoals.mockReturnValue([]);
   mockLoadProposal.mockReturnValue(null);
+  mockIsEnrolled.mockReturnValue(true);
+  mockKillSwitchOn.mockReturnValue(false);
   titleCounter = 0;
 });
 
@@ -201,6 +211,78 @@ describe('runInventCycle — flag gate (default OFF)', () => {
 // ---------------------------------------------------------------------------
 
 describe('runInventCycle — invents for active repos and enqueues', () => {
+  it('holds outward authority through invention and rejects a KILL armed during the producer', async () => {
+    const repo = path.join(tmpHome, 'repo-race-kill');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+
+    let releaseInvent!: (items: WorkItem[]) => void;
+    let markInventStarted!: () => void;
+    const inventStarted = new Promise<void>((resolve) => { markInventStarted = resolve; });
+    mockInventWorkItems.mockImplementation(() => {
+      markInventStarted();
+      return new Promise<WorkItem[]>((resolve) => { releaseInvent = resolve; });
+    });
+
+    const cycle = runInventCycle(makeCfg({ generative: true }));
+    await inventStarted;
+
+    const contender = acquireOutwardMutationFence(0);
+    expect(contender).toBeNull();
+    mockKillSwitchOn.mockReturnValue(true);
+    releaseInvent([makeItem(repo, 'Raced invention')]);
+
+    const result = await cycle;
+    expect(result).toEqual({ invented: 0, enqueued: 0 });
+    expect(readBacklog()).toBeNull();
+
+    mockKillSwitchOn.mockReturnValue(false);
+    const successor = acquireOutwardMutationFence(100);
+    expect(ownsOutwardMutationFence(successor)).toBe(true);
+    releaseOutwardMutationFence(successor);
+  });
+
+  it('rechecks enrollment after invention before persisting backlog work', async () => {
+    const repo = path.join(tmpHome, 'repo-race-unenroll');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+
+    let releaseInvent!: (items: WorkItem[]) => void;
+    let markInventStarted!: () => void;
+    const inventStarted = new Promise<void>((resolve) => { markInventStarted = resolve; });
+    mockInventWorkItems.mockImplementation(() => {
+      markInventStarted();
+      return new Promise<WorkItem[]>((resolve) => { releaseInvent = resolve; });
+    });
+
+    const cycle = runInventCycle(makeCfg({ generative: true }));
+    await inventStarted;
+    mockIsEnrolled.mockReturnValue(false);
+    releaseInvent([makeItem(repo, 'Unenrolled invention')]);
+
+    const result = await cycle;
+    expect(result).toEqual({ invented: 0, enqueued: 0 });
+    expect(readBacklog()).toBeNull();
+  });
+
+  it('uses borrowed outward authority without recursively acquiring the fence', async () => {
+    const repo = path.join(tmpHome, 'repo-borrowed-authority');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+    mockInventWorkItems.mockResolvedValue([makeItem(repo, 'Borrowed authority invention')]);
+    const authority = acquireOutwardMutationFence(100);
+    expect(ownsOutwardMutationFence(authority)).toBe(true);
+
+    try {
+      const result = await runInventCycle(makeCfg({ generative: true }), { authority: authority! });
+      expect(result.enqueued).toBe(1);
+      expect(ownsOutwardMutationFence(authority)).toBe(true);
+      expect(readBacklog()?.items).toHaveLength(1);
+    } finally {
+      releaseOutwardMutationFence(authority);
+    }
+  });
+
   it('enqueues invented items into ~/.ashlr/backlog.json', async () => {
     mockListEnrolled.mockReturnValue(['/tmp/repo-a']);
     mockInventWorkItems.mockResolvedValue([

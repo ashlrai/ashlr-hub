@@ -2177,3 +2177,38 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Missing state is inactive; malformed, unsigned, conflicting, future-dated, rollback-suspect, or over-cap state is critical/degraded.
 - Local HMAC protects visible integrity but cannot prove freshness after coherent state-and-key rollback.
 - Production remains on immutable `f178db34fa6e47eb44df9f3db855943db602ef76` with auto-merge disabled until the complete enforce controller is proven.
+
+## Current Overnight Cycle - Cross-Process Outward Mutation Authority
+- [x] Rehydrate protected remote source in an isolated worktree while preserving the canonical routing and test edits.
+- [x] Audit every autonomous outward-effect path, deferred task, shutdown boundary, policy transition, sandbox lifecycle, remote handoff, and local merge path with parallel adversarial agents.
+- [x] Add one process-wide unforgeable outward-mutation fence and hold it through autonomous execution, capture, verification, staging, push/PR, local merge, fanout, cleanup, and awaited side effects.
+- [x] Make KILL and unenrollment durable-before-wait, crash-recoverable, and unable to report quiescence while a cooperating outward effect remains active.
+- [x] Add signed exact-remote pre-push intent, bounded retry/reconciliation, local merge receipts, later-base ancestry reconciliation, and realized-merge fanout replay.
+- [x] Add durable policy transactions, sandbox reservations, fixed-point daemon drain, token-bound local locks, and authenticated abandoned-guard recovery.
+- [x] Make live PID ownership conservative under clock drift, suspend, DST ambiguity, PID reuse, and unknown liveness; reclaim only after the OS proves `ESRCH`.
+- [x] Add M403-M424 plus sandbox reservation coverage and native Windows CI partitions.
+- [x] Re-prove the expanded physical-identity tree with a final exhaustive suite after closing all legacy fixture and mock-contract fallout.
+- [x] Re-run typecheck, build, lint, dependency audit, and diff checks on the exact commit candidate.
+- [x] Commit, push, and open protected PR #30.
+- [ ] Observe the final exact-SHA cross-platform CI matrix.
+- [ ] Keep production on immutable `f178db34fa6e47eb44df9f3db855943db602ef76`; auto-merge enforcement and deployment remain NO-GO.
+
+### Final Verification Recovery
+- The first serial exhaustive pass after physical identity hardening found 95 failures across 18 files; focused repairs reduced the fast discovery pass to 73 failures across 14 files.
+- Four disjoint workers repaired the compatibility fixtures and mocks for the stricter canonical enrollment/proposal/goal-source contracts; the timing-sensitive deadline assertion now uses an injected clock without relaxing production budgets.
+- Final adversarial review found and closed source/common-directory and post-create sandbox path races, healthy-empty alias enrollment projections, missing remote and local realized-merge fanout authority, and two native CI coverage gaps.
+- Native CI exposed six masked portability defects: a two-backslash preload replacement that did not normalize Windows paths, synchronous tool probes that could wait on a SIGTERM handler, Windows `UNKNOWN` results for physically resolvable 8.3 ancestors, rounded numeric Windows file identities, worktree failure provenance recomputed after rollback changed the observed path state, and a private POSIX-only dispatch-manifest directory `fsync`.
+- The fixes normalize each Windows separator before Node parses `NODE_OPTIONS`, use bounded `SIGKILL` probe termination, resolve `UNKNOWN` ancestors physically before guarded absence fallback, transport exact BigInt file identities and pin the published reservation metadata, freeze reservation truth before rollback, and reuse the validated cross-platform directory-durability helper.
+- Eight changed physical-identity files now run fourteen named Windows cases in a dedicated hermetic step. This preserves native junction and canonical-path evidence without importing unrelated legacy POSIX assumptions from their full files into the stable portability partitions.
+- The first full-file roster experiment failed deterministically and was replaced rather than waived: Windows 1/3 exposed unrelated legacy assumptions, while Windows 2/3 independently exposed the 8.3 and rollback-provenance defects. Both exact Ubuntu exhaustives, both macOS jobs, and both Windows 3/3 jobs on that intermediate production source remained green.
+- The pre-native-recovery exhaustive baseline passes 534 files with 11,218 tests green and 9 intentional skips in 600.54 seconds, plus typecheck, build, zero-error lint with the unchanged 104-warning baseline, zero-vulnerability audit, and diff checks. Final exact-SHA Ubuntu CI remains the exhaustive authority after the native corrections.
+- Authority reads remain fail closed for lexical or missing physical enrollments. Tests that represent healthy state must create and use physical canonical paths; malformed and legacy-state tests must remain explicitly degraded.
+- Windows-only runner variance also crossed the old local bounds for one 256-commit fixture and one synchronization-heavy lifecycle test in only one of two duplicate exact-SHA jobs. Their behavioral assertions are unchanged; the per-test ceilings are now 45 and 30 seconds while production deadlines remain untouched.
+- Final adversarial review then closed adjacent authority races: metadata publication now compares exact BigInt directory and opened-file identities through rename; rollback revalidates and monitors the reservation around every Git mutation, including the exact worktree while removal is allowed to make it absent; and the parent independently brackets exact HEAD, branch, and retained common-directory association reads with the child-attested worktree plus source/common/reservation identity pins before returning success.
+- Rollback separately proves an initially absent worktree remains absent, and all worktree discovery/validation Git processes strip inherited `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR`. Native adversarial fixtures now force both an absent path appearing during removal and hostile repository-selection overrides.
+
+### Authority Limits
+- Manual human-confirmed apply and desktop actions do not yet share universal durable pre-effect intent and reconciliation.
+- Older host auto-merge requests are not automatically revoked; this production installation has never enabled auto-merge.
+- Cooperative locks cannot stop an uncooperative same-user process, and external engines remain outside a filesystem jail beyond the cooperative sandbox protocol.
+- Host-local evidence cannot prove freshness after coherent state/key rollback; an external monotonic anchor remains required for enforcement.

@@ -24,11 +24,15 @@ import type { Goal, Milestone, Proposal, SwarmRun } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 const mockListGoals = vi.fn();
+const mockListGoalsDetailed = vi.fn();
+const mockLoadGoal = vi.fn();
 const mockUpdateMilestoneStatusFromGoals = vi.fn();
 
 // Goals store — provide listGoals so linkMilestoneOutcome can scan milestones.
 vi.mock('../src/core/goals/store.js', () => ({
   listGoals: (...args: unknown[]) => mockListGoals(...args),
+  listGoalsDetailed: (...args: unknown[]) => mockListGoalsDetailed(...args),
+  loadGoal: (...args: unknown[]) => mockLoadGoal(...args),
   updateMilestoneStatus: (...args: unknown[]) => mockUpdateMilestoneStatusFromGoals(...args),
   goalsDir: () => '/tmp/fake-goals',
 }));
@@ -55,7 +59,12 @@ afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 // Lazy imports AFTER mocks are registered.
 // ---------------------------------------------------------------------------
 
-import { setStatus, updateProposalField } from '../src/core/inbox/store.js';
+import {
+  listProposalsDetailed,
+  loadProposal,
+  setStatus,
+  updateProposalField,
+} from '../src/core/inbox/store.js';
 
 // Advance-side imports — for contract 1 we rely on m28.advance.test.ts, but
 // we re-assert the core linkage here with a minimal smoke test.
@@ -69,7 +78,8 @@ const mockLoadProposal = vi.fn();
 vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
-vi.mock('../src/core/sandbox/policy.js', () => ({
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
   assertMayMutate: (...args: unknown[]) => mockAssertMayMutate(...args),
 }));
 // NOTE: goals/store.js mock above covers advance.ts too (same vi.mock key).
@@ -84,6 +94,35 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const REPO = path.join(fs.realpathSync.native(process.cwd()), '.m228-enrolled-repo');
+let goalRows: Goal[] = [];
+
+function useHealthyGoalRows(goals: Goal[]): void {
+  goalRows = goals;
+  mockListGoals.mockImplementation(() => goalRows);
+  mockListGoalsDetailed.mockImplementation(() => ({
+    goals: goalRows,
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    scannedFiles: goalRows.length,
+    unreadableFiles: 0,
+    limitExceeded: false,
+  }));
+  mockLoadGoal.mockImplementation((goalId: string) =>
+    goalRows.find((goal) => goal.id === goalId) ?? null,
+  );
+  mockUpdateMilestoneStatusFromGoals.mockImplementation(
+    (goalId: string, milestoneId: string, status: Milestone['status']) => {
+      const goal = goalRows.find((candidate) => candidate.id === goalId);
+      const milestone = goal?.milestones.find((candidate) => candidate.id === milestoneId);
+      if (!goal || !milestone) return null;
+      milestone.status = status;
+      return goal;
+    },
+  );
+}
 
 function makeMilestone(overrides: Partial<Milestone> = {}): Milestone {
   const now = new Date().toISOString();
@@ -107,7 +146,7 @@ function makeGoal(milestoneOverrides: Partial<Milestone> = {}): Goal {
   return {
     id: 'goal-1',
     objective: 'ship the widget',
-    project: '/tmp/enrolled-repo',
+    project: REPO,
     status: 'active',
     milestones: [makeMilestone(milestoneOverrides)],
     createdAt: now,
@@ -119,7 +158,7 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   const now = new Date().toISOString();
   return {
     id: 'prop-target',
-    repo: path.resolve('/tmp/enrolled-repo'),
+    repo: REPO,
     origin: 'swarm',
     kind: 'patch',
     title: 'Advance goal: ship the widget — ship the widget',
@@ -136,7 +175,7 @@ function makeSwarmRun(overrides: Partial<SwarmRun> = {}): SwarmRun {
     id: 'swarm-abc',
     goal: 'ship the widget — ship the widget',
     specId: null,
-    project: '/tmp/enrolled-repo',
+    project: REPO,
     createdAt: now,
     updatedAt: now,
     budget: { maxTokens: 200_000, maxSteps: 40, allowCloud: false },
@@ -228,8 +267,10 @@ describe('M228 Contract 1 — advanceGoal sets proposalId + proposed status', ()
 describe('M228 Contract 2 — generic applied lifecycle state grants no completion credit', () => {
   beforeEach(() => {
     mockListGoals.mockReset();
+    mockListGoalsDetailed.mockReset();
+    mockLoadGoal.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
-    mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
+    useHealthyGoalRows([]);
   });
 
   it('does not complete a milestone from applied status plus passing verification alone', () => {
@@ -237,7 +278,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal(); // milestone has proposalId: 'prop-target'
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     setStatus('prop-target', 'applied');
 
@@ -249,7 +290,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     setStatus('prop-target', 'applied');
 
@@ -261,7 +302,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     setStatus('prop-target', 'applied');
 
@@ -273,7 +314,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     updateProposalField('prop-target', { verifyResult: { passed: true } });
 
@@ -285,7 +326,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     updateProposalField('prop-target', { verifyResult: { passed: false } });
 
@@ -298,7 +339,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
 
     // Goal milestone has a DIFFERENT proposalId
     const goal = makeGoal({ proposalId: 'prop-other' });
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     setStatus('prop-target', 'applied');
 
@@ -309,7 +350,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
-    mockListGoals.mockImplementation(() => { throw new Error('disk error'); });
+    mockListGoalsDetailed.mockImplementation(() => { throw new Error('disk error'); });
 
     // setStatus must not throw even if listGoals blows up.
     expect(() => setStatus('prop-target', 'applied')).not.toThrow();
@@ -320,7 +361,7 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
     mockUpdateMilestoneStatusFromGoals.mockImplementation(() => {
       throw new Error('store write failed');
     });
@@ -332,8 +373,10 @@ describe('M228 Contract 2 — generic applied lifecycle state grants no completi
 describe('M228 Contract 3 — proposal rejected → linked milestone resets to pending', () => {
   beforeEach(() => {
     mockListGoals.mockReset();
+    mockListGoalsDetailed.mockReset();
+    mockLoadGoal.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
-    mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
+    useHealthyGoalRows([]);
   });
 
   it('milestone with matching proposalId is reset to "pending" when proposal is rejected', () => {
@@ -341,18 +384,22 @@ describe('M228 Contract 3 — proposal rejected → linked milestone resets to p
     stubExistingProposal(proposal);
 
     const goal = makeGoal(); // milestone proposalId: 'prop-target', status: 'proposed'
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
-    setStatus('prop-target', 'rejected');
+    expect(listProposalsDetailed()).toMatchObject({ sourceState: 'healthy', complete: true });
+    expect(loadProposal('prop-target')).toMatchObject({ id: 'prop-target', repo: REPO });
+    expect(setStatus('prop-target', 'rejected')).toBe(true);
 
     expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith(
       'goal-1',
       'g1-m0',
       'pending',
     );
+    expect(mockLoadGoal).toHaveBeenCalledWith('goal-1');
+    expect(goal.milestones[0]?.status).toBe('pending');
   });
 
-  it('only the first goal with a matching proposalId is updated (one owner per proposal)', () => {
+  it('resets every linked milestone when corrupted state has duplicate owners', () => {
     const proposal = makeProposal({ status: 'pending' });
     stubExistingProposal(proposal);
 
@@ -365,13 +412,15 @@ describe('M228 Contract 3 — proposal rejected → linked milestone resets to p
       milestones: [makeMilestone({ id: 'g2-m0', proposalId: 'prop-target' })],
     };
     goal2.milestones[0]!.updatedAt = now;
-    mockListGoals.mockReturnValue([goal1, goal2]);
+    useHealthyGoalRows([goal1, goal2]);
 
-    setStatus('prop-target', 'rejected');
+    expect(setStatus('prop-target', 'rejected')).toBe(true);
 
-    // Only one update — we stop after the first match.
-    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledTimes(1);
+    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledTimes(2);
     expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith('goal-1', 'g1-m0', 'pending');
+    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith('goal-2', 'g2-m0', 'pending');
+    expect(goal1.milestones[0]?.status).toBe('pending');
+    expect(goal2.milestones[0]?.status).toBe('pending');
   });
 
   it('non-terminal statuses (approved, pending, failed) do NOT trigger milestone update', () => {
@@ -379,7 +428,7 @@ describe('M228 Contract 3 — proposal rejected → linked milestone resets to p
     stubExistingProposal(proposal);
 
     const goal = makeGoal();
-    mockListGoals.mockReturnValue([goal]);
+    useHealthyGoalRows([goal]);
 
     for (const s of ['approved', 'pending', 'failed'] as const) {
       mockUpdateMilestoneStatusFromGoals.mockClear();

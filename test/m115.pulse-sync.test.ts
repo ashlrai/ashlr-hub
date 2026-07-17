@@ -268,7 +268,9 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
 
     const out = await pollAndApplyCommands(cfg);
 
-    expect(policy.enroll).toHaveBeenCalledWith('/repo/new');
+    expect(policy.enroll).toHaveBeenCalledWith('/repo/new', {
+      borrowedFence: expect.objectContaining({ path: expect.any(String), token: expect.any(String) }),
+    });
     expect(goals.createGoal).not.toHaveBeenCalled();
     expect(inbox.setStatus).not.toHaveBeenCalled();
     expect(out[0]!.outcome).toBe('done');
@@ -302,6 +304,65 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
     expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
   });
 
+  it('does not recover a fresh local claim or an expired foreign claim', async () => {
+    const freshLocal = cmd({
+      id: 'fresh-local',
+      status: 'claimed',
+      claimedBy: 'mason',
+      claimedAt: new Date().toISOString(),
+    });
+    const expiredForeign = cmd({
+      id: 'expired-foreign',
+      status: 'claimed',
+      claimedBy: 'another-machine',
+      claimedAt: '2020-01-01T00:00:00.000Z',
+    });
+    vi.mocked(exporter.pollFleetCommands).mockImplementation(async (_xcfg, opts) => ({
+      ok: true,
+      skipped: false,
+      commands: opts?.status === 'claimed' ? [freshLocal, expiredForeign] : [],
+      status: 200,
+      detail: 'bounded recovery fixture',
+    }));
+
+    await expect(pollAndApplyCommands(cfg)).resolves.toEqual([]);
+
+    expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
+    expect(exporter.claimFleetCommand).not.toHaveBeenCalled();
+  });
+
+  it('bounds expired claim recovery to one command-page per pass', async () => {
+    const expired = Array.from({ length: 30 }, (_, index) => cmd({
+      id: `expired-${index}`,
+      status: 'claimed',
+      claimedBy: 'mason',
+      claimedAt: '2020-01-01T00:00:00.000Z',
+    }));
+    vi.mocked(exporter.pollFleetCommands).mockImplementation(async (_xcfg, opts) => ({
+      ok: true,
+      skipped: false,
+      commands: opts?.status === 'claimed' ? expired : [],
+      status: 200,
+      detail: 'bounded recovery fixture',
+    }));
+
+    await expect(pollAndApplyCommands(cfg)).resolves.toEqual([]);
+
+    expect(exporter.patchFleetCommand).toHaveBeenCalledTimes(25);
+    expect(exporter.patchFleetCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      'expired-24',
+      expect.objectContaining({ status: 'pending' }),
+      expect.anything(),
+    );
+    expect(exporter.patchFleetCommand).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'expired-25',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('dispatches a MIXED batch — one of each kind — to the right handlers', async () => {
     queueCommands([
       cmd({ id: 'm-g', kind: 'assign_goal', payload: { objective: 'do X' } }),
@@ -331,7 +392,9 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
     expect(exporter.exportFleetEvents).toHaveBeenCalled(); // tick heartbeat
     expect(res.commands).toHaveLength(1);
     expect(res.commands[0]!.outcome).toBe('done');
-    expect(policy.enroll).toHaveBeenCalledWith('/r');
+    expect(policy.enroll).toHaveBeenCalledWith('/r', {
+      borrowedFence: expect.objectContaining({ path: expect.any(String), token: expect.any(String) }),
+    });
   });
 });
 
@@ -477,7 +540,9 @@ describe('pulse-sync — never throws on Pulse failure (best-effort)', () => {
 
     // The local action already ran; the outcome is still reported despite the
     // failed writeback (the cloud re-derives state from the next tick's spans).
-    expect(policy.enroll).toHaveBeenCalledWith('/r');
+    expect(policy.enroll).toHaveBeenCalledWith('/r', {
+      borrowedFence: expect.objectContaining({ path: expect.any(String), token: expect.any(String) }),
+    });
     expect(out).toHaveLength(1);
     expect(out[0]!.outcome).toBe('done');
   });

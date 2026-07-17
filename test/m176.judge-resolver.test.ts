@@ -43,6 +43,8 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: (engine: string | undefined) =>
+    String(engine ?? '').toLowerCase().startsWith('claude'),
 }));
 
 const mockListProposals = vi.fn();
@@ -57,6 +59,7 @@ vi.mock('../src/core/inbox/store.js', () => ({
 const mockKillSwitchOn = vi.fn(() => false);
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
+  isEnrolled: () => true,
 }));
 
 const mockReadDecisions = vi.fn(() => []);

@@ -21,14 +21,18 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   }),
 }));
 
-vi.mock('../src/core/sandbox/worktree.js', () => ({
-  sandboxDiff: () => ({
-    files: 1,
-    patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,
-    insertions: 20,
-    deletions: 0,
-  }),
-}));
+vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/sandbox/worktree.js')>();
+  return {
+    ...real,
+    sandboxDiff: () => ({
+      files: 1,
+      patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,
+      insertions: 20,
+      deletions: 0,
+    }),
+  };
+});
 
 vi.mock('../src/core/run/completeness-gate.js', () => ({
   runCompletenessGate: vi.fn(async () => ({ pass: true })),
@@ -71,16 +75,20 @@ vi.mock('../src/core/run/engines.js', () => ({
 
 describe('M259 diff dedup producer credit', () => {
   const originalHome = process.env.HOME;
+  const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   let home: string;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'ashlr-m259-credit-'));
     process.env.HOME = home;
+    process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
     recordDecision.mockClear();
   });
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
     rmSync(home, { recursive: true, force: true });
   });
 

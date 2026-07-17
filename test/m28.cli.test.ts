@@ -433,6 +433,10 @@ describe('cmdGoals — steering', () => {
     await cmdGoals(['plan', id, '--json']);
     const m0 = `${id}-m0`;
     const store = await import('../src/core/goals/store.js');
+    const goal = store.loadGoal(id)!;
+    goal.createdAt = '2025-12-31T23:00:00.000Z';
+    goal.milestones[0]!.createdAt = '2025-12-31T23:00:00.000Z';
+    expect(store.saveGoal(goal)).toBe(true);
     store.updateMilestoneStatus(id, m0, 'in-progress', {
       swarmId: 'old-swarm',
       now: '2026-01-01T00:00:00.000Z',

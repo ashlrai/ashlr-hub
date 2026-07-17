@@ -27,6 +27,8 @@ import { dirname, isAbsolute, join } from 'node:path';
 import type { DaemonDispatchManifestSummary, EngineId, WorkItem } from '../types.js';
 import type { DispatchPlan } from '../fabric/concurrent-dispatch.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -175,6 +177,15 @@ function boundedNullableText(value: unknown, max: number): string | null | undef
   return value === null ? null : boundedOptionalText(value, max);
 }
 
+function canonicalManifestRepoIdentity(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_TEXT.repo || !isAbsolute(value)) return null;
+  if (scrubSecrets(value) !== value) return null;
+  const canonical = canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+  return canonical !== null && canonical.length <= MAX_TEXT.repo && scrubSecrets(canonical) === canonical
+    ? canonical
+    : null;
+}
+
 function sanitizeCountMap(input: ReadonlyMap<EngineId, number> | Record<string, number> | undefined): Record<string, number> {
   if (!input) return {};
   const entries = input instanceof Map ? [...input.entries()] : Object.entries(input);
@@ -206,7 +217,7 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
       itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'),
       ...(attemptId ? { attemptId } : {}),
       source: boundedText(item.source, 80, 'unknown') as WorkItem['source'],
-      repo: boundedText(item.repo, MAX_TEXT.repo, 'unknown'),
+      repo: item.repo,
       title: boundedText(item.title ?? item.id, MAX_TEXT.title, 'untitled'),
       backend: boundedText(backend, 80, 'builtin') as EngineId,
       ...(routeReason ? { routeReason } : {}),
@@ -241,11 +252,13 @@ export function sanitizeDispatchManifestEvent(event: DispatchManifestEvent): Dis
     const attemptId = boundedOptionalText(assignment.attemptId, 160);
     const routeReason = boundedOptionalText(assignment.routeReason, MAX_TEXT.reason);
     const model = boundedNullableText(assignment.model, MAX_TEXT.model);
+    const repo = canonicalManifestRepoIdentity(assignment.repo);
+    if (repo === null) throw new Error('invalid dispatch manifest repository identity');
     return {
       itemId: boundedText(assignment.itemId, MAX_TEXT.itemId, 'unknown'),
       ...(attemptId ? { attemptId } : {}),
       source: boundedText(assignment.source, 80, 'unknown') as WorkItem['source'],
-      repo: boundedText(assignment.repo, MAX_TEXT.repo, 'unknown'),
+      repo,
       title: boundedText(assignment.title, MAX_TEXT.title, 'untitled'),
       backend: boundedText(assignment.backend, 80, 'builtin') as EngineId,
       ...(routeReason ? { routeReason } : {}),
@@ -323,7 +336,8 @@ function isAssignment(value: unknown): value is DispatchManifestAssignment {
   return isBoundedString(value['itemId'], MAX_TEXT.itemId) &&
     (value['attemptId'] === undefined || isBoundedString(value['attemptId'], 160)) &&
     typeof value['source'] === 'string' && PERSISTED_WORK_SOURCES.has(value['source']) &&
-    isBoundedString(value['repo'], MAX_TEXT.repo) && isBoundedString(value['title'], MAX_TEXT.title) &&
+    isBoundedString(value['repo'], MAX_TEXT.repo) && canonicalManifestRepoIdentity(value['repo']) === value['repo'] &&
+    isBoundedString(value['title'], MAX_TEXT.title) &&
     typeof value['backend'] === 'string' && ENGINE_IDS.has(value['backend'] as EngineId) &&
     (value['routeReason'] === undefined || isBoundedString(value['routeReason'], MAX_TEXT.reason)) &&
     (value['model'] === undefined || value['model'] === null || isBoundedString(value['model'], MAX_TEXT.model));
@@ -420,16 +434,6 @@ function writeAll(fd: number, bytes: Buffer): void {
   }
 }
 
-function fsyncDirectory(path: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 function appendManifestLine(
   path: string,
   line: string,
@@ -483,7 +487,12 @@ function appendManifestLine(
 export function recordDispatchManifest(eventOrEvents: DispatchManifestEvent | DispatchManifestEvent[]): DaemonDispatchManifestSummary | undefined {
   const firstInput = Array.isArray(eventOrEvents) ? eventOrEvents[0] : eventOrEvents;
   if (!firstInput) return undefined;
-  const first = sanitizeDispatchManifestEvent(firstInput);
+  let first: DispatchManifestEvent;
+  try {
+    first = sanitizeDispatchManifestEvent(firstInput);
+  } catch {
+    return dispatchManifestSummary(firstInput, false);
+  }
   let lock: ReturnType<typeof acquireLocalStoreLock> | undefined;
   try {
     const input = Array.isArray(eventOrEvents) ? eventOrEvents : [eventOrEvents];

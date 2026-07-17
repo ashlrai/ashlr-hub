@@ -44,11 +44,18 @@ vi.mock('../src/core/run/verify-commands.js', () => ({
 }));
 
 const mockListEnrolled = vi.fn();
-vi.mock('../src/core/sandbox/policy.js', () => ({
-  listEnrolled: () => mockListEnrolled(),
-  isEnrolled: vi.fn(() => true),
-  readRegistry: vi.fn(() => ({ repos: [] })),
-}));
+const mockIsEnrolled = vi.fn(() => true);
+const mockKillSwitchOn = vi.fn(() => false);
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/policy.js')>();
+  return {
+    ...actual,
+    listEnrolled: () => mockListEnrolled(),
+    isEnrolled: (...args: unknown[]) => mockIsEnrolled(...args),
+    killSwitchOn: () => mockKillSwitchOn(),
+    readRegistry: vi.fn(() => ({ repos: [] })),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Lazy imports (after mocks)
@@ -60,6 +67,11 @@ const { detectBreakage, proposeHeal, runSelfHealCycle, runSelfHealCycleForRepos 
 const { isActionableSelfHealFailureText } = await import(
   '../src/core/fleet/self-heal-trust.js'
 );
+const {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} = await import('../src/core/sandbox/mutation-fence.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -120,9 +132,11 @@ const TIMEOUT_FAIL_RESULT = {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'm165-'));
+  tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'm165-')));
   process.env.HOME = tmpHome;
   vi.resetAllMocks();
+  mockIsEnrolled.mockReturnValue(true);
+  mockKillSwitchOn.mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -385,6 +399,81 @@ describe('proposeHeal', () => {
 // ---------------------------------------------------------------------------
 
 describe('runSelfHealCycle', () => {
+  it('holds outward authority through verification and rejects a KILL armed during the producer', async () => {
+    const repo = path.join(tmpHome, 'repo-race-kill');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+
+    let releaseVerify!: (value: typeof BUILD_FAIL_RESULT) => void;
+    let markVerifyStarted!: () => void;
+    const verifyStarted = new Promise<void>((resolve) => { markVerifyStarted = resolve; });
+    mockRunVerifyCommand.mockImplementation(() => {
+      markVerifyStarted();
+      return new Promise<typeof BUILD_FAIL_RESULT>((resolve) => { releaseVerify = resolve; });
+    });
+
+    const cycle = runSelfHealCycle(makeCfg());
+    await verifyStarted;
+
+    const contender = acquireOutwardMutationFence(0);
+    expect(contender).toBeNull();
+    mockKillSwitchOn.mockReturnValue(true);
+    releaseVerify(BUILD_FAIL_RESULT);
+
+    const result = await cycle;
+    expect(result).toEqual({ checked: 1, broken: [], healItems: [] });
+    expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'self-heal-queue.json'))).toBe(false);
+
+    mockKillSwitchOn.mockReturnValue(false);
+    const successor = acquireOutwardMutationFence(100);
+    expect(ownsOutwardMutationFence(successor)).toBe(true);
+    releaseOutwardMutationFence(successor);
+  });
+
+  it('rechecks enrollment after verification before persisting a heal item', async () => {
+    const repo = path.join(tmpHome, 'repo-race-unenroll');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+
+    let releaseVerify!: (value: typeof BUILD_FAIL_RESULT) => void;
+    let markVerifyStarted!: () => void;
+    const verifyStarted = new Promise<void>((resolve) => { markVerifyStarted = resolve; });
+    mockRunVerifyCommand.mockImplementation(() => {
+      markVerifyStarted();
+      return new Promise<typeof BUILD_FAIL_RESULT>((resolve) => { releaseVerify = resolve; });
+    });
+
+    const cycle = runSelfHealCycle(makeCfg());
+    await verifyStarted;
+    mockIsEnrolled.mockReturnValue(false);
+    releaseVerify(BUILD_FAIL_RESULT);
+
+    const result = await cycle;
+    expect(result).toEqual({ checked: 1, broken: [], healItems: [] });
+    expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'self-heal-queue.json'))).toBe(false);
+  });
+
+  it('uses borrowed outward authority without recursively acquiring the fence', async () => {
+    const repo = path.join(tmpHome, 'repo-borrowed-authority');
+    fs.mkdirSync(repo, { recursive: true });
+    mockListEnrolled.mockReturnValue([repo]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+    mockRunVerifyCommand.mockReturnValue(BUILD_FAIL_RESULT);
+    const authority = acquireOutwardMutationFence(100);
+    expect(ownsOutwardMutationFence(authority)).toBe(true);
+
+    try {
+      const result = await runSelfHealCycle(makeCfg(), { authority: authority! });
+      expect(result.broken).toEqual([repo]);
+      expect(ownsOutwardMutationFence(authority)).toBe(true);
+      expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'self-heal-queue.json'))).toBe(true);
+    } finally {
+      releaseOutwardMutationFence(authority);
+    }
+  });
+
   it('returns zeroed result when flag is disabled', async () => {
     mockListEnrolled.mockReturnValue(['/tmp/repo-a', '/tmp/repo-b']);
     const result = await runSelfHealCycle({ foundry: { selfHeal: false } as unknown as AshlrConfig['foundry'] });
@@ -680,6 +769,36 @@ describe('runSelfHealCycle', () => {
     expect(result.checked).toBe(1);
     expect(result.broken).toEqual([repoA]);
     expect(result.healItems[0]!.repo).toBe(repoA);
+  });
+
+  it('accepts a current physical alias only for an exactly canonical enrolled path', async () => {
+    const repo = path.join(tmpHome, 'repo-physical');
+    const alias = path.join(tmpHome, 'repo-alias');
+    fs.mkdirSync(repo, { recursive: true });
+    const canonicalRepo = fs.realpathSync.native(repo);
+    fs.symlinkSync(
+      canonicalRepo,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    mockListEnrolled.mockReturnValue([canonicalRepo]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    const currentAlias = await runSelfHealCycleForRepos([alias], makeCfg());
+
+    expect(currentAlias.checked).toBe(1);
+    expect(mockRunVerifyCommand).toHaveBeenCalledTimes(1);
+    expect(mockRunVerifyCommand.mock.calls[0]![1]).toBe(canonicalRepo);
+
+    mockRunVerifyCommand.mockClear();
+    mockListEnrolled.mockReturnValue([alias]);
+
+    const legacyRegistryAlias = await runSelfHealCycleForRepos([canonicalRepo], makeCfg());
+
+    expect(legacyRegistryAlias).toEqual({ checked: 0, broken: [], healItems: [] });
+    expect(mockRunVerifyCommand).not.toHaveBeenCalled();
   });
 
   it('targeted self-heal maintenance replaces stale failure text for the requested repo', async () => {

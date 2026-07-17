@@ -13,10 +13,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SpawnSyncReturns } from 'node:child_process';
+import { win32 } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Mock child_process BEFORE importing the module under test.
-// tools-registry.ts uses spawnSync (or execFileSync) for `which` and --version.
+// tools-registry.ts uses spawnSync (or execFileSync) for PATH lookup and --version.
 // We intercept ALL calls and route based on the command+args.
 // ---------------------------------------------------------------------------
 
@@ -26,6 +27,9 @@ type MockResponse = SpawnSyncReturns<string>;
 let _mockResponses: Map<string, MockResponse> = new Map();
 // Default fallback (ENOENT = not found).
 let _defaultResponse: MockResponse;
+let _execFileCalls: string[] = [];
+let _execFileOptions: Array<{ key: string; options: unknown }> = [];
+const origSystemRoot = process.env.SystemRoot;
 
 // ---------------------------------------------------------------------------
 // Mock node:fs — controls existsSync for app-path detection (ashlr-md etc.)
@@ -78,8 +82,10 @@ vi.mock('node:child_process', () => ({
     if (_mockResponses.has(cmd)) return _mockResponses.get(cmd)!;
     return _defaultResponse ?? enoent(cmd);
   },
-  execFileSync: (cmd: string, args: string[] = [], _opts?: unknown): string => {
+  execFileSync: (cmd: string, args: string[] = [], options?: unknown): string => {
     const key = `${cmd} ${args.join(' ')}`.trim();
+    _execFileCalls.push(key);
+    _execFileOptions.push({ key, options });
     const resp = _mockResponses.get(key) ?? _mockResponses.get(cmd) ?? _defaultResponse;
     if (!resp) throw Object.assign(new Error(`${cmd}: not found`), { code: 'ENOENT' });
     if (resp.error) throw resp.error;
@@ -96,17 +102,23 @@ import { getToolsRegistry } from '../src/core/tools-registry.js';
 
 /** Register a tool as "installed" with a given version and path. */
 function mockInstalled(toolCmd: string, version: string, binPath: string): void {
-  // which <tool>
+  // Register both platform locators so the same fixture is native-portable.
   _mockResponses.set(`which ${toolCmd}`, whichResult(binPath));
-  // <tool> --version
-  _mockResponses.set(`${toolCmd} --version`, versionResult(version));
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+  const whereExe = win32.join(systemRoot, 'System32', 'where.exe');
+  _mockResponses.set(`${whereExe} $PATH:${toolCmd}`, whichResult(binPath));
+  // Execute the resolved path for version identity, not a second PATH lookup.
+  _mockResponses.set(`${binPath} --version`, versionResult(version));
   // also handle bare cmd key for version lookup fallbacks
   _mockResponses.set(toolCmd, whichResult(binPath));
 }
 
-/** Register a tool as absent (ENOENT on which). */
+/** Register a tool as absent (ENOENT from either platform locator). */
 function mockAbsent(toolCmd: string): void {
   _mockResponses.set(`which ${toolCmd}`, enoent(toolCmd));
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+  const whereExe = win32.join(systemRoot, 'System32', 'where.exe');
+  _mockResponses.set(`${whereExe} $PATH:${toolCmd}`, enoent(toolCmd));
   _mockResponses.set(`${toolCmd} --version`, enoent(toolCmd));
   _mockResponses.set(toolCmd, enoent(toolCmd));
 }
@@ -114,12 +126,78 @@ function mockAbsent(toolCmd: string): void {
 beforeEach(() => {
   _mockResponses = new Map();
   _defaultResponse = enoent('__default__');
+  _execFileCalls = [];
+  _execFileOptions = [];
   // Reset app-path presence — no apps present by default.
   _existingPaths = new Set();
 });
 
 afterEach(() => {
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
+  if (origSystemRoot === undefined) delete process.env.SystemRoot;
+  else process.env.SystemRoot = origSystemRoot;
+});
+
+describe('getToolsRegistry — platform PATH lookup', () => {
+  it('uses where.exe on Windows and keeps the first non-empty result', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    process.env.SystemRoot = 'C:\\Windows';
+    _mockResponses.set(
+      'C:\\Windows\\System32\\where.exe $PATH:phantom',
+      whichResult('\r\nC:\\Tools\\phantom.exe\r\nC:\\Other\\phantom.exe'),
+    );
+    _mockResponses.set('C:\\Tools\\phantom.exe --version', versionResult('0.6.0'));
+
+    const phantom = getToolsRegistry().tools.find(tool => tool.id === 'phantom');
+
+    expect(phantom).toMatchObject({
+      installed: true,
+      path: 'C:\\Tools\\phantom.exe',
+      version: '0.6.0',
+    });
+    expect(_execFileCalls).toContain('C:\\Windows\\System32\\where.exe $PATH:phantom');
+    expect(_execFileCalls).not.toContain('which phantom');
+    expect(_execFileCalls).not.toContain('phantom --version');
+    expect(_execFileOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'C:\\Windows\\System32\\where.exe $PATH:phantom',
+        options: expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      }),
+      expect.objectContaining({
+        key: 'C:\\Tools\\phantom.exe --version',
+        options: expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      }),
+    ]));
+  });
+
+  it('fails closed when where.exe cannot resolve a Windows binary', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    process.env.SystemRoot = 'C:\\Windows';
+    mockAbsent('phantom');
+
+    const phantom = getToolsRegistry().tools.find(tool => tool.id === 'phantom');
+
+    expect(phantom).toMatchObject({ installed: false, path: null, version: null });
+    expect(_execFileCalls).toContain('C:\\Windows\\System32\\where.exe $PATH:phantom');
+  });
+
+  it('does not invoke a shell to version a discovered Windows command shim', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    process.env.SystemRoot = 'C:\\Windows';
+    _mockResponses.set(
+      'C:\\Windows\\System32\\where.exe $PATH:phantom',
+      whichResult('C:\\Tools\\phantom.cmd'),
+    );
+
+    const phantom = getToolsRegistry().tools.find(tool => tool.id === 'phantom');
+
+    expect(phantom).toMatchObject({
+      installed: true,
+      path: 'C:\\Tools\\phantom.cmd',
+      version: null,
+    });
+    expect(_execFileCalls).toContain('C:\\Tools\\phantom.cmd --version');
+  });
 });
 
 // ---------------------------------------------------------------------------

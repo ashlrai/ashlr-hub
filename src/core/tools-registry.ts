@@ -1,14 +1,14 @@
 /**
  * core/tools-registry.ts — Detect installed ashlr ecosystem tools + versions.
  *
- * Probes each known tool via `which` (binary presence) + a `--version` invocation
+ * Probes each known tool via the platform PATH locator + a `--version` invocation
  * (version string). Fast, synchronous, and NEVER throws — a missing or broken
  * tool yields { installed: false, version: null, path: null }.
  */
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import type { ToolInfo, ToolsRegistry } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ interface ToolSpec {
   /** Display name. */
   name: string;
   /**
-   * Binary candidates to probe with `which`, in priority order.
+   * Binary candidates to probe through PATH, in priority order.
    * The first hit wins.
    */
   binaries: string[];
@@ -39,7 +39,7 @@ interface ToolSpec {
   parseVersion?: (raw: string) => string | null;
   /**
    * When true, the binary name collides with a common system tool (e.g. `stack`
-   * is Haskell's build tool, `ac` is login-accounting). Mere `which` success is
+   * is Haskell's build tool, `ac` is login-accounting). A PATH lookup alone is
    * NOT enough to claim the ashlr tool is installed — we require a parseable
    * version probe so a system binary of the same name is not falsely reported.
    */
@@ -57,23 +57,35 @@ interface ToolSpec {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const WHICH_TIMEOUT_MS = 3_000;
+const LOCATOR_TIMEOUT_MS = 3_000;
 const VERSION_TIMEOUT_MS = 3_000;
+// A synchronous timeout still waits when a child handles SIGTERM. Use the
+// uncatchable termination signal so PATH-controlled probes cannot hang callers.
+const PROBE_KILL_SIGNAL = 'SIGKILL';
 
 /**
- * Resolve the absolute path of a binary using `which`.
- * Returns null when the binary is not found or when `which` fails/times out.
+ * Resolve the absolute path of a binary using the platform PATH locator.
+ * Returns null when the binary is not found or when the locator fails/times out.
  * Never throws.
  */
-function which(binary: string): string | null {
+function findBinary(binary: string): string | null {
   try {
-    const result = execFileSync('which', [binary], {
+    let locator = 'which';
+    let query = binary;
+    if (process.platform === 'win32') {
+      const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+      if (!systemRoot || !win32.isAbsolute(systemRoot)) return null;
+      locator = win32.join(systemRoot, 'System32', 'where.exe');
+      // The $PATH: prefix excludes the current directory from where.exe lookup.
+      query = `$PATH:${binary}`;
+    }
+    const result = execFileSync(locator, [query], {
       encoding: 'utf8',
-      timeout: WHICH_TIMEOUT_MS,
+      timeout: LOCATOR_TIMEOUT_MS,
+      killSignal: PROBE_KILL_SIGNAL,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const trimmed = result.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    return result.split(/\r?\n/u).map(line => line.trim()).find(Boolean) ?? null;
   } catch {
     return null;
   }
@@ -91,6 +103,7 @@ function runVersionCmd(args: string[]): string | null {
     const stdout = execFileSync(cmd, rest, {
       encoding: 'utf8',
       timeout: VERSION_TIMEOUT_MS,
+      killSignal: PROBE_KILL_SIGNAL,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return stdout.trim() || null;
@@ -279,7 +292,7 @@ const TOOL_SPECS: ToolSpec[] = [
  */
 function probeTool(spec: ToolSpec): ToolInfo {
   // App-type tools (e.g. Tauri desktop apps) are detected by filesystem path,
-  // not by a CLI binary in PATH. Short-circuit before the `which` probe.
+  // not by a CLI binary in PATH. Short-circuit before the locator probe.
   if (spec.appPaths && spec.appPaths.length > 0) {
     const appPath = probeAppPath(spec.appPaths);
     if (appPath) {
@@ -288,11 +301,11 @@ function probeTool(spec: ToolSpec): ToolInfo {
     return { id: spec.id, name: spec.name, installed: false, version: null, path: null };
   }
 
-  // 1. Resolve the binary path (first candidate that `which` finds).
+  // 1. Resolve the binary path (first candidate the platform locator finds).
   let resolvedPath: string | null = null;
   let resolvedBinary: string | null = null;
   for (const bin of spec.binaries) {
-    const p = which(bin);
+    const p = findBinary(bin);
     if (p) {
       resolvedPath = p;
       resolvedBinary = bin;
@@ -308,8 +321,9 @@ function probeTool(spec: ToolSpec): ToolInfo {
   let version: string | null = null;
 
   if (spec.versionArgs !== null) {
-    // Build the args: use explicit versionArgs override, or default to [binary, '--version']
-    const args: string[] = spec.versionArgs ?? [resolvedBinary, '--version'];
+    // Execute the located path, not a second PATH lookup that could resolve a
+    // different file. Windows script shims fail closed because no shell is used.
+    const args: string[] = spec.versionArgs ?? [resolvedPath, '--version'];
     const raw = runVersionCmd(args);
 
     if (raw) {
@@ -324,7 +338,7 @@ function probeTool(spec: ToolSpec): ToolInfo {
   }
 
   // Ambiguous binary names (e.g. `stack`) collide with common system tools.
-  // `which` succeeding is NOT proof the ashlr tool is present — require a
+  // PATH lookup succeeding is NOT proof the ashlr tool is present — require a
   // parseable version, else report not-installed to avoid false positives that
   // inflate installedCount and falsely pass the doctor 'ashlr-tools-installed'
   // check.
@@ -340,7 +354,7 @@ function probeTool(spec: ToolSpec): ToolInfo {
 // ---------------------------------------------------------------------------
 
 /**
- * Detect installed ecosystem tools + versions via PATH (which + --version) or
+ * Detect installed ecosystem tools + versions via PATH lookup + --version or
  * filesystem presence for desktop app tools (e.g. ashlr-md .app bundle).
  * Fast and NEVER throws — a missing tool yields { installed:false, version:null,
  * path:null }. Detects: phantom, ashlr/ashlr-plugin, stack, pulse/pulse-agent,

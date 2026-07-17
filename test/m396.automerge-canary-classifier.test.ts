@@ -533,7 +533,11 @@ describe('M396 committed docs-only canary inspector', () => {
     const timeouts: number[] = [];
     const runner: AutoMergeCanaryGitRunner = (invocation) => {
       timeouts.push(invocation.timeoutMs);
-      const result = runRealGit(invocation);
+      // The injected clock owns this deadline test. Keep process startup under a
+      // stable fixture timeout while recording the exact production budget.
+      const result = timeouts.length < 3
+        ? runRealGit({ ...invocation, timeoutMs: 5_000 })
+        : { ok: true as const, stdout: Buffer.alloc(0) };
       now += 4;
       return result;
     };

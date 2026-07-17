@@ -9,8 +9,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -67,6 +69,7 @@ const RAW_EXECUTION_CANARIES = [
 ] as const;
 
 let tmpHome: string;
+let fixtureRepo: string;
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
 let prevAshlrHome: string | undefined;
@@ -117,7 +120,9 @@ beforeEach(() => {
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
   prevAshlrHome = process.env.ASHLR_HOME;
-  tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m349-secret-safety-'));
+  tmpHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m349-secret-safety-')));
+  fixtureRepo = join(tmpHome, 'repo');
+  mkdirSync(fixtureRepo, { recursive: true, mode: 0o700 });
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
@@ -142,10 +147,10 @@ describe('M349 secret safety invariants', () => {
     expect(scrubbed).toContain(SAFE_COMMIT_SHA);
   });
 
-  it('keeps action, dispatch, decision, audit, judge, and genome stores metadata-only for fake secrets', () => {
+  it('rejects a secret-bearing dispatch repo and keeps other stores metadata-only', () => {
     audit({
       action: 'm349:audit-canary',
-      repo: '/tmp/repo',
+      repo: fixtureRepo,
       sandboxId: null,
       summary: `audit summary ${SECRET_BUNDLE}`,
       result: 'ok',
@@ -188,12 +193,12 @@ describe('M349 secret safety invariants', () => {
       },
     });
 
-    recordDispatchProduction({
+    const dispatchWrite = recordDispatchProduction({
       schemaVersion: 1,
       ts: '2026-07-09T06:00:01.000Z',
       itemId: `item token=${SECRET_VALUES[0]}`,
       source: 'test',
-      repo: `/tmp/repo token=${SECRET_VALUES[1]}`,
+      repo: `${fixtureRepo} token=${SECRET_VALUES[1]}`,
       title: `dispatch title ${SECRET_BUNDLE}`,
       backend: 'codex',
       tier: 'frontier',
@@ -222,7 +227,7 @@ describe('M349 secret safety invariants', () => {
       outcome: 'proposal-created',
       action: `agent action token=${SECRET_VALUES[3]}`,
       summary: `agent summary ${SECRET_BUNDLE}`,
-      repo: `/tmp/repo token=${SECRET_VALUES[4]}`,
+      repo: `${fixtureRepo} token=${SECRET_VALUES[4]}`,
       itemId: `item token=${SECRET_VALUES[5]}`,
       proposalId: 'prop-m349',
       runId: 'run-m349',
@@ -282,25 +287,24 @@ describe('M349 secret safety invariants', () => {
 
     expect(readBack.audit).toHaveLength(1);
     expect(readBack.decisions).toHaveLength(1);
-    expect(readBack.dispatch).toHaveLength(1);
+    expect(dispatchWrite).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readBack.dispatch).toEqual([]);
     expect(readBack.actions).toHaveLength(1);
     expect(readBack.judge).toHaveLength(1);
-    expect(readBack.attemptRecords).toHaveLength(1);
+    expect(readBack.attemptRecords).toEqual([]);
     expect(readBack.genomeLoaded.some((row) => row.id === entry.id)).toBe(true);
 
     expectRedacted('audit record', readBack.audit[0]);
     expectRedacted('decision record', readBack.decisions[0]);
-    expectRedacted('dispatch record', readBack.dispatch[0]);
     expectRedacted('agent-action record', readBack.actions[0]);
     expectRedacted('judge trace record', readBack.judge[0]);
-    expectRedacted('attempt record', readBack.attemptRecords[0]);
     expectRedacted('genome returned entry', readBack.genomeEntry);
     expectRedacted('genome loaded entry', readBack.genomeLoaded.find((row) => row.id === entry.id));
 
     const root = join(tmpHome, '.ashlr');
     expectRedacted('audit raw bytes', allPersistedText(join(root, 'audit')));
     expectRedacted('decisions raw bytes', allPersistedText(join(root, 'decisions')));
-    expectRedacted('dispatch raw bytes', allPersistedText(join(root, 'dispatch-production')));
+    expect(allPersistedText(join(root, 'dispatch-production'))).toBe('');
     expectRedacted('agent-actions raw bytes', allPersistedText(join(root, 'agent-actions')));
     expectRedacted('judge raw bytes', allPersistedText(join(root, 'judge-traces')));
     expectRedacted('genome raw bytes', allPersistedText(join(root, 'genome')));
@@ -339,7 +343,7 @@ describe('M349 secret safety invariants', () => {
           ts: '2026-07-09T06:00:03.000Z',
           itemId: 'item-m349-attempt',
           source: 'goal',
-          repo: '/tmp/repo',
+          repo: fixtureRepo,
           title: 'safe attempt title',
           backend: 'codex',
           tier: 'frontier',
@@ -410,7 +414,7 @@ describe('M349 secret safety invariants', () => {
           outcome: 'proposal-created',
           action: 'dispatch',
           summary: rawStdout,
-          repo: '/tmp/repo',
+          repo: fixtureRepo,
           itemId: 'item-m349-attempt',
           proposalId: 'prop-m349-attempt',
           runId: 'run-m349-attempt',
@@ -424,7 +428,7 @@ describe('M349 secret safety invariants', () => {
           version: 1,
           proposal: {
             id: 'prop-m349-attempt',
-            repo: '/tmp/repo',
+            repo: fixtureRepo,
             origin: 'agent',
             kind: 'patch',
             status: 'pending',

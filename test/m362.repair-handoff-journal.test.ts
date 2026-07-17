@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
@@ -718,10 +718,12 @@ describe('M362 durable repair handoff journal', () => {
     }
   });
 
-  it('canonicalizes and scrubs parent identity before either causal ledger persists it', () => {
+  it('canonicalizes a lexical parent repo while scrubbing non-identity metadata', () => {
     const repo = fx.makeRepo();
     const secret = 'github_pat_1234567890abcdefghijklmnop';
-    expect(recordRepairHandoffs(event(relative(process.cwd(), repo.dir), {
+    const nested = join(repo.dir, 'identity-probe');
+    mkdirSync(nested);
+    expect(recordRepairHandoffs(event(join(nested, '..'), {
       itemId: `repo:goal:${secret}`,
     }))).toMatchObject({ recorded: 1, failed: 0 });
 
@@ -1296,23 +1298,17 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.observations).toEqual([]);
   });
 
-  it('recovers malformed crash locks after grace and never releases a successor inode', () => {
+  it('keeps aged malformed crash locks fail-closed for operator repair', () => {
     const lockPath = join(fx.ashlrDir, 'fleet', 'm362.lock');
     mkdirSync(dirname(lockPath), { recursive: true });
     writeFileSync(lockPath, '');
     const old = new Date(Date.now() - 5_000);
     utimesSync(lockPath, old, old);
 
-    const acquired = acquireLocalStoreLock(lockPath, 2_000);
-    expect(acquired).not.toBeNull();
-    const priorPath = `${lockPath}.prior`;
-    renameSync(lockPath, priorPath);
-    writeFileSync(lockPath, 'successor');
-    releaseLocalStoreLock(acquired);
-
+    const acquired = acquireLocalStoreLock(lockPath, 100);
+    expect(acquired).toBeNull();
     expect(existsSync(lockPath)).toBe(true);
     rmSync(lockPath);
-    rmSync(priorPath);
   });
 
   it('recovers a dead owner that crashed during hard-link lock installation', () => {

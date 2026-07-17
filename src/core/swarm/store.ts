@@ -23,9 +23,6 @@ import {
   lstatSync,
   mkdirSync,
   opendirSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 
 import type { SwarmRun, SwarmTaskRun } from '../types.js';
@@ -51,6 +48,7 @@ import {
   MAX_CASE_OWNERSHIP_METADATA_ENTRIES,
   type CaseOwnershipClaim,
 } from '../util/case-folded-ownership.js';
+import { writePrivateFileAtomically } from '../util/private-file-write.js';
 
 // ---------------------------------------------------------------------------
 // Bounded list cap — never read more than this many swarm files at once.
@@ -353,7 +351,6 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
     return { ok: false, reason: 'invalid' };
   }
 
-  let tmp: string | undefined;
   let lock: ReturnType<typeof acquireLocalStoreLock> = null;
   let ownershipClaim: CaseOwnershipClaim | null = null;
   try {
@@ -411,10 +408,11 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
       return { ok: false, reason: 'invalid' };
     }
 
-    tmp = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    writeFileSync(tmp, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    renameSync(tmp, target);
-    tmp = undefined;
+    const candidate = `${target}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+    writePrivateFileAtomically(candidate, target, json, {
+      anchorPath: stateRoot(),
+      label: 'Swarm persistence temporary file',
+    });
     completeCaseFoldedOwnership(ownershipClaim);
     ownershipClaim = null;
     bindPersistenceSnapshot(s, json, revision);
@@ -424,13 +422,6 @@ export function saveSwarm(s: SwarmRun): SwarmSaveResult {
       ? { ok: false, reason: 'conflict' }
       : { ok: false, reason: 'unavailable' };
   } finally {
-    if (tmp !== undefined) {
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // The rename succeeded or cleanup is not possible; never throw.
-      }
-    }
     releaseLocalStoreLock(lock);
   }
 }

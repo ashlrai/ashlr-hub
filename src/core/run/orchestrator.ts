@@ -118,6 +118,14 @@ import {
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { writePrivateFileAtomically } from '../util/private-file-write.js';
+import { assertMayMutate } from '../sandbox/policy.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+  type OutwardMutationFence,
+} from '../sandbox/mutation-fence.js';
 import {
   addPersistenceMarker,
   bindPersistenceSnapshot,
@@ -1029,7 +1037,6 @@ export function saveRun(s: RunState): void {
   const lock = acquireLocalStoreLock(path.join(runsDir(), `.write-lock-${foldedId}`));
   if (!lock) throw new Error(`Run persistence lock unavailable for ${s.id}`);
   const legacyTmp = `${dest}.tmp`;
-  let tmp: string | undefined;
   let ownershipClaim: CaseOwnershipClaim | null = null;
   try {
     ownershipClaim = acquireCaseFoldedOwnership({
@@ -1083,25 +1090,19 @@ export function saveRun(s: RunState): void {
     if (Buffer.byteLength(payload, 'utf8') > MAX_PERSISTED_RUN_BYTES) {
       throw new Error(`Refusing run record larger than ${MAX_PERSISTED_RUN_BYTES} bytes`);
     }
-    tmp = path.join(
+    const candidate = path.join(
       path.dirname(dest),
       `.${path.basename(dest)}.${process.pid}.${randomUUID()}.tmp`,
     );
-    fs.writeFileSync(tmp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    fs.renameSync(tmp, dest);
-    tmp = undefined;
+    writePrivateFileAtomically(candidate, dest, payload, {
+      anchorPath: stateRoot(),
+      label: 'Run persistence temporary file',
+    });
     completeCaseFoldedOwnership(ownershipClaim);
     ownershipClaim = null;
     Object.assign(s, normalized);
     bindPersistenceSnapshot(s, payload, revision);
   } finally {
-    if (tmp) {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        // Best-effort cleanup after a failed write or rename.
-      }
-    }
     releaseLocalStoreLock(lock);
   }
 }
@@ -2959,6 +2960,9 @@ async function runGoalInternal(
   let activeSandbox: Sandbox | null = null;
   let sandboxModule: typeof import('../sandbox/worktree.js') | null = null;
   let engCtx: EngineerContext | undefined;
+  let engineerExecutionFence: OutwardMutationFence | null = null;
+  let engineerCleanupAuthority: import('../sandbox/worktree.js').BorrowedSandboxCleanupAuthority | null = null;
+  let engineerExecutionAuthorized = false;
   if (opts.tools !== false && client.supportsTools) {
     if (opts.engineer === true) {
       // M226: opts.cwd can arrive as a FILE path when a milestone names a file
@@ -2979,6 +2983,25 @@ async function runGoalInternal(
       try {
         sandboxModule = await import('../sandbox/worktree.js');
         activeSandbox = sandboxModule.createSandbox(sourceRepo);
+        engineerExecutionFence = acquireOutwardMutationFence();
+        if (!ownsOutwardMutationFence(engineerExecutionFence)) {
+          throw new Error('outward mutation fence unavailable before engineer execution');
+        }
+        assertMayMutate(sourceRepo);
+        const authorityModule = sandboxModule as {
+          borrowSandboxCleanupAuthority?:
+            typeof import('../sandbox/worktree.js').borrowSandboxCleanupAuthority;
+        };
+        if (
+          'borrowSandboxCleanupAuthority' in authorityModule &&
+          typeof authorityModule.borrowSandboxCleanupAuthority === 'function'
+        ) {
+          engineerCleanupAuthority = authorityModule.borrowSandboxCleanupAuthority(engineerExecutionFence);
+          if (!engineerCleanupAuthority) {
+            throw new Error('outward mutation authority became invalid before engineer execution');
+          }
+        }
+        engineerExecutionAuthorized = true;
         engCtx = {
           workspaceRoot: activeSandbox.worktreePath,
           sourceRepo,
@@ -3004,6 +3027,38 @@ async function runGoalInternal(
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (activeSandbox && sandboxModule) {
+          if (engineerExecutionAuthorized) {
+            try {
+              const cleanupModule = sandboxModule as {
+                removeSandbox: typeof sandboxModule.removeSandbox;
+                removeSandboxWithBorrowedAuthority?:
+                  typeof sandboxModule.removeSandboxWithBorrowedAuthority;
+              };
+              if (
+                'removeSandboxWithBorrowedAuthority' in cleanupModule &&
+                typeof cleanupModule.removeSandboxWithBorrowedAuthority === 'function'
+              ) {
+                cleanupModule.removeSandboxWithBorrowedAuthority(
+                  activeSandbox,
+                  engineerCleanupAuthority,
+                );
+              } else {
+                cleanupModule.removeSandbox(activeSandbox);
+              }
+            } catch { /* idempotent */ }
+          } else {
+            // An acquisition/policy failure did not authorize this operation.
+            // Release first so standalone cleanup rechecks KILL under the fence.
+            releaseOutwardMutationFence(engineerExecutionFence);
+            engineerExecutionFence = null;
+            try { sandboxModule.removeSandbox(activeSandbox); } catch { /* idempotent */ }
+          }
+        }
+        releaseOutwardMutationFence(engineerExecutionFence);
+        engineerExecutionFence = null;
+        engineerCleanupAuthority = null;
+        engineerExecutionAuthorized = false;
         process.stderr.write(
           `[ashlr run] --engineer unavailable (${msg}) — enroll the repo (ashlr enroll) ` +
             `and clear the kill switch; continuing with read-only gateway tools\n`,
@@ -3083,10 +3138,25 @@ async function runGoalInternal(
       // diff capture best-effort
     } finally {
       try {
-        wt.removeSandbox(sb);
+        const cleanupModule = wt as {
+          removeSandbox: typeof wt.removeSandbox;
+          removeSandboxWithBorrowedAuthority?: typeof wt.removeSandboxWithBorrowedAuthority;
+        };
+        if (
+          'removeSandboxWithBorrowedAuthority' in cleanupModule &&
+          typeof cleanupModule.removeSandboxWithBorrowedAuthority === 'function'
+        ) {
+          cleanupModule.removeSandboxWithBorrowedAuthority(sb, engineerCleanupAuthority);
+        } else {
+          cleanupModule.removeSandbox(sb);
+        }
       } catch {
         // removal is idempotent
       }
+      releaseOutwardMutationFence(engineerExecutionFence);
+      engineerExecutionFence = null;
+      engineerCleanupAuthority = null;
+      engineerExecutionAuthorized = false;
     }
   };
 

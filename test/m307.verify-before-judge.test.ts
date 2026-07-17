@@ -29,12 +29,18 @@ const highRiskDiff = [
 
 const mockAutoMergeProposal = vi.fn();
 const mockVerifyProposal = vi.fn();
+const mockVerifyAndPersistProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/merge.js')>();
   return {
     ...actual,
     autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+    hasCurrentVerificationBinding: (candidate: Proposal) =>
+      candidate.verifyResult?.baseBranch === 'main' &&
+      candidate.verifyResult.baseHead === '0'.repeat(40) &&
+      candidate.verifyResult.diffHash === hashDiff(candidate.diff ?? ''),
     verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
+    verifyAndPersistProposal: (...args: unknown[]) => mockVerifyAndPersistProposal(...args),
   };
 });
 
@@ -64,6 +70,7 @@ vi.mock('../src/core/fleet/manager.js', () => ({
 
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: vi.fn(() => false),
+  isEnrolled: () => true,
 }));
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
@@ -159,6 +166,32 @@ beforeEach(() => {
     ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
     detail: 'passed',
   } satisfies VerifyProposalResult);
+  mockVerifyAndPersistProposal.mockImplementation(async (
+    candidate: Proposal,
+    config: AshlrConfig,
+    source: string,
+  ) => {
+    const verify = await mockVerifyProposal(candidate, config) as VerifyProposalResult;
+    const verifyResult = {
+      passed: verify.ok,
+      ...(verify.ok ? {} : { failed: [verify.detail] }),
+      detail: verify.detail,
+      ran: verify.ran,
+      baseBranch: 'main',
+      baseHead: '0'.repeat(40),
+      diffHash: hashDiff(candidate.diff ?? ''),
+      verifiedAt: new Date().toISOString(),
+      source,
+    };
+    const persisted = mockUpdateProposalField(candidate.id, { verifyResult });
+    return {
+      verify,
+      verifyResult,
+      persisted,
+      authorityLive: true,
+      reason: 'verification evidence persisted under live authority',
+    };
+  });
 });
 
 describe('M307 verify-before-judge', () => {
@@ -275,8 +308,17 @@ describe('M307 verify-before-judge', () => {
   });
 
   it('uses a cached passing verifyResult without re-running verification', async () => {
+    const diffHash = hashDiff(docDiff);
     mockListProposals.mockReturnValue([
-      proposal({ verifyResult: { passed: true, source: 'auto-merge-preflight' } }),
+      proposal({
+        verifyResult: {
+          passed: true,
+          source: 'auto-merge-preflight',
+          baseBranch: 'main',
+          baseHead: '0'.repeat(40),
+          diffHash,
+        },
+      }),
     ]);
 
     await runAutoMergePass(cfg());
@@ -310,6 +352,9 @@ describe('M307 verify-before-judge', () => {
           passed: false,
           source: 'auto-merge-preflight',
           failed: ['npm run test failed'],
+          baseBranch: 'main',
+          baseHead: '0'.repeat(40),
+          diffHash: hashDiff(docDiff),
         },
       }),
     ]);
@@ -319,7 +364,7 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 }, expect.anything());
     expect(mockSetStatus).not.toHaveBeenCalled();
     expect(r.autoArchived).toBe(0);
     expect(r.results[0]?.reason).toMatch(/readiness preflight: known verification failure/);
@@ -333,6 +378,9 @@ describe('M307 verify-before-judge', () => {
           passed: false,
           source: 'auto-merge-preflight',
           failed: ['npm run test failed'],
+          baseBranch: 'main',
+          baseHead: '0'.repeat(40),
+          diffHash: hashDiff(docDiff),
         },
       }),
     ]);
@@ -349,11 +397,11 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass/),
-      undefined,
+      expect.anything(),
       {},
       'pending',
     );
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 }, expect.anything());
     expect(mockUpdateProposalField.mock.invocationCallOrder[0]!).toBeLessThan(
       mockSetStatus.mock.invocationCallOrder[0]!,
     );
@@ -370,7 +418,7 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 }, expect.anything());
     expect(mockSetStatus).not.toHaveBeenCalled();
     expect(r.autoArchived).toBe(0);
     expect(r.results[0]?.reason).toMatch(/risk class 'high' exceeds maxRisk 'low'/);
@@ -396,7 +444,7 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal',
-      undefined,
+      expect.anything(),
       {},
       'pending',
     );
@@ -427,11 +475,11 @@ describe('M307 verify-before-judge', () => {
       'rejected',
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass.*risk class 'high'/),
-      undefined,
+      expect.anything(),
       {},
       'pending',
     );
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 }, expect.anything());
     expect(r.autoArchived).toBe(1);
   });
 });
