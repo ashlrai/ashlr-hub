@@ -21,15 +21,21 @@ import {
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
   captureGateRepairWorkItem,
+  generatedRepairRootKey,
   isRejectedCaptureRecoveryAuthorized,
   noDiffResliceWorkItem,
+  proposalRepairWorkItem,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
 } from '../src/core/fleet/proposal-repair-work.js';
 import { proposalRepairId } from '../src/core/fleet/proposal-repair-identity.js';
 import { decisionsDir } from '../src/core/fleet/decisions-ledger.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
-import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchProductionDir,
+  recordDispatchProduction,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
@@ -48,13 +54,41 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
-import { createProposal, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
+import { createProposal, inboxDir, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import {
   PROPOSAL_PERSISTENCE_MISMATCH_REASON,
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from '../src/core/inbox/persistence-mismatch.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
 let fx: H1Fixture;
+
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 
 beforeEach(() => {
   expect.hasAssertions();
@@ -139,6 +173,179 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
   return handoff
     ? { ...value, repairHandoffId: handoff.eventId, repairGenerationId: handoff.generationId }
     : value;
+}
+
+function recordDiagnosticEmpty(
+  repair: WorkItem,
+  attemptId: string,
+  backend: 'local-coder' | 'kimi',
+  ordinal: 1 | 2,
+) {
+  const ts = new Date(Date.now() - (3 - ordinal) * 1_000).toISOString();
+  const routeReason = `m310 diagnostic attempt ${ordinal}`;
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: repair.id,
+    source: repair.source,
+    repo: repair.repo,
+    title: repair.title,
+    backend,
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend,
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(repair),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: repair.repairHandoffId,
+    repairGenerationId: repair.repairGenerationId,
+    repairTreatmentUnitId: repair.repairTreatmentUnitId,
+    repairTreatment: repair.repairTreatment,
+    repairAttemptOrdinal: ordinal,
+  };
+  if (ordinal === 2) event.repairPreviousBackend = 'local-coder';
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return recordGeneratedRepairLifecycle(repair, { kind: 'dispatch-proof-empty-diff', eventTs: ts });
+}
+
+function diagnosticProposalEvent(
+  repair: WorkItem,
+  attemptId: string,
+  proposalId: string,
+  ts = '2026-07-10T15:30:00.000Z',
+): DispatchProductionEvent {
+  const eventTs = Date.parse(ts) < Date.now() - 60_000 ? new Date().toISOString() : ts;
+  const routeReason = 'm310 diagnostic proposal attempt';
+  return {
+    schemaVersion: 1,
+    ts: eventTs,
+    itemId: repair.id,
+    source: repair.source,
+    repo: repair.repo,
+    title: repair.title,
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId,
+      diffFiles: 1,
+      diffLines: 2,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(repair),
+    spentUsd: 0,
+    diffFiles: 1,
+    diffLines: 2,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: repair.repairHandoffId,
+    repairGenerationId: generatedRepairGenerationId(repair) ?? undefined,
+    repairTreatmentUnitId: repair.repairTreatmentUnitId,
+    repairTreatment: repair.repairTreatment,
+    repairAttemptOrdinal: 1,
+    ...(repair.repairTreatmentUnitId === undefined && repair.repairTreatment === undefined
+      ? { repairRootId: repair.repairRootId, repairDepth: repair.repairDepth }
+      : {}),
+  };
+}
+
+const DIAGNOSTIC_PROPOSAL_DIFF =
+  'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
+
+function diagnosticProposalForEvent(
+  repair: WorkItem,
+  event: DispatchProductionEvent,
+  overrides: Partial<Proposal> = {},
+): Proposal {
+  if (!event.proposalId || !event.runId || !event.trajectoryId || !event.runEventSummary) {
+    throw new Error('diagnostic proposal event must carry complete proposal binding');
+  }
+  const diff = overrides.diff ?? DIAGNOSTIC_PROPOSAL_DIFF;
+  return {
+    repo: repair.repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Durable diagnostic repair proposal',
+    summary: 'A complete generated repair proposal with matching receipt evidence.',
+    status: 'pending',
+    createdAt: event.ts,
+    ...overrides,
+    id: event.proposalId,
+    diff,
+    diffHash: hashDiff(diff),
+    workItemId: repair.id,
+    workItemGenerationId: generatedRepairGenerationId(repair)!,
+    workSource: 'self',
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+    runEventSummary: {
+      ...event.runEventSummary,
+      ...overrides.runEventSummary,
+      runId: event.runId,
+      proposalId: event.proposalId,
+    },
+  };
+}
+
+function recordDiagnosticProposal(
+  repair: WorkItem,
+  attemptId: string,
+  proposalId: string,
+  ts?: string,
+) {
+  const event = diagnosticProposalEvent(repair, attemptId, proposalId, ts);
+  mkdirSync(inboxDir(), { recursive: true });
+  writeJson(
+    join(inboxDir(), `${proposalId}.json`),
+    diagnosticProposalForEvent(repair, event),
+  );
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return recordGeneratedRepairLifecycle(repair, {
+    kind: 'proposal-created',
+    attemptId: event.trajectoryId!,
+    proposalId,
+    ts: event.ts,
+  });
 }
 
 describe('queued autonomy work scanner', () => {
@@ -567,34 +774,45 @@ describe('queued autonomy work scanner', () => {
   });
 
   it('persists physical proposal repo identity and rejects legacy alias authority', () => {
-    const repo = fx.makeRepo();
-    const canonicalRepo = realpathSync.native(repo.dir);
-    const nested = join(repo.dir, 'identity-probe');
-    const lexicalAlias = join(nested, '..');
-    const linkedAlias = join(fx.home, 'proposal-repo-alias');
-    mkdirSync(nested);
-    symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    if (process.platform === 'win32') {
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+        runner: semanticPrivateStorageRunner,
+      });
+    }
+    try {
+      const repo = fx.makeRepo();
+      const canonicalRepo = realpathSync.native(repo.dir);
+      const nested = join(repo.dir, 'identity-probe');
+      const lexicalAlias = join(nested, '..');
+      const linkedAlias = join(fx.home, 'proposal-repo-alias');
+      mkdirSync(nested);
+      symlinkSync(canonicalRepo, linkedAlias, process.platform === 'win32' ? 'junction' : 'dir');
 
-    const createForRepo = (repoPath: string, title: string) => {
-      const candidate = partialProposal(repoPath, { title, diffHash: undefined });
-      const { id: _id, status: _status, createdAt: _createdAt, ...input } = candidate;
-      return createProposal(input);
-    };
-    const lexical = createForRepo(lexicalAlias, 'Lexical repo alias proposal');
-    const linked = createForRepo(linkedAlias, 'Linked repo alias proposal');
+      const createForRepo = (repoPath: string, title: string) => {
+        const candidate = partialProposal(repoPath, { title, diffHash: undefined });
+        const { id: _id, status: _status, createdAt: _createdAt, ...input } = candidate;
+        return createProposal(input);
+      };
+      const lexical = createForRepo(lexicalAlias, 'Lexical repo alias proposal');
+      const linked = createForRepo(linkedAlias, 'Linked repo alias proposal');
 
-    expect(lexical.repo).toBe(canonicalRepo);
-    expect(linked.repo).toBe(canonicalRepo);
-    expect(loadProposal(lexical.id)?.repo).toBe(canonicalRepo);
-    expect(loadProposal(linked.id)?.repo).toBe(canonicalRepo);
+      expect(lexical.repo).toBe(canonicalRepo);
+      expect(linked.repo).toBe(canonicalRepo);
+      expect(loadProposal(lexical.id)?.repo).toBe(canonicalRepo);
+      expect(loadProposal(linked.id)?.repo).toBe(canonicalRepo);
 
-    const linkedPath = join(fx.ashlrDir, 'inbox', `${linked.id}.json`);
-    const persisted = JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal;
-    expect(persisted.repo).toBe(canonicalRepo);
+      const linkedPath = join(fx.ashlrDir, 'inbox', `${linked.id}.json`);
+      const persisted = JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal;
+      expect(persisted.repo).toBe(canonicalRepo);
 
-    writeFileSync(linkedPath, JSON.stringify({ ...persisted, repo: linkedAlias }, null, 2) + '\n', 'utf8');
-    expect(loadProposal(linked.id)).toBeNull();
-    expect((JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal).repo).toBe(linkedAlias);
+      writeFileSync(linkedPath, JSON.stringify({ ...persisted, repo: linkedAlias }, null, 2) + '\n', 'utf8');
+      expect(loadProposal(linked.id)).toBeNull();
+      expect((JSON.parse(readFileSync(linkedPath, 'utf8')) as Proposal).repo).toBe(linkedAlias);
+    } finally {
+      if (process.platform === 'win32') {
+        _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+      }
+    }
   });
 
   it('does not derive or journal repair authority from an invalid raw repo identity', () => {
@@ -834,11 +1052,11 @@ describe('queued autonomy work scanner', () => {
     const proposal = partialProposal(repo.dir, { createdAt: '2026-07-10T14:00:00.000Z' });
     queueProposalRepairWorkForPendingProposals([proposal], new Date('2026-07-10T15:00:00.000Z'));
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'proposal-created',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      proposalId: 'prop-complete-repair',
-    });
+    expect(recordDiagnosticProposal(
+      repair,
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      'prop-complete-repair',
+    )).toMatchObject({ recorded: true, disposition: 'retired' });
 
     const result = queueProposalRepairWorkForPendingProposals(
       [proposal],
@@ -1058,6 +1276,90 @@ describe('queued autonomy work scanner', () => {
     expect(reslice!.detail).toContain('env=[omitted]');
     expect(reslice!.detail).not.toContain('DO_NOT_COPY');
     expect(reslice!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+  });
+
+  it('binds one repair descendant to its canonical root and refuses a child of that repair', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T13:00:00.000Z');
+    const original = captureFailure(repo.dir, {
+      ts: '2026-07-10T12:00:00.000Z',
+      itemId: 'repo:goal:rooted-parent',
+      source: 'goal',
+      outcome: 'empty-diff',
+      runId: 'run-rooted-parent',
+      objectiveHash: createHash('sha256').update('rooted-parent').digest('hex'),
+    });
+    const parentRepair = noDiffResliceWorkItem(original, now);
+    expect(parentRepair).toMatchObject({ repairDepth: 0, repairRootId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    if (!parentRepair) throw new Error('expected rooted parent repair');
+    const childEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T12:30:00.000Z',
+      itemId: parentRepair.id,
+      source: 'self',
+      outcome: 'empty-diff',
+      runId: 'run-rooted-child',
+      objectiveHash: workItemObjectiveHash(parentRepair),
+      repairGenerationId: 'c'.repeat(64),
+    });
+    const child = noDiffResliceWorkItem(childEvent, now, parentRepair);
+
+    expect(child).toMatchObject({
+      repairRootId: parentRepair.repairRootId,
+      repairDepth: 1,
+      repairParentItemId: parentRepair.id,
+    });
+    expect(generatedRepairRootKey(child!)).toBe(generatedRepairRootKey(parentRepair));
+    expect(noDiffResliceWorkItem({
+      ...childEvent,
+      itemId: child!.id,
+      objectiveHash: workItemObjectiveHash(child!),
+    }, now, child!)).toBeNull();
+  });
+
+  it('admits at most one active repair for a canonical repo/root across capture and no-diff producers', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T13:00:00.000Z');
+    const objectiveHash = createHash('sha256').update('shared-root').digest('hex');
+    const capture = captureFailure(repo.dir, {
+      ts: '2026-07-10T12:00:00.000Z',
+      itemId: 'repo:self:shared-repair-root',
+      outcome: 'proposal-capture-error',
+      runId: 'run-shared-capture',
+      objectiveHash,
+    });
+    const noDiff = captureFailure(repo.dir, {
+      ts: '2026-07-10T12:01:00.000Z',
+      itemId: capture.itemId,
+      outcome: 'empty-diff',
+      runId: 'run-shared-empty',
+      objectiveHash,
+    });
+
+    const result = queueProposalRepairWorkForPendingProposals([], now, {
+      dispatchEvents: [capture, noDiff],
+    });
+    const queued = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(result).toMatchObject({
+      repairRootAdmissionConsidered: 2,
+      repairRootAdmissionAdmitted: 1,
+      repairRootAdmissionAlreadyActive: 1,
+    });
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ repairDepth: 0, repairRootId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it('never turns a proposal emitted by generated repair work into another repair descendant', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = partialProposal(repo.dir, {
+      workItemId: 'repo:proposal-repair:source',
+      workItemGenerationId: 'a'.repeat(64),
+    });
+
+    expect(proposalRepairWorkItem(proposal)).toBeNull();
   });
 
   it('assigns stable no-diff treatments and bounds target-localization instructions', () => {
@@ -1288,19 +1590,9 @@ describe('queued autonomy work scanner', () => {
       items: [ordinary, repair],
     });
 
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    recordDiagnosticEmpty(repair, 'attempt-12345678-1234-4123-8123-123456789abc', 'local-coder', 1);
     const active = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
-    });
+    recordDiagnosticEmpty(repair, 'attempt-22345678-1234-4123-8123-123456789abc', 'kimi', 2);
     const terminal = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const remaining = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
     const remainingBacklog = JSON.parse(readFileSync(join(fx.ashlrDir, 'backlog.json'), 'utf8')) as { items: WorkItem[] };
@@ -1344,18 +1636,13 @@ describe('queued autonomy work scanner', () => {
       generatedAt: now.toISOString(), repos: [repo.dir], items: [ordinary, repair],
     });
 
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
-    expect(recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
-      backend: 'kimi',
-      tier: 'mid',
-    })).toMatchObject({ disposition: 'quarantined' });
+    recordDiagnosticEmpty(repair, 'attempt-12345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    expect(recordDiagnosticEmpty(
+      repair,
+      'attempt-22345678-1234-4123-8123-123456789abc',
+      'kimi',
+      2,
+    )).toMatchObject({ disposition: 'quarantined' });
 
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const remaining = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
@@ -1388,11 +1675,11 @@ describe('queued autonomy work scanner', () => {
     });
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'proposal-created',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      proposalId: 'prop-prune-failure',
-    });
+    recordDiagnosticProposal(
+      repair,
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      'prop-prune-failure',
+    );
     const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
     mkdirSync(join(fx.ashlrDir, '.self-heal-queue.lock'));
 
@@ -1420,11 +1707,11 @@ describe('queued autonomy work scanner', () => {
     });
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [firstEvent] });
     const firstGeneration = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(firstGeneration, {
-      kind: 'proposal-created',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      proposalId: 'prop-repair-success',
-    });
+    recordDiagnosticProposal(
+      firstGeneration,
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      'prop-repair-success',
+    );
     const retired = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [firstEvent] });
 
     const nextEvent = captureFailure(repo.dir, {
@@ -1437,8 +1724,9 @@ describe('queued autonomy work scanner', () => {
     const found = await scanQueuedAutonomyWork(repo.dir);
 
     expect(retired).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
-    expect(recurring).toMatchObject({ dispatchNoDiffQueued: 0, dispatchRepairRetired: 1 });
+    expect(recurring).toMatchObject({ dispatchNoDiffQueued: 0 });
     expect(found).toEqual([]);
+    expect(readGeneratedRepairLifecycle(firstGeneration)).toMatchObject({ disposition: 'retired' });
   });
 
   it('allows a changed objective to start a fresh generation after retirement', async () => {
@@ -1454,11 +1742,11 @@ describe('queued autonomy work scanner', () => {
     });
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [firstEvent] });
     const first = (await scanQueuedAutonomyWork(repo.dir))[0]!;
-    recordGeneratedRepairLifecycle(first, {
-      kind: 'proposal-created',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      proposalId: 'prop-first-objective',
-    });
+    recordDiagnosticProposal(
+      first,
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      'prop-first-objective',
+    );
 
     const changedEvent = captureFailure(repo.dir, {
       ...firstEvent,
@@ -1507,6 +1795,39 @@ describe('queued autonomy work scanner', () => {
     expect(found.some((candidate) => candidate.tags.includes('dispatch-no-diff-reslice'))).toBe(true);
   });
 
+  it('fails proposal repair maintenance closed when detailed proposal storage is malformed', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:malformed-proposal-storage',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-malformed-proposal-storage',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    mkdirSync(inboxDir(), { recursive: true });
+    writeFileSync(join(inboxDir(), 'hidden-pending.json'), '{malformed', 'utf8');
+
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+
+    expect(result).toMatchObject({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+      failed: 1,
+      proposalInboxAvailable: false,
+      dispatchSourceState: 'degraded',
+      dispatchSourceComplete: false,
+      dispatchSourceInvalidRows: 0,
+      dispatchSourceUnreadableFiles: 1,
+      dispatchSourceStopReasons: ['io-error'],
+    });
+    expect((await scanQueuedAutonomyWork(repo.dir)).some((candidate) => candidate.id === repair.id)).toBe(true);
+  });
+
   it('reconciles a crash-persisted exact proposal back to its repair generation', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1521,26 +1842,22 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const attemptId = 'attempt-12345678-1234-4123-8123-123456789abc';
-    const durableProposal: Proposal = {
-      id: 'prop-crash-reconcile',
-      repo: repo.dir,
-      origin: 'agent',
-      kind: 'patch',
+    const proposalEvent = diagnosticProposalEvent(
+      repair,
+      attemptId,
+      'prop-crash-reconcile',
+      '2026-07-10T15:00:00.000Z',
+    );
+    const durableProposal = diagnosticProposalForEvent(repair, proposalEvent, {
       title: 'Recovered generated repair',
       summary: 'The proposal persisted before lifecycle projection.',
-      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
-      workItemId: repair.id,
-      workItemGenerationId: generatedRepairGenerationId(repair)!,
-      workSource: 'self',
-      runId: attemptId,
-      trajectoryId: `run:${attemptId}`,
-      runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
-      status: 'pending',
-      createdAt: '2026-07-10T15:00:00.000Z',
-    };
+    });
 
+    mkdirSync(inboxDir(), { recursive: true });
+    writeJson(join(inboxDir(), `${durableProposal.id}.json`), durableProposal);
+    expect(recordDispatchProduction(proposalEvent)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
-      dispatchEvents: [sourceEvent],
+      dispatchEvents: [sourceEvent, proposalEvent],
       lifecycleProposals: [durableProposal],
     });
     const found = await scanQueuedAutonomyWork(repo.dir);
@@ -1549,7 +1866,7 @@ describe('queued autonomy work scanner', () => {
     expect(found).toEqual([]);
   });
 
-  it('retires a v2 objective generation when its v1 proposal becomes applied', async () => {
+  it('blocks a distinct v2 generation when persisted v1 receipt authority is ambiguous', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const now = new Date('2026-07-10T16:00:00.000Z');
@@ -1606,14 +1923,26 @@ describe('queued autonomy work scanner', () => {
       activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
     });
     const appliedProposal: Proposal = { ...pendingProposal, status: 'applied' };
+    const proposalEvent = diagnosticProposalEvent(
+      legacyRepair,
+      attemptId,
+      appliedProposal.id,
+      appliedProposal.createdAt,
+    );
+    expect(recordDispatchProduction(proposalEvent)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
-      dispatchEvents: [recurrence],
+      dispatchEvents: [recurrence, proposalEvent],
       lifecycleProposals: [appliedProposal],
     });
     const found = await scanQueuedAutonomyWork(repo.dir);
 
     expect(v1.generationId).not.toBe(v2.generationId);
-    expect(result).toMatchObject({ dispatchRepairRetired: 1, dispatchNoDiffQueued: 0 });
+    expect(result).toMatchObject({
+      dispatchRepairRetired: 0,
+      dispatchNoDiffQueued: 0,
+      dispatchRepairLifecycleUnavailable: 1,
+      blockedItemKeys: expect.arrayContaining([expect.any(String)]),
+    });
     expect(found).toEqual([]);
   });
 
@@ -1631,24 +1960,20 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
     const attemptId = 'attempt-32345678-1234-4123-8123-123456789abc';
-    const partial: Proposal = {
-      id: 'prop-partial-reconcile',
-      repo: repo.dir,
+    const partialEvent = diagnosticProposalEvent(
+      repair,
+      attemptId,
+      'prop-partial-reconcile',
+      '2026-07-10T15:00:00.000Z',
+    );
+    const partial = diagnosticProposalForEvent(repair, partialEvent, {
       origin: 'swarm',
-      kind: 'patch',
       title: 'Partial generated repair',
       summary: 'Useful material from a failed repair attempt.',
       diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+partial\n',
-      workItemId: repair.id,
-      workItemGenerationId: generatedRepairGenerationId(repair)!,
-      workSource: 'self',
-      runId: attemptId,
-      trajectoryId: `run:${attemptId}`,
-      runEventSummary: { runId: attemptId, status: 'failed', outcome: 'proposal-created', proposalCreated: true },
+      runEventSummary: { ...partialEvent.runEventSummary!, status: 'failed' },
       isPartial: true,
-      status: 'pending',
-      createdAt: '2026-07-10T15:00:00.000Z',
-    };
+    });
 
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: [sourceEvent],
@@ -1659,27 +1984,36 @@ describe('queued autonomy work scanner', () => {
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'active' });
     expect((await scanQueuedAutonomyWork(repo.dir)).some((candidate) => candidate.id === repair.id)).toBe(true);
 
-    const rejected: Proposal = {
-      ...partial,
-      id: 'prop-rejected-reconcile',
+    const rejectedEvent = diagnosticProposalEvent(
+      repair,
+      attemptId,
+      'prop-rejected-reconcile',
+      partial.createdAt,
+    );
+    const rejected = diagnosticProposalForEvent(repair, rejectedEvent, {
       isPartial: false,
       status: 'rejected',
-      runEventSummary: {
-        runId: attemptId,
-        status: 'done',
-        outcome: 'proposal-created',
-        proposalCreated: true,
-      },
-    };
+    });
     expect(queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: [sourceEvent],
       lifecycleProposals: [rejected],
     }).dispatchRepairRetired).toBe(0);
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'active' });
 
-    const applied: Proposal = { ...rejected, id: 'prop-applied-reconcile', status: 'applied' };
+    const proposalEvent = diagnosticProposalEvent(
+      repair,
+      attemptId,
+      'prop-applied-reconcile',
+      rejected.createdAt,
+    );
+    const applied = diagnosticProposalForEvent(repair, proposalEvent, {
+      status: 'applied',
+    });
+    mkdirSync(inboxDir(), { recursive: true });
+    writeJson(join(inboxDir(), `${applied.id}.json`), applied);
+    expect(recordDispatchProduction(proposalEvent)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     expect(queueProposalRepairWorkForPendingProposals(undefined, now, {
-      dispatchEvents: [sourceEvent],
+      dispatchEvents: [sourceEvent, proposalEvent],
       lifecycleProposals: [applied],
     })).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'retired' });
@@ -1814,11 +2148,6 @@ describe('queued autonomy work scanner', () => {
         reason: 'proposal-capture-error: src/other.ts:5 expected other state',
       }),
     ];
-    expect(recordRepairHandoffs(events[1]!, {
-      schemaVersion: 2,
-      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
-    })).toMatchObject({ recorded: 1, failed: 0 });
-
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
       dispatchEvents: events,
     });
@@ -1869,6 +2198,33 @@ describe('queued autonomy work scanner', () => {
     expect(generatedRepairGenerationId(unrelatedLegacyShape)).toBeNull();
   });
 
+  it('fails closed and reports detailed dispatch storage degradation', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-15T12:00:00.000Z');
+    const dispatchDir = dispatchProductionDir();
+    mkdirSync(dispatchDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dispatchDir, '2026-07-15.jsonl'), '{malformed dispatch row\n', { mode: 0o600 });
+
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now);
+    const queued = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(result).toMatchObject({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+      failed: 1,
+      dispatchCaptureFailed: 1,
+      dispatchNoDiffFailed: 1,
+      dispatchSourceState: 'degraded',
+      dispatchSourceComplete: false,
+      dispatchSourceInvalidRows: 1,
+      proposalInboxAvailable: true,
+    });
+    expect(result.dispatchSourceStopReasons).toEqual([]);
+    expect(queued).toEqual([]);
+  });
+
   it('does not queue repair work for clean pending proposals', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1911,10 +2267,11 @@ describe('queued autonomy work scanner', () => {
     const result = queueProposalRepairWorkForPendingProposals([partialProposal(repo.dir)]);
 
     expect(result).toMatchObject({
-      eligible: 1,
+      eligible: 0,
       queued: 0,
-      failed: 1,
+      failed: 0,
       dispatchRepairPruneFailed: 1,
+      blockedRootKeys: [expect.any(String)],
     });
     expect(readFileSync(path, 'utf8')).toBe('{corrupt queue');
   });

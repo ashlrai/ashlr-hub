@@ -7,7 +7,24 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
 
 import { hashDiff, signLocalMergeIntent } from '../src/core/foundry/provenance.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
@@ -23,6 +40,8 @@ const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 
 let home: string;
 let repo: string;
+
+const realWindowsAuthorityTest = 'refuses an exact-looking merge beyond the bounded first-parent window';
 
 function git(args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -145,14 +164,16 @@ function createInterruptedMerge(ancestry: Ancestry): MergeFixture {
   return { proposalId: proposal.id, baseBeforeOid, proposalHeadOid, mergeCommitOid, intent };
 }
 
-beforeEach(() => {
+beforeEach(({ task }) => {
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32'
+    && task.name !== realWindowsAuthorityTest;
   home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-home-')));
   repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m411-repo-')));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = path.join(home, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
-  setKill(false);
+  expect(setKill(false).ok).toBe(true);
 
   execFileSync('git', ['init', '--initial-branch=main', repo], { stdio: 'pipe' });
   git(['config', 'user.email', 'test@ashlr.test']);
@@ -160,12 +181,19 @@ beforeEach(() => {
   fs.writeFileSync(path.join(repo, 'README.md'), '# fixture\n', 'utf8');
   git(['add', 'README.md']);
   git(['commit', '-m', 'init']);
-  expect(enroll(repo).ok).toBe(true);
+  try {
+    expect(enroll(repo).ok).toBe(true);
+  } finally {
+    // One bounded Windows fixture proves native authority setup. The remaining
+    // cases exercise reconciliation semantics without repeating native ACL work.
+    privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  }
 });
 
 afterEach(() => {
   try { setKill(false); } catch { /* best effort */ }
   try { unenroll(repo); } catch { /* best effort */ }
+  privateStorageHarness.useSemanticAdapter = false;
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(home, { recursive: true, force: true });
   if (originalHome === undefined) delete process.env.HOME;
@@ -213,17 +241,23 @@ describe('M411 local merge reconciliation', () => {
     expect(git(['rev-parse', 'main'])).toBe(fixture.mergeCommitOid);
   }, 15_000);
 
-  it('completes realized-merge fanout when reconciliation retains live authority', async () => {
-    const fixture = createInterruptedMerge('exact');
+  describe('realized-merge fanout authority', () => {
+    let fixture: MergeFixture;
 
-    const result = await autoMergeProposal(fixture.proposalId, config(true));
+    beforeEach(() => {
+      fixture = createInterruptedMerge('exact');
+    });
 
-    expect(result).toMatchObject({ ok: true, merged: true });
-    const applied = loadProposal(fixture.proposalId)!;
-    expect(applied.realizedMergeFanoutVersion).toBe(3);
-    expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
-      .filter((decision) => decision.action === 'merged' && decision.verdict === 'merged'))
-      .toHaveLength(1);
+    it('completes realized-merge fanout when reconciliation retains live authority', async () => {
+      const result = await autoMergeProposal(fixture.proposalId, config(true));
+
+      expect(result).toMatchObject({ ok: true, merged: true });
+      const applied = loadProposal(fixture.proposalId)!;
+      expect(applied.realizedMergeFanoutVersion).toBe(3);
+      expect(readDecisions({ proposalId: fixture.proposalId, requireComplete: true })
+        .filter((decision) => decision.action === 'merged' && decision.verdict === 'merged'))
+        .toHaveLength(1);
+    });
   });
 
   it('finds the exact interrupted merge after the base advances again', async () => {
@@ -244,7 +278,7 @@ describe('M411 local merge reconciliation', () => {
     expect(git(['rev-parse', 'main'])).toBe(advancedHead);
   });
 
-  it('refuses an exact-looking merge beyond the bounded first-parent window', async () => {
+  it(realWindowsAuthorityTest, async () => {
     const fixture = createInterruptedMerge('exact');
     const tree = git(['rev-parse', `${fixture.mergeCommitOid}^{tree}`]);
     let head = fixture.mergeCommitOid;

@@ -456,7 +456,7 @@ export function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
 
 /**
  * Create an isolated H1 fixture:
- *   1. Snapshot + relocate HOME and USERPROFILE to a FRESH os.tmpdir() dir so
+ *   1. Snapshot + relocate HOME, USERPROFILE, and ASHLR_HOME to a FRESH os.tmpdir() dir so
  *      every ~/.ashlr read/write is isolated on POSIX and Windows.
  *   2. Snapshot the re-entrancy env (ASHLR_IN_DAEMON / ASHLR_IN_SWARM) and clear
  *      it so a tick/daemon run is not refused by the recursion guard.
@@ -470,12 +470,14 @@ export function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
 export function makeFixture(): H1Fixture {
   const prevHome = process.env.HOME;
   const prevUserProfile = process.env.USERPROFILE;
+  const prevAshlrHome = process.env.ASHLR_HOME;
   const prevInDaemon = process.env.ASHLR_IN_DAEMON;
   const prevInSwarm = process.env.ASHLR_IN_SWARM;
 
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-h1-home-')));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
   delete process.env.ASHLR_IN_DAEMON;
   delete process.env.ASHLR_IN_SWARM;
 
@@ -501,6 +503,8 @@ export function makeFixture(): H1Fixture {
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = prevUserProfile;
+    if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+    else process.env.ASHLR_HOME = prevAshlrHome;
     if (prevInDaemon === undefined) delete process.env.ASHLR_IN_DAEMON;
     else process.env.ASHLR_IN_DAEMON = prevInDaemon;
     if (prevInSwarm === undefined) delete process.env.ASHLR_IN_SWARM;
@@ -553,6 +557,8 @@ export function makeFixture(): H1Fixture {
       else process.env.HOME = prevHome;
       if (prevUserProfile === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = prevUserProfile;
+      if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+      else process.env.ASHLR_HOME = prevAshlrHome;
       if (prevInDaemon === undefined) delete process.env.ASHLR_IN_DAEMON;
       else process.env.ASHLR_IN_DAEMON = prevInDaemon;
       if (prevInSwarm === undefined) delete process.env.ASHLR_IN_SWARM;

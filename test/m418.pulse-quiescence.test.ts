@@ -3,11 +3,33 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
+
 import type { AshlrConfig } from '../src/core/types.js';
 import { emitFleetEvent, runPulseSync } from '../src/core/integrations/pulse-sync.js';
 import { isEnrolled, setKill } from '../src/core/sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
   releaseOutwardMutationFence,
 } from '../src/core/sandbox/mutation-fence.js';
 
@@ -16,19 +38,34 @@ const cfg = { user: { id: 'm418', name: 'M418' } } as AshlrConfig;
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   home = join(tmpdir(), `ashlr-m418-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
+  previousAshlrHome = process.env.ASHLR_HOME;
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
   process.env.PULSE_URL = 'http://pulse.m418.invalid';
   process.env.PULSE_FLEET_PAT = 'm418-test-pat';
+
+  const fence = acquireOutwardMutationFence();
+  try {
+    if (!ownsOutwardMutationFence(fence)) {
+      throw new Error('M418 fixture failed to establish private authority roots');
+    }
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
+  privateStorageHarness.useSemanticAdapter = true;
 });
 
 afterEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   vi.unstubAllGlobals();
   delete process.env.PULSE_URL;
   delete process.env.PULSE_FLEET_PAT;
@@ -36,6 +73,8 @@ afterEach(() => {
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   rmSync(home, { recursive: true, force: true });
 });
 

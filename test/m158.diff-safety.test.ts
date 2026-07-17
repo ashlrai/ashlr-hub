@@ -368,6 +368,7 @@ describe('M158 — isDestructiveDiff: never-throws on bad input', () => {
 describe('M158 — createProposal: auto-rejects destructive diff at intake', () => {
   beforeEach(() => {
     fs.rmSync(fakeHome, { recursive: true, force: true });
+    fs.mkdirSync(fakeHome, { recursive: true, mode: 0o700 });
     auditCalls.length = 0;
     ledgerEntries.length = 0;
   });

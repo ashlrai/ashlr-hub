@@ -282,11 +282,25 @@ function worktreePathFor(id: string): string {
 // git helper — execFile arg arrays, no shell
 // ---------------------------------------------------------------------------
 
+type SandboxGitRunFaultHookForTest = (
+  cwd: string,
+  args: readonly string[],
+) => void;
+
+let sandboxGitRunFaultHookForTest: SandboxGitRunFaultHookForTest | undefined;
+
+export function _setSandboxGitRunFaultHookForTest(
+  hook: SandboxGitRunFaultHookForTest | undefined,
+): void {
+  sandboxGitRunFaultHookForTest = hook;
+}
+
 /**
  * Run a git command inside `cwd`. Throws on failure (callers decide whether
  * to tolerate). Always uses an arg array — never a shell string.
  */
 function gitRun(cwd: string, args: string[]): string {
+  sandboxGitRunFaultHookForTest?.(cwd, [...args]);
   const env = { ...process.env };
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;

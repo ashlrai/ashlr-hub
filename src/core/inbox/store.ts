@@ -549,10 +549,11 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
   );
 }
 
-const DEFAULT_PROPOSAL_READ_MAX_FILES = 512;
+const HARD_PROPOSAL_READ_MAX_FILES = 4_096;
+// Bounded operational headroom for the live authority source, not archival retention.
+const DEFAULT_PROPOSAL_READ_MAX_FILES = HARD_PROPOSAL_READ_MAX_FILES;
 const DEFAULT_PROPOSAL_READ_MAX_BYTES = 64 * 1024 * 1024;
 const DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES = AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES;
-const HARD_PROPOSAL_READ_MAX_FILES = 4_096;
 const HARD_PROPOSAL_READ_MAX_BYTES = 256 * 1024 * 1024;
 const HARD_PROPOSAL_READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PROPOSAL_DIRECTORY_ENTRIES = 8_192;
@@ -954,8 +955,13 @@ export function createProposal(
 
   const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
+  const boundRunEventSummary = input.runEventSummary?.proposalCreated === true &&
+    input.runEventSummary.proposalId === undefined
+    ? { ...input.runEventSummary, proposalId }
+    : input.runEventSummary;
   const baseProposal: Proposal = {
     ...input,
+    ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
     ...(owner !== undefined ? { owner } : {}),
     id: proposalId,
     status: initialStatus,

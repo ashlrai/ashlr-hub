@@ -16,6 +16,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 import type { Proposal, RealizedMergeEvidence } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -23,18 +29,44 @@ import type { Proposal, RealizedMergeEvidence } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
 const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
+
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m119-home-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
   if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = origAshlrHome;
 });
@@ -741,6 +773,27 @@ describe('m119 decisions-ledger', () => {
 // ---------------------------------------------------------------------------
 
 describe('m119 store.setStatus ledger hook', () => {
+  beforeEach(() => {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+    if (process.platform === 'win32') {
+      const ashlrHome = path.join(tmpHome, '.ashlr');
+      fs.mkdirSync(ashlrHome, { mode: 0o700 });
+      expect(assurePrivateStoragePath(
+        ashlrHome,
+        'directory',
+        'secure-created',
+        { anchorPath: tmpHome },
+      ).ok).toBe(true);
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+        runner: semanticPrivateStorageRunner,
+      });
+    }
+  });
+
+  afterEach(() => {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  });
+
   it('records a rejection in the ledger without changing proposal behavior', async () => {
     // We cannot easily test the full store in unit tests without a real inbox dir,
     // so we seed a proposal file directly and call setStatus.
@@ -770,8 +823,12 @@ describe('m119 store.setStatus ledger hook', () => {
     // We'll call the module directly (it's still the real implementation for setStatus).
     const storeModule = await import('../src/core/inbox/store.js');
 
-    // setStatus should not throw
-    expect(() => storeModule.setStatus('prop-hook-test-001', 'rejected', undefined, 'no diff')).not.toThrow();
+    expect(storeModule.setStatus(
+      'prop-hook-test-001',
+      'rejected',
+      undefined,
+      'no diff',
+    )).toBe(true);
 
     // The proposal file should now have status === 'rejected'
     const raw = fs.readFileSync(path.join(inboxPath, 'prop-hook-test-001.json'), 'utf8');
@@ -809,7 +866,7 @@ describe('m119 store.setStatus ledger hook', () => {
     );
 
     const storeModule = await import('../src/core/inbox/store.js');
-    expect(() => storeModule.setStatus('prop-hook-test-002', 'approved')).not.toThrow();
+    expect(storeModule.setStatus('prop-hook-test-002', 'approved')).toBe(true);
 
     const raw = fs.readFileSync(path.join(inboxPath, 'prop-hook-test-002.json'), 'utf8');
     const updated = JSON.parse(raw) as { status: string; decisionReason?: string };

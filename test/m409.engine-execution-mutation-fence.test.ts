@@ -4,6 +4,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AshlrConfig, RunTask } from '../src/core/types.js';
 import { makeCfg, withTmpHome, type DisposableRepo } from './helpers/h1-fixture.js';
 
+const privateStorageMocks = vi.hoisted(() => ({ useRealAssurance: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => privateStorageMocks.useRealAssurance
+      ? actual.assurePrivateStoragePath(...args)
+      : { ok: true, reason: 'exact-private-dacl' },
+  };
+});
+
 vi.mock('../src/core/run/engines.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
   return { ...actual, spawnEngine: vi.fn() };
@@ -24,6 +38,11 @@ import {
 import { listProposals } from '../src/core/inbox/store.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import { listSandboxes } from '../src/core/sandbox/worktree.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 
 interface SourceSnapshot {
   tree: string;
@@ -45,6 +64,22 @@ function sourceSnapshot(repo: DisposableRepo): SourceSnapshot {
       timeout: 30_000,
     }).trim(),
   };
+}
+
+function prepareAuthorityRoots(): void {
+  privateStorageMocks.useRealAssurance = true;
+  try {
+    const fence = acquireOutwardMutationFence();
+    try {
+      if (!ownsOutwardMutationFence(fence)) {
+        throw new Error('M409 fixture failed to establish private authority roots');
+      }
+    } finally {
+      releaseOutwardMutationFence(fence);
+    }
+  } finally {
+    privateStorageMocks.useRealAssurance = false;
+  }
 }
 
 function makeConfig(): AshlrConfig {
@@ -136,6 +171,7 @@ describe('M409 engine execution outward mutation fence', () => {
     await withTmpHome(async (fx) => {
       const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      prepareAuthorityRoots();
       const repo = fx.makeRepo();
       repo.enroll();
       const before = sourceSnapshot(repo);

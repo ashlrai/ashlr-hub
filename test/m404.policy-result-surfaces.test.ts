@@ -5,6 +5,8 @@ const policyMocks = vi.hoisted(() => ({
   enroll: vi.fn(),
   unenroll: vi.fn(),
   setKill: vi.fn(),
+  readEnrollmentRegistry: vi.fn(),
+  killSwitchOn: vi.fn(),
 }));
 
 const fleetMocks = vi.hoisted(() => ({
@@ -16,6 +18,8 @@ vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => ({
   enroll: policyMocks.enroll,
   unenroll: policyMocks.unenroll,
   setKill: policyMocks.setKill,
+  readEnrollmentRegistry: policyMocks.readEnrollmentRegistry,
+  killSwitchOn: policyMocks.killSwitchOn,
 }));
 
 vi.mock('../src/core/fleet/status.js', async (importOriginal) => ({
@@ -31,6 +35,14 @@ beforeEach(() => {
   policyMocks.enroll.mockReset();
   policyMocks.unenroll.mockReset();
   policyMocks.setKill.mockReset();
+  policyMocks.readEnrollmentRegistry.mockReset();
+  policyMocks.readEnrollmentRegistry.mockReturnValue({
+    state: 'ready',
+    repos: [],
+    reason: 'missing-registry',
+  });
+  policyMocks.killSwitchOn.mockReset();
+  policyMocks.killSwitchOn.mockReturnValue(false);
   fleetMocks.buildFleetStatus.mockClear();
 });
 
@@ -85,6 +97,49 @@ async function callFleetApi(action: 'pause' | 'resume') {
 }
 
 describe('PolicyMutationResult operator surfaces', () => {
+  it('emits typed healthy enrollment authority in JSON mode', async () => {
+    policyMocks.readEnrollmentRegistry.mockReturnValue({
+      state: 'ready',
+      repos: ['/repo/one'],
+      reason: 'healthy',
+    });
+    policyMocks.killSwitchOn.mockReturnValue(true);
+    const logs: string[] = [];
+    const errors: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((...args) => logs.push(args.join(' ')));
+    vi.spyOn(console, 'error').mockImplementation((...args) => errors.push(args.join(' ')));
+
+    await expect(cmdEnroll(['list', '--json'])).resolves.toBe(0);
+
+    expect(JSON.parse(logs.join('\n'))).toEqual({
+      state: 'ready',
+      repos: ['/repo/one'],
+      reason: 'healthy',
+      killSwitchOn: true,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('emits typed degraded enrollment authority in JSON mode and exits nonzero', async () => {
+    policyMocks.readEnrollmentRegistry.mockReturnValue({
+      state: 'degraded',
+      reason: 'malformed-registry',
+    });
+    const logs: string[] = [];
+    const errors: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((...args) => logs.push(args.join(' ')));
+    vi.spyOn(console, 'error').mockImplementation((...args) => errors.push(args.join(' ')));
+
+    await expect(cmdEnroll(['list', '--json'])).resolves.toBe(1);
+
+    expect(JSON.parse(logs.join('\n'))).toEqual({
+      state: 'degraded',
+      reason: 'malformed-registry',
+      killSwitchOn: false,
+    });
+    expect(errors).toEqual([]);
+  });
+
   it('reports unsafe enrollment storage as a CLI error', async () => {
     policyMocks.enroll.mockReturnValue({
       ok: false,

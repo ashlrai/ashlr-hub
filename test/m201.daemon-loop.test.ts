@@ -62,9 +62,11 @@
  *   - H1 fixture provides isolated tmp HOME per test.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import { basename, join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { basename, dirname, join, resolve } from 'node:path';
 import type {
   AshlrConfig,
   DaemonTick,
@@ -75,6 +77,30 @@ import type {
 } from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
+
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
@@ -101,6 +127,27 @@ const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
+
+const mockPublishGeneratedRepairTreatmentOutcome = vi.fn();
+const mockReadPendingGeneratedRepairTreatmentOutcomes = vi.fn();
+vi.mock('../src/core/fleet/generated-repair-lifecycle.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/generated-repair-lifecycle.js')>();
+  return {
+    ...actual,
+    publishGeneratedRepairTreatmentOutcome: (...args: Parameters<typeof actual.publishGeneratedRepairTreatmentOutcome>) => {
+      const forced = mockPublishGeneratedRepairTreatmentOutcome(...args);
+      return typeof forced === 'boolean'
+        ? forced
+        : actual.publishGeneratedRepairTreatmentOutcome(...args);
+    },
+    readPendingGeneratedRepairTreatmentOutcomes: (...args: Parameters<typeof actual.readPendingGeneratedRepairTreatmentOutcomes>) => {
+      const override = mockReadPendingGeneratedRepairTreatmentOutcomes.getMockImplementation();
+      return override
+        ? mockReadPendingGeneratedRepairTreatmentOutcomes(...args)
+        : actual.readPendingGeneratedRepairTreatmentOutcomes(...args);
+    },
+  };
+});
 
 const mockRunConcurrentDispatch = vi.fn();
 vi.mock('../src/core/fabric/concurrent-dispatch.js', async (importOriginal) => {
@@ -150,10 +197,17 @@ vi.mock('../src/core/fleet/self-heal.js', () => ({
 
 const mockQueueProposalRepairWorkForPendingProposals = vi.fn();
 const mockResolveDiagnosticResliceParents = vi.fn();
+const mockGeneratedRepairProposalDispatchAuthority = vi.fn();
 const mockIsRejectedCaptureRecoveryAuthorized = vi.fn();
 const mockBeginRejectedCaptureRecoveryDispatch = vi.fn();
 vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
   beginRejectedCaptureRecoveryDispatch: (...args: unknown[]) => mockBeginRejectedCaptureRecoveryDispatch(...args),
+  generatedRepairRootKey: (item: WorkItem) =>
+    /^[a-f0-9]{64}$/.test(item.repairRootId ?? '') && (item.repairDepth === 0 || item.repairDepth === 1)
+      ? `${resolve(item.repo)}\0${item.repairRootId}`
+      : null,
+  generatedRepairProposalDispatchAuthority: (...args: unknown[]) =>
+    mockGeneratedRepairProposalDispatchAuthority(...args),
   isRejectedCaptureRecoveryAuthorized: (...args: unknown[]) => mockIsRejectedCaptureRecoveryAuthorized(...args),
   queueProposalRepairWorkForPendingProposals: (...args: unknown[]) => mockQueueProposalRepairWorkForPendingProposals(...args),
   resolveDiagnosticResliceParents: (...args: unknown[]) => mockResolveDiagnosticResliceParents(...args),
@@ -307,6 +361,7 @@ import {
 import {
   acquireDaemonLock,
   daemonLockPath,
+  daemonSpendGuardPath,
   loadDaemonState,
   readDaemonSpendGuard,
   releaseDaemonLock,
@@ -320,10 +375,15 @@ import {
 } from '../src/core/inbox/store.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
+  dispatchProductionDir,
   readDispatchProductionEvents,
   recordDispatchProduction,
+  resolveDispatchProductionFailureAttemptReceipt,
+  resolveDispatchProductionAttemptReceiptWitnesses,
+  resolveDispatchProductionAttemptProofs,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { listAttemptRecords } from '../src/core/autonomy/attempt-records.js';
 import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
 import {
@@ -338,16 +398,21 @@ import {
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { generatedRepairLifecycleAttemptHash } from '../src/core/fleet/generated-repair-identity.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
 import {
   generatedRepairCooldownKey,
   generatedRepairGenerationId,
+  generatedRepairGenerationIds,
   generatedRepairLifecyclePath,
+  readPendingGeneratedRepairTreatmentOutcomes,
   readGeneratedRepairLifecycle,
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import {
   recordRepairHandoffs,
+  repairHandoffJournalPath,
   repairHandoffFromDispatchEvent,
 } from '../src/core/fleet/repair-handoff-journal.js';
 import {
@@ -356,6 +421,7 @@ import {
   type H1Fixture,
 } from './helpers/h1-fixture.js';
 import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Fixture lifecycle.
@@ -364,10 +430,32 @@ import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
 let fx: H1Fixture;
 let prevAshlrHome: string | undefined;
 
+beforeAll(() => {
+  if (process.platform !== 'win32') return;
+
+  const proofFixture = makeFixture();
+  const realCallsBefore = privateStorageHarness.realCalls;
+  fs.mkdirSync(proofFixture.ashlrDir, { recursive: true });
+  try {
+    expect(assurePrivateStoragePath(
+      proofFixture.ashlrDir,
+      'directory',
+      'secure-created',
+      { anchorPath: proofFixture.home },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+  } finally {
+    privateStorageHarness.useSemanticAdapter = true;
+    proofFixture.cleanup();
+  }
+});
+
 beforeEach(() => {
   mockRunSwarm.mockReset();
   mockBuildBacklog.mockReset();
   mockRunGoal.mockReset();
+  mockPublishGeneratedRepairTreatmentOutcome.mockReset();
+  mockReadPendingGeneratedRepairTreatmentOutcomes.mockReset();
   mockResolveDiagnosticResliceParents.mockReset();
   mockResolveDiagnosticResliceParents.mockImplementation((items: WorkItem[]) => ({
     dispatchable: items,
@@ -382,6 +470,8 @@ beforeEach(() => {
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
   mockQueueProposalRepairWorkForPendingProposals.mockReset();
+  mockGeneratedRepairProposalDispatchAuthority.mockReset();
+  mockGeneratedRepairProposalDispatchAuthority.mockReturnValue('not-applicable');
   mockIsRejectedCaptureRecoveryAuthorized.mockReset();
   mockIsRejectedCaptureRecoveryAuthorized.mockReturnValue(true);
   mockBeginRejectedCaptureRecoveryDispatch.mockReset();
@@ -471,19 +561,34 @@ beforeEach(() => {
   // Default: local engine tier.
   mockEngineTierOf.mockReturnValue('local');
   // Default runSwarm: success, $0.001 cost.
-  mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => ({
-    id: (opts as { runId?: string } | undefined)?.runId ?? `mock-swarm-${Date.now()}`,
-    status: 'done',
-    goal: 'mock goal',
-    result: 'mock result',
-    usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
-  }));
+  mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => {
+    const fields = opts as { runId?: string; workItemId?: string } | undefined;
+    const selectionOnlyRepair = fields?.workItemId?.includes(':proposal-repair-nodiff:') === true;
+    return {
+      id: fields?.runId ?? `mock-swarm-${Date.now()}`,
+      status: 'done',
+      goal: 'mock goal',
+      result: 'mock result',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      ...(selectionOnlyRepair ? {
+        proposalOutcome: {
+          kind: 'proposal-disabled' as const,
+          reason: 'selection-only diagnostic fixture',
+        },
+      } : {}),
+    };
+  });
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   fx.cleanup();
   if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = prevAshlrHome;
+});
+
+afterAll(() => {
+  privateStorageHarness.useSemanticAdapter = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -555,6 +660,12 @@ function makeItems(repoDir: string, count: number) {
   }));
 }
 
+function testRepairRootId(repoDir: string, identity: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify(['m201:repair-root:v1', resolve(repoDir), identity]))
+    .digest('hex');
+}
+
 function makeDiagnosticResliceItem(
   repoDir: string,
   hash = 'abcdef123456',
@@ -564,6 +675,12 @@ function makeDiagnosticResliceItem(
   const ts = new Date().toISOString();
   const parentItemId = `repo:goal:stalled:${hash}`;
   const objectiveHash = hash.repeat(6).slice(0, 64);
+  const repairRootAuthorityId = `dispatch:${parentItemId}:goal:${objectiveHash}`;
+  const repairRootId = createHash('sha256').update(JSON.stringify([
+    'ashlr:repair-root:v2',
+    resolve(repoDir),
+    repairRootAuthorityId,
+  ])).digest('hex');
   const parentEvent: DispatchProductionEvent = {
     schemaVersion: 1,
     ts,
@@ -602,6 +719,9 @@ function makeDiagnosticResliceItem(
     score,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts,
+    repairRootId,
+    repairRootAuthorityId,
+    repairDepth: 0,
     repairHandoffId: handoff.eventId,
     repairGenerationId: handoff.generationId,
     repairTreatmentUnitId: handoff.repairTreatmentUnitId,
@@ -612,6 +732,31 @@ function makeDiagnosticResliceItem(
     repairParentTier: parentTier,
     repairParentObjectiveHash: objectiveHash,
   };
+}
+
+function addLegacyGenerationAlias(item: WorkItem, hash: string, parentTier: EngineTier): string {
+  const parentEvent: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: item.ts,
+    itemId: item.repairParentItemId!,
+    source: 'goal',
+    repo: item.repo,
+    title: `Resolve stalled objective ${hash}`,
+    backend: parentTier === 'mid' ? 'local-coder' : 'builtin',
+    tier: parentTier,
+    assignedBy: 'router',
+    routeReason: 'test diagnostic parent route',
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`,
+    objectiveHash: item.repairParentObjectiveHash,
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+  };
+  expect(recordRepairHandoffs(parentEvent, { schemaVersion: 1 })).toMatchObject({ recorded: 1, failed: 0 });
+  const alias = generatedRepairGenerationIds(item).find((generationId) => generationId !== item.repairGenerationId);
+  if (!alias) throw new Error('expected a legacy generated-repair alias');
+  return alias;
 }
 
 function makeDiagnosticResliceForTreatment(
@@ -625,6 +770,312 @@ function makeDiagnosticResliceForTreatment(
     if (item.repairTreatment === treatment) return item;
   }
   throw new Error(`Unable to construct diagnostic reslice treatment ${treatment}`);
+}
+
+function createDiagnosticPendingProposal(item: WorkItem, attemptId: string) {
+  return persistProposalRunEventProposalId(createProposal({
+    repo: item.repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Crash-persisted generated repair proposal',
+    summary: 'The proposal committed before daemon attempt-proof persistence.',
+    diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+    workItemId: item.id,
+    workItemGenerationId: item.repairGenerationId,
+    workSource: item.source,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+    },
+  }));
+}
+
+function seedDiagnosticEmptyProof(
+  item: WorkItem,
+  attemptId: string,
+  backend: Exclude<EngineId, 'builtin'>,
+  tier: EngineTier,
+  repairAttemptOrdinal: 1 | 2 = 1,
+  repairPreviousBackend?: Exclude<EngineId, 'builtin'>,
+) {
+  const event = recordDiagnosticEmptyReceipt(
+    item,
+    attemptId,
+    backend,
+    tier,
+    repairAttemptOrdinal,
+    repairPreviousBackend,
+  );
+  return recordGeneratedRepairLifecycle(item, { kind: 'dispatch-proof-empty-diff', eventTs: event.ts });
+}
+
+function recordDiagnosticEmptyReceipt(
+  item: WorkItem,
+  attemptId: string,
+  backend: Exclude<EngineId, 'builtin'>,
+  tier: EngineTier,
+  repairAttemptOrdinal: 1 | 2 = 1,
+  repairPreviousBackend?: Exclude<EngineId, 'builtin'>,
+): DispatchProductionEvent {
+  const ts = new Date(Date.parse(item.ts) + repairAttemptOrdinal).toISOString();
+  const routeReason = 'm201 canonical diagnostic proof';
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend,
+    tier,
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend,
+      tier,
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal,
+    ...(repairAttemptOrdinal === 2 ? { repairPreviousBackend: repairPreviousBackend ?? backend } : {}),
+  };
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return event;
+}
+
+function recordDiagnosticProposalReceipt(
+  item: WorkItem,
+  attemptId: string,
+  proposalId: string,
+): DispatchProductionEvent {
+  const routeReason = 'm201 canonical diagnostic proposal receipt';
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId,
+      costUsd: 0.001,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal: 1,
+    spentUsd: 0.001,
+    basis: 'run-proposal-outcome',
+  };
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return event;
+}
+
+function recordOrdinaryRepairSuccessReceipt(
+  item: WorkItem,
+  attemptId: string,
+  outcome: 'empty-diff' | 'proposal-created',
+  proposalId?: string,
+): DispatchProductionEvent {
+  const routeReason = 'm201 exact ordinary repair success receipt';
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend: 'local-coder',
+    tier: 'mid',
+    assignedBy: 'daemon',
+    routeReason,
+    outcome,
+    proposalCreated: outcome === 'proposal-created',
+    ...(proposalId ? { proposalId } : {}),
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'done',
+      outcome,
+      proposalCreated: outcome === 'proposal-created',
+      ...(proposalId ? { proposalId } : {}),
+      costUsd: 0.001,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: generatedRepairGenerationId(item)!,
+    repairAttemptOrdinal: 1,
+    repairRootId: item.repairRootId,
+    repairDepth: item.repairDepth as 0 | 1,
+    spentUsd: 0.001,
+    basis: 'run-proposal-outcome',
+  };
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return event;
+}
+
+function seedDiagnosticFailureReceipt(
+  item: WorkItem,
+  attemptId: string,
+  backend: Exclude<EngineId, 'builtin'>,
+  tier: EngineTier,
+  ts: string,
+  repairAttemptOrdinal: 1 | 2 = 1,
+  repairPreviousBackend?: Exclude<EngineId, 'builtin'>,
+): DispatchProductionEvent {
+  const routeReason = 'm201 canonical diagnostic failure receipt';
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: item.id,
+    source: item.source,
+    repo: item.repo,
+    title: item.title,
+    backend,
+    tier,
+    assignedBy: 'daemon',
+    routeReason,
+    outcome: 'engine-failed',
+    proposalCreated: false,
+    runId: attemptId,
+    trajectoryId: `run:${attemptId}`,
+    routeSnapshot: {
+      backend,
+      tier,
+      assignedBy: 'daemon',
+      reason: routeReason,
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+    runEventSummary: {
+      runId: attemptId,
+      status: 'failed',
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      costUsd: 0.001,
+    },
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: 'fleet-router-v1',
+    objectiveHash: workItemObjectiveHash(item),
+    spentUsd: 0.001,
+    reason: 'provider failed before producing a diff',
+    basis: 'run-proposal-outcome',
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: item.repairGenerationId,
+    repairTreatmentUnitId: item.repairTreatmentUnitId,
+    repairTreatment: item.repairTreatment,
+    repairAttemptOrdinal,
+    ...(repairAttemptOrdinal === 2 ? { repairPreviousBackend: repairPreviousBackend ?? backend } : {}),
+    repairRootId: item.repairRootId,
+    repairDepth: item.repairDepth as 0 | 1,
+  };
+  expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+  return event;
+}
+
+function repairReservationPath(item: WorkItem): string {
+  if (!/^[a-f0-9]{64}$/.test(item.repairRootId ?? '')) throw new Error('repair root required');
+  return join(dirname(dispatchProductionDir()), 'repair-attempt-reservations', `${item.repairRootId}.json`);
+}
+
+function writeRepairReservationMarker(
+  item: WorkItem,
+  options: {
+    reservationId: string;
+    backend: EngineId;
+    tier: EngineTier;
+    repairAttemptOrdinal: 1 | 2;
+    previousBackend?: EngineId;
+    phase: 'prepared' | 'launched';
+    createdAt?: string;
+  },
+): string {
+  const markerPath = repairReservationPath(item);
+  fs.mkdirSync(dirname(markerPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(markerPath, `${JSON.stringify({
+    schemaVersion: 1,
+    reservationId: options.reservationId,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+    generationIds: generatedRepairGenerationIds(item).sort(),
+    itemIdHash: createHash('sha256')
+      .update(JSON.stringify(['ashlr:repair-item:v1', item.id]))
+      .digest('hex'),
+    objectiveHash: workItemObjectiveHash(item),
+    repairRootId: item.repairRootId,
+    repairDepth: item.repairDepth,
+    repairRootAuthorityItemIdHash: createHash('sha256')
+      .update(JSON.stringify(['ashlr:repair-item:v1', item.repairRootAuthorityId]))
+      .digest('hex'),
+    backend: options.backend,
+    tier: options.tier,
+    repairAttemptOrdinal: options.repairAttemptOrdinal,
+    previousBackend: options.repairAttemptOrdinal === 2 ? options.previousBackend ?? 'local-coder' : null,
+    attemptHash: generatedRepairLifecycleAttemptHash(`run:${options.reservationId}`),
+    phase: options.phase,
+  })}\n`, { mode: 0o600 });
+  return markerPath;
 }
 
 function seedHealthyGeneratedRepairYield(repoDir: string): void {
@@ -664,6 +1115,37 @@ function seedHealthyGeneratedRepairYield(repoDir: string): void {
       reason: 'engine "codex" completed without file changes',
     },
   ]);
+}
+
+function mockCanonicalEmptyDiffRunGoal(reason: string, costUsd = 0.001): void {
+  mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason });
+  mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+  mockRunGoal.mockImplementation(async (_goal, _cfg, options) => ({
+    id: (options as { runId: string }).runId,
+    status: 'done',
+    engine: 'local-coder',
+    engineTier: 'mid',
+    usage: { totalTokens: 100, estCostUsd: costUsd, steps: 1 },
+    proposalOutcome: { kind: 'empty-diff' as const, reason },
+  }));
+}
+
+function persistProposalRunEventProposalId(
+  proposal: ReturnType<typeof createProposal>,
+): ReturnType<typeof createProposal> {
+  const bound = {
+    ...proposal,
+    ...(proposal.diff ? {
+      diffHash: createHash('sha256').update(proposal.diff, 'utf8').digest('hex'),
+    } : {}),
+    runEventSummary: { ...proposal.runEventSummary, proposalId: proposal.id },
+  };
+  fs.writeFileSync(
+    join(inboxDir(), `${proposal.id}.json`),
+    `${JSON.stringify(bound, null, 2)}\n`,
+    'utf8',
+  );
+  return bound;
 }
 
 /** Enroll a repo and seed buildBacklog with N items. */
@@ -747,7 +1229,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('A0b: a temporarily missing exact canonical enrollment degrades the tick', async () => {
     const repo = fx.makeRepo();
@@ -761,7 +1243,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
@@ -1070,12 +1552,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
-    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 1);
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 1, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
       items: [generic, reslice],
     });
+    mockCanonicalEmptyDiffRunGoal('automatic diagnostic drain fixture');
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
     const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
@@ -1097,8 +1580,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       counts: { available: 1, selected: 1, limit: 3, automatic: 1 },
     });
     expect(selection?.tags).toEqual(expect.arrayContaining(['drain-select', 'drain:diagnostic-reslices', 'auto-drain']));
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
-    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
       workItemId: reslice.id,
       delegationScope: {
         workItemId: reslice.id,
@@ -1109,14 +1592,15 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   });
 
   it.each([
-    ['baseline-reslice', 'builtin', false],
-    ['target-localization', 'local-coder', true],
+    ['baseline-reslice', false],
+    ['target-localization', true],
   ] as const)(
     'A1-reslice-dispatch-config: %s sets only its repo-map/localization treatment fields',
-    async (treatment, backend, localization) => {
+    async (treatment, localization) => {
       const repo = fx.makeRepo();
       repo.enroll();
-      const parentTier: EngineTier = backend === 'builtin' ? 'local' : 'mid';
+      const backend = 'local-coder';
+      const parentTier: EngineTier = 'mid';
       const reslice = makeDiagnosticResliceForTreatment(repo.dir, treatment, parentTier);
       mockBuildBacklog.mockResolvedValue({
         generatedAt: new Date().toISOString(),
@@ -1125,6 +1609,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       });
       mockRouteBackend.mockReturnValue({ backend, tier: parentTier, reason: 'treatment dispatch test' });
       mockEngineTierOf.mockImplementation((engine: unknown) => engine === 'local-coder' ? 'mid' : 'local');
+      mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+        id: (options as { runId: string }).runId,
+        status: 'done',
+        engine: backend,
+        engineTier: parentTier,
+        usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'valid treatment dispatch evidence' },
+      }));
 
       const config = {
         ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
@@ -1138,9 +1630,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       const originalFoundry = structuredClone(config.foundry);
 
       const result = await tick(config, { dryRun: false });
-      const dispatchCall = backend === 'builtin'
-        ? mockRunSwarm.mock.calls[0]
-        : mockRunGoal.mock.calls[0];
+      const dispatchCall = mockRunGoal.mock.calls[0];
       const dispatchCfg = dispatchCall?.[1] as AshlrConfig;
 
       expect(result.reason).toBe('ok');
@@ -1151,6 +1641,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       expect(dispatchCfg).not.toBe(config);
       expect(dispatchCfg.foundry?.models).toBe(config.foundry?.models);
       expect(config.foundry).toEqual(originalFoundry);
+      expect(readGeneratedRepairLifecycle(reslice)).toMatchObject({
+        available: true,
+        disposition: 'active',
+        authoritativeEmptyRuns: 1,
+        lastAuthoritativeEmptyBackend: 'local-coder',
+      });
     },
   );
 
@@ -1177,8 +1673,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
-    const firstReslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 2);
-    const secondReslice = makeDiagnosticResliceItem(repo.dir, 'fedcba654321', 1);
+    const firstReslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 2, 'mid');
+    const secondReslice = makeDiagnosticResliceItem(repo.dir, 'fedcba654321', 1, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -1190,8 +1686,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       ...config.daemon,
       drainLimits: { diagnosticReslices: 1 },
     };
+    mockCanonicalEmptyDiffRunGoal('automatic diagnostic drain fairness fixture');
     const result = await tick(config, { dryRun: false });
-    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+    const dispatchedIds = mockRunGoal.mock.calls.map((call) => call[2]?.workItemId);
 
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(2);
@@ -1222,6 +1719,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         `Produce a fresh complete fix and verify it.`,
       score,
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, suffix),
+      repairRootAuthorityId: `m201:${suffix}`,
+      repairDepth: 0,
     });
     const firstRepair = repair('abcdef123456', 100);
     const secondRepair = repair('fedcba654321', 90);
@@ -1230,9 +1730,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [firstRepair, secondRepair, generic],
     });
+    mockCanonicalEmptyDiffRunGoal('generated repair fairness fixture');
 
     const result = await tick(cfgBuiltin({ perTickItems: 2, parallel: 2 }), { dryRun: false });
-    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+    const dispatchedIds = mockRunGoal.mock.calls.map((call) => call[2]?.workItemId);
 
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(2);
@@ -1256,6 +1757,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         'Produce a fresh complete fix and verify it. RAW_PRECLAIM_TEXT_M201',
       score: 100,
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'route-blocked'),
+      repairRootAuthorityId: 'm201:route-blocked',
+      repairDepth: 0,
     };
     mockInspectGeneratedRepairRouteFeasibility.mockImplementation((item: WorkItem) => ({
       feasible: item.id !== repair.id,
@@ -1343,6 +1847,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         `Original work item: repo:goal:cap-${index}\n` +
         'Produce a fresh complete fix and verify it.',
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, `cap-${index}`),
+      repairRootAuthorityId: `m201:cap-${index}`,
+      repairDepth: 0,
     }));
     mockInspectGeneratedRepairRouteFeasibility.mockReturnValue({
       feasible: false,
@@ -1382,6 +1889,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         'Original work item: repo:goal:unrelated\n' +
         'Produce a fresh complete fix and verify it.',
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'unrelated'),
+      repairRootAuthorityId: 'm201:unrelated',
+      repairDepth: 0,
     };
     mockInspectGeneratedRepairRouteFeasibility.mockImplementation((item: WorkItem) => ({
       feasible: item.id === reslice.id,
@@ -1424,7 +1934,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
-    const reslice = makeDiagnosticResliceItem(repo.dir, 'aabbccddeeff', 1);
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'aabbccddeeff', 1, 'mid');
     seedTicks([
       {
         ts: new Date(Date.now() - 1_000).toISOString(),
@@ -1453,8 +1963,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [generic, reslice],
     });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'fairness fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
 
-    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
 
     expect(result.reason).toBe('ok');
     expect(result.drain).toMatchObject({
@@ -1470,8 +1985,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       tags: expect.arrayContaining(['fairness-deferred', 'ordinary-turn']),
       counts: expect.objectContaining({ fairnessDeferred: 1 }),
     });
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
-    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
     expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(false);
   });
 
@@ -1507,6 +2022,72 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedIds).not.toContain(items[0]!.id);
   });
 
+  it('A1-shared-production-failure: settles only the executing claim and permits an immediate retry', async () => {
+    const { repo, items } = enrollWithItems(1);
+    const item = items[0]!;
+    const sharedPath = join(fx.ashlrDir, 'shared-production-failure');
+    const observer = new SharedStore(sharedPath, 60_000);
+    const unrelatedItemId = `${repo.dir}:unrelated-shared-claim`;
+    expect(observer.claimItems([unrelatedItemId], 1, 'other-machine')).toEqual([unrelatedItemId]);
+    const dailyLedgerPath = join(dispatchProductionDir(), `${today()}.jsonl`);
+    let executions = 0;
+    mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => {
+      executions++;
+      expect(observer.readHealth({ machineId: 'm201-production-failure' }).claimSamples).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            itemId: item.id,
+            machineId: 'm201-production-failure',
+            state: 'executing',
+            phase: 'executing',
+            owned: true,
+          }),
+          expect.objectContaining({ itemId: unrelatedItemId, machineId: 'other-machine' }),
+        ]),
+      );
+      if (executions === 1) fs.mkdirSync(dailyLedgerPath, { recursive: true });
+      return {
+        id: (opts as { runId: string }).runId,
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+        proposalOutcome: {
+          kind: 'proposal-disabled' as const,
+          reason: 'shared queue persistence fixture',
+        },
+      };
+    });
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'm201-production-failure',
+          leaseMs: 60_000,
+          trustedCoherentStorage: true,
+        },
+      },
+    } as AshlrConfig;
+
+    const failed = await tick(config, { dryRun: false });
+    const afterFailure = observer.readSnapshot();
+
+    expect(failed.reason).toBe('state-persistence-failed');
+    expect(afterFailure.claims).not.toHaveProperty(item.id);
+    expect(afterFailure.claims).toHaveProperty(unrelatedItemId);
+    expect(afterFailure.worked.some((event) => event.itemId === item.id)).toBe(false);
+
+    fs.rmSync(dailyLedgerPath, { recursive: true, force: true });
+    const retried = await tick(config, { dryRun: false });
+    const afterRetry = observer.readSnapshot();
+
+    expect(retried.reason).toBe('ok');
+    expect(executions).toBe(2);
+    expect(afterRetry.claims).not.toHaveProperty(item.id);
+    expect(afterRetry.claims).toHaveProperty(unrelatedItemId);
+    expect(afterRetry.worked.some((event) => event.itemId === item.id)).toBe(false);
+  });
+
   it('A1-drain-auto-local-only: automatic diagnostic drains preserve local-only local-coder routing', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1519,8 +2100,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       items: [generic, reslice],
     });
     mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('local-only', 'frontier budget constrained'));
-    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
-    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockCanonicalEmptyDiffRunGoal('automatic local-only drain fixture');
 
     const result = await tick(
       {
@@ -1579,7 +2159,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [reslice, generic],
     });
-
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
     const selection = actions.find((event) => event.action === 'daemon:drain-select');
@@ -1621,12 +2200,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
     const reslice = makeDiagnosticResliceItem(repo.dir, 'feedface9999', 1, 'mid');
-    recordGeneratedRepairLifecycle(reslice, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    seedDiagnosticEmptyProof(
+      reslice,
+      'attempt-12345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+    );
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'only installed mid backend' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
     mockBuildBacklog.mockResolvedValue({
@@ -1828,7 +2407,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
-    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc888888', 1);
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc888888', 1, 'mid');
     seedHealthyGeneratedRepairYield(repo.dir);
     const emptyAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
     recordOutcome(generatedRepairCooldownKey(reslice), 'empty', emptyAt);
@@ -1837,6 +2416,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [reslice, generic],
     });
+    mockCanonicalEmptyDiffRunGoal('fast repair cooldown fixture');
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
@@ -1875,8 +2455,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
     });
     expect(repairDecision?.tags).toEqual(expect.arrayContaining(['fast-repair-cooldown', 'latest-empty', 'claimed']));
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
-    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
       workItemId: reslice.id,
     });
   });
@@ -1930,20 +2510,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1-generated-repair-dispatch-skip: selected generated repairs skipped by budget are append-only workspace events only', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const resliceA = makeDiagnosticResliceItem(repo.dir, 'abcabc666660', 10);
-    const resliceB = makeDiagnosticResliceItem(repo.dir, 'abcabc666661', 9);
+    const resliceA = makeDiagnosticResliceItem(repo.dir, 'abcabc666660', 10, 'mid');
+    const resliceB = makeDiagnosticResliceItem(repo.dir, 'abcabc666661', 9, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
       items: [resliceA, resliceB],
     });
-    mockRunSwarm.mockResolvedValue({
-      id: 'budget-drain-swarm',
-      status: 'done',
-      goal: 'mock goal',
-      result: 'mock result',
-      usage: { totalTokens: 100, estCostUsd: 0.02, steps: 1 },
-    });
+    mockCanonicalEmptyDiffRunGoal('budget drain fixture', 0.02);
 
     const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.02, perTickItems: 2, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
@@ -1954,7 +2528,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(2);
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(skipped).toMatchObject({
       kind: 'dispatch',
       outcome: 'skipped',
@@ -2058,6 +2632,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         'Original work item: repo:goal:stalled\n' +
         'Produce a fresh complete fix and verify it.',
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'maintenance-refill'),
+      repairRootAuthorityId: 'm201:maintenance-refill',
+      repairDepth: 0 as const,
     }));
     mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
       scanned: 1,
@@ -2076,6 +2653,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     mockBuildBacklog
       .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
       .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: repairItems });
+    mockCanonicalEmptyDiffRunGoal('proposal repair maintenance fixture');
 
     const result = await tick(
       { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
@@ -2091,7 +2669,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       { terminalLifecycleEnabled: true },
     ]);
     expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(result.producerMaintenance).toMatchObject({
       proposalRepair: true,
       proposalRepairEligible: 2,
@@ -2123,6 +2701,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         'Original work item: repo:goal:revoked\n' +
         'Produce a fresh complete fix and verify it.',
       tags: ['self-heal', 'proposal-repair', 'rejected-capture-recovery', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'rejected-recovery'),
+      repairRootAuthorityId: 'm201:rejected-recovery',
+      repairDepth: 0 as const,
     }));
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -2130,9 +2711,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       items: [repair!],
     });
     mockBeginRejectedCaptureRecoveryDispatch.mockReturnValue({ authorized: false });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'reauthorization fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
 
     const result = await tick(
-      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { autonomyControlLoop: false, allowedBackends: ['local-coder'] },
+      } as AshlrConfig,
       { dryRun: false },
     );
 
@@ -2193,12 +2779,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'abcdee123456', 10, 'mid');
     const ordinary = makeItems(repo.dir, 1)[0]!;
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-63345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    seedDiagnosticEmptyProof(
+      repair,
+      'attempt-63345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+    );
     const path = generatedRepairLifecyclePath();
     const ledger = JSON.parse(fs.readFileSync(path, 'utf8')) as {
       records: Array<{ emptyAttemptTiers?: string[] }>;
@@ -2233,6 +2819,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       source: 'self',
       score: 100,
       tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'ordinary-terminal'),
+      repairRootAuthorityId: 'm201:ordinary-terminal',
+      repairDepth: 0,
     };
     const ordinary = makeItems(repo.dir, 1)[0]!;
     mockBuildBacklog.mockResolvedValue({
@@ -2249,6 +2838,38 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
     expect(result.dispatches?.map((dispatch) => dispatch.itemId)).toEqual([ordinary.id]);
+  });
+
+  it('A1a2b1ab: rootless legacy and widened-depth repairs fail closed without starving ordinary work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const rootless = makeDiagnosticResliceItem(repo.dir, 'abcddf123456', 100, 'mid');
+    delete rootless.repairRootId;
+    delete rootless.repairDepth;
+    const depthRejected = {
+      ...makeDiagnosticResliceItem(repo.dir, 'abcdcf123456', 99, 'mid'),
+      repairDepth: 2,
+    } as unknown as WorkItem;
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [rootless, depthRejected, ordinary],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+    expect(result.dispatches?.map((dispatch) => dispatch.itemId)).toEqual([ordinary.id]);
+    expect(result.producerMaintenance).toMatchObject({
+      repairRootAdmissionRootless: 1,
+      repairRootAdmissionDepthRejected: 1,
+    });
   });
 
   it('A1a2b1b: later producer refresh cannot reintroduce a blocked repair', async () => {
@@ -4492,6 +5113,52 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h5b-handoff-failure: degraded local handoff authority refuses before dispatch and permits retry', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    fs.mkdirSync(repairHandoffJournalPath(), { recursive: true });
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValueOnce({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+      failed: 0,
+      handoffSourceState: 'degraded',
+    });
+    let executions = 0;
+    mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => {
+      executions++;
+      return {
+        id: (opts as { runId: string }).runId,
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+        proposalOutcome: {
+          kind: 'empty-diff' as const,
+          reason: 'local handoff persistence fixture',
+          files: 0,
+          insertions: 0,
+          deletions: 0,
+        },
+      };
+    });
+    const config = cfgBuiltin({ perTickItems: 1, parallel: 1 });
+
+    const failed = await tick(config, { dryRun: false });
+
+    expect(failed.reason).toBe('state-persistence-failed');
+    expect(executions).toBe(0);
+    expect(readDispatchProductionEvents().some((event) => event.itemId === item.id)).toBe(false);
+    expect(loadWorkedLedger().events.some((event) => event.itemId === item.id)).toBe(false);
+
+    fs.rmSync(repairHandoffJournalPath(), { recursive: true, force: true });
+    const retried = await tick(config, { dryRun: false });
+
+    expect(retried.reason).toBe('ok');
+    expect(executions).toBe(1);
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === item.id)).toEqual([
+      expect.objectContaining({ itemId: item.id, outcome: 'empty' }),
+    ]);
+  });
+
   it('A1h5b1: generated repair success becomes terminal only when its proposal exists durably', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -4508,7 +5175,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         runId: string;
         workItemGenerationId: string;
       };
-      const proposal = createProposal({
+      const proposal = persistProposalRunEventProposalId(createProposal({
         repo: repo.dir,
         origin: 'agent',
         kind: 'patch',
@@ -4521,7 +5188,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         runId: attemptId,
         trajectoryId: `run:${attemptId}`,
         runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
-      });
+      }));
       return {
         id: attemptId,
         status: 'done',
@@ -4542,6 +5209,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       foundry: { allowedBackends: ['local-coder'] },
     } as AshlrConfig, { dryRun: false });
 
+    expect(result.reason).toBe('ok');
     expect(result.proposalsCreated).toBe(1);
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
@@ -4554,18 +5222,566 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: true,
       repairTreatmentAttemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
+  });
+
+  it('A1h5b1p: degraded attempt-proof authority blocks only repairs and does not stop ordinary work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'fedcba654321', 10, 'mid');
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair, ordinary],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'proof authority preflight' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const attemptDir = join(dispatchProductionDir(), 'repair-attempt-proofs');
+    fs.mkdirSync(attemptDir, { recursive: true });
+    fs.writeFileSync(join(attemptDir, '.protocol.json'), '{"malformed":true}\n', { mode: 0o600 });
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-ordinary-despite-degraded-receipts',
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'ordinary work completed' },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 2, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'ok',
+      dispatches: expect.arrayContaining([
+        expect.objectContaining({ itemId: ordinary.id, dispatched: true }),
+      ]),
+    });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b1o: ordinary generated repair terminal success creates no proofless treatment outbox', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const base = makeItems(repo.dir, 1)[0]!;
+    const repair: WorkItem = {
+      ...base,
+      id: `${basename(repo.dir)}:proposal-repair:abc123abc123`,
+      source: 'self',
+      title: 'Repair proposal prop-ordinary: test failure in src/app.ts:12',
+      detail:
+        'Proposal repair: recover a complete proposal after a test failure in src/app.ts:12.\n' +
+        'Proposal: prop-ordinary\n' +
+        'Original work item: repo:goal:ordinary\n' +
+        'Produce a fresh complete fix and verify it.',
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+      repairRootId: testRepairRootId(repo.dir, 'ordinary-terminal'),
+      repairRootAuthorityId: 'm201:ordinary-terminal',
+      repairDepth: 0,
+    };
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'ordinary repair success' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => {
+      const { runId, workItemGenerationId } = options as { runId: string; workItemGenerationId: string };
+      const proposal = persistProposalRunEventProposalId(createProposal({
+        repo: repo.dir,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Ordinary generated repair proposal',
+        summary: 'A complete ordinary generated repair.',
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        workItemId: repair.id,
+        workItemGenerationId,
+        workSource: repair.source,
+        runId,
+        trajectoryId: `run:${runId}`,
+        runEventSummary: { runId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
+      }));
+      return {
+        id: runId,
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: { kind: 'filed', proposalId: proposal.id, reason: 'proposal filed', files: 1 },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(1);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'retired' });
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toMatchObject({
+      available: true,
+      prooflessLegacy: 0,
+      requiredAction: null,
+    });
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
+    expect(mockPublishGeneratedRepairTreatmentOutcome).not.toHaveBeenCalled();
+    expect(readDispatchProductionEvents().some((event) =>
+      event.itemId === repair.id && event.repairTreatmentOutcome !== undefined
+    )).toBe(false);
+    expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
+      outcome: 'proposal-created',
+      repairGenerationId: generatedRepairGenerationId(repair),
+      repairAttemptOrdinal: 1,
+      repairRootId: repair.repairRootId,
+      repairDepth: 0,
+    });
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+      repairGenerationId: generatedRepairGenerationId(repair)!,
+      repairAttemptOrdinal: 1,
+    }])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{ status: 'proven', event: { itemId: repair.id, outcome: 'proposal-created' } }],
+    });
+
+    const backlogReadsBeforeNextTick = mockBuildBacklog.mock.calls.length;
+    const next = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+    expect(next.reason).not.toBe('state-persistence-failed');
+    expect(mockBuildBacklog.mock.calls.length).toBeGreaterThan(backlogReadsBeforeNextTick);
+  });
+
+  it('A1h5b1oa: unavailable treatment reconciliation does not starve ordinary work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockReadPendingGeneratedRepairTreatmentOutcomes.mockReturnValue(Object.assign([], {
+      available: false,
+      prooflessLegacy: 0,
+      requiredAction: 'operator-reset' as const,
+    }));
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'ok',
+      itemsConsidered: 1,
+    });
+    expect(mockBuildBacklog).toHaveBeenCalled();
+    expect(mockRunGoal.mock.calls.length + mockRunSwarm.mock.calls.length).toBe(1);
+  });
+
+  it('A1h5b1ob: persistent startup treatment publication failure remains visible through no-backlog ticks and recovery', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcfed123456', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockReadPendingGeneratedRepairTreatmentOutcomes.mockReturnValue(Object.assign([{
+      generationId: 'a'.repeat(64),
+      attemptHash: 'b'.repeat(64),
+      outcome: 'not-converted' as const,
+      disposition: 'quarantined' as const,
+      candidate: {} as DispatchProductionEvent,
+    }], {
+      available: true,
+      prooflessLegacy: 0,
+      requiredAction: null,
+    }));
+    mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
+
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig;
+
+    const first = await tick(config, { dryRun: false });
+    const second = await tick(config, { dryRun: false });
+
+    for (const result of [first, second]) {
+      expect(result).toMatchObject({
+        reason: 'state-persistence-failed',
+        residentSafePersistenceFailure: 'repair-treatment',
+        itemsConsidered: 0,
+        spentUsd: 0,
+      });
+    }
+    expect(loadDaemonState().ticks.slice(-2)).toEqual([
+      expect.objectContaining({
+        reason: 'state-persistence-failed',
+        residentSafePersistenceFailure: 'repair-treatment',
+      }),
+      expect.objectContaining({
+        reason: 'state-persistence-failed',
+        residentSafePersistenceFailure: 'repair-treatment',
+      }),
+    ]);
+    expect(mockPublishGeneratedRepairTreatmentOutcome).toHaveBeenCalledTimes(2);
+    expect(mockBuildBacklog).toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+
+    mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(true);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+    const recovered = await tick(config, { dryRun: false });
+
+    expect(recovered).toMatchObject({
+      reason: 'no-backlog',
+      itemsConsidered: 0,
+      spentUsd: 0,
+    });
+    expect(recovered.residentSafePersistenceFailure).toBeUndefined();
+  });
+
+  it('A1h5b1oc: startup treatment publication failure remains visible when every backlog item is skipped', async () => {
+    const { repo, items } = enrollWithItems(1);
+    createProposal({
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Pending ordinary work',
+      summary: 'Leaves the tick with no dispatchable backlog item.',
+      diff: 'diff --git a/x.ts b/x.ts\n',
+      workItemId: items[0]!.id,
+    });
+    mockReadPendingGeneratedRepairTreatmentOutcomes.mockReturnValue(Object.assign([{
+      generationId: 'c'.repeat(64),
+      attemptHash: 'd'.repeat(64),
+      outcome: 'not-converted' as const,
+      disposition: 'quarantined' as const,
+      candidate: {} as DispatchProductionEvent,
+    }], {
+      available: true,
+      prooflessLegacy: 0,
+      requiredAction: null,
+    }));
+    mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'state-persistence-failed',
+      residentSafePersistenceFailure: 'repair-treatment',
+      itemsConsidered: 0,
+      spentUsd: 0,
+    });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b1p: failed canonical production persistence grants no lifecycle or cooldown authority', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef123457', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock repair empty' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const productionFailurePath = join(
+      dispatchProductionDir(),
+      `.attempt-authority-${repair.repairGenerationId}.lock`,
+    );
+    mockRunGoal.mockImplementationOnce(async () => {
+      fs.mkdirSync(productionFailurePath);
+      return {
+        id: 'run-diagnostic-unpersisted-empty',
+        status: 'done',
+        engine: 'local-coder',
+        engineTier: 'mid',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'no changes' },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+    expect(loadWorkedLedger().events.some((event) => event.itemId.includes(repair.id))).toBe(false);
+    fs.rmSync(productionFailurePath, { recursive: true, force: true });
+
+    const afterRestart = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(afterRestart).toMatchObject({
+      reason: 'no-backlog',
+      itemsConsidered: 0,
+    });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1h5b1p-proposal-crash: a pending proposal persisted before production append prevents re-execution', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef123458', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'proposal crash fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const productionFailurePath = join(
+      dispatchProductionDir(),
+      `.attempt-authority-${repair.repairGenerationId}.lock`,
+    );
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => {
+      const { runId, workItemGenerationId } = options as { runId: string; workItemGenerationId: string };
+      const proposal = createProposal({
+        repo: repo.dir,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Proposal persisted before production append crash',
+        summary: 'Durable evidence from the original paid execution.',
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        workItemId: repair.id,
+        workItemGenerationId,
+        workSource: repair.source,
+        runId,
+        trajectoryId: `run:${runId}`,
+        runEventSummary: { runId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
+      });
+      fs.mkdirSync(productionFailurePath);
+      return {
+        id: runId,
+        status: 'done',
+        engine: 'local-coder',
+        engineTier: 'mid',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: { kind: 'filed', proposalId: proposal.id, reason: 'proposal filed', files: 1 },
+      };
+    });
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig;
+
+    const crashed = await tick(config, { dryRun: false });
+
+    expect(crashed.reason).toBe('state-persistence-failed');
+    expect(pendingCount()).toBe(1);
+    expect(readDispatchProductionEvents().some((event) => event.itemId === repair.id)).toBe(false);
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([
+      { repairGenerationId: repair.repairGenerationId!, repairAttemptOrdinal: 1 },
+    ])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{ status: 'missing' }],
+    });
+    fs.rmSync(productionFailurePath, { recursive: true, force: true });
+
+    const restarted = await tick(config, { dryRun: false });
+
+    expect(restarted.itemsConsidered).toBe(0);
+    expect(restarted.reason).toBe('no-backlog');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['witness-write', 'witness-ack'] as const)(
+    'A1h5b1w: terminal treatment %s failure leaves the outbox pending and reports persistence failure',
+    async (failureMode) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      const repair = makeDiagnosticResliceItem(repo.dir, `abcde${failureMode === 'witness-write' ? '1' : '2'}123456`, 10, 'mid');
+      seedDiagnosticEmptyProof(
+        repair,
+        `attempt-${failureMode === 'witness-write' ? '73345678' : '83345678'}-1234-4123-8123-123456789abc`,
+        'local-coder',
+        'mid',
+      );
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [repair],
+      });
+      mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'terminal witness failure fixture' });
+      mockEngineTierOf.mockReturnValue('mid');
+      mockRunGoal.mockImplementationOnce(async () => {
+        if (failureMode === 'witness-write') {
+          fs.writeFileSync(
+            join(dispatchProductionDir(), 'repair-treatment-outcomes'),
+            'not a treatment receipt directory',
+            'utf8',
+          );
+        }
+        return {
+          id: `run-terminal-${failureMode}`,
+          status: 'done',
+          engine: 'kimi',
+          engineTier: 'mid',
+          usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+          proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
+        };
+      });
+      if (failureMode === 'witness-ack') {
+        mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
+      }
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder', 'kimi'] },
+      } as AshlrConfig, { dryRun: false });
+      const pending = readPendingGeneratedRepairTreatmentOutcomes();
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(result.residentSafePersistenceFailure).toBe('repair-treatment');
+      expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+        available: true,
+        disposition: 'quarantined',
+        authoritativeEmptyRuns: 2,
+      });
+      expect(pending).toEqual([
+        expect.objectContaining({
+          generationId: repair.repairGenerationId,
+          outcome: 'not-converted',
+          attemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          candidate: expect.objectContaining({ itemId: repair.id }),
+        }),
+      ]);
+
+      if (failureMode === 'witness-write') {
+        fs.rmSync(join(dispatchProductionDir(), 'repair-treatment-outcomes'), { force: true });
+      } else {
+        mockPublishGeneratedRepairTreatmentOutcome.mockReset();
+      }
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [],
+      });
+
+      const retried = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder', 'kimi'] },
+      } as AshlrConfig, { dryRun: false });
+      const witnesses = readDispatchProductionEvents().filter((event) =>
+        event.itemId === repair.id && event.repairTreatmentOutcome === 'not-converted'
+      );
+
+      expect(retried.reason).toBe('no-backlog');
+      expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
+      expect(witnesses).toHaveLength(1);
+      expect(witnesses[0]).toMatchObject({
+        repairGenerationId: repair.repairGenerationId,
+        repairTreatmentAttemptHash: pending[0]!.attemptHash,
+      });
+    },
+  );
+
+  it('A1h5b1w-persistence: a later spend-guard persistence failure strips resident-safe treatment status', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcde3123456', 10, 'mid');
+    seedDiagnosticEmptyProof(
+      repair,
+      'attempt-93345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+    );
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'combined persistence failure fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
+    mockRunGoal.mockImplementationOnce(async () => {
+      const guardPath = daemonSpendGuardPath();
+      fs.rmSync(guardPath, { force: true });
+      fs.mkdirSync(guardPath, { recursive: true });
+      return {
+        id: 'run-terminal-combined-persistence-failure',
+        status: 'done',
+        engine: 'kimi',
+        engineTier: 'mid',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(result.residentSafePersistenceFailure).toBeUndefined();
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toHaveLength(1);
+    expect(fs.statSync(daemonSpendGuardPath()).isDirectory()).toBe(true);
+    fs.rmSync(daemonSpendGuardPath(), { recursive: true, force: true });
+  });
+
+  it('A1h5b1w-startup-persistence: a later critical persistence failure dominates a persistent startup treatment failure', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+    mockReadPendingGeneratedRepairTreatmentOutcomes.mockReturnValue(Object.assign([{
+      generationId: 'e'.repeat(64),
+      attemptHash: 'f'.repeat(64),
+      outcome: 'not-converted' as const,
+      disposition: 'quarantined' as const,
+      candidate: {} as DispatchProductionEvent,
+    }], {
+      available: true,
+      prooflessLegacy: 0,
+      requiredAction: null,
+    }));
+    mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
+
+    const treatmentOnly = await tick(cfgBuiltin(), { dryRun: false });
+    expect(treatmentOnly).toMatchObject({
+      reason: 'state-persistence-failed',
+      residentSafePersistenceFailure: 'repair-treatment',
+    });
+
+    fs.mkdirSync(daemonSpendGuardPath(), { recursive: true });
+    const critical = await tick(cfgBuiltin(), { dryRun: false });
+
+    expect(critical.reason).toBe('state-persistence-failed');
+    expect(critical.residentSafePersistenceFailure).toBeUndefined();
+    fs.rmSync(daemonSpendGuardPath(), { recursive: true, force: true });
   });
 
   it('A1h5b1a: excludes a repair when only its prior empty backend is routable', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'abcdea123456', 10, 'mid');
-    expect(recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-33345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    })).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
+    expect(seedDiagnosticEmptyProof(
+      repair,
+      'attempt-33345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+    )).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -4573,6 +5789,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'same backend retry' });
     mockEngineTierOf.mockReturnValue('mid');
+    mockInspectGeneratedRepairRouteFeasibility.mockReturnValue({
+      feasible: false,
+      requiredTier: 'mid',
+      requiresAlternative: true,
+      backend: null,
+      reason: 'alternate-backend-unavailable',
+    });
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
@@ -4596,12 +5819,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'abcded123456', 10, 'mid');
-    recordGeneratedRepairLifecycle(repair, {
-      kind: 'empty-diff',
-      attemptId: 'attempt-43345678-1234-4123-8123-123456789abc',
-      backend: 'local-coder',
-      tier: 'mid',
-    });
+    seedDiagnosticEmptyProof(
+      repair,
+      'attempt-43345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      'mid',
+    );
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -4623,6 +5846,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       foundry: { allowedBackends: ['local-coder', 'kimi'] },
     } as AshlrConfig, { dryRun: false });
 
+    expect(result.reason).toBe('ok');
     expect(result.dispatches?.[0]).toMatchObject({ backend: 'kimi', tier: 'mid', dispatched: true });
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'kimi' });
     expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
@@ -4654,6 +5878,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairAttemptOrdinal: 2,
       repairTreatmentAttemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
   });
 
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
@@ -4726,6 +5951,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
     } as AshlrConfig, { dryRun: false });
 
+    expect(result.reason).toBe('ok');
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(result.dispatches?.[0]).toMatchObject({ backend: 'local-coder', production: { outcome: 'empty-diff' } });
     expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
@@ -4763,12 +5989,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       (_item: WorkItem, backend: EngineId) => backend !== 'builtin',
     );
     mockRunGoal.mockResolvedValueOnce({
-      id: 'run-diagnostic-fallback-empty',
+      id: 'run-diagnostic-fallback-failure',
       status: 'done',
       engine: 'builtin',
       engineTier: 'local',
       usage: { totalTokens: 0, estCostUsd: 0, steps: 1 },
-      proposalOutcome: { kind: 'empty-diff', reason: 'fallback made no changes' },
+      proposalOutcome: { kind: 'engine-failed-no-diff', reason: 'fallback execution failed' },
     });
 
     const result = await tick({
@@ -4793,7 +6019,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
       repairLineageInvalid: true,
       backend: 'builtin',
-      outcome: 'empty-diff',
+      outcome: 'engine-failed',
     });
     expect(readAgentActions({ complete: true }).find((event) =>
       event.action === 'daemon:dispatch' && event.itemId === repair.id
@@ -4801,6 +6027,911 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairLineageInvalid: true,
       backend: 'builtin',
     });
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(loadWorkedLedger().events).not.toContainEqual(expect.objectContaining({
+      itemId: generatedRepairCooldownKey(repair),
+    }));
+    const reservationDir = join(dirname(dispatchProductionDir()), 'repair-attempt-reservations');
+    expect(fs.readdirSync(reservationDir).filter((name) => name.endsWith('.json'))).toHaveLength(1);
+
+    const immediateRetry = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        autonomyControlLoop: false,
+        allowedBackends: ['local-coder'],
+        bestOfN: 2,
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(immediateRetry.itemsConsidered).toBe(0);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['engine-failed', { kind: 'engine-failed-no-diff', reason: 'adversarial engine failure' }],
+    ['proposal-capture-error', { kind: 'proposal-capture-error', reason: 'adversarial capture failure' }],
+  ] as const)('A1h5b3b: canonical %s repair outcomes settle and require a same-tier alternate after cooldown', async (
+    outcome,
+    proposalOutcome,
+  ) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaac123456', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder', tier: 'mid', reason: 'real router repeats the failed route',
+    });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal
+      .mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+        id: (options as { runId: string }).runId,
+        status: 'done',
+        engine: 'local-coder',
+        engineTier: 'mid',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome,
+      }))
+      .mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+        id: (options as { runId: string }).runId,
+        status: 'done',
+        engine: 'kimi',
+        engineTier: 'mid',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'alternate completed without changes' },
+      }));
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig;
+
+    const first = await tick(config, { dryRun: false });
+    const immediate = await tick(config, { dryRun: false });
+    vi.setSystemTime(new Date('2026-07-15T12:31:00.000Z'));
+    const retry = await tick(config, { dryRun: false });
+    const reservationDir = join(dirname(dispatchProductionDir()), 'repair-attempt-reservations');
+    const markerNames = fs.existsSync(reservationDir)
+      ? fs.readdirSync(reservationDir).filter((name) => name.endsWith('.json'))
+      : [];
+
+    expect(first.reason).toBe('ok');
+    expect(immediate.itemsConsidered).toBe(0);
+    expect(retry.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(2);
+    expect(mockRunGoal.mock.calls[1]?.[2]).toMatchObject({ workItemId: repair.id, engine: 'kimi' });
+    expect(markerNames).toEqual([]);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+    });
+    expect(readDispatchProductionEvents().find((event) =>
+      event.itemId === repair.id && event.outcome === outcome
+    )).toMatchObject({
+      outcome,
+      backend: 'local-coder',
+      objectiveHash: workItemObjectiveHash(repair),
+      proposalCreated: false,
+    });
+    expect(readDispatchProductionEvents().find((event) =>
+      event.itemId === repair.id && event.outcome === 'empty-diff'
+    )).toMatchObject({
+      backend: 'kimi',
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+      repairGenerationId: repair.repairGenerationId!,
+      repairAttemptOrdinal: 2,
+    }])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{
+        status: 'proven',
+        proof: { repairAttemptOrdinal: 2, previousBackend: 'local-coder', backend: 'kimi' },
+      }],
+    });
+    expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
+      itemId: generatedRepairCooldownKey(repair),
+      outcome: 'dispatch-blocked',
+    }));
+  });
+
+  it('A1h5b3b-terminal-crash: an exact empty receipt reconstructs missing lifecycle before clearing a crash marker', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaabbb123456', 10, 'mid');
+    const firstAttempt = 'attempt-11345678-1234-4123-8123-123456789abc';
+    const terminalAttempt = 'attempt-21345678-1234-4123-8123-123456789abc';
+    expect(seedDiagnosticEmptyProof(repair, firstAttempt, 'local-coder', 'mid')).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+    });
+    recordDiagnosticEmptyReceipt(
+      repair,
+      terminalAttempt,
+      'kimi',
+      'mid',
+      2,
+      'local-coder',
+    );
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+    });
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: terminalAttempt,
+      backend: 'kimi',
+      tier: 'mid',
+      repairAttemptOrdinal: 2,
+      phase: 'launched',
+    });
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+      schemaVersion: 1,
+      ts: new Date(Date.now() + index + 1).toISOString(),
+      machineId: 'm201',
+      itemId: `repo:goal:terminal-receipt-noise-${index}`,
+      source: 'goal',
+      repo: repo.dir,
+      title: `Terminal receipt noise ${index}`,
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'test exact receipt recovery beyond raw scan cap',
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }));
+    expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('no-backlog');
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'quarantined',
+      authoritativeEmptyRuns: 2,
+    });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('A1h5b3b-proposal-crash: an exact proposal receipt reconstructs missing lifecycle before clearing a crash marker', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaabbc223456', 10, 'mid');
+    const attemptId = 'attempt-31345678-2234-4123-8123-123456789abc';
+    const proposal = createDiagnosticPendingProposal(repair, attemptId);
+    const receipt = recordDiagnosticProposalReceipt(repair, attemptId, proposal.id);
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: attemptId,
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+    expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+      repairGenerationId: repair.repairGenerationId!,
+      repairAttemptOrdinal: 1,
+    }])).toMatchObject({
+      status: 'resolved',
+      resolutions: [{ status: 'proven', event: { ts: receipt.ts, proposalId: proposal.id } }],
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('no-backlog');
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b3b-proposal-conflict: an exact receipt conflicting with durable proposal binding stays fenced', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaabbc323456', 10, 'mid');
+    const otherRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbc423456', 10, 'mid');
+    const attemptId = 'attempt-31345678-3234-4123-8123-123456789abc';
+    const conflictingProposal = createDiagnosticPendingProposal(otherRepair, attemptId);
+    recordDiagnosticProposalReceipt(repair, attemptId, conflictingProposal.id);
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: attemptId,
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'no-backlog',
+      itemsConsidered: 0,
+      producerMaintenance: {
+        repairAttemptReservationState: 'blocked-ambiguous',
+        repairAttemptReservationsBlocked: 1,
+      },
+    });
+    expect(fs.existsSync(markerPath)).toBe(true);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({ disposition: 'active' });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b3b-failed-receipt-crash: an old immutable failure settles only its root and lets another root continue', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-12T08:00:00.000Z'));
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const failedRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbe123456', 20, 'mid');
+    const attemptId = 'attempt-51345678-1234-4123-8123-123456789abc';
+    const eventTs = '2026-07-12T08:00:01.000Z';
+    const markerPath = writeRepairReservationMarker(failedRepair, {
+      reservationId: attemptId,
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+      createdAt: '2026-07-12T08:00:00.000Z',
+    });
+    const failure = seedDiagnosticFailureReceipt(
+      failedRepair,
+      attemptId,
+      'local-coder',
+      'mid',
+      eventTs,
+    );
+    const rawPath = join(dispatchProductionDir(), '2026-07-12.jsonl');
+    expect(fs.existsSync(rawPath)).toBe(true);
+    for (const [index, ts] of [
+      '2026-07-13T08:00:00.000Z',
+      '2026-07-14T08:00:00.000Z',
+      '2026-07-15T08:00:00.000Z',
+    ].entries()) {
+      expect(recordDispatchProduction({
+        schemaVersion: 1,
+        ts,
+        machineId: 'm201',
+        itemId: `repo:goal:partition-rotation-${index}`,
+        source: 'goal',
+        repo: repo.dir,
+        title: `Partition rotation witness ${index}`,
+        backend: 'local-coder',
+        tier: 'mid',
+        assignedBy: 'daemon',
+        routeReason: 'test partition rotation',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        spentUsd: 0,
+        reason: 'test partition rotation',
+        basis: 'run-proposal-outcome',
+      })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    }
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
+    const unrelatedRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbf123456', 10, 'mid');
+
+    expect(resolveDispatchProductionFailureAttemptReceipt({
+      repairGenerationId: failedRepair.repairGenerationId!,
+      repairAttemptOrdinal: 1,
+      attemptHash: generatedRepairLifecycleAttemptHash(`run:${attemptId}`),
+    })).toMatchObject({
+      status: 'proven',
+      event: { outcome: 'engine-failed' },
+    });
+    const falseTerminalTargets = (['empty-diff', 'proposal-created'] as const).map((outcome) => ({
+      ts: failure.ts,
+      sequenceStartTs: failedRepair.ts,
+      sequenceEndTs: new Date().toISOString(),
+      itemId: failedRepair.id,
+      repo: failedRepair.repo,
+      source: failedRepair.source,
+      outcome,
+      ...(outcome === 'proposal-created' ? { proposalId: 'prop-false-failure-proof' } : {}),
+      objectiveHash: workItemObjectiveHash(failedRepair)!,
+      repairHandoffId: failedRepair.repairHandoffId!,
+      repairGenerationId: failedRepair.repairGenerationId!,
+      repairTreatmentUnitId: failedRepair.repairTreatmentUnitId!,
+      repairTreatment: failedRepair.repairTreatment!,
+      repairAttemptOrdinal: 1 as const,
+    }));
+    expect(resolveDispatchProductionAttemptProofs(falseTerminalTargets)).toMatchObject({
+      status: 'resolved',
+      resolutions: [
+        { status: 'unproven' },
+        { status: 'unproven' },
+      ],
+    });
+
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [failedRepair, unrelatedRepair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'unrelated root route' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-unrelated-root',
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'unrelated root completed without changes' },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(result.dispatches).toEqual([
+      expect.objectContaining({ itemId: unrelatedRepair.id, dispatched: true }),
+    ]);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readGeneratedRepairLifecycle(failedRepair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+    expect(loadWorkedLedger().events.filter((worked) =>
+      worked.itemId === generatedRepairCooldownKey(failedRepair))).toEqual([
+      expect.objectContaining({ outcome: 'dispatch-blocked' }),
+    ]);
+  });
+
+  it('A1h5b3b-ordinary-crash: durable empty receipts recover proposal and capture repair reservations into cooldown', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const proposal = createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Incomplete ordinary proposal repair',
+      summary: 'Repair the incomplete proposal.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+partial\n',
+      workItemId: 'repo:goal:ordinary-proposal-parent',
+      isPartial: true,
+    });
+    const actualProposalRepair = await vi.importActual<
+      typeof import('../src/core/fleet/proposal-repair-work.js')
+    >('../src/core/fleet/proposal-repair-work.js');
+    const proposalRepair = actualProposalRepair.proposalRepairWorkItem(proposal, now);
+    expect(proposalRepair).not.toBeNull();
+    if (!proposalRepair) throw new Error('expected ordinary proposal repair');
+    const captureParent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now.toISOString(),
+      machineId: 'm201',
+      itemId: 'repo:self:ordinary-capture-parent',
+      source: 'self',
+      repo: repo.dir,
+      title: 'Self improvement capture failure with useful work',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'self-improvement local route',
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      runId: 'run-ordinary-capture-parent',
+      spentUsd: 0.001,
+      reason: 'proposal-capture-error: completeness gate failed for src/app.ts:12',
+      diffFiles: 1,
+      diffLines: 4,
+      objectiveHash: 'b'.repeat(64),
+      basis: 'run-proposal-outcome',
+    };
+    expect(recordRepairHandoffs(captureParent, {
+      schemaVersion: 2,
+      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+    })).toMatchObject({ recorded: 1, failed: 0 });
+    const captureHandoff = repairHandoffFromDispatchEvent(captureParent)!;
+    const captureRepair = actualProposalRepair.captureGateRepairWorkItem({
+      ...captureParent,
+      repairHandoffId: captureHandoff.eventId,
+      repairGenerationId: captureHandoff.generationId,
+    }, now);
+    expect(captureRepair).not.toBeNull();
+    if (!captureRepair) throw new Error('expected ordinary capture repair');
+    expect(generatedRepairGenerationId(captureRepair)).toMatch(/^[a-f0-9]{64}$/);
+
+    const markers = [proposalRepair, captureRepair].map((item, index) => {
+      const reservationId = index === 0
+        ? 'attempt-12345678-1234-4123-8123-123456789abc'
+        : 'attempt-22345678-1234-4123-8123-123456789abc';
+      const marker = writeRepairReservationMarker(item, {
+        reservationId,
+        backend: 'local-coder',
+        tier: 'mid',
+        repairAttemptOrdinal: 1,
+        phase: 'launched',
+      });
+      recordOrdinaryRepairSuccessReceipt(item, reservationId, 'empty-diff');
+      expect(resolveDispatchProductionAttemptReceiptWitnesses([{
+        repairGenerationId: generatedRepairGenerationId(item)!,
+        repairAttemptOrdinal: 1,
+      }])).toMatchObject({
+        status: 'resolved',
+        resolutions: [{ status: 'proven', event: { itemId: item.id, outcome: 'empty-diff' } }],
+      });
+      return marker;
+    });
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+      schemaVersion: 1,
+      ts: new Date(Date.now() + index + 1).toISOString(),
+      machineId: 'm201',
+      itemId: `repo:goal:ordinary-success-noise-${index}`,
+      source: 'goal',
+      repo: repo.dir,
+      title: `Ordinary success receipt noise ${index}`,
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'push exact repair success beyond the raw row scan cap',
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }));
+    expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
+    for (const [index, ts] of [
+      '2026-07-16T08:00:00.000Z',
+      '2026-07-17T08:00:00.000Z',
+      '2026-07-18T08:00:00.000Z',
+    ].entries()) {
+      expect(recordDispatchProduction({
+        ...noise[index]!,
+        ts,
+        itemId: `repo:goal:ordinary-success-partition-${index}`,
+      })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    }
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [proposalRepair, captureRepair],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.itemsConsidered).toBe(0);
+    expect(markers.map((marker) => fs.existsSync(marker))).toEqual([false, false]);
+    for (const repair of [proposalRepair, captureRepair]) {
+      expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+        available: true,
+        disposition: 'active',
+        authoritativeEmptyRuns: 1,
+      });
+      expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
+        itemId: generatedRepairCooldownKey(repair),
+        outcome: 'empty',
+      }));
+    }
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('A1h5b3b-never-launched: startup clears a prepared marker without age-based inference', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaabbc123456', 10, 'mid');
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: 'attempt-31345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'prepared',
+    });
+    const cfg = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig;
+    mockLoadConfig.mockReturnValue(cfg);
+
+    const state = await runDaemon(cfg, { once: false, dryRun: false, maxCycles: 0 });
+
+    expect(state.running).toBe(false);
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b3b-ambiguous: degraded receipt source quarantines only its repair root', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaabbd123456', 10, 'mid');
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: 'attempt-41345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+    const receiptSource = join(dispatchProductionDir(), 'repair-attempt-proofs');
+    fs.rmSync(receiptSource, { recursive: true, force: true });
+    fs.mkdirSync(dispatchProductionDir(), { recursive: true });
+    fs.writeFileSync(receiptSource, 'ambiguous receipt source', 'utf8');
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair, ordinary],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'ok',
+      itemsConsidered: 1,
+      producerMaintenance: {
+        repairAttemptReservationState: 'blocked-ambiguous',
+        repairAttemptReservationsBlocked: 1,
+      },
+    });
+    expect(fs.existsSync(markerPath)).toBe(true);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+  });
+
+  it('A1h5b3b-root-fence: a same-root distinct descendant cannot dispatch around a crash marker', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const rootRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbd223456', 10, 'mid');
+    const descendant: WorkItem = {
+      ...rootRepair,
+      id: `${rootRepair.id}-descendant`,
+      title: `${rootRepair.title} descendant`,
+      repairDepth: 1,
+    };
+    const markerPath = writeRepairReservationMarker(rootRepair, {
+      reservationId: 'attempt-41345678-2234-4123-8123-123456789abc',
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+    expect(repairReservationPath(descendant)).toBe(markerPath);
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [descendant, ordinary],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'ok',
+      itemsConsidered: 1,
+      producerMaintenance: {
+        repairAttemptReservationState: 'blocked-ambiguous',
+        repairAttemptReservationsBlocked: 1,
+      },
+    });
+    expect(fs.existsSync(markerPath)).toBe(true);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+  });
+
+  it('A1h5b3c: a cooperating writer holding the root reservation blocks execution', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaad123456', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'reservation fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const reservation = acquireLocalStoreLock(join(
+      dirname(dispatchProductionDir()),
+      'repair-attempt-reservations',
+      `${repair.repairRootId}.lock`,
+    ));
+    expect(reservation).not.toBeNull();
+
+    try {
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'] },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.reason).toBe('ok');
+      expect(result.itemsConsidered).toBe(1);
+      expect(result.dispatches?.[0]).toMatchObject({
+        dispatched: false,
+        skipReason: 'repair-attempt-reservation-unavailable',
+      });
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+        available: true,
+        disposition: 'active',
+        authoritativeEmptyRuns: 0,
+      });
+    } finally {
+      if (reservation) releaseLocalStoreLock(reservation);
+    }
+  });
+
+  it('A1h5b3c-process: a second process holding the root lock blocks every generation alias', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const hash = 'aaaaae123456';
+    const repair = makeDiagnosticResliceItem(repo.dir, hash, 10, 'mid');
+    const legacyAlias = addLegacyGenerationAlias(repair, hash, 'mid');
+    expect(generatedRepairGenerationIds(repair).sort()).toEqual(
+      expect.arrayContaining([repair.repairGenerationId, legacyAlias]),
+    );
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mixed alias fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const rootLockPath = join(
+      dirname(dispatchProductionDir()),
+      'repair-attempt-reservations',
+      `${repair.repairRootId}.lock`,
+    );
+    const childScript = `
+      const { acquireLocalStoreLock, releaseLocalStoreLock } = await import('./src/core/fleet/local-store-lock.ts');
+      const lock = acquireLocalStoreLock(process.argv[1], 0);
+      if (!lock) process.exit(2);
+      process.stdout.write('ready\\n');
+      const finish = () => { releaseLocalStoreLock(lock); process.exit(0); };
+      process.on('SIGTERM', finish);
+      process.on('SIGINT', finish);
+      setInterval(() => {}, 1000);
+    `;
+    const child = spawn(process.execPath, [
+      '--import', 'tsx', '--input-type=module', '--eval', childScript, rootLockPath,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, ASHLR_HOME: process.env.ASHLR_HOME },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const ready = new Promise<void>((resolveReady, rejectReady) => {
+      const timeout = setTimeout(() => rejectReady(new Error('root lock child did not become ready')), 5_000);
+      child.once('error', rejectReady);
+      child.stdout.on('data', (chunk: Buffer) => {
+        if (!chunk.toString('utf8').includes('ready')) return;
+        clearTimeout(timeout);
+        resolveReady();
+      });
+      child.once('exit', (code) => {
+        if (code !== null && code !== 0) rejectReady(new Error(`root lock child exited ${code}`));
+      });
+    });
+
+    try {
+      await ready;
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'] },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result).toMatchObject({
+        reason: 'ok',
+        itemsConsidered: 1,
+        dispatches: [expect.objectContaining({
+          dispatched: false,
+          skipReason: 'repair-attempt-reservation-unavailable',
+        })],
+      });
+      expect(mockRunGoal).not.toHaveBeenCalled();
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise<void>((resolveExit) => {
+        if (child.exitCode !== null) return resolveExit();
+        child.once('exit', () => resolveExit());
+      });
+    }
+  });
+
+  it('A1h5b3c-alias-expansion: a crash marker created for one alias blocks an expanded family after restart', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const hash = 'aaaaaf123456';
+    const repair = makeDiagnosticResliceItem(repo.dir, hash, 10, 'mid');
+    const originalGeneration = repair.repairGenerationId!;
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'alias expansion crash fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const config = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig;
+
+    const markerPath = writeRepairReservationMarker(repair, {
+      reservationId: 'run-alias-expansion-crash',
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+    const reservationDir = join(dirname(dispatchProductionDir()), 'repair-attempt-reservations');
+    const markerNamesBefore = fs.readdirSync(reservationDir).filter((name) => name.endsWith('.json'));
+    expect(markerNamesBefore).toHaveLength(1);
+    expect(markerPath).toBe(join(reservationDir, markerNamesBefore[0]!));
+    expect(JSON.parse(fs.readFileSync(join(reservationDir, markerNamesBefore[0]!), 'utf8'))).toMatchObject({
+      generationIds: [originalGeneration],
+    });
+
+    const legacyAlias = addLegacyGenerationAlias(repair, hash, 'mid');
+    expect(generatedRepairGenerationIds(repair).sort()).toEqual(
+      expect.arrayContaining([originalGeneration, legacyAlias]),
+    );
+    const childScript = `
+      const { existsSync, readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const [dir, rootId] = process.argv.slice(1);
+      const markerPath = join(dir, rootId + '.json');
+      if (!existsSync(markerPath)) process.exit(2);
+      const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+      process.stdout.write(JSON.stringify({ marker: rootId + '.json', generationIds: marker.generationIds }));
+    `;
+    const child = spawn(process.execPath, [
+      '--input-type=module', '--eval', childScript,
+      reservationDir, repair.repairRootId!,
+    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let childOutput = '';
+    child.stdout.on('data', (chunk: Buffer) => { childOutput += chunk.toString('utf8'); });
+    const childExit = await new Promise<number | null>((resolveExit, rejectExit) => {
+      child.once('error', rejectExit);
+      child.once('exit', resolveExit);
+    });
+    expect(childExit).toBe(0);
+    expect(JSON.parse(childOutput)).toEqual({
+      marker: markerNamesBefore[0],
+      generationIds: [originalGeneration],
+    });
+
+    const restarted = await tick(config, { dryRun: false });
+
+    expect(restarted).toMatchObject({
+      reason: 'no-backlog',
+      itemsConsidered: 0,
+      producerMaintenance: {
+        repairAttemptReservationState: 'blocked-ambiguous',
+        repairAttemptReservationsBlocked: 1,
+      },
+    });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(fs.readdirSync(reservationDir).filter((name) => name.endsWith('.json'))).toEqual(markerNamesBefore);
+  });
+
+  it('A1h5b3d: trusted capture repairs stay single-candidate under Best-of-N configuration', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const parent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now.toISOString(),
+      itemId: 'repo:self:capture-parent',
+      source: 'self',
+      repo: repo.dir,
+      title: 'Repair failed proposal capture',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'router',
+      routeReason: 'capture parent route',
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      runId: 'attempt-52345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-52345678-1234-4123-8123-123456789abc',
+      reason: 'proposal-capture-error: src/app.ts:12 expected ready state',
+      objectiveHash: 'a'.repeat(64),
+      spentUsd: 0.002,
+      basis: 'run-proposal-outcome',
+    };
+    expect(recordRepairHandoffs(parent, {
+      schemaVersion: 2,
+      activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+    })).toMatchObject({ recorded: 1, failed: 0 });
+    const handoff = repairHandoffFromDispatchEvent(parent)!;
+    const { captureGateRepairWorkItem } = await vi.importActual<
+      typeof import('../src/core/fleet/proposal-repair-work.js')
+    >('../src/core/fleet/proposal-repair-work.js');
+    const repair = captureGateRepairWorkItem({
+      ...parent,
+      repairHandoffId: handoff.eventId,
+      repairGenerationId: handoff.generationId,
+    }, now);
+    expect(repair).not.toBeNull();
+    if (!repair) throw new Error('expected capture repair work item');
+    expect(generatedRepairGenerationId(repair)).toMatch(/^[a-f0-9]{64}$/);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'capture repair route' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+      id: (options as { runId: string }).runId,
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'proposal-capture-error', reason: 'adversarial capture failure' },
+    }));
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'kimi'],
+        bestOfN: 3,
+        bestOfNCandidates: [
+          { engine: 'kimi', model: 'kimi-test' },
+          { engine: 'local-coder', model: 'qwen-test' },
+        ],
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'local-coder' });
   });
 
   it('A1h5b4: failed partial proposals do not retire generated repair work', async () => {
@@ -5378,6 +7509,87 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedItemIds).toContain(items[2]!.id);
   });
 
+  it('A7a: unavailable diagnostic proposal authority quarantines its root while ordinary work continues', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdea123456', 10, 'mid');
+    const proposal = createDiagnosticPendingProposal(
+      repair,
+      'attempt-a2345678-1234-4123-8123-123456789abc',
+    );
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    mockGeneratedRepairProposalDispatchAuthority.mockImplementation(
+      (item: WorkItem, candidate: Proposal) =>
+        item.id === repair.id && candidate.id === proposal.id ? 'unavailable' : 'not-applicable',
+    );
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair, ordinary],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'crash recovery retry' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-crash-recovery-retry',
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'proposal-disabled', reason: 'selection-only crash recovery fixture' },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+  });
+
+  it.each(['proven', 'unavailable'] as const)(
+    'A7a2: %s diagnostic proposal authority remains fail-closed during selection',
+    async (authority) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      const repair = makeDiagnosticResliceItem(
+        repo.dir,
+        authority === 'proven' ? 'abcdeb123456' : 'abcdec123456',
+        10,
+        'mid',
+      );
+      const proposal = createDiagnosticPendingProposal(
+        repair,
+        authority === 'proven'
+          ? 'attempt-b2345678-1234-4123-8123-123456789abc'
+          : 'attempt-c2345678-1234-4123-8123-123456789abc',
+      );
+      mockGeneratedRepairProposalDispatchAuthority.mockImplementation(
+        (item: WorkItem, candidate: Proposal) =>
+          item.id === repair.id && candidate.id === proposal.id ? authority : 'not-applicable',
+      );
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [repair],
+      });
+
+      const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+      expect(result.itemsConsidered).toBe(0);
+      expect(result.reason).toBe('ok');
+      expect(mockRunGoal).not.toHaveBeenCalled();
+    },
+  );
+
   it('A8: concurrent dispatch records a forensic manifest before execution', async () => {
     const { items } = enrollWithItems(2);
     const cfg = makeCfg({
@@ -5549,6 +7761,154 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A7a1: stale diagnostic proposal authority cannot age out before duplicate-proof validation', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'acbdfe123456', 10, 'mid');
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-01T00:00:00.000Z'));
+      const proposal = createDiagnosticPendingProposal(
+        repair,
+        'attempt-b2345678-1234-4123-8123-123456789abc',
+      );
+      vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'));
+      const actualProposalRepair = await vi.importActual<
+        typeof import('../src/core/fleet/proposal-repair-work.js')
+      >('../src/core/fleet/proposal-repair-work.js');
+      mockGeneratedRepairProposalDispatchAuthority.mockImplementation(
+        actualProposalRepair.generatedRepairProposalDispatchAuthority,
+      );
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [repair, ordinary],
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+          productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+        },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result).toMatchObject({
+        reason: 'ok',
+        itemsConsidered: 1,
+      });
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+      expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: ordinary.id });
+      expect(proposal.status).toBe('pending');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('A7a0: malformed proposal storage blocks duplicate selection and exposes degraded maintenance truth', async () => {
+    enrollWithItems(1);
+    fs.mkdirSync(inboxDir(), { recursive: true });
+    fs.writeFileSync(join(inboxDir(), 'hidden-pending.json'), '{malformed', 'utf8');
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+      failed: 1,
+      proposalInboxAvailable: false,
+      dispatchSourceState: 'degraded',
+      dispatchSourceComplete: false,
+      dispatchSourceInvalidRows: 2,
+      dispatchSourceUnreadableFiles: 1,
+      dispatchSourceStopReasons: ['io-error'],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.producerMaintenance).toMatchObject({
+      proposalRepair: true,
+      proposalRepairInboxAvailable: false,
+      dispatchRepairSourceState: 'degraded',
+      dispatchRepairSourceComplete: false,
+      dispatchRepairSourceInvalidRows: 2,
+      dispatchRepairSourceUnreadableFiles: 1,
+      dispatchRepairSourceStopReasons: ['io-error'],
+    });
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+  });
+
+  it('A7a0b: dispatch-only degradation refuses before selection with a healthy proposal inbox', async () => {
+    enrollWithItems(1);
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 0,
+      eligible: 0,
+      queued: 0,
+      failed: 1,
+      proposalInboxAvailable: true,
+      handoffSourceState: 'healthy',
+      dispatchSourceState: 'degraded',
+      dispatchSourceComplete: false,
+      dispatchSourceInvalidRows: 1,
+      dispatchSourceUnreadableFiles: 0,
+      dispatchSourceStopReasons: [],
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 3 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'state-persistence-failed',
+      itemsConsidered: 0,
+      producerMaintenance: {
+        proposalRepairInboxAvailable: true,
+        dispatchRepairSourceState: 'degraded',
+        dispatchRepairSourceComplete: false,
+        dispatchRepairSourceInvalidRows: 1,
+        dispatchRepairSourceUnreadableFiles: 0,
+        dispatchRepairSourceStopReasons: [],
+      },
+    });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+  });
+
+  it('A7a0c: proposal maintenance exceptions expose both degraded sources and refuse execution', async () => {
+    enrollWithItems(1);
+    mockQueueProposalRepairWorkForPendingProposals.mockImplementationOnce(() => {
+      throw new Error('adversarial dispatch reader failure');
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 3 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({
+      reason: 'state-persistence-failed',
+      itemsConsidered: 0,
+      producerMaintenance: {
+        proposalRepairInboxAvailable: false,
+        repairHandoffSourceState: 'degraded',
+        dispatchRepairSourceState: 'degraded',
+        dispatchRepairSourceComplete: false,
+        dispatchRepairSourceInvalidRows: 0,
+        dispatchRepairSourceUnreadableFiles: 1,
+        dispatchRepairSourceStopReasons: ['io-error'],
+      },
+    });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+  });
+
   it('A7c: stale pending proposals do not skip matching items under production velocity', async () => {
     const { repo, items } = enrollWithItems(2);
     vi.useFakeTimers();
@@ -5718,8 +8078,7 @@ describe('M201 — Group B: TieredPool local/cloud concurrency caps', () => {
     mockEngineTierOf.mockImplementation(() => (idx++ < 2 ? 'local' : 'frontier'));
 
     const cloudConc = { current: 0, max: 0 };
-    const localConc = { current: 0, max: 0 };
-    mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
+    mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, _opts: unknown) => {
       // We can't directly inspect which tier was used from opts, so track total conc as proxy
       cloudConc.current++;
       cloudConc.max = Math.max(cloudConc.max, cloudConc.current);
@@ -6062,6 +8421,89 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(state.ticks.length).toBe(2);
     expect(state.running).toBe(false);
     expect(mockRunSwarm.mock.calls.length).toBeLessThanOrEqual(2);
+  }, 10_000);
+
+  it('E2a: continuous mode remains resident after a durably settled generated-repair failure', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'ccddaa123456', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'continuous failure fixture' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+      id: (options as { runId: string }).runId,
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'engine-failed-no-diff', reason: 'paid engine failed' },
+    }));
+    const cfg = cfgBuiltin({ perTickItems: 1, parallel: 1 });
+    cfg.daemon = {
+      ...cfg.daemon,
+      mode: 'continuous',
+      idleBackoffMs: 1,
+      intervalMs: 1,
+    };
+    cfg.foundry = { ...cfg.foundry, allowedBackends: ['local-coder'] };
+    mockLoadConfig.mockReturnValue(cfg);
+
+    const state = await runDaemon(cfg, { once: false, dryRun: false, maxCycles: 3 });
+
+    expect(state.running).toBe(false);
+    expect(state.ticks).toHaveLength(3);
+    expect(state.ticks[0]?.reason).toBe('ok');
+    expect(state.ticks.slice(1).every((entry) => entry.reason !== 'state-persistence-failed')).toBe(true);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('E2aa: continuous mode backs off on every selected-but-skipped cycle', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockBeginRejectedCaptureRecoveryDispatch.mockReturnValue({ authorized: false });
+    const cfg = cfgBuiltin({ perTickItems: 1, parallel: 1 });
+    cfg.daemon = {
+      ...cfg.daemon,
+      mode: 'continuous',
+      idleBackoffMs: 13,
+      intervalMs: 1_000,
+    };
+    mockLoadConfig.mockReturnValue(cfg);
+    const realSetTimeout = globalThis.setTimeout;
+    const sleepMs: number[] = [];
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((
+      (handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        sleepMs.push(Number(timeout ?? 0));
+        return realSetTimeout(handler as (...handlerArgs: unknown[]) => void, 0, ...args);
+      }
+    ) as typeof setTimeout);
+
+    try {
+      const state = await runDaemon(cfg, { once: false, dryRun: false, maxCycles: 3 });
+
+      expect(state.ticks).toHaveLength(3);
+      expect(state.ticks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ itemsConsidered: 1, reason: 'ok' }),
+      ]));
+      expect(state.ticks.every((daemonTick) =>
+        daemonTick.dispatches?.every((dispatch) => dispatch.dispatched === false) === true
+      )).toBe(true);
+      expect(sleepMs.filter((ms) => ms === 13)).toHaveLength(3);
+      expect(mockBeginRejectedCaptureRecoveryDispatch).toHaveBeenCalledTimes(3);
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   }, 10_000);
 
   it('E2b: batch loop sleeps with live daemon.intervalMs, not the startup config interval', async () => {
@@ -7055,6 +9497,6 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
 
     expect(source).toContain('concurrentAssignedRouteReason({');
-    expect(source).toContain('candidateAllowed: generatedRepairCandidateAllowed(item, _backend, routingCfg)');
+    expect(source).toContain('candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg)');
   });
 });

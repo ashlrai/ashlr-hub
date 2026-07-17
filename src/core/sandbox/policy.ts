@@ -17,7 +17,6 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
-  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -41,6 +40,7 @@ import {
 } from '../fleet/local-store-lock.js';
 import type { Enrollment } from '../types.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -199,12 +199,33 @@ const KILL_SENTINEL_BYTES = Buffer.from('kill switch active\n', 'utf8');
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const NONCE_RE = /^[a-f0-9]{32}$/;
 
-interface RegistryReadResult {
-  ok: boolean;
-  registry: Enrollment;
-  reason: string;
-  bytes: Buffer | null;
-}
+type EnrollmentRegistryReadyReason = 'missing-empty' | 'healthy';
+
+type EnrollmentRegistryDegradedReason =
+  | 'registry-transaction-incomplete'
+  | 'unsafe-ashlr-directory'
+  | 'uninspectable-registry'
+  | 'unsafe-or-oversized-registry'
+  | 'registry-identity-changed'
+  | 'short-registry-read'
+  | 'too-many-enrolled-repos'
+  | 'invalid-enrollment-entry'
+  | 'unreadable-registry'
+  | 'malformed-registry';
+
+type RegistryReadResult =
+  | {
+      ok: true;
+      registry: Enrollment;
+      reason: EnrollmentRegistryReadyReason;
+      bytes: Buffer | null;
+    }
+  | {
+      ok: false;
+      registry: Enrollment;
+      reason: EnrollmentRegistryDegradedReason;
+      bytes: null;
+    };
 
 interface RegistryTransaction {
   path: string;
@@ -241,6 +262,18 @@ export interface PolicyMutationResult {
   reason: string;
 }
 
+/** A non-mutating view of enrollment authority at the instant it was read. */
+export type EnrollmentRegistrySnapshot =
+  | {
+      state: 'ready';
+      repos: string[];
+      reason: EnrollmentRegistryReadyReason;
+    }
+  | {
+      state: 'degraded';
+      reason: EnrollmentRegistryDegradedReason;
+    };
+
 export type EnrollmentRegistryReadiness =
   | {
       state: 'ready';
@@ -267,8 +300,123 @@ function safeAuthorityFile(stat: Stats): boolean {
   return safeAuthorityFileWithLinks(stat, [1]);
 }
 
+function safeAuthorityDirectory(stat: Stats): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() && ownedByCurrentUser(stat) &&
+    (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+type AuthorityDirectorySnapshot =
+  | { state: 'missing' }
+  | { state: 'safe'; identity: Stats }
+  | { state: 'unsafe' }
+  | { state: 'changed' };
+
+function readAshlrDirectorySnapshot(): AuthorityDirectorySnapshot {
+  let identity: Stats;
+  try {
+    identity = lstatSync(ashlrDir());
+  } catch (error) {
+    return missingPath(error) ? { state: 'missing' } : { state: 'unsafe' };
+  }
+  if (!safeAuthorityDirectory(identity)) return { state: 'unsafe' };
+  if (process.platform !== 'win32') return { state: 'safe', identity };
+
+  const home = canonicalHome();
+  if (!home || !assurePrivateStoragePath(
+    ashlrDir(),
+    'directory',
+    'inspect-owned',
+    { anchorPath: home },
+  ).ok) return { state: 'unsafe' };
+
+  try {
+    const afterAssurance = lstatSync(ashlrDir());
+    if (!safeAuthorityDirectory(afterAssurance)) return { state: 'unsafe' };
+    return sameAuthorityDirectoryIdentity(identity, afterAssurance)
+      ? { state: 'safe', identity: afterAssurance }
+      : { state: 'changed' };
+  } catch {
+    return { state: 'changed' };
+  }
+}
+
+function sameAuthorityDirectory(
+  before: AuthorityDirectorySnapshot,
+  after: AuthorityDirectorySnapshot,
+): boolean {
+  if (before.state === 'missing' || after.state === 'missing') {
+    return before.state === 'missing' && after.state === 'missing';
+  }
+  return before.state === 'safe' && after.state === 'safe' &&
+    sameAuthorityDirectoryIdentity(before.identity, after.identity);
+}
+
+function sameAuthorityDirectoryIdentity(left: Stats, right: Stats): boolean {
+  return sameFile(left, right) && left.ctimeMs === right.ctimeMs;
+}
+
+function openAuthorityDirectoryGuard(snapshot: AuthorityDirectorySnapshot): number | null | undefined {
+  if (snapshot.state !== 'safe' || process.platform === 'win32') return undefined;
+  try {
+    const directoryOnly = typeof fsConstants.O_DIRECTORY === 'number' ? fsConstants.O_DIRECTORY : 0;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const fd = openSync(ashlrDir(), fsConstants.O_RDONLY | directoryOnly | noFollow);
+    const opened = fstatSync(fd);
+    if (!safeAuthorityDirectory(opened) || !sameAuthorityDirectoryIdentity(snapshot.identity, opened)) {
+      closeSync(fd);
+      return null;
+    }
+    return fd;
+  } catch {
+    return null;
+  }
+}
+
+function authorityDirectoryGuardStable(
+  before: AuthorityDirectorySnapshot,
+  after: AuthorityDirectorySnapshot,
+  fd: number | undefined,
+): boolean {
+  if (!sameAuthorityDirectory(before, after)) return false;
+  if (fd === undefined) return true;
+  try {
+    const held = fstatSync(fd);
+    return before.state === 'safe' && safeAuthorityDirectory(held) &&
+      sameAuthorityDirectoryIdentity(before.identity, held);
+  } catch {
+    return false;
+  }
+}
+
 function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameAshlrDirectoryObject(identity: Stats): boolean {
+  const current = readAshlrDirectorySnapshot();
+  return current.state === 'safe' && sameFile(identity, current.identity);
+}
+
+type EnrollmentReadRaceStage = 'after-file-read';
+let enrollmentReadRaceHookForTest: ((stage: EnrollmentReadRaceStage) => void) | undefined;
+
+export function setEnrollmentReadRaceHookForTest(
+  hook: ((stage: EnrollmentReadRaceStage) => void) | undefined,
+): void {
+  enrollmentReadRaceHookForTest = hook;
+}
+
+function secureCreatedWindowsAuthorityFile(path: string, identity: Stats): boolean {
+  if (process.platform !== 'win32') return true;
+  if (!assurePrivateStoragePath(path, 'file', 'secure-created', { anchorPath: ashlrDir() }).ok) {
+    return false;
+  }
+  try {
+    const named = lstatSync(path);
+    return safeAuthorityFile(named) && sameFile(identity, named);
+  } catch {
+    return false;
+  }
 }
 
 function missingPath(error: unknown): boolean {
@@ -276,13 +424,30 @@ function missingPath(error: unknown): boolean {
 }
 
 function assureAshlrDir(): boolean {
+  let created = false;
   try {
     const dir = ashlrDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const stat = lstatSync(dir);
-    if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUser(stat)) return false;
-    if (process.platform !== 'win32') chmodSync(dir, 0o700);
-    return true;
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    }
+    const before = lstatSync(dir);
+    if (before.isSymbolicLink() || !before.isDirectory() || !ownedByCurrentUser(before)) return false;
+    if (process.platform !== 'win32') {
+      chmodSync(dir, 0o700);
+      return true;
+    }
+    const home = canonicalHome();
+    if (!home || !assurePrivateStoragePath(
+      dir,
+      'directory',
+      created ? 'secure-created' : 'inspect-owned',
+      { anchorPath: home },
+    ).ok) return false;
+    const after = lstatSync(dir);
+    return safeAuthorityDirectory(after) && sameFile(before, after);
   } catch {
     return false;
   }
@@ -537,7 +702,7 @@ function beginRegistryTransaction(record: RegistryTransactionRecord): RegistryTr
       0o600,
     );
     const opened = fstatSync(fd);
-    if (!safeAuthorityFile(opened)) return null;
+    if (!safeAuthorityFile(opened) || !secureCreatedWindowsAuthorityFile(markerTemp, opened)) return null;
     writeAll(fd, bytes);
     fchmodSync(fd, 0o600);
     fsyncSync(fd);
@@ -698,6 +863,7 @@ function clearPartialRegistryTransaction(
 
 function recoverPartialInitialRegistryTransaction(
   marker: Extract<TransactionMarkerFileRead, { state: 'present' }>,
+  authorityIdentity: Stats,
 ): { ok: boolean; reason: string } {
   try {
     const dir = ashlrDir();
@@ -721,7 +887,11 @@ function recoverPartialInitialRegistryTransaction(
     if (temp.state !== 'present' || !validInitialRegistryTemp(temp.bytes)) {
       return { ok: false, reason: 'registry-transaction-tampered' };
     }
-    if (!clearPartialRegistryTransaction(registryTransactionPath(), marker)) {
+    if (!sameAshlrDirectoryObject(authorityIdentity) ||
+      !clearPartialRegistryTransaction(registryTransactionPath(), marker)) {
+      return { ok: false, reason: 'registry-transaction-recovery-failed' };
+    }
+    if (!sameAshlrDirectoryObject(authorityIdentity)) {
       return { ok: false, reason: 'registry-transaction-recovery-failed' };
     }
     if (removeVerifiedArtifact(tempPath, temp)) {
@@ -734,9 +904,14 @@ function recoverPartialInitialRegistryTransaction(
 }
 
 function recoverRegistryTransaction(): { ok: boolean; reason: string } {
+  if (!assureAshlrDir()) return { ok: false, reason: 'unsafe-ashlr-directory' };
+  const authority = readAshlrDirectorySnapshot();
+  if (authority.state !== 'safe') return { ok: false, reason: 'unsafe-ashlr-directory' };
   const observed = readRegistryTransaction();
   if (observed.state === 'missing') return { ok: true, reason: 'no-transaction' };
-  if (observed.state === 'partial') return recoverPartialInitialRegistryTransaction(observed.marker);
+  if (observed.state === 'partial') {
+    return recoverPartialInitialRegistryTransaction(observed.marker, authority.identity);
+  }
   if (observed.state === 'invalid') return { ok: false, reason: 'registry-transaction-tampered' };
   const transaction = observed.transaction;
   const owner = transactionOwnerState(transaction.record);
@@ -789,6 +964,9 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
   }
 
   try {
+    if (!sameAshlrDirectoryObject(authority.identity)) {
+      return { ok: false, reason: 'registry-transaction-recovery-failed' };
+    }
     if (prepared) {
       if (tempState.state !== 'match' || !removeVerifiedArtifact(temp, tempState.read)) {
         return { ok: false, reason: 'registry-transaction-recovery-failed' };
@@ -797,6 +975,9 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
       const backupRead = backupState as { state: 'match'; read: Extract<AuthorityFileRead, { state: 'present' }> };
       const current = lstatSync(backup);
       if (!safeAuthorityFile(current) || !sameFile(current, backupRead.read.identity)) {
+        return { ok: false, reason: 'registry-transaction-recovery-failed' };
+      }
+      if (!sameAshlrDirectoryObject(authority.identity)) {
         return { ok: false, reason: 'registry-transaction-recovery-failed' };
       }
       renameSync(backup, dest);
@@ -813,7 +994,7 @@ function recoverRegistryTransaction(): { ok: boolean; reason: string } {
       }
     }
     fsyncDirectory(dir);
-    if (!clearRegistryTransaction(transaction)) {
+    if (!sameAshlrDirectoryObject(authority.identity) || !clearRegistryTransaction(transaction)) {
       return { ok: false, reason: 'registry-transaction-recovery-failed' };
     }
     return {
@@ -859,8 +1040,21 @@ function clearRegistryTransaction(transaction: RegistryTransaction): boolean {
 /** Missing is a valid empty registry. Existing malformed or unsafe state is degraded. */
 function readRegistryDetailed(): RegistryReadResult {
   let fd: number | undefined;
+  let directoryFd: number | undefined;
   try {
     const p = enrollmentPath();
+    const directoryBefore = readAshlrDirectorySnapshot();
+    if (directoryBefore.state === 'changed') {
+      return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+    }
+    if (directoryBefore.state === 'unsafe') {
+      return { ok: false, registry: { repos: [] }, reason: 'unsafe-ashlr-directory', bytes: null };
+    }
+    const openedDirectory = openAuthorityDirectoryGuard(directoryBefore);
+    if (openedDirectory === null) {
+      return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+    }
+    directoryFd = openedDirectory;
     if (registryTransactionIncomplete()) {
       return { ok: false, registry: { repos: [] }, reason: 'registry-transaction-incomplete', bytes: null };
     }
@@ -871,12 +1065,37 @@ function readRegistryDetailed(): RegistryReadResult {
       if (!missingPath(error)) {
         return { ok: false, registry: { repos: [] }, reason: 'uninspectable-registry', bytes: null };
       }
-      return registryTransactionIncomplete()
-        ? { ok: false, registry: { repos: [] }, reason: 'registry-transaction-incomplete', bytes: null }
-        : { ok: true, registry: { repos: [] }, reason: 'missing-empty', bytes: null };
+      if (registryTransactionIncomplete()) {
+        return { ok: false, registry: { repos: [] }, reason: 'registry-transaction-incomplete', bytes: null };
+      }
+      const directoryAfter = readAshlrDirectorySnapshot();
+      if (directoryAfter.state === 'changed') {
+        return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+      }
+      if (directoryAfter.state === 'unsafe') {
+        return { ok: false, registry: { repos: [] }, reason: 'unsafe-ashlr-directory', bytes: null };
+      }
+      return authorityDirectoryGuardStable(directoryBefore, directoryAfter, directoryFd)
+        ? { ok: true, registry: { repos: [] }, reason: 'missing-empty', bytes: null }
+        : { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
     }
     if (!safeAuthorityFile(pathBefore) || pathBefore.size > MAX_REGISTRY_BYTES) {
       return { ok: false, registry: { repos: [] }, reason: 'unsafe-or-oversized-registry', bytes: null };
+    }
+    if (process.platform === 'win32') {
+      if (!assurePrivateStoragePath(
+        p,
+        'file',
+        'inspect-existing',
+        { anchorPath: ashlrDir() },
+      ).ok) {
+        return { ok: false, registry: { repos: [] }, reason: 'unsafe-or-oversized-registry', bytes: null };
+      }
+      const pathAfterAssurance = lstatSync(p);
+      if (!safeAuthorityFile(pathAfterAssurance) || !sameFile(pathBefore, pathAfterAssurance)) {
+        return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+      }
+      pathBefore = pathAfterAssurance;
     }
     fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
@@ -887,10 +1106,31 @@ function readRegistryDetailed(): RegistryReadResult {
     if (before.size > 0 && readSync(fd, bytes, 0, before.size, 0) !== before.size) {
       return { ok: false, registry: { repos: [] }, reason: 'short-registry-read', bytes: null };
     }
+    enrollmentReadRaceHookForTest?.('after-file-read');
     const after = fstatSync(fd);
-    const pathAfter = lstatSync(p);
+    let pathAfter = lstatSync(p);
+    if (process.platform === 'win32') {
+      if (!assurePrivateStoragePath(
+        p,
+        'file',
+        'inspect-existing',
+        { anchorPath: ashlrDir() },
+      ).ok) {
+        return { ok: false, registry: { repos: [] }, reason: 'unsafe-or-oversized-registry', bytes: null };
+      }
+      const pathAfterAssurance = lstatSync(p);
+      if (!safeAuthorityFile(pathAfterAssurance) || !sameFile(pathAfter, pathAfterAssurance)) {
+        return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+      }
+      pathAfter = pathAfterAssurance;
+    }
+    const directoryAfter = readAshlrDirectorySnapshot();
+    if (directoryAfter.state === 'changed') {
+      return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
+    }
     if (!safeAuthorityFile(after) || !sameFile(before, after) || !sameFile(after, pathAfter) ||
-      after.size !== before.size) {
+      after.size !== before.size ||
+      !authorityDirectoryGuardStable(directoryBefore, directoryAfter, directoryFd)) {
       return { ok: false, registry: { repos: [] }, reason: 'registry-identity-changed', bytes: null };
     }
     const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
@@ -924,12 +1164,26 @@ function readRegistryDetailed(): RegistryReadResult {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* best-effort close */ }
     }
+    if (directoryFd !== undefined) {
+      try { closeSync(directoryFd); } catch { /* best-effort close */ }
+    }
   }
   return { ok: false, registry: { repos: [] }, reason: 'malformed-registry', bytes: null };
 }
 
 function readRegistry(): Enrollment {
   return readRegistryDetailed().registry;
+}
+
+/**
+ * Read enrollment authority without acquiring a mutation fence or recovering an
+ * interrupted transaction. Degraded snapshots omit repos so corrupt authority
+ * cannot be confused with the valid missing-empty default.
+ */
+export function readEnrollmentRegistry(): EnrollmentRegistrySnapshot {
+  const read = readRegistryDetailed();
+  if (!read.ok) return { state: 'degraded', reason: read.reason };
+  return { state: 'ready', repos: [...read.registry.repos], reason: read.reason };
 }
 
 /**
@@ -1012,7 +1266,9 @@ function writeRegistry(reg: Enrollment, beforeBytes: Buffer | null): { ok: boole
       0o600,
     );
     const opened = fstatSync(fd);
-    if (!safeAuthorityFile(opened)) throw new Error('unsafe enrollment temp file');
+    if (!safeAuthorityFile(opened) || !secureCreatedWindowsAuthorityFile(tmp, opened)) {
+      throw new Error('unsafe enrollment temp file');
+    }
     writeAll(fd, bytes);
     fchmodSync(fd, 0o600);
     fsyncSync(fd);

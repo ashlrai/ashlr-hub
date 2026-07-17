@@ -8,34 +8,47 @@
  *
  * H7 ABSOLUTE RULES (proven by test/h7.*):
  *  - READ-ONLY: composes only read-only primitives — probeEndpoint (local GET,
- *    never throws), listEnrolled, killSwitchOn, loadDaemonState (H5 self-heal),
- *    listSandboxes. It MUTATES NOTHING and adds NO outward capability.
- *  - The ONE write is the `~/.ashlr` writeable probe — it writes then UNLINKS a
- *    private sentinel under the (HOME-relative, isolated-in-tests) ~/.ashlr dir;
- *    it touches no repo, no enrollment, no kill, no daemon state, and leaves no
- *    persistent artifact.
+ *    never throws), readEnrollmentRegistry, killSwitchOn, loadDaemonState (H5
+ *    self-heal), listSandboxes. It MUTATES NOTHING and adds NO outward capability.
+ *  - The `~/.ashlr` writeable probe uses only ownership/ACL/access metadata. It
+ *    never creates the authority directory or a probe file and never removes state.
  *  - NEVER throws — every facet degrades to a typed result on error.
  *  - No new runtime deps; node builtins + existing core modules only.
  *
  * NOTE: paths are resolved at CALL TIME via homedir() (matching policy.ts /
  * daemon/state.ts) so a test that relocates process.env.HOME gets an ISOLATED
  * ~/.ashlr — never the real one. (config.ts CONFIG_DIR is captured at import
- * time, so we do NOT use it here for the writeable sentinel.)
+ * time, so we do NOT use it here for the writeable probe.)
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  type Stats,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { AshlrConfig } from './types.js';
 import { probeEndpoint } from './providers.js';
-import { listEnrolled, killSwitchOn } from './sandbox/policy.js';
+import {
+  killSwitchOn,
+  readEnrollmentRegistry,
+  type EnrollmentRegistrySnapshot,
+} from './sandbox/policy.js';
 import { loadDaemonState, daemonStatePath } from './daemon/state.js';
 import { listSandboxes, ORPHAN_STALE_MS } from './sandbox/worktree.js';
 import { getPhantomStatus } from './phantom.js';
 import { discoverMcpServers } from './mcp-registry.js';
 import type { PhantomStatus } from './types.js';
+import { assurePrivateStoragePath } from './util/private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -108,43 +121,134 @@ function ashlrDir(): string {
 /** Orphan-sandbox count threshold at/above which sandbox health warns. */
 export const SANDBOX_ORPHAN_WARN_THRESHOLD = 3;
 
+function ownedSafeDirectory(stat: Stats): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() &&
+    (typeof process.getuid !== 'function' || stat.uid === process.getuid()) &&
+    (process.platform === 'win32' || (stat.mode & 0o022) === 0);
+}
+
+function sameDirectory(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.ctimeMs === right.ctimeMs;
+}
+
+function missingPath(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+function pathRemainsMissing(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    return missingPath(error);
+  }
+}
+
+/** Pin an existing POSIX directory to detect path replacement during the probe. */
+function openDirectoryGuard(path: string, expected: Stats): number | null | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const directoryOnly = typeof fsConstants.O_DIRECTORY === 'number' ? fsConstants.O_DIRECTORY : 0;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const fd = openSync(path, fsConstants.O_RDONLY | directoryOnly | noFollow);
+    const opened = fstatSync(fd);
+    if (!ownedSafeDirectory(opened) || !sameDirectory(expected, opened)) {
+      closeSync(fd);
+      return null;
+    }
+    return fd;
+  } catch {
+    return null;
+  }
+}
+
+function directoryGuardStable(expected: Stats, fd: number | undefined): boolean {
+  if (fd === undefined) return true;
+  try {
+    const held = fstatSync(fd);
+    return ownedSafeDirectory(held) && sameDirectory(expected, held);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-facet read-only helpers (each NEVER throws)
 // ---------------------------------------------------------------------------
 
-/**
- * READ-ONLY writeable probe for ~/.ashlr. Writes then immediately UNLINKS a
- * private sentinel under the (call-time, HOME-relative) ~/.ashlr dir. Returns
- * true when writeable, false otherwise. Leaves NO persistent artifact. Never
- * throws.
- */
+/** Read-only ownership, ACL, and OS-access probe for ~/.ashlr or its parent. */
 export function checkAshlrWriteable(): boolean {
   const dir = ashlrDir();
-  // A unique sentinel name so concurrent probes never collide and a leftover
-  // (should an unlink ever be skipped) is unmistakably transient.
-  const sentinel = join(dir, `.ashlr-preflight-${process.pid}-${Date.now()}.tmp`);
+  let before: Stats;
   try {
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(sentinel, '', 'utf8');
-    return true;
+    before = lstatSync(dir);
+  } catch (error) {
+    if (!missingPath(error)) return false;
+
+    let homeGuard: number | null | undefined;
+    try {
+      const home = homedir();
+      const homeBefore = lstatSync(home);
+      if (!ownedSafeDirectory(homeBefore)) return false;
+      if (process.platform === 'win32' && !assurePrivateStoragePath(
+        home,
+        'directory',
+        'inspect-owned',
+        { anchorPath: dirname(home) },
+      ).ok) return false;
+      homeGuard = openDirectoryGuard(home, homeBefore);
+      if (homeGuard === null) return false;
+      accessSync(home, fsConstants.W_OK | fsConstants.X_OK);
+      const homeAfter = lstatSync(home);
+      return ownedSafeDirectory(homeAfter) && sameDirectory(homeBefore, homeAfter) &&
+        directoryGuardStable(homeBefore, homeGuard) && pathRemainsMissing(dir);
+    } catch {
+      return false;
+    } finally {
+      if (typeof homeGuard === 'number') {
+        try { closeSync(homeGuard); } catch { /* read-only guard cleanup */ }
+      }
+    }
+  }
+
+  let dirGuard: number | null | undefined;
+  try {
+    if (!ownedSafeDirectory(before)) return false;
+    if (process.platform === 'win32' && !assurePrivateStoragePath(
+      dir,
+      'directory',
+      'inspect-owned',
+      { anchorPath: homedir() },
+    ).ok) return false;
+    dirGuard = openDirectoryGuard(dir, before);
+    if (dirGuard === null) return false;
+    accessSync(dir, fsConstants.W_OK | fsConstants.X_OK);
+    const after = lstatSync(dir);
+    return ownedSafeDirectory(after) && sameDirectory(before, after) &&
+      directoryGuardStable(before, dirGuard);
   } catch {
     return false;
   } finally {
-    // ALWAYS attempt to remove the sentinel — leave no persistent artifact.
-    try {
-      if (existsSync(sentinel)) unlinkSync(sentinel);
-    } catch {
-      /* idempotent — never throw from the cleanup */
+    if (typeof dirGuard === 'number') {
+      try { closeSync(dirGuard); } catch { /* read-only guard cleanup */ }
     }
   }
 }
 
-/** READ-ONLY enrollment snapshot: { count } via listEnrolled(). Never throws. */
-export function readEnrollmentState(): { count: number } {
+export type EnrollmentState =
+  | { count: number }
+  | { count: 0; degraded: true; reason: string };
+
+/** READ-ONLY enrollment snapshot. Never confuses a degraded registry with empty. */
+export function readEnrollmentState(): EnrollmentState {
   try {
-    return { count: listEnrolled().length };
+    const snapshot: EnrollmentRegistrySnapshot = readEnrollmentRegistry();
+    if (snapshot.state === 'degraded') {
+      return { count: 0, degraded: true, reason: snapshot.reason };
+    }
+    return { count: snapshot.repos.length };
   } catch {
-    return { count: 0 };
+    return { count: 0, degraded: true, reason: 'enrollment-registry-read-failed' };
   }
 }
 
@@ -335,7 +439,7 @@ function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapsh
  *
  * Composes (all read-only, all degrade gracefully):
  *  - local model reachable via probeEndpoint (down => WARNING, never a blocker)
- *  - enrollment count via readEnrollmentState (0 => INFO, never a blocker)
+ *  - enrollment via readEnrollmentState (degraded => BLOCKER; valid 0 => INFO)
  *  - kill-switch via readKillState (on => WARNING)
  *  - daemon not stuck via readDaemonHealth (self-heal already applied)
  *  - ~/.ashlr writeable via checkAshlrWriteable (not writeable => BLOCKER)
@@ -344,8 +448,8 @@ function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapsh
  *
  * `ready` is true iff blockers.length === 0. Never throws.
  *
- * MUST NOT mutate any enrollment/kill/daemon/sandbox/repo state; the ONLY write
- * is the self-cleaning sentinel inside checkAshlrWriteable.
+ * MUST NOT mutate any enrollment/kill/daemon/sandbox/repo state. The writeable
+ * check is also read-only and leaves a fresh home unchanged.
  */
 export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport> {
   const blockers: ReadinessFinding[] = [];
@@ -399,10 +503,17 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     }
   }
 
-  // -- enrollment state (empty is FINE — info, never a blocker) ---------------
+  // -- enrollment state (degraded blocks; valid empty remains informational) --
   {
-    const { count } = readEnrollmentState();
-    if (count === 0) {
+    const enrollment = readEnrollmentState();
+    if ('degraded' in enrollment) {
+      blockers.push({
+        id: 'enrollment',
+        severity: 'blocker',
+        detail: `enrollment registry degraded: ${enrollment.reason}`,
+        fix: 'Repair ~/.ashlr/enrollment.json before running autonomy.',
+      });
+    } else if (enrollment.count === 0) {
       info.push({
         id: 'enrollment',
         severity: 'info',
@@ -413,7 +524,7 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
       info.push({
         id: 'enrollment',
         severity: 'info',
-        detail: `${count} repo(s) enrolled`,
+        detail: `${enrollment.count} repo(s) enrolled`,
       });
     }
   }

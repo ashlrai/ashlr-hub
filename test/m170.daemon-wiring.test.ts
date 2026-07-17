@@ -20,8 +20,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import type { AshlrConfig, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, Proposal, WorkItem } from '../src/core/types.js';
 import { generatedRepairGenerationId } from '../src/core/fleet/generated-repair-lifecycle.js';
+import { proposalRepairRootIdentity } from '../src/core/fleet/proposal-repair-work.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared BEFORE lazy imports so the daemon module binds to them.
@@ -182,9 +183,10 @@ vi.mock('../src/core/fleet/subscription-usage.js', () => ({
   isSubscriptionEngine: () => false,
 }));
 
-// And engineTierOf — return 'cloud' for non-builtin.
+// Match the production tier contract so generated-repair reservations can
+// validate the persisted backend/tier binding.
 vi.mock('../src/core/run/sandboxed-engine.js', () => ({
-  engineTierOf: () => 'cloud',
+  engineTierOf: (engine: string) => engine === 'builtin' ? 'local' : engine === 'local-coder' ? 'mid' : 'frontier',
 }));
 
 // And autoMerge — no-op.
@@ -279,7 +281,7 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
         backend: {
           engine: 'claude',
           model: null,
-          tier: 'cloud',
+          tier: 'frontier',
           assignedBy: 'router',
           reason: 'mock',
         },
@@ -383,6 +385,18 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
   it('binds editing-backend options to the exact generated repair generation', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    const proposalAuthority: Proposal = {
+      id: 'prop-stalled',
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Stalled proposal',
+      summary: 'Proposal requiring generated repair.',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    const repairRoot = proposalRepairRootIdentity(proposalAuthority, repo.dir);
+    if (!repairRoot) throw new Error('Expected a canonical proposal repair root identity');
     const repair: WorkItem = {
       id: 'repo:proposal-repair:abcdef123456',
       repo: repo.dir,
@@ -398,17 +412,26 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
       score: 5,
       tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
       ts: new Date().toISOString(),
+      ...repairRoot,
     };
     mockBuildBacklog.mockResolvedValue({
       generatedAt: repair.ts,
       repos: [repo.dir],
       items: [repair],
     });
+    mockRunGoal.mockResolvedValue({
+      id: `mock-repair-rungoal-${Date.now()}`,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'no file changes' },
+    });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock editing route' });
 
-    await tick(makeCfg({ foundry: { allowedBackends: ['local-coder'] } }), { dryRun: false });
+    const tickResult = await tick(makeCfg({ foundry: { allowedBackends: ['local-coder'] } }), { dryRun: false });
 
     const runOpts = mockRunGoal.mock.calls[0]?.[2] as { workItemGenerationId?: string } | undefined;
+    expect(tickResult.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(runOpts?.workItemGenerationId).toBe(generatedRepairGenerationId(repair));
   });
 });

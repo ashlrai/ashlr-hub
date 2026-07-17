@@ -17,6 +17,10 @@ import {
   sandboxesDir,
   sweepOrphanSandboxesDetailed,
 } from '../src/core/sandbox/worktree.js';
+import {
+  acquireOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 const originalMaxSandboxes = process.env.ASHLR_MAX_SANDBOXES;
@@ -43,8 +47,15 @@ function ageReservation(home: string): void {
   utimesSync(home, old, old);
 }
 
+function prepareSandboxAuthorityRoot(): void {
+  const fence = acquireOutwardMutationFence();
+  if (!fence) throw new Error('reservation fixture could not prepare sandbox authority root');
+  releaseOutwardMutationFence(fence);
+}
+
 beforeEach(() => {
   fx = makeFixture();
+  prepareSandboxAuthorityRoot();
   delete process.env.ASHLR_MAX_SANDBOXES;
 });
 

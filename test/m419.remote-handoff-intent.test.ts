@@ -66,9 +66,15 @@ import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { createProposal, loadProposal, setStatus } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance, verifyLocalMergeIntent } from '../src/core/foundry/provenance.js';
 import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 import type { AshlrConfig, EngineTier, Proposal } from '../src/core/types.js';
 
 const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 const originalAshlrHome = process.env.ASHLR_HOME;
 const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 const TEST_POLICY_SNAPSHOT = {
@@ -80,6 +86,38 @@ const TEST_POLICY_SNAPSHOT = {
 let tmpHome: string;
 let tmpRepo: string;
 let bareRepo: string;
+
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
+
+function useNativePrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+}
+
+function useSemanticPrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+    runner: semanticPrivateStorageRunner,
+  });
+}
 
 function git(dir: string, args: string[]): string {
   return execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', encoding: 'utf8' }).trim();
@@ -195,10 +233,12 @@ function expectDurableIntentAtPush(proposal: Proposal): void {
 }
 
 beforeEach(() => {
+  useNativePrivateStorageRunner();
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m419-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m419-repo-'));
   bareRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m419-bare-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
   setKill(false);
@@ -209,6 +249,7 @@ beforeEach(() => {
   git(tmpRepo, ['fetch', 'origin']);
   git(tmpRepo, ['remote', 'set-head', 'origin', 'main']);
   expect(enroll(tmpRepo).ok).toBe(true);
+  if (process.platform === 'win32') useSemanticPrivateStorageRunner();
 
   stagingPushHookMock.mockReset();
   originAuthorityMock.mockReset();
@@ -254,16 +295,22 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try { setKill(false); } catch { /* ignore */ }
-  try { unenroll(tmpRepo); } catch { /* ignore */ }
-  fs.rmSync(tmpHome, { recursive: true, force: true });
-  fs.rmSync(tmpRepo, { recursive: true, force: true });
-  fs.rmSync(bareRepo, { recursive: true, force: true });
-  process.env.HOME = originalHome;
-  if (originalAshlrHome === undefined) delete process.env.ASHLR_HOME;
-  else process.env.ASHLR_HOME = originalAshlrHome;
-  if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
-  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
+  try {
+    try { setKill(false); } catch { /* ignore */ }
+    try { unenroll(tmpRepo); } catch { /* ignore */ }
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(bareRepo, { recursive: true, force: true });
+  } finally {
+    useNativePrivateStorageRunner();
+    process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalAshlrHome === undefined) delete process.env.ASHLR_HOME;
+    else process.env.ASHLR_HOME = originalAshlrHome;
+    if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
+  }
 });
 
 describe('M419 remote handoff intent', { timeout: 60_000 }, () => {

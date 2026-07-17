@@ -54,8 +54,35 @@ import {
 } from '../src/core/sandbox/policy.js';
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
 const CHILD_TIMEOUT_MS = 8_000;
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 const tsxImportUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
@@ -116,6 +143,16 @@ let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 let previousAshlrHome: string | undefined;
 const children = new Set<ChildProcess>();
+
+function useNativePrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+}
+
+function useSemanticPrivateStorageRunner(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+    runner: semanticPrivateStorageRunner,
+  });
+}
 
 function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -203,6 +240,7 @@ async function releaseHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
+  useNativePrivateStorageRunner();
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
   previousAshlrHome = process.env.ASHLR_HOME;
@@ -212,9 +250,19 @@ beforeEach(() => {
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
   policyTestHooks.afterKillPrecheck = null;
+
+  // Establish the authority root through the production path so spawned Windows
+  // processes inherit the same protected root they are expected to validate.
+  const fence = acquireOutwardMutationFence();
+  if (!ownsOutwardMutationFence(fence)) {
+    throw new Error('failed to establish the M403 outward mutation authority root');
+  }
+  releaseOutwardMutationFence(fence);
+  if (process.platform === 'win32') useSemanticPrivateStorageRunner();
 });
 
 afterEach(async () => {
+  useNativePrivateStorageRunner();
   policyTestHooks.afterKillPrecheck = null;
   const running = [...children];
   for (const child of running) child.kill('SIGKILL');
@@ -339,12 +387,17 @@ describe('M403 cooperative outward mutation fence', { timeout: 15_000 }, () => {
 
   it('linearizes unenrollment after an already-held outward fence', async () => {
     const repo = join(home, 'repo');
-    expect(enroll(repo)).toEqual({
-      ok: true,
-      changed: true,
-      quiesced: true,
-      reason: 'enrolled',
-    });
+    if (process.platform === 'win32') useNativePrivateStorageRunner();
+    try {
+      expect(enroll(repo)).toEqual({
+        ok: true,
+        changed: true,
+        quiesced: true,
+        reason: 'enrolled',
+      });
+    } finally {
+      if (process.platform === 'win32') useSemanticPrivateStorageRunner();
+    }
     const holder = await startHolder();
     const worker = spawnWorker('unenroll', {
       M403_REPO: repo,
@@ -537,18 +590,29 @@ describe('M403 cooperative outward mutation fence', { timeout: 15_000 }, () => {
 
 describe('M403 policy registry refusal contracts', () => {
   it('refuses a malformed registry without replacing it', () => {
-    const repo = join(home, 'repo');
-    mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
-    const malformed = `${JSON.stringify({ repos: [repo], unexpected: true })}\n`;
-    writeFileSync(enrollmentPath(), malformed, { mode: 0o600 });
+    if (process.platform === 'win32') useNativePrivateStorageRunner();
+    try {
+      const repo = join(home, 'repo');
+      mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+      const malformed = `${JSON.stringify({ repos: [repo], unexpected: true })}\n`;
+      writeFileSync(enrollmentPath(), malformed, { mode: 0o600 });
+      expect(assurePrivateStoragePath(
+        enrollmentPath(),
+        'file',
+        'secure-created',
+        { anchorPath: process.env.ASHLR_HOME! },
+      ).ok).toBe(true);
 
-    expect(enroll(join(home, 'other-repo'))).toEqual({
-      ok: false,
-      changed: false,
-      quiesced: false,
-      reason: 'malformed-registry',
-    });
-    expect(readFileSync(enrollmentPath(), 'utf8')).toBe(malformed);
+      expect(enroll(join(home, 'other-repo'))).toEqual({
+        ok: false,
+        changed: false,
+        quiesced: false,
+        reason: 'malformed-registry',
+      });
+      expect(readFileSync(enrollmentPath(), 'utf8')).toBe(malformed);
+    } finally {
+      if (process.platform === 'win32') useSemanticPrivateStorageRunner();
+    }
   });
 
   it('refuses an unsafe registry path without replacing it', () => {

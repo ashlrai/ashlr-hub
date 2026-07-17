@@ -19,6 +19,8 @@ export interface DirectoryDurabilityFs {
 export interface DirectoryDurabilityOptions {
   platform?: NodeJS.Platform;
   fs?: DirectoryDurabilityFs;
+  expectedIdentity?: { dev: bigint; ino: bigint };
+  beforeFsync?: () => void;
 }
 
 const DEFAULT_FS: DirectoryDurabilityFs = {
@@ -71,6 +73,11 @@ export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions
   const fs = options.fs ?? DEFAULT_FS;
   const platform = options.platform ?? process.platform;
   const named = requireNamedDirectory(path, fs);
+  if (options.expectedIdentity && (
+    named.dev !== options.expectedIdentity.dev || named.ino !== options.expectedIdentity.ino
+  )) {
+    throw new Error(`durability directory identity changed: ${path}`);
+  }
   let fd: number | undefined;
 
   try {
@@ -90,6 +97,7 @@ export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions
     }
 
     try {
+      options.beforeFsync?.();
       fs.fsyncSync(fd);
     } catch (error) {
       if (!mayIgnoreWindowsDirectoryFdError(error, platform)) throw error;

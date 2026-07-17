@@ -17,6 +17,11 @@ import {
   type DaemonLock,
 } from '../src/core/daemon/state.js';
 import { exportToPulse } from '../src/core/fleet/pulse-export.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 
 const cfg = {
@@ -26,6 +31,7 @@ const cfg = {
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
 let daemonLock: DaemonLock | undefined;
 
 beforeEach(() => {
@@ -33,9 +39,20 @@ beforeEach(() => {
   mkdirSync(home, { recursive: true });
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
+  previousAshlrHome = process.env.ASHLR_HOME;
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
   process.env.ASHLR_PULSE_PAT = 'm421-test-pat';
+
+  const fence = acquireOutwardMutationFence();
+  try {
+    if (!ownsOutwardMutationFence(fence)) {
+      throw new Error('M421 fixture failed to establish private authority roots');
+    }
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
 });
 
 afterEach(() => {
@@ -47,6 +64,8 @@ afterEach(() => {
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   rmSync(home, { recursive: true, force: true });
 });
 

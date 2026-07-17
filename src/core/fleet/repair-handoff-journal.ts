@@ -14,6 +14,7 @@ import {
   renameSync,
   unlinkSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -33,10 +34,15 @@ import {
 import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
+import { fsyncDirectory as fsyncDirectoryDurably } from '../util/durability.js';
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_RECORDS = 100_000;
 const MAX_ROW_BYTES = 2_048;
+const PARENT_AUTHORITY_RETRY_MS = 10;
+const PARENT_AUTHORITY_RETRIES = 200;
+const PARENT_AUTHORITY_RETRY_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const WORK_SOURCES = new Set<WorkSource>([
   'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',
@@ -133,6 +139,20 @@ export interface RepairHandoffV2Activation {
   activatedAt: string;
 }
 
+type RepairHandoffJournalFaultPoint =
+  | 'append-file-fsync'
+  | 'append-path-verification'
+  | 'append-directory-fsync';
+
+let repairHandoffJournalFaultForTest:
+  ((point: RepairHandoffJournalFaultPoint) => void) | undefined;
+
+export function _setRepairHandoffJournalFaultForTest(
+  hook: ((point: RepairHandoffJournalFaultPoint) => void) | undefined,
+): void {
+  repairHandoffJournalFaultForTest = hook;
+}
+
 export function repairHandoffJournalPath(): string {
   return join(homedir(), '.ashlr', 'fleet', 'repair-handoffs.jsonl');
 }
@@ -149,8 +169,8 @@ function repairHandoffLockPath(path: string): string {
   return `${path}.lock`;
 }
 
-function privateOwner(uid: number): boolean {
-  return typeof process.getuid !== 'function' || uid === process.getuid();
+function privateOwner(uid: number | bigint): boolean {
+  return typeof process.getuid !== 'function' || BigInt(process.getuid()) === BigInt(uid);
 }
 
 function validIdentity(value: string): boolean {
@@ -192,13 +212,18 @@ function semanticEventId(fields: Pick<
 
 const ACTIVATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function validRepairHandoffV2Activation(value: unknown): value is RepairHandoffV2Activation {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+function canonicalRepairHandoffV2Activation(value: unknown): RepairHandoffV2Activation | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  if (typeof row['id'] !== 'string' || !ACTIVATION_ID_RE.test(row['id'])) return false;
-  if (typeof row['activatedAt'] !== 'string') return false;
+  if (typeof row['id'] !== 'string' || !ACTIVATION_ID_RE.test(row['id'])) return null;
+  if (typeof row['activatedAt'] !== 'string') return null;
   const parsed = Date.parse(row['activatedAt']);
-  return Number.isFinite(parsed) && new Date(parsed).toISOString() === row['activatedAt'];
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== row['activatedAt']) return null;
+  return { id: row['id'].toLowerCase(), activatedAt: row['activatedAt'] };
+}
+
+export function validRepairHandoffV2Activation(value: unknown): value is RepairHandoffV2Activation {
+  return canonicalRepairHandoffV2Activation(value) !== null;
 }
 
 function childItemId(kind: RepairHandoffKind, repo: string, parentItemId: string): string {
@@ -457,64 +482,212 @@ function sameParentProvenance(left: RepairHandoffObservation, right: RepairHando
     left.parentTier === right.parentTier;
 }
 
-function ensurePrivatePath(path: string): Stats {
+function safeRepairHandoffDirectory(stat: Stats | BigIntStats): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() && privateOwner(stat.uid);
+}
+
+function safeRepairHandoffJournal(stat: Stats | BigIntStats): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && privateOwner(stat.uid) && stat.nlink === 1;
+}
+
+function assureRepairHandoffStoragePath(
+  path: string,
+  kind: 'file' | 'directory',
+  mode: PrivateStorageMode,
+  anchorPath: string,
+): void {
+  if (!assurePrivateStoragePath(
+    path, kind, mode, { anchorPath },
+  ).ok) throw new Error(`unsafe Windows repair handoff ${kind}`);
+}
+
+function assureRepairHandoffJournalFile(path: string, mode: PrivateStorageMode, opened: Stats): void {
+  assureRepairHandoffStoragePath(path, 'file', mode, dirname(path));
+  const named = lstatSync(path);
+  if (!safeRepairHandoffJournal(named) || named.dev !== opened.dev || named.ino !== opened.ino) {
+    throw new Error('unsafe repair handoff journal');
+  }
+}
+
+function ensurePrivatePath(path: string): BigIntStats {
   const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const dirStat = lstatSync(dir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || !privateOwner(dirStat.uid)) {
+  const created = !existsSync(dir) && mkdirSync(dir, { recursive: true, mode: 0o700 }) !== undefined;
+  const dirStat = lstatSync(dir, { bigint: true });
+  if (!safeRepairHandoffDirectory(dirStat)) {
     throw new Error('unsafe repair handoff directory');
   }
   chmodSync(dir, 0o700);
+  assureRepairHandoffStoragePath(
+    dir,
+    'directory',
+    created ? 'secure-created' : 'inspect-existing',
+    dirname(dir),
+  );
+  const assuredDirStat = lstatSync(dir, { bigint: true });
+  if (
+    !safeRepairHandoffDirectory(assuredDirStat) ||
+    assuredDirStat.dev !== dirStat.dev || assuredDirStat.ino !== dirStat.ino
+  ) throw new Error('unsafe repair handoff directory');
   if (existsSync(path)) {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1) {
+    if (!safeRepairHandoffJournal(stat)) {
       throw new Error('unsafe repair handoff journal');
     }
+    assureRepairHandoffJournalFile(path, 'inspect-existing', stat);
   }
-  return dirStat;
+  return assuredDirStat;
 }
 
 function appendObservation(observation: RepairHandoffObservation): boolean {
   const path = observation.schemaVersion === 2
     ? repairHandoffV2JournalPath()
     : repairHandoffJournalPath();
+  try {
+    ensurePrivatePath(path);
+  } catch {
+    return false;
+  }
   const lock = acquireLocalStoreLock(repairHandoffLockPath(path));
   if (!lock) return false;
   let fd: number | undefined;
   try {
     const directory = ensurePrivatePath(path);
-    const before = existsSync(path) ? lstatSync(path) : undefined;
-    fd = openSync(path, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW, 0o600);
-    const stat = fstatSync(fd);
-    const bytes = Buffer.from(`\n${JSON.stringify(observation)}\n`, 'utf8');
-    if (!stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1 || stat.size + bytes.length > MAX_FILE_BYTES) return false;
-    if (before && (before.dev !== stat.dev || before.ino !== stat.ino)) return false;
-    fchmodSync(fd, 0o600);
-    if (bytes.length > MAX_ROW_BYTES) return false;
-    if (writeSync(fd, bytes) !== bytes.length) return false;
-    fsyncSync(fd);
-    const persisted = fstatSync(fd);
-    const authoritative = lstatSync(path);
-    const currentDirectory = lstatSync(dirname(path));
+    const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
+    const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
+    const durable = observation.schemaVersion === 1 ? v1 : v2;
+    const combined = combineRepairHandoffReadsAfterParentSettlement([v1, v2]);
     if (
-      persisted.nlink !== 1 || authoritative.isSymbolicLink() || !authoritative.isFile() ||
-      authoritative.dev !== persisted.dev || authoritative.ino !== persisted.ino ||
-      currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
+      durable.conflictingIds > 0 || durable.limitExceeded ||
+      combined.sourceState === 'degraded' || combined.conflictingIds > 0 || combined.limitExceeded
     ) return false;
-    let dirFd: number | undefined;
-    try {
-      dirFd = openSync(dirname(path), fsConstants.O_RDONLY);
-      fsyncSync(dirFd);
-    } finally {
-      if (dirFd !== undefined) closeSync(dirFd);
+    if (hasExactObservation(durable, observation)) {
+      fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || !privateOwner(opened.uid) || opened.nlink !== 1) return false;
+      syncRepairHandoffAuthority(path, fd, directory);
+      closeSync(fd);
+      fd = undefined;
+      return exactObservationHasHealthyAuthority(observation);
     }
-    return true;
+    if (durable.physicalRows + (durable.tornTail ? 1 : 0) >= MAX_RECORDS) return false;
+    if (!observationAdmissionAllowed(durable, observation)) return false;
+    const before = existsSync(path) ? lstatSync(path) : undefined;
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+        (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
+      0o600,
+    );
+    try {
+      const stat = fstatSync(fd);
+      const bytes = Buffer.from(`\n${JSON.stringify(observation)}\n`, 'utf8');
+      if (!stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1 || stat.size + bytes.length > MAX_FILE_BYTES) return false;
+      if (before && (before.dev !== stat.dev || before.ino !== stat.ino)) return false;
+      fchmodSync(fd, 0o600);
+      if (!before) assureRepairHandoffJournalFile(path, 'secure-created', stat);
+      if (bytes.length > MAX_ROW_BYTES) return false;
+      if (writeSync(fd, bytes) !== bytes.length) return false;
+      syncRepairHandoffAuthority(path, fd, directory);
+      return exactObservationHasHealthyAuthority(observation);
+    } catch {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { /* best effort */ }
+        fd = undefined;
+      }
+      return false;
+    }
   } catch {
     return false;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
     releaseLocalStoreLock(lock);
   }
+}
+
+function syncRepairHandoffAuthority(path: string, fd: number, directory: BigIntStats): void {
+  repairHandoffJournalFaultForTest?.('append-file-fsync');
+  fsyncSync(fd);
+  repairHandoffJournalFaultForTest?.('append-path-verification');
+  const persisted = fstatSync(fd);
+  const authoritative = lstatSync(path);
+  const currentDirectory = lstatSync(dirname(path), { bigint: true });
+  if (
+    persisted.nlink !== 1 || authoritative.isSymbolicLink() || !authoritative.isFile() ||
+    authoritative.dev !== persisted.dev || authoritative.ino !== persisted.ino ||
+    currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
+  ) throw new Error('repair handoff path changed after append');
+  fsyncDirectoryDurably(dirname(path), {
+    expectedIdentity: { dev: directory.dev, ino: directory.ino },
+    beforeFsync: () => repairHandoffJournalFaultForTest?.('append-directory-fsync'),
+  });
+}
+
+function exactObservationHasHealthyAuthority(observation: RepairHandoffObservation): boolean {
+  const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
+  const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
+  const durable = observation.schemaVersion === 1 ? v1 : v2;
+  const combined = combineRepairHandoffReadsAfterParentSettlement([v1, v2]);
+  return hasExactObservation(durable, observation) &&
+    durable.sourceState === 'healthy' &&
+    combined.sourceState === 'healthy' &&
+    combined.conflictingIds === 0 &&
+    !combined.limitExceeded;
+}
+
+function combineRepairHandoffReadsAfterParentSettlement(
+  reads: readonly InternalRepairHandoffReadResult[],
+): RepairHandoffReadResult {
+  let combined = combineRepairHandoffReads(reads);
+  if (reads.some((read) => read.sourceState === 'degraded')) return combined;
+  for (let attempt = 1; combined.sourceState === 'degraded' && attempt < PARENT_AUTHORITY_RETRIES; attempt++) {
+    Atomics.wait(PARENT_AUTHORITY_RETRY_SLEEP, 0, 0, PARENT_AUTHORITY_RETRY_MS);
+    combined = combineRepairHandoffReads(reads);
+  }
+  return combined;
+}
+
+function hasExactObservation(
+  read: InternalRepairHandoffReadResult,
+  observation: RepairHandoffObservation,
+): boolean {
+  const expected = fullObservationFingerprint(observation);
+  return read.durableRows.some((row) => fullObservationFingerprint(row) === expected);
+}
+
+function observationAdmissionAllowed(
+  read: InternalRepairHandoffReadResult,
+  observation: RepairHandoffObservation,
+): boolean {
+  if (observation.schemaVersion !== 2) return true;
+
+  const durableV2 = read.durableRows.filter(
+    (row): row is RepairHandoffObservationV2 => row.schemaVersion === 2,
+  );
+  const sameEvent = durableV2.filter((row) => row.eventId === observation.eventId);
+  if (sameEvent.some((row) => row.parentAttemptId === observation.parentAttemptId)) return false;
+  if (sameEvent.some((row) => Date.parse(row.ts) === Date.parse(observation.ts))) return false;
+
+  const incoming = canonicalRepairHandoffV2Activation({
+    id: observation.writerActivationId,
+    activatedAt: observation.writerActivatedAt,
+  });
+  const claims = durableV2.flatMap((row) => {
+    const activation = canonicalRepairHandoffV2Activation({
+      id: row.writerActivationId,
+      activatedAt: row.writerActivatedAt,
+    });
+    return activation ? [activation] : [];
+  });
+  if (!incoming) return claims.length === 0;
+  if (claims.some((claim) =>
+    (claim.id === incoming.id && claim.activatedAt !== incoming.activatedAt) ||
+    (claim.activatedAt === incoming.activatedAt && claim.id !== incoming.id))) return false;
+
+  const highWater = claims.reduce<number | null>((latest, claim) => {
+    const activatedAt = Date.parse(claim.activatedAt);
+    return latest === null || activatedAt > latest ? activatedAt : latest;
+  }, null);
+  return highWater === null || Date.parse(incoming.activatedAt) >= highWater;
 }
 
 export function recordRepairHandoffs(
@@ -534,7 +707,10 @@ export function recordRepairHandoffs(
     } catch {
       continue;
     }
-    if (options.schemaVersion === 2 && !validRepairHandoffV2Activation(options.activation)) {
+    const activation = options.schemaVersion === 2
+      ? canonicalRepairHandoffV2Activation(options.activation)
+      : null;
+    if (options.schemaVersion === 2 && !activation) {
       result.attempted += 1;
       result.failed += 1;
       continue;
@@ -543,8 +719,8 @@ export function recordRepairHandoffs(
       ? (() => {
           const bound = {
             ...objectiveScoped,
-            writerActivationId: options.activation!.id,
-            writerActivatedAt: options.activation!.activatedAt,
+            writerActivationId: activation!.id,
+            writerActivatedAt: activation!.activatedAt,
           };
           const eventId = semanticEventId(bound);
           return {
@@ -579,7 +755,10 @@ export function recordRepairHandoffs(
 }
 
 interface InternalRepairHandoffReadResult extends Omit<RepairHandoffReadResult, 'authorityDigest'> {
+  durableRows: RepairHandoffObservation[];
   compactionRows: RepairHandoffObservation[];
+  activeActivationRows: RepairHandoffObservationV2[];
+  tornTail: boolean;
   quarantinedIds?: Set<string>;
 }
 
@@ -590,7 +769,10 @@ function readRepairHandoffsInternal(
   if (!existsSync(path)) {
     return {
       observations: [],
+      durableRows: [],
       compactionRows: [],
+      activeActivationRows: [],
+      tornTail: false,
       sourceState: 'missing',
       invalidRows: 0,
       conflictingIds: 0,
@@ -605,7 +787,10 @@ function readRepairHandoffsInternal(
     if (before.size > MAX_FILE_BYTES || (process.platform !== 'win32' && (before.mode & 0o077) !== 0)) {
       return {
         observations: [],
+        durableRows: [],
         compactionRows: [],
+        activeActivationRows: [],
+        tornTail: false,
         sourceState: 'degraded',
         invalidRows: 0,
         conflictingIds: 0,
@@ -622,13 +807,20 @@ function readRepairHandoffsInternal(
     const read = opened.size > 0 ? readSync(fd, bytes, 0, bytes.length, 0) : 0;
     const text = bytes.subarray(0, read).toString('utf8');
     const completeLines = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n').slice(0, -1);
+    const tornTail = text.length > 0 && !text.endsWith('\n');
     const byId = new Map<string, {
       schemaVersion: 1 | 2;
-      attempts: Map<string, { fingerprint: string; row: RepairHandoffObservation }>;
+      attempts: Map<string, { fingerprint: string; row: RepairHandoffObservation; physicalOrder: number }>;
       conflict: boolean;
     }>();
     const invalidClaimedIds = new Set<string>();
-    let invalidRows = text.endsWith('\n') ? 0 : 1;
+    const durableRows: RepairHandoffObservation[] = [];
+    const activationConflictingIds = new Set<string>();
+    const activationClaimsById = new Map<string, Map<string, Set<string>>>();
+    const activationClaimsByTime = new Map<string, Map<string, Set<string>>>();
+    let activationHighWater: RepairHandoffV2Activation | null = null;
+    let nextPhysicalOrder = 0;
+    let invalidRows = tornTail ? 1 : 0;
     const physicalRows = completeLines.filter(Boolean).length;
     const limitExceeded = physicalRows > MAX_RECORDS;
     for (const line of completeLines) {
@@ -645,6 +837,63 @@ function readRepairHandoffsInternal(
           ) invalidClaimedIds.add((parsed as Record<string, string>)['eventId']!);
           continue;
         }
+        if (
+          parsed.schemaVersion === 2 &&
+          parsed.writerActivationId !== undefined &&
+          parsed.writerActivatedAt !== undefined
+        ) {
+          const canonicalActivation = canonicalRepairHandoffV2Activation({
+            id: parsed.writerActivationId,
+            activatedAt: parsed.writerActivatedAt,
+          })!;
+          parsed.writerActivationId = canonicalActivation.id;
+          const timesForId = activationClaimsById.get(parsed.writerActivationId) ?? new Map<string, Set<string>>();
+          const idsForTime = activationClaimsByTime.get(parsed.writerActivatedAt) ?? new Map<string, Set<string>>();
+          const conflictingClaims = [
+            ...[...timesForId.entries()]
+              .filter(([activatedAt]) => activatedAt !== parsed.writerActivatedAt)
+              .flatMap(([_activatedAt, eventIds]) => [...eventIds]),
+            ...[...idsForTime.entries()]
+              .filter(([activationId]) => activationId !== parsed.writerActivationId)
+              .flatMap(([_activationId, eventIds]) => [...eventIds]),
+          ];
+          if (conflictingClaims.length > 0) {
+            activationConflictingIds.add(parsed.eventId);
+            for (const eventId of conflictingClaims) activationConflictingIds.add(eventId);
+          } else if (
+            activationHighWater &&
+            Date.parse(parsed.writerActivatedAt) < Date.parse(activationHighWater.activatedAt)
+          ) {
+            // Physical append order is the durable writer chronology. Once a
+            // newer activation has appeared, an older writer cannot mint or
+            // extend authority in any generation.
+            activationConflictingIds.add(parsed.eventId);
+          } else if (
+            !activationHighWater ||
+            Date.parse(parsed.writerActivatedAt) > Date.parse(activationHighWater.activatedAt)
+          ) {
+            activationHighWater = {
+              id: parsed.writerActivationId,
+              activatedAt: parsed.writerActivatedAt,
+            };
+          }
+
+          const idsAtClaimedTime = timesForId.get(parsed.writerActivatedAt) ?? new Set<string>();
+          idsAtClaimedTime.add(parsed.eventId);
+          timesForId.set(parsed.writerActivatedAt, idsAtClaimedTime);
+          activationClaimsById.set(parsed.writerActivationId, timesForId);
+
+          const timesForClaimedId = idsForTime.get(parsed.writerActivationId) ?? new Set<string>();
+          timesForClaimedId.add(parsed.eventId);
+          idsForTime.set(parsed.writerActivationId, timesForClaimedId);
+          activationClaimsByTime.set(parsed.writerActivatedAt, idsForTime);
+        } else if (parsed.schemaVersion === 2 && activationHighWater) {
+          // Unbound rows are compatible only with the pre-activation journal.
+          // Once a bound writer appears, physical append order prevents a
+          // rollback writer from minting healthy schema-v2 authority.
+          activationConflictingIds.add(parsed.eventId);
+        }
+        durableRows.push(parsed);
         let event = byId.get(parsed.eventId);
         if (!event) {
           event = { schemaVersion: parsed.schemaVersion, attempts: new Map(), conflict: false };
@@ -663,12 +912,20 @@ function readRepairHandoffsInternal(
           )) {
             event.conflict = true;
           } else {
-            event.attempts.set(parsed.parentAttemptId, { fingerprint, row: parsed });
+            event.attempts.set(parsed.parentAttemptId, {
+              fingerprint,
+              row: parsed,
+              physicalOrder: nextPhysicalOrder++,
+            });
           }
         } else {
           const fingerprint = observationFingerprint(parsed);
           if (!attempt) {
-            event.attempts.set(parsed.parentAttemptId, { fingerprint, row: parsed });
+            event.attempts.set(parsed.parentAttemptId, {
+              fingerprint,
+              row: parsed,
+              physicalOrder: nextPhysicalOrder++,
+            });
           } else if (attempt.fingerprint !== fingerprint) event.conflict = true;
           else if (
             hasParentProvenance(attempt.row) &&
@@ -692,23 +949,53 @@ function readRepairHandoffsInternal(
       .map(([_eventId, entry]) => entry);
     const conflictingIds = new Set([
       ...invalidClaimedIds,
+      ...activationConflictingIds,
       ...[...byId.entries()].filter(([_eventId, entry]) => entry.conflict).map(([eventId]) => eventId),
     ]);
-    const observations = validEvents
-      .map((entry) => [...entry.attempts.values()]
-        .map((attempt) => attempt.row)
-        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0]!)
+    const authoritativeEvents = validEvents.filter((entry) =>
+      ![...entry.attempts.values()].some(({ row }) => activationConflictingIds.has(row.eventId)),
+    );
+    const observations = authoritativeEvents
+      .map((entry) => {
+        const attempts = [...entry.attempts.values()].map((attempt) => attempt.row);
+        if (entry.schemaVersion === 1) {
+          return attempts.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0]!;
+        }
+        // Journal order, unlike event time, is monotonic under the store lock.
+        // Keep the first durable row as the generation's immutable proof fence.
+        // Reactivation changes the active writer epoch, but not generation
+        // identity, so it must not move this lower bound past child evidence.
+        return attempts[0]!;
+      })
       .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
-    const compactionRows = validEvents
-      .flatMap((entry) => [...entry.attempts.values()].map((attempt) => attempt.row))
-      .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+    const activeActivationRows = activationHighWater
+      ? authoritativeEvents.flatMap((entry) => {
+          if (entry.schemaVersion !== 2) return [];
+          const active = [...entry.attempts.values()]
+            .filter(({ row }) =>
+              row.schemaVersion === 2 &&
+              row.writerActivationId === activationHighWater!.id &&
+              row.writerActivatedAt === activationHighWater!.activatedAt)
+            .sort((left, right) =>
+              Date.parse(right.row.ts) - Date.parse(left.row.ts) ||
+              right.physicalOrder - left.physicalOrder)[0];
+          return active?.row.schemaVersion === 2 ? [active.row] : [];
+        })
+      : [];
+    const compactionRows = authoritativeEvents
+      .flatMap((entry) => [...entry.attempts.values()])
+      .sort((left, right) => left.physicalOrder - right.physicalOrder)
+      .map((attempt) => attempt.row);
     const after = fstatSync(fd);
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.nlink !== 1 || after.size !== opened.size) {
       throw new Error('repair handoff journal changed during read');
     }
     return {
       observations,
+      durableRows,
       compactionRows,
+      activeActivationRows,
+      tornTail,
       // The row threshold is an observability/compaction signal, not an
       // authority failure: every row was still parsed under the byte cap.
       sourceState: invalidRows > 0 || conflictingIds.size > 0 ? 'degraded' : 'healthy',
@@ -721,7 +1008,10 @@ function readRepairHandoffsInternal(
   } catch {
     return {
       observations: [],
+      durableRows: [],
       compactionRows: [],
+      activeActivationRows: [],
+      tornTail: false,
       sourceState: 'degraded',
       invalidRows: 1,
       conflictingIds: 0,
@@ -737,11 +1027,10 @@ function combineRepairHandoffReads(
   reads: readonly InternalRepairHandoffReadResult[],
 ): RepairHandoffReadResult {
   const quarantinedIds = new Set(reads.flatMap((read) => [...(read.quarantinedIds ?? [])]));
-  const candidates = reads
-    .flatMap((read) => read.observations)
-    .filter((row) => !quarantinedIds.has(row.eventId))
-    .sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
-  const parentStatuses = readDispatchProductionParents(candidates.map((row) => ({
+  const parentEvidenceRows = reads
+    .flatMap((read) => read.compactionRows)
+    .filter((row) => !quarantinedIds.has(row.eventId));
+  const parentEvidenceStatuses = readDispatchProductionParents(parentEvidenceRows.map((row) => ({
     ts: row.ts,
     itemId: row.parentItemId,
     repo: row.repo,
@@ -752,12 +1041,34 @@ function combineRepairHandoffReads(
     ...(row.parentTier !== undefined ? { tier: row.parentTier } : {}),
     ...(row.parentObjectiveHash !== undefined ? { objectiveHash: row.parentObjectiveHash } : {}),
   })));
+  const parentStatusByFingerprint = new Map(parentEvidenceRows.map((row, index) => [
+    fullObservationFingerprint(row),
+    parentEvidenceStatuses[index]!,
+  ]));
+  const candidates = reads
+    .flatMap((read) => read.observations)
+    .filter((row) => !quarantinedIds.has(row.eventId))
+    .sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+  const parentStatuses = candidates.map((row) =>
+    parentStatusByFingerprint.get(fullObservationFingerprint(row)) ?? 'degraded');
   const observations = candidates.filter((_row, index) => parentStatuses[index] === 'found');
-  const missingParentRows = candidates.length - observations.length;
+  const objectiveControlParentStatuses = new Map<string, Set<(typeof parentStatuses)[number]>>();
+  for (let index = 0; index < candidates.length; index++) {
+    const family = repairHandoffObjectiveControlFamilyKey(candidates[index]!);
+    if (family === null) continue;
+    const statuses = objectiveControlParentStatuses.get(family) ??
+      new Set<(typeof parentStatuses)[number]>();
+    statuses.add(parentStatuses[index]!);
+    objectiveControlParentStatuses.set(family, statuses);
+  }
+  const splitObjectiveControlFamily = [...objectiveControlParentStatuses.values()].some((statuses) =>
+    statuses.has('found') && statuses.size > 1);
+  const parentQuarantinedIds = new Set(parentEvidenceRows
+    .filter((_row, index) => parentEvidenceStatuses[index] !== 'found')
+    .map((row) => row.eventId));
   const invalidRows = reads.reduce((sum, read) => sum + read.invalidRows, 0);
-  const conflictingIds = quarantinedIds.size;
-  const anyDegraded = reads.some((read) => read.sourceState === 'degraded') ||
-    missingParentRows > 0;
+  const conflictingIds = new Set([...quarantinedIds, ...parentQuarantinedIds]).size;
+  const intrinsicallyDegraded = reads.some((read) => read.sourceState === 'degraded');
   const anyPresent = reads.some((read) => read.sourceState !== 'missing');
   const authorityDigest = createHash('sha256').update(JSON.stringify([
     'ashlr:repair-handoff-authority:v1',
@@ -765,7 +1076,9 @@ function combineRepairHandoffReads(
   ])).digest('hex');
   return {
     observations,
-    sourceState: anyDegraded ? 'degraded' : anyPresent ? 'healthy' : 'missing',
+    sourceState: intrinsicallyDegraded || parentQuarantinedIds.size > 0 || splitObjectiveControlFamily
+      ? 'degraded'
+      : anyPresent ? 'healthy' : 'missing',
     invalidRows,
     conflictingIds,
     limitExceeded: reads.some((read) => read.limitExceeded),
@@ -781,7 +1094,10 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
   ]);
 }
 
-function repairHandoffAliasFamilyKey(row: RepairHandoffObservation): string | null {
+/** Stable objective-control family shared by queue and lifecycle authority. */
+export function repairHandoffObjectiveControlFamilyKey(
+  row: RepairHandoffObservation,
+): string | null {
   if (!row.parentObjectiveHash) return null;
   return JSON.stringify([
     row.kind,
@@ -800,25 +1116,46 @@ export function readRepairHandoffSchemaSummary(
   const combined = combineRepairHandoffReads([v1, v2]);
   const v1Authorities = combined.observations.filter((row) => row.schemaVersion === 1);
   const v2Authorities = combined.observations.filter((row) => row.schemaVersion === 2);
-  const currentActivationV2 = currentActivation
-    ? v2Authorities.filter((row) =>
-        row.writerActivationId === currentActivation.id &&
-        row.writerActivatedAt === currentActivation.activatedAt &&
-        Date.parse(row.ts) >= Date.parse(currentActivation.activatedAt))
+  const authoritativeV2GenerationIds = new Set(v2Authorities.map((row) => row.generationId));
+  const activeActivationCandidates = v2.activeActivationRows.filter((row) =>
+    authoritativeV2GenerationIds.has(row.generationId));
+  const activeParentStatuses = readDispatchProductionParents(activeActivationCandidates.map((row) => ({
+    ts: row.ts,
+    itemId: row.parentItemId,
+    repo: row.repo,
+    outcome: row.parentOutcome,
+    attemptId: row.parentAttemptId,
+    source: row.parentSource,
+    backend: row.parentBackend,
+    tier: row.parentTier,
+    objectiveHash: row.parentObjectiveHash,
+  })));
+  const activeActivationV2Authorities = activeActivationCandidates
+    .filter((_row, index) => activeParentStatuses[index] === 'found');
+  const canonicalCurrentActivation = currentActivation
+    ? canonicalRepairHandoffV2Activation(currentActivation)
+    : null;
+  const currentActivationV2 = canonicalCurrentActivation
+    ? activeActivationV2Authorities.filter((row) =>
+        row.writerActivationId === canonicalCurrentActivation.id &&
+        row.writerActivatedAt === canonicalCurrentActivation.activatedAt &&
+        Date.parse(row.ts) >= Date.parse(canonicalCurrentActivation.activatedAt))
     : [];
-  const currentActivationAuthorityDigest = currentActivation
+  const latestCurrentActivationV2At = currentActivationV2.reduce<string | null>((latest, row) =>
+    latest === null || Date.parse(row.ts) > Date.parse(latest) ? row.ts : latest, null);
+  const currentActivationAuthorityDigest = canonicalCurrentActivation
     ? createHash('sha256').update(JSON.stringify([
         'ashlr:repair-handoff:activation-authority:v1',
-        currentActivation.id,
-        currentActivation.activatedAt,
+        canonicalCurrentActivation.id,
+        canonicalCurrentActivation.activatedAt,
         currentActivationV2.map(fullObservationFingerprint).sort(),
       ])).digest('hex')
     : null;
   const v1FamilyKeys = new Set(v1Authorities
-    .map(repairHandoffAliasFamilyKey)
+    .map(repairHandoffObjectiveControlFamilyKey)
     .filter((key): key is string => key !== null));
   const aliasFamilies = new Set(v2Authorities
-    .map(repairHandoffAliasFamilyKey)
+    .map(repairHandoffObjectiveControlFamilyKey)
     .filter((key): key is string => key !== null && v1FamilyKeys.has(key))).size;
   return {
     sourceState: combined.sourceState,
@@ -833,7 +1170,7 @@ export function readRepairHandoffSchemaSummary(
     latestV2At: v2Authorities[0]?.ts ?? null,
     currentActivationV2Authorities: currentActivationV2.length,
     unboundV2Authorities: v2Authorities.filter((row) => !row.writerActivationId).length,
-    latestCurrentActivationV2At: currentActivationV2[0]?.ts ?? null,
+    latestCurrentActivationV2At,
     currentActivationAuthorityDigest,
     authorityDigest: combined.authorityDigest,
   };
@@ -844,48 +1181,67 @@ function compactRepairHandoffFile(
   expectedSchemaVersion: 1 | 2,
 ): RepairHandoffCompactionResult {
   if (!existsSync(path)) return { available: true, before: 0, after: 0, removed: 0 };
+  try {
+    ensurePrivatePath(path);
+  } catch {
+    return { available: false, before: 0, after: 0, removed: 0 };
+  }
   const lock = acquireLocalStoreLock(repairHandoffLockPath(path));
   if (!lock) return { available: false, before: 0, after: 0, removed: 0 };
   let tmp: string | undefined;
   let fd: number | undefined;
   try {
     const read = readRepairHandoffsInternal(path, expectedSchemaVersion);
-    if (read.conflictingIds > 0) {
+    if (read.conflictingIds > 0 || read.limitExceeded) {
+      return { available: false, before: read.physicalRows, after: 0, removed: 0 };
+    }
+    const parentAuthority = combineRepairHandoffReads([{ ...read, sourceState: 'healthy' }]);
+    if (parentAuthority.sourceState === 'degraded') {
       return { available: false, before: read.physicalRows, after: 0, removed: 0 };
     }
     // Preserve every semantic event id: old fingerprints are the immutable
     // conflict history that prevents a later replay from minting new authority.
     // Compaction only removes physical replays and invalid/torn rows.
     const compacted = read.compactionRows;
-    if (compacted.length === read.physicalRows) {
+    if (compacted.length === read.physicalRows && read.invalidRows === 0 && !read.tornTail) {
       return { available: true, before: read.physicalRows, after: compacted.length, removed: 0 };
     }
     const directory = ensurePrivatePath(path);
     tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const openedTmp = fstatSync(fd);
+    if (!safeRepairHandoffJournal(openedTmp)) throw new Error('unsafe repair handoff compaction file');
+    fchmodSync(fd, 0o600);
+    assureRepairHandoffJournalFile(tmp, 'secure-created', openedTmp);
     const bytes = Buffer.from(compacted.map((row) => JSON.stringify(row)).join('\n') + (compacted.length ? '\n' : ''), 'utf8');
     if (writeSync(fd, bytes) !== bytes.length) throw new Error('short repair handoff compaction write');
-    fchmodSync(fd, 0o600);
     fsyncSync(fd);
     const compactedFile = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
     renameSync(tmp, path);
     tmp = undefined;
+    assureRepairHandoffJournalFile(path, 'inspect-existing', compactedFile);
     const authoritative = lstatSync(path);
-    const currentDirectory = lstatSync(dirname(path));
+    const currentDirectory = lstatSync(dirname(path), { bigint: true });
     if (
       authoritative.isSymbolicLink() || !authoritative.isFile() || authoritative.nlink !== 1 ||
       authoritative.dev !== compactedFile.dev || authoritative.ino !== compactedFile.ino ||
+      !safeRepairHandoffDirectory(currentDirectory) ||
       currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino
     ) throw new Error('repair handoff compaction path changed');
-    let dirFd: number | undefined;
-    try {
-      dirFd = openSync(dirname(path), fsConstants.O_RDONLY);
-      fsyncSync(dirFd);
-    } finally {
-      if (dirFd !== undefined) closeSync(dirFd);
-    }
+    fsyncDirectoryDurably(dirname(path), {
+      expectedIdentity: { dev: directory.dev, ino: directory.ino },
+    });
+    const repaired = readRepairHandoffsInternal(path, expectedSchemaVersion);
+    const repairedAuthority = combineRepairHandoffReads([repaired]);
+    if (
+      repaired.sourceState !== 'healthy' || repaired.invalidRows !== 0 || repaired.tornTail ||
+      repaired.conflictingIds > 0 || repaired.limitExceeded ||
+      repairedAuthority.sourceState === 'degraded' ||
+      repaired.compactionRows.map(fullObservationFingerprint).join('\n') !==
+        compacted.map(fullObservationFingerprint).join('\n')
+    ) throw new Error('repair handoff compaction did not restore authority');
     return {
       available: true,
       before: read.physicalRows,

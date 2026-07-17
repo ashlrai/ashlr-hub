@@ -34,6 +34,12 @@ let repo: string;
 let baseOid: string;
 let headOid: string;
 
+const OBSERVATION_DURATION_MS = 24 * 60 * 60 * 1_000;
+
+function activeObservationNow(active: AutoMergeCanaryStateV1): Date {
+  return new Date(Date.parse(active.activatedAt) + 1_000);
+}
+
 function git(args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
     encoding: 'utf8',
@@ -82,7 +88,7 @@ function state(
   activatedAt = new Date(Date.now() - 1_000),
 ): AutoMergeCanaryStateV1 {
   const activatedAtIso = activatedAt.toISOString();
-  const deadlineAtIso = new Date(activatedAt.getTime() + 60_000).toISOString();
+  const deadlineAtIso = new Date(activatedAt.getTime() + OBSERVATION_DURATION_MS).toISOString();
   return {
     schemaVersion: 1,
     epochId: '123e4567-e89b-42d3-a456-426614174000',
@@ -108,7 +114,7 @@ function state(
       maxInFlight: 1,
       minMergeIntervalMs: 1,
       leaseDurationMs: 60_000,
-      observationDurationMs: 60_000,
+      observationDurationMs: OBSERVATION_DURATION_MS,
     },
     counters: { admissions: 0, merges: 0, inFlight: 0, rollbacks: 0 },
     shadowCounters: {
@@ -343,7 +349,7 @@ describe('M402 real shadow observation hook', () => {
       deps: {
         readStore: () => read(active),
         appendObservation: append,
-        now: () => new Date(Date.parse(active.activatedAt) + 1_000),
+        now: () => activeObservationNow(active),
       },
     });
     const inspection = inspectCommittedAutoMergeCanaryPatch(repo, baseOid, headOid);
@@ -370,7 +376,11 @@ describe('M402 real shadow observation hook', () => {
     const sourceState = state(sourceBindings);
     const sourceAppend = vi.fn(() => success(sourceState));
     expect(observeAutoMergeCanaryShadow(sourceInput, {
-      deps: { readStore: () => read(sourceState), appendObservation: sourceAppend },
+      deps: {
+        readStore: () => read(sourceState),
+        appendObservation: sourceAppend,
+        now: () => activeObservationNow(sourceState),
+      },
     })).toMatchObject({ status: 'observed', outcome: 'rejected' });
     expect(sourceAppend.mock.calls[0]![1]).toMatchObject({
       outcome: 'rejected',
@@ -395,7 +405,11 @@ describe('M402 real shadow observation hook', () => {
       }
       const append = vi.fn(() => success(mismatched));
       const result = observeAutoMergeCanaryShadow(candidate, {
-        deps: { readStore: () => read(mismatched), appendObservation: append },
+        deps: {
+          readStore: () => read(mismatched),
+          appendObservation: append,
+          now: () => activeObservationNow(mismatched),
+        },
       });
       expect(result, field).toMatchObject({
         status: 'observed',
@@ -646,7 +660,7 @@ describe('M402 real shadow observation hook', () => {
       .mockReturnValueOnce(read(initial))
       .mockReturnValueOnce(read(winner));
     const result = observeAutoMergeCanaryShadow(input(), {
-      deps: { readStore, appendObservation: append },
+      deps: { readStore, appendObservation: append, now: () => activeObservationNow(initial) },
     });
     expect(result).toMatchObject({ status: 'observed', casRetries: 1 });
     expect(append).toHaveBeenCalledTimes(2);
@@ -661,7 +675,12 @@ describe('M402 real shadow observation hook', () => {
     append.mockReturnValue({ ok: false, reason: 'unavailable' });
     const audit = vi.fn();
     expect(observeAutoMergeCanaryShadow(input(), {
-      deps: { readStore: () => read(initial), appendObservation: append, auditEvent: audit },
+      deps: {
+        readStore: () => read(initial),
+        appendObservation: append,
+        auditEvent: audit,
+        now: () => activeObservationNow(initial),
+      },
     })).toEqual({ status: 'failed', stage: 'append' });
     expect(append).toHaveBeenCalledTimes(1);
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({
@@ -700,7 +719,9 @@ describe('M402 real shadow observation hook', () => {
     const audit = vi.fn();
     const flow = (deps: Parameters<typeof observeAutoMergeCanaryShadow>[1]['deps']) => {
       const before = { merged: false, route: 'local' };
-      const observation = observeAutoMergeCanaryShadow(input(), { deps: { auditEvent: audit, ...deps } });
+      const observation = observeAutoMergeCanaryShadow(input(), {
+        deps: { now: () => activeObservationNow(active), auditEvent: audit, ...deps },
+      });
       const after = { merged: false, route: 'local' };
       return { before, observation, after };
     };
@@ -782,6 +803,7 @@ describe('M402 real shadow observation hook', () => {
         resolveOrigin: resolveGitHubOriginAuthorityDetails,
         inspectCommitted: () => failedInspection,
         appendObservation: append,
+        now: () => activeObservationNow(active),
       },
     })).toMatchObject({ status: 'observed', outcome: 'inspection-error' });
     expect(append.mock.calls[0]![1]).toMatchObject({

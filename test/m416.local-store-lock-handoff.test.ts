@@ -1,26 +1,72 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { PathLike } from 'node:fs';
 
 const faults = vi.hoisted(() => ({
+  assuranceCalls: [] as Array<{
+    path: string;
+    kind: string;
+    mode: string;
+    anchorPath: string | undefined;
+  }>,
   candidateUnlinkPath: undefined as string | undefined,
+  assuranceSideEffect: undefined as (() => void) | undefined,
   crashAfterGuardLinkFor: undefined as string | undefined,
   failCanonicalLstatPath: undefined as string | undefined,
   failCanonicalLstatCount: 0,
   replaceWhenElectionInstalledFor: undefined as string | undefined,
   replacementToken: 'successor-token',
+  competingDeadGenerationFor: undefined as string | undefined,
+  competingDeadGenerationPid: undefined as number | undefined,
+  competingDeadGenerationLinkAttempts: 0,
+  competingDeadGenerationToken: 'competing-dead-token',
   strandedGuardPath: undefined as string | undefined,
   installedPaths: new Set<string>(),
+  events: [] as string[],
+  fdPaths: new Map<number, string>(),
+  failDirectoryFsyncFor: undefined as string | undefined,
+  directoryFsyncErrorCode: 'EIO',
+  failLstatOnceFor: undefined as string | undefined,
+  rejectAssurance: undefined as ((path: string, kind: string, mode: string) => boolean) | undefined,
+  shortWriteFor: undefined as 'main' | 'reclaim' | undefined,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    closeSync(fd: number): void {
+      actual.closeSync(fd);
+      faults.fdPaths.delete(fd);
+    },
+    fsyncSync(fd: number): void {
+      const target = faults.fdPaths.get(fd);
+      if (target === faults.failDirectoryFsyncFor) {
+        throw Object.assign(new Error('injected directory fsync failure'), {
+          code: faults.directoryFsyncErrorCode,
+        });
+      }
+      actual.fsyncSync(fd);
+    },
     linkSync(existingPath: PathLike, newPath: PathLike): void {
-      actual.linkSync(existingPath, newPath);
       const existing = String(existingPath);
       const installed = String(newPath);
+      if (
+        installed === faults.competingDeadGenerationFor && existing.endsWith('.candidate')
+      ) {
+        faults.competingDeadGenerationLinkAttempts += 1;
+        if (faults.competingDeadGenerationLinkAttempts === 2) {
+          actual.writeFileSync(installed, `${JSON.stringify({
+            pid: faults.competingDeadGenerationPid,
+            token: faults.competingDeadGenerationToken,
+            startRef: '0'.repeat(64),
+            startRefVerified: true,
+            startRefSource: 'self-clock-epoch-second',
+          })}\n`, { encoding: 'utf8', mode: 0o600 });
+        }
+      }
+      actual.linkSync(existingPath, newPath);
       faults.installedPaths.add(installed);
       if (
         existing === faults.crashAfterGuardLinkFor &&
@@ -40,6 +86,10 @@ vi.mock('node:fs', async (importOriginal) => {
     },
     lstatSync(path: PathLike, ...args: unknown[]) {
       const target = String(path);
+      if (target === faults.failLstatOnceFor) {
+        faults.failLstatOnceFor = undefined;
+        throw Object.assign(new Error('injected transient lstat failure'), { code: 'EIO' });
+      }
       if (
         target === faults.failCanonicalLstatPath && faults.installedPaths.has(target) &&
         faults.failCanonicalLstatCount > 0
@@ -48,6 +98,11 @@ vi.mock('node:fs', async (importOriginal) => {
         throw Object.assign(new Error('injected post-install lstat failure'), { code: 'EIO' });
       }
       return (actual.lstatSync as (...params: unknown[]) => import('node:fs').Stats)(path, ...args);
+    },
+    openSync(path: PathLike, flags: number, mode?: number): number {
+      const fd = actual.openSync(path, flags, mode);
+      faults.fdPaths.set(fd, String(path));
+      return fd;
     },
     unlinkSync(path: PathLike): void {
       const target = String(path);
@@ -60,6 +115,41 @@ vi.mock('node:fs', async (importOriginal) => {
         throw Object.assign(new Error('injected candidate unlink failure'), { code: 'EIO' });
       }
       actual.unlinkSync(path);
+    },
+    writeSync(fd: number, ...args: unknown[]): number {
+      const target = faults.fdPaths.get(fd) ?? `fd:${fd}`;
+      faults.events.push(`write:${target}`);
+      const written = (actual.writeSync as (...params: unknown[]) => number)(fd, ...args);
+      const isReclaim = target.includes('.reclaim.owner.');
+      if ((faults.shortWriteFor === 'reclaim' && isReclaim) ||
+        (faults.shortWriteFor === 'main' && !isReclaim && target.endsWith('.candidate'))) {
+        faults.shortWriteFor = undefined;
+        return Math.max(0, written - 1);
+      }
+      return written;
+    },
+  };
+});
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath(
+      target: string,
+      kind: Parameters<typeof actual.assurePrivateStoragePath>[1],
+      mode: Parameters<typeof actual.assurePrivateStoragePath>[2],
+      options: Parameters<typeof actual.assurePrivateStoragePath>[3] = {},
+    ) {
+      faults.assuranceCalls.push({ path: target, kind, mode, anchorPath: options.anchorPath });
+      faults.events.push(`assure:${mode}:${kind}:${target}`);
+      const sideEffect = faults.assuranceSideEffect;
+      faults.assuranceSideEffect = undefined;
+      sideEffect?.();
+      if (faults.rejectAssurance?.(target, kind, mode)) {
+        return { ok: false, reason: 'injected-assurance-failure' };
+      }
+      return actual.assurePrivateStoragePath(target, kind, mode, options);
     },
   };
 });
@@ -76,14 +166,35 @@ import {
   verifiedProcessStartRef,
   type ProcessStartIdentityRuntime,
 } from '../src/core/fleet/local-store-lock.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
 let tmpDir: string;
 const DEFINITELY_ABSENT_PID = 2_147_483_647;
 const DEFINITELY_ABSENT_CREATOR_PID = 2_147_483_646;
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as { nonce: string; operation: string; mode?: string };
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason: request.mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+    }),
+  };
+};
 
-function writeProvablyStaleLock(lockPath: string, token = 'stale-token'): void {
+function writeProvablyStaleLock(
+  lockPath: string,
+  token = 'stale-token',
+  pid = DEFINITELY_ABSENT_PID,
+): void {
   fs.writeFileSync(lockPath, `${JSON.stringify({
-    pid: DEFINITELY_ABSENT_PID,
+    pid,
     token,
     startRef: '0'.repeat(64),
     startRefVerified: true,
@@ -91,28 +202,318 @@ function writeProvablyStaleLock(lockPath: string, token = 'stale-token'): void {
   })}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
+function exitedChildPid(): number {
+  const child = spawnSync(
+    process.execPath,
+    ['-e', 'process.stdout.write(String(process.pid))'],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  const pid = Number(child.stdout);
+  expect(child.status).toBe(0);
+  expect(Number.isSafeInteger(pid)).toBe(true);
+  expect(pid).toBeGreaterThan(0);
+  expect(() => process.kill(pid, 0)).toThrow();
+  return pid;
+}
+
 beforeEach(() => {
+  faults.assuranceCalls.length = 0;
+  faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
   faults.crashAfterGuardLinkFor = undefined;
   faults.failCanonicalLstatPath = undefined;
   faults.failCanonicalLstatCount = 0;
   faults.replaceWhenElectionInstalledFor = undefined;
   faults.replacementToken = 'successor-token';
+  faults.competingDeadGenerationFor = undefined;
+  faults.competingDeadGenerationPid = undefined;
+  faults.competingDeadGenerationLinkAttempts = 0;
+  faults.competingDeadGenerationToken = 'competing-dead-token';
   faults.strandedGuardPath = undefined;
   faults.installedPaths.clear();
+  faults.events.length = 0;
+  faults.fdPaths.clear();
+  faults.failDirectoryFsyncFor = undefined;
+  faults.directoryFsyncErrorCode = 'EIO';
+  faults.failLstatOnceFor = undefined;
+  faults.rejectAssurance = undefined;
+  faults.shortWriteFor = undefined;
+  _setPrivateStorageTestControlForTest(
+    PRIVATE_STORAGE_TEST_CONTROL,
+    process.platform === 'win32' ? { runner: semanticPrivateStorageRunner } : undefined,
+  );
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m416-lock-handoff-'));
 });
 
 afterEach(() => {
+  faults.assuranceCalls.length = 0;
+  faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
   faults.crashAfterGuardLinkFor = undefined;
   faults.failCanonicalLstatPath = undefined;
   faults.replaceWhenElectionInstalledFor = undefined;
+  faults.competingDeadGenerationFor = undefined;
+  faults.competingDeadGenerationPid = undefined;
+  faults.competingDeadGenerationLinkAttempts = 0;
   faults.strandedGuardPath = undefined;
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  faults.events.length = 0;
+  faults.fdPaths.clear();
+  faults.failDirectoryFsyncFor = undefined;
+  faults.directoryFsyncErrorCode = 'EIO';
+  faults.failLstatOnceFor = undefined;
+  faults.rejectAssurance = undefined;
+  faults.shortWriteFor = undefined;
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } finally {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  }
 });
 
 describe('local store lock installation handoff', () => {
+  it('refuses authority without artifacts when the self clock is unavailable', () => {
+    const lockPath = path.join(tmpDir, 'self-clock-unavailable.lock');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Number.NaN);
+    try {
+      expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      expect(fs.readdirSync(tmpDir)).toEqual([]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('keeps generic lock acquisition independent of private-storage assurance', () => {
+    const lockPath = path.join(tmpDir, 'generic-structural.lock');
+
+    const lock = acquireLocalStoreLock(lockPath, 0);
+
+    expect(lock).not.toBeNull();
+    expect(faults.assuranceCalls).toEqual([]);
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(faults.assuranceCalls).toEqual([]);
+  });
+
+  it('retains exact storage opt-in through ownership and release', () => {
+    const lockPath = path.join(tmpDir, 'exact-inspection-retained.lock');
+    const lock = acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    });
+    expect(lock).not.toBeNull();
+    const installed = fs.lstatSync(lockPath);
+    const installedBytes = fs.readFileSync(lockPath);
+    faults.rejectAssurance = (_target, _kind, mode) => mode === 'inspect-existing';
+
+    expect(ownsLocalStoreLock(lock)).toBe(false);
+    expect(releaseLocalStoreLock(lock)).toBe(false);
+
+    const retained = fs.lstatSync(lockPath);
+    expect({ dev: retained.dev, ino: retained.ino, nlink: retained.nlink }).toEqual({
+      dev: installed.dev,
+      ino: installed.ino,
+      nlink: 1,
+    });
+    expect(fs.readFileSync(lockPath)).toEqual(installedBytes);
+    expect(JSON.parse(installedBytes.toString('utf8'))).toMatchObject({ token: lock?.token });
+
+    faults.rejectAssurance = undefined;
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('secures a fresh directory and candidate before writing lock payload bytes', () => {
+    const lockDir = path.join(tmpDir, 'fresh-locks');
+    const lockPath = path.join(lockDir, 'ordered.lock');
+
+    const lock = acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    });
+
+    expect(lock).not.toBeNull();
+    const directoryAssurance = `assure:secure-created:directory:${lockDir}`;
+    const candidateCall = faults.assuranceCalls.find((call) =>
+      call.kind === 'file' && call.mode === 'secure-created' && call.path.endsWith('.candidate'));
+    expect(candidateCall).toMatchObject({ anchorPath: tmpDir });
+    const candidateAssurance = `assure:secure-created:file:${candidateCall?.path}`;
+    const candidateWrite = `write:${candidateCall?.path}`;
+    expect(faults.events.indexOf(directoryAssurance)).toBeGreaterThanOrEqual(0);
+    expect(faults.events.indexOf(candidateAssurance)).toBeGreaterThan(
+      faults.events.indexOf(directoryAssurance),
+    );
+    expect(faults.events.indexOf(candidateWrite)).toBeGreaterThan(
+      faults.events.indexOf(candidateAssurance),
+    );
+    expect(faults.assuranceCalls).toContainEqual({
+      path: lockDir,
+      kind: 'directory',
+      mode: 'secure-created',
+      anchorPath: tmpDir,
+    });
+    releaseLocalStoreLock(lock);
+  });
+
+  it('leaves no payload or authority when fresh candidate assurance fails', () => {
+    const lockPath = path.join(tmpDir, 'candidate-assurance-failure.lock');
+    faults.rejectAssurance = (_target, kind, mode) => kind === 'file' && mode === 'secure-created';
+
+    expect(acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    })).toBeNull();
+
+    const candidate = faults.assuranceCalls.find((call) => call.mode === 'secure-created')?.path;
+    expect(candidate).toMatch(/\.candidate$/);
+    expect(faults.events).not.toContain(`write:${candidate}`);
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
+  });
+
+  it('exactly inspects an existing directory and canonical lock before trusting ownership', () => {
+    const lockPath = path.join(tmpDir, 'existing-canonical.lock');
+    writeProvablyStaleLock(lockPath);
+    const before = fs.readFileSync(lockPath);
+    faults.rejectAssurance = (target, kind, mode) =>
+      target === lockPath && kind === 'file' && mode === 'inspect-existing';
+
+    expect(acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    })).toBeNull();
+
+    expect(faults.assuranceCalls).toContainEqual({
+      path: tmpDir,
+      kind: 'directory',
+      mode: 'inspect-existing',
+      anchorPath: tmpDir,
+    });
+    expect(faults.assuranceCalls).toContainEqual({
+      path: lockPath,
+      kind: 'file',
+      mode: 'inspect-existing',
+      anchorPath: tmpDir,
+    });
+    expect(fs.readFileSync(lockPath)).toEqual(before);
+    expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
+  });
+
+  it('fails closed when reclaim-election candidate assurance is unavailable', () => {
+    const lockPath = path.join(tmpDir, 'reclaim-assurance-failure.lock');
+    writeProvablyStaleLock(lockPath);
+    const stale = fs.lstatSync(lockPath);
+    faults.rejectAssurance = (target, kind, mode) =>
+      target.includes('.reclaim.owner.') && kind === 'file' && mode === 'secure-created';
+
+    expect(acquireLocalStoreLock(lockPath, 0, { exactPrivateStorage: true })).toBeNull();
+
+    const retained = fs.lstatSync(lockPath);
+    expect({ dev: retained.dev, ino: retained.ino }).toEqual({ dev: stale.dev, ino: stale.ino });
+    expect(faults.assuranceCalls.some((call) =>
+      call.path.includes('.reclaim.owner.') && call.mode === 'secure-created')).toBe(true);
+    expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
+  });
+
+  it('recovers a retained same-process release after a transient path failure', () => {
+    const lockPath = path.join(tmpDir, 'release-transient-failure.lock');
+    const lock = acquireLocalStoreLock(lockPath, 0);
+    expect(lock).not.toBeNull();
+    faults.failLstatOnceFor = lockPath;
+
+    expect(releaseLocalStoreLock(lock)).toBe(false);
+
+    expect(fs.existsSync(lockPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({ token: lock?.token });
+    const successor = acquireLocalStoreLock(lockPath, 100);
+    expect(successor).not.toBeNull();
+    expect(successor?.token).not.toBe(lock?.token);
+    expect(releaseLocalStoreLock(successor)).toBe(true);
+  });
+
+  it('does not return authority when canonical handoff cannot be directory-durable', () => {
+    const lockPath = path.join(tmpDir, 'directory-fsync-failure.lock');
+    faults.failDirectoryFsyncFor = tmpDir;
+
+    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'accepts only the shared Windows unsupported-directory-fsync semantics',
+    () => {
+      const lockPath = path.join(tmpDir, 'windows-unsupported-directory-fsync.lock');
+      faults.failDirectoryFsyncFor = tmpDir;
+      faults.directoryFsyncErrorCode = 'EPERM';
+
+      const lock = acquireLocalStoreLock(lockPath, 0);
+
+      expect(lock).not.toBeNull();
+      expect(releaseLocalStoreLock(lock)).toBe(true);
+    },
+  );
+
+  it('bounds live-owner contention without repeating exact storage assurance', () => {
+    const lockPath = path.join(tmpDir, 'bounded-live-contention.lock');
+    const anchorPath = tmpDir;
+    const holder = acquireLocalStoreLock(lockPath, 0, { anchorPath });
+    expect(holder).not.toBeNull();
+    faults.assuranceCalls.length = 0;
+    const started = performance.now();
+
+    expect(acquireLocalStoreLock(lockPath, 30, { anchorPath })).toBeNull();
+
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(faults.assuranceCalls).toEqual([]);
+    expect(releaseLocalStoreLock(holder)).toBe(true);
+  });
+
+  it('rejects a trusted-anchor replacement during directory assurance', () => {
+    const trusted = path.join(tmpDir, 'trusted-anchor');
+    const displaced = path.join(tmpDir, 'trusted-anchor.displaced');
+    const lockDir = path.join(trusted, 'locks');
+    const lockPath = path.join(lockDir, 'anchor-replacement.lock');
+    fs.mkdirSync(trusted, { mode: 0o700 });
+    faults.assuranceSideEffect = () => {
+      fs.renameSync(trusted, displaced);
+      fs.mkdirSync(trusted, { mode: 0o700 });
+    };
+
+    expect(acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: trusted,
+      exactPrivateStorage: true,
+    })).toBeNull();
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.readdirSync(path.join(displaced, 'locks'))).toEqual([]);
+  });
+
+  it('identity-cleans a secured main candidate after a short write', () => {
+    const lockPath = path.join(tmpDir, 'main-short-write.lock');
+    faults.shortWriteFor = 'main';
+
+    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
+  });
+
+  it('identity-cleans a secured reclaim candidate after a short write', () => {
+    const lockPath = path.join(tmpDir, 'reclaim-short-write.lock');
+    writeProvablyStaleLock(lockPath);
+    const stale = fs.lstatSync(lockPath);
+    faults.shortWriteFor = 'reclaim';
+
+    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+
+    const retained = fs.lstatSync(lockPath);
+    expect({ dev: retained.dev, ino: retained.ino }).toEqual({ dev: stale.dev, ino: stale.ino });
+    expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
+  });
+
   it('treats a probe-source switch as unknown instead of a dead process', () => {
     let psAvailable = true;
     let procReads = 0;
@@ -177,18 +578,6 @@ describe('local store lock installation handoff', () => {
         shell: false,
         windowsHide: true,
       });
-    }
-  });
-
-  it('refuses authority without artifacts when the self clock is unavailable', () => {
-    const lockPath = path.join(tmpDir, 'self-clock-unavailable.lock');
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Number.NaN);
-    try {
-      expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
-      expect(fs.existsSync(lockPath)).toBe(false);
-      expect(fs.readdirSync(tmpDir)).toEqual([]);
-    } finally {
-      now.mockRestore();
     }
   });
 
@@ -315,6 +704,41 @@ describe('local store lock installation handoff', () => {
         windowsHide: true,
       });
     }
+  });
+
+  it('reclaims a proven-dead canonical lock with a zero wait budget', () => {
+    const lockPath = path.join(tmpDir, 'zero-wait-dead-owner.lock');
+    const staleToken = 'zero-wait-stale-token';
+    writeProvablyStaleLock(lockPath, staleToken, exitedChildPid());
+
+    const lock = acquireLocalStoreLock(lockPath, 0);
+
+    expect(lock).not.toBeNull();
+    expect(lock?.token).not.toBe(staleToken);
+    expect(ownsLocalStoreLock(lock)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: process.pid,
+      token: lock?.token,
+    });
+    expect(releaseLocalStoreLock(lock)).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('spends the zero-wait reclaim allowance on only one canonical installation attempt', () => {
+    const lockPath = path.join(tmpDir, 'zero-wait-dead-churn.lock');
+    const competingPid = exitedChildPid();
+    writeProvablyStaleLock(lockPath, 'first-dead-token', exitedChildPid());
+    faults.competingDeadGenerationFor = lockPath;
+    faults.competingDeadGenerationPid = competingPid;
+
+    expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+
+    expect(faults.competingDeadGenerationLinkAttempts).toBe(2);
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: competingPid,
+      token: faults.competingDeadGenerationToken,
+    });
+    expect(fs.readdirSync(tmpDir).filter((name) => name.endsWith('.candidate'))).toEqual([]);
   });
 
   it('does not unlink a new ownership generation that keeps the observed inode', () => {

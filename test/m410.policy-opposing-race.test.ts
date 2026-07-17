@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,15 +8,18 @@ const fenceBarrier = vi.hoisted(() => ({
   beforeAcquire: undefined as (() => void) | undefined,
 }));
 
-vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>(),
-  acquireOutwardMutationFence: () => {
-    fenceBarrier.beforeAcquire?.();
-    return { path: 'm410-barrier', token: 'owned', dev: 1, ino: 1 };
-  },
-  ownsOutwardMutationFence: () => true,
-  releaseOutwardMutationFence: () => undefined,
-}));
+vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>();
+  return {
+    ...actual,
+    acquireOutwardMutationFence: (
+      ...args: Parameters<typeof actual.acquireOutwardMutationFence>
+    ) => {
+      fenceBarrier.beforeAcquire?.();
+      return actual.acquireOutwardMutationFence(...args);
+    },
+  };
+});
 
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 
@@ -38,13 +40,15 @@ beforeEach(() => {
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
   previousAshlrHome = process.env.ASHLR_HOME;
-  home = join(tmpdir(), `ashlr-m410-${process.pid}-${randomUUID()}`);
-  mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
-  writeFileSync(join(home, '.ashlr', 'KILL'), 'kill switch active\n', { mode: 0o600 });
+  home = mkdtempSync(join(tmpdir(), 'ashlr-m410-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
   fenceBarrier.beforeAcquire = undefined;
+  const seeded = setKill(true, { waitMs: 500 });
+  if (!seeded.ok || !seeded.quiesced || !killSwitchOn()) {
+    throw new Error(`M410 fixture failed to seed KILL through policy: ${seeded.reason}`);
+  }
 });
 
 afterEach(() => {

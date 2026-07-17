@@ -5,9 +5,9 @@
  *  - PREFLIGHT-READ-ONLY: `ashlr preflight` / buildReadiness report readiness
  *    (model reachable, enrollment count, kill-switch, daemon not stuck, ~/.ashlr
  *    writeable, sandbox health, git, phantom) and MUTATE NOTHING — enrollment.json
- *    / KILL / daemon.json / sandboxes/ are byte-identical before/after, and no
- *    persistent sentinel is left behind. Model DOWN is a warning, never a crash
- *    or a blocker. Empty enrollment is fine (info, not a blocker).
+ *    / KILL / daemon.json / sandboxes/ are byte-identical before/after, and a
+ *    fresh home never gains ~/.ashlr. Model DOWN is a warning, never a crash or
+ *    a blocker. Valid empty enrollment is fine; degraded enrollment blocks.
  *
  * SAFETY (inherited verbatim from H1/H2/H4/H5/H6):
  *  - ISOLATED HOME per test via the H1 fixture (makeFixture): every ~/.ashlr
@@ -23,6 +23,19 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const privateStorageMocks = vi.hoisted(() => ({ assure: vi.fn() }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) =>
+      privateStorageMocks.assure.getMockImplementation()
+        ? privateStorageMocks.assure(...args)
+        : actual.assurePrivateStoragePath(...args),
+  };
+});
 
 // Hoisted mock of the providers module so buildReadiness/cmdPreflight never make
 // a real network probe. Default: every endpoint DOWN (never throws).
@@ -40,12 +53,15 @@ vi.mock('../src/core/providers.js', () => ({
 }));
 
 // Post-mock (lazy) imports of the REAL surfaces under test.
-import { buildReadiness } from '../src/core/readiness.js';
+import { buildReadiness, checkAshlrWriteable, readEnrollmentState } from '../src/core/readiness.js';
 import { cmdPreflight } from '../src/cli/preflight.js';
 import { loadConfig } from '../src/core/config.js';
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
+import { withPlatform } from './helpers/platform.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
-import { existsSync, readFileSync, readdirSync, chmodSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, chmodSync, statSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 let fx: H1Fixture | undefined;
@@ -79,14 +95,12 @@ function snapshotState(ashlrDir: string): Record<string, string> {
   return snap;
 }
 
-/** List any leftover preflight sentinel files in ~/.ashlr (should be none). */
-function leftoverSentinels(ashlrDir: string): string[] {
-  if (!existsSync(ashlrDir)) return [];
-  return readdirSync(ashlrDir).filter((n) => n.includes('preflight') && n.endsWith('.tmp'));
-}
-
 beforeEach(() => {
   fx = makeFixture();
+  privateStorageMocks.assure.mockImplementation((_path, _kind, mode) => ({
+    ok: true,
+    reason: mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+  }));
   // Default: both local model endpoints DOWN.
   mockProbeEndpoint.mockImplementation(async (id: string, url: string) => ({
     id,
@@ -102,6 +116,7 @@ afterEach(() => {
   fx = undefined;
   vi.restoreAllMocks();
   mockProbeEndpoint.mockReset();
+  privateStorageMocks.assure.mockReset();
 });
 
 describe('h7 preflight — READ-ONLY readiness check', () => {
@@ -132,6 +147,7 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
     expect.hasAssertions();
     // Fresh isolated home: nothing enrolled.
     expect(existsSync(join(fx!.ashlrDir, 'enrollment.json'))).toBe(false);
+    expect(existsSync(fx!.ashlrDir)).toBe(false);
     const cfg = makeCfg({
       models: { lmstudio: 'http://localhost:1234', ollama: 'http://localhost:11434', providerChain: [] },
     } as Partial<import('../src/core/types.js').AshlrConfig>);
@@ -147,7 +163,142 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
     expect(enrollFinding?.severity).toBe('info');
     expect(report.blockers.some((f) => f.id === 'enrollment')).toBe(false);
     expect(report.ready).toBe(true);
+    expect(existsSync(fx!.ashlrDir)).toBe(false);
   });
+
+  it('preserves the healthy enrollment shape and blocks a degraded registry exactly', async () => {
+    expect.hasAssertions();
+    expect(readEnrollmentState()).toEqual({ count: 0 });
+
+    mkdirSync(fx!.ashlrDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fx!.ashlrDir, 'enrollment.json'), '{"repos":"invalid"}\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+
+    expect(readEnrollmentState()).toEqual({
+      count: 0,
+      degraded: true,
+      reason: 'malformed-registry',
+    });
+
+    const report = await buildReadiness(makeCfg());
+    expect(report.ready).toBe(false);
+    expect(report.blockers).toContainEqual({
+      id: 'enrollment',
+      severity: 'blocker',
+      detail: 'enrollment registry degraded: malformed-registry',
+      fix: 'Repair ~/.ashlr/enrollment.json before running autonomy.',
+    });
+    expect(report.info.some((finding) => finding.id === 'enrollment')).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects an unsafe authority directory without writing through it', async () => {
+    const redirected = join(fx!.home, 'redirected-authority');
+    mkdirSync(redirected, { recursive: true, mode: 0o700 });
+    symlinkSync(redirected, fx!.ashlrDir, 'dir');
+
+    const report = await buildReadiness(makeCfg());
+
+    expect(report.ready).toBe(false);
+    expect(report.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'enrollment', detail: expect.stringContaining('unsafe-ashlr-directory') }),
+      expect.objectContaining({ id: 'ashlr-writeable' }),
+    ]));
+    expect(readdirSync(redirected)).toEqual([]);
+  });
+
+  it('checks a fresh home without creating ~/.ashlr or changing its entries', () => {
+    const before = readdirSync(fx!.home);
+
+    expect(checkAshlrWriteable()).toBe(true);
+
+    expect(existsSync(fx!.ashlrDir)).toBe(false);
+    expect(readdirSync(fx!.home)).toEqual(before);
+  });
+
+  it('fails closed and preserves concurrent state when ~/.ashlr appears during a fresh-home probe', () => {
+    const concurrent = join(fx!.ashlrDir, 'concurrent-state.json');
+    privateStorageMocks.assure.mockImplementation((path, kind, mode) => {
+      if (path === fx!.home && kind === 'directory' && mode === 'inspect-owned') {
+        mkdirSync(fx!.ashlrDir, { mode: 0o700 });
+        writeFileSync(concurrent, '{"preserve":true}\n', 'utf8');
+      }
+      return { ok: true, reason: 'owned-safe-path' };
+    });
+
+    expect(existsSync(fx!.ashlrDir)).toBe(false);
+    expect(withPlatform('win32', () => checkAshlrWriteable())).toBe(false);
+    expect(privateStorageMocks.assure).toHaveBeenCalledWith(
+      fx!.home,
+      'directory',
+      'inspect-owned',
+      { anchorPath: join(fx!.home, '..') },
+    );
+    expect(readFileSync(concurrent, 'utf8')).toBe('{"preserve":true}\n');
+    expect(readdirSync(fx!.ashlrDir)).toEqual(['concurrent-state.json']);
+  });
+
+  it('fails closed when Windows authority assurance is unavailable', () => {
+    mkdirSync(fx!.ashlrDir, { recursive: true, mode: 0o700 });
+    const before = readdirSync(fx!.ashlrDir);
+    for (const reason of [
+      'untrusted-item-write',
+      'wrong-owner',
+      'reparse-point',
+      'powershell-unavailable',
+    ]) {
+      privateStorageMocks.assure.mockReset();
+      privateStorageMocks.assure.mockReturnValue({ ok: false, reason });
+      expect(withPlatform('win32', () => checkAshlrWriteable())).toBe(false);
+      expect(privateStorageMocks.assure).toHaveBeenCalledWith(
+        fx!.ashlrDir,
+        'directory',
+        'inspect-owned',
+        { anchorPath: fx!.home },
+      );
+      expect(readdirSync(fx!.ashlrDir)).toEqual(before);
+    }
+  });
+
+  it('fails closed and preserves both directories when existing authority is replaced mid-probe', () => {
+    mkdirSync(fx!.ashlrDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fx!.ashlrDir, 'original-state.json'), '{"original":true}\n', 'utf8');
+    privateStorageMocks.assure.mockReset();
+    const displaced = join(fx!.home, '.ashlr-displaced');
+    privateStorageMocks.assure.mockImplementation(() => {
+      renameSync(fx!.ashlrDir, displaced);
+      mkdirSync(fx!.ashlrDir, { mode: 0o700 });
+      writeFileSync(join(fx!.ashlrDir, 'replacement-state.json'), '{"replacement":true}\n', 'utf8');
+      return { ok: true, reason: 'mock-assured' };
+    });
+
+    expect(withPlatform('win32', () => checkAshlrWriteable())).toBe(false);
+    expect(readFileSync(join(displaced, 'original-state.json'), 'utf8')).toBe('{"original":true}\n');
+    expect(readFileSync(join(fx!.ashlrDir, 'replacement-state.json'), 'utf8')).toBe('{"replacement":true}\n');
+  });
+
+  it.runIf(process.platform === 'win32')('rejects a native permissive authority DACL without changing directory entries', () => {
+    privateStorageMocks.assure.mockReset();
+    mkdirSync(fx!.ashlrDir, { recursive: true });
+    const assurance = assurePrivateStoragePath(
+      fx!.ashlrDir,
+      'directory',
+      'secure-created',
+      { anchorPath: fx!.home },
+    );
+    expect(assurance, assurance.reason).toMatchObject({ ok: true });
+    const permissive = spawnSync('icacls.exe', [fx!.ashlrDir, '/grant', '*S-1-1-0:(OI)(CI)M'], {
+      windowsHide: true,
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+    expect(permissive.status, permissive.stderr).toBe(0);
+
+    expect(checkAshlrWriteable()).toBe(false);
+    expect(readdirSync(fx!.ashlrDir)).toEqual([]);
+  }, 45_000);
 
   it('tolerates a DOWN local model — surfaces a warning, never crashes, never a blocker', async () => {
     expect.hasAssertions();
@@ -170,16 +321,13 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
   });
 
   // Skipped on Windows: this test makes ~/.ashlr non-writeable via chmod(0o500),
-  // but Windows ignores POSIX directory permission bits — the directory stays
-  // writeable, the sentinel write succeeds, and no blocker is produced. The probe
-  // logic (checkAshlrWriteable, a real write+catch) is platform-agnostic and is
-  // covered on macOS/Linux CI where chmod genuinely blocks the write.
+  // but Windows ignores POSIX directory permission bits, so the OS access check
+  // still succeeds. The POSIX permission path is covered on macOS/Linux CI.
   it.skipIf(process.platform === 'win32')('reports a blocker (ready=false, exit 1) when ~/.ashlr is not writeable', async () => {
     expect.hasAssertions();
-    // Force ~/.ashlr to exist but be NON-writeable so the sentinel write fails.
+    // Force ~/.ashlr to exist but be NON-writeable so the OS access probe fails.
     // (loadConfig() below would otherwise create it; create it ourselves first.)
     const ashlrDir = fx!.ashlrDir;
-    const { mkdirSync } = await import('node:fs');
     if (!existsSync(ashlrDir)) mkdirSync(ashlrDir, { recursive: true });
     const before = statSync(ashlrDir).mode;
     chmodSync(ashlrDir, 0o500); // r-x: no write
@@ -248,7 +396,7 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
 
   it(
     'PREFLIGHT-READ-ONLY: enrollment.json / KILL / daemon.json / sandboxes/ are ' +
-      'byte-identical before vs after a preflight run, and no sentinel file is left behind',
+      'byte-identical and authority directory entries are unchanged after a preflight run',
     async () => {
       expect.hasAssertions();
       // Seed some real state: enroll a disposable repo + flip the kill switch on
@@ -256,9 +404,11 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
       const repo = fx!.makeRepo();
       repo.enroll();
       fx!.setKill(true);
+      loadConfig();
 
       const ashlrDir = fx!.ashlrDir;
       const before = snapshotState(ashlrDir);
+      const entriesBefore = readdirSync(ashlrDir).sort();
 
       mockProbeEndpoint.mockImplementation(async (id: string, url: string) => ({
         id,
@@ -279,10 +429,9 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
       expect(after['KILL']).toBe(before['KILL']);
       expect(after['daemon.json']).toBe(before['daemon.json']);
       expect(after['sandboxes/']).toBe(before['sandboxes/']);
+      expect(readdirSync(ashlrDir).sort()).toEqual(entriesBefore);
       // The enrolled repo is still enrolled (preflight never unenrolled it).
       expect(repo.isEnrolled()).toBe(true);
-      // No transient writeable-probe sentinel was left behind.
-      expect(leftoverSentinels(ashlrDir)).toEqual([]);
     },
   );
 });

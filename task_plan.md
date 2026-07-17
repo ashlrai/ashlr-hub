@@ -7,7 +7,8 @@
 - [x] Verify 261 focused tests, typecheck, scoped lint, build, dependency audit, and diff checks locally.
 - [x] Land protected fixture hotfix PR #56 and require a green five-job post-merge master run.
 - [x] Merge master into PR #31, retarget it, require fresh exact-head and post-merge CI, and merge it normally.
-- [ ] Retarget and merge PR #32 with fresh exact-head and post-merge CI, then apply the pre-tested M402/M49 resolution to PR #33.
+- [x] Retarget and merge PR #32 with fresh exact-head and post-merge CI.
+- [ ] Retarget and merge PR #33 with the verified M402/M49 resolution and fresh exact-head/post-merge CI.
 - [ ] Continue in conflict-minimizing order: #34, #36, #38-#53, #35, then #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
@@ -2255,3 +2256,260 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Repair two M141 fixtures exposed by the first exhaustive pass that constructed future `01:00Z` rows during the UTC-midnight hour.
 - [x] Pass the exhaustive hermetic suite on the exact candidate: 534 files, 11,238 tests green, and 9 intentional skips in 600.68 seconds.
 - [ ] Commit, push, open a stacked protected PR against `codex/release-native-authority`, and observe the exact-SHA ten-check matrix without merging or deploying.
+
+## Lifecycle Attempt Authority Cycle (2026-07-14)
+- [x] Rehydrate the exact dispatch-attempt proof SHA in an isolated worktree while preserving canonical user edits and production NO-GO state.
+- [x] Bind diagnostic empty-diff and proposal-created lifecycle transitions to canonical immutable dispatch receipts.
+- [x] Make daemon dispatch production persistence precede lifecycle adoption and withhold settlement/cooldown authority on incomplete writes.
+- [x] Add receipt-complete generation resolution that avoids global partition scans and remains valid across long outages and mature ledgers.
+- [x] Reconcile crash-persisted empty and proposal attempts directly from exact generation receipts without trusting caller-only evidence.
+- [x] Preserve generation authority across unchanged parent recurrence and current writer activation rollover.
+- [x] Make terminal treatment publication immutable, idempotent, proof-revalidated, and recoverable after acknowledgement-save failure.
+- [x] Keep proofless legacy terminal rows observable and unpublished without mutating them during reads.
+- [x] Restore acknowledgement compatibility by requiring an exact already-durable treatment receipt and terminal attempt proof.
+- [x] Add native Windows receipt-path coverage plus adversarial lifecycle, recovery, replay, corruption, and portability tests.
+- [x] Pass the focused authority matrix: 7 files, 570 tests; typecheck, build, zero-error scoped lint, dependency audit, and diff checks.
+- [ ] Pass the final exhaustive hermetic suite and independent final review on the exact candidate.
+- [ ] Commit, push, open a protected stacked PR against `codex/dispatch-attempt-proof`, and observe the exact-SHA matrix without merging or deploying.
+
+## Authority Re-Review And Repair-Amplification Cycle (2026-07-15)
+- [x] Rehydrate the isolated authority worktree, canonical user edits, green stacked PRs, immutable production release, and Entire state.
+- [x] Run fresh adversarial reviews after the initial focused-green result instead of treating test counts as release authority.
+- [x] Fix terminal caller forgery, oversized-partition publication, rollback-marker adoption, generation-bound retention, and lifecycle memory amplification.
+- [x] Fix stale FleetStatus action authority and the disabled-auto-merge false-idle contradiction.
+- [x] Close post-retention protocol rollback, missing-protocol quality, alias-family reservation expansion, and pre-dispatch degraded-source blockers.
+- [x] Preserve proposal authority through lifecycle alias merges and finish retained-proof fallback on exact v5/v4 writer output.
+- [x] Establish treatment receipt/retention-marker DACLs in the real writer and include exact-DACL cases in the native selector.
+- [x] Finish full crash-state fixture validation and reduce lifecycle serialization memory headroom.
+- [x] Close ordinary/diagnostic outbox separation, schema-v1 acknowledgement migration, pre-spend attempt-quality refusal, stale diagnostic duplicate authority, and split alias-family degradation.
+- [x] Re-run corrected focused integration plus typecheck, changed-file lint, build, dependency audit, and diff checks.
+- [ ] Run the exact native Windows selectors, exhaustive hermetic suite, and final independent review on this corrected tree.
+- [ ] Update exact counts, commit/push a protected stacked PR, and keep production, auto-merge, self-merge, release, tag, and deploy unchanged/NO-GO.
+
+## Next P2 - Enrollment Read Truth
+- [x] Add a read-only typed enrollment-registry snapshot that distinguishes missing-empty from malformed/degraded authority without invoking mutation recovery.
+- [x] Propagate degraded enrollment into FleetStatus queue source quality, autonomous ship readiness, readiness preflight, and doctor; never render it as healthy-zero.
+- [x] Preserve the legacy `listEnrolled(): string[]` compatibility contract while adding explicit policy, M49, readiness, and doctor regressions.
+- [x] Reject symlinked or identity-changing `.ashlr` authority directories and make the writeability sentinel exclusive, no-follow, inode-bound, and replacement-safe.
+- [x] Prove prepared enrollment transactions remain byte-identical under read-only snapshots and repair a stale daemon fixture without weakening production tier or settlement checks.
+- [x] Pass the exact exhaustive suite: 534 files, 11,387 tests green, 11 intentional skips, 0 failures in 656.17 seconds under the unchanged 900-second hard cap.
+- [ ] Run the exact selectors on a native Windows host; the macOS replay passed 733 selector executions with 565 platform skips/filters but is not Windows authority.
+
+## Next P0 - Root-Bound Repair Admission
+- [ ] Add explicit metadata-only repair root identity and depth to work items and proposals; never infer lineage from titles.
+- [ ] Enforce one active repair per root and an initial maximum repair depth of one, with legacy unknown-root repairs withheld fail closed.
+- [ ] Unify capture/no-diff admission by root objective and make terminal pruning projection-complete and failure-visible.
+- [ ] Add root-level amplification and escape-funnel metrics: roots, descendants, depth, cap denials, proposal, verification, merge, and stable-window outcomes.
+- Live evidence: 68/80 queue rows are generated repairs, reconstructed chains reach depth 15, seven roots have multiple queued descendants, and one root has 20 rows.
+
+## Ruthless Operational Readiness Audit (2026-07-15)
+- [x] Recheck live daemon, guards, queue, verifier coverage, resource posture, attempts, trajectories, merges, and learning sources instead of relying on prior green tests.
+- [x] Confirm the fleet is safe and observable but not fully autonomous: 0 dispatch attempts, 0 trajectories, 0 merges, and 0 realized outcomes in the current 24-hour window.
+- [x] Quantify historical proposal yield: 372 dispatch outcomes produced 15 proposals (4.0%); 171 were empty diffs, 100 gate-blocked, 29 capture errors, and 175 repair attempts.
+- [x] Confirm all 24 enrolled repositories have valid explicit merge contracts, while 19 are silent and 53/74 visible backlog rows are concentrated in Phantom.
+- [x] Keep production merge authority disabled while the candidate still has open P1 findings and lacks native Windows/exhaustive evidence.
+- [ ] Close the final readiness, handoff, dispatch, lifecycle, repair-root, and proposal-source completeness findings with focused adversarial tests.
+- [ ] Re-run exact static, focused integration, exhaustive, local selector, and native Windows gates on one frozen tree.
+- [ ] Run a proposal-production canary with root-depth one, production-velocity routing, and explicit throughput SLOs before any auto-merge activation.
+- [ ] Activate docs/additive-test auto-merge only after protected remote preflight and complete causal/post-merge evidence; source changes remain gated.
+
+### Operating Decision
+- Optimize useful closed-loop throughput, not tick count, memory volume, goal count, or raw agent concurrency.
+- The next canary must produce at least 20 unique root attempts, at least 5 merge-grade proposals, greater than 30% proposal yield, 100% causal spine coverage, and no repair descendant deeper than one.
+- Recursive learning requires route -> attempt -> proposal/no-proposal -> verification -> protected merge/rejection -> stable/adverse post-merge classification. Event collection without realized outcomes is observational telemetry, not self-improvement.
+
+### Audit Checkpoint Result
+- [x] Restore complete proposal authority for the current 671-file inbox under the bounded 4,096-file/64-MiB reader contract.
+- [x] Make readiness writeability checks genuinely read-only and close degraded enrollment action authority.
+- [x] Close the reviewed lifecycle proposal-fence, duplicate-row, commit-marker, terminal-reader, and retained-receipt races.
+- [x] Close the reviewed handoff replay, durability, combined-source, torn-tail, capacity, compaction, and burst-test defects.
+- [x] Add canonical root/depth metadata, fail-closed legacy handling, root-local contention, atomic root admission, and reservation binding.
+- [x] Pass the seven-file integrated authority matrix: 578 tests green with 6 intentional platform skips, plus typecheck, quiet lint, build, zero-vulnerability audit, and diff checks.
+- [ ] Close remaining P1s: retired treatment identities suppress raw rows; compaction allocation is aggregate-bounded; native Windows covers the protocol-anchor DACL; failed-attempt receipts remain exact beyond 24 hours.
+- [ ] Run exhaustive hermetic and native Windows verification on one frozen tree before staging, commit, push, or PR.
+
+## Adversarial Authority Closure - Second Pass (2026-07-15)
+- [x] Make raw treatment rows non-terminal and require canonical immutable treatment receipts for terminal authority.
+- [x] Bound treatment compaction allocations and add exact receipt recovery beyond capped raw analytics history.
+- [x] Add root-scoped execution reservations so a crash-left marker fences every descendant of the same repair root.
+- [x] Reconstruct exact diagnostic and ordinary success outcomes after receipt-before-lifecycle crashes; keep receiptless failures reserved and fail closed.
+- [x] Bind ordinal-two alternate attempts to the failed ordinal-one backend and strip resident-safe persistence classification after any later critical persistence failure.
+- [x] Pass the first corrected integrated matrix: 593 tests with six intentional platform skips, plus typecheck, quiet lint, build, zero-vulnerability audit, and diff checks.
+- [x] Independently reject the implementer-green ledger after finding four additional P1s: retirement resurrection after raw partition deletion, duplicate raw events across failure-intent crashes, undiscoverable valid receipt sets above 256, and per-file Windows DACL probes hidden behind a batch preflight.
+- [ ] Preserve root/depth on generic success receipts and close the current four M201 integration failures; latest evidence is 211/215 green.
+- [ ] Close all four fresh ledger P1s with exact crash, deletion, maximum-cardinality, and native-DACL selector coverage.
+- [ ] Run fresh independent reviews of the corrected daemon/lifecycle and ledger/storage trees; focused green tests alone are insufficient.
+- [ ] Freeze one exact tree, rerun the full focused matrix and static gates, then run the 534-file exhaustive suite with the 900-second hard cap and a 720-second silent-run allowance.
+- [ ] Replay every Windows selector locally and require protected native Windows authority before staging, commit, push, or PR.
+
+### Corrected Tree Checkpoint
+- [x] Close treatment retirement resurrection after raw partition deletion, duplicate failure events across intent crashes, 2,048-receipt discovery, and hidden per-file Windows DACL probes.
+- [x] Separate modern exact treatment authority from bounded raw analytics; preserve raw fallback only for legacy schema v1.
+- [x] Recover failure-intent appends from exact offset, digest, physical file identity, size, and timestamps without scanning an oversized partition or assuming absence.
+- [x] Keep persistent treatment publication failure visible across no-backlog and all-skipped ticks until exact recovery, with critical persistence failures dominating resident-safe classification.
+- [x] Make ordinal-two diagnostic success publishable from its lifecycle capsule, bind alternate failures across legitimate generation aliases, and keep ordinary proposal lifecycle authority valid after raw partition cap, rotation, or deletion.
+- [x] Pass the corrected eight-file authority matrix: 624 tests green, six intentional platform skips, zero failures in 103.14 seconds.
+- [x] Pass typecheck, quiet full lint, production build, zero-vulnerability dependency audit, and `git diff --check` on the corrected tree.
+- [x] Migrate bounded schema-v1 retirement into exact modern tombstones before protocol mutation; preserve authority after raw deletion and fail closed with prior bytes unchanged on incomplete legacy history.
+- [x] Require exact aggregate membership for every compact treatment marker; committed readers reject orphan, extra, missing, conflicting, unsafe, replaced, or mutated markers.
+- [x] Separate objective control families, compatible active evidence aliases, and strict parent-row proof aliases; restore split-family degradation and writer-rollback queue suppression.
+- [x] Add the missing native Windows selectors for append crash, oversized offset recovery, mutation/refusal, and maximum-cardinality batch assurance.
+- [x] Pass the final corrected eight-file authority matrix: 639 tests green, six intentional platform skips, zero failures in 137.90 seconds.
+- [x] Pass final typecheck, quiet full lint, production build, zero-vulnerability dependency audit, and `git diff --check`.
+- [x] Receive SHIP from the final alias/control review and the one-question compact-membership review on this exact tree.
+- [x] Run the exhaustive 534-file hermetic suite with the 900-second hard cap and 720-second silent-run allowance: 11,470 passed, 17 skipped, six failed across two files in 821.95 seconds.
+- [x] Close the exhaustive regressions: pin the M402 canary fixtures to an injected active clock and preserve canonical root/depth metadata in the M170 repair fixture without weakening production checks.
+- [x] Rerun the corrected files, expanded authority matrix, static gates, and full exhaustive on one unchanged tree: 534 files, 11,476 passed, 17 skipped, zero failures in 756.28 seconds.
+- [x] Replay every exact Windows workflow selector locally: 751 passed, 739 platform/filter skips, zero failures across all three portability partitions and both native authority steps.
+- [ ] Require protected native Windows authority before staging, commit, push, or PR.
+
+### Ruthless Product Verdict
+- Ashlr Hub is a high-assurance autonomous control plane, not yet a high-output autonomous product factory.
+- Current autonomy grade is approximately 3/10; safety and observability are approximately B+.
+- The audited 24-hour window produced zero dispatch attempts, trajectories, evidence packs, merges, or realized outcomes despite healthy daemon and guard processes.
+- The current optimization target is `stable realized improvements/week`; an initial credible target is three to five, with proposal yield above 30% in the bounded 20-root canary.
+- Agent count, event volume, queue size, and memory count are not success metrics. Do not expand generation until repair depth is one, active goals are capped at four, source authority is healthy, and the escape funnel closes through protected merge plus stable/adverse post-merge classification.
+
+## Next P0 - Realized Learning Eligibility
+- [ ] Add an observation-only `LearningEligibilityV1` projection joining dispatch, proposal/no-proposal, verification, protected merge/rejection, and stable/adverse/inconclusive outcome by authenticated identity.
+- [ ] Persist the complete evaluated candidate-set digest, eligibility/refusal vector, policy version/epoch, and selection-propensity availability without raw prompts, diffs, output, environment, or repository contents.
+- [ ] Keep `policyEligible:false` and `recursiveLearningEligible:false` until denominator completeness, stable/adverse precedence, and multi-epoch sample gates are independently proven.
+- [ ] Stop learned-router positive credit at merge realization; consume realized post-merge outcomes only after the eligibility contract becomes authoritative.
+
+## Next P0 - Judge-Free Enforcement Closure
+- [ ] Expand test-weakening protection to every merge, canary, provenance, mutation-fence, and rollback-control suite; prove assertion removal is detected for each protected file.
+- [ ] Require producer-v2 provenance bound to proposal, repository, source revision, route, and diff identity; sign the evidence pack itself and reject legacy-only evidence for judge-free authority.
+- [ ] Require a safe minimum branch-protection policy, including strict checks, admin enforcement, no bypass actors, no force pushes/deletions, and explicit signature policy.
+- [ ] Constrain the first enforceable canary to the deterministic docs-only classifier and implement serialized admission, confirmed host enable/cancel, deterministic rollback, and external rollback-resistant freshness.
+
+## PR #33 Native Windows Authority Repair (2026-07-15)
+- [x] Publish lifecycle attempt authority as `d3f534b` on protected stacked PR #33 without merging, releasing, deploying, or enabling auto-merge.
+- [x] Diagnose the exact-SHA Windows failure as one shared root cause: the outward lock recursively created inherited-ACL `.ashlr` state before enrollment could exact-inspect it.
+- [x] Secure fresh `.ashlr` and `.ashlr/authority` directories before local lock creation; inspect pre-existing directories without rewriting them and refuse unsafe roots or fence children.
+- [x] Bind partial and full registry recovery mutations to the originally verified `.ashlr` filesystem object.
+- [x] Add native proofs for exact fresh-root/fence DACLs, unchanged permissive-root refusal, and permissive nested-fence refusal; keep selector alternatives unique and manifest-bound.
+- [x] Repair Windows fixture isolation in M2/M113 and the missing-HOME assumptions exposed in M271/M273/M274 without weakening production authority.
+- [x] Pass focused authority verification: 119 passed with four platform skips; the eight exhaustive regressions were repaired and all 23 affected drain/judge tests pass.
+- [x] Pass typecheck, full lint with the existing warning baseline only, build, zero-vulnerability audit, and diff checks.
+- [x] Pass the corrected exhaustive suite: 534 files, 11,476 passed, 20 intentional skips, zero failures in 747.99 seconds.
+- [x] Receive independent SHIP on the final security boundary with no P0/P1 findings under the declared current-user/SYSTEM/Administrators trust model.
+- [x] Push correction `594a5c4`; both protected macOS jobs passed, while duplicate Windows portability 3/3 jobs crossed the five-minute no-output watchdog before their first file result.
+- [x] Add real per-test dot progress to Windows portability 3/3 without synthetic heartbeats or a larger timeout; bind it in M30 and replay the exact selector locally (170 passed, one platform skip).
+- [x] Close the genuine Windows 1/3 and 2/3 fixture failures with coherent home authority, production-secured roots, and exact environment restoration; do not relax production gates or timeouts.
+- [x] Amortize repeated Windows first-use ACL proof only for the same exact root and authority filesystem objects, with replacement/different-root/unsafe-root regressions.
+- [x] Remove quadratic byte counting from the M360 100,000-record cap fixture; the exact case now completes in 1.91 seconds and full M360 passes in 20.54 seconds.
+- [x] Replay all three local Windows partitions and native alias authority: 285+213+170+31 assertions passed with two intentional platform skips.
+- [x] Pass the final frozen exhaustive suite: 534 files, 11,479 passed, 20 intentional skips, zero failures in 750.66 seconds.
+- [x] Push the reporter correction as `c0cbe59`; protected macOS passed, while Windows portability 1/3 exposed three remaining permissive legacy fixtures.
+- [x] Repair M403/M415/M422 through production-secured roots and exact private artifact assurance; combined focused verification is 29/29 and the exact local Windows 1/3 contract is 285 passed with one intentional skip.
+- [x] Move first-use ACL setup outside timed M23/M411 test bodies and secure the M426 real root before its junction alias without changing production gates or test timeouts.
+- [x] Preserve the required Windows 3/3 check while splitting its active-progress workload into a bounded overflow job; local contracts pass 66/66 and 104 with one platform skip.
+- [x] Close `e45a583` native 1/3 and overflow fixture findings without production or timeout changes; six-file integration is 61/61 and corrected local contracts are 285+104 with two platform skips.
+- [x] Close the final native 2/3 authority/path separation findings and amortize M315 real private-storage proof without weakening handoff semantics; corrected 2/3 is 213/213 and 3/3 is 66/66 locally.
+- [x] Remove the final M315 runner-speed race by splitting its real authority proof into bounded hooks without increasing hook, test, idle, or hard-runtime budgets.
+- [x] Close the `fa2e010` duplicate-run fixture costs in M2/M23/M220/M411/M415/M418/M422, and make M426 spell the retained Git registration through an alias without placing mutation authority behind that alias.
+- [x] Replay the corrected local Windows contracts on one tree: 1/3 passes 285 with one skip, 2/3 passes 213, 3/3 passes 66, and overflow passes 104 with one skip; typecheck, build, zero-vulnerability audit, and diff checks pass.
+- [x] Classify the `fcc12d0` native-only failures: M201/M342/M423 repeated PowerShell DACL work, M22 split Windows home authority, and M426 synthetic retained-registration behavior; no production authorization regression was found.
+- [x] Preserve explicit real native proofs while moving redundant semantic cases onto Windows-only private-storage adapters; make M22 coordinate all home variables and make M426 use Git-native locked alias retention.
+- [x] Pass the five-file correction matrix with 424 assertions green and four platform skips, plus typecheck, full lint at the existing warning baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
+- [x] Classify `4957f59`: every Ubuntu, macOS, overflow, and 3/3 duplicate passed; the remaining native selector failures were confined to M22/M342/M360/M362 fixture authority and M23/M426 Windows Git/runtime behavior.
+- [x] Preserve real native-DACL proofs while scoping semantic adapters, keep M22's local authority adapter live, move M23 bootstrap into fixture setup, and make M426's rollback race production-monitor-owned.
+- [x] Pass the corrected eight-file integration (643 passed, six skipped), exact native path/lifecycle selector (52 passed), 2/3 (213), 3/3 (66), native alias (31), and all static/security gates.
+- [x] Push `7d4e637` and classify its remaining duplicate failures: one fail-closed M315 authority acquisition plus M342 batch timeout and incomplete M360/M362 semantic adapter coverage.
+- [x] Keep single-path assurance at five seconds, give bounded batch assurance the 15-second ceiling, remove M315's redundant DACL proof, and preserve dedicated native authority in M379/H4 plus explicit lifecycle proofs.
+- [x] Pass M315/M342/M360/M362/M379 (387 passed, seven skipped), exact 3/3 (66 passed), typecheck, changed-file lint, and diff checks.
+- [x] Classify both 2/3 duplicates: Windows Git legitimately removed the locked alias registration, and one unrelated M426 path case exhausted its 15-second body on redundant DACL startup.
+- [x] Fault-inject only worktree remove/prune after a real alias registration, prove residual inventory and attempted cleanup, and keep M426 path semantics behind the real mutation fence with dedicated ACL proofs elsewhere.
+- [x] Pass full M426 (19/19), M23+M426 integration (49/49), typecheck, changed-file lint, and diff checks.
+- [x] Pass full lint at the existing warning baseline, build, zero-vulnerability audit, and independent final SHIP review with no P0/P1 findings.
+- [x] Classify `a5ce1a7`: Ubuntu exhaustive, macOS shared-queue authority, Windows overflow, and Windows 3/3 passed in both duplicate runs; native 1/3 retained 24 lifecycle failures and native 2/3 retained one cleanup-injection failure.
+- [x] Isolate M342/M360/M362 into independent hermetic Vitest processes while preserving the exact manifest, selector set, five-minute idle watchdog, and one aggregate 15-minute hard cap.
+- [x] Replace the still-bypassed Windows cleanup shim with deterministic remove/prune fault injection at the production `execFileSync` boundary; preserve real Git creation, alias spelling, locks, inventory, branch deletion, and postcondition reads.
+- [x] Isolate the remaining M342 failures to its three deliberate real-DACL cases, grant only that native test adapter the existing 15-second bounded ceiling, and keep production's five-second default unchanged.
+- [x] Remove unrelated Windows ACL startup from M413 cancellation/finalization semantics while retaining the real mutation fence, kill-switch, cancellation, and cleanup authority.
+- [x] Pass the checked-in native lifecycle command (52 selected assertions), full M342 (137 passed, four skipped), full M426 (19/19), exact 2/3 (213/213), M413 (1/1), M30 (7/7), typecheck, full lint at the unchanged baseline, build, zero-vulnerability audit, diff checks, and independent SHIP review.
+- [x] Classify `c4fe878`: M413 is green in both 2/3 duplicates, while setup-time module caching bypasses the M426 child-process mock and M342's same three exact native assertions remain unresolved despite the test-only 15-second ceiling.
+- [x] Replace M426 injection with a fault-only `gitRun` pre-execution hook that cannot mutate argv, suppress a permitted command, or fabricate Git output; reset in both `finally` and `afterEach`.
+- [x] Add authenticated native diagnostics for M342 intent DACL, broadened directory reasons, and the 512-file retention batch preflight without weakening any expected authority outcome.
+- [x] Classify `21e1a57`: both 2/3 jobs exposed a Git-format separator defect in the alias backlink; native M342 exposed an imprecise unsafe-source projection, a timing-dependent durable-intent fixture, and Administrator-owned manually seeded receipts. One PR-native run also exceeded two five-second M201 junction cases.
+- [x] Write alias backlinks in Git `/` syntax with exact porcelain assertions, inject the attempt crash after the durable intent fsync, preserve `source-unsafe` in the batch resolver, normalize only the manually seeded receipt owners, and grant the two real junction cases bounded 15-second bodies.
+- [x] Pass combined M201/M342/M426 verification at 373 passed with four platform skips, full M426 at 19/19, M30 at 7/7, typecheck, quiet full lint, and diff checks; receive independent agreement on all three native root causes.
+- [x] Classify `cedb906`: M426 passes both its main and native-alias executions, closing the Git backlink defect. M342 still launches one redundant post-crash PowerShell inspection, its broadened-directory proof retains a five-second body, and its JSON path array is treated as one PowerShell object. Single-duplicate M405/M408/H7 timeout clusters are unrelated runner-load variance.
+- [x] Bind the intent crash hook to the exact path only after production exact inspection and directory fsync, prove existence and bytes without a redundant adapter process, iterate owner paths as scalar static file ACL calls, and grant the multi-adapter directory proof a bounded 60-second native body.
+- [x] Classify `b698317`: both native 1/3 runs now pass every M342 case except the durable-intent setup, which fails before reaching the assured hook on its first attempt. Both directory/owner corrections pass, and macOS, 3/3, and overflow pass in both duplicate runs.
+- [x] Bound durable-intent setup recovery to three attempts and accept only the attempt that reaches the post-exact-inspection/fsync hook with the canonical path, live file, and expected bytes; deterministic authority failures still exhaust the bound and fail.
+- [x] Classify `6407e57`: both native 1/3 runs exhausted all three M342 setup attempts before the assured hook in 202-215 seconds, while both native 2/3 runs completed H7 rollback behavior after its existing deadlines. Treat both as repeated native fixture cost, not runner noise.
+- [x] Make M342's crash attempt ordinal two of the already-admitted generation, route only its exact intent and dot-delimited stage path through the real native adapter, assert the exact two native call tuples, remove retries, and restore full native mode before later DACL proofs.
+- [x] Give H7 one explicit real outward-fence authority proof and use the Windows semantic adapter only for its repeated rollback-behavior cases; preserve every assertion and the existing 5/15-second deadlines.
+- [x] Pass M342/H7/M30 at 156 assertions with four platform skips, full quiet lint, typecheck, build, zero-vulnerability audit, diff checks, and independent SHIP with no P0/P1 findings.
+- [x] Classify `2cd75e1`: H7 passes both native 2/3 duplicates and M342's exact intent stage/final proof passes both native 1/3 jobs; only the later retention recovery trigger still fails after repeated unrelated ACL assurances. Both Ubuntu, macOS, and 3/3 duplicates pass; one PR-only M407 overflow timeout is duplicate-asymmetric.
+- [x] Route only the retention marker's atomic stage rewrite and final canonical path through the real native adapter, assert the exact two calls, restore full native mode, and retain the final real readback inspection.
+- [x] Repass M342/H7/M30 at 156 assertions with four platform skips plus typecheck, focused lint, and diff checks after the retention correction.
+- [x] Classify protected `789ee10`: both native 1/3 duplicates complete retention recovery but record six canonical pre-rewrite inspections before the exact stage/final pair; all 2/3, 3/3, and overflow duplicates pass, while one PR-only macOS M426 marker read races the production destination monitor.
+- [x] Make M342's selective native contract transaction-aware so only the successful stage creation and first post-stage canonical inspection delegate to the real adapter; publish M426's out-of-band randomized-path marker before making the monitored path appear.
+- [x] Pass the corrected M342/M426/H7 integration at 168 assertions with four platform skips, repeat the M426 race case 20/20, and pass typecheck, full quiet lint, build, zero-vulnerability audit, and diff checks.
+- [x] Push `480dcab` and classify its protected duplicates: M342 passes all 17 native cases in both 1/3 jobs, and both 2/3, 3/3, overflow, and macOS jobs pass; completing M342 exposes the same six latent M360 fixture failures in both native 1/3 jobs.
+- [x] Remove M360's hook-name-dependent adapter selection, keep only handoff/proposal prerequisites semantic, and explicitly re-enter native mode for dispatch receipt creation plus the exact lifecycle root, treatment directory, retention file, lifecycle publication, marker, receipt, replay, and read-recovery assertions.
+- [x] Pass full M360 locally at 111 assertions with two platform skips plus typecheck, focused lint, and diff checks.
+- [x] Classify protected `5254ff4`: every Ubuntu, macOS, Windows 2/3, Windows 3/3, and overflow duplicate passes, while both native 1/3 jobs reproduce the same five diagnostic fixture failures plus the dedicated native dispatch prerequisite failure.
+- [x] Bind Windows semantic mode directly to diagnostic fixture construction and natively secure every controlled semantic-created `.ashlr` prerequisite descendant before the dedicated lifecycle transaction.
+- [x] Pass the corrected full M360 locally at 111 assertions with two platform skips plus typecheck, full quiet lint, production build, zero-vulnerability audit, diff checks, and two independent SHIP reviews with no P0/P1/P2 findings.
+- [x] Publish `daa4815` and classify duplicate protected authority: every Ubuntu, macOS, Windows 3/3, and overflow copy passes; both native Windows 1/3 copies reproduce the same six M360 failures, and one Windows 2/3 copy exposes an independent finite-timeout outlier.
+- [x] Split independent blockers into stacked PR #34 (Windows reservation-sweep budget) and PR #35 (verifier PATH authority), with focused/static verification complete.
+- [x] Establish production exact-DACL authority in the repair-handoff store, inode-bind compaction durability, and replace M360's partial module mock with a sentinel-guarded canonical authenticated runner/observer.
+- [x] Pass integrated M360/M362/M379 at 203 assertions with four platform skips plus full quiet lint, typecheck, production build, zero-vulnerability audit, diff checks, and independent security reviews with all P2 requests addressed.
+- [x] Publish the M360 correction as `be0e89a` and classify both protected duplicates: every job except Windows portability 1/3 passes, while M360 returns before proposal persistence at the shared local-store lock.
+- [x] Correct the local-store lock's exact Windows directory/candidate/canonical authority, bind proposal locks to an exact `~/.ashlr` root, and prove lifecycle transition persistence plus contention/release/replacement safety locally.
+- [x] Publish the first lock-authority correction as immutable `4211282` and classify its protected failures without waivers: generic exact-DACL enforcement broke monitoring cursors, proposal persistence regressed on Ubuntu, and fixture contracts exposed changed assurance/config behavior.
+- [x] Make exact private-storage assurance an explicit proposal-only option, preserve generic structural lock hardening, repair the Linux fixtures, and prove post-acquisition ownership/release remain exact and fail closed.
+- [x] Publish corrected immutable `5a96c8d` and classify its narrowed matrix: native M416/Windows 3/3 pass; remaining failures are one zero-wait reclaim bug plus bounded authority-fixture costs and Linux anchor assumptions.
+- [x] Grant one race-safe installation attempt after proven-dead zero-wait reclaim, make authority fixtures cross-platform and cost-bounded, preserve all assertions/deadlines, and pass focused/static plus PR #35 combined verification.
+- [ ] Publish the next immutable SHA and require every duplicate protected job, including native 1/3 authority, to pass before merge consideration.
+
+## Next P0 - Source-Complete GitHub Policy Authority
+- [x] Paginate effective branch rules to exhaustion and refuse truncated, over-limit, or permission-incomplete observations.
+- [x] Bind classic protection to the exact branch's GraphQL rule, including force-push and pull-request bypass allowance completeness, while retaining REST App-bound status-check identities.
+- [x] Preserve ruleset source boundaries and reject unknown pagination, malformed source-local allowances, and incomplete typed-check bindings before flattening can appear authoritative.
+- [x] Re-read the exact branch head, classic rule, and every effective ruleset detail after observation, and fail closed on hybrid snapshots or identity drift.
+- [x] Require exact source-local configured-check bindings with `app_id:-1` any-app semantics while rejecting zero, malformed, duplicate, and conflicting identities.
+- [x] Publish schema-v2 source-complete policy evidence as stacked PR #36 (`d76eb66`), with 133 focused tests, full static gates, and live read-only attestation; no merge authority was enabled.
+- [ ] Add signed evidence-pack v3 after live policy closure, binding evaluator version, policy hash, exact configured checks, and the complete sealed pack digest.
+
+### Remaining Defense In Depth
+- [ ] Add a deterministic parent-replacement recovery test that proves markers and artifacts remain intact after authority-root substitution.
+- [ ] Evaluate atomic Windows directory creation with `Directory.CreateDirectory(path, DirectorySecurity)` to remove the transient inherited-ACL interval even inside the trusted-principal boundary.
+- [ ] Strengthen recovery ABA detection without treating legitimate child-entry ctime changes as parent replacement.
+
+## PR #33 Final Native Fixture Closure (2026-07-16)
+- [x] Publish zero-wait recovery correction `c26a5e9`; both protected duplicates passed macOS, Ubuntu, Windows 2/3, Windows 3/3, and overflow.
+- [x] Classify the sole duplicate hermetic failure as M403 creating enrollment state through a semantic adapter before a native child exact-inspected it.
+- [x] Establish the M403 enrollment registry through the native production path, then restore the semantic adapter only for repeated parent-side contention mechanics; all 14 focused cases pass unchanged.
+- [x] Prove the M403 correction in both protected Windows 1/3 hermetic runs; the child now returns the expected authoritative `unenrolled` result.
+- [x] Classify the remaining duplicate native-step failure as one M310 identity fixture exceeding its unchanged five-second body during repeated exact proposal-lock assurances.
+- [x] Scope the authenticated semantic private-storage adapter to M310's physical alias/canonicalization behavior and restore native mode in `finally`; no production code, assertion, timeout, or exact-DACL proof changes.
+- [x] Isolate the six remaining native M360 failures to its hand-written proposal JSON bypassing production persistence; do not relax locks, DACLs, lifecycle admission, assertions, or deadlines.
+- [x] File M360 authority fixtures through `createProposal()`, reload exact causal bindings through `loadProposal()`, and let production-generated proposal IDs flow into dispatch and lifecycle evidence.
+- [x] Pass full M360 at 111 assertions with two platform skips, H2 proposal persistence at 10/10, typecheck, scoped lint, and diff checks.
+- [x] Publish `cb273a6` and prove production proposal persistence/reload is no longer the native blocker; classify the next refusal as lexical lifecycle repo identity versus writer-canonical dispatch identity.
+- [x] Canonicalize lifecycle diagnostic proof targets through the writer's exact identity function, retain strict receipt comparison, and add ordered admission-stage plus immutable-witness regression proof.
+- [x] Repass full M360 at 111 assertions with two platform skips plus typecheck, focused lint, production build, and diff checks on the corrected tree.
+- [x] Use protected `8e65fdd` to prove canonical receipt targeting reaches terminal proof construction on Windows and isolate the remaining refusal to lifecycle-ledger persistence.
+- [x] Correct the retained-live-receipt regression assumption and extend bounded test-only tracing across proposal binding, record construction, save outcome, and exact caught persistence error.
+- [x] Use protected `98f9e15` to identify Windows directory-fd `fsync` `EPERM` as the final persistence refusal after valid lifecycle record construction.
+- [x] Replace the lifecycle's duplicate raw directory fsync with the shared identity-validating Windows-aware durability primitive, preserving exact DACL inspection and all rollback/file-fsync guarantees.
+- [x] Use protected `f4adc11` to prove Windows persistence succeeds and reduce native M360 from six failures to two post-success fixture expectations.
+- [x] Reconstruct a genuine pre-protocol v2 tombstone fixture and require the successful transaction's post-commit lifecycle-file DACL inspection without changing production authority.
+- [x] Trace the final native DACL mismatch to four exact stable-read/exact-DACL pairs and replace broad mode predicates with exact ordered transaction assertions.
+- [x] Require all four installed-ledger inspections in the successful native recovery-read sequence exposed by `41797c2`.
+- [x] Raise only the complete native DACL integration test's measured timeout from 60 to 120 seconds after `3318f0d` reached the ceiling with no assertion failure.
+- [x] Set the same isolated native test to a 240-second bounded budget after `b7e5cad` measured the full real-PowerShell transaction at roughly 131 seconds.
+- [x] Use protected `5750932` to prove M360 green and isolate the next native blocker to duplicate raw directory-fd fsync calls in repair-handoff append and compaction.
+- [x] Route both repair-handoff directory durability sites through the shared Windows-aware identity-validating primitive without relaxing file or directory authority.
+- [ ] Require every protected job on the final immutable PR #33 SHA before merge consideration.
+
+## Next P0 - Safe-Minimum Protected-Remote Policy V1
+- [x] Select a pure versioned policy evaluator as the next authority slice after PR #36 source-complete observation.
+- [ ] Require strict App-bound checks, admin enforcement, zero bypass actors, force-push/deletion prohibition, and explicit signature policy across source-local classic/ruleset evidence.
+- [ ] Re-evaluate at every force-fresh remote checkpoint and project unsafe or unknown policy as unavailable.
+- [ ] Publish as a stacked PR on #36 only after exhaustive policy, drift, status, static, and protected verification.
+- [ ] Add signed evidence-pack v3 only after the evaluator is authoritative.

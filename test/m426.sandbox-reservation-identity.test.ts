@@ -15,10 +15,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve, win32 } from 'node:path';
+import { delimiter, dirname, join, relative, resolve, win32 } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  _setSandboxGitRunFaultHookForTest,
   canonicalPathIdentity,
   createSandbox,
   listSandboxes,
@@ -26,11 +27,29 @@ import {
   sandboxesDir,
   sweepOrphanSandboxesDetailed,
 } from '../src/core/sandbox/worktree.js';
+import {
+  acquireOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import { enroll, isEnrolled } from '../src/core/sandbox/policy.js';
 import type { Sandbox } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 vi.setConfig({ testTimeout: 15_000 });
+
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? { ok: true, reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl' }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
 
 interface PublicationObservation {
   metadataExists: boolean;
@@ -111,7 +130,7 @@ function realGitPath(): string {
 }
 
 function installGitShim(
-  mode: 'observe-add' | 'registration-noop' | 'common-dir-alias' |
+  mode: 'observe-add' | 'common-dir-alias' |
     'retarget-source' | 'retarget-common-dir' | 'retarget-during-worktree-add' |
     'retarget-sandbox-home' | 'retarget-sandbox-parent' | 'observe-pinned-argv' |
     'hang-worktree-descendant' | 'retarget-after-worktree-add' |
@@ -146,21 +165,16 @@ if (mode === 'observe-pinned-argv' && worktreeIndex >= 0 && args[worktreeIndex +
   fs.writeFileSync(process.env.M426_MARKER, JSON.stringify(args));
 }
 
-if (mode === 'registration-noop') {
-  if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) process.exit(0);
-  if (args[0] === 'branch' && args[1] === '-D') process.exit(0);
-  if (args[0] === 'show-ref' && args.at(-1)?.startsWith('refs/heads/ashlr/sandbox/')) process.exit(1);
-}
-
 if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
     args[worktreeIndex + 1] === 'add') process.exit(1);
 
 if (mode === 'fail-add-then-appear-on-remove' && worktreeIndex >= 0 &&
     args[worktreeIndex + 1] === 'remove') {
   const worktree = args[worktreeIndex + 3];
-  fs.mkdirSync(worktree, { recursive: true });
   fs.writeFileSync(process.env.M426_MARKER, worktree);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+  fs.mkdirSync(worktree, { recursive: true });
+  // The destination monitor owns termination once it observes the appeared path.
+  for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 }
 
 if (mode === 'common-dir-alias') {
@@ -313,10 +327,17 @@ function makeDirectoryAlias(target: string): string {
   return alias;
 }
 
+function prepareSandboxAuthorityRoot(): void {
+  const fence = acquireOutwardMutationFence();
+  if (!fence) throw new Error('M426 fixture could not prepare sandbox authority root');
+  releaseOutwardMutationFence(fence);
+}
+
 beforeEach(() => {
   originalPath = process.env.PATH;
   originalNodeOptions = process.env.NODE_OPTIONS;
   originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   fx = makeFixture();
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
 });
@@ -336,10 +357,15 @@ afterEach(() => {
   delete process.env.M426_SOURCE_GIT_DIR;
   delete process.env.M426_SOURCE_GIT_BACKUP;
   delete process.env.M426_REPLACEMENT_GIT_DIR;
+  _setSandboxGitRunFaultHookForTest(undefined);
   if (originalAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
-  fx.cleanup();
-  cleanupTrackedPaths({ deferTransientWindowsLocks: true, maxRetries: 10 });
+  try {
+    fx.cleanup();
+    cleanupTrackedPaths({ deferTransientWindowsLocks: true, maxRetries: 10 });
+  } finally {
+    privateStorageHarness.useSemanticAdapter = false;
+  }
 });
 
 afterAll(() => {
@@ -368,6 +394,7 @@ describe('M426 sandbox reservation and path identity', () => {
   it('keeps fresh metadata-free homes and reclaims them after a nonzero recovery age', () => {
     const id = 'm426-metadata-free';
     const home = join(sandboxesDir(), id);
+    prepareSandboxAuthorityRoot();
     mkdirSync(home, { recursive: true, mode: 0o700 });
 
     const fresh = sweepOrphanSandboxesDetailed();
@@ -488,13 +515,41 @@ describe('M426 sandbox reservation and path identity', () => {
 
   it('does not report cleanup complete when Git retains an alias-spelled registration', () => {
     const repo = fx.makeRepo();
-    const aliasHome = makeDirectoryAlias(fx.home);
-    process.env.HOME = aliasHome;
-    process.env.USERPROFILE = aliasHome;
-
+    prepareSandboxAuthorityRoot();
     const sandbox = createSandbox(repo.dir, { allowAnyRepo: true });
-    process.env.PATH = originalPath;
-    installGitShim('registration-noop');
+    const aliasHome = makeDirectoryAlias(fx.home);
+    const aliasWorktree = join(aliasHome, relative(fx.home, sandbox.worktreePath));
+    const worktreeGitFile = join(sandbox.worktreePath, '.git');
+    const gitdirRecord = readFileSync(worktreeGitFile, 'utf8').trim();
+    expect(gitdirRecord).toMatch(/^gitdir: /u);
+    const worktreeAdminDir = resolve(
+      sandbox.worktreePath,
+      gitdirRecord.slice('gitdir: '.length),
+    );
+    const registrationGitdir = join(worktreeAdminDir, 'gitdir');
+    const physicalRegistration = readFileSync(registrationGitdir, 'utf8');
+    const gitAliasWorktree = process.platform === 'win32'
+      ? aliasWorktree.replaceAll('\\', '/')
+      : aliasWorktree;
+    const aliasRegistration = `${gitAliasWorktree}/.git\n`;
+    git(repo.dir, [
+      'worktree', 'lock', '--reason', 'M426 retained registration', sandbox.worktreePath,
+    ]);
+    git(sandbox.worktreePath, ['checkout', '--detach']);
+    writeFileSync(registrationGitdir, aliasRegistration, 'utf8');
+    expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
+    const retainedBefore = git(repo.dir, ['worktree', 'list', '--porcelain']);
+    expect(retainedBefore.split(/\r?\n/u).filter((line) => line.startsWith('worktree ')))
+      .toContain(`worktree ${gitAliasWorktree}`);
+    expect(retainedBefore).not.toContain(`worktree ${gitAliasWorktree}/.git`);
+    expect(retainedBefore).toContain('locked M426 retained registration');
+    const attemptedCleanup: Array<{ cwd: string; args: string[] }> = [];
+    _setSandboxGitRunFaultHookForTest((cwd, args) => {
+      if (args[0] === 'worktree' && (args[1] === 'remove' || args[1] === 'prune')) {
+        attemptedCleanup.push({ cwd, args: [...args] });
+        throw new Error(`M426 injected git ${args.slice(0, 2).join(' ')} failure`);
+      }
+    });
     try {
       const result = removeSandbox(sandbox);
       expect(result).toMatchObject({
@@ -503,8 +558,20 @@ describe('M426 sandbox reservation and path identity', () => {
       });
       expect(result.failureClasses).toContain('worktree-remaining');
       expect(existsSync(sandbox.worktreePath)).toBe(true);
+      expect(readFileSync(registrationGitdir, 'utf8')).toBe(aliasRegistration);
+      const retainedAfter = git(repo.dir, ['worktree', 'list', '--porcelain']);
+      expect(retainedAfter.split(/\r?\n/u).filter((line) => line.startsWith('worktree ')))
+        .toContain(`worktree ${gitAliasWorktree}`);
+      expect(branches(repo.dir)).not.toContain(sandbox.branch);
+      expect(attemptedCleanup).toEqual([
+        { cwd: repo.dir, args: ['worktree', 'remove', '--force', sandbox.worktreePath] },
+        { cwd: repo.dir, args: ['worktree', 'prune'] },
+      ]);
     } finally {
+      _setSandboxGitRunFaultHookForTest(undefined);
       process.env.PATH = originalPath;
+      writeFileSync(registrationGitdir, physicalRegistration, 'utf8');
+      try { git(repo.dir, ['worktree', 'unlock', sandbox.worktreePath]); } catch { /* best effort */ }
       try { git(repo.dir, ['worktree', 'remove', '--force', sandbox.worktreePath]); } catch { /* best effort */ }
       try { git(repo.dir, ['worktree', 'prune']); } catch { /* best effort */ }
       try { git(repo.dir, ['branch', '-D', sandbox.branch]); } catch { /* best effort */ }

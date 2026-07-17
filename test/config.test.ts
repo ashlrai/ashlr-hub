@@ -491,8 +491,8 @@ describe('saveConfig', () => {
   it.skipIf(process.platform === 'win32')('fsyncs both the completed file and its directory', () => {
     saveConfig(defaultConfig());
 
-    // Lock owner record, completed config file, and config directory.
-    expect(fsFaults.fsyncCalls).toBe(3);
+    // Lock record/publication, completed config/directory, and lock release.
+    expect(fsFaults.fsyncCalls).toBe(5);
   });
 
   it('uses a unique temporary name in the config directory for each save', () => {

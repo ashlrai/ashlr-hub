@@ -24,11 +24,27 @@ import * as path from 'node:path';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
 
+const privateStorageMocks = vi.hoisted(() => ({ useRealAssurance: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => privateStorageMocks.useRealAssurance
+      ? actual.assurePrivateStoragePath(...args)
+      : { ok: true, reason: 'exact-private-dacl' },
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation — before any module import resolves homedir()
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 const origInDaemon = process.env.ASHLR_IN_DAEMON;
 const origInSwarm = process.env.ASHLR_IN_SWARM;
 
@@ -97,6 +113,11 @@ import {
 import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { loadFleetQuota } from '../src/core/fleet/quota.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -169,6 +190,22 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-repo-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
+
+  privateStorageMocks.useRealAssurance = true;
+  try {
+    const fence = acquireOutwardMutationFence();
+    try {
+      if (!ownsOutwardMutationFence(fence)) {
+        throw new Error('M113 fixture failed to establish private authority roots');
+      }
+    } finally {
+      releaseOutwardMutationFence(fence);
+    }
+  } finally {
+    privateStorageMocks.useRealAssurance = false;
+  }
 
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
@@ -209,7 +246,12 @@ afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
 
-  process.env.HOME = origHome;
+  if (origHome !== undefined) process.env.HOME = origHome;
+  else delete process.env.HOME;
+  if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile;
+  else delete process.env.USERPROFILE;
+  if (origAshlrHome !== undefined) process.env.ASHLR_HOME = origAshlrHome;
+  else delete process.env.ASHLR_HOME;
   if (origInDaemon !== undefined) process.env.ASHLR_IN_DAEMON = origInDaemon;
   else delete process.env.ASHLR_IN_DAEMON;
   if (origInSwarm !== undefined) process.env.ASHLR_IN_SWARM = origInSwarm;

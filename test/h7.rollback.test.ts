@@ -15,7 +15,7 @@
  *  - Every it.todo MUST become a real expect() + expect.hasAssertions() in BUILD.
  */
 
-import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { makeFixture, type H1Fixture, type DisposableRepo } from './helpers/h1-fixture.js';
@@ -29,15 +29,61 @@ import {
   ORPHAN_STALE_MS,
 } from '../src/core/sandbox/worktree.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
+import {
+  acquireOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import type { AuditEntry } from '../src/core/types.js';
 
 const ENV_KEY = 'ASHLR_TEST_ALLOW_ANY_REPO';
+
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+  nativeFenceAcquired: false,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 let fx: H1Fixture | undefined;
 let repo: DisposableRepo | undefined;
 let prevEnv: string | undefined;
 
+beforeAll(() => {
+  const proofFixture = makeFixture();
+  privateStorageHarness.useSemanticAdapter = false;
+  try {
+    const fence = acquireOutwardMutationFence();
+    if (!fence) throw new Error('H7 fixture could not acquire native outward authority');
+    privateStorageHarness.nativeFenceAcquired = true;
+    releaseOutwardMutationFence(fence);
+  } finally {
+    // The rollback cases prove semantics, not the same expensive Windows ACL
+    // adapter invocation twelve times. The native proof above remains explicit.
+    privateStorageHarness.useSemanticAdapter = true;
+    proofFixture.cleanup();
+  }
+}, 45_000);
+
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = true;
   fx = makeFixture();
   prevEnv = process.env[ENV_KEY];
   process.env[ENV_KEY] = '1'; // H5 env-gate: allow makeOrphanSandbox on a tmp repo
@@ -70,6 +116,10 @@ function muteStdout(): void {
 describe('h7 rollback — one-command inward-only undo', () => {
   it('unenrolls the repo (listEnrolled drops the repo) after rollback', async () => {
     expect.hasAssertions();
+    expect(privateStorageHarness.nativeFenceAcquired).toBe(true);
+    if (process.platform === 'win32') {
+      expect(privateStorageHarness.realCalls).toBeGreaterThan(0);
+    }
     const r = repo!;
     r.enroll();
     // Precondition: the disposable repo IS enrolled before rollback.

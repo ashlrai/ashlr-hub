@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const faults = vi.hoisted(() => ({
+  establishPrivateRoot: null as (() => void) | null,
+  secureAuthorityFile: null as ((path: string) => void) | null,
   enrollmentPath: '',
   killPath: '',
   installedRegistry: false,
@@ -20,6 +22,29 @@ const faults = vi.hoisted(() => ({
   openPaths: new Map<number, string>(),
   durabilityEvents: [] as string[],
 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 vi.mock('../src/core/fleet/local-store-lock.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/fleet/local-store-lock.js')>();
@@ -44,6 +69,8 @@ vi.mock('node:fs', async () => {
         (flags & actual.constants.O_CREAT) !== 0 && (flags & actual.constants.O_EXCL) !== 0) {
         faults.raceKillCreate = false;
         actual.writeFileSync(named, faults.raceKillBytes, { mode: 0o600 });
+        if (!faults.secureAuthorityFile) throw new Error('authority file assurer unavailable');
+        faults.secureAuthorityFile(named);
         faults.durabilityEvents.push('racer-created-kill');
         const error = new Error('injected concurrent sentinel create') as NodeJS.ErrnoException;
         error.code = 'EEXIST';
@@ -110,12 +137,25 @@ vi.mock('node:fs', async () => {
   };
 });
 
-vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>(),
-  acquireOutwardMutationFence: () => ({ path: 'm415-fence', token: 'owned', dev: 1, ino: 1 }),
-  ownsOutwardMutationFence: () => true,
-  releaseOutwardMutationFence: () => undefined,
-}));
+vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>();
+  faults.establishPrivateRoot = () => {
+    const fence = actual.acquireOutwardMutationFence();
+    try {
+      if (!actual.ownsOutwardMutationFence(fence)) {
+        throw new Error('production outward mutation fence unavailable');
+      }
+    } finally {
+      actual.releaseOutwardMutationFence(fence);
+    }
+  };
+  return {
+    ...actual,
+    acquireOutwardMutationFence: () => ({ path: 'm415-fence', token: 'owned', dev: 1, ino: 1 }),
+    ownsOutwardMutationFence: () => true,
+    releaseOutwardMutationFence: () => undefined,
+  };
+});
 
 import * as fs from 'node:fs';
 import {
@@ -126,19 +166,38 @@ import {
   listEnrolled,
   setKill,
 } from '../src/core/sandbox/policy.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
 let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
+let previousAshlrHome: string | undefined;
+
+function secureInjectedAuthorityFile(path: string): void {
+  const authorityRoot = process.env.ASHLR_HOME;
+  if (!authorityRoot) throw new Error('ASHLR_HOME unavailable for authority file assurance');
+  const assurance = assurePrivateStoragePath(
+    path,
+    'file',
+    'secure-created',
+    { anchorPath: authorityRoot },
+  );
+  if (!assurance.ok) {
+    throw new Error(`could not secure injected authority file: ${assurance.reason}`);
+  }
+}
 
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
+  previousAshlrHome = process.env.ASHLR_HOME;
   home = join(tmpdir(), `ashlr-m415-${process.pid}-${randomUUID()}`);
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  fs.mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+  process.env.ASHLR_HOME = join(home, '.ashlr');
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
   faults.enrollmentPath = join(home, '.ashlr', 'enrollment.json');
   faults.killPath = join(home, '.ashlr', 'KILL');
@@ -154,13 +213,20 @@ beforeEach(() => {
   faults.failProcessIdentity = false;
   faults.openPaths.clear();
   faults.durabilityEvents.length = 0;
+  faults.secureAuthorityFile = secureInjectedAuthorityFile;
+  if (!faults.establishPrivateRoot) throw new Error('private root initializer unavailable');
+  faults.establishPrivateRoot();
+  faults.openPaths.clear();
 });
 
 afterEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
   if (previousUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = previousUserProfile;
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -198,49 +264,62 @@ describe('M415 policy durability races', () => {
       name.startsWith('.enrollment.transaction.'))).toEqual([]);
   });
 
-  it('keeps a failed permissive install non-authoritative when rollback also fails', () => {
-    const originalRepo = join(home, 'original-repo');
-    const newlyEnrolledRepo = join(home, 'newly-enrolled-repo');
-    fs.writeFileSync(
-      faults.enrollmentPath,
-      `${JSON.stringify({ repos: [originalRepo] }, null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    faults.failPostInstall = true;
-    faults.failRollback = true;
+  describe('failed permissive install recovery', () => {
+    let originalRepo: string;
 
-    const result = enroll(newlyEnrolledRepo);
-
-    expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
-    expect(faults.postInstallFailed).toBe(true);
-    expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(true);
-    expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
-      repos: [originalRepo, canonicalEnrollmentPath(newlyEnrolledRepo)],
+    beforeEach(() => {
+      const realCallsBefore = privateStorageHarness.realCalls;
+      originalRepo = join(home, 'original-repo');
+      fs.writeFileSync(
+        faults.enrollmentPath,
+        `${JSON.stringify({ repos: [originalRepo] }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      secureInjectedAuthorityFile(faults.enrollmentPath);
+      if (process.platform === 'win32') {
+        expect(privateStorageHarness.realCalls).toBeGreaterThan(realCallsBefore);
+        privateStorageHarness.useSemanticAdapter = true;
+      }
     });
-    expect(listEnrolled()).toEqual([]);
-    expect(isEnrolled(newlyEnrolledRepo)).toBe(false);
-    expect(() => assertMayMutate(newlyEnrolledRepo)).toThrow(/not enrolled/i);
 
-    const child = spawnSync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        '--input-type=module',
-        '--eval',
-        `import { isEnrolled, listEnrolled } from ${JSON.stringify(policyModuleUrl)};` +
-          `process.stdout.write(JSON.stringify({ repos: listEnrolled(), enrolled: isEnrolled(${JSON.stringify(newlyEnrolledRepo)}) }));`,
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home, USERPROFILE: home },
-        encoding: 'utf8',
-        timeout: 5_000,
-      },
-    );
-    if (child.error) throw child.error;
-    expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout)).toEqual({ repos: [], enrolled: false });
+    it('keeps a failed permissive install non-authoritative when rollback also fails', () => {
+      const newlyEnrolledRepo = join(home, 'newly-enrolled-repo');
+      faults.failPostInstall = true;
+      faults.failRollback = true;
+
+      const result = enroll(newlyEnrolledRepo);
+
+      expect(result).toMatchObject({ ok: false, changed: false, quiesced: false });
+      expect(faults.postInstallFailed).toBe(true);
+      expect(fs.existsSync(join(home, '.ashlr', 'enrollment.transaction'))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(faults.enrollmentPath, 'utf8'))).toEqual({
+        repos: [originalRepo, canonicalEnrollmentPath(newlyEnrolledRepo)],
+      });
+      expect(listEnrolled()).toEqual([]);
+      expect(isEnrolled(newlyEnrolledRepo)).toBe(false);
+      expect(() => assertMayMutate(newlyEnrolledRepo)).toThrow(/not enrolled/i);
+
+      const child = spawnSync(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          '--input-type=module',
+          '--eval',
+          `import { isEnrolled, listEnrolled } from ${JSON.stringify(policyModuleUrl)};` +
+            `process.stdout.write(JSON.stringify({ repos: listEnrolled(), enrolled: isEnrolled(${JSON.stringify(newlyEnrolledRepo)}) }));`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
+          encoding: 'utf8',
+          timeout: 5_000,
+        },
+      );
+      if (child.error) throw child.error;
+      expect(child.status, child.stderr).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual({ repos: [], enrolled: false });
+    });
   });
 
   it('syncs and validates a concurrently-created sentinel before reporting success', () => {

@@ -5,7 +5,7 @@
  * Asserts summary counts and specific failure conditions.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import type { AshlrConfig, ProviderRegistry, PhantomStatus } from '../src/core/types.js';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync,
@@ -68,6 +68,49 @@ let _providerRegistry: ProviderRegistry = {
   chain: ['lmstudio', 'ollama'],
 };
 
+const privateStorageHarness = vi.hoisted(() => ({
+  adapterHome: null as string | null,
+  adapterAshlrHome: null as string | null,
+}));
+
+// Keep Windows report tests focused on doctor semantics after one real ACL
+// proof below; all other platforms and paths continue through production code.
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  const { isAbsolute, relative, sep } = await import('node:path');
+  const isWithin = (root: string, candidate: string): boolean => {
+    const nested = relative(root, candidate);
+    return nested === '' || (
+      nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)
+    );
+  };
+
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      const [candidate, , mode, options] = args;
+      const { adapterHome, adapterAshlrHome } = privateStorageHarness;
+      const anchor = options?.anchorPath;
+      if (
+        process.platform === 'win32' &&
+        adapterHome !== null &&
+        adapterAshlrHome !== null &&
+        anchor !== undefined &&
+        isWithin(adapterAshlrHome, candidate) &&
+        isWithin(adapterHome, anchor)
+      ) {
+        return {
+          ok: true,
+          reason: mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
+
 vi.mock('../src/core/phantom.js', () => ({
   phantomInstalled: () => _phantomStatus.installed,
   getPhantomStatus: () => _phantomStatus,
@@ -81,6 +124,7 @@ vi.mock('../src/core/providers.js', () => ({
 
 // Import doctor AFTER mocks are registered.
 import { runDoctor } from '../src/core/doctor.js';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
 // spend more than Vitest's 5s default in process startup across a single probe.
@@ -92,10 +136,27 @@ vi.setConfig({ testTimeout: 15_000 });
 
 let tmpHome: string;
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
+const origAshlrHome = process.env.ASHLR_HOME;
 const origPath = process.env.PATH;
 
 function makeTmpHome(): string {
   return mkdtempSync(join(tmpdir(), 'ashlr-doctor-test-'));
+}
+
+function setFixtureHome(home: string): void {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = join(home, '.ashlr');
+}
+
+function restoreFixtureHome(): void {
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
 }
 
 /**
@@ -159,9 +220,32 @@ function makeConfig(tmpH: string): AshlrConfig {
   };
 }
 
+beforeAll(() => {
+  if (process.platform !== 'win32') return;
+
+  const proofHome = makeTmpHome();
+  const proofAshlrHome = join(proofHome, '.ashlr');
+  mkdirSync(proofAshlrHome, { recursive: true });
+  setFixtureHome(proofHome);
+  try {
+    const proof = assurePrivateStoragePath(
+      proofAshlrHome,
+      'directory',
+      'secure-created',
+      { anchorPath: proofHome },
+    );
+    expect(proof).toEqual({ ok: true, reason: 'exact-private-dacl' });
+  } finally {
+    rmSync(proofHome, { recursive: true, force: true });
+    restoreFixtureHome();
+  }
+});
+
 beforeEach(() => {
   tmpHome = makeTmpHome();
-  process.env.HOME = tmpHome;
+  setFixtureHome(tmpHome);
+  privateStorageHarness.adapterHome = tmpHome;
+  privateStorageHarness.adapterAshlrHome = join(tmpHome, '.ashlr');
   installAshlrShim(tmpHome);
 
   // Reset to healthy defaults before each test.
@@ -178,8 +262,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  privateStorageHarness.adapterHome = null;
+  privateStorageHarness.adapterAshlrHome = null;
   rmSync(tmpHome, { recursive: true, force: true });
-  process.env.HOME = origHome;
+  restoreFixtureHome();
   process.env.PATH = origPath;
 });
 

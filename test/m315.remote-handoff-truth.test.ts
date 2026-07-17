@@ -27,6 +27,29 @@ const {
   ghExecMock: vi.fn(),
   localIntentPersistedHookMock: vi.fn(),
 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  useSemanticAdapter: false,
+  realCalls: 0,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      if (process.platform === 'win32' && privateStorageHarness.useSemanticAdapter) {
+        return {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        };
+      }
+      privateStorageHarness.realCalls += 1;
+      return actual.assurePrivateStoragePath(...args);
+    },
+  };
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -111,6 +134,7 @@ import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
 const origAshlrHome = process.env.ASHLR_HOME;
 const origAllowAny = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 let tmpHome: string;
@@ -122,6 +146,24 @@ const TEST_POLICY_SNAPSHOT = {
   classic: { enforceAdmins: true },
   rulesets: [],
 } as const;
+
+function setFixtureEnvironment(home: string): void {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.ASHLR_HOME = path.join(home, '.ashlr');
+  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+}
+
+function restoreFixtureEnvironment(): void {
+  if (origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
+  if (origAllowAny === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAny;
+}
 
 function git(dir: string, args: string[]): string {
   return execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', encoding: 'utf8' }).trim();
@@ -259,9 +301,8 @@ beforeEach(() => {
   tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-')));
   tmpRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-')));
   bareRepo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-bare-')));
-  process.env.HOME = tmpHome;
-  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
-  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  setFixtureEnvironment(tmpHome);
+  privateStorageHarness.useSemanticAdapter = true;
   ghCallsFile = path.join(tmpHome, 'gh-calls.jsonl');
   ghExecMock.mockReset();
   localIntentPersistedHookMock.mockReset();
@@ -339,16 +380,16 @@ beforeEach(() => {
 
 afterEach(() => {
   _setProposalReadRaceHookForTest(undefined);
-  try { unenroll(tmpRepo); } catch { /* ignore */ }
-  try { setKill(false); } catch { /* ignore */ }
-  fs.rmSync(tmpHome, { recursive: true, force: true });
-  fs.rmSync(tmpRepo, { recursive: true, force: true });
-  fs.rmSync(bareRepo, { recursive: true, force: true });
-  process.env.HOME = origHome;
-  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
-  else process.env.ASHLR_HOME = origAshlrHome;
-  if (origAllowAny === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
-  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAny;
+  try {
+    try { unenroll(tmpRepo); } catch { /* ignore */ }
+    try { setKill(false); } catch { /* ignore */ }
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+    fs.rmSync(bareRepo, { recursive: true, force: true });
+  } finally {
+    privateStorageHarness.useSemanticAdapter = false;
+    restoreFixtureEnvironment();
+  }
 });
 
 describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
