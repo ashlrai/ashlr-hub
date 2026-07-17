@@ -1,5 +1,12 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Stack Integration Cycle
+- Protected PR #30 merged to `master` as `827faf6ee3c8f7311e6824466d3d6b478f46cd27` after 10/10 exact-head checks passed. The merge commit preserves the checked candidate tree.
+- Post-merge run `29547392728` passed macOS and every Windows partition. Ubuntu passed 11,203 tests and failed six assertions solely because five M402 canary fixtures and one M49 queued-work fixture had aged beyond their intended observation windows.
+- The hotfix ports only the five time-stability test changes already proven on `5677e1117ded0c8bc2e2a414ad4fa352dfb9c5db`; it changes no production code and preserves exact-deadline, freshness, binding, CAS, and fail-closed assertions.
+- Local verification is green: 261 focused assertions, typecheck, scoped zero-error lint, production build, zero-vulnerability dependency audit, and `git diff --check`.
+- PR #31 remains paused on its original clean head until this hotfix lands and protected post-merge master CI is green. Production remains unchanged with auto-merge, self-merge, canary enforcement, and positive learning disabled.
+
 ## Current Protected Remote Authority Cycle
 - Incident boundary: PR #22 exposed that verification/tier remote-main paths did not require the same live protection evidence as evidence mode. GitHub `master` protection is now strict and App-bound, while production `foundry.autoMerge.enabled` remains deliberately false on immutable release `f178db34fa6e47eb44df9f3db855943db602ef76` with daemon PID 780.
 - Test infrastructure: Vitest 4.1.10 migration PR #26 merged as `450cc7c94e1662ac14acd27df6383ed8cf24afdb` after 10,647 local tests and every protected Ubuntu, macOS, and Windows check passed. Compatibility restores mock clearing/restoration and updates the removed suite-options signature.

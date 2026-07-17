@@ -1,5 +1,14 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Stack Integration Cycle
+- [x] Merge protected PR #30 with exact-head authority and preserve its merge tree.
+- [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.
+- [x] Port only the five time-stability fixture repairs from the already-green source-revision branch.
+- [x] Verify 261 focused tests, typecheck, scoped lint, build, dependency audit, and diff checks locally.
+- [ ] Land the protected master fixture hotfix and require a green post-merge master run.
+- [ ] Rebase-by-merge and retarget PR #31 only after master is green; continue the dependency stack sequentially.
+- [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
+
 ## Goal
 Identify and execute the highest-leverage work that makes Ashlr Hub and its surrounding tool ecosystem more useful as a 24/7 autonomous self-improving engineering fleet.
 
