@@ -12,7 +12,8 @@
 - [x] Finish timeout-only PR #34 with 12/12 exact-head checks, verified merge-tree authority, and green six-job post-merge run `29553196281`.
 - [x] Retarget and merge source-complete policy PR #36 with exact-head and post-merge authority.
 - [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
-- [ ] Retarget and merge signed evidence-pack PR #39, then continue #40-#53, #35, and #37.
+- [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
+- [ ] Retarget and merge signed-evidence activation PR #40, then continue #41-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
