@@ -2892,6 +2892,18 @@ async function runGoalInternal(
       : 'sandbox source revision inspection unavailable';
   };
 
+  const authorizeEngineerToolExecution = (): string | undefined => {
+    const refusal = inspectEngineerSourceRevision();
+    if (!refusal) return undefined;
+    sourceRevisionRefusal = refusal;
+    state.status = 'failed';
+    state.result = `Run refused before tool execution: ${refusal}.`;
+    state.proposalOutcome = { kind: 'sandbox-unavailable', reason: refusal };
+    state.updatedAt = new Date().toISOString();
+    saveRun(state);
+    return refusal;
+  };
+
   const reserveRunModelStep = (
     taskId: string,
     kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
@@ -3119,18 +3131,27 @@ async function runGoalInternal(
           });
           const persistedRevisionRefusal = inspectEngineerSourceRevision(sb);
           if (persistedRevisionRefusal) {
+            let durablyRejected = proposal.status !== 'pending';
             if (proposal.status === 'pending') {
-              inbox.setStatus(
+              durablyRejected = inbox.setStatus(
                 proposal.id,
                 'rejected',
                 'Source revision changed during engineer proposal capture.',
                 'source revision admission refused',
-              );
+              ) && inbox.load(proposal.id)?.status === 'rejected';
             }
             sourceRevisionRefusal = persistedRevisionRefusal;
             state.status = 'failed';
-            state.result = `Engineer proposal capture refused: ${persistedRevisionRefusal}.`;
-            state.proposalOutcome = { kind: 'sandbox-unavailable', reason: persistedRevisionRefusal };
+            state.result = durablyRejected
+              ? `Engineer proposal capture refused: ${persistedRevisionRefusal}.`
+              : `Engineer proposal capture failed: source revision changed and durable proposal quarantine could not be confirmed (${proposal.id}).`;
+            state.proposalOutcome = durablyRejected
+              ? { kind: 'sandbox-unavailable', reason: persistedRevisionRefusal }
+              : {
+                  kind: 'proposal-capture-error',
+                  reason: 'source revision changed and durable proposal quarantine could not be confirmed',
+                  proposalId: proposal.id,
+                };
             state.updatedAt = new Date().toISOString();
             saveRun(state);
             return;
@@ -3147,9 +3168,32 @@ async function runGoalInternal(
       // diff capture best-effort
     } finally {
       try {
-        wt.removeSandbox(sb);
+        const cleanup = wt.removeSandbox(sb);
+        if (cleanup.status !== 'complete') {
+          state.status = 'failed';
+          state.result = `${state.result ? `${state.result} ` : ''}Engineer sandbox cleanup ${cleanup.status}: ${cleanup.failureClasses.join(', ') || 'postconditions unconfirmed'}.`;
+          (state as RunStateWithSandboxRetention).sandboxRetention = {
+            status: 'retained',
+            reason: 'process-cleanup-unconfirmed',
+            sandboxId: sb.id,
+            worktreePath: sb.worktreePath,
+            recovery: 'orphan-sweep',
+          };
+          state.updatedAt = new Date().toISOString();
+          saveRun(state);
+        }
       } catch {
-        // removal is idempotent
+        state.status = 'failed';
+        state.result = `${state.result ? `${state.result} ` : ''}Engineer sandbox cleanup threw before postconditions were confirmed.`;
+        (state as RunStateWithSandboxRetention).sandboxRetention = {
+          status: 'retained',
+          reason: 'process-cleanup-unconfirmed',
+          sandboxId: sb.id,
+          worktreePath: sb.worktreePath,
+          recovery: 'orphan-sweep',
+        };
+        state.updatedAt = new Date().toISOString();
+        saveRun(state);
       }
     }
   };
@@ -3444,6 +3488,7 @@ async function runGoalInternal(
                       adaptivePrompts,
                       onStep: makeTaskOnStep(smallerClient.id),
                       reserveModelStep: taskStepAuthority(task.id, smallerClient.id),
+                      authorizeToolExecution: authorizeEngineerToolExecution,
                       ...(effectJournal ? { effectJournal } : {}),
                       ...(opts.signal ? { signal: opts.signal } : {}),
                     });
@@ -3461,6 +3506,7 @@ async function runGoalInternal(
                   adaptivePrompts,
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  authorizeToolExecution: authorizeEngineerToolExecution,
                   ...(effectJournal ? { effectJournal } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
@@ -3475,6 +3521,7 @@ async function runGoalInternal(
                   adaptivePrompts,
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
+                  authorizeToolExecution: authorizeEngineerToolExecution,
                   ...(effectJournal ? { effectJournal } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
@@ -3574,6 +3621,7 @@ async function runGoalInternal(
                 adaptivePrompts,
                 onStep: taskOnStep,
                 reserveModelStep: taskStepAuthority(task.id, escalatedClient.id),
+                authorizeToolExecution: authorizeEngineerToolExecution,
                 ...(effectJournal ? { effectJournal } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               }).catch((err) => {
@@ -3654,6 +3702,7 @@ async function runGoalInternal(
                 adaptivePrompts,
                 onStep: makeTaskOnStep(retryClient.id),
                 reserveModelStep: taskStepAuthority(task.id, retryClient.id),
+                authorizeToolExecution: authorizeEngineerToolExecution,
                 ...(effectJournal ? { effectJournal } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               });
@@ -3776,6 +3825,8 @@ async function runGoalInternal(
     if (cancelled()) {
       aborted = true;
       cancelledAbort = true;
+    } else if (sourceRevisionRefusal) {
+      aborted = true;
     } else if (overBudget(state.usage, budget)) {
       aborted = true;
     }
@@ -3796,7 +3847,7 @@ async function runGoalInternal(
       state.terminationReason = 'cancelled';
     } else if (sourceRevisionRefusal) {
       state.status = 'failed';
-      state.result = `Run refused before model execution: ${sourceRevisionRefusal}.`;
+      state.result = `Run refused by source revision admission: ${sourceRevisionRefusal}.`;
       state.proposalOutcome = { kind: 'sandbox-unavailable', reason: sourceRevisionRefusal };
     }
     state.updatedAt = new Date().toISOString();

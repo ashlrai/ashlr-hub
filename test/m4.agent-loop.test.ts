@@ -536,6 +536,33 @@ describe('runTask — caller cancellation', () => {
   });
 });
 
+describe('runTask — tool execution authority', () => {
+  it('refuses a tool call without invoking its executor', async () => {
+    const executor = vi.fn(async () => 'must not run');
+    const authorizeToolExecution = vi.fn(() => 'sandbox source revision refused: source-revision-stale');
+    const client = mockClient([toolCallResult('write_file', { path: 'stale.ts' })]);
+    const task = makeTask();
+    const { steps, onStep } = collectSteps();
+
+    await runTask(task, client, {
+      tools: [{ name: 'write_file', safety: 'write', fn: executor }],
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      authorizeToolExecution,
+    });
+
+    expect(authorizeToolExecution).toHaveBeenCalledOnce();
+    expect(executor).not.toHaveBeenCalled();
+    expect(task.status).toBe('failed');
+    expect(task.error).toContain('source-revision-stale');
+    expect(steps).toContainEqual(expect.objectContaining({
+      kind: 'tool',
+      summary: 'write_file: execution refused',
+    }));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ctx.usage mutation — verifies accumulation across steps
 // ---------------------------------------------------------------------------

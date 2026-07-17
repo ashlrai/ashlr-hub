@@ -1200,13 +1200,27 @@ export async function captureSandboxedProposal(
     const proposal = inbox.create(proposalInput);
     const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
     if (!persistedAdmission.ok) {
+      let durablyRejected = true;
       if (!isDiffDedupResult(proposal) && proposal.status === 'pending') {
-        inbox.setStatus(
+        durablyRejected = inbox.setStatus(
           proposal.id,
           'rejected',
           'Source revision changed during proposal capture.',
           'source revision admission refused',
+        ) && inbox.load(proposal.id)?.status === 'rejected';
+      }
+      if (!durablyRejected) {
+        const outcome = proposalOutcome(
+          'proposal-capture-error',
+          'source revision changed and durable proposal quarantine could not be confirmed',
+          diff,
+          proposal.id,
         );
+        return {
+          state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+          proposalId: proposal.id,
+          proposalOutcome: outcome,
+        };
       }
       const outcome = sourceRevisionRefusalOutcome(persistedAdmission);
       return {

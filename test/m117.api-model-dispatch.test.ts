@@ -73,12 +73,13 @@ function durableInboxStore(
     },
     setStatus: (id, status, result) => {
       const proposal = proposals.get(id);
-      if (!proposal) return;
+      if (!proposal) return false;
       proposals.set(id, {
         ...proposal,
         status,
         ...(result !== undefined ? { result } : {}),
       });
+      return true;
     },
     pendingCount: () => [...proposals.values()]
       .filter((proposal) => proposal.status === 'pending').length,
@@ -580,7 +581,11 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
   });
 
   it('rejects a proposal if the source revision changes during persistence', async () => {
-    const setStatus = vi.fn();
+    let status: Proposal['status'] = 'pending';
+    const setStatus = vi.fn((_id, nextStatus: Proposal['status']) => {
+      status = nextStatus;
+      return true;
+    });
     const inspectSandboxSourceRevision = vi.fn()
       .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
       .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
@@ -608,7 +613,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
           status: 'pending',
           createdAt: new Date().toISOString(),
         }),
-        load: vi.fn(),
+        load: () => ({ id: 'stale-during-create', status } as Proposal),
         setStatus,
       }),
     }));
@@ -646,6 +651,71 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(result.proposalOutcome).toMatchObject({
       kind: 'sandbox-unavailable',
       reason: expect.stringContaining('source-revision-stale'),
+    });
+
+    vi.resetModules();
+  });
+
+  it('reports the pending proposal when stale-capture quarantine cannot persist', async () => {
+    const inspectSandboxSourceRevision = vi.fn()
+      .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
+      .mockReturnValueOnce({ ok: true, baseHead: 'base-head', currentHead: 'base-head' })
+      .mockReturnValue({
+        ok: false,
+        reason: 'source-revision-stale',
+        baseHead: 'base-head',
+        currentHead: 'advanced-head',
+      });
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      inspectSandboxSourceRevision,
+      sandboxDiff: () => ({
+        files: 1,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 1,
+        deletions: 1,
+      }),
+    }));
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (input: Record<string, unknown>) => ({
+          ...input,
+          id: 'stale-quarantine-failed',
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        }),
+        load: () => ({ id: 'stale-quarantine-failed', status: 'pending' }),
+        setStatus: () => false,
+      }),
+    }));
+    vi.doMock('../src/core/foundry/provenance.js', () => ({
+      hashDiff: () => 'hash-abc',
+      signProvenance: () => 'sig-abc',
+    }));
+
+    const { captureSandboxedProposal } = await import(
+      '../src/core/run/sandboxed-engine.js?stale-quarantine=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+    const result = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: { completenessGate: false },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-stale-quarantine',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-stale-quarantine',
+        baseHead: 'base-head',
+        createdAt: new Date().toISOString(),
+      },
+      runId: 'run-m117-stale-quarantine',
+    });
+
+    expect(result.proposalId).toBe('stale-quarantine-failed');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'proposal-capture-error',
+      proposalId: 'stale-quarantine-failed',
+      reason: expect.stringContaining('quarantine could not be confirmed'),
     });
 
     vi.resetModules();

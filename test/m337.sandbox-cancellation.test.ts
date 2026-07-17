@@ -52,12 +52,13 @@ function durableInboxStore(
     },
     setStatus: (id, status, result) => {
       const proposal = proposals.get(id);
-      if (!proposal) return;
+      if (!proposal) return false;
       proposals.set(id, {
         ...proposal,
         status,
         ...(result !== undefined ? { result } : {}),
       });
+      return true;
     },
     pendingCount: () => [...proposals.values()]
       .filter((proposal) => proposal.status === 'pending').length,

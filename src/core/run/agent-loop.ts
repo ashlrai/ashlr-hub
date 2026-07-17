@@ -103,6 +103,12 @@ export async function runTask(
     /** Run-wide authority that reserves a step before any external model call. */
     reserveModelStep?: ReserveModelStep;
     /**
+     * Optional synchronous authority checked immediately before every tool call.
+     * Returning a reason refuses execution and fails the task without invoking
+     * the tool. The callback must not include raw prompts or tool arguments.
+     */
+    authorizeToolExecution?: () => string | undefined;
+    /**
      * M264: optional context prefix prepended to the system prompt.
      * Used by local-context.ts to inject NORTH-STAR + ecosystem map +
      * genome recall + repo tree for local api-model engines (local-coder,
@@ -406,6 +412,15 @@ export async function runTask(
       if (result.toolCalls && result.toolCalls.length > 0 && useTools) {
         for (const tc of result.toolCalls) {
           if (cancelIfRequested()) break;
+
+          const toolRefusal = ctx.authorizeToolExecution?.();
+          if (toolRefusal) {
+            task.status = 'failed';
+            task.error = `Tool execution refused: ${toolRefusal}`;
+            delete task.result;
+            emitStep('tool', `${tc.name}: execution refused`);
+            break;
+          }
 
           // M11: emit tool-call stream event before execution.
           emitStream({
