@@ -77,7 +77,12 @@ function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function state(bindings: AutoMergeCanaryCandidateBindings): AutoMergeCanaryStateV1 {
+function state(
+  bindings: AutoMergeCanaryCandidateBindings,
+  activatedAt = new Date(Date.now() - 1_000),
+): AutoMergeCanaryStateV1 {
+  const activatedAtIso = activatedAt.toISOString();
+  const deadlineAtIso = new Date(activatedAt.getTime() + 60_000).toISOString();
   return {
     schemaVersion: 1,
     epochId: '123e4567-e89b-42d3-a456-426614174000',
@@ -117,13 +122,13 @@ function state(bindings: AutoMergeCanaryCandidateBindings): AutoMergeCanaryState
     lastShadowEvidence: null,
     lease: { holderDigest: null, acquiredAt: null, expiresAt: null },
     observation: {
-      startedAt: '2026-07-14T12:00:00.000Z',
-      deadlineAt: '2026-07-15T12:00:00.000Z',
+      startedAt: activatedAtIso,
+      deadlineAt: deadlineAtIso,
       completedAt: null,
     },
-    activatedAt: '2026-07-14T12:00:00.000Z',
-    updatedAt: '2026-07-14T12:00:00.000Z',
-    clockHighWater: '2026-07-14T12:00:00.000Z',
+    activatedAt: activatedAtIso,
+    updatedAt: activatedAtIso,
+    clockHighWater: activatedAtIso,
     pendingEffect: null,
     blocker: null,
     attestation: digest('observer-state'),
@@ -338,7 +343,7 @@ describe('M402 real shadow observation hook', () => {
       deps: {
         readStore: () => read(active),
         appendObservation: append,
-        now: () => new Date('2026-07-14T12:00:01.000Z'),
+        now: () => new Date(Date.parse(active.activatedAt) + 1_000),
       },
     });
     const inspection = inspectCommittedAutoMergeCanaryPatch(repo, baseOid, headOid);
@@ -597,10 +602,11 @@ describe('M402 real shadow observation hook', () => {
   });
 
   it.each([
-    ['at the exact deadline', '2026-07-15T12:00:00.000Z'],
-    ['after the deadline', '2026-07-15T12:00:00.001Z'],
-  ])('does no observer work %s', (_label, now) => {
+    ['at the exact deadline', 0],
+    ['after the deadline', 1],
+  ])('does no observer work %s', (_label, offsetMs) => {
     const active = state(actualBindings());
+    const now = new Date(Date.parse(active.observation.deadlineAt) + offsetMs);
     const inspect = vi.fn();
     const origin = vi.fn();
     const append = vi.fn();
@@ -613,7 +619,7 @@ describe('M402 real shadow observation hook', () => {
         resolveOrigin: origin,
         appendObservation: append,
         auditEvent: audit,
-        now: () => new Date(now),
+        now: () => now,
       },
     })).toEqual({ status: 'inactive' });
     expect(inspect).not.toHaveBeenCalled();
@@ -671,11 +677,8 @@ describe('M402 real shadow observation hook', () => {
         ? { ok: false as const, reason: 'conflict' as const }
         : success(cleanWinner);
     });
-    const times = [
-      new Date('2026-07-14T12:00:01.000Z'),
-      new Date('2026-07-14T12:00:02.000Z'),
-      new Date('2026-07-14T12:00:03.000Z'),
-    ];
+    const activatedAt = Date.parse(initial.activatedAt);
+    const times = [1_000, 2_000, 3_000].map((offsetMs) => new Date(activatedAt + offsetMs));
     const racedResult = observeAutoMergeCanaryShadow(input(), {
       deps: {
         readStore: vi.fn().mockReturnValueOnce(read(initial)).mockReturnValueOnce(read(cleanWinner)),
