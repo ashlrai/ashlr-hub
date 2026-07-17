@@ -498,12 +498,13 @@ describe('queued autonomy work scanner', () => {
   it('recovers a recent rejected capture artifact without reopening or copying it', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const now = new Date('2026-07-12T12:00:00.000Z');
+    const now = new Date(Date.now() - 60_000);
+    const createdAt = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const proposal = partialProposal(repo.dir, {
       status: 'rejected',
-      createdAt: '2026-07-12T11:00:00.000Z',
+      createdAt,
       runId: 'attempt-12345678-1234-4123-8123-123456789abc',
       trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
       diffHash: undefined,
@@ -756,12 +757,13 @@ describe('queued autonomy work scanner', () => {
   it('expires materialized rejected-capture recovery after the bounded window', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const materializedAt = new Date('2026-07-12T12:00:00.000Z');
+    const materializedAt = new Date(Date.now() - 60_000);
+    const createdAt = new Date(materializedAt.getTime() - 60 * 60 * 1000).toISOString();
     vi.useFakeTimers();
     vi.setSystemTime(materializedAt);
     const proposal = partialProposal(repo.dir, {
       status: 'rejected',
-      createdAt: '2026-07-12T11:00:00.000Z',
+      createdAt,
       runId: 'attempt-32345678-1234-4123-8123-123456789abc',
       trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
       decisionReason: 'auto-drained: permanent readiness blocker persisted for 2 pass(es): known verification failure',
@@ -770,7 +772,7 @@ describe('queued autonomy work scanner', () => {
     queueProposalRepairWorkForPendingProposals([proposal], materializedAt);
     expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
 
-    const expiredAt = new Date('2026-07-14T11:00:00.001Z');
+    const expiredAt = new Date(Date.parse(createdAt) + 48 * 60 * 60 * 1000 + 1);
     vi.setSystemTime(expiredAt);
     const expired = queueProposalRepairWorkForPendingProposals([], expiredAt);
 
