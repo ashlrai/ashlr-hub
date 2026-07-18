@@ -196,15 +196,11 @@ beforeEach(() => {
   // Default: spawnSync fails (no real gh calls)
   _spawnSyncImpl = makeSpawnSyncFail();
 
-  privateStorageHarness.useSemanticAdapter = false;
-  try {
-    // Preserve a production-backed private root and enrollment proof per fixture.
-    expect(setKill(false).ok).toBe(true);
-    expect(enroll(tmpRepo).ok).toBe(true);
-  } finally {
-    // Semantic assertions do not need to repeat the Windows PowerShell ACL proof.
-    privateStorageHarness.useSemanticAdapter = true;
-  }
+  // Native Windows DACL behavior is covered by the dedicated H4/H7/M379
+  // suites. M23 owns apply semantics and must not launch PowerShell per fixture.
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
+  expect(setKill(false).ok).toBe(true);
+  expect(enroll(tmpRepo).ok).toBe(true);
 });
 
 afterEach(() => {

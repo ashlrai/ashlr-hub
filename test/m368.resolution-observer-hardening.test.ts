@@ -155,26 +155,32 @@ describe('M368 resolution observer hardening', () => {
   it('replays one physical witness when only the backlog envelope timestamp changes', () => {
     const prior = checkpoint();
     let writes = 0;
-    const first = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:31:00.000Z'),
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
-        writeCheckpoint: () => ++writes > 1,
-      },
-    });
-    const second = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:32:00.000Z'),
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:30:00.000Z', [absent('2026-07-11T11:31:00.000Z')]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
-        writeCheckpoint: () => ++writes > 1,
-      },
-    });
+    const fixedWallClock = Date.now();
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(fixedWallClock);
+    try {
+      const first = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:31:00.000Z'),
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
+          writeCheckpoint: () => ++writes > 1,
+        },
+      });
+      const second = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:32:00.000Z'),
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:30:00.000Z', [absent('2026-07-11T11:31:00.000Z')]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
+          writeCheckpoint: () => ++writes > 1,
+        },
+      });
 
-    expect(first).toMatchObject({ outcome: 'write-failed', recorded: 1 });
-    expect(second).toMatchObject({ outcome: 'completed', replayed: 1 });
-    expect(readResolutionWitnesses()).toMatchObject({ physicalRows: 1, witnesses: [expect.any(Object)] });
+      expect(first).toMatchObject({ outcome: 'write-failed', recorded: 1 });
+      expect(second).toMatchObject({ outcome: 'completed', replayed: 1 });
+      expect(readResolutionWitnesses()).toMatchObject({ physicalRows: 1, witnesses: [expect.any(Object)] });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('refuses a checkpoint rollback and preserves the newer cursor', () => {

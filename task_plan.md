@@ -14,7 +14,8 @@
 - [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
 - [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
 - [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
-- [ ] Retarget and merge evidence-health PR #41, then continue #42-#53, #35, and #37.
+- [x] Retarget and merge evidence-health PR #41 with 12/12 exact-head and six-job post-merge authority.
+- [ ] Retarget and merge causal-identity PR #42, then continue #43-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2561,3 +2562,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] P0: add a single-flight evidence-mode post-merge observation hold and deterministic adverse quarantine before granting positive learning credit.
 - [ ] P0: promote the shadow canary into a default-off, one-admission docs-only protected-remote controller with cancellation and containment authority.
 - [ ] Keep host auto-merge disabled until the controller, observation latch, rollback rehearsal, and protected matrix are complete.
+
+## Causal Proposal Identity Cycle (2026-07-16)
+- [x] Rebind created run summaries to the generated durable proposal ID and canonical top-level run ID.
+- [x] Strip proposal identity from false or omitted `proposalCreated` summaries.
+- [x] Neutralize proposal-created identity on diff-hash dedup returns without mutating the durable duplicate owner.
+- [x] Pass 188 focused assertions with two platform skips, typecheck, scoped lint, build, audit, and diff checks.
+- [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
+- [x] Publish protected stacked PR #42 on fully protected-green #41; require duplicate protected CI before merge consideration.
+- [x] Repair Ubuntu CI contract/timing assertions without changing production causal semantics or observer deadlines; rerun 24 focused assertions and static gates.

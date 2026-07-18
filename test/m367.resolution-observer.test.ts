@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildSourceBaseDigest } from '../src/core/fleet/source-base-digest.js';
 import { buildScannerObservationDigest } from '../src/core/fleet/scanner-observation-digest.js';
@@ -173,6 +173,8 @@ describe('M367 bounded advisory resolution observer', () => {
   it('replays after a checkpoint crash without duplicating physical witness rows', () => {
     const prior = checkpoint();
     let writes = 0;
+    const fixedWallClock = Date.now();
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(fixedWallClock);
     const options = {
       now: () => new Date('2026-07-11T11:31:00.000Z'),
       deps: {
@@ -182,9 +184,13 @@ describe('M367 bounded advisory resolution observer', () => {
       },
     };
 
-    expect(runResolutionObserver(options)).toMatchObject({ outcome: 'write-failed', recorded: 1 });
-    expect(runResolutionObserver(options)).toMatchObject({ outcome: 'completed', replayed: 1 });
-    expect(readResolutionWitnesses()).toMatchObject({ physicalRows: 1, witnesses: [expect.any(Object)] });
+    try {
+      expect(runResolutionObserver(options)).toMatchObject({ outcome: 'write-failed', recorded: 1 });
+      expect(runResolutionObserver(options)).toMatchObject({ outcome: 'completed', replayed: 1 });
+      expect(readResolutionWitnesses()).toMatchObject({ physicalRows: 1, witnesses: [expect.any(Object)] });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('retains pending authority across unavailable or hashless current observations', () => {
