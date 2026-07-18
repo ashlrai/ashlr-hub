@@ -807,14 +807,28 @@ export function formatFleetStatus(s: FleetStatus): string {
   // Autonomy evidence
   const autonomy = s.autonomy;
   lines.push('Autonomy evidence:');
-  if (!autonomy || autonomy.evidencePacks === 0) {
-    lines.push('  no evidence packs yet');
+  if (!autonomy) {
+    lines.push('  unavailable');
   } else {
+    const quality = autonomy.sourceQuality;
     const tiers = Object.entries(autonomy.byTier)
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([tier, count]) => `${tier}:${count}`)
       .join(', ');
+    lines.push(`  authority: ${autonomy.authorityState}`);
     lines.push(`  packs:     ${autonomy.evidencePacks}`);
+    lines.push(
+      `  protocols: v3=${autonomy.protocols.sealedV3}, legacy=${autonomy.protocols.legacy}`,
+    );
+    lines.push(
+      `  source:    ${quality.sourceState} (${quality.complete ? 'complete' : 'partial'}, ` +
+        `present=${quality.sourcePresent ? 'yes' : 'no'})`,
+    );
+    lines.push(
+      `  read:      ${quality.filesRead} file(s), ${quality.bytesRead} byte(s), ` +
+        `${quality.invalidFiles} invalid, ${quality.unreadableFiles} unreadable` +
+        `${quality.limitExceeded ? ', limit exceeded' : ''}`,
+    );
     lines.push(`  allowed:   ${autonomy.allowed}`);
     lines.push(`  denied:    ${autonomy.denied}`);
     lines.push(`  latest:    ${autonomy.latestAt ?? '—'}`);

@@ -527,6 +527,140 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).not.toContain("'none observed'");
   });
 
+  it('CLI renders degraded autonomy evidence as partial authority, never an empty healthy store', async () => {
+    const { formatFleetStatus } = await import('../src/cli/fleet.js');
+    const rendered = formatFleetStatus({
+      generatedAt: '2026-07-16T12:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      autonomy: {
+        evidencePacks: 0,
+        latestAt: null,
+        allowed: 0,
+        denied: 0,
+        byTier: {},
+        recent: [],
+        authorityState: 'degraded',
+        protocols: { sealedV3: 0, legacy: 0 },
+        sourceQuality: {
+          sourceState: 'degraded',
+          sourcePresent: true,
+          complete: false,
+          filesRead: 2,
+          bytesRead: 2048,
+          invalidFiles: 1,
+          unreadableFiles: 2,
+          limitExceeded: true,
+        },
+      },
+      killed: false,
+    } as any);
+
+    expect(rendered).toContain('authority: degraded');
+    expect(rendered).toContain('protocols: v3=0, legacy=0');
+    expect(rendered).toContain('source:    degraded (partial, present=yes)');
+    expect(rendered).toContain('read:      2 file(s), 2048 byte(s), 1 invalid, 2 unreadable, limit exceeded');
+    expect(rendered).not.toContain('no evidence packs yet');
+  });
+
+  it('app.js gives degraded, cold-start, and ready evidence distinct render contracts', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const start = src.indexOf('function autonomyAuthorityState(autonomy)');
+    const end = src.indexOf('\nfunction compactFleetReason', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const helperSource = src.slice(start, end);
+    const helpers = new Function(
+      `${helperSource}\nreturn { autonomyAuthorityState, autonomyEvidenceMetric, autonomyEvidenceHeroMetric, autonomyEvidenceProtocolsMetric, ` +
+        'autonomyEvidenceSourceMetric, autonomyEvidenceDiagnosticsMetric, autonomyEvidenceReadMetric, ' +
+        'autonomyEvidenceAccent, autonomyEvidenceToneClass };',
+    )() as Record<string, (autonomy: Record<string, any>) => string>;
+
+    const degraded = {
+      evidencePacks: 0,
+      allowed: 0,
+      denied: 0,
+      authorityState: 'degraded',
+      protocols: { sealedV3: 0, legacy: 0 },
+      sourceQuality: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        filesRead: 2, bytesRead: 2048, invalidFiles: 1, unreadableFiles: 2, limitExceeded: true,
+      },
+    };
+    expect(helpers.autonomyAuthorityState!(degraded)).toBe('degraded');
+    expect(helpers.autonomyEvidenceMetric!(degraded)).toBe('degraded / 0 observed');
+    expect(helpers.autonomyEvidenceHeroMetric!(degraded)).toBe('degraded · 0');
+    expect(helpers.autonomyEvidenceProtocolsMetric!(degraded)).toBe('0 v3 / 0 legacy');
+    expect(helpers.autonomyEvidenceSourceMetric!(degraded)).toBe('degraded / partial');
+    expect(helpers.autonomyEvidenceDiagnosticsMetric!(degraded))
+      .toBe('1 invalid / 2 unreadable / limit exceeded');
+    expect(helpers.autonomyEvidenceReadMetric!(degraded)).toBe('2 files / 2048 bytes');
+    expect(helpers.autonomyEvidenceAccent!(degraded)).toBe('#f87171');
+    expect(helpers.autonomyEvidenceToneClass!(degraded)).toBe('fd-meta-val--fail');
+    expect(helpers.autonomyEvidenceMetric!(degraded)).not.toBe('0 packs');
+
+    const coldStart = {
+      evidencePacks: 0,
+      allowed: 0,
+      denied: 0,
+      authorityState: 'cold-start',
+      protocols: { sealedV3: 0, legacy: 0 },
+      sourceQuality: {
+        sourceState: 'missing', sourcePresent: false, complete: true,
+        filesRead: 0, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+      },
+    };
+    expect(helpers.autonomyEvidenceMetric!(coldStart)).toBe('cold-start / 0 packs');
+    expect(helpers.autonomyEvidenceHeroMetric!(coldStart)).toBe('cold-start · 0');
+    expect(helpers.autonomyEvidenceAccent!(coldStart)).toBe('#fbbf24');
+    expect(helpers.autonomyEvidenceToneClass!(coldStart)).toBe('fd-meta-val--warn');
+
+    const ready = {
+      evidencePacks: 3,
+      allowed: 3,
+      denied: 0,
+      authorityState: 'ready',
+      protocols: { sealedV3: 2, legacy: 1 },
+      sourceQuality: {
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        filesRead: 3, bytesRead: 4096, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+      },
+    };
+    expect(helpers.autonomyEvidenceMetric!(ready)).toBe('ready / 3 packs');
+    expect(helpers.autonomyEvidenceHeroMetric!(ready)).toBe('ready · 3');
+    expect(helpers.autonomyEvidenceProtocolsMetric!(ready)).toBe('2 v3 / 1 legacy');
+    expect(helpers.autonomyEvidenceAccent!(ready)).toBe('#38bdf8');
+    expect(helpers.autonomyEvidenceToneClass!(ready)).toBeNull();
+
+    const missingDiagnostics = { ...ready, sourceQuality: undefined };
+    expect(helpers.autonomyAuthorityState!(missingDiagnostics)).toBe('unavailable');
+    expect(helpers.autonomyEvidenceAccent!(missingDiagnostics)).toBe('#94a3b8');
+    expect(helpers.autonomyEvidenceToneClass!(missingDiagnostics)).toBe('fd-meta-val--warn');
+
+    const inconsistentPartial = {
+      ...ready,
+      sourceQuality: { ...ready.sourceQuality, complete: false },
+    };
+    expect(helpers.autonomyAuthorityState!(inconsistentPartial)).toBe('degraded');
+    expect(helpers.autonomyEvidenceAccent!(inconsistentPartial)).toBe('#f87171');
+    expect(helpers.autonomyEvidenceToneClass!(inconsistentPartial)).toBe('fd-meta-val--fail');
+
+    expect(src).toContain("controlMetric('Evidence authority', autonomyEvidenceHeroMetric(autonomy), autonomyEvidenceAccent(autonomy))");
+    expect(src).toContain("mkMeta('Evidence authority', autonomyEvidenceMetric(autonomy), evidenceTone)");
+    expect(src).toContain("mkMeta('Evidence source', autonomyEvidenceSourceMetric(autonomy), evidenceTone)");
+    expect(src).toContain("mkMeta('Evidence diagnostics', autonomyEvidenceDiagnosticsMetric(autonomy), evidenceTone)");
+    expect(src).toContain("['Authority', autonomyEvidenceMetric(autonomy)]");
+    expect(src).toContain('Signed evidence authority is degraded; inspect source diagnostics before autonomous merge.');
+    expect(src).not.toContain('No autonomy evidence packs yet.');
+  });
+
   it('app.js uses canonical daemon state field names instead of hiding live values', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),

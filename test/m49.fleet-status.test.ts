@@ -825,6 +825,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       latestAt: null,
       allowed: 0,
       denied: 0,
+      authorityState: 'cold-start',
+      protocols: { sealedV3: 0, legacy: 0 },
+      sourceQuality: { sourceState: 'missing', sourcePresent: false, complete: true },
     });
     expect(s.autonomyDirection).toMatchObject({
       confidence: expect.any(String),
@@ -5679,6 +5682,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       latestAt: '2026-07-02T00:00:00.000Z',
       allowed: 2,
       denied: 0,
+      authorityState: 'ready',
+      protocols: { sealedV3: 0, legacy: 2 },
+      sourceQuality: { sourceState: 'healthy', complete: true, invalidFiles: 0, unreadableFiles: 0 },
     });
     expect(s.autonomy?.byTier).toMatchObject({ T4: 2 });
     expect(s.autonomy?.recent[0]).toMatchObject({
@@ -5689,6 +5695,70 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       changedFiles: 1,
       changedLines: 1,
     });
+  });
+
+  it('counts the complete bounded evidence corpus instead of truncating totals at the recent display limit', async () => {
+    const evidenceDir = join(tmpHome, '.ashlr', 'evidence');
+    mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < 205; index++) {
+      const id = `prop-corpus-${String(index).padStart(3, '0')}`;
+      const pack = makeEvidencePack(id, `2026-07-02T00:${String(index % 60).padStart(2, '0')}:00.000Z`);
+      writeFileSync(join(evidenceDir, `${id}.json`), `${JSON.stringify(pack, null, 2)}\n`, { mode: 0o600 });
+    }
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.autonomy).toMatchObject({
+      evidencePacks: 205,
+      authorityState: 'ready',
+      protocols: { sealedV3: 0, legacy: 205 },
+      sourceQuality: { sourceState: 'healthy', complete: true, filesRead: 205 },
+    });
+    expect(status.autonomy?.recent).toHaveLength(8);
+  });
+
+  it('surfaces degraded signed evidence as merge authority instead of a healthy zero', async () => {
+    const repo = join(tmpHome, 'signed-evidence-degraded-repo');
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Pending evidence-bound change',
+      summary: 'summary',
+      diff: docsDiff('pending'),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    });
+    expect(proposal.status).toBe('pending');
+    const evidenceDir = join(tmpHome, '.ashlr', 'evidence');
+    mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(evidenceDir, 'corrupt.json'), '{not-json\n', { mode: 0o600 });
+
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    }));
+
+    expect(status.autonomy).toMatchObject({
+      evidencePacks: 0,
+      authorityState: 'degraded',
+      protocols: { sealedV3: 0, legacy: 0 },
+      sourceQuality: { sourceState: 'degraded', complete: false, invalidFiles: 1 },
+    });
+    expect(status.autonomousShipReadiness?.evidenceMatrix?.sources)
+      .toContainEqual(expect.objectContaining({
+        id: 'autonomy-packs',
+        label: 'Signed Evidence Authority',
+        eligibility: 'withheld',
+        status: 'degraded',
+      }));
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: { id: 'signed-evidence-degraded', source: 'autonomy-packs' },
+      primaryAction: { id: 'inspect-signed-evidence', priority: 'high' },
+    });
+    expect(status.autonomousShipReadiness?.primaryAction?.commands?.[0]?.argv)
+      .toEqual(['ashlr', 'fleet', 'evidence', 'doctor', 'autonomy-packs', '--json']);
   });
 
   it('keeps disabled auto-merge with pending proposals merge-blocked and inspection-only', async () => {
@@ -5901,14 +5971,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'cold-start',
       summary: {
         eligible: 1,
-        'cold-start': 3,
+        'cold-start': 4,
         withheld: 0,
         observational: 1,
         'not-applicable': 2,
       },
     });
     expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.map((source) => source.id)).toEqual([
-      'decisions', 'judge-traces', 'agent-actions', 'dispatch-production', 'dispatch-manifests', 'best-of-n',
+      'autonomy-packs', 'decisions', 'judge-traces', 'agent-actions', 'dispatch-production', 'dispatch-manifests', 'best-of-n',
       'post-merge',
     ]);
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
@@ -8088,6 +8158,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         denied: 1,
         byTier: { T4: 2, T0: 1 },
         recent: [],
+        authorityState: 'ready',
+        protocols: { sealedV3: 2, legacy: 1 },
+        sourceQuality: {
+          sourceState: 'healthy', sourcePresent: true, complete: true,
+          filesRead: 3, bytesRead: 1024, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+        },
       },
       autonomyControlMode: 'executable',
       autoMergeReadiness: {

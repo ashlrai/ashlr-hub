@@ -2347,9 +2347,68 @@ function laneLocksMetric(laneLocks) {
   return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
 }
 
+function autonomyAuthorityState(autonomy) {
+  if (!autonomy) return 'unavailable';
+  const source = autonomy.sourceQuality;
+  if (!source) return 'unavailable';
+  if (source?.sourceState === 'missing') return 'cold-start';
+  if (source && (source.sourceState !== 'healthy' || source.complete !== true)) return 'degraded';
+  return autonomy.authorityState === 'ready' ? 'ready' : 'degraded';
+}
+
 function autonomyEvidenceMetric(autonomy) {
-  if (!autonomy || !autonomy.evidencePacks) return '0 packs';
-  return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
+  if (!autonomy) return 'unavailable';
+  const authority = autonomyAuthorityState(autonomy);
+  const packs = autonomy.evidencePacks ?? 0;
+  const packLabel = authority === 'degraded' ? `${packs} observed` : `${packs} packs`;
+  return `${authority} / ${packLabel}`;
+}
+
+function autonomyEvidenceHeroMetric(autonomy) {
+  if (!autonomy) return 'unavailable';
+  return `${autonomyAuthorityState(autonomy)} · ${autonomy.evidencePacks ?? 0}`;
+}
+
+function autonomyEvidenceProtocolsMetric(autonomy) {
+  if (!autonomy?.protocols) return 'unknown';
+  return `${autonomy.protocols.sealedV3 ?? 0} v3 / ${autonomy.protocols.legacy ?? 0} legacy`;
+}
+
+function autonomyEvidenceSourceMetric(autonomy) {
+  const source = autonomy?.sourceQuality;
+  if (!source) return 'unavailable';
+  return `${source.sourceState ?? 'unknown'} / ${source.complete === true ? 'complete' : 'partial'}`;
+}
+
+function autonomyEvidenceDiagnosticsMetric(autonomy) {
+  const source = autonomy?.sourceQuality;
+  if (!source) return 'unavailable';
+  return [
+    `${source.invalidFiles ?? 0} invalid`,
+    `${source.unreadableFiles ?? 0} unreadable`,
+    source.limitExceeded ? 'limit exceeded' : null,
+  ].filter(Boolean).join(' / ');
+}
+
+function autonomyEvidenceReadMetric(autonomy) {
+  const source = autonomy?.sourceQuality;
+  if (!source) return 'unavailable';
+  return `${source.filesRead ?? 0} files / ${source.bytesRead ?? 0} bytes`;
+}
+
+function autonomyEvidenceAccent(autonomy) {
+  const authority = autonomyAuthorityState(autonomy);
+  if (authority === 'degraded') return '#f87171';
+  if (authority === 'cold-start') return '#fbbf24';
+  if (authority === 'ready') return (autonomy?.denied ?? 0) > 0 ? '#f87171' : '#38bdf8';
+  return '#94a3b8';
+}
+
+function autonomyEvidenceToneClass(autonomy) {
+  const authority = autonomyAuthorityState(autonomy);
+  if (authority === 'degraded') return 'fd-meta-val--fail';
+  if (authority === 'cold-start' || authority === 'unavailable') return 'fd-meta-val--warn';
+  return (autonomy?.denied ?? 0) > 0 ? 'fd-meta-val--warn' : null;
 }
 
 function compactFleetReason(reason, max = 88) {
@@ -3560,7 +3619,11 @@ function renderFleet() {
   const autonomy = f.autonomy ?? null;
   autonomyCard.appendChild(el('h2', { cls: 'card-title' }, 'Autonomy Evidence'));
   autonomyCard.appendChild(infoGrid([
-    ['Evidence packs', autonomy?.evidencePacks ?? 0],
+    ['Authority', autonomyEvidenceMetric(autonomy)],
+    ['Protocols', autonomyEvidenceProtocolsMetric(autonomy)],
+    ['Source', autonomyEvidenceSourceMetric(autonomy)],
+    ['Diagnostics', autonomyEvidenceDiagnosticsMetric(autonomy)],
+    ['Read', autonomyEvidenceReadMetric(autonomy)],
     ['Allowed', autonomy?.allowed ?? 0],
     ['Denied', autonomy?.denied ?? 0],
     ['Latest', autonomy?.latestAt ? fmtRelative(autonomy.latestAt) : '—'],
@@ -3571,7 +3634,12 @@ function renderFleet() {
     for (const row of evidenceRows) list.appendChild(row);
     autonomyCard.appendChild(list);
   } else {
-    autonomyCard.appendChild(el('p', { cls: 'hint' }, 'No autonomy evidence packs yet.'));
+    const authority = autonomyAuthorityState(autonomy);
+    autonomyCard.appendChild(el('p', { cls: 'hint' }, authority === 'degraded'
+      ? 'Signed evidence authority is degraded; inspect source diagnostics before autonomous merge.'
+      : authority === 'cold-start'
+        ? 'Signed evidence authority is in cold start; no packs have been observed yet.'
+        : 'Signed evidence authority is unavailable.'));
   }
   section.appendChild(autonomyCard);
 
@@ -3903,7 +3971,7 @@ function renderControl() {
   }
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
-  heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
+  heroMetrics.appendChild(controlMetric('Evidence authority', autonomyEvidenceHeroMetric(autonomy), autonomyEvidenceAccent(autonomy)));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
   const shipReadiness = d.fleet?.autonomousShipReadiness ?? fleet.autonomousShipReadiness ?? null;
   const missionBrief = d.fleet?.missionBrief ?? fleet.missionBrief ?? null;
@@ -5191,8 +5259,12 @@ function fdRenderStatusPanel(snap) {
       activeWork.malformed ? 'fd-meta-val--warn' : null));
   }
   if (autonomy) {
-    grid.appendChild(mkMeta('Evidence packs', String(autonomy.evidencePacks ?? 0),
-      autonomy.denied > 0 ? 'fd-meta-val--warn' : null));
+    const evidenceTone = autonomyEvidenceToneClass(autonomy);
+    grid.appendChild(mkMeta('Evidence authority', autonomyEvidenceMetric(autonomy), evidenceTone));
+    grid.appendChild(mkMeta('Evidence v3/legacy', autonomyEvidenceProtocolsMetric(autonomy), evidenceTone));
+    grid.appendChild(mkMeta('Evidence source', autonomyEvidenceSourceMetric(autonomy), evidenceTone));
+    grid.appendChild(mkMeta('Evidence diagnostics', autonomyEvidenceDiagnosticsMetric(autonomy), evidenceTone));
+    grid.appendChild(mkMeta('Evidence read', autonomyEvidenceReadMetric(autonomy), evidenceTone));
     grid.appendChild(mkMeta('Autonomy latest', autonomy.latestAt ? fmtRelative(autonomy.latestAt) : '—'));
   }
   if (phantom?.agentReport?.delegationSafety) {

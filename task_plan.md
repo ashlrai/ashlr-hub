@@ -13,7 +13,8 @@
 - [x] Retarget and merge source-complete policy PR #36 with exact-head and post-merge authority.
 - [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
 - [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
-- [ ] Retarget and merge signed-evidence activation PR #40, then continue #41-#53, #35, and #37.
+- [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
+- [ ] Retarget and merge evidence-health PR #41, then continue #42-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2546,3 +2547,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass 265 focused assertions with one intentional skip, typecheck, scoped lint, build, zero-vulnerability audit, and diff checks on the rebased PR #39 head.
 - [x] Commit, push, and open protected activation PR #40 on PR #39 without merging or deploying.
 - [ ] Observe the complete PR #39 and PR #40 protected matrices before any merge or deployment.
+
+## Signed Evidence Fleet Health Cycle (2026-07-16)
+- [x] Audit Fleet OS evidence authority and identify false healthy-zero reporting for degraded signed-pack storage.
+- [x] Preserve signed-pack source completeness, invalid/unreadable counts, and sealed-v3 versus legacy protocol counts in fleet status.
+- [x] Add signed evidence as required merge-authority evidence and emit a high-priority read-only diagnosis action when pending proposals are fail-closed.
+- [x] Add read-only `autonomy-packs` evidence-doctor coverage without storage/key creation or malformed-file mutation.
+- [x] Complete CLI, standalone Fleet, and Mission Control degraded/cold-start rendering; pass 194 focused tests, CI manifest, and static gates.
+- [x] Publish stacked protected PR #41 on #40 after local review and verification; require duplicate protected CI before merge consideration.
+
+## Ranked Autonomy Follow-Ups (2026-07-16 Audit)
+- [ ] P0: replace whole-history proposal authority with a transactional bounded operational projection before the 4,096-file cliff stops production.
+- [ ] P0: add a single-flight evidence-mode post-merge observation hold and deterministic adverse quarantine before granting positive learning credit.
+- [ ] P0: promote the shadow canary into a default-off, one-admission docs-only protected-remote controller with cancellation and containment authority.
+- [ ] Keep host auto-merge disabled until the controller, observation latch, rollback rehearsal, and protected matrix are complete.
