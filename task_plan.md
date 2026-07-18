@@ -1,5 +1,26 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Stack Integration Cycle
+- [x] Merge protected PR #30 with exact-head authority and preserve its merge tree.
+- [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.
+- [x] Port only the five time-stability fixture repairs from the already-green source-revision branch.
+- [x] Verify 261 focused tests, typecheck, scoped lint, build, dependency audit, and diff checks locally.
+- [x] Land protected fixture hotfix PR #56 and require a green five-job post-merge master run.
+- [x] Merge master into PR #31, retarget it, require fresh exact-head and post-merge CI, and merge it normally.
+- [x] Retarget and merge PR #32 with fresh exact-head and post-merge CI.
+- [x] Retarget and merge PR #33 with the verified M402/M49 resolution and fresh exact-head/post-merge CI.
+- [x] Finish timeout-only PR #34 with 12/12 exact-head checks, verified merge-tree authority, and green six-job post-merge run `29553196281`.
+- [x] Retarget and merge source-complete policy PR #36 with exact-head and post-merge authority.
+- [x] Retarget and merge safe-minimum policy PR #38 with exact-head and post-merge authority.
+- [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
+- [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
+- [x] Retarget and merge evidence-health PR #41 with 12/12 exact-head and six-job post-merge authority.
+- [x] Retarget and merge causal-identity PR #42 with exact-head and six-job post-merge authority.
+- [x] Retarget and merge operational-projection PR #43 with rerun-backed exact-head and six-job post-merge authority.
+- [x] Retarget and merge projection-transaction PR #44 with exact-head and six-job post-merge authority.
+- [ ] Retarget and merge projection-replay-ledger PR #45, then continue #46-#53, #35, and #37.
+- [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
+
 ## Goal
 Identify and execute the highest-leverage work that makes Ashlr Hub and its surrounding tool ecosystem more useful as a 24/7 autonomous self-improving engineering fleet.
 
