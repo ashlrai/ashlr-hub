@@ -19,7 +19,8 @@
 - [x] Retarget and merge operational-projection PR #43 with rerun-backed exact-head and six-job post-merge authority.
 - [x] Retarget and merge projection-transaction PR #44 with exact-head and six-job post-merge authority.
 - [x] Retarget and merge projection-replay-ledger PR #45 with rerun-backed exact-head and six-job post-merge authority.
-- [ ] Retarget and merge bounded-agent-events PR #46, then continue #47-#53, #35, and #37.
+- [x] Retarget and merge bounded-agent-events PR #46 with rerun-backed exact-head and six-job post-merge authority.
+- [ ] Retarget and merge independent-review-policy PR #47, then continue #48-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
