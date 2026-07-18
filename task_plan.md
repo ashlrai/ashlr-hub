@@ -15,7 +15,8 @@
 - [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
 - [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
 - [x] Retarget and merge evidence-health PR #41 with 12/12 exact-head and six-job post-merge authority.
-- [ ] Retarget and merge causal-identity PR #42, then continue #43-#53, #35, and #37.
+- [x] Retarget and merge causal-identity PR #42 with exact-head and six-job post-merge authority.
+- [ ] Retarget and merge operational-projection PR #43, then continue #44-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
