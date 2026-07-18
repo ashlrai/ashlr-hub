@@ -20,6 +20,8 @@
 - PR #40 now includes that exact green master without conflicts. Its signed-evidence activation tree passes 335 focused assertions with one intentional skip across remote handoff, merge, provenance, evidence-pack, and FleetStatus suites; typecheck, scoped lint, build, zero-vulnerability audit, and diff checks pass.
 - PR #40 passed 12/12 exact-head checks at `cb783b6881f8f524d332a0270163a65f7d95be5c` and merged normally as `6c0e507e6b14818bd009670237867db06fd4bc55`. Its merge tree exactly matches the checked candidate, and post-merge run `29558446947` passed all six jobs.
 - PR #41 now includes that exact green master without conflicts. Its evidence-health surface passes 194 focused dashboard, SSE, evidence-doctor, and FleetStatus assertions; typecheck, scoped lint with zero errors, browser-script syntax, build, zero-vulnerability audit, and diff checks pass.
+- PR #41 passed 12/12 exact-head checks at `a803846db80d2422f13fa489eecb55723aa1610a` and merged normally as `c6505191ee4674d18b79e3f7509d6c54e4deaeab`. Its merge parents are the prior protected master and that exact head, its merge tree exactly matches the checked candidate, and post-merge run `29630670900` passed all six jobs.
+- PR #42 now includes the #41 merge commit without conflicts. Its causal proposal identity tree passes 116 focused apply/store, partial-diff timeout, resolution-observer, and control-plane-lock assertions; typecheck, scoped lint, build, zero-vulnerability audit, and diff checks pass. It remains subject to fresh exact-head and post-merge CI after retargeting to master.
 - Production remains unchanged with auto-merge, self-merge, canary enforcement, and positive learning disabled.
 
 ## Current Protected Remote Authority Cycle
