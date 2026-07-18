@@ -3416,6 +3416,7 @@ export async function autoMergeProposal(
             verdict: verdict.verdict,
             reason: verdict.rationale,
             detail: verdict.wouldMerge ? 'would-merge' : '',
+            ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
             ...(inlineAttestation !== undefined
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }

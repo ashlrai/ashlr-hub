@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readAgentActions } from '../fleet/agent-action-ledger.js';
+import { readAgentActions, type AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
 import {
   readDispatchProductionEvents,
@@ -36,6 +36,11 @@ import type {
   WorkSource,
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+import {
+  agentSemanticProposalSubjectRef,
+  agentSemanticModelFamily,
+  sanitizeAgentSemanticEvents,
+} from '../learning/agent-semantic-events.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
@@ -84,6 +89,7 @@ export interface TrajectoryTimelineEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  semanticEvents?: OutcomeRecordDecision['semanticEvents'];
   evidence?: {
     target: string;
     trustBasis: string;
@@ -139,6 +145,8 @@ export interface TrajectoryRecord {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
+  agentActionSourceQuality?: AgentActionSourceQuality;
   coverage: TrajectoryRecordCoverage;
   timeline: TrajectoryTimelineEvent[];
 }
@@ -575,10 +583,28 @@ function findOrCreateRecord(
 }
 
 function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimelineEvent): void {
-  const sanitized = sanitizeMetadata(event);
+  const { semanticEvents: candidateSemanticEvents, ...metadata } = event;
+  const semanticEvents = sanitizeAgentSemanticEvents(
+    candidateSemanticEvents,
+    agentSemanticProposalSubjectRef(event.proposalId),
+    agentSemanticModelFamily(event.model ?? event.backend),
+  );
+  const sanitized = {
+    ...sanitizeMetadata(metadata),
+    ...(semanticEvents ? { semanticEvents: semanticEvents.map((semanticEvent) => ({ ...semanticEvent })) } : {}),
+  } as TrajectoryTimelineEvent;
   record.timeline.push(sanitized);
   record.startedAt = firstTime(record.startedAt, sanitized.ts);
   record.latestAt = activityTime(record.latestAt, sanitized.ts);
+}
+
+function decisionSourceQualityRank(
+  quality: OutcomeRecord['decisionSourceQuality'],
+): number {
+  if (!quality) return 0;
+  if (quality.sourceState === 'degraded' || !quality.complete) return 3;
+  if (quality.sourceState === 'missing') return 2;
+  return 1;
 }
 
 function fillRecordMetadata(
@@ -672,6 +698,9 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         maxFiles: 3,
         requireComplete: true,
       }));
+  const agentActionSourceQuality = (actions as typeof actions & {
+    sourceQuality?: AgentActionSourceQuality;
+  }).sourceQuality;
   const skillUses = safeArray(() =>
     (deps.readSkillUseEvents ?? readSkillUseEvents)({
       sinceMs,
@@ -781,6 +810,10 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       routerPolicyVersion: proposal.routerPolicyVersion,
       learningEpoch: proposal.learningEpoch,
     });
+    if (outcome.decisionSourceQuality && decisionSourceQualityRank(outcome.decisionSourceQuality) >
+      decisionSourceQualityRank(record.decisionSourceQuality)) {
+      record.decisionSourceQuality = sanitizeMetadata(outcome.decisionSourceQuality);
+    }
     record.coverage.proposal = true;
     record.terminalOutcome = betterTerminalOutcome(
       record.terminalOutcome,
@@ -866,6 +899,12 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         ...(decision.labelBasis ? { labelBasis: decision.labelBasis } : {}),
         ...(decision.routerPolicyVersion ? { routerPolicyVersion: decision.routerPolicyVersion } : {}),
         ...(decision.learningEpoch ? { learningEpoch: decision.learningEpoch } : {}),
+        ...(decision.semanticEvents && (
+          outcome.decisionSourceQuality === undefined || (
+            outcome.decisionSourceQuality.sourceState === 'healthy' &&
+            outcome.decisionSourceQuality.complete
+          )
+        ) ? { semanticEvents: decision.semanticEvents } : {}),
       });
     }
 
@@ -952,6 +991,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       labelBasis: action.labelBasis,
       routerPolicyVersion: action.routerPolicyVersion,
       learningEpoch: action.learningEpoch,
+      ...(action.semanticEvents ? { semanticEvents: action.semanticEvents } : {}),
     });
   };
 
@@ -1032,10 +1072,11 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
           if (time !== 0) return time;
           return timelineRank(a.kind) - timelineRank(b.kind) || a.kind.localeCompare(b.kind);
         })
-        .slice(0, 40);
+        .slice(-40);
       const { aliases: _aliases, ...publicRecord } = record;
       const resultRecord: TrajectoryRecord = {
         ...publicRecord,
+        ...(agentActionSourceQuality ? { agentActionSourceQuality } : {}),
         timeline,
         terminalOutcome: record.terminalOutcome === 'unknown' && record.coverage.proposal
           ? 'pending'

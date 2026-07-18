@@ -1315,10 +1315,11 @@ describe('m141 — reasoning-before-verdict: verdict JSON still parseable', () =
 
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
-    const proposal = makeProposal({ id: 'draft-selection-only' });
+    const proposal = makeProposal({ id: 'prop-m141abc1-000001-111111111111111111111111' });
     const verdict = await judgeProposal(proposal, {} as never, client, { recordTrace: false });
 
     expect(verdict.verdict).toBe('review');
+    expect(verdict.semanticEvents?.map((event) => event.kind)).toEqual(['action', 'challenge']);
     expect(readJudgeTraces({ proposalId: proposal.id })).toHaveLength(0);
   });
 

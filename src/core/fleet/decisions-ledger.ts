@@ -26,6 +26,12 @@ import {
 } from 'node:fs';
 import type { DecisionEntry } from '../types.js';
 import { normalizeDecisionLearningFields } from '../learning/causal.js';
+import {
+  agentSemanticProposalSubjectRef,
+  agentSemanticModelFamily,
+  remintAgentSemanticEvents,
+  sanitizeAgentSemanticEvents,
+} from '../learning/agent-semantic-events.js';
 import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +96,7 @@ export interface DecisionSourceQuality {
   bytesRead: number;
   rowsScanned: number;
   invalidRows: number;
+  semanticRejectedRows?: number;
   unreadableFiles: number;
 }
 
@@ -120,11 +127,26 @@ function optionalJudgeAttestation(value: unknown): string | undefined {
   return stripSecrets(value);
 }
 
-function sanitizeDecisionEntry(entry: DecisionEntry): DecisionEntry {
+function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = false): DecisionEntry {
   const parsedTs = Date.parse(entry.ts);
+  const proposalId = stripSecrets(entry.proposalId);
+  const semanticSubjectRef = agentSemanticProposalSubjectRef(proposalId);
+  const semanticEvents = semanticSubjectRef
+    ? (remintSemanticOccurrence ? remintAgentSemanticEvents : sanitizeAgentSemanticEvents)(
+        entry.semanticEvents,
+        semanticSubjectRef,
+        agentSemanticModelFamily(entry.model ?? entry.engine),
+        { producerRole: 'manager', producerVersion: 'manager-semantic-v1' },
+      )
+    : undefined;
+  const semanticEventsState = semanticEvents
+    ? undefined
+    : entry.semanticEvents !== undefined || entry.semanticEventsState === 'rejected'
+      ? 'rejected' as const
+      : undefined;
   const clean: DecisionEntry = {
     ts: Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString(),
-    proposalId: stripSecrets(entry.proposalId),
+    proposalId,
     action: entry.action,
     ...(optionalScrubbedText(entry.workItemId) !== undefined ? { workItemId: optionalScrubbedText(entry.workItemId) } : {}),
     ...(optionalScrubbedText(entry.workSource) !== undefined ? { workSource: optionalScrubbedText(entry.workSource) as DecisionEntry['workSource'] } : {}),
@@ -137,6 +159,8 @@ function sanitizeDecisionEntry(entry: DecisionEntry): DecisionEntry {
     ...(optionalScrubbedText(entry.labelBasis) !== undefined ? { labelBasis: optionalScrubbedText(entry.labelBasis) as DecisionEntry['labelBasis'] } : {}),
     ...(optionalScrubbedText(entry.routerPolicyVersion) !== undefined ? { routerPolicyVersion: optionalScrubbedText(entry.routerPolicyVersion) } : {}),
     ...(optionalScrubbedText(entry.learningEpoch) !== undefined ? { learningEpoch: optionalScrubbedText(entry.learningEpoch) } : {}),
+    ...(semanticEvents ? { semanticEvents } : {}),
+    ...(semanticEventsState ? { semanticEventsState } : {}),
     ...(optionalScrubbedText(entry.engine) !== undefined ? { engine: optionalScrubbedText(entry.engine) } : {}),
     ...(optionalScrubbedText(entry.model) !== undefined ? { model: optionalScrubbedText(entry.model) } : {}),
     ...(optionalScrubbedText(entry.verdict) !== undefined ? { verdict: optionalScrubbedText(entry.verdict) } : {}),
@@ -173,7 +197,7 @@ export function recordDecision(entry: DecisionEntry): void {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
-    const record = sanitizeDecisionEntry(entry);
+    const record = sanitizeDecisionEntry(entry, true);
 
     const line = JSON.stringify(record) + '\n';
     if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
@@ -265,6 +289,7 @@ function emptyDecisionRead(
     bytesRead: 0,
     rowsScanned: 0,
     invalidRows: 0,
+    semanticRejectedRows: 0,
     unreadableFiles: 0,
     ...overrides,
   };
@@ -484,6 +509,23 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
                 result.invalidRows++;
                 continue;
               }
+              if (obj['semanticEvents'] !== undefined) {
+                const subjectRef = agentSemanticProposalSubjectRef(stripSecrets(obj['proposalId']));
+                if (!subjectRef || !sanitizeAgentSemanticEvents(
+                  obj['semanticEvents'], subjectRef, agentSemanticModelFamily(obj['model'] ?? obj['engine']),
+                  { producerRole: 'manager', producerVersion: 'manager-semantic-v1' },
+                )) {
+                  result.invalidRows++;
+                  continue;
+                }
+              }
+              if (obj['semanticEventsState'] !== undefined) {
+                if (obj['semanticEventsState'] !== 'rejected' || obj['semanticEvents'] !== undefined) {
+                  result.invalidRows++;
+                  continue;
+                }
+                result.semanticRejectedRows = (result.semanticRejectedRows ?? 0) + 1;
+              }
               const entryMs = Date.parse(obj['ts']);
               if (!Number.isFinite(entryMs)) {
                 result.invalidRows++;
@@ -567,6 +609,7 @@ export function readDecisions(opts: ReadDecisionsOptions = {}): DecisionEntry[] 
       bytesRead: result.bytesRead,
       rowsScanned: result.rowsScanned,
       invalidRows: result.invalidRows,
+      semanticRejectedRows: result.semanticRejectedRows,
       unreadableFiles: result.unreadableFiles,
     } satisfies DecisionSourceQuality,
     enumerable: false,

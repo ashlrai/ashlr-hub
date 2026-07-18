@@ -17,7 +17,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import type { AshlrConfig, Proposal, QualityMetrics } from '../types.js';
+import type { AgentSemanticEventV1, AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
 import { recordJudgeTrace } from './judge-trace.js';
 import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
@@ -26,6 +26,12 @@ import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
 import { CLAUDE5_FABLE_API_ID, fableEnabled } from '../run/model-catalog.js';
+import {
+  agentSemanticSubjectRef,
+  agentSemanticModelFamily,
+  defineAgentSemanticEvents,
+} from '../learning/agent-semantic-events.js';
+import { causalMetadataFromProposal } from '../learning/causal.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -53,6 +59,52 @@ export interface ManagerVerdict {
    * any actual merge — purely informational; merge gates re-check everything.
    */
   wouldMerge: boolean;
+  /** Opaque metadata-only observations; never judge or merge authority. */
+  semanticEvents?: AgentSemanticEventV1[];
+}
+
+export function managerSemanticEvents(
+  verdict: Pick<ManagerVerdict,
+    'proposalId' | 'verdict' | 'value' | 'correctness' | 'scope' | 'alignment' | 'wouldMerge'>,
+  model = 'unknown',
+): AgentSemanticEventV1[] {
+  const subjectRef = agentSemanticSubjectRef('proposal', verdict.proposalId);
+  const producerModelFamily = agentSemanticModelFamily(model);
+  const action = {
+    kind: 'action' as const,
+    predicate: 'manager.judge.completed' as const,
+    actionCode: 'manager.judge' as const,
+    status: 'completed' as const,
+  };
+  const challenge = verdict.verdict === 'ship' && verdict.wouldMerge
+    ? undefined
+    : {
+        kind: 'challenge',
+        predicate: verdict.verdict === 'ship' ? 'manager.bounds.blocked' : `manager.verdict.${verdict.verdict}`,
+        challengeCode: verdict.verdict === 'ship' ? 'merge.bounds-exceeded' : `verdict.${verdict.verdict}`,
+        severity: verdict.verdict === 'harmful'
+          ? 'critical'
+          : verdict.verdict === 'noise'
+            ? 'high'
+            : 'medium',
+      } as const;
+  return defineAgentSemanticEvents({
+    subjectRef,
+    producerRole: 'manager',
+    producerModelFamily,
+    producerVersion: 'manager-semantic-v1',
+  }, [action, ...(challenge ? [challenge] : [])]);
+}
+
+function safeManagerSemanticEvents(
+  verdict: Parameters<typeof managerSemanticEvents>[0],
+  model?: string,
+): AgentSemanticEventV1[] | undefined {
+  try {
+    return managerSemanticEvents(verdict, model);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Optional controls for callers that use the judge as ephemeral selection signal. */
@@ -447,21 +499,29 @@ function parseStrictReasoning(raw: string): Record<string, unknown> | null {
   return { value, correctness, scope, alignment, verdict, rationale };
 }
 
-function parseJudgeResponse(raw: string): { obj: Record<string, unknown> | null; fullReasoning: string } {
+function parseJudgeResponse(raw: string): {
+  obj: Record<string, unknown> | null;
+  fullReasoning: string;
+  source: 'json' | 'reasoning' | 'none';
+} {
   const candidates = normaliseJudgeTextCandidates(raw);
   const fullReasoning = candidates.map(extractFullReasoning).find((r) => r.length > 0) ?? '';
 
   for (const candidate of candidates) {
     const obj = extractJson(candidate);
-    if (obj) return { obj, fullReasoning };
+    if (obj) return { obj, fullReasoning, source: 'json' };
   }
 
   for (const candidate of candidates) {
     const obj = parseStrictReasoning(candidate);
-    if (obj) return { obj, fullReasoning: fullReasoning || extractFullReasoning(candidate) || candidate.trim() };
+    if (obj) return {
+      obj,
+      fullReasoning: fullReasoning || extractFullReasoning(candidate) || candidate.trim(),
+      source: 'reasoning',
+    };
   }
 
-  return { obj: null, fullReasoning };
+  return { obj: null, fullReasoning, source: 'none' };
 }
 
 const VALID_VERDICTS = new Set(['ship', 'review', 'noise', 'harmful']);
@@ -514,19 +574,22 @@ function autoMergeBounds(cfg: AshlrConfig): {
 export async function judgeProposal(
   proposal: Proposal,
   cfg: AshlrConfig,
-  client: { complete: JudgeComplete },
+  client: { complete: JudgeComplete; model?: string },
   options: JudgeProposalOptions = {},
 ): Promise<ManagerVerdict> {
-  const fallback = (): ManagerVerdict => ({
-    proposalId: proposal.id,
-    verdict: 'review',
-    value: 3,
-    correctness: 3,
-    scope: 3,
-    alignment: 3,
-    rationale: 'parse failure — defaulting to review',
-    wouldMerge: false,
-  });
+  const fallback = (): ManagerVerdict => {
+    const verdict: ManagerVerdict = {
+      proposalId: proposal.id,
+      verdict: 'review',
+      value: 3,
+      correctness: 3,
+      scope: 3,
+      alignment: 3,
+      rationale: 'parse failure — defaulting to review',
+      wouldMerge: false,
+    };
+    return verdict;
+  };
 
   throwIfJudgeCancelled(options.signal);
 
@@ -556,6 +619,7 @@ export async function judgeProposal(
 
   const parsed = parseJudgeResponse(raw);
   let obj = parsed.obj;
+  let parseSource = parsed.source;
   fullReasoning = parsed.fullReasoning;
   // ONE-SHOT RETRY: if parse failed, re-prompt the model asking for JSON only.
   if (!obj) {
@@ -565,6 +629,7 @@ export async function judgeProposal(
       const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt, options.signal);
       const retryParsed = parseJudgeResponse(raw2);
       obj = retryParsed.obj;
+      parseSource = retryParsed.source;
       fullReasoning = fullReasoning || retryParsed.fullReasoning;
     } catch {
       throwIfJudgeCancelled(options.signal);
@@ -637,7 +702,25 @@ export async function judgeProposal(
     });
   }
 
-  return { proposalId: proposal.id, verdict, value, correctness, scope, alignment, rationale, wouldMerge };
+  const result: ManagerVerdict = {
+    proposalId: proposal.id,
+    verdict,
+    value,
+    correctness,
+    scope,
+    alignment,
+    rationale,
+    wouldMerge,
+  };
+  const completeStructuredRubric = parseSource === 'json' &&
+    typeof obj['verdict'] === 'string' && VALID_VERDICTS.has(obj['verdict'].toLowerCase()) &&
+    ['value', 'correctness', 'scope', 'alignment'].every((field) =>
+      typeof obj![field] === 'number' && Number.isInteger(obj![field]) &&
+      Number(obj![field]) >= 1 && Number(obj![field]) <= 5);
+  const semanticEvents = completeStructuredRubric
+    ? safeManagerSemanticEvents(result, client.model)
+    : undefined;
+  return semanticEvents ? { ...result, semanticEvents } : result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,7 +1294,7 @@ export async function runManager(
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
-    let judgeClient: { complete: JudgeComplete } | null = null;
+    let judgeClient: { complete: JudgeComplete; model: string } | null = null;
     let judgeStats: JudgeCallStats | null = null;
 
     // Step 1: resolveJudgeClient — Claude CLI when allowed+installed, else local-72b.
@@ -1221,7 +1304,7 @@ export async function runManager(
     // so they naturally fall through to Step 2 (getActiveClient mock).
     try {
       const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
-      judgeClient = resolved;
+      judgeClient = { complete: resolved.complete, model: resolved.judgeEngine };
       judgeEngine = resolved.judgeEngine;
       judgeStats = resolved.stats;
     } catch {
@@ -1266,7 +1349,7 @@ export async function runManager(
         verdict = await judgeProposal(proposal, cfg, judgeClient);
       } else {
         // No client — default every proposal to 'review' (never auto-reject).
-        verdict = {
+        const fallbackVerdict: ManagerVerdict = {
           proposalId: proposal.id,
           verdict: 'review',
           value: 3,
@@ -1276,6 +1359,7 @@ export async function runManager(
           rationale: 'no judge available — defaulting to review',
           wouldMerge: false,
         };
+        verdict = fallbackVerdict;
       }
 
       verdicts.push(verdict);
@@ -1314,9 +1398,11 @@ export async function runManager(
       recordDecision({
         ts: decisionTs,
         proposalId: proposal.id,
-        ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
-        ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
-        ...(proposal.runId ? { runId: proposal.runId } : {}),
+        ...causalMetadataFromProposal(proposal, {
+          ts: decisionTs,
+          learningSource: 'decision-ledger',
+          labelBasis: 'judge-verdict',
+        }),
         action: 'judged',
         engine: judgeEngine,
         // M322: record the model that ACTUALLY answered (fallback-aware — a
@@ -1331,6 +1417,7 @@ export async function runManager(
         verdict: verdict.verdict,
         reason: verdict.rationale,
         detail: verdict.wouldMerge ? 'would-merge' : '',
+        ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
         ...(judgeAttestation !== undefined
           ? { judgeAttestationIssuedAt: decisionTs, judgeAttestationIntent: 'would-merge' as const }

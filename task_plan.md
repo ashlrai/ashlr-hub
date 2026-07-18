@@ -18,7 +18,8 @@
 - [x] Retarget and merge causal-identity PR #42 with exact-head and six-job post-merge authority.
 - [x] Retarget and merge operational-projection PR #43 with rerun-backed exact-head and six-job post-merge authority.
 - [x] Retarget and merge projection-transaction PR #44 with exact-head and six-job post-merge authority.
-- [ ] Retarget and merge projection-replay-ledger PR #45, then continue #46-#53, #35, and #37.
+- [x] Retarget and merge projection-replay-ledger PR #45 with rerun-backed exact-head and six-job post-merge authority.
+- [ ] Retarget and merge bounded-agent-events PR #46, then continue #47-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2611,7 +2612,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Structured Agent Reasoning And Independent Review (2026-07-16)
 - [x] Audit current action, run-summary, trajectory, observer, manager, red-team, and Best-of-N telemetry contracts.
 - [x] Select a metadata-only `intent|observation|prediction|action|evidence|challenge` event union instead of persisting or parsing free-form chain-of-thought.
-- [ ] Add bounded strict semantic events to decisions, agent actions, outcomes, and trajectory projections with recursive raw-content rejection.
-- [ ] Emit the first deterministic semantic events from Manager's existing scores/verdict and measure calibration, challenge precision, and trajectory join coverage.
+- [x] Add bounded all-or-nothing semantic events to decisions, agent actions, outcomes, and trajectory projections with finite registries, parent binding, deterministic identities, and exact sequence validation.
+- [x] Emit only complete-JSON Manager action/challenge metadata; prohibit synthetic fallback predictions, score-as-observation claims, reasoning-derived telemetry, and calibration authority.
+- [x] Preserve exact occurrence/event identities through outcome/trajectory projection, expose degraded decision and agent-action source quality, and withhold semantic projection from degraded sources.
+- [x] Prove 100,000 seeded raw-content canaries persist zero semantic rows and near-authorized semantic evidence cannot replace cryptographic merge authority.
+- [ ] Add independent post-effect observations and preregistered prediction mapping before enabling calibration metrics.
 - [ ] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
 - [ ] Repair Best-of-N's null correctness critic and draft-first deterministic test gap before treating candidate selection as independent review.
+- [x] Publish protected draft PR #46 after final independent blocker review returned `SHIP`; require both duplicate protected matrices before promotion.

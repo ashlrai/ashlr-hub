@@ -206,6 +206,7 @@ async function runAuthorizedFrontierJudge(
             verdict: 'ship',
             reason: verdict.rationale ?? '',
             detail: 'would-merge',
+            ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
             ...(judgeAttestation !== undefined
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
