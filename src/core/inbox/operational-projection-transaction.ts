@@ -264,7 +264,7 @@ function writeRecord(
   }
 }
 
-export function prepareOperationalProjectionTransaction(
+export function prepareOperationalProjectionTransactionJournalOnly(
   input: PrepareOperationalProjectionTransactionInput,
 ): OperationalProjectionTransactionReadResult {
   if (!ownsProposalStoreMutationLock(input.storeLock) || !validProposalId(input.proposalId) ||
@@ -313,7 +313,7 @@ export function prepareOperationalProjectionTransaction(
     : { state: 'degraded', reason: 'transaction-write-failed', transaction: null };
 }
 
-export function advanceOperationalProjectionTransaction(
+export function advanceOperationalProjectionTransactionJournalOnly(
   transactionId: string,
   phase: OperationalProjectionTransactionPhase,
   storeLock: ProposalStoreMutationLock,
