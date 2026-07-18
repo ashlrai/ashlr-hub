@@ -16,7 +16,8 @@
 - [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
 - [x] Retarget and merge evidence-health PR #41 with 12/12 exact-head and six-job post-merge authority.
 - [x] Retarget and merge causal-identity PR #42 with exact-head and six-job post-merge authority.
-- [ ] Retarget and merge operational-projection PR #43, then continue #44-#53, #35, and #37.
+- [x] Retarget and merge operational-projection PR #43 with rerun-backed exact-head and six-job post-merge authority.
+- [ ] Retarget and merge projection-transaction PR #44, then continue #45-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2582,3 +2583,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Publish protected stacked PR #43 on #42 with the dormant activation boundary explicit.
 - [ ] Add crash-recoverable proposal-plus-projection writer transactions and an external anti-rollback anchor.
 - [ ] Cut hot consumers over only after transaction recovery, source-completeness, and concurrent mutation tests pass.
+
+## Operational Projection Transaction Journal (2026-07-16)
+- [x] Persist an authenticated active two-artifact intent under exact writer-lock ownership.
+- [x] Enforce monotonic phases, clocks, signing-key generation, and unambiguous two-digest movement.
+- [x] Classify every before/after crash boundary from observed digests, including missing-artifact creation.
+- [x] Fail closed for tamper, malformed state, unsafe storage, key replacement, phase skips, lock mismatch, and active overlap.
+- [ ] Add an externally anchored monotonic floor that rejects replay of an older valid active record.
+- [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
+- [x] Publish draft stacked PR #44 on #43 with valid-record replay called out as a merge blocker.
