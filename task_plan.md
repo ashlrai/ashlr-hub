@@ -15,7 +15,8 @@
 - [x] Retarget and merge signed evidence-pack PR #39 with exact-head and post-merge authority.
 - [x] Retarget and merge signed-evidence activation PR #40 with exact-head and post-merge authority.
 - [x] Retarget and merge evidence-health PR #41 with 12/12 exact-head and six-job post-merge authority.
-- [ ] Retarget and merge causal-identity PR #42, then continue #43-#53, #35, and #37.
+- [x] Retarget and merge causal-identity PR #42 with exact-head and six-job post-merge authority.
+- [ ] Retarget and merge operational-projection PR #43, then continue #44-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2571,3 +2572,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Complete independent re-review with SHIP and no remaining P0/P1/P2 findings.
 - [x] Publish protected stacked PR #42 on fully protected-green #41; require duplicate protected CI before merge consideration.
 - [x] Repair Ubuntu CI contract/timing assertions without changing production causal semantics or observer deadlines; rerun 24 focused assertions and static gates.
+
+## Operational Proposal Projection Foundation (2026-07-16)
+- [x] Define proposal-local operational membership without mutable side-ledger authority.
+- [x] Add a bounded, private, domain-keyed sealed manifest and fail-closed read path.
+- [x] Require exact complete namespace reconciliation for offline migration and reject active overflow before publication.
+- [x] Prove 4,097 terminal records no longer consume active authority capacity while 4,097 active records fail closed.
+- [x] Remove unsafe runtime point-read activation and pass independent blocker re-review with SHIP.
+- [x] Publish protected stacked PR #43 on #42 with the dormant activation boundary explicit.
+- [ ] Add crash-recoverable proposal-plus-projection writer transactions and an external anti-rollback anchor.
+- [ ] Cut hot consumers over only after transaction recovery, source-completeness, and concurrent mutation tests pass.
