@@ -406,11 +406,11 @@ describe('M300 [F] isFrontierJudge frontier predicate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [A1] Codex ship attestation accepted by evaluateVerificationGate
+// [A1] Independent frontier ship attestation accepted by evaluateVerificationGate
 // ---------------------------------------------------------------------------
 
-describe('M300 [A1] codex ship attestation → evaluateVerificationGate accepts gpt-5.5', () => {
-  it('accepts a valid HMAC-signed codex attestation (gpt-5.5 judge)', async () => {
+describe('M300 [A1] independent ship attestation → evaluateVerificationGate accepts Claude', () => {
+  it('accepts a valid HMAC-signed Claude attestation for a Codex producer', async () => {
     const { evaluateVerificationGate } = await import('../src/core/inbox/merge.js');
     const { signJudgeAttestation, hashDiff, signProvenance } = await import('../src/core/foundry/provenance.js');
 
@@ -425,10 +425,10 @@ describe('M300 [A1] codex ship attestation → evaluateVerificationGate accepts 
       '+export const x = 1;',
     ].join('\n') + '\n';
     const diffHash = hashDiff(diff);
-    const judgeEngine = 'gpt-5.5';
+    const judgeEngine = 'claude-opus-4-5';
     const proposalId = 'prop-m300-a1';
 
-    // Sign an attestation as a gpt-5.5 (Codex) judge
+    // Sign an attestation from the independent Claude reviewer family.
     const judgeAttestation = signJudgeAttestation({ proposalId, judgeEngine, verdict: 'ship', diffHash });
 
     const mergeAuthority = [{ engine: 'codex', model: 'gpt-5.5' }];
