@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mocks.judgeProposal(...args),
+  resolveFrontierJudgeClient: () => null,
+  wrapClient: (raw: { complete?: unknown; model?: unknown }) =>
+    typeof raw.complete === 'function'
+      ? { complete: raw.complete, model: typeof raw.model === 'string' ? raw.model : 'unknown' }
+      : null,
 }));
 
 vi.mock('../src/core/run/provider-client.js', () => ({
@@ -204,6 +209,7 @@ beforeEach(() => {
   enroll(tmpRepo);
 
   mocks.getActiveClient.mockResolvedValue({
+    id: 'anthropic',
     model: 'claude-opus-4-5',
     complete: async () => '{}',
   });

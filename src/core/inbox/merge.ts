@@ -143,8 +143,16 @@ import {
   verifyJudgeAttestation,
   verifyProvenance,
 } from '../foundry/provenance.js';
-import { judgeProposal, resolveFrontierJudgeClient } from '../fleet/manager.js';
-import { evaluateReviewerIndependence } from '../fleet/reviewer-independence.js';
+import {
+  judgeProposal,
+  resolveFrontierJudgeClient,
+  wrapClient,
+  type MinimalProviderClient,
+} from '../fleet/manager.js';
+import {
+  evaluateReviewerIndependence,
+  producerModelFamily,
+} from '../fleet/reviewer-independence.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
@@ -3337,6 +3345,27 @@ export async function autoMergeProposal(
           if (resolved && typeof resolved.model === 'string' && resolved.model.length > 0) {
             inlineJudgeEngine = resolved.model;
             judgeClient = resolved;
+          }
+          if (!judgeClient) {
+            const producerFamily = producerModelFamily(proposal.engineModel);
+            const targetProvider = producerFamily === 'claude' ? 'openai' :
+              producerFamily === 'openai' ? 'anthropic' : null;
+            const targetModel = targetProvider === 'openai' ? 'gpt-5.5' : 'claude-opus-4-5';
+            if (targetProvider) {
+              const { getActiveClient } = await import('../run/provider-client.js');
+              const rawClient = await getActiveClient(cfg, {
+                allowCloud: true,
+                provider: targetProvider,
+                model: targetModel,
+              }) as MinimalProviderClient;
+              if (rawClient.id === targetProvider) {
+                const wrapped = wrapClient(rawClient);
+                if (wrapped && evaluateReviewerIndependence(proposal, wrapped.model).independent) {
+                  inlineJudgeEngine = wrapped.model;
+                  judgeClient = wrapped;
+                }
+              }
+            }
           }
         } catch {
           judgeClient = null;

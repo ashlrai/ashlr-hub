@@ -734,7 +734,7 @@ export async function judgeProposal(
 // module which has many side effects)
 // ---------------------------------------------------------------------------
 
-interface MinimalProviderClient {
+export interface MinimalProviderClient {
   id?: string;
   complete?: JudgeComplete;
   chat?: (
@@ -755,7 +755,7 @@ interface MinimalProviderClient {
  * Wrap a ProviderClient into the simple `complete(system, user)` interface
  * the judge needs. Tries several API shapes gracefully.
  */
-function wrapClient(
+export function wrapClient(
   raw: MinimalProviderClient,
 ): { complete: JudgeComplete; model: string } | null {
   // Shape 1: already has a .complete() method (test mocks use this)
