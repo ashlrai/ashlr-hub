@@ -390,6 +390,32 @@ describe('Trajectory records', () => {
     }));
   });
 
+  it('keeps witnessed applied proposals terminal regardless of release label', () => {
+    for (const labelBasis of [
+      undefined,
+      'proposal-status',
+      'post-merge-credit-release-v1',
+    ] as const) {
+      const base = outcomeRecord();
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          listOutcomeRecords: () => [{
+            ...base,
+            proposal: { ...base.proposal, status: 'applied', labelBasis },
+            decisions: [{ ...base.decisions[0]!, labelBasis }],
+          }],
+        }),
+      });
+
+      expect(record?.terminalOutcome).toBe('merged');
+      expect(record?.timeline).toContainEqual(expect.objectContaining({
+        kind: 'decision', action: 'merged',
+      }));
+      expect(summarizeTrajectoryLearning([record!]).routeSpine.dispatchToMerge.count).toBe(1);
+    }
+  });
+
   it('attaches realized post-merge truth without rewriting the historical merge outcome', () => {
     const realizedAt = '2026-07-09T00:04:00.000Z';
     const [record] = listTrajectoryRecords({

@@ -27,7 +27,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -416,7 +416,7 @@ describe('M257 — Elon Director', () => {
       expect(ctx.goals.active).toHaveLength(1);
     });
 
-    it('counts one canonical merge and ignores legacy or duplicate rows even with a current witness', async () => {
+    it('keeps one canonical merge factual without granting per-engine ship credit', async () => {
       mockReadDecisions.mockReturnValue([
         { ...MOCK_DECISIONS[0], labelBasis: undefined },
         MOCK_DECISIONS[0],
@@ -427,7 +427,37 @@ describe('M257 — Elon Director', () => {
       const ctx = await buildDirectorContext(makeConfig() as never);
 
       expect(ctx.outcomes.mergedCount).toBe(1);
-      expect(ctx.outcomes.engineShipRates.claude).toBe(100);
+      expect(ctx.outcomes.engineShipRates).toEqual({});
+    });
+
+    it('excludes factual merges from an engine rejection-derived adaptive rate', async () => {
+      mockReadDecisions.mockReturnValue([
+        MOCK_DECISIONS[0],
+        { ...MOCK_DECISIONS[1], engine: 'claude' },
+      ]);
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.outcomes.mergedCount).toBe(1);
+      expect(ctx.outcomes.engineShipRates).toEqual({ claude: 0 });
+    });
+
+    it('does not trust a caller-supplied release label as per-engine success credit', async () => {
+      mockReadDecisions.mockReturnValue([
+        MOCK_DECISIONS[0],
+        {
+          ...MOCK_DECISIONS[0],
+          ts: new Date(FIXED_NOW_MS - 500).toISOString(),
+          labelBasis: 'post-merge-credit-release-v1',
+        },
+      ]);
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.outcomes.mergedCount).toBe(1);
+      expect(ctx.outcomes.engineShipRates).toEqual({});
     });
 
     it('counts a legacy merge row as zero even with a current realized witness', async () => {
@@ -478,6 +508,45 @@ describe('M257 — Elon Director', () => {
       expect(ctx.learning.skillCount).toBe(0);
       // other sections still work
       expect(ctx.goals.active).toHaveLength(1);
+    });
+
+    it('does not trust legacy or release-tagged m243 genome rows as positive skill signal', async () => {
+      const hubPath = join(tmpDir, 'hub.jsonl');
+      writeFileSync(hubPath, [
+        JSON.stringify({
+          title: 'Legacy skill',
+          tags: ['m243:skill'],
+          ts: new Date(FIXED_NOW_MS - 1000).toISOString(),
+        }),
+        JSON.stringify({
+          title: 'Caller-tagged release skill',
+          tags: ['m243:skill', 'credit:released-v1'],
+          ts: new Date(FIXED_NOW_MS - 1000).toISOString(),
+        }),
+        JSON.stringify({
+          title: 'A negative lesson remains visible',
+          tags: ['m235:anti-playbook'],
+          ts: new Date(FIXED_NOW_MS - 1000).toISOString(),
+        }),
+      ].join('\n') + '\n');
+      mockHubStorePath.mockReturnValue(hubPath);
+
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const ctx = await buildDirectorContext(makeConfig() as never);
+
+      expect(ctx.learning.skillCount).toBe(0);
+      expect(ctx.learning.lessonsCount).toBe(1);
+      expect(ctx.learning.recentLessonTitles).toEqual(['A negative lesson remains visible']);
+    });
+
+    it('renders factual merges and authenticated-only adaptive signals explicitly', async () => {
+      const { buildDirectorContext } = await import('../src/core/comms/director-context.js');
+      const { renderDirectorPrompt } = await import('../src/core/comms/director-prompt.js');
+      const prompt = renderDirectorPrompt(await buildDirectorContext(makeConfig() as never));
+
+      expect(prompt).toContain('Realized merges (factual only): 1, Rejected: 1');
+      expect(prompt).not.toContain('claude=100%');
+      expect(prompt).toContain('Released-credit engine ship rates: codex=0%');
     });
 
     it('7. derives resourcePosture=full when claude is open', async () => {

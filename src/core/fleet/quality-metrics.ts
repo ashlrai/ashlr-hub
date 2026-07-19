@@ -14,6 +14,7 @@ import {
   realizedMergeOf,
 } from '../inbox/realized-merge.js';
 import { readDecisions } from './decisions-ledger.js';
+import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
 import { verifyProducerProvenanceV2 } from '../foundry/provenance.js';
 
@@ -101,7 +102,11 @@ function judgePredictionKey(entry: DecisionEntry): string {
   return `${entry.proposalId}\u0000${entry.engine ?? ''}\u0000${entry.model ?? ''}`;
 }
 
-function isCanonicalMergedDecision(entry: DecisionEntry): boolean {
+function isReleasedMergedDecision(entry: DecisionEntry): boolean {
+  return entry.action === 'merged' && hasReleasedPostMergeCredit(entry.labelBasis);
+}
+
+function isFactualMergedDecision(entry: DecisionEntry): boolean {
   return entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1';
 }
 
@@ -142,8 +147,7 @@ export function computeQualityMetrics(
     }
     let proposals = proposalRead.proposals;
 
-    // Realized outcomes belong to the window in which the witness was observed.
-    // Non-realized proposals retain their creation-time lifecycle semantics.
+    // Operational merge facts belong to the witness observation window.
     if (sinceMs !== undefined) {
       proposals = proposals.filter((p) => isInWindow(proposalWindowMs(p), sinceMs));
     }
@@ -162,7 +166,6 @@ export function computeQualityMetrics(
       );
     }
 
-    // ── Load decisions (same window) ────────────────────────────────────────
     const decisions = readDecisions({ requireComplete: true });
 
     // ── Aggregate counts ─────────────────────────────────────────────────────
@@ -292,8 +295,7 @@ function buildTrend(
 ): NonNullable<QualityMetrics['trend']> {
   if (window === '7d') return []; // not enough data for multi-period trend
 
-  // Group one created and one realized terminal outcome per proposal. Bare
-  // historical merged rows remain forensic data and cannot create a trend win.
+  // Operational trend: group one created and one realized merge per proposal.
   const weekMap: Record<string, { merged: number; created: number }> = {};
   const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
   const proposed = new Map<string, DecisionEntry>();
@@ -307,7 +309,7 @@ function buildTrend(
       const existing = proposed.get(d.proposalId);
       if (isNewerDecision(d, existing)) proposed.set(d.proposalId, d);
     }
-    if (isCanonicalMergedDecision(d)) {
+    if (isFactualMergedDecision(d)) {
       const existing = merged.get(d.proposalId);
       if (isNewerDecision(d, existing)) merged.set(d.proposalId, d);
     }
@@ -526,13 +528,13 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
       if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
     }
 
-    // Pass 2b: one terminal outcome per proposal. A current realized witness
-    // makes the merge authoritative over stale rejection rows; without it,
-    // bare merged rows are ignored and only the newest rejection can count.
+    // Pass 2b: one terminal outcome per proposal. Released credit backed by a
+    // current realized witness is authoritative over stale rejection rows;
+    // otherwise merge facts are ignored and the newest rejection can count.
     const latestMerged = new Map<string, DecisionEntry>();
     const latestTerminal = new Map<string, DecisionEntry>();
     for (const e of entries) {
-      if (isCanonicalMergedDecision(e)) {
+      if (isReleasedMergedDecision(e)) {
         const existing = latestMerged.get(e.proposalId);
         if (isNewerDecision(e, existing)) latestMerged.set(e.proposalId, e);
       }

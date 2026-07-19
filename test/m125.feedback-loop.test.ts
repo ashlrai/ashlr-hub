@@ -133,7 +133,7 @@ function makeDecision(
     proposalId,
     action,
     verdict,
-    ...(action === 'merged' ? { labelBasis: 'realized-merge-v1' as const } : {}),
+    ...(action === 'merged' ? { labelBasis: 'post-merge-credit-release-v1' as const } : {}),
   };
 }
 
@@ -212,13 +212,27 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     expect(priors.global['security']?.created).toBe(1);
   });
 
-  it('counts merged decisions correctly', async () => {
+  it('does not treat the raw reserved release label as feedback authority', async () => {
     const p = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
     _mockDecisions = [
       makeDecision(p.id, 'merged', 'approved'),
     ];
     const priors = await computeOutcomePriors({ listProposals: () => [p] });
-    expect(priors.global['todo']?.merged).toBeGreaterThanOrEqual(1);
+    expect(priors.global['todo']?.merged).toBe(0);
+    expect(priors.global['todo']?.acceptRate).toBe(0);
+  });
+
+  it('does not count realized-merge-v1 as positive feedback credit', async () => {
+    const p = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
+    _mockDecisions = [{
+      ...makeDecision(p.id, 'merged', 'approved'),
+      labelBasis: 'realized-merge-v1',
+    }];
+
+    const priors = await computeOutcomePriors({ listProposals: () => [p] });
+
+    expect(priors.global['todo']?.merged).toBe(0);
+    expect(priors.global['todo']?.acceptRate).toBe(0);
   });
 
   it('counts rejected decisions correctly', async () => {
@@ -254,7 +268,7 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     expect(priors.global['todo']?.noiseRate).toBeGreaterThan(0);
   });
 
-  it('counts worked-ledger diff/empty events per source', async () => {
+  it('withholds worked-ledger diff credit while preserving empty evidence', async () => {
     _mockWorkedEvents = [
       makeWorkedEvent('dep', 'diff'),
       makeWorkedEvent('dep', 'diff'),
@@ -262,9 +276,31 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     ];
     const priors = await computeOutcomePriors({ listProposals: () => [] });
 
-    expect(priors.global['dep']?.diffCount).toBe(2);
+    expect(priors.global['dep']?.diffCount).toBe(0);
     expect(priors.global['dep']?.emptyCount).toBe(1);
-    expect(priors.global['dep']?.emptyRate).toBeCloseTo(1 / 3, 5);
+    expect(priors.global['dep']?.emptyRate).toBe(1);
+  });
+
+  it('refuses distinguishable legacy merge:shipped diff rows as adaptive credit', async () => {
+    const legacyProposals = Array.from({ length: MIN_SAMPLES }, (_, index) =>
+      makeProposal({
+        id: `/repo/alpha:dep:legacy-proposal-${index}`,
+        kind: 'patch' as ProposalKind,
+      }));
+    _mockWorkedEvents = [
+      ...legacyProposals.map((proposal) => ({
+        itemId: proposal.id,
+        outcome: 'diff' as const,
+        ts: new Date().toISOString(),
+      })),
+      ...Array.from({ length: MIN_SAMPLES }, () => makeWorkedEvent('dep', 'empty')),
+    ];
+
+    const priors = await computeOutcomePriors({ listProposals: () => legacyProposals });
+    const stats = priors.global['dep']!;
+
+    expect(stats).toMatchObject({ diffCount: 0, emptyCount: MIN_SAMPLES, emptyRate: 1 });
+    expect(scoreAdjustment(makeItem('dep'), priors)).toBeCloseTo(0.6, 5);
   });
 
   it('separates stats by repo', async () => {
@@ -274,23 +310,23 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
     ];
     const priors = await computeOutcomePriors({ listProposals: () => [] });
 
-    expect(priors.byRepo['/repo/alpha']?.['security']?.diffCount).toBe(1);
+    expect(priors.byRepo['/repo/alpha']?.['security']).toBeUndefined();
     expect(priors.byRepo['/repo/beta']?.['security']?.emptyCount).toBe(1);
   });
 
   it('respects windowMs — excludes old entries', async () => {
     const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days ago
     _mockWorkedEvents = [
-      { itemId: '/repo/alpha:dep:old', outcome: 'diff', ts: old },
-      makeWorkedEvent('dep', 'diff'), // recent
+      { itemId: '/repo/alpha:dep:old', outcome: 'empty', ts: old },
+      makeWorkedEvent('dep', 'empty'), // recent
     ];
     // 7-day window — should exclude the old event.
     const windowMs = 7 * 24 * 60 * 60 * 1000;
     const priors = await computeOutcomePriors({ listProposals: () => [], windowMs });
-    expect(priors.global['dep']?.diffCount).toBe(1); // only recent
+    expect(priors.global['dep']?.emptyCount).toBe(1); // only recent
   });
 
-  it('rates are recomputed correctly: acceptRate = merged / created', async () => {
+  it('keeps predictive ship counts separate from released merge credit', async () => {
     const p1 = withRealizedMerge(makeProposal({ kind: 'patch' as ProposalKind }));
     const p2 = makeProposal({ kind: 'patch' as ProposalKind });
     const p3 = makeProposal({ kind: 'patch' as ProposalKind });
@@ -298,12 +334,11 @@ describe('M125 §1 — computeOutcomePriors: aggregation', () => {
       makeDecision(p1.id, 'merged', 'approved'),
       makeDecision(p2.id, 'judged', 'ship'),
     ];
-    // The ship verdict remains predictive; only the merged row is accepted.
+    // The ship verdict remains predictive; the raw v1 merged row is not accepted.
     const priors = await computeOutcomePriors({ listProposals: () => [p1, p2, p3] });
     const stats = priors.global['todo']!;
     expect(stats.created).toBe(3);
-    expect(stats.merged + stats.shipCount).toBe(2);
-    expect(stats.acceptRate).toBeCloseTo(1 / 3, 5);
+    expect(stats).toMatchObject({ merged: 0, shipCount: 1, acceptRate: 0 });
   });
 });
 

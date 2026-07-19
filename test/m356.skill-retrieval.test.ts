@@ -10,13 +10,19 @@ import type { SkillCard } from '../src/core/types.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
   inspectVerifiedSkillCorpus,
-  MAX_SELECTED_SKILLS,
   SKILL_RETRIEVAL_POLICY_VERSION,
   selectVerifiedSkills,
 } from '../src/core/fleet/skill-retrieval.js';
 
 let previousHome: string | undefined;
 let home: string;
+
+const CREDIT_RELEASE_LABEL = 'post-merge-credit-release-v1' as const;
+const CREDIT_RELEASE_TAG = 'credit:released-v1' as const;
+
+function releasedTags(...tags: string[]): string[] {
+  return [CREDIT_RELEASE_TAG, ...tags];
+}
 
 beforeEach(() => {
   previousHome = process.env.HOME;
@@ -40,7 +46,7 @@ function card(overrides: Partial<SkillCard> = {}): SkillCard {
     summary: 'Run focused typecheck and tests before broader verification.',
     status: 'verified',
     source: 'verified-proposal',
-    tags: ['typescript', 'verification'],
+    tags: releasedTags('typescript', 'verification'),
     taskKinds: ['typescript-change'],
     commandKinds: ['typecheck', 'test'],
     verification: {
@@ -50,12 +56,37 @@ function card(overrides: Partial<SkillCard> = {}): SkillCard {
       evidenceCount: 3,
     },
     proposalId: 'proposal-fixture',
+    labelBasis: CREDIT_RELEASE_LABEL,
     ...overrides,
   };
-  return attestSkillCard(unsigned)!;
+  const signed = attestSkillCard(unsigned);
+  return signed ?? unsigned;
 }
 
 describe('M356 verified skill retrieval', () => {
+  it('does not treat a generic attestation over release metadata as release authority', () => {
+    const { contentHash: _contentHash, attestation: _attestation, ...unsigned } = card();
+    const signed = attestSkillCard(unsigned);
+
+    expect(signed).not.toBeNull();
+    expect(selectVerifiedSkills([signed!], { title: 'Verify TypeScript changes' }))
+      .toMatchObject({ eligibleCount: 0, selectedSkillIds: [], selected: [] });
+  });
+
+  it.each([
+    'POST-MERGE-CREDIT-RELEASE-V1',
+    ' post-merge-credit-release-v1 ',
+  ])('treats non-canonical release-label spelling as non-authoritative: %s', (labelBasis) => {
+    const { contentHash: _contentHash, attestation: _attestation, ...unsigned } = card({
+      labelBasis,
+    });
+    const signed = attestSkillCard(unsigned);
+
+    expect(signed).not.toBeNull();
+    expect(selectVerifiedSkills([signed!], { title: 'Verify TypeScript changes' }))
+      .toMatchObject({ eligibleCount: 0, selectedSkillIds: [] });
+  });
+
   it('inspects signed lifecycle eligibility without query or card text', () => {
     const inspection = inspectVerifiedSkillCorpus([
       card({ skillId: 'skill.eligible' }),
@@ -66,7 +97,7 @@ describe('M356 verified skill retrieval', () => {
       { ...card({ skillId: 'skill.tampered' }), summary: 'tampered after attestation' },
     ]);
 
-    expect(inspection).toEqual({ considered: 5, current: 4, eligible: 1, conflicting: 0 });
+    expect(inspection).toEqual({ considered: 5, current: 4, eligible: 0, conflicting: 0 });
     expect(Object.keys(inspection).sort()).toEqual(['conflicting', 'considered', 'current', 'eligible']);
     expect(JSON.stringify(inspection)).not.toContain('skill.');
   });
@@ -81,7 +112,34 @@ describe('M356 verified skill retrieval', () => {
       exact,
     ]);
 
-    expect(inspection).toEqual({ considered: 5, current: 1, eligible: 1, conflicting: 1 });
+    expect(inspection).toEqual({ considered: 5, current: 1, eligible: 0, conflicting: 1 });
+  });
+
+  it('keeps every generic-signed release attempt ineligible', () => {
+    const cards = [
+      card({ skillId: 'skill.released' }),
+      card({ skillId: 'skill.legacy', labelBasis: 'evidence-policy' }),
+      card({ skillId: 'skill.missing-label', labelBasis: undefined }),
+      card({ skillId: 'skill.realized-only', labelBasis: 'realized-merge-v1' }),
+      card({
+        skillId: 'skill.missing-tag',
+        tags: ['typescript', 'verification'],
+      }),
+    ];
+
+    expect(inspectVerifiedSkillCorpus(cards)).toEqual({
+      considered: 5,
+      current: 5,
+      eligible: 0,
+      conflicting: 0,
+    });
+    const selection = selectVerifiedSkills(cards, {
+      title: 'Verify TypeScript changes',
+      tags: ['typescript', 'verification'],
+    });
+    expect(selection.eligibleCount).toBe(0);
+    expect(selection.selectedSkillIds).toEqual([]);
+    expect(selection.selected).toEqual([]);
   });
 
   it('fails closed for absent and hostile corpus inputs', () => {
@@ -96,7 +154,7 @@ describe('M356 verified skill retrieval', () => {
     expect(inspectVerifiedSkillCorpus([hostile])).toEqual(empty);
   });
 
-  it('selects at most two relevant verified-proposal cards in shadow mode', () => {
+  it('selects no generic-signed released cards in shadow mode', () => {
     const result = selectVerifiedSkills([
       card({ skillId: 'skill.z', name: 'TypeScript test workflow' }),
       card({ skillId: 'skill.a', name: 'TypeScript verification workflow' }),
@@ -114,14 +172,10 @@ describe('M356 verified skill retrieval', () => {
     expect(result).toMatchObject({
       mode: 'shadow',
       policyVersion: SKILL_RETRIEVAL_POLICY_VERSION,
-      eligibleCount: 3,
+      eligibleCount: 0,
     });
-    expect(result.selected).toHaveLength(MAX_SELECTED_SKILLS);
-    expect(result.selected[0]?.contentHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(result.selectedSkillIds).toEqual(['skill.z', 'skill.a']);
-    expect(result.selected.every((entry) => (
-      entry.status === 'verified' && entry.source === 'verified-proposal'
-    ))).toBe(true);
+    expect(result.selected).toEqual([]);
+    expect(result.selectedSkillIds).toEqual([]);
   });
 
   it('uses bounded metadata relevance instead of input order', () => {
@@ -130,20 +184,20 @@ describe('M356 verified skill retrieval', () => {
         skillId: 'skill.docs',
         name: 'Documentation workflow',
         summary: 'Update markdown documentation.',
-        tags: ['docs'],
+        tags: releasedTags('docs'),
         taskKinds: ['documentation'],
       }),
       card({
         skillId: 'skill.security',
         name: 'Dependency security repair',
         summary: 'Audit vulnerable dependencies and run security tests.',
-        tags: ['security', 'dependencies'],
+        tags: releasedTags('security', 'dependencies'),
         taskKinds: ['dependency-repair'],
       }),
     ];
     const query = { title: 'Repair a security dependency', tags: ['security'] };
 
-    expect(selectVerifiedSkills(cards, query).selectedSkillIds).toEqual(['skill.security']);
+    expect(selectVerifiedSkills(cards, query).selectedSkillIds).toEqual([]);
     expect(selectVerifiedSkills([...cards].reverse(), query)).toEqual(selectVerifiedSkills(cards, query));
   });
 
@@ -152,36 +206,33 @@ describe('M356 verified skill retrieval', () => {
       skillId,
       name: 'Focused verification',
       summary: 'Run tests.',
-      tags: ['verification'],
+      tags: releasedTags('verification'),
       taskKinds: ['typescript-change'],
     }));
     const query = { title: 'TypeScript verification' };
     const expected = selectVerifiedSkills(cards, query);
 
-    expect(expected.selectedSkillIds).toEqual(['skill.a', 'skill.b']);
+    expect(expected.selectedSkillIds).toEqual([]);
     expect(selectVerifiedSkills([cards[2]!, cards[0]!, cards[1]!], query)).toEqual(expected);
     expect(selectVerifiedSkills([cards[1]!, cards[2]!, cards[0]!], query)).toEqual(expected);
   });
 
   it('uses only the latest revision and fails closed on conflicting duplicate revisions', () => {
     const result = selectVerifiedSkills([
-      card({ skillId: 'skill.latest', revision: 1, name: 'Old docs workflow', tags: ['docs'] }),
-      card({ skillId: 'skill.latest', revision: 2, name: 'Current security workflow', tags: ['security'] }),
-      card({ skillId: 'skill.revoked', revision: 1, tags: ['security'] }),
-      card({ skillId: 'skill.revoked', revision: 2, status: 'revoked', tags: ['security'] }),
-      card({ skillId: 'skill.deprecated', revision: 1, tags: ['security'] }),
-      card({ skillId: 'skill.deprecated', revision: 2, status: 'deprecated', tags: ['security'] }),
-      card({ skillId: 'skill.conflict', revision: 4, tags: ['security'] }),
-      card({ skillId: 'skill.conflict', revision: 4, name: 'Conflicting immutable row', tags: ['security'] }),
-      card({ skillId: 'skill.exact', revision: 3, tags: ['security'] }),
-      card({ skillId: 'skill.exact', revision: 3, tags: ['security'] }),
+      card({ skillId: 'skill.latest', revision: 1, name: 'Old docs workflow', tags: releasedTags('docs') }),
+      card({ skillId: 'skill.latest', revision: 2, name: 'Current security workflow', tags: releasedTags('security') }),
+      card({ skillId: 'skill.revoked', revision: 1, tags: releasedTags('security') }),
+      card({ skillId: 'skill.revoked', revision: 2, status: 'revoked', tags: releasedTags('security') }),
+      card({ skillId: 'skill.deprecated', revision: 1, tags: releasedTags('security') }),
+      card({ skillId: 'skill.deprecated', revision: 2, status: 'deprecated', tags: releasedTags('security') }),
+      card({ skillId: 'skill.conflict', revision: 4, tags: releasedTags('security') }),
+      card({ skillId: 'skill.conflict', revision: 4, name: 'Conflicting immutable row', tags: releasedTags('security') }),
+      card({ skillId: 'skill.exact', revision: 3, tags: releasedTags('security') }),
+      card({ skillId: 'skill.exact', revision: 3, tags: releasedTags('security') }),
     ], { title: 'Security workflow', tags: ['security'] });
 
-    expect(result.selectedSkillIds).toEqual(['skill.latest', 'skill.exact']);
-    expect(result.selected.find((entry) => entry.skillId === 'skill.latest')?.revision).toBe(2);
-    expect(result.selectedSkillIds).not.toContain('skill.revoked');
-    expect(result.selectedSkillIds).not.toContain('skill.deprecated');
-    expect(result.selectedSkillIds).not.toContain('skill.conflict');
+    expect(result.selectedSkillIds).toEqual([]);
+    expect(result.eligibleCount).toBe(0);
   });
 
   it('requires complete verification provenance and rejects skill chains', () => {
@@ -211,8 +262,8 @@ describe('M356 verified skill retrieval', () => {
       }),
     ], { title: 'Verify TypeScript changes', tags: ['verification'] });
 
-    expect(result.eligibleCount).toBe(1);
-    expect(result.selectedSkillIds).toEqual(['skill.eligible']);
+    expect(result.eligibleCount).toBe(0);
+    expect(result.selectedSkillIds).toEqual([]);
   });
 
   it('skips malformed, empty, and hostile records without throwing', () => {
@@ -255,13 +306,13 @@ describe('M356 verified skill retrieval', () => {
       skillId: 'skill.poisoned',
       name: 'Security verification',
       summary: 'security security diff --git a/private.ts b/private.ts\n+secret contents',
-      tags: ['security'],
+      tags: releasedTags('security'),
     });
     const secret = 'ghp_1234567890abcdefABCDEF';
     const secretMetadata = card({
       skillId: 'skill.secret',
       name: `Security token=${secret}`,
-      tags: ['security'],
+      tags: releasedTags('security'),
     });
 
     const result = selectVerifiedSkills(
@@ -294,7 +345,7 @@ describe('M356 verified skill retrieval', () => {
         skillId: 'skill.huge',
         name: huge,
         summary: huge,
-        tags: manyTags,
+        tags: releasedTags(...manyTags),
         taskKinds: manyTags,
         commandKinds: manyTags,
       }),
@@ -306,9 +357,7 @@ describe('M356 verified skill retrieval', () => {
     });
 
     expect(result.selected.length).toBeLessThanOrEqual(2);
-    expect(result.selected[0]?.name.length).toBeLessThanOrEqual(120);
-    expect(result.selected[0]?.summary.length).toBeLessThanOrEqual(320);
-    expect(result.selected[0]?.matchedFields.length).toBeLessThanOrEqual(5);
+    expect(result.selected).toEqual([]);
     expect(JSON.stringify(result).length).toBeLessThan(2_000);
   });
 });

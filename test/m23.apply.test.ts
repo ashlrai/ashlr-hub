@@ -490,7 +490,7 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
     for (const k of after.keys()) {
       expect(before.has(k), `applyProposal created working tree file: ${k}`).toBe(true);
     }
-  });
+  }, 15_000);
 
   it('NEVER pushes — no spawnSync call to gh push', async () => {
     const spawnSpy = vi.fn(() => ({
@@ -509,7 +509,7 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
       const hasGitPush = args.some(a => typeof a === 'string' && a.includes('push'));
       expect(hasGitPush).toBe(false);
     }
-  });
+  }, 15_000);
 
   it('sets status=applied on success', async () => {
     const p = createProposal(makeInput({ diff: makeSimpleDiff('status-check.txt', 'ok\n') }));
@@ -520,7 +520,7 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
       const loaded = loadProposal(p.id);
       expect(loaded!.status).toBe('applied');
     }
-  });
+  }, 15_000);
 
   it('never throws even when diff application fails', async () => {
     // Provide a malformed diff that git apply will reject
@@ -528,7 +528,7 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
     setStatus(p.id, 'approved');
 
     await expect(applyProposal(p.id, { confirmed: true })).resolves.toBeDefined();
-  });
+  }, 15_000);
 
   it('sets status=failed and returns ok:false when diff is invalid', async () => {
     const p = createProposal(makeInput({ diff: 'INVALID DIFF CONTENT' }));

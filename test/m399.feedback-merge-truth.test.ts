@@ -1,5 +1,5 @@
 /**
- * M399: merge priors must reflect applied proposals, not authorization rows.
+ * M399: merge priors require future origin-bound release authority.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import type {
   RealizedMergeEvidence,
   WorkItem,
 } from '../src/core/types.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from '../src/core/fleet/post-merge-credit.js';
 import { computeOutcomePriors, scoreAdjustment } from '../src/core/fleet/feedback.js';
 
 let decisions: DecisionEntry[] = [];
@@ -92,7 +93,7 @@ function decision(
     action,
     ...(verdict !== undefined ? { verdict } : {}),
     ...(action === 'merged' && canonicalMerge
-      ? { labelBasis: 'realized-merge-v1' as const }
+      ? { labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL }
       : {}),
   };
 }
@@ -118,7 +119,7 @@ describe('M399 computeOutcomePriors merge truth', () => {
     expect(priors.byRepo[p.repo]?.todo?.merged).toBe(0);
   });
 
-  it('counts application once after authorization', async () => {
+  it('does not credit application from a raw reserved v1 label', async () => {
     const p = realizedProposal('applied');
     decisions = [
       decision(p.id, 'merge-authorized', 'approved'),
@@ -127,11 +128,11 @@ describe('M399 computeOutcomePriors merge truth', () => {
 
     const priors = await computeOutcomePriors({ listProposals: () => [p] });
 
-    expect(priors.global.todo).toMatchObject({ created: 1, merged: 1, acceptRate: 1 });
-    expect(priors.byRepo[p.repo]?.todo?.merged).toBe(1);
+    expect(priors.global.todo).toMatchObject({ created: 1, merged: 0, acceptRate: 0 });
+    expect(priors.byRepo[p.repo]?.todo?.merged).toBe(0);
   });
 
-  it('deduplicates repeated merged rows per proposal', async () => {
+  it('grants zero credit for repeated raw v1 rows with EDV enabled or disabled', async () => {
     const first = { ...realizedProposal('duplicate-merge'), verifyResult: { passed: true } };
     const second = { ...realizedProposal('distinct-merge'), verifyResult: { passed: true } };
     decisions = [
@@ -146,17 +147,17 @@ describe('M399 computeOutcomePriors merge truth', () => {
       edvVerify: true,
     });
 
-    expect(priors.global.todo).toMatchObject({ created: 2, merged: 2, acceptRate: 1 });
-    expect(priors.byRepo[first.repo]?.todo?.merged).toBe(2);
+    expect(priors.global.todo).toMatchObject({ created: 2, merged: 0, acceptRate: 0 });
+    expect(priors.byRepo[first.repo]?.todo?.merged).toBe(0);
     expect(edvPriors.global.todo).toMatchObject({
       created: 2,
-      merged: 2,
-      mergedWeightedSum: 2,
-      acceptRate: 1,
+      merged: 0,
+      acceptRate: 0,
     });
+    expect(edvPriors.global.todo?.mergedWeightedSum).toBeUndefined();
   });
 
-  it('applies merge windows to witness time instead of the ledger row time', async () => {
+  it('does not let witness or ledger timing upgrade a raw v1 label', async () => {
     vi.setSystemTime(new Date('2026-07-14T13:00:00.000Z'));
     const recentWitness = realizedProposal('recent-witness', '2026-07-14T12:30:00.000Z');
     const oldWitness = realizedProposal('old-witness', '2026-07-01T12:30:00.000Z');
@@ -170,7 +171,7 @@ describe('M399 computeOutcomePriors merge truth', () => {
       windowMs: 60 * 60 * 1000,
     });
 
-    expect(priors.global.todo).toMatchObject({ created: 2, merged: 1, acceptRate: 0.5 });
+    expect(priors.global.todo).toMatchObject({ created: 2, merged: 0, acceptRate: 0 });
   });
 
   it('rejects future realized evidence and future judge predictions', async () => {
@@ -232,7 +233,7 @@ describe('M399 computeOutcomePriors merge truth', () => {
     expect(priors.global.todo).toMatchObject({ merged: 0, rejected: 1, acceptRate: 0 });
   });
 
-  it('makes a newer exact realized witness authoritative over stale rejection history', async () => {
+  it('keeps adverse history authoritative when a newer witness has only raw v1 credit', async () => {
     const p = realizedProposal('realized-after-rejection', '2026-07-14T12:20:00.000Z');
     decisions = [
       decision(p.id, 'merged', 'applied', '2026-07-14T12:00:00.000Z'),
@@ -241,7 +242,7 @@ describe('M399 computeOutcomePriors merge truth', () => {
 
     const priors = await computeOutcomePriors({ listProposals: () => [p] });
 
-    expect(priors.global.todo).toMatchObject({ merged: 1, rejected: 0, acceptRate: 1 });
+    expect(priors.global.todo).toMatchObject({ merged: 0, rejected: 1, acceptRate: 0 });
   });
 
   it('keeps a genuinely newer rejection terminal over older realized evidence', async () => {

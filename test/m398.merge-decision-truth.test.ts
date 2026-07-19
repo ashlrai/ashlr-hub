@@ -9,15 +9,16 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  getActiveClient: vi.fn(),
   judgeProposal: vi.fn(),
+  getActiveClient: vi.fn(),
   persistEvidencePack: vi.fn(),
   persistedEvidencePack: null as unknown,
+  resolveFrontierJudgeClient: vi.fn(),
 }));
 
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mocks.judgeProposal(...args),
-  resolveFrontierJudgeClient: () => null,
+  resolveFrontierJudgeClient: (...args: unknown[]) => mocks.resolveFrontierJudgeClient(...args),
   wrapClient: (raw: { complete?: unknown; model?: unknown }) =>
     typeof raw.complete === 'function'
       ? { complete: raw.complete, model: typeof raw.model === 'string' ? raw.model : 'unknown' }
@@ -52,7 +53,7 @@ import {
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
-import { judgeTracesDir, recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
+import { judgeTracesDir, readJudgeTraces, recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
 import { hashDiff, signLocalMergeIntent, signProvenance } from '../src/core/foundry/provenance.js';
 import {
   addMilestone,
@@ -86,6 +87,9 @@ const originalAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 let tmpHome: string;
 let tmpRepo: string;
 
+const PRODUCER_MODEL = 'codex:gpt-5.5';
+const REVIEWER_MODEL = 'claude-opus-4-5';
+
 function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
     encoding: 'utf8',
@@ -114,6 +118,8 @@ function config(): AshlrConfig {
   return {
     foundry: {
       mergeAuthority: [{ engine: 'codex', model: 'gpt-5.5' }],
+      managerJudgeEngine: 'claude',
+      managerJudgeModel: REVIEWER_MODEL,
       autoMerge: {
         enabled: true,
         maxRisk: 'low',
@@ -144,8 +150,8 @@ function createFrontierProposal(trajectoryId: string): Proposal {
     summary: 'Separate manager authorization from terminal merge truth',
     diff,
     diffHash,
-    provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
-    engineModel: 'codex:gpt-5.5',
+    provenanceSig: signProvenance(PRODUCER_MODEL, 'frontier', diffHash),
+    engineModel: PRODUCER_MODEL,
     engineTier: 'frontier',
     workItemId: `${tmpRepo}:issue:m398`,
     workSource: 'issue',
@@ -212,6 +218,13 @@ beforeEach(() => {
     id: 'anthropic',
     model: 'claude-opus-4-5',
     complete: async () => '{}',
+  });
+  mocks.resolveFrontierJudgeClient.mockImplementation((_cfg, options) => {
+    if (options?.producerModel !== PRODUCER_MODEL || options?.requireIndependent !== true) return null;
+    return {
+      model: REVIEWER_MODEL,
+      complete: async () => '{}',
+    };
   });
   mocks.judgeProposal.mockImplementation(async (proposal: Proposal) => ({
     proposalId: proposal.id,
@@ -615,13 +628,13 @@ describe('M398 merge decision truth', () => {
     expect(mocks.judgeProposal).not.toHaveBeenCalled();
   });
 
-  it('leaves outcome projection unacknowledged on degraded trace reads and repairs it once healthy', async () => {
+  it('keeps factual fanout independent of degraded judge traces without projecting a merged outcome', async () => {
     mocks.persistEvidencePack.mockReturnValue(true);
     const proposal = createFrontierProposal('trajectory-m398-degraded-outcome-retry');
     recordJudgeTrace({
       traceId: 'm398-degraded-outcome',
       proposalId: proposal.id,
-      judgeEngine: 'codex:gpt-5.5',
+      judgeEngine: REVIEWER_MODEL,
       verdict: 'ship',
       scores: { value: 4, correctness: 4, scope: 1, alignment: 4 },
       fullReasoning: 'qualified merge fixture',
@@ -636,14 +649,25 @@ describe('M398 merge decision truth', () => {
 
     const traceFile = path.join(judgeTracesDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
     const healthyTraceSource = fs.readFileSync(traceFile, 'utf8');
+    const initialTraces = readJudgeTraces({ proposalId: proposal.id });
+    expect(initialTraces).toHaveLength(1);
+    expect(initialTraces[0]).toMatchObject({
+      traceId: 'm398-degraded-outcome',
+      judgeEngine: REVIEWER_MODEL,
+    });
+    expect(initialTraces[0]?.outcome).toBeUndefined();
+    expect(initialTraces[0]?.outcomeBasis).toBeUndefined();
     fs.appendFileSync(traceFile, '{"torn":', 'utf8');
 
     expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
-    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBeUndefined();
+    expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
 
     fs.writeFileSync(traceFile, healthyTraceSource, 'utf8');
     expect(replayRealizedMergeFanout(proposal.id, undefined, () => true)).toBe(true);
     expect(loadProposal(proposal.id)?.realizedMergeFanoutVersion).toBe(3);
+    const replayedTrace = readJudgeTraces({ proposalId: proposal.id })[0];
+    expect(replayedTrace?.outcome).toBeUndefined();
+    expect(replayedTrace?.outcomeBasis).toBeUndefined();
   });
 
   it('leaves milestone projection unacknowledged until its linked goal write is durable', async () => {

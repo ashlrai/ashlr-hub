@@ -259,7 +259,13 @@ function judgedEntries(
     return [
       { proposalId, action: 'judged', engine, model, verdict, ts },
       ...(positive && includeMerged
-        ? [{ proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1', ts }]
+        ? [{
+            proposalId,
+            action: 'merged',
+            verdict: 'applied',
+            labelBasis: 'post-merge-credit-release-v1',
+            ts,
+          }]
         : []),
     ];
   }).flat();
@@ -302,31 +308,24 @@ describe('engineScoreFor — neutral fallback', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildEngineScores — sample floor', () => {
-  it(`score is 0.5 when sample count < ${LEARNED_ROUTING_MIN_SAMPLES}`, () => {
+  it(`withholds ${LEARNED_ROUTING_MIN_SAMPLES - 1} raw v1 positive samples`, () => {
     const n = LEARNED_ROUTING_MIN_SAMPLES - 1; // just below floor
     writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship'));
     const scores = buildEngineScores('issue');
-    // The entry should exist but score should be neutral
-    const s = scores.get('claude:opus');
-    expect(s).toBeDefined();
-    expect(s!.score).toBe(0.5);
-    expect(s!.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(scores.has('claude:opus')).toBe(false);
   });
 
-  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples above the weighted floor`, () => {
+  it(`withholds exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh raw v1 positive samples`, () => {
     const fixedNow = 1_700_000_000_000;
     const routeNow = fixedNow + 1;
     writeDecisions(
       judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'issue', 'ship', fixedNow),
     );
     const scores = buildEngineScores('issue', routeNow);
-    const s = scores.get('claude:opus');
-    expect(s).toBeDefined();
-    expect(s!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
-    expect(s!.score).toBeGreaterThan(0.5);
+    expect(scores.has('claude:opus')).toBe(false);
   });
 
-  it(`score reflects actual ratio when sample count > ${LEARNED_ROUTING_MIN_SAMPLES}`, () => {
+  it(`withholds raw v1 positives above ${LEARNED_ROUTING_MIN_SAMPLES} samples`, () => {
     // Use a fixed nowMs == the entries' ts so recency-decay is exactly 1.0 (no
     // boundary flakiness): exactly-MIN raw samples would dip just under the
     // weighted floor with even a few ms of decay. Pin time + go above the floor.
@@ -335,9 +334,7 @@ describe('buildEngineScores — sample floor', () => {
       ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES + 2, 'claude', 'opus', 'issue', 'ship', fixedNow),
     ]);
     const scores = buildEngineScores('issue', fixedNow);
-    const s = scores.get('claude:opus');
-    expect(s).toBeDefined();
-    expect(s!.score).toBeGreaterThan(0.5); // all ships → score > neutral
+    expect(scores.has('claude:opus')).toBe(false);
   });
 });
 
@@ -366,7 +363,7 @@ describe('buildEngineScores — ship/reject bias', () => {
     ]);
   });
 
-  it('attributes positive credit to signed proposal provenance, not the judge row', () => {
+  it('does not let signed provenance upgrade a raw v1 label into positive credit', () => {
     const n = LEARNED_ROUTING_MIN_SAMPLES + 1;
     writeDecisions(judgedEntries(n, 'claude', 'opus', 'issue', 'ship'));
     for (const proposalId of realized.times.keys()) {
@@ -378,7 +375,7 @@ describe('buildEngineScores — ship/reject bias', () => {
 
     const scores = buildEngineScores('issue');
     expect(scores.has('claude:opus')).toBe(false);
-    expect(scores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+    expect(scores.has('codex:gpt-5.5')).toBe(false);
   });
 
   it('does not credit a realized proposal whose producer provenance is invalid', () => {
@@ -447,7 +444,7 @@ describe('buildEngineScores — ship/reject bias', () => {
     expect(buildEngineScores('issue').size).toBe(0);
   });
 
-  it('does not promote a legacy merged row even when the proposal has a witness', () => {
+  it('does not promote an old realized-merge label even when the proposal has a witness', () => {
     const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
     const entries = judgedEntries(n, 'claude', 'opus', 'issue', 'ship', undefined, false);
     writeDecisions(entries.flatMap((entry) => entry.action === 'judged'
@@ -455,6 +452,7 @@ describe('buildEngineScores — ship/reject bias', () => {
           proposalId: entry.proposalId,
           action: 'merged',
           verdict: 'applied',
+          labelBasis: 'realized-merge-v1',
           ts: entry.ts,
         }]
       : [entry]));
@@ -463,7 +461,7 @@ describe('buildEngineScores — ship/reject bias', () => {
     expect(buildEngineScores('issue').size).toBe(0);
   });
 
-  it('uses witness time for the learned-routing window', () => {
+  it('does not let a fresh witness upgrade a raw v1 label into routing credit', () => {
     const now = 1_800_000_000_000;
     const old = now - 100 * 24 * 60 * 60 * 1000;
     const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
@@ -472,9 +470,7 @@ describe('buildEngineScores — ship/reject bias', () => {
       realized.times.set(proposalId, new Date(now).toISOString());
     }
 
-    const score = buildEngineScores('issue', now).get('claude:opus');
-    expect(score?.samples).toBe(n);
-    expect(score?.score).toBeGreaterThan(0.5);
+    expect(buildEngineScores('issue', now).has('claude:opus')).toBe(false);
 
     for (const proposalId of realized.times.keys()) {
       realized.times.set(proposalId, new Date(old).toISOString());
@@ -523,14 +519,13 @@ describe('buildEngineScores — ship/reject bias', () => {
           action: 'judged',
           engine: 'codex',
           model: 'gpt-5.5',
-          verdict: 'ship',
+          verdict: 'noise',
         },
-        { proposalId, action: 'merged', verdict: 'applied', labelBasis: 'realized-merge-v1' },
       ];
     }).flat());
 
     const issueScores = buildEngineScores('issue');
-    expect(issueScores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+    expect(issueScores.get('codex:gpt-5.5')?.score).toBe(0);
     expect(buildEngineScores('todo').size).toBe(0);
   });
 
@@ -551,12 +546,10 @@ describe('buildEngineScores — ship/reject bias', () => {
     expect(s!.score).toBeLessThan(0.5);
   });
 
-  it('claude:opus has score > 0.5 after many ship verdicts', () => {
+  it('many ship verdicts plus raw v1 labels create no positive score', () => {
     writeDecisions(judgedEntries(LEARNED_ROUTING_MIN_SAMPLES + 3, 'claude', 'opus', 'issue', 'ship'));
     const scores = buildEngineScores('issue');
-    const s = scores.get('claude:opus');
-    expect(s).toBeDefined();
-    expect(s!.score).toBeGreaterThan(0.5);
+    expect(scores.has('claude:opus')).toBe(false);
   });
 
   it('codex:gpt-5.5 has score < 0.5 after many noise/review/harmful verdicts', () => {
@@ -570,20 +563,16 @@ describe('buildEngineScores — ship/reject bias', () => {
     expect(s!.score).toBeLessThan(0.5);
   });
 
-  it('mixed verdicts: score proportional to ship fraction', () => {
-    const n = LEARNED_ROUTING_MIN_SAMPLES + 5;
-    const ships = Math.ceil(n * 0.7);
-    const rejects = n - ships;
+  it('raw v1 ships add zero while negative outcomes remain effective', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
     writeDecisions([
-      ...judgedEntries(ships, 'claude', 'opus', 'todo', 'ship'),
-      ...judgedEntries(rejects, 'claude', 'opus', 'todo', 'noise', undefined, true, 'reject'),
+      ...judgedEntries(n, 'claude', 'opus', 'todo', 'ship'),
+      ...judgedEntries(n, 'claude', 'opus', 'todo', 'noise', undefined, true, 'reject'),
     ]);
     const scores = buildEngineScores('todo');
     const s = scores.get('claude:opus');
     expect(s).toBeDefined();
-    // score should be close to 0.7 (with recency weight they're all recent so near-equal)
-    expect(s!.score).toBeGreaterThan(0.6);
-    expect(s!.score).toBeLessThanOrEqual(1.0);
+    expect(s!.score).toBe(0);
   });
 });
 
@@ -592,7 +581,7 @@ describe('buildEngineScores — ship/reject bias', () => {
 // ---------------------------------------------------------------------------
 
 describe('sortEnginesByScore', () => {
-  it('promotes high-ship-rate engine to front', () => {
+  it('does not promote an engine from raw v1 positive history', () => {
     // claude:opus has high ship rate; codex:gpt-5.5 has high reject rate
     writeDecisions([
       ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES + 2, 'claude', 'opus', 'issue', 'ship'),
@@ -600,9 +589,7 @@ describe('sortEnginesByScore', () => {
     ]);
     const scores = buildEngineScores('issue');
     const ordered = sortEnginesByScore(['codex', 'claude'] as any, scores, null);
-    // claude should be first even though codex was first in the original list
-    expect(ordered[0]).toBe('claude');
-    expect(ordered[1]).toBe('codex');
+    expect(ordered).toEqual(['codex', 'claude']);
   });
 
   it('is a no-op (stable) when scores map is empty (cold-start)', () => {
@@ -665,7 +652,7 @@ describe('routeTask — flag-off parity', () => {
 // ---------------------------------------------------------------------------
 
 describe('routeTask — learned bias promotes high-ship engine', () => {
-  it(`routes on exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples through the real sort path`, () => {
+  it(`keeps static routing with exactly ${LEARNED_ROUTING_MIN_SAMPLES} raw v1 positives`, () => {
     const fixedNow = 1_700_000_000_000;
     vi.useFakeTimers();
     vi.setSystemTime(new Date(fixedNow));
@@ -679,10 +666,10 @@ describe('routeTask — learned bias promotes high-ship engine', () => {
     const cfg = makeCfg({ learnedRouting: true, routingPolicy: 'balanced' });
 
     const result = routeTask(item, cfg, ctx);
-    expect(result.engine).toBe('claude');
+    expect(result.engine).toBe('codex');
   });
 
-  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples deterministic when the route clock is delayed`, () => {
+  it(`keeps raw v1 positives held when the route clock is delayed`, () => {
     const fixedNow = 1_700_000_000_000;
     vi.useFakeTimers();
     vi.setSystemTime(new Date(fixedNow));
@@ -692,16 +679,14 @@ describe('routeTask — learned bias promotes high-ship engine', () => {
     vi.setSystemTime(new Date(fixedNow + 1_000));
 
     const scores = buildEngineScores('todo');
-    const claudeScore = scores.get('claude:opus');
-    expect(claudeScore).toBeDefined();
-    expect(claudeScore!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(scores.has('claude:opus')).toBe(false);
 
     const item = makeItem('todo', 4, 5);
     const ctx = makeCtx(['claude', 'codex']);
     const cfg = makeCfg({ learnedRouting: true, routingPolicy: 'balanced' });
 
     const result = routeTask(item, cfg, ctx);
-    expect(result.engine).toBe('claude');
+    expect(result.engine).toBe('codex');
   });
 
   it(`keeps ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh samples in the thin-sample guard through routing`, () => {

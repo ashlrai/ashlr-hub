@@ -521,7 +521,7 @@ describe('M200 [A] verification gate — NIM-produced proposal in verification m
     expect(r.attempted).toBe(0);
   });
 
-  it('[A-V6] NIM frontier proposal, verification mode, already frontier-judged → judge not re-called, merge attempted', async () => {
+  it('[A-V6] current independent cached judge evidence skips a duplicate review before merge', async () => {
     const p = makeNimProp('av6', 'frontier'); // nim promoted to frontier tier
     mockListProposals.mockReturnValue([p]);
     // Cached frontier ship verdict.
@@ -529,7 +529,6 @@ describe('M200 [A] verification gate — NIM-produced proposal in verification m
 
     const r = await runAutoMergePass(verifyCfg());
 
-    // hasRecentShipVerdict=true → judge not called.
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('av6', expect.anything());
     expect(r.judged).toBe(0);
@@ -945,14 +944,14 @@ describe('M200 [C] tri-tier invariants — nim same as claude/codex', () => {
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('c5b', expect.anything());
   });
 
-  it('[C-6] nim already-judged (hasRecentShipVerdict=true) → judge NOT re-called (cache hit)', async () => {
+  it('[C-6] current independent cached judge evidence is not re-reviewed', async () => {
     const p = makeNimProp('c6', 'frontier');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([frontierShipEntry('c6')]);
 
     const r = await runAutoMergePass(tierCfg());
 
-    expect(mockJudgeProposal).not.toHaveBeenCalled(); // cached
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('c6', expect.anything());
     expect(r.judged).toBe(0);
     expect(r.attempted).toBe(1);
@@ -1013,7 +1012,8 @@ describe('M200 [C] tri-tier invariants — nim same as claude/codex', () => {
     expect(r.merged).toBe(1);
     expect(r.branched).toBe(1);
     expect(r.results).toHaveLength(2);
-    // Judge not called (both cached).
+    // Both signed Claude rows are independent current authority for Kimi.
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(r.judged).toBe(0);
   });
 

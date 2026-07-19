@@ -554,6 +554,32 @@ describe('appendHubEntry — append-only, never overwrites', () => {
     expect(entry.tags).toEqual(expect.arrayContaining(['alpha', 'beta']));
   });
 
+  it('does not let appendHubEntry mint released skill authority', () => {
+    const entry = appendHubEntry({
+      text: 'Caller-supplied released skill',
+      tags: ['m243:skill', 'credit:released-v1', 'verification'],
+    });
+
+    expect(entry.tags).toContain('m243:skill');
+    expect(entry.tags).toContain('verification');
+    expect(entry.tags).not.toContain('credit:released-v1');
+    expect(loadGenome(makeConfig()).find((candidate) => candidate.id === entry.id)?.tags)
+      .not.toContain('credit:released-v1');
+  });
+
+  it('canonicalizes case and whitespace before refusing released skill authority', () => {
+    const entry = appendHubEntry({
+      text: 'Caller-supplied variant released skill',
+      tags: [' M243:SKILL ', ' CREDIT:RELEASED-V1 ', 'Verification'],
+    });
+
+    expect(entry.tags).toContain('M243:SKILL');
+    expect(entry.tags).toContain('Verification');
+    expect(entry.tags.map((tag) => tag.toLowerCase())).not.toContain('credit:released-v1');
+    expect(loadGenome(makeConfig()).find((candidate) => candidate.id === entry.id)?.tags
+      .map((tag) => tag.toLowerCase())).not.toContain('credit:released-v1');
+  });
+
   it('uses empty tags array when tags not provided', () => {
     const entry = appendHubEntry({ text: 'No tags note' });
     expect(Array.isArray(entry.tags)).toBe(true);

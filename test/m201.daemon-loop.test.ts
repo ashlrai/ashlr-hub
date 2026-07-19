@@ -4680,7 +4680,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
-  it('A1h2f: live builtin dispatch records signed shadow selections without changing swarm inputs', async () => {
+  it('A1h2f: live builtin dispatch keeps skill selection dormant and leaves swarm inputs unchanged', async () => {
     const { items } = enrollWithItems(2);
     const skill = attestSkillCard(sanitizeSkillCard({
       schemaVersion: 1,
@@ -4709,20 +4709,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.dispatches).toHaveLength(2);
     const events = readSkillUseEvents();
-    expect(events).toHaveLength(2);
-    expect(new Set(events.map((event) => event.eventId)).size).toBe(2);
-    expect(new Set(events.map((event) => event.runId))).toEqual(
-      new Set(result.dispatches?.map((dispatch) => dispatch.runId)),
-    );
-    expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        skillId: 'skill.m201-focused-repair',
-        mode: 'shadow',
-        stage: 'selected',
-        outcome: 'unknown',
-        routeSnapshot: expect.objectContaining({ backend: 'builtin', skillMode: 'shadow' }),
-      }),
-    ]));
+    expect(events).toEqual([]);
     for (const call of mockRunSwarm.mock.calls) {
       expect(call[2]).not.toHaveProperty('selectedSkillIds');
       expect(call[2]).not.toHaveProperty('skills');
@@ -4733,7 +4720,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(persisted).not.toContain(items[1]!.title);
   });
 
-  it('A1h2g: final external route is observed in shadow mode without changing runGoal options', async () => {
+  it('A1h2g: final external route executes without dormant skill observation or changed runGoal options', async () => {
     enrollWithItems(1);
     const skill = attestSkillCard(sanitizeSkillCard({
       schemaVersion: 1,
@@ -4773,11 +4760,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       { dryRun: false },
     );
 
-    expect(readSkillUseEvents({ limit: 1 })[0]).toMatchObject({
-      skillId: 'skill.external-m201-repair',
-      mode: 'shadow',
-      routeSnapshot: { backend: 'local-coder', tier: 'mid', model: 'qwen-shadow' },
-    });
+    expect(readSkillUseEvents({ limit: 1 })).toEqual([]);
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
       engine: 'local-coder',
       model: 'qwen-shadow',
@@ -4785,7 +4768,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunGoal.mock.calls[0]?.[2]).not.toHaveProperty('selectedSkillIds');
   });
 
-  it('A1h2g1: shadow selection waits for execution and records the actual fallback route', async () => {
+  it('A1h2g1: fallback execution does not revive dormant skill-selection telemetry', async () => {
     enrollWithItems(1);
     recordM201ShadowSkill({ skillId: 'skill.m201-fallback-route' });
     mockRouteBackend.mockReturnValue({
@@ -4812,19 +4795,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       { dryRun: false },
     );
 
-    expect(readSkillUseEvents()).toEqual([
-      expect.objectContaining({
-        skillId: 'skill.m201-fallback-route',
-        routeSnapshot: expect.objectContaining({
-          backend: 'builtin',
-          tier: 'local',
-          model: null,
-          selectedSkillIds: ['skill.m201-fallback-route'],
-          skillMode: 'shadow',
-          skillPolicyVersion: expect.any(String),
-        }),
-      }),
-    ]);
+    expect(readSkillUseEvents()).toEqual([]);
   });
 
   it('A1h2g2: kill-switch outcomes do not emit shadow selection events', async () => {

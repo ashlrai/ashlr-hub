@@ -157,6 +157,7 @@ import {
   learnFromApplied,
   curateSkills,
 } from '../src/core/fleet/skill-library.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from '../src/core/fleet/post-merge-credit.js';
 
 import {
   emit,
@@ -213,7 +214,7 @@ function writeLedgerEntries(
                 proposalId: e.proposalId,
                 action: 'merged',
                 verdict: 'applied',
-                labelBasis: 'realized-merge-v1',
+                labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
               }]
             : []
         ),
@@ -239,6 +240,7 @@ function writeLedgerEntries(
       delete proposal.realizedMerge;
       delete proposal.realizedMergeFanoutVersion;
       delete proposal.localMergeIntent;
+      delete proposal.labelBasis;
     }
     if (proposal.realizedMerge?.source === 'local-default-branch') {
       proposal.realizedMerge.observedAt = observedAt;
@@ -312,6 +314,7 @@ function makeProposal(
     title,
     summary: `Successfully completed: ${title}`,
     status: 'applied',
+    labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
     createdAt: FIXED_ISO,
     engineTier: 'frontier',
     engineModel,
@@ -538,12 +541,9 @@ describe('INTEGRATION S1: decisions ledger → M240 learned routing bias', () =>
     ]);
   });
 
-  it('high-ship engine (claude:opus) scores > 0.5 for task-class', () => {
+  it('does not admit caller-authored release labels as positive routing history', () => {
     const scores = buildEngineScores(TASK_CLASS, FIXED_MS);
-    const s = scores.get('claude:opus');
-    expect(s, 'claude:opus score must be present in map').toBeDefined();
-    expect(s!.score).toBeGreaterThan(0.5);
-    expect(s!.samples).toBeGreaterThanOrEqual(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(scores.has('claude:opus')).toBe(false);
   });
 
   it('high-reject engine (codex:gpt-5.5) scores < 0.5 for task-class', () => {
@@ -666,10 +666,10 @@ describe('INTEGRATION S2: M235 learnFromRejection → anti-playbooks in genome',
 // hub.jsonl contains m243:skill entries with abstracted (not raw-diff) text.
 // ===========================================================================
 
-describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
+describe('INTEGRATION S3: M243 current reuse stays fail closed', () => {
   const cfg = makeCfg();
 
-  it('writes one skill entry per applied proposal', () => {
+  it('does not mint genome skills or telemetry from persisted release metadata', () => {
     const proposals = [
       makeProposal('prop-applied-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'),
       makeProposal('prop-applied-002', 'Add rate limiting to API', 'codex:gpt-5.5'),
@@ -685,56 +685,16 @@ describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
       (e) => Array.isArray(e['tags']) && (e['tags'] as string[]).includes('m243:skill'),
     );
 
-    expect(skills).toHaveLength(3);
-
-    // hubOnly is an input field to appendHubEntry; it is not persisted to hub.jsonl.
-    // Verify instead that no skill entry has a 'project' field (hub-only write).
-    for (const e of skills) {
-      expect(e['project'], `skill must have null project (hub-only write)`).toBeNull();
-    }
-
-    // Workflow text must NOT contain raw diff markers (AWM/Voyager principle)
-    for (const e of skills) {
-      const text = String(e['text']);
-      expect(text).not.toContain('--- a/');
-      expect(text).not.toContain('+++ b/');
-      expect(text).not.toContain('@@ -1 +1 @@');
-    }
-  });
-
-  it('skill text contains the proposal title and engine info', () => {
-    const p = makeProposal('prop-applied-detail', 'Fix crash in parser', 'claude:claude-opus-4-5');
-    learnVerifiedApplied(p, cfg);
-
-    const entries = readHubEntries();
-    const skills = entries.filter(
-      (e) => Array.isArray(e['tags']) && (e['tags'] as string[]).includes('m243:skill'),
-    );
-    expect(skills).toHaveLength(1);
-
-    const text = String(skills[0]!['text']);
-    expect(text).toContain('Fix crash in parser');
-    expect(text).toContain('claude:claude-opus-4-5');
-  });
-
-  it('skill also writes a decisions-ledger telemetry entry', () => {
-    const p = makeProposal('prop-skill-ledger-01', 'Add rate limiting', 'claude:claude-opus-4-5');
-    learnVerifiedApplied(p, cfg);
-
-    const today = new Date(FIXED_MS).toISOString().slice(0, 10);
-    const ledgerFile = path.join(tmpHome, '.ashlr', 'decisions', `${today}.jsonl`);
-    expect(fs.existsSync(ledgerFile)).toBe(true);
-
-    const lines = fs
-      .readFileSync(ledgerFile, 'utf8')
-      .split('\n')
-      .filter((l) => l.trim())
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
-
-    const telemetry = lines.filter((l) => l['action'] === 'skill-library:written');
-    expect(telemetry).toHaveLength(1);
-    expect(telemetry[0]!['proposalId']).toBe('prop-skill-ledger-01');
-    expect(String(telemetry[0]!['detail'])).toContain('engine=');
+    expect(skills).toHaveLength(0);
+    const decisionsDir = path.join(tmpHome, '.ashlr', 'decisions');
+    const telemetry = fs.existsSync(decisionsDir)
+      ? fs.readdirSync(decisionsDir)
+        .flatMap((file) => fs.readFileSync(path.join(decisionsDir, file), 'utf8').split('\n'))
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line['action'] === 'skill-library:written')
+      : [];
+    expect(telemetry).toEqual([]);
   });
 });
 
@@ -746,8 +706,8 @@ describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
 // the success skills.
 // ===========================================================================
 
-describe('INTEGRATION S4: full loop — genome contains both anti-playbooks and skills', () => {
-  it('genome has m235:anti-playbook AND m243:skill entries after one loop cycle', () => {
+describe('INTEGRATION S4: full loop — unreleased success credit stays absent', () => {
+  it('keeps anti-playbooks while refusing m243 skill authority', () => {
     const cfg = makeCfg();
 
     // Failures → anti-playbooks
@@ -765,7 +725,7 @@ describe('INTEGRATION S4: full loop — genome contains both anti-playbooks and 
     const hasSkills = allTags.some((t) => t === 'm243:skill');
 
     expect(hasAntiPlaybooks, 'genome must have m235:anti-playbook entries').toBe(true);
-    expect(hasSkills, 'genome must have m243:skill entries').toBe(true);
+    expect(hasSkills, 'genome must not mint m243:skill entries').toBe(false);
 
     // Exact counts
     const antiPlaybookCount = entries.filter(
@@ -776,7 +736,7 @@ describe('INTEGRATION S4: full loop — genome contains both anti-playbooks and 
     ).length;
 
     expect(antiPlaybookCount).toBe(2);
-    expect(skillCount).toBe(2);
+    expect(skillCount).toBe(0);
   });
 });
 
@@ -883,7 +843,7 @@ describe('INTEGRATION S6: COMPOUNDING — written entries are recallable for fut
     expect(total).toBeLessThanOrEqual(ANTI_PLAYBOOK_INJECT_CAP);
   });
 
-  it('curateSkills returns the skills the loop wrote', async () => {
+  it('curateSkills cannot recall authority the loop was not allowed to mint', () => {
     const cfg = makeCfg();
 
     learnVerifiedApplied(makeProposal('recall-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
@@ -902,22 +862,10 @@ describe('INTEGRATION S6: COMPOUNDING — written entries are recallable for fut
 
     const recalled = curateSkills(hubEntries);
 
-    // curateSkills caps at SKILL_INJECT_CAP (800 chars). Two full skill entries
-    // combined (~880 chars) may exceed the cap, so at least 1 entry is guaranteed
-    // to be recalled; the cap may trim the second.
-    expect(recalled.length).toBeGreaterThanOrEqual(1);
-    // All recalled entries must carry the m243:skill tag
-    for (const e of recalled) {
-      expect(e.tags).toContain('m243:skill');
-    }
-
-    // Total recalled chars must not exceed the inject cap
-    const { SKILL_INJECT_CAP } = await import('../src/core/fleet/skill-library.js');
-    const total = recalled.reduce((sum, e) => sum + e.title.length + e.text.length, 0);
-    expect(total).toBeLessThanOrEqual(SKILL_INJECT_CAP);
+    expect(recalled).toEqual([]);
   });
 
-  it('both anti-playbooks AND skills are recallable together from the same genome', async () => {
+  it('recalls anti-playbooks without cross-populating unreleased skills', () => {
     const cfg = makeCfg();
 
     // Write mixed outcomes — exactly what a fleet loop cycle produces
@@ -938,7 +886,7 @@ describe('INTEGRATION S6: COMPOUNDING — written entries are recallable for fut
     const skills = curateSkills(hubEntries);
 
     expect(antiPlaybooks.length).toBeGreaterThanOrEqual(1);
-    expect(skills.length).toBeGreaterThanOrEqual(1);
+    expect(skills).toEqual([]);
 
     // The two curators must NOT cross-contaminate each other's entries
     const antiPlaybookIds = new Set(antiPlaybooks.map((e) => e.id));
@@ -989,18 +937,18 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     const claudeScore = scores.get('claude:opus');
     const codexScore = scores.get('codex:gpt-5.5');
 
-    expect(claudeScore?.score, 'claude must score > 0.5 (high ship rate)').toBeGreaterThan(0.5);
+    expect(claudeScore, 'unreleased positive history must stay absent').toBeUndefined();
     expect(codexScore?.score, 'codex must score < 0.5 (high reject rate)').toBeLessThan(0.5);
 
     // ─── Step 3: M235 writes anti-playbooks for failures ─────────────────────
     learnFromRejection('smoke-rej-001', 'Trivial rename', 'noise', 'too trivial', cfg);
     learnFromRejection('smoke-rej-002', 'Dangerous drop', 'harmful', 'deletes prod data', cfg);
 
-    // ─── Step 4: M243 writes skills for successes ────────────────────────────
+    // ─── Step 4: M243 remains blocked without a release protocol ─────────────
     learnVerifiedApplied(makeProposal('smoke-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
     learnVerifiedApplied(makeProposal('smoke-app-002', 'Add rate limiting to API', 'codex:gpt-5.5'), cfg);
 
-    // ─── Step 5: genome has both anti-playbooks AND skills ───────────────────
+    // ─── Step 5: genome has anti-playbooks but no released skills ────────────
     const rawHub = readHubEntries();
     const antiPlaybooks = rawHub.filter(
       (e) => (e['tags'] as string[]).includes('m235:anti-playbook'),
@@ -1010,7 +958,7 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     );
 
     expect(antiPlaybooks).toHaveLength(2);
-    expect(skills).toHaveLength(2);
+    expect(skills).toHaveLength(0);
 
     // ─── Step 6: M241 regression event → createGoal enqueued ────────────────
     emit('regression:detected', { signal: 'CI failed on main', repo: '/home/agent/proj' }, cfg);
@@ -1021,7 +969,7 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     expect(mockApplyDiff).not.toHaveBeenCalled();
     expect(mockGitPush).not.toHaveBeenCalled();
 
-    // ─── Step 7: COMPOUNDING — recall path returns both kinds of entry ───────
+    // ─── Step 7: recall cannot invent unreleased skill authority ─────────────
     const hubEntries = rawHub.map((e) => ({
       id: String(e['id']),
       project: (e['project'] as string | null) ?? null,
@@ -1036,7 +984,7 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     const recalledSkills = curateSkills(hubEntries);
 
     expect(recalledAntiPlaybooks.length, 'anti-playbooks must be recallable (injectOnRun)').toBeGreaterThanOrEqual(1);
-    expect(recalledSkills.length, 'skills must be recallable (injectOnRun)').toBeGreaterThanOrEqual(1);
+    expect(recalledSkills, 'unreleased skills must not be recallable').toEqual([]);
 
     // The recall results must not cross-contaminate
     const apIds = new Set(recalledAntiPlaybooks.map((e) => e.id));

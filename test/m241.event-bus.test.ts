@@ -393,7 +393,7 @@ describe('5. SAFETY: handlers only enqueue/notify — no merge/push/apply', () =
     expect(mockGitPush).not.toHaveBeenCalled();           // no push
   });
 
-  it('merge:shipped: records causal workItemId + notifies — does not re-merge or apply', async () => {
+  it('merge:shipped: notifies but cannot mint causal worked-ledger credit', async () => {
     mockLoadProposal.mockReturnValue({
       id: 'p-shipped',
       workItemId: 'item-shipped',
@@ -404,22 +404,29 @@ describe('5. SAFETY: handlers only enqueue/notify — no merge/push/apply', () =
     emit('merge:shipped', { proposalId: 'p-shipped', repo: '/r', title: 'fix', engineTier: 'frontier' }, cfgOn());
     await flush();
 
-    // Allowed: record outcome + notify (fire-and-forget, proposal-only path)
-    expect(mockRecordOutcome).toHaveBeenCalledWith('item-shipped', 'diff');
-    expect(mockNotifyFleetEvent).toHaveBeenCalled();
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+    expect(mockRecordOutcome).not.toHaveBeenCalled();
+    expect(mockNotifyFleetEvent).toHaveBeenCalledWith('merge', {
+      repo: '/r',
+      title: 'fix',
+      engine: 'frontier',
+      proposalId: 'p-shipped',
+    }, expect.anything());
     // Forbidden: no second merge loop, no apply, no push
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
     expect(mockApplyDiff).not.toHaveBeenCalled();
     expect(mockGitPush).not.toHaveBeenCalled();
   });
 
-  it('merge:shipped: falls back to proposalId for legacy proposals', async () => {
+  it('merge:shipped: cannot mint fallback proposalId credit for legacy proposals', async () => {
     mockLoadProposal.mockReturnValue(null);
 
     emit('merge:shipped', { proposalId: 'p-legacy', repo: '/r' }, cfgOn());
     await flush();
 
-    expect(mockRecordOutcome).toHaveBeenCalledWith('p-legacy', 'diff');
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+    expect(mockRecordOutcome).not.toHaveBeenCalled();
+    expect(mockNotifyFleetEvent).toHaveBeenCalled();
   });
 
   it('goal:done: generative OFF => no invent-cycle, no destructive calls', async () => {

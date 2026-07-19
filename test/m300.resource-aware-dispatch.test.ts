@@ -13,7 +13,7 @@
  *  [F2]  isFrontierJudge accepts codex-* and bare 'codex'.
  *  [F3]  isFrontierJudge still rejects non-frontier (qwen/local/nim/kimi).
  *  [F4]  isFrontierJudge still accepts claude-* (unchanged).
- *  [A1]  Codex ship attestation: evaluateVerificationGate accepts gpt-5.5 judge + valid HMAC.
+ *  [A1]  Same-family Codex ship attestation is refused despite a valid HMAC.
  *  [S1]  Non-frontier judge: evaluateVerificationGate refuses (qwen2.5:72b).
  *
  * SAFETY: the merge gate (value≥3+corr≥4, verify, scope, frontier-authority,
@@ -406,11 +406,11 @@ describe('M300 [F] isFrontierJudge frontier predicate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [A1] Independent frontier ship attestation accepted by evaluateVerificationGate
+// [A1] Same-family Codex ship attestation refused by evaluateVerificationGate
 // ---------------------------------------------------------------------------
 
-describe('M300 [A1] independent ship attestation → evaluateVerificationGate accepts Claude', () => {
-  it('accepts a valid HMAC-signed Claude attestation for a Codex producer', async () => {
+describe('M300 [A1] same-family codex attestation is not independent merge authority', () => {
+  it('refuses a valid HMAC-signed codex review of a codex-produced proposal', async () => {
     const { evaluateVerificationGate } = await import('../src/core/inbox/merge.js');
     const { signJudgeAttestation, hashDiff, signProvenance } = await import('../src/core/foundry/provenance.js');
 
@@ -425,10 +425,10 @@ describe('M300 [A1] independent ship attestation → evaluateVerificationGate ac
       '+export const x = 1;',
     ].join('\n') + '\n';
     const diffHash = hashDiff(diff);
-    const judgeEngine = 'claude-opus-4-5';
+    const judgeEngine = 'gpt-5.5';
     const proposalId = 'prop-m300-a1';
 
-    // Sign an attestation from the independent Claude reviewer family.
+    // A valid signature cannot make a same-family review independent.
     const judgeAttestation = signJudgeAttestation({ proposalId, judgeEngine, verdict: 'ship', diffHash });
 
     const mergeAuthority = [{ engine: 'codex', model: 'gpt-5.5' }];
@@ -476,7 +476,8 @@ describe('M300 [A1] independent ship attestation → evaluateVerificationGate ac
     ];
 
     const verdict = evaluateVerificationGate(proposal as never, cfg, decisions);
-    expect(verdict.authorized).toBe(true);
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toMatch(/producer and reviewer are both openai family/i);
   });
 });
 

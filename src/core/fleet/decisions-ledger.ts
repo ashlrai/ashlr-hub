@@ -33,6 +33,7 @@ import {
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -192,12 +193,15 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  */
 export function recordDecision(entry: DecisionEntry): void {
   try {
+    const record = sanitizeDecisionEntry(entry, true);
+    // Reserved positive authority must come from the future proof-bound release
+    // writer, never this generic operational ledger API. Check the immutable
+    // sanitized snapshot so stateful getters cannot change values after guard.
+    if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return;
     const dir = decisionsDir();
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
-
-    const record = sanitizeDecisionEntry(entry, true);
 
     const line = JSON.stringify(record) + '\n';
     if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;

@@ -27,7 +27,7 @@
  *
  * BUILT-IN HANDLERS (registered at module load)
  *   (a) regression:detected  → enqueue a fix work-item goal (proposal-only)
- *   (b) merge:shipped        → record to the worked-ledger + notify (M212)
+ *   (b) merge:shipped        → notify operators (M212); no learning credit
  *   (c) goal:done            → log + optionally trigger invent-engine for a
  *                              follow-up (flag-gated cfg.foundry.generative)
  *
@@ -241,34 +241,20 @@ async function _handleRegressionDetected(
 }
 
 // ---------------------------------------------------------------------------
-// Built-in handler (b): merge:shipped → record to worked-ledger + notify
+// Built-in handler (b): merge:shipped → operational notification only
 // ---------------------------------------------------------------------------
 
 /**
- * When a merge ships, record a 'diff' outcome in the worked-ledger for the
- * source item (if a proposalId is present) and fire the M212
- * notifyFleetEvent('merge') notification.
+ * When a merge ships, fire the M212 notifyFleetEvent('merge') notification.
  *
- * SAFETY: recordOutcome and notifyFleetEvent are both fire-and-forget,
- * proposal-only, and never apply/push/merge.
+ * SAFETY: a generic lifecycle event is not release authority. In particular,
+ * this handler must not write worked-ledger `diff` rows or any other adaptive
+ * productivity credit. A future release writer must own that separately.
  */
 async function _handleMergeShipped(
   payload: FleetBusPayload<'merge:shipped'>,
   cfg: AshlrConfig,
 ): Promise<void> {
-  try {
-    // Record to worked-ledger so the originating item is cooled down after a
-    // real merge. New proposals carry workItemId; old records fall back to
-    // proposalId for backward-compatible continuity.
-    if (payload.proposalId) {
-      const { recordOutcome } = await import('./worked-ledger.js');
-      const { loadProposal } = await import('../inbox/store.js');
-      const proposal = loadProposal(payload.proposalId);
-      recordOutcome(proposal?.workItemId ?? payload.proposalId, 'diff');
-    }
-  } catch {
-    // Best-effort.
-  }
   try {
     // Reuse M212 notification (merge kind).
     const { notifyFleetEvent } = await import('../comms/events.js');

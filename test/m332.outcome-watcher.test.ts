@@ -1089,7 +1089,7 @@ describe('M332 outcome consumers', () => {
       });
       ledger.push({
         ts: ts(0.75 + i), proposalId: pid, action: 'merged', verdict: 'applied',
-        labelBasis: 'realized-merge-v1',
+        labelBasis: 'post-merge-credit-release-v1',
       });
     }
     appliedProposals = Array.from({ length: 6 }, (_, index) => ({
@@ -1119,8 +1119,8 @@ describe('M332 outcome consumers', () => {
         observedAt: ts(0.75 + index),
       },
     }));
-    const before = buildProducerScores('issue', NOW).get('claude:sonnet-5')!;
-    expect(before.score).toBeCloseTo(1.0, 3);
+    const before = buildProducerScores('issue', NOW);
+    expect(before.has('claude:sonnet-5')).toBe(false);
 
     // Now three of those merges were REVERTED in the real world.
     vi.mocked(readJudgeTraces).mockReturnValue(
@@ -1130,7 +1130,12 @@ describe('M332 outcome consumers', () => {
         outcomeAt: ts(0.5),
       })) as never,
     );
-    const after = buildProducerScores('issue', NOW).get('claude:sonnet-5')!;
+    const after = buildProducerScores('issue', NOW);
     expect(after).toEqual(before);
+
+    ledger = ledger.map((entry) => entry['action'] === 'merged'
+      ? { ...entry, labelBasis: 'realized-merge-v1' }
+      : entry);
+    expect(buildProducerScores('issue', NOW).has('claude:sonnet-5')).toBe(false);
   });
 });

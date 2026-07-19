@@ -69,7 +69,9 @@ export interface DirectorContext {
     rejectedCount: number;
     costUsdToday: number;
     cacheHitRate: number;               // 0–1
-    engineShipRates: Record<string, number>; // engine → ship%
+    // Adaptive rates use released positive credit only. Factual realized merges
+    // are deliberately excluded until an authenticated release writer exists.
+    engineShipRates: Record<string, number>; // engine → released ship%
     blockedGoals: string[];             // goalIds with all-blocked milestones
   };
 
@@ -359,7 +361,6 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
     let costUsd = 0;
     let cacheHits = 0;
     let cacheTotal = 0;
-    const engineShip = new Map<string, number>();
     const engineTotal = new Map<string, number>();
     const countedMergedProposals = new Set<string>();
 
@@ -382,19 +383,18 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
         cacheTotal++;
         if (d.cacheHit) cacheHits++;
       }
-      if (d.engine && (canonicalMerge || d.action === 'rejected')) {
+      // realized-merge-v1 is factual lifecycle telemetry, not positive policy
+      // input. With no authenticated credit-release writer, only rejection
+      // rows may contribute to an engine's adaptive denominator.
+      if (d.engine && d.action === 'rejected') {
         const eng = d.engine;
         engineTotal.set(eng, (engineTotal.get(eng) ?? 0) + 1);
-        if (canonicalMerge) {
-          engineShip.set(eng, (engineShip.get(eng) ?? 0) + 1);
-        }
       }
     }
 
     const engineShipRates: Record<string, number> = {};
-    for (const [eng, total] of engineTotal.entries()) {
-      const shipped = engineShip.get(eng) ?? 0;
-      engineShipRates[eng] = total > 0 ? Math.round((shipped / total) * 100) : 0;
+    for (const eng of engineTotal.keys()) {
+      engineShipRates[eng] = 0;
     }
 
     outcomesData = {
@@ -497,7 +497,6 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
     if (existsSync(hubPath)) {
       const raw = readFileSync(hubPath, 'utf8');
       let antiPlaybookCount = 0;
-      let skillCount = 0;
       const recentTitles: string[] = [];
       const since7d = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
@@ -512,7 +511,6 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
           };
           if (!Array.isArray(entry.tags)) continue;
           const isAnti = entry.tags.includes('m235:anti-playbook');
-          const isSkill = entry.tags.includes('m243:skill');
           const ts = entry.ts ? Date.parse(entry.ts) : 0;
           const inWindow = ts >= since7d;
           if (isAnti && inWindow) {
@@ -521,7 +519,6 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
               recentTitles.push(entry.title.slice(0, 80));
             }
           }
-          if (isSkill && inWindow) skillCount++;
         } catch {
           // malformed line — skip
         }
@@ -530,7 +527,9 @@ export async function buildDirectorContext(cfg: AshlrConfig): Promise<DirectorCo
       learningData = {
         lessonsCount: antiPlaybookCount,
         recentLessonTitles: recentTitles,
-        skillCount,
+        // Genome tags are caller-controlled metadata. A future authenticated
+        // release reader may populate this, but no such writer exists today.
+        skillCount: 0,
       };
     }
   } catch {

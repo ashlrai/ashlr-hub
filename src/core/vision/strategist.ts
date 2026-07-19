@@ -513,8 +513,8 @@ You have the full ecosystem map above. When proposing goals, recommendedDirectio
 
 === FLEET METRICS (30-day window) ===
 Proposals created: ${m.proposalsCreated}
-Merged: ${m.merged} | Rejected: ${m.rejected} | Pending: ${m.pending}
-Accept rate: ${(m.acceptRate * 100).toFixed(1)}%
+Positive merge/acceptance credit: unavailable pending authenticated post-merge release
+Rejected: ${m.rejected} | Pending: ${m.pending}
 Empty-diff rate: ${(m.emptyRate * 100).toFixed(1)}%
 Trivial ratio: ${(m.trivialRatio * 100).toFixed(1)}%
 Avg diff lines: ${m.avgDiffLines.toFixed(0)}

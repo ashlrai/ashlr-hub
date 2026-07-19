@@ -63,7 +63,7 @@ function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
     promptContext: '',
     ts: new Date().toISOString(),
     outcome: 'merged',
-    outcomeBasis: 'realized-merge-v1',
+    outcomeBasis: 'post-merge-credit-release-v1',
     ...overrides,
   };
   if (trace.outcome !== 'merged') delete trace.outcomeBasis;
@@ -274,6 +274,45 @@ describe('m187 — cohenKappa', () => {
 // ---------------------------------------------------------------------------
 
 describe('m187 — samples only outcome-linked proposals', () => {
+  it('excludes the old realized-merge basis despite a current authenticated proposal witness', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const trace = makeTrace({
+      proposalId: 'old-realized-basis',
+      outcomeBasis: 'realized-merge-v1',
+    });
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [trace],
+      proposalSource: healthyProposalSource([
+        makeAuthenticatedMergedProposal(trace.proposalId),
+      ]),
+      judgeCalls: calls,
+    }));
+
+    expect(report.replayed).toBe(0);
+    expect(report.agreements).toBe(0);
+    expect(calls.n).toBe(0);
+  });
+
+  it('excludes raw release-labeled merges despite a current authenticated proposal witness', async () => {
+    const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
+    const trace = makeTrace({ proposalId: 'raw-release-label' });
+    const calls = { n: 0 };
+
+    const report = await runCounterfactualReplay(CFG, buildOpts({
+      traces: [trace],
+      proposalSource: healthyProposalSource([
+        makeAuthenticatedMergedProposal(trace.proposalId),
+      ]),
+      judgeCalls: calls,
+    }));
+
+    expect(report.replayed).toBe(0);
+    expect(report.agreements).toBe(0);
+    expect(calls.n).toBe(0);
+  });
+
   it('ignores an unqualified historical merged outcome', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const trace = makeTrace({ proposalId: 'legacy-unqualified' });
@@ -305,7 +344,7 @@ describe('m187 — samples only outcome-linked proposals', () => {
     expect(calls.n).toBe(0);
   });
 
-  it('replays only merged traces backed by current authenticated proposal witnesses', async () => {
+  it('replays no merged traces regardless of realized-witness validity', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const ids = ['valid-merge', 'forged-merge', 'stale-merge', 'stripped-merge'];
     const traces = ids.map((proposalId) => makeTrace({ proposalId }));
@@ -327,9 +366,9 @@ describe('m187 — samples only outcome-linked proposals', () => {
       judgeCalls: calls,
     }));
 
-    expect(report.details.map((detail) => detail.proposalId)).toEqual(['valid-merge']);
-    expect(report.replayed).toBe(1);
-    expect(calls.n).toBe(1);
+    expect(report.details).toEqual([]);
+    expect(report.replayed).toBe(0);
+    expect(calls.n).toBe(0);
   });
 
   it.each([
@@ -339,7 +378,7 @@ describe('m187 — samples only outcome-linked proposals', () => {
     const { runCounterfactualReplay, calibrationReportPath } = await import(
       '../src/core/fleet/counterfactual.js'
     );
-    const trace = makeTrace({ proposalId: 'withheld-source' });
+    const trace = makeTrace({ proposalId: 'withheld-source', outcome: 'rejected' });
     const persist = vi.fn();
     const calls = { n: 0 };
 
@@ -347,7 +386,7 @@ describe('m187 — samples only outcome-linked proposals', () => {
       traces: [trace],
       proposalSource: {
         ...quality,
-        proposals: [makeAuthenticatedMergedProposal(trace.proposalId)],
+        proposals: [makeProposal({ id: trace.proposalId })],
       },
       judgeCalls: calls,
       persistFn: persist,
@@ -373,7 +412,7 @@ describe('m187 — samples only outcome-linked proposals', () => {
     const events: string[] = [];
 
     const opts = buildOpts({
-      traces: [makeTrace({ proposalId: 'single-snapshot' })],
+      traces: [makeTrace({ proposalId: 'single-snapshot', outcome: 'rejected' })],
       proposalReads,
       persistFn: () => { events.push('persist'); },
     });
@@ -398,7 +437,7 @@ describe('m187 — samples only outcome-linked proposals', () => {
   it('ignores traces without a recorded outcome', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
-    const withOutcome = makeTrace({ proposalId: 'has-outcome', outcome: 'merged' });
+    const withOutcome = makeTrace({ proposalId: 'has-outcome', outcome: 'rejected' });
     const noOutcome = makeTrace({ proposalId: 'no-outcome', outcome: undefined });
 
     const calls = { n: 0 };
@@ -443,7 +482,7 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
     };
 
     const report = await runCounterfactualReplay(CFG, buildOpts({
-      traces: [makeTrace({ proposalId: 'ephemeral-replay', outcome: 'merged' })],
+      traces: [makeTrace({ proposalId: 'ephemeral-replay', outcome: 'rejected' })],
       judgeFn,
     }));
 
@@ -455,11 +494,11 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const calls = { n: 0 };
     const older = makeTrace({
-      traceId: 'trace-retry-old', proposalId: 'retry-once', outcome: 'merged',
+      traceId: 'trace-retry-old', proposalId: 'retry-once', outcome: 'rejected',
       ts: '2025-01-01T00:00:00.000Z', outcomeAt: '2025-01-02T00:00:00.000Z',
     });
     const newer = makeTrace({
-      traceId: 'trace-retry-new', proposalId: 'retry-once', outcome: 'merged',
+      traceId: 'trace-retry-new', proposalId: 'retry-once', outcome: 'rejected',
       ts: '2025-01-03T00:00:00.000Z', outcomeAt: '2025-01-04T00:00:00.000Z',
     });
     const report = await runCounterfactualReplay(CFG, buildOpts({
@@ -474,31 +513,31 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
   it('counts an agreement when fresh verdict intent matches the outcome intent', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
-    // merged outcome (intent=merge) + fresh verdict 'ship' (intent=merge) → agree
-    const trace = makeTrace({ proposalId: 'agree-1', outcome: 'merged', judgeEngine: 'judgeA' });
+    // rejected outcome (intent=reject) + fresh verdict 'noise' (intent=reject) → agree
+    const trace = makeTrace({ proposalId: 'agree-1', outcome: 'rejected', judgeEngine: 'judgeA' });
     const report = await runCounterfactualReplay(CFG, buildOpts({
       traces: [trace],
-      verdictFor: () => 'ship',
+      verdictFor: () => 'noise',
     }));
 
     expect(report.replayed).toBe(1);
     expect(report.agreements).toBe(1);
     expect(report.disagreements).toBe(0);
     expect(report.details[0]!.agreed).toBe(true);
-    expect(report.details[0]!.replayVerdict).toBe('ship');
-    expect(report.details[0]!.replayIntent).toBe('merge');
-    expect(report.details[0]!.outcomeIntent).toBe('merge');
+    expect(report.details[0]!.replayVerdict).toBe('noise');
+    expect(report.details[0]!.replayIntent).toBe('reject');
+    expect(report.details[0]!.outcomeIntent).toBe('reject');
     expect(report.details[0]!.replayJudgeEngine).toBe('frontier-opus-mock');
   });
 
   it('counts a disagreement when fresh verdict diverges from the realized outcome', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
-    // merged outcome (intent=merge) but fresh verdict 'noise' (intent=reject) → disagree
-    const trace = makeTrace({ proposalId: 'disagree-1', outcome: 'merged' });
+    // rejected outcome (intent=reject) but fresh verdict 'ship' (intent=merge) → disagree
+    const trace = makeTrace({ proposalId: 'disagree-1', outcome: 'rejected' });
     const report = await runCounterfactualReplay(CFG, buildOpts({
       traces: [trace],
-      verdictFor: () => 'noise',
+      verdictFor: () => 'ship',
     }));
 
     expect(report.agreements).toBe(0);
@@ -509,18 +548,16 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
   it('computes per-judge kappa keyed by the original judge engine', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
-    // 4 traces all originally judged by 'judgeA'. Two merged→ship (agree-merge),
-    // two rejected→noise (agree-reject) → perfect agreement, kappa ~ 1.0.
+    // Four adverse traces across review/reject intents with perfect replay agreement.
     const traces = [
-      makeTrace({ proposalId: 'k1', judgeEngine: 'judgeA', outcome: 'merged' }),
-      makeTrace({ proposalId: 'k2', judgeEngine: 'judgeA', outcome: 'merged' }),
+      makeTrace({ proposalId: 'k1', judgeEngine: 'judgeA', outcome: 'reverted' }),
+      makeTrace({ proposalId: 'k2', judgeEngine: 'judgeA', outcome: 'reverted' }),
       makeTrace({ proposalId: 'k3', judgeEngine: 'judgeA', outcome: 'rejected' }),
       makeTrace({ proposalId: 'k4', judgeEngine: 'judgeA', outcome: 'rejected' }),
     ];
     const report = await runCounterfactualReplay(CFG, buildOpts({
       traces,
-      // ship for the merged ones, noise for the rejected ones → perfect.
-      verdictFor: (p) => (p.id === 'k1' || p.id === 'k2' ? 'ship' : 'noise'),
+      verdictFor: (p) => (p.id === 'k1' || p.id === 'k2' ? 'review' : 'noise'),
     }));
 
     expect(report.replayed).toBe(4);
@@ -536,18 +573,18 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
     const traces = [
-      makeTrace({ proposalId: 's1', outcome: 'merged' }),
-      makeTrace({ proposalId: 's2', outcome: 'merged' }),
+      makeTrace({ proposalId: 's1', outcome: 'rejected' }),
+      makeTrace({ proposalId: 's2', outcome: 'rejected' }),
     ];
     const proposals: Record<string, Proposal> = {
-      s1: makeAuthenticatedMergedProposal('s1', { engineModel: 'codex:gpt-5.5' }),
-      s2: makeAuthenticatedMergedProposal('s2', { engineModel: 'claude:opus' }),
+      s1: makeProposal({ id: 's1', engineModel: 'codex:gpt-5.5' }),
+      s2: makeProposal({ id: 's2', engineModel: 'claude:opus' }),
     };
     const report = await runCounterfactualReplay(CFG, buildOpts({
       traces,
       proposals,
-      // codex agrees (ship→merge), claude disagrees (noise→reject)
-      verdictFor: (p) => (p.engineModel === 'codex:gpt-5.5' ? 'ship' : 'noise'),
+      // codex agrees (noise→reject), claude disagrees (ship→merge)
+      verdictFor: (p) => (p.engineModel === 'codex:gpt-5.5' ? 'noise' : 'ship'),
     }));
 
     expect(report.calibrationBySource['codex:gpt-5.5']!.accuracy).toBe(1);
@@ -560,8 +597,8 @@ describe('m187 — re-judge + agreement + kappa + source breakdown', () => {
 
     // Proposal has no engineModel and origin will be used unless ledger wins.
     // Here proposal has no engineModel/origin sentinel; ledger supplies model.
-    const trace = makeTrace({ proposalId: 'led-1', outcome: 'merged' });
-    const proposal = makeAuthenticatedMergedProposal('led-1');
+    const trace = makeTrace({ proposalId: 'led-1', outcome: 'rejected' });
+    const proposal = makeProposal({ id: 'led-1' });
     delete (proposal as Partial<Proposal>).engineModel;
     delete (proposal as Partial<Proposal>).origin;
 
@@ -588,8 +625,8 @@ describe('m187 — persists calibration.json', () => {
     );
 
     const report = await runCounterfactualReplay(CFG, buildOpts({
-      traces: [makeTrace({ proposalId: 'persist-1', outcome: 'merged' })],
-      verdictFor: () => 'ship',
+      traces: [makeTrace({ proposalId: 'persist-1', outcome: 'rejected' })],
+      verdictFor: () => 'noise',
     }));
     expect(report.replayed).toBe(1);
 
@@ -612,8 +649,8 @@ describe('m187 — persists calibration.json', () => {
     );
 
     // Smuggle a secret into the work-source string via the proposal engineModel.
-    const trace = makeTrace({ proposalId: 'secret-1', outcome: 'merged' });
-    const proposal = makeAuthenticatedMergedProposal('secret-1', {
+    const trace = makeTrace({ proposalId: 'secret-1', outcome: 'rejected' });
+    const proposal = makeProposal({ id: 'secret-1',
       engineModel: 'engine api_key=sk-abcdefghijklmnopqrstuvwx',
     });
     await runCounterfactualReplay(CFG, buildOpts({
@@ -636,7 +673,7 @@ describe('m187 — respects the sample cap', () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
     const traces = Array.from({ length: 8 }, (_, i) =>
-      makeTrace({ proposalId: `cap-${i}`, outcome: 'merged' }),
+      makeTrace({ proposalId: `cap-${i}`, outcome: 'rejected' }),
     );
     const calls = { n: 0 };
     const report = await runCounterfactualReplay(CFG, buildOpts({
@@ -653,7 +690,7 @@ describe('m187 — respects the sample cap', () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
     const traces = Array.from({ length: 20 }, (_, i) =>
-      makeTrace({ proposalId: `dc-${i}`, outcome: 'merged' }),
+      makeTrace({ proposalId: `dc-${i}`, outcome: 'rejected' }),
     );
 
     // Default cap (10) when neither opts nor cfg specify one.
@@ -669,7 +706,7 @@ describe('m187 — respects the sample cap', () => {
   it('cap <= 0 replays nothing', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const report = await runCounterfactualReplay(CFG, buildOpts({
-      traces: [makeTrace({ outcome: 'merged' })],
+      traces: [makeTrace({ outcome: 'rejected' })],
       maxSamples: 0,
     }));
     expect(report.replayed).toBe(0);
@@ -686,14 +723,14 @@ describe('m187 — skips unrecoverable proposals', () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
 
     const traces = [
-      makeTrace({ proposalId: 'ok-1', outcome: 'merged' }),
-      makeTrace({ proposalId: 'gone-1', outcome: 'merged' }),
-      makeTrace({ proposalId: 'nodiff-1', outcome: 'merged' }),
+      makeTrace({ proposalId: 'ok-1', outcome: 'rejected' }),
+      makeTrace({ proposalId: 'gone-1', outcome: 'rejected' }),
+      makeTrace({ proposalId: 'nodiff-1', outcome: 'rejected' }),
     ];
     const proposals: Record<string, Proposal | null> = {
-      'ok-1': makeAuthenticatedMergedProposal('ok-1'),
+      'ok-1': makeProposal({ id: 'ok-1' }),
       'gone-1': null, // proposal file gone
-      'nodiff-1': makeAuthenticatedMergedProposal('nodiff-1', { diff: '   ' }), // empty diff
+      'nodiff-1': makeProposal({ id: 'nodiff-1', diff: '   ' }), // empty diff
     };
     const report = await runCounterfactualReplay(CFG, buildOpts({ traces, proposals }));
 
@@ -705,7 +742,7 @@ describe('m187 — skips unrecoverable proposals', () => {
   it('returns an empty report when outcomes exist but no diffs are recoverable', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const report = await runCounterfactualReplay(CFG, buildOpts({
-      traces: [makeTrace({ proposalId: 'x', outcome: 'merged' })],
+      traces: [makeTrace({ proposalId: 'x', outcome: 'rejected' })],
       proposals: { x: null },
     }));
     expect(report.replayed).toBe(0);
@@ -721,7 +758,7 @@ describe('m187 — never throws', () => {
   it('returns an empty report when no frontier judge is available', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
     const report = await runCounterfactualReplay(CFG, buildOpts({
-      traces: [makeTrace({ outcome: 'merged' })],
+      traces: [makeTrace({ outcome: 'rejected' })],
       judgeClient: null,
     }));
     expect(report.replayed).toBe(0);
@@ -730,7 +767,7 @@ describe('m187 — never throws', () => {
 
   it('does not throw when the judge fn throws on every proposal', async () => {
     const { runCounterfactualReplay } = await import('../src/core/fleet/counterfactual.js');
-    const opts = buildOpts({ traces: [makeTrace({ outcome: 'merged' })] });
+    const opts = buildOpts({ traces: [makeTrace({ outcome: 'rejected' })] });
     opts._judgeProposalFn = async () => {
       throw new Error('boom');
     };

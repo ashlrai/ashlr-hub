@@ -51,7 +51,7 @@ import { emitFleetEvent } from '../integrations/pulse-sync.js';
 import type { FleetEvent } from '../integrations/pulse-exporter.js';
 // M119: decisions ledger hook — additive, never-throws, no behavior change.
 import { readDecisionsDetailed, recordDecision } from '../fleet/decisions-ledger.js';
-import { linkOutcome, linkOutcomeResult } from '../fleet/judge-trace.js';
+import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
@@ -59,6 +59,7 @@ import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
+import { isPostMergeCreditReleaseLabel } from '../fleet/post-merge-credit.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
@@ -962,6 +963,12 @@ export function createProposal(
     // to persistence/audit. The rejected return is deliberately unscoped.
     repo: repoIdentityValid ? canonicalRepo : null,
   });
+  // Proposal creation is not a post-merge credit release protocol. Normalize
+  // the reserved authority label before any causal metadata is signed or saved.
+  if (typeof input.labelBasis === 'string' &&
+    isPostMergeCreditReleaseLabel(input.labelBasis.trim())) {
+    input.labelBasis = 'proposal-status';
+  }
   // Realized merge evidence is never accepted on proposal creation. The only
   // supported persistence boundary for this field is recordRealizedMerge.
   delete input.realizedMerge;
@@ -1650,11 +1657,9 @@ function retryIdempotentRealizedMergeProjections(
   stillAuthorized: () => boolean = () => true,
 ): boolean {
   if (!stillAuthorized()) return false;
-  const outcome = linkOutcomeResult(updated.id, 'merged', { basis: 'realized-merge-v1' });
-  if (outcome.status !== 'linked' && outcome.status !== 'already-linked' && outcome.status !== 'not-found') {
-    return false;
-  }
-  if (!stillAuthorized()) return false;
+  // A realized merge is factual lifecycle evidence, not positive learning
+  // authority. Judge-outcome credit is deliberately withheld until a future
+  // purpose-built post-merge release proof mints post-merge-credit-release-v1.
   if (proposalCompletesGoalMilestone(updated) &&
     !linkMilestoneOutcome(updated.id, 'applied', stillAuthorized)) return false;
   return stillAuthorized();
@@ -1665,8 +1670,9 @@ function fanoutRealizedMerge(
   realizedMerge: RealizedMergeEvidence,
   stillAuthorized: () => boolean = () => true,
 ): boolean {
-  // Version 3 acknowledges every applicable idempotent projection. Versions 1
-  // and 2 retain their historical meaning and are migrated only after replay.
+  // Version 3 acknowledges factual idempotent projections. Positive routing,
+  // judge, ROI, trajectory, worked-ledger, and skill credit are a separate
+  // release protocol and are never implied by this marker.
   if (!stillAuthorized()) return false;
   if (!ensureRealizedMergeDecision(updated, realizedMerge, stillAuthorized)) return false;
 

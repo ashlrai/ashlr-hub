@@ -68,8 +68,6 @@ import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js
 import { estCostUsd } from '../run/budget.js';
 // M235: recursive self-improvement write-back (fire-and-forget, gated cfg.foundry.selfImprove, default ON)
 import { learnFromRejection } from './self-improve.js';
-// M243: skill-library write-back (fire-and-forget, gated cfg.foundry.skillLibrary, default ON)
-import { learnFromApplied } from './skill-library.js';
 import { recordAgentAction } from './agent-action-ledger.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
 import { isApprovedRemoteHandoffRetryCandidate } from '../inbox/remote-handoff.js';
@@ -122,10 +120,10 @@ async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfi
         repo,
         engineTier: proposal.engineTier,
       }, cfg);
-    } catch { /* best-effort observation */ }
+    } catch { /* best-effort operational notification */ }
 
-    if (!authorized()) return;
-    try { await Promise.resolve(learnFromApplied(proposal, cfg)); } catch { /* best-effort observation */ }
+    // Reusable skills remain withheld. The future proof-bound release worker
+    // will own skill distillation after independent stability observation.
   } finally {
     releaseOutwardMutationFence(fence);
   }

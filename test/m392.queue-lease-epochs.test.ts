@@ -155,12 +155,21 @@ describe('M392 shared queue exact claim generations', () => {
       .toHaveLength(1);
   });
 
-  it('guards a raced successful diff when no explicit claim policy is supplied', () => {
+  it('keeps ambiguous v1 diffs non-cooling while honoring an explicit diff policy', () => {
     const worker = new SharedStore(dir, 30_000);
     const contender = new SharedStore(dir, 30_000);
     expect(worker.recordOutcome('diff-race-item', 'diff', 'worker-A')).toBe(true);
 
-    expect(contender.claimLeases(['diff-race-item'], 1, 'worker-B')).toEqual([]);
+    // V1 does not record whether a diff came from an executor or the historical
+    // merge:shipped fanout, so it cannot grant implicit cooldown authority.
+    expect(contender.claimLeases(['diff-race-item'], 1, 'worker-B')).toHaveLength(1);
+
+    expect(worker.recordOutcome('explicit-diff-race-item', 'diff', 'worker-A')).toBe(true);
+    const policies = new Map([[
+      'explicit-diff-race-item',
+      { itemIds: ['explicit-diff-race-item'], cooldownMs: 60_000, outcomeCooldownMs: { diff: 60_000 } },
+    ]]);
+    expect(contender.claimLeases(['explicit-diff-race-item'], 1, 'worker-B', policies)).toEqual([]);
   });
 
   it('strictly expires a claim and fences same-machine ABA mutations', () => {

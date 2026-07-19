@@ -33,7 +33,10 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import type { Proposal } from '../types.js';
 import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
-import { listProposalsDetailed } from '../inbox/store.js';
+import {
+  POST_MERGE_CREDIT_RELEASE_LABEL,
+  hasReleasedPostMergeCredit,
+} from './post-merge-credit.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,17 +44,19 @@ import { listProposalsDetailed } from '../inbox/store.js';
 
 export type JudgeOutcome = 'merged' | 'reverted' | 'rejected' | 'followed-up';
 export const REALIZED_MERGE_OUTCOME_BASIS = 'realized-merge-v1' as const;
+export const RELEASED_MERGE_OUTCOME_BASIS = POST_MERGE_CREDIT_RELEASE_LABEL;
 export const PROPOSAL_REJECTION_OUTCOME_BASIS = 'proposal-rejection-v1' as const;
 export const POST_MERGE_OBSERVATION_OUTCOME_BASIS = 'post-merge-observation-v1' as const;
 export type JudgeOutcomeBasis =
   | typeof REALIZED_MERGE_OUTCOME_BASIS
+  | typeof RELEASED_MERGE_OUTCOME_BASIS
   | typeof PROPOSAL_REJECTION_OUTCOME_BASIS
   | typeof POST_MERGE_OBSERVATION_OUTCOME_BASIS;
 export interface JudgeOutcomeQualification {
   basis: JudgeOutcomeBasis;
 }
 export interface RealizedMergeOutcomeQualification {
-  basis: typeof REALIZED_MERGE_OUTCOME_BASIS;
+  basis: typeof REALIZED_MERGE_OUTCOME_BASIS | typeof RELEASED_MERGE_OUTCOME_BASIS;
 }
 export interface ProposalRejectionOutcomeQualification {
   basis: typeof PROPOSAL_REJECTION_OUTCOME_BASIS;
@@ -125,6 +130,7 @@ const VERDICTS = new Set<JudgeTrace['verdict']>(['ship', 'review', 'noise', 'har
 const OUTCOMES = new Set<JudgeOutcome>(['merged', 'reverted', 'rejected', 'followed-up']);
 const OUTCOME_BASES = new Set<JudgeOutcomeBasis>([
   REALIZED_MERGE_OUTCOME_BASIS,
+  RELEASED_MERGE_OUTCOME_BASIS,
   PROPOSAL_REJECTION_OUTCOME_BASIS,
   POST_MERGE_OBSERVATION_OUTCOME_BASIS,
 ]);
@@ -294,6 +300,9 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
     } as JudgeTrace);
     if (!record.ts) return;
     if (record.outcome !== undefined && !OUTCOMES.has(record.outcome)) return;
+    // Positive merged outcomes are reserved for the future proof-bound release
+    // writer. This generic trace API may record predictions and adverse facts.
+    if (record.outcome === 'merged') return;
     if (record.outcomeBasis !== undefined &&
       (!OUTCOME_BASES.has(record.outcomeBasis) || record.outcome === undefined ||
         !isOutcomeBasisCompatible(record.outcome, record.outcomeBasis))) return;
@@ -411,9 +420,19 @@ function isOutcomeBasisCompatible(
   basis: JudgeOutcomeBasis | undefined,
 ): boolean {
   if (basis === undefined) return outcome !== 'merged';
-  if (outcome === 'merged') return basis === REALIZED_MERGE_OUTCOME_BASIS;
+  if (outcome === 'merged') return basis === RELEASED_MERGE_OUTCOME_BASIS;
   if (outcome === 'rejected') return basis === PROPOSAL_REJECTION_OUTCOME_BASIS;
   return basis === POST_MERGE_OBSERVATION_OUTCOME_BASIS;
+}
+
+function isOutcomeBasisStructurallyCompatible(
+  outcome: JudgeOutcome,
+  basis: JudgeOutcomeBasis,
+): boolean {
+  if (outcome === 'merged') {
+    return basis === REALIZED_MERGE_OUTCOME_BASIS || basis === RELEASED_MERGE_OUTCOME_BASIS;
+  }
+  return isOutcomeBasisCompatible(outcome, basis);
 }
 
 function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
@@ -439,7 +458,7 @@ function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
       !OUTCOME_BASES.has(obj['outcomeBasis'] as JudgeOutcomeBasis))) return null;
   if (obj['outcomeBasis'] !== undefined &&
     (obj['outcome'] === undefined ||
-      !isOutcomeBasisCompatible(
+      !isOutcomeBasisStructurallyCompatible(
         obj['outcome'] as JudgeOutcome,
         obj['outcomeBasis'] as JudgeOutcomeBasis,
       ))) return null;
@@ -648,25 +667,28 @@ export function readJudgeTraces(filter: ReadJudgeTracesOptions = {}): JudgeTrace
   return traces;
 }
 
-/** True only when a merged label carries the canonical realized-merge basis. */
+/** True only when a merged label carries explicit post-merge credit release. */
 export function isQualifiedMergedJudgeOutcome<
   T extends Pick<JudgeTrace, 'outcome' | 'outcomeBasis'>,
 >(trace: T): trace is T & {
   outcome: 'merged';
-  outcomeBasis: typeof REALIZED_MERGE_OUTCOME_BASIS;
+  outcomeBasis: typeof RELEASED_MERGE_OUTCOME_BASIS;
 } {
-  return trace.outcome === 'merged' && trace.outcomeBasis === REALIZED_MERGE_OUTCOME_BASIS;
+  return trace.outcome === 'merged' &&
+    trace.outcomeBasis === RELEASED_MERGE_OUTCOME_BASIS &&
+    hasReleasedPostMergeCredit(trace.outcomeBasis);
 }
 
 /**
  * Adverse outcomes retain their historical semantics. A positive merged label
- * is authoritative only when it is explicitly bound to realized-merge-v1.
+ * is authoritative only when it is explicitly bound to a post-merge credit release.
  */
 export function isQualifiedJudgeOutcome<
   T extends Pick<JudgeTrace, 'outcome' | 'outcomeBasis'>,
 >(trace: T): trace is T & { outcome: JudgeOutcome } {
   if (trace.outcome === undefined || !OUTCOMES.has(trace.outcome)) return false;
   if (trace.outcomeBasis !== undefined && !OUTCOME_BASES.has(trace.outcomeBasis)) return false;
+  if (trace.outcome === 'merged') return isQualifiedMergedJudgeOutcome(trace);
   return isOutcomeBasisCompatible(trace.outcome, trace.outcomeBasis);
 }
 
@@ -740,17 +762,13 @@ export function linkOutcomeResult(
   qualification?: JudgeOutcomeQualification,
 ): LinkJudgeOutcomeResult {
   try {
+    // The generic trace writer is not release authority. A future dedicated
+    // release worker must verify the protected-base proof before it can append
+    // positive outcome credit; accepting a caller-supplied label here would
+    // make the firewall forgeable.
+    if (outcome === 'merged') return { status: 'unqualified' };
     if (!isOutcomeBasisCompatible(outcome, qualification?.basis)) {
       return { status: 'unqualified' };
-    }
-    if (outcome === 'merged') {
-      const proposals = listProposalsDetailed({ requireComplete: true });
-      if (proposals.sourceState === 'degraded' || !proposals.complete) {
-        return { status: 'degraded' };
-      }
-      if (!qualifiedMergedProposal(proposalId, proposals)) {
-        return { status: 'unqualified' };
-      }
     }
     const dir = judgeTracesDir();
     if (!existsSync(dir)) return { status: 'not-found' };

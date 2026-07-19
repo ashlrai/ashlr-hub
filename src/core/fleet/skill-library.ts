@@ -49,6 +49,10 @@ import { loadProposal } from '../inbox/store.js';
 import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { recordDecision } from './decisions-ledger.js';
+import {
+  POST_MERGE_CREDIT_RELEASE_LABEL,
+  hasReleasedPostMergeCredit,
+} from './post-merge-credit.js';
 import { attestSkillCard } from './skill-attestation.js';
 import { recordSkillCard, sanitizeSkillCard } from './skill-records.js';
 import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js';
@@ -57,15 +61,14 @@ import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js'
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Skill genome entries older than this many days are skipped during
- *  inject-time curation (stale-archive cap). */
-const STALE_DAYS = 90;
-
 /** Hard cap on total characters injected from skill entries per run. */
 export const SKILL_INJECT_CAP = 800;
 
 /** Tag prefix for all genome entries written by this module. */
 const TAG = 'm243:skill';
+
+/** Exact genome/card marker for a released positive-credit skill. */
+export const SKILL_CREDIT_RELEASE_TAG = 'credit:released-v1' as const;
 
 const RAW_PAYLOAD_MARKER = /\bRAW_[A-Z0-9_]*(?:PROMPT|DIFF|STDOUT|STDERR|ENV|FILE_CONTENTS?|ARGV|COMMAND_OUTPUT)[A-Z0-9_]*\b/g;
 const DIFF_PAYLOAD_START = /(?:^|\n)(?:diff --git |--- [ab]\/|\+\+\+ [ab]\/|@@ )/m;
@@ -170,6 +173,7 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     const proposal = loadProposal(proposalId);
     if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied' ||
       !hasRealizedMergeEvidence(proposal)) return null;
+    if (!hasReleasedPostMergeCredit(proposal.labelBasis)) return null;
     if (typeof proposal.diff !== 'string' || proposal.diff.length === 0) return null;
     if (!verifyProvenance(proposal).ok) return null;
 
@@ -229,7 +233,12 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
     summary: safeSummary,
     status: 'verified',
     source: 'verified-proposal',
-    tags: [TAG, `engine:${proposal.engineTier}`, `proposal:${boundedMetadataText(proposal.id, 24, 'unknown')}`],
+    tags: [
+      TAG,
+      SKILL_CREDIT_RELEASE_TAG,
+      `engine:${proposal.engineTier}`,
+      `proposal:${boundedMetadataText(proposal.id, 24, 'unknown')}`,
+    ],
     taskKinds: [taskClass],
     commandKinds,
     verification: {
@@ -264,7 +273,7 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
       gateCount,
     },
     learningSource: 'verified-proposal',
-    labelBasis: 'evidence-policy',
+    labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
     ...(proposal.routerPolicyVersion ?? evidence.routerPolicyVersion
       ? { routerPolicyVersion: proposal.routerPolicyVersion ?? evidence.routerPolicyVersion }
       : {}),
@@ -344,6 +353,7 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
       text: workflow,
       tags: [
         TAG,
+        SKILL_CREDIT_RELEASE_TAG,
         `engine:${boundedMetadataText(authoritative.engineTier, 24, 'unknown')}`,
         `proposal:${boundedMetadataText(authoritative.id, 24, 'unknown')}`,
       ],
@@ -367,6 +377,7 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
       proposalId: authoritative.id,
       action: 'skill-library:written' as Parameters<typeof recordDecision>[0]['action'],
       detail: `engine=${authoritative.engineTier}`,
+      labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
       repo: authoritative.repo ?? '',
       engine: authoritative.engineModel ?? '',
       model: '',
@@ -381,52 +392,9 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Filter a list of genome entries to skill entries suitable for inject-time
- * grounding. Applies:
- *   1. Tag filter: only entries tagged 'm243:skill'.
- *   2. Stale-archive: skip entries older than STALE_DAYS.
- *   3. Char cap: accumulate entries (most-recent first) until
- *      SKILL_INJECT_CAP chars would be exceeded.
- *
- * Returns a subset of the input, safe to prepend to agent prompts.
- * Pure; never throws.
+ * Skill injection remains disabled until a distinct post-merge release proof
+ * and verifier exist. Tags and generic genome persistence are not authority.
  */
-export function curateSkills(entries: GenomeEntry[]): GenomeEntry[] {
-  try {
-    if (!Array.isArray(entries) || entries.length === 0) return [];
-
-    const cutoffMs = Date.now() - STALE_DAYS * 86_400_000;
-
-    // Filter to skill entries that are fresh.
-    const fresh = entries.filter((e) => {
-      if (!e.tags.includes(TAG)) return false;
-      try {
-        const ms = Date.parse(e.ts);
-        if (!Number.isFinite(ms)) return true; // no valid ts — keep it
-        return ms >= cutoffMs;
-      } catch {
-        return true;
-      }
-    });
-
-    // Sort most-recent first.
-    fresh.sort((a, b) => {
-      const ta = Date.parse(a.ts) || 0;
-      const tb = Date.parse(b.ts) || 0;
-      return tb - ta;
-    });
-
-    // Accumulate up to SKILL_INJECT_CAP chars.
-    const result: GenomeEntry[] = [];
-    let charCount = 0;
-    for (const e of fresh) {
-      const size = e.title.length + e.text.length;
-      if (charCount + size > SKILL_INJECT_CAP) break;
-      charCount += size;
-      result.push(e);
-    }
-    return result;
-  } catch {
-    return [];
-  }
+export function curateSkills(_entries: GenomeEntry[]): GenomeEntry[] {
+  return [];
 }

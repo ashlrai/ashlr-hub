@@ -41,6 +41,7 @@ import type {
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
+import { hasReleasedPostMergeCredit } from '../fleet/post-merge-credit.js';
 import { listProposalsDetailed } from '../inbox/store.js';
 import {
   authenticatedRealizedMergeOf,
@@ -949,17 +950,17 @@ function authoritativeMergeTimes(
   sinceMs?: number,
 ): Map<string, string> {
   const mergedAt = new Map<string, string>();
-  const canonicalMerged = new Set<string>();
+  const releasedMerged = new Set<string>();
   const latestRejection = new Map<string, DecisionEntry>();
   for (const entry of entries) {
-    if (entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1') {
-      canonicalMerged.add(entry.proposalId);
+    if (entry.action === 'merged' && hasReleasedPostMergeCredit(entry.labelBasis)) {
+      releasedMerged.add(entry.proposalId);
     }
     if (entry.action !== 'rejected') continue;
     const existing = latestRejection.get(entry.proposalId);
     if (isNewerDecision(entry, existing)) latestRejection.set(entry.proposalId, entry);
   }
-  for (const proposalId of canonicalMerged) {
+  for (const proposalId of releasedMerged) {
     const authority = realized.get(proposalId);
     if (!authority || (sinceMs !== undefined && authority.observedAtMs < sinceMs)) continue;
     const rejection = latestRejection.get(proposalId);
@@ -1021,8 +1022,8 @@ function recencyWeight(ts: string, nowMs: number): number {
  *  3. Derive producer, model, and task class only from provenance-v2 proposals.
  *  4. Apply recency weight: w = 2^(-(age_ms / HALF_LIFE_MS)).
  *  5. Count negative judge predictions only when their proposal has signed
- *     producer provenance. Positive credit additionally requires a canonical
- *     merged row and authenticated realized-merge witness.
+ *     producer provenance. Positive credit additionally requires a released
+ *     post-merge decision and authenticated realized-merge witness.
  *  6. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
  *  7. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
  *     when stabilized totalWeight < LEARNED_ROUTING_MIN_SAMPLES.
@@ -1197,9 +1198,9 @@ export function buildProducerScores(
     const entries = readDecisions({ requireComplete: true });
     if (entries.length === 0) return map;
 
-    // Authoritative merges and negative judgments join back to the signed
-    // proposal. A Gate 7 ship is prediction evidence only; it cannot create a
-    // producer success sample until Gate 8/application records `merged`.
+    // Released merges and negative judgments join back to the signed proposal.
+    // Gate 7 and factual application are evidence only; neither creates a
+    // producer success sample until post-merge credit is explicitly released.
     const acc = new Map<
       string,
       { engine: EngineId; model: string | null; ship: number; reject: number }

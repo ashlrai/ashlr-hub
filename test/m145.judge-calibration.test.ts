@@ -72,7 +72,7 @@ function makeTrace(overrides: Partial<JudgeTrace> = {}): JudgeTrace {
     ...overrides,
   };
   if (trace.outcome === 'merged' && trace.outcomeBasis === undefined) {
-    trace.outcomeBasis = 'realized-merge-v1';
+    trace.outcomeBasis = 'post-merge-credit-release-v1';
   } else if (trace.outcome !== 'merged') {
     delete trace.outcomeBasis;
   }
@@ -353,7 +353,7 @@ describe('m145 darkCurrent — baseline distribution', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 runDegradationHarness — catching judge', () => {
-  it('suppresses durable trace recording for synthetic corruption judgments', async () => {
+  it('does not invoke synthetic corruption judging before merged credit can be verified', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
     const ids = [pid(), pid(), pid(), pid(), pid()];
     const traces = ids.map((id) => makeTrace({ proposalId: id, outcome: 'merged' }));
@@ -383,11 +383,13 @@ describe('m145 runDegradationHarness — catching judge', () => {
       _judgeProposalFn: judge,
     });
 
-    expect(result.sampleSize).toBe(5);
-    expect(judgeOptions).toEqual(Array.from({ length: 5 }, () => ({ recordTrace: false })));
+    expect(result.sampleSize).toBe(0);
+    expect(result.trials).toEqual([]);
+    expect(result.flags.join(' ')).toMatch(/insufficient traces/i);
+    expect(judgeOptions).toEqual([]);
   });
 
-  it('samples a proposal once when it has multiple judge trace retries', async () => {
+  it('does not sample duplicate release-labeled retries before proof verification', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
     const ids = [pid(), pid(), pid(), pid(), pid()];
     const traces = ids.map((id) => makeTrace({ proposalId: id, outcome: 'merged' }));
@@ -402,11 +404,11 @@ describe('m145 runDegradationHarness — catching judge', () => {
       _judgeProposalFn: judge as never,
     });
 
-    expect(result.sampleSize).toBe(5);
-    expect(judge).toHaveBeenCalledTimes(5);
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
   });
 
-  it('produces high recovery rate when judge scores corrupted diff lower', async () => {
+  it('withholds recovery scoring even when an injected judge would catch corruption', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
     const proposalId1 = pid();
@@ -440,13 +442,14 @@ describe('m145 runDegradationHarness — catching judge', () => {
       _judgeProposalFn: catchingJudge as never,
     });
 
-    expect(result.sampleSize).toBeGreaterThanOrEqual(5);
-    expect(result.recoveryRate).toBeGreaterThanOrEqual(0.8);
-    expect(result.flags).not.toContain(expect.stringMatching(/recovery rate/));
-    expect(result.trials.every((t) => t.caught)).toBe(true);
+    expect(result.sampleSize).toBe(0);
+    expect(result.recoveryRate).toBe(0);
+    expect(result.trials).toEqual([]);
+    expect(result.flags.join(' ')).toMatch(/insufficient traces/i);
+    expect(catchingJudge).not.toHaveBeenCalled();
   });
 
-  it('trial.caught is true when verdict escalates (ship → harmful)', async () => {
+  it('does not create trials from release-labeled rows with exact realized witnesses', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
     const ids = [pid(), pid(), pid(), pid(), pid()];
@@ -464,8 +467,10 @@ describe('m145 runDegradationHarness — catching judge', () => {
       _judgeProposalFn: escalatingJudge as never,
     });
 
-    expect(result.recoveryRate).toBeGreaterThan(0);
-    expect(result.trials.every((t) => t.caught)).toBe(true);
+    expect(result.sampleSize).toBe(0);
+    expect(result.recoveryRate).toBe(0);
+    expect(result.trials).toEqual([]);
+    expect(escalatingJudge).not.toHaveBeenCalled();
   });
 });
 
@@ -474,7 +479,7 @@ describe('m145 runDegradationHarness — catching judge', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 runDegradationHarness — missing judge', () => {
-  it('produces low recovery rate and a flag when judge does not score lower', async () => {
+  it('does not invoke a rubber-stamp judge without verified positive samples', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
     const ids = [pid(), pid(), pid(), pid(), pid()];
@@ -492,13 +497,13 @@ describe('m145 runDegradationHarness — missing judge', () => {
       _judgeProposalFn: missingJudge as never,
     });
 
-    expect(result.sampleSize).toBeGreaterThanOrEqual(5);
-    expect(result.recoveryRate).toBe(0); // same scores → none caught
-    expect(result.flags.length).toBeGreaterThan(0);
-    expect(result.flags.some((f) => f.includes('recovery rate'))).toBe(true);
+    expect(result.sampleSize).toBe(0);
+    expect(result.recoveryRate).toBe(0);
+    expect(result.flags.join(' ')).toMatch(/insufficient traces/i);
+    expect(missingJudge).not.toHaveBeenCalled();
   });
 
-  it('adds critical flag when recovery rate < 30%', async () => {
+  it('reports insufficient evidence rather than a recovery-rate claim', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
 
     const ids = [pid(), pid(), pid(), pid(), pid()];
@@ -516,9 +521,11 @@ describe('m145 runDegradationHarness — missing judge', () => {
       _judgeProposalFn: blindJudge as never,
     });
 
-    // recovery 0% < 30%: both the general and critical flags should be set
-    expect(result.flags.some((f) => f.includes('recovery rate'))).toBe(true);
-    expect(result.flags.some((f) => f.includes('critical'))).toBe(true);
+    expect(result.sampleSize).toBe(0);
+    expect(result.flags.join(' ')).toMatch(/insufficient traces/i);
+    expect(result.flags.some((f) => f.includes('recovery rate'))).toBe(false);
+    expect(result.flags.some((f) => f.includes('critical'))).toBe(false);
+    expect(blindJudge).not.toHaveBeenCalled();
   });
 });
 
@@ -527,6 +534,25 @@ describe('m145 runDegradationHarness — missing judge', () => {
 // ---------------------------------------------------------------------------
 
 describe('m145 runDegradationHarness — insufficient traces', () => {
+  it('ignores the old realized-merge basis even with authenticated proposal witnesses', async () => {
+    const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
+    const traces = Array.from({ length: 6 }, () => makeTrace({
+      outcome: 'merged',
+      outcomeBasis: 'realized-merge-v1',
+    }));
+    const proposals = traces.map((trace) => makeAuthenticatedMergedProposal(trace.proposalId));
+    const judge = mockJudge('harmful', { value: 1, correctness: 1, scope: 1, alignment: 1 });
+
+    const result = await runDegradationHarness({} as never, {
+      _readTracesFn: () => traces,
+      _readProposalsFn: () => healthyProposalSource(proposals),
+      _judgeProposalFn: judge as never,
+    });
+
+    expect(result.sampleSize).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+  });
+
   it('ignores unqualified historical merged traces', async () => {
     const { runDegradationHarness } = await import('../src/core/fleet/judge-calibration.js');
     const traces = Array.from({ length: 6 }, () => makeUnqualifiedMergedTrace());
@@ -712,11 +738,11 @@ describe('m145 judgeHealth — assembles combined report', () => {
     const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
 
     const traces: JudgeTrace[] = [
-      makeTrace({ verdict: 'ship',   outcome: 'merged',   judgeEngine: 'e1', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 } }),
-      makeTrace({ verdict: 'ship',   outcome: 'merged',   judgeEngine: 'e1', scores: { value: 4, correctness: 4, scope: 2, alignment: 4 } }),
+      makeTrace({ verdict: 'review', outcome: 'reverted', judgeEngine: 'e1', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 } }),
+      makeTrace({ verdict: 'noise',  outcome: 'rejected', judgeEngine: 'e1', scores: { value: 4, correctness: 4, scope: 2, alignment: 4 } }),
       makeTrace({ verdict: 'review', outcome: 'reverted', judgeEngine: 'e1', scores: { value: 3, correctness: 3, scope: 3, alignment: 3 } }),
       makeTrace({ verdict: 'noise',  outcome: 'rejected', judgeEngine: 'e1', scores: { value: 1, correctness: 1, scope: 1, alignment: 1 } }),
-      makeTrace({ verdict: 'ship',   outcome: 'merged',   judgeEngine: 'e1', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 } }),
+      makeTrace({ verdict: 'review', outcome: 'reverted', judgeEngine: 'e1', scores: { value: 5, correctness: 5, scope: 1, alignment: 5 } }),
     ];
 
     const report = await judgeHealth({} as never, {
@@ -785,7 +811,7 @@ describe('m145 judgeHealth — assembles combined report', () => {
     expect(report.flags.some((f) => f.includes('rubber-stamp'))).toBe(true);
   });
 
-  it('plumbs degradation harness through opts.runDegradation', async () => {
+  it('plumbs degradation mode while withholding unverified merged samples', async () => {
     const { judgeHealth } = await import('../src/core/fleet/judge-calibration.js');
 
     const ids = [pid(), pid(), pid(), pid(), pid(), pid()];
@@ -804,8 +830,9 @@ describe('m145 judgeHealth — assembles combined report', () => {
       _judgeProposalFn: catchingJudge as never,
     });
 
-    expect(report.degradationRecoveryRate).not.toBeNull();
-    expect(report.degradationRecoveryRate!).toBeGreaterThan(0.5);
+    expect(report.degradationRecoveryRate).toBeNull();
+    expect(report.flags.join(' ')).toMatch(/insufficient traces/i);
+    expect(catchingJudge).not.toHaveBeenCalled();
   });
 
   it('never throws with empty traces', async () => {

@@ -12,6 +12,8 @@
 import type { AshlrConfig, GenomeEntry, RecallHit } from '../types.js';
 import { loadGenome } from './store.js';
 
+const SKILL_TAG = 'm243:skill';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -210,25 +212,19 @@ function entryToEmbedText(entry: GenomeEntry): string {
   return parts.join(' ').slice(0, 2000);
 }
 
-/** Match the stable footprint emitted by learnFromApplied; the tag alone is untrusted. */
-function isLegacyInternalSkill(entry: GenomeEntry, tags: Set<string>): boolean {
-  if (!tags.has('m243:skill') || entry.source !== 'hub') return false;
-
-  const hasEngine = entry.tags.some((tag) => /^engine:\S+$/i.test(tag.trim()));
-  const hasProposal = entry.tags.some((tag) => /^proposal:\S+$/i.test(tag.trim()));
-  return (
-    hasEngine &&
-    hasProposal &&
-    entry.title.startsWith('Skill: ') &&
-    entry.text.startsWith('Skill: proven workflow for "') &&
-    entry.text.includes('Pattern (plan→do→verify):')
-  );
+/** Skill rows need a future release-proof verifier before entering recall. */
+function isRecallEligibleEntry(entry: GenomeEntry): boolean {
+  try {
+    const tags = new Set(entry.tags.map((tag) => tag.trim().toLowerCase()));
+    return !tags.has(SKILL_TAG);
+  } catch {
+    return false;
+  }
 }
 
 function memoryTierMultiplier(entry: GenomeEntry): number {
   const tags = new Set(entry.tags.map((tag) => tag.trim().toLowerCase()));
   if (tags.has('m26') && tags.has('playbook')) return 1.7;
-  if (isLegacyInternalSkill(entry, tags)) return 1.55;
   if (tags.has('m235:anti-playbook')) return 1.5;
   if (tags.has('reflection') || tags.has('compaction')) return 1.35;
   if (tags.has('run') || tags.has('swarm')) return 0.9;
@@ -264,7 +260,7 @@ export async function recall(
   // Load all entries defensively (store never throws)
   let entries: GenomeEntry[];
   try {
-    entries = loadGenome(cfg);
+    entries = loadGenome(cfg).filter(isRecallEligibleEntry);
   } catch {
     entries = [];
   }

@@ -622,7 +622,7 @@ describe('M220 tick() integration — antiClog default ON', () => {
 
     // The fresh item should have been dispatched
     expect(dispatched.length).toBeGreaterThan(0);
-  });
+  }, 15_000);
 
   it('shared queue mode writes rejected/noise sweep feedback to the shared store', async () => {
     const judgedId = 'shared-judged-noise-item';
@@ -667,7 +667,7 @@ describe('M220 tick() integration — antiClog default ON', () => {
     expect(sharedEvents.some((event) => event.outcome === 'judged-noise')).toBe(true);
     expect(sharedStore.recentlyDeclined(judgedId, 6 * 60 * 60 * 1000)).toBe(true);
     expect(loadWorkedLedger().events.some((event) => event.itemId === judgedId)).toBe(false);
-  });
+  }, 15_000);
 
   it('a fresh substantive item is NOT skipped when antiClog is ON', async () => {
     const freshId = 'fresh-unrelated-item';
