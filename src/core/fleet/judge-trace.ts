@@ -1,11 +1,10 @@
 /**
- * M141: Judge trace store — append-only JSONL sink for the full CoT reasoning
- * produced by the manager judge on every proposal.
+ * M141: Append-only metadata ledger for manager judge verdicts.
  *
  * Writes to ~/.ashlr/judge-traces/YYYY-MM-DD.jsonl — one JudgeTrace per line.
  * Mirrors decisions-ledger.ts conventions:
  *   - Append-only; never truncate/rewrite/delete.
- *   - Secret-scrubbed before write.
+ *   - New rows never persist chain-of-thought or prompt context.
  *   - recordJudgeTrace() never throws.
  *   - readJudgeTraces() preserves the legacy array API while detailed reads
  *     expose bounded source quality and completeness.
@@ -69,6 +68,8 @@ export interface PostMergeObservationOutcomeQualification {
 // than 'reverted'; maps to intent 'review' in calibration.
 
 export interface JudgeTrace {
+  /** V2 is metadata-only. Undefined/1 identifies a redacted legacy row. */
+  schemaVersion?: 1 | 2;
   /** Stable identity used by append-only outcome patches. */
   traceId?: string;
   /** Proposal id this trace belongs to. */
@@ -84,17 +85,14 @@ export interface JudgeTrace {
     scope: number;
     alignment: number;
   };
-  /**
-   * Full chain-of-thought reasoning text extracted from the judge response
-   * (the prose that precedes the verdict JSON). May be empty string when
-   * the judge emitted no prose before the JSON block.
-   */
+  /** Deprecated read-model compatibility field. Always empty. */
   fullReasoning: string;
-  /**
-   * Snapshot of the prompt context sent to the judge (title, summary, kind,
-   * engine, optional vision section — NOT the full diff to keep the file lean).
-   */
+  /** Deprecated read-model compatibility field. Always empty. */
   promptContext: string;
+  /** Explains why free-form reasoning is absent from the read model. */
+  reasoningState?: 'not-persisted' | 'legacy-redacted';
+  /** Explains why prompt context is absent from the read model. */
+  promptContextState?: 'not-persisted' | 'legacy-redacted';
   /** ISO timestamp of when the trace was recorded. */
   ts: string;
   /**
@@ -116,6 +114,33 @@ export interface JudgeTrace {
   _patchFor?: string;
 }
 
+interface PersistedJudgeTraceV2 extends Omit<
+  JudgeTrace,
+  'schemaVersion' | 'fullReasoning' | 'promptContext' | 'reasoningState' | 'promptContextState'
+> {
+  schemaVersion: 2;
+  reasoningState: 'not-persisted';
+  promptContextState: 'not-persisted';
+}
+
+export type JudgeTraceWriteInput = Omit<
+  JudgeTrace,
+  | 'schemaVersion'
+  | 'ts'
+  | 'fullReasoning'
+  | 'promptContext'
+  | 'reasoningState'
+  | 'promptContextState'
+  | '_patchForTraceId'
+  | '_patchFor'
+> & {
+  ts?: string;
+  /** Accepted only for source compatibility and deliberately discarded. */
+  fullReasoning?: string;
+  /** Accepted only for source compatibility and deliberately discarded. */
+  promptContext?: string;
+};
+
 const DEFAULT_MAX_FILES = 1_024;
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_ROWS = 100_000;
@@ -133,6 +158,11 @@ const OUTCOME_BASES = new Set<JudgeOutcomeBasis>([
   RELEASED_MERGE_OUTCOME_BASIS,
   PROPOSAL_REJECTION_OUTCOME_BASIS,
   POST_MERGE_OBSERVATION_OUTCOME_BASIS,
+]);
+const V2_KEYS = new Set([
+  'schemaVersion', 'traceId', 'proposalId', 'judgeEngine', 'verdict', 'scores',
+  'reasoningState', 'promptContextState', 'ts', 'outcome', 'outcomeBasis',
+  'outcomeAt', '_patchForTraceId', '_patchFor',
 ]);
 
 export interface ReadJudgeTracesOptions {
@@ -187,12 +217,14 @@ export function judgeTracesDir(): string {
 // Secret scrubbing — delegates to shared scrubSecrets (src/core/util/scrub.ts)
 // ---------------------------------------------------------------------------
 
-function scrubTrace(trace: JudgeTrace): JudgeTrace {
-  return {
-    ...trace,
-    fullReasoning: scrubSecrets(trace.fullReasoning).slice(0, 32_000),
-    promptContext: scrubSecrets(trace.promptContext).slice(0, 16_000),
-  };
+function metadataText(value: unknown, maxBytes: number): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const clean = scrubSecrets(value).slice(0, maxBytes);
+  for (const char of clean) {
+    const code = char.codePointAt(0)!;
+    if (code < 32 || code === 127) return null;
+  }
+  return clean;
 }
 
 function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
@@ -279,7 +311,7 @@ function writeAll(fd: number, bytes: Buffer): void {
  *
  * Append-only. Never throws.
  */
-export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }): void {
+export function recordJudgeTrace(trace: JudgeTraceWriteInput): void {
   try {
     const dir = judgeTracesDir();
     if (!existsSync(dir)) {
@@ -289,16 +321,36 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
     if (!isSafeJudgeTraceDirectory(directory)) return;
     chmodSync(dir, 0o700);
 
-    const record: JudgeTrace = scrubTrace({
-      ...trace,
-      ts: (() => {
-        const value = trace.ts ?? new Date().toISOString();
-        const parsed = Date.parse(value);
-        return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
-      })(),
-      traceId: trace.traceId ?? `jt-${randomUUID()}`,
-    } as JudgeTrace);
-    if (!record.ts) return;
+    const proposalId = metadataText(trace.proposalId, 4_096);
+    const judgeEngine = metadataText(trace.judgeEngine, 512);
+    const traceId = metadataText(trace.traceId ?? `jt-${randomUUID()}`, 512);
+    const parsedTs = Date.parse(trace.ts ?? new Date().toISOString());
+    const verdict = trace.verdict;
+    const scores = trace.scores ? { ...trace.scores } : trace.scores;
+    const outcome = trace.outcome;
+    const outcomeBasis = trace.outcomeBasis;
+    const rawOutcomeAt = trace.outcomeAt;
+    const parsedOutcomeAt = rawOutcomeAt === undefined ? undefined : Date.parse(rawOutcomeAt);
+    if (!proposalId || !judgeEngine || !traceId || !Number.isFinite(parsedTs) ||
+      !VERDICTS.has(verdict) || !validScores(scores) ||
+      (rawOutcomeAt !== undefined && !Number.isFinite(parsedOutcomeAt)) ||
+      (rawOutcomeAt !== undefined && outcome === undefined)) return;
+    const record: PersistedJudgeTraceV2 = {
+      schemaVersion: 2,
+      traceId,
+      proposalId,
+      judgeEngine,
+      verdict,
+      scores,
+      reasoningState: 'not-persisted',
+      promptContextState: 'not-persisted',
+      ts: new Date(parsedTs).toISOString(),
+      ...(outcome !== undefined ? { outcome } : {}),
+      ...(outcomeBasis !== undefined ? { outcomeBasis } : {}),
+      ...(parsedOutcomeAt !== undefined
+        ? { outcomeAt: new Date(parsedOutcomeAt).toISOString() }
+        : {}),
+    };
     if (record.outcome !== undefined && !OUTCOMES.has(record.outcome)) return;
     // Positive merged outcomes are reserved for the future proof-bound release
     // writer. This generic trace API may record predictions and adverse facts.
@@ -439,6 +491,16 @@ function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
   const patch = typeof obj['_patchForTraceId'] === 'string' || typeof obj['_patchFor'] === 'string';
+  const metadataOnly = obj['schemaVersion'] === 2;
+  if (obj['schemaVersion'] !== undefined && obj['schemaVersion'] !== 1 && !metadataOnly) return null;
+  if (metadataOnly && (
+    Object.keys(obj).some((key) => !V2_KEYS.has(key)) ||
+    obj['reasoningState'] !== 'not-persisted' ||
+    obj['promptContextState'] !== 'not-persisted' ||
+    Object.hasOwn(obj, 'fullReasoning') || Object.hasOwn(obj, 'promptContext')
+  )) return null;
+  if (!metadataOnly &&
+    (typeof obj['fullReasoning'] !== 'string' || typeof obj['promptContext'] !== 'string')) return null;
   if (
     typeof obj['proposalId'] !== 'string' ||
     typeof obj['judgeEngine'] !== 'string' ||
@@ -446,10 +508,12 @@ function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
     !VERDICTS.has(obj['verdict'] as JudgeTrace['verdict']) ||
     typeof obj['ts'] !== 'string' ||
     !Number.isFinite(Date.parse(obj['ts'])) ||
-    typeof obj['fullReasoning'] !== 'string' ||
-    typeof obj['promptContext'] !== 'string' ||
     (!patch && !validScores(obj['scores']))
   ) return null;
+  const proposalId = metadataText(obj['proposalId'], 4_096);
+  const judgeEngine = metadataText(obj['judgeEngine'], 512);
+  const traceId = obj['traceId'] === undefined ? undefined : metadataText(obj['traceId'], 512);
+  if (!proposalId || !judgeEngine || (obj['traceId'] !== undefined && !traceId)) return null;
   const now = Date.now();
   if (Date.parse(obj['ts'] as string) > now + MAX_FUTURE_SKEW_MS) return null;
   if (obj['outcome'] !== undefined && !OUTCOMES.has(obj['outcome'] as JudgeOutcome)) return null;
@@ -470,7 +534,30 @@ function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
     ? obj['outcomeAt'].slice(0, 10)
     : obj['ts'].slice(0, 10);
   if (physicalDate !== fileDate) return null;
-  return scrubTrace(obj as unknown as JudgeTrace);
+  return {
+    ...(metadataOnly ? { schemaVersion: 2 as const } : { schemaVersion: 1 as const }),
+    ...(traceId ? { traceId } : {}),
+    proposalId,
+    judgeEngine,
+    verdict: obj['verdict'] as JudgeTrace['verdict'],
+    scores: validScores(obj['scores'])
+      ? { ...obj['scores'] }
+      : { value: 1, correctness: 1, scope: 1, alignment: 1 },
+    fullReasoning: '',
+    promptContext: '',
+    reasoningState: metadataOnly ? 'not-persisted' : 'legacy-redacted',
+    promptContextState: metadataOnly ? 'not-persisted' : 'legacy-redacted',
+    ts: new Date(Date.parse(obj['ts'] as string)).toISOString(),
+    ...(obj['outcome'] !== undefined ? { outcome: obj['outcome'] as JudgeOutcome } : {}),
+    ...(obj['outcomeBasis'] !== undefined
+      ? { outcomeBasis: obj['outcomeBasis'] as JudgeOutcomeBasis }
+      : {}),
+    ...(obj['outcomeAt'] !== undefined ? { outcomeAt: obj['outcomeAt'] as string } : {}),
+    ...(typeof obj['_patchForTraceId'] === 'string'
+      ? { _patchForTraceId: obj['_patchForTraceId'] }
+      : {}),
+    ...(typeof obj['_patchFor'] === 'string' ? { _patchFor: obj['_patchFor'] } : {}),
+  };
 }
 
 function traceKey(trace: JudgeTrace): string {
@@ -781,13 +868,14 @@ export function linkOutcomeResult(
       return { status: 'already-linked', ...(target.traceId ? { traceId: target.traceId } : {}) };
     }
     const outcomeAt = new Date().toISOString();
-    const patch: JudgeTrace = {
+    const patch: PersistedJudgeTraceV2 = {
+      schemaVersion: 2,
       proposalId,
       judgeEngine: target.judgeEngine,
       verdict: target.verdict,
       scores: target.scores,
-      fullReasoning: '',
-      promptContext: '',
+      reasoningState: 'not-persisted',
+      promptContextState: 'not-persisted',
       ts: target.ts,
       outcome,
       outcomeAt,
