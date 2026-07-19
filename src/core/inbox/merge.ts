@@ -107,6 +107,7 @@ import type {
   AshlrConfig,
   AutoMergeTrustBasis,
   DecisionEntry,
+  JudgeDecisionReasonCode,
   EngineTier,
   Proposal,
   ProposalBrowserVerifyEvidence,
@@ -154,6 +155,7 @@ import {
   producerModelFamily,
 } from '../fleet/reviewer-independence.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
+import { judgeDecisionReasonCode } from '../fleet/judge-decision-metadata.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
   detectVerifyCommands,
@@ -997,7 +999,11 @@ export interface ExplainAutoMergeGateOptions {
    * manager gate is enabled and this is absent, the explainer reports missing
    * evidence instead of invoking a judge.
    */
-  managerVerdict?: { verdict: string; wouldMerge: boolean; rationale?: string };
+  managerVerdict?: {
+    verdict: string;
+    wouldMerge: boolean;
+    reasonCode?: JudgeDecisionReasonCode;
+  };
 }
 
 function autoMergeConfigValue(cfg: AshlrConfig, key: string): unknown {
@@ -1562,7 +1568,9 @@ export function explainAutoMergeGate(
         verdict.verdict === 'ship' && verdict.wouldMerge === true,
         verdict.verdict === 'ship' && verdict.wouldMerge === true
           ? `manager gate passed: verdict='${verdict.verdict}', wouldMerge=true`
-          : `manager gate blocked: verdict='${verdict.verdict}', wouldMerge=${verdict.wouldMerge}${verdict.rationale ? ` — ${verdict.rationale}` : ''}`,
+          : `manager gate blocked: verdict='${verdict.verdict}', wouldMerge=${verdict.wouldMerge}, reasonCode=${
+            verdict.reasonCode ?? judgeDecisionReasonCode(verdict.verdict, verdict.wouldMerge)
+          }`,
       );
     }
   }
@@ -3296,7 +3304,11 @@ export async function autoMergeProposal(
       }
       const cachedEntry = priorEntries.find((e) => e.action === 'judged' && e.verdict);
 
-      let managerVerdict: { verdict: string; wouldMerge: boolean; rationale: string } | null = null;
+      let managerVerdict: {
+        verdict: string;
+        wouldMerge: boolean;
+        reasonCode: JudgeDecisionReasonCode;
+      } | null = null;
 
       const cachedJudgeEngine = cachedEntry?.engine ?? cachedEntry?.model;
       const cachedReviewerIndependent = evaluateReviewerIndependence(proposal, cachedJudgeEngine).independent;
@@ -3325,7 +3337,10 @@ export async function autoMergeProposal(
         managerVerdict = {
           verdict: cachedEntry.verdict,
           wouldMerge: cachedEntry.verdict === 'ship' && cachedEntry.detail === 'would-merge',
-          rationale: cachedEntry.reason ?? 'cached verdict',
+          reasonCode: cachedEntry.judgeReasonCode ?? judgeDecisionReasonCode(
+            cachedEntry.verdict,
+            cachedEntry.detail === 'would-merge',
+          ),
         };
       } else {
         // No fresh cached verdict — judge inline.
@@ -3432,7 +3447,6 @@ export async function autoMergeProposal(
             engine: inlineJudgeEngine,
             model: inlineJudgeEngine,
             verdict: verdict.verdict,
-            reason: verdict.rationale,
             detail: verdict.wouldMerge && inlineReviewerIndependence.independent ? 'would-merge' : '',
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
@@ -3447,7 +3461,10 @@ export async function autoMergeProposal(
           managerVerdict = {
             verdict: verdict.verdict,
             wouldMerge: verdict.wouldMerge,
-            rationale: verdict.rationale,
+            reasonCode: judgeDecisionReasonCode(
+              verdict.verdict,
+              verdict.wouldMerge && inlineReviewerIndependence.independent,
+            ),
           };
         } catch {
           // judgeProposal threw unexpectedly — FAIL CLOSED.
@@ -3464,10 +3481,9 @@ export async function autoMergeProposal(
 
       // Only 'ship' + wouldMerge proceeds; everything else leaves pending.
       if (managerVerdict.verdict !== 'ship' || !managerVerdict.wouldMerge) {
-        const gateReason =
-          managerVerdict.verdict === 'ship' && !managerVerdict.wouldMerge
-            ? `manager gate: verdict='ship' but wouldMerge=false — ${managerVerdict.rationale}`
-            : `manager gate: verdict='${managerVerdict.verdict}' — ${managerVerdict.rationale}`;
+        const gateReason = `manager gate held: verdict='${managerVerdict.verdict}', wouldMerge=${
+          managerVerdict.wouldMerge
+        }, reasonCode=${managerVerdict.reasonCode}`;
         audit({
           action: 'inbox:auto-merge',
           repo,
@@ -3547,7 +3563,7 @@ export async function autoMergeProposal(
           labelBasis: 'merge-gate',
         }),
         action: 'merge-authorized',
-        reason: `gate 7 passed: verdict=${managerVerdict.verdict}, ${managerVerdict.rationale}`,
+        reason: `gate 7 passed: verdict=${managerVerdict.verdict}, reasonCode=${managerVerdict.reasonCode}`,
       });
     }
 

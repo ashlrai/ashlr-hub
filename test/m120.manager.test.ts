@@ -674,6 +674,13 @@ describe('m120 runManager — shadow mode', () => {
     });
     expect(firstDecision?.semanticEvents?.map((event) => event.kind)).toEqual(['action']);
     expect(JSON.stringify(firstDecision?.semanticEvents)).not.toContain('Good.');
+    expect(firstDecision).toMatchObject({
+      judgeDecisionMetadataVersion: 2,
+      judgeReasonCode: 'judge-ship-would-merge',
+      judgeRationaleState: 'not-persisted',
+    });
+    expect(firstDecision?.reason).toBeUndefined();
+    expect(JSON.stringify(firstDecision)).not.toContain('Good.');
   });
 
   it('does NOT call setStatus in shadow mode (applyRejects=false)', async () => {
@@ -889,8 +896,10 @@ describe('m120 runManager — applyRejects=true', () => {
 
     // setStatus should have been called for noise (indices 1, 4) and harmful (index 3)
     expect(setStatusCalls.length).toBe(3);
-    for (const [_id, status] of setStatusCalls) {
+    for (const [_id, status, _result, reason] of setStatusCalls) {
       expect(status).toBe('rejected');
+      expect(['judge-noise', 'judge-harmful']).toContain(reason);
+      expect(reason).not.toContain('verdict:');
     }
   });
 

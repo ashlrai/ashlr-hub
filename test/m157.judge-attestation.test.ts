@@ -605,7 +605,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     expect(escalated).toBeDefined();
     expect(escalated?.verdict).toBe('review');
     expect(escalated?.judgeAttestation).toBeUndefined();
-    expect(escalated?.reason).toMatch(/independent reviewer|judge available/i);
+    expect(escalated?.reason).toBe('manager-judge-unavailable');
   });
 
   it('[M1d] mixed Claude/OpenAI producers route to opposite-family reviewers', async () => {

@@ -1,10 +1,8 @@
 /**
  * self-improve.ts — M235: recursive self-improvement write-back.
  *
- * Closes the learning loop: when the judge rejects a proposal (verdict
- * review | noise | harmful), extract the reasoning, derive an anti-playbook
- * lesson, and persist it as a genome entry so FUTURE agent runs are warned
- * off repeating the same failure pattern.
+ * Closes the learning loop with metadata-only negative observations. Model
+ * reasoning and proposal text are never persisted or replayed into future runs.
  *
  * SAFETY INVARIANTS:
  *  - WRITE TARGET: genome hub + decisions ledger ONLY. Never touches
@@ -60,34 +58,21 @@ function isRejection(v: string): v is RejectionVerdict {
 // ---------------------------------------------------------------------------
 
 /**
- * Derive a concise anti-playbook lesson from a judge verdict + reasoning.
- * Pure; never throws.
+ * Derive a finite anti-playbook lesson from a judge verdict. The legacy text
+ * parameters are intentionally ignored so older callers cannot persist raw
+ * proposal content or model reasoning.
  */
 export function deriveLesson(
   verdict: RejectionVerdict,
-  reasoning: string,
-  proposalTitle: string,
+  _reasoning: string,
+  _proposalTitle: string,
 ): string {
-  const safeTitle = (proposalTitle ?? '').replace(/\s+/g, ' ').trim().slice(0, 80) || '(untitled)';
-  const safeReasoning = (reasoning ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
-
-  const verdictLabel: Record<RejectionVerdict, string> = {
-    review: 'requires human review',
-    noise: 'was too trivial / low-value',
-    harmful: 'was unsafe / harmful',
+  const lessonByVerdict: Record<RejectionVerdict, string> = {
+    review: 'A proposal required review. Do not promote uncertain work without stronger deterministic evidence.',
+    noise: 'A proposal was classified as noise. Prefer work with explicit user value and measurable repository impact.',
+    harmful: 'A proposal was classified as harmful. Refuse the pattern and require independent safety evidence before retrying.',
   };
-
-  const label = verdictLabel[verdict];
-  const reasonPart = safeReasoning
-    ? `\n\nJudge reasoning: ${safeReasoning}`
-    : '';
-
-  return (
-    `Anti-playbook: avoid this pattern\n\n` +
-    `A proposal titled "${safeTitle}" was judged '${verdict}' (${label}).` +
-    reasonPart +
-    `\n\nFuture agents: if your diff matches this pattern, reconsider before proposing.`
-  );
+  return `Anti-playbook observation (${verdict}): ${lessonByVerdict[verdict]}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +91,9 @@ export function deriveLesson(
  * try/catch). Gated on cfg.foundry?.selfImprove !== false.
  *
  * @param proposalId  The proposal id (for ledger correlation).
- * @param proposalTitle  Short human-readable title (for the lesson text).
+ * @param proposalTitle  Legacy compatibility input; deliberately discarded.
  * @param verdict  Must be 'review' | 'noise' | 'harmful'.
- * @param reasoning  The judge's CoT reasoning text (may be empty).
+ * @param reasoning  Legacy compatibility input; deliberately discarded.
  * @param cfg  Fleet config.
  */
 export function learnFromRejection(
@@ -132,7 +117,7 @@ export function learnFromRejection(
   // Derive and write the lesson.
   try {
     const lesson = deriveLesson(verdict, reasoning, proposalTitle);
-    const title = `Anti-playbook: ${verdict} — ${(proposalTitle ?? '').slice(0, 60) || 'untitled'}`;
+    const title = `Anti-playbook observation: ${verdict}`;
 
     appendHubEntry({
       title,
