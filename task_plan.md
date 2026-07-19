@@ -2647,3 +2647,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Align the full CI contract with dormant positive ROI, strategy, and skill consumers plus independent reviewer-family authority after Ubuntu exposed 16 stale assertions across seven suites.
 - [ ] Re-run the complete duplicate protected matrix on the corrected immutable head.
 - [ ] Build the separate protected-base release authority with reservation, detached verification, denominator-complete observation, monotonic quarantine, and crash-safe idempotent fanout.
+
+## Observation-Only Learning Eligibility Projection (2026-07-16)
+- [x] Audit the signed merge, protected-base, verification, stability, adverse, denominator, rollback, and consumer contracts behind positive learning release.
+- [x] Refuse premature release authority while denominator completeness, sealed execution proof, historical branch-policy binding, and an external monotonic anchor remain unavailable.
+- [x] Add bounded `LearningEligibilityV1` projection over dispatch-rooted trajectories with host-keyed subject/proposal digests, fixed stage states, refusal vectors, policy/epoch identity, propensity availability, and a complete evaluated-set digest.
+- [x] Keep every projected member `policyEligible:false` and `recursiveLearningEligible:false`; raw release labels and caller-supplied metadata remain non-authoritative.
+- [x] Reject partial candidate sets, duplicate subjects, malformed/oversized populations, invalid identities, missing keys, and degraded source inputs without persisting raw prompts, rationale, diffs, output, environment, paths, or contents.
+- [x] Pass 63 focused trajectory/population/firewall/eligibility assertions, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
+- [x] Publish the isolated stacked PR #49 on PR #48 and require the complete protected matrix.
+- [ ] Remove free-form chain-of-thought and prompt context from durable judge traces; project only validated closed semantic events and bounded numeric metadata.
