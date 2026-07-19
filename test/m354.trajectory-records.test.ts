@@ -17,6 +17,7 @@ import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js'
 import type { Proposal, SkillUseEvent } from '../src/core/types.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 import {
+  agentRunSemanticEvents,
   agentSemanticSubjectRef,
   defineAgentSemanticEvents,
 } from '../src/core/learning/agent-semantic-events.js';
@@ -1554,6 +1555,66 @@ describe('Trajectory records', () => {
     const actionEvent = record?.timeline.find((event) => event.kind === 'agent-action');
     expect(actionEvent?.semanticEvents).toEqual([semanticEvent]);
     expect(record?.timeline.filter((event) => event.kind === 'agent-action')).toHaveLength(1);
+  });
+
+  it('preserves proposal-less run semantics on the joined action timeline', () => {
+    const runId = 'run-semantic-proposal-less';
+    const semanticEvents = agentRunSemanticEvents({
+      runId,
+      model: 'qwen3-coder',
+      status: 'done',
+      proposalCreated: false,
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          actor: 'agent',
+          kind: 'maintenance',
+          outcome: 'no-proposal',
+          action: 'sandboxed-engine:run',
+          proposalId: undefined,
+          runId,
+          trajectoryId: `run:${runId}`,
+          model: 'qwen3-coder',
+          semanticEvents,
+        })],
+      }),
+    });
+
+    expect(record?.proposalId).toBeUndefined();
+    expect(record?.runId).toBe(runId);
+    expect(record?.timeline).toHaveLength(1);
+    expect(record?.timeline[0]?.semanticEvents).toEqual(semanticEvents);
+  });
+
+  it('drops action semantics not bound to any carrier identity', () => {
+    const semanticEvents = agentRunSemanticEvents({
+      runId: 'run-semantic-unbound',
+      model: 'qwen3-coder',
+      status: 'done',
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          actor: 'agent',
+          kind: 'maintenance',
+          action: 'sandboxed-engine:run',
+          proposalId: undefined,
+          runId: 'run-semantic-different',
+          trajectoryId: undefined,
+          model: 'qwen3-coder',
+          semanticEvents,
+        })],
+      }),
+    });
+
+    expect(record?.timeline[0]?.semanticEvents).toBeUndefined();
   });
 
   it('publishes degraded agent-action source quality instead of a healthy empty timeline', () => {

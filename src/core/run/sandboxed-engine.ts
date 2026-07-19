@@ -90,6 +90,7 @@ import {
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from '../inbox/persistence-mismatch.js';
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
+import { agentRunSemanticEvents } from '../learning/agent-semantic-events.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
@@ -493,6 +494,12 @@ function recordSandboxedRunAgentAction(fields: {
     const outcomeLabel = fields.outcome?.kind ?? fields.status;
     const proposalId = fields.proposalId ?? fields.outcome?.proposalId;
     const proposalCreated = proposalCreatedForRunEvent(fields.outcome);
+    const semanticEvents = agentRunSemanticEvents({
+      runId: fields.runId,
+      model: fields.engineModel,
+      status: fields.status,
+      ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+    });
     const summary = runEventSummary({
       runId: fields.runId,
       status: fields.status,
@@ -535,6 +542,7 @@ function recordSandboxedRunAgentAction(fields: {
       ...(summary ? { runEventSummary: summary } : {}),
       learningSource: 'agent-action',
       labelBasis: 'dispatch-outcome',
+      semanticEvents,
       backend: fields.engine,
       tier: fields.tier,
       model: fields.engineModel,

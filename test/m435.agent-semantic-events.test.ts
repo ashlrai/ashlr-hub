@@ -7,6 +7,7 @@ import {
   agentSemanticEventId,
   agentSemanticModelFamily,
   agentSemanticSubjectRef,
+  agentRunSemanticEvents,
   defineAgentSemanticEvents,
   sanitizeAgentSemanticEvents,
 } from '../src/core/learning/agent-semantic-events.js';
@@ -20,7 +21,10 @@ import {
   agentActionsDir,
   readAgentActions,
   readAgentActionsDetailed,
+  readAgentWorkspaceDetailed,
   recordAgentAction,
+  summarizeAgentWorkspace,
+  type AgentActionEvent,
 } from '../src/core/fleet/agent-action-ledger.js';
 import { managerSemanticEvents } from '../src/core/fleet/manager.js';
 import { evaluateVerificationGate } from '../src/core/inbox/merge.js';
@@ -145,6 +149,171 @@ describe('M435 metadata-only agent semantic events', () => {
     expect(persisted?.semanticEvents?.[0]?.eventId).not.toBe(input?.eventId);
   });
 
+  it('persists run-bound agent work state without requiring a proposal identity', () => {
+    const runId = 'run-m435-agent-terminal';
+    const semanticEvents = agentRunSemanticEvents({
+      runId,
+      model: 'ollama/qwen3-coder',
+      status: 'done',
+      proposalCreated: false,
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:02.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'no-proposal',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId,
+      model: 'ollama/qwen3-coder',
+      semanticEvents,
+    });
+
+    const [persisted] = readAgentActions();
+    expect(persisted?.proposalId).toBeUndefined();
+    expect(persisted?.semanticEventsState).toBeUndefined();
+    expect(persisted?.semanticEvents?.map((event) => event.kind))
+      .toEqual(['intent', 'action', 'observation']);
+    expect(persisted?.semanticEvents).toEqual([
+      expect.objectContaining({
+        subjectRef: `run:${runId}`,
+        producerRole: 'agent',
+        objectiveCode: 'work.execute',
+      }),
+      expect.objectContaining({ actionCode: 'agent.run', status: 'completed' }),
+      expect.objectContaining({ metricCode: 'agent.proposal.created', value: 0, unit: 'boolean' }),
+    ]);
+    expect(persisted?.semanticEvents?.[0]?.sourceRef).not.toBe(semanticEvents[0]?.sourceRef);
+    expect(JSON.stringify(persisted?.semanticEvents)).not.toMatch(
+      /prompt|reasoning|rationale|diff|stdout|stderr|environment|file.?content/i,
+    );
+  });
+
+  it('rejects run semantics whose opaque subject does not match the carrier run', () => {
+    const semanticEvents = agentRunSemanticEvents({
+      runId: 'run-m435-wrong-subject',
+      model: 'gpt-5.5-codex',
+      status: 'failed',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:03.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'failed',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId: 'run-m435-actual-subject',
+      model: 'gpt-5.5-codex',
+      semanticEvents,
+    });
+
+    const [persisted] = readAgentActions();
+    expect(persisted?.semanticEvents).toBeUndefined();
+    expect(persisted?.semanticEventsState).toBe('rejected');
+  });
+
+  it('projects replay-idempotent run signals and collapses contradictions to unknown', () => {
+    const runId = 'run-m435-workspace-signal';
+    const completed = agentRunSemanticEvents({
+      runId,
+      model: 'ollama/qwen3-coder',
+      status: 'done',
+      proposalCreated: false,
+    });
+    const base: AgentActionEvent = {
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:04.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'no-proposal',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId,
+      model: 'ollama/qwen3-coder',
+      semanticEvents: completed,
+    };
+    expect(summarizeAgentWorkspace([base, { ...base }]).runSignals).toEqual([{
+      runId,
+      terminal: 'completed',
+      proposal: 'not-created',
+      latestAt: base.ts,
+    }]);
+
+    const blocked = agentRunSemanticEvents({
+      runId,
+      model: 'ollama/qwen3-coder',
+      status: 'aborted',
+      proposalCreated: true,
+    });
+    const conflicted = summarizeAgentWorkspace([
+      base,
+      { ...base, ts: '2026-07-16T20:00:05.000Z', outcome: 'blocked', semanticEvents: blocked },
+    ]);
+    expect(conflicted.runSignals).toEqual([{
+      runId,
+      terminal: 'unknown',
+      proposal: 'unknown',
+      latestAt: '2026-07-16T20:00:05.000Z',
+    }]);
+    expect(JSON.stringify(conflicted.runSignals)).not.toMatch(
+      /summary|prompt|reasoning|rationale|diff|stdout|stderr|environment|file.?content/i,
+    );
+  });
+
+  it('excludes mismatched run subjects from the workspace signal projection', () => {
+    const semanticEvents = agentRunSemanticEvents({
+      runId: 'run-m435-signal-wrong',
+      model: 'gpt-5.5-codex',
+      status: 'done',
+    });
+    const workspace = summarizeAgentWorkspace([{
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:06.000Z',
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'ok',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId: 'run-m435-signal-actual',
+      model: 'gpt-5.5-codex',
+      semanticEvents,
+    }]);
+    expect(workspace.runSignalsState).toBe('available');
+    expect(workspace.runSignals).toEqual([]);
+  });
+
+  it('withholds run signals when the physical agent-action source is degraded', () => {
+    const runId = 'run-m435-degraded-signal';
+    const recordedAt = new Date().toISOString();
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: recordedAt,
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'ok',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId,
+      model: 'gpt-5.5-codex',
+      semanticEvents: agentRunSemanticEvents({
+        runId,
+        model: 'gpt-5.5-codex',
+        status: 'done',
+      }),
+    });
+    fs.appendFileSync(
+      path.join(agentActionsDir(), `${recordedAt.slice(0, 10)}.jsonl`),
+      `${JSON.stringify({ schemaVersion: 1, invalid: true })}\n`,
+    );
+
+    const detailed = readAgentWorkspaceDetailed({ windowMs: 48 * 60 * 60 * 1000 });
+    expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(detailed.workspace.runSignalsState).toBe('withheld');
+    expect(detailed.workspace.runSignals).toEqual([]);
+  });
+
   it('drops malformed nested events without dropping legacy carrier rows', () => {
     const valid = observation();
     const leaked = { ...observation(2), prompt: 'sk-live-secret raw prompt' };
@@ -255,6 +424,14 @@ describe('M435 metadata-only agent semantic events', () => {
       kind: 'action', predicate: 'attacker.covert.channel',
       actionCode: 'manager.judge', status: 'completed',
     } as never])).toThrow();
+    expect(() => defineAgentSemanticEvents({
+      ...producer,
+      producerRole: 'agent',
+      producerVersion: 'agent-semantic-v1',
+    }, [{
+      kind: 'action', predicate: 'manager.judge.completed',
+      actionCode: 'agent.run', status: 'completed',
+    }])).toThrow();
     const badSequence = sixteen.map((event) => ({ ...event }));
     badSequence[1]!.sequence = 1;
     expect(sanitizeAgentSemanticEvents(badSequence, producer.subjectRef)).toBeUndefined();
