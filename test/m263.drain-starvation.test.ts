@@ -189,7 +189,7 @@ function expectAttestedShipDecision(proposalId: string): void {
   expect(entry).toEqual(expect.objectContaining({
     proposalId,
     action: 'judged',
-    engine: 'gpt-5.5',
+    engine: 'claude-opus-4-8',
     verdict: 'ship',
     detail: 'would-merge',
     judgeAttestationIssuedAt: expect.any(String),
@@ -219,7 +219,7 @@ beforeEach(() => {
     ok: true, merged: true, reason: `merged ${id}`,
   } as AutoMergeResult));
   mockResolveFrontierJudgeClient.mockReturnValue({
-    model: 'gpt-5.5',
+    model: 'claude-opus-4-8',
     complete: async () => '{"verdict":"review","value":2,"correctness":2,"scope":2,"alignment":2,"rationale":"mock"}',
   });
 
