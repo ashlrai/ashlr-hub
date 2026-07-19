@@ -109,6 +109,7 @@ async function harness(opts: {
   api: ReturnType<typeof vi.fn>;
   judgeScores?: number[];
   runTests?: ReturnType<typeof vi.fn>;
+  runTestsForProposal?: ReturnType<typeof vi.fn>;
   subscriptionEngines?: string[];
   draftMode?: boolean;
 }): Promise<Harness> {
@@ -213,8 +214,14 @@ async function harness(opts: {
   vi.doMock('../src/core/fleet/manager.js', () => ({
     judgeProposal,
   }));
-  if (opts.runTests) {
-    vi.doMock('../src/core/run/run-tests.js', () => ({ runTests: opts.runTests }));
+  if (opts.runTests || opts.runTestsForProposal || opts.draftMode) {
+    const runTests = opts.runTests ?? vi.fn(async () => true);
+    const runTestsForProposal = opts.runTestsForProposal ?? vi.fn(async () => true);
+    const runTestsModule = () => ({
+      runTests,
+      runTestsForProposal,
+    });
+    vi.doMock('../src/core/run/run-tests.js', runTestsModule);
   }
   const setStatus = vi.fn();
   vi.doMock('../src/core/inbox/store.js', () => ({
@@ -586,6 +593,87 @@ describe('M333 — file-once proposal capture', () => {
     ]);
     expect(rec.candidates[0]?.proposalOutcome).toBe('proposal-disabled');
     expect(rec.candidates[1]?.proposalOutcome).toBe('filed');
+  });
+
+  it('verifies in-memory drafts and never files a deterministically failing candidate', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const runTestsForProposal = vi.fn(async (proposal: { diff?: string }) =>
+      proposal.diff !== 'DRAFT_DIFF_1');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [2, 5, 3],
+      draftMode: true,
+      runTestsForProposal,
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 3,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+        { engine: 'claude' as never },
+      ],
+    });
+
+    expect(runTestsForProposal).toHaveBeenCalledTimes(3);
+    expect(runTestsForProposal.mock.calls.map((call) => call[2])).toEqual(['quick', 'quick', 'quick']);
+    expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([true, false, true]);
+    expect(result.winner).toMatchObject({ index: 2, proposalId: 'proposal-sb-2' });
+    expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true))
+      .toEqual([expect.arrayContaining([
+        'claude',
+        expect.any(String),
+        expect.any(Object),
+        expect.objectContaining({ existingWorktree: expect.objectContaining({ id: 'sb-2' }) }),
+      ])]);
+  });
+
+  it('files no winner when every in-memory draft fails deterministic verification', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const runTestsForProposal = vi.fn(async () => false);
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      draftMode: true,
+      runTestsForProposal,
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
+    expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([false, false]);
+    expect(h.captureSandboxedProposal).toHaveBeenCalledTimes(2);
+    expect(h.captureSandboxedProposal?.mock.calls.every((call) => call[3]?.['draftOnly'] === true)).toBe(true);
+    expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('prefers verified-green evidence over a higher critic score with unavailable verification', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const runTestsForProposal = vi.fn(async (proposal: { diff?: string }) => {
+      if (proposal.diff === 'DRAFT_DIFF_0') throw new Error('verifier unavailable');
+      return true;
+    });
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 3],
+      draftMode: true,
+      runTestsForProposal,
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([undefined, true]);
+    expect(result.winner).toMatchObject({ index: 1, proposalId: 'proposal-sb-1' });
+    expect(h.filedProposals?.size).toBe(1);
   });
 
   it('retains the sandbox handle for cleanup when draft capture throws', async () => {

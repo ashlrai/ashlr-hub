@@ -33,6 +33,7 @@ import {
 import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
+import { runTests, runTestsForProposal } from './run-tests.js';
 import {
   abandonExecutionAuthority,
   acquireExecutionAuthority,
@@ -390,24 +391,6 @@ async function runBestOfNInternal(
     judgeProposal = mod.judgeProposal;
   } catch {
     // manager unavailable — candidates will be unjudged; score falls back to 0
-  }
-
-  // ── 3. Resolve test runner (M140 — tolerate absence) ───────────────────
-  type RunTestsFn = (
-    proposalId: string,
-    cfg: AshlrConfig,
-    profile?: 'quick' | 'merge' | 'deep',
-    options?: { signal?: AbortSignal },
-  ) => Promise<boolean>;
-  let runTests: RunTestsFn | undefined;
-  try {
-    // Dynamic import so absence is graceful — runTests may not exist yet
-    const mod = await import('../run/run-tests.js' as string);
-    if (typeof (mod as Record<string, unknown>).runTests === 'function') {
-      runTests = (mod as { runTests: RunTestsFn }).runTests;
-    }
-  } catch {
-    // M140 not yet available — skip real test filter
   }
 
   // ── 3b. Resolve taste critic (M183 — flag-gated) ───────────────────────
@@ -888,17 +871,22 @@ async function runBestOfNInternal(
         }
         if (opts?.signal?.aborted) return { ...c, verdict, score };
 
-        // Real test filter (M140 — optional)
-        if (runTests && c.proposalId) {
+        // Deterministic quick verification. Infrastructure errors remain neutral.
+        if (c.proposalDraft || c.proposalId) {
           try {
-            testsPassed = await runTests(
-              c.proposalId,
-              cfg,
-              'quick',
-              opts?.signal ? { signal: opts.signal } : undefined,
-            );
-            // If tests failed, penalise score strongly so passing candidates win
-            if (!testsPassed) score = score * 0.1;
+            testsPassed = c.proposalDraft
+              ? await runTestsForProposal(
+                  c.proposalDraft,
+                  cfg,
+                  'quick',
+                  opts?.signal ? { signal: opts.signal } : undefined,
+                )
+              : await runTests(
+                  c.proposalId as string,
+                  cfg,
+                  'quick',
+                  opts?.signal ? { signal: opts.signal } : undefined,
+                );
           } catch {
             // test runner unavailable — don't penalise
           }
@@ -933,17 +921,17 @@ async function runBestOfNInternal(
     // Prefer clean material over partial evidence. If every clean candidate is
     // absent or fails final capture, the strongest partial remains a truthful,
     // deterministic fallback instead of being discarded with its producer error.
-    const eligible = scored.filter(candidateHasProposalMaterial);
+    const eligible = scored.filter((candidate) =>
+      candidateHasProposalMaterial(candidate) && candidate.testsPassed !== false,
+    );
     eligible.sort((a, b) => {
       const aClean = candidateHasPartialProposalMaterial(a) ? 0 : 1;
       const bClean = candidateHasPartialProposalMaterial(b) ? 0 : 1;
       if (bClean !== aClean) return bClean - aClean;
 
-      // Passing > non-passing.
-      // NOTE: testsPassed !== false intentionally treats undefined (tests not attempted /
-      // not available) as non-blocking — it is not a failure; only explicit false is penalised.
-      const aPass = a.testsPassed !== false ? 1 : 0;
-      const bPass = b.testsPassed !== false ? 1 : 0;
+      // Passing > unverified. Explicit failures were removed from eligibility.
+      const aPass = a.testsPassed === true ? 1 : 0;
+      const bPass = b.testsPassed === true ? 1 : 0;
       if (bPass !== aPass) return bPass - aPass;
 
       // M183: when tasteCritic is enabled, prefer highest taste overall score.

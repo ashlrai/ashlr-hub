@@ -3,10 +3,10 @@
  * repo's own verification commands in a throwaway sandbox worktree.
  *
  * THIS MODULE'S NAME AND `runTests` SIGNATURE ARE LOAD-BEARING: best-of-n.ts
- * has dynamically imported `../run/run-tests.js` expecting
+ * imports `./run-tests.js` expecting
  * `runTests(proposalId, cfg): Promise<boolean>` since M170 and degraded
- * gracefully while the module was absent. Landing this file activates the
- * tests-green preference in best-of-N candidate selection.
+ * `runTests(proposalId, cfg): Promise<boolean>`. The in-memory companion keeps
+ * winner-only Best-of-N capture behind the same verification path.
  *
  * Flow: loadProposal → createSandbox (policy-gated, kill-switch aware) →
  * `git apply` the diff → detectRepoExecutionProfile INSIDE the worktree (so a
@@ -27,11 +27,8 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, Proposal, Sandbox } from '../types.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
-import { createSandbox, removeSandbox } from '../sandbox/worktree.js';
-
-type Sandbox = ReturnType<typeof createSandbox>;
 import { detectRepoExecutionProfile } from './repo-profile.js';
 import {
   filterVerifyCommandsForProfile,
@@ -123,6 +120,23 @@ export async function runTests(
   return detailed.passed;
 }
 
+/** Verify an in-memory proposal draft before it is persisted. */
+export async function runTestsForProposal(
+  proposal: Pick<Proposal, 'repo' | 'diff'>,
+  cfg: AshlrConfig,
+  profile: VerifyCommandProfile = 'merge',
+  options: RunTestsOptions = {},
+): Promise<boolean> {
+  const detailed = await runTestsForProposalDetailed(proposal, cfg, profile, options);
+  if (detailed.skipped === 'cancelled') {
+    if (options.signal?.reason instanceof Error) throw options.signal.reason;
+    const error = new Error('Test run cancelled');
+    error.name = 'AbortError';
+    throw error;
+  }
+  return detailed.passed;
+}
+
 /** Full-fidelity variant for evidence packs and the M335 dashboard. */
 export async function runTestsDetailed(
   proposalId: string,
@@ -130,7 +144,28 @@ export async function runTestsDetailed(
   profile: VerifyCommandProfile = 'merge',
   options: RunTestsOptions = {},
 ): Promise<TestRunResult> {
+  if (options.signal?.aborted) return { passed: false, commands: [], skipped: 'cancelled' };
+  let proposal: Pick<Proposal, 'repo' | 'diff'> | null = null;
+  try {
+    const { loadProposal } = await import('../inbox/store.js');
+    proposal = loadProposal(proposalId);
+  } catch {
+    /* fall through to no-proposal */
+  }
+  if (options.signal?.aborted) return { passed: false, commands: [], skipped: 'cancelled' };
+  if (!proposal) return { passed: true, commands: [], skipped: 'no-proposal' };
+  return runTestsForProposalDetailed(proposal, cfg, profile, options);
+}
+
+/** Full-fidelity draft verifier shared by persisted and winner-only proposal paths. */
+export async function runTestsForProposalDetailed(
+  proposal: Pick<Proposal, 'repo' | 'diff'>,
+  cfg: AshlrConfig,
+  profile: VerifyCommandProfile = 'merge',
+  options: RunTestsOptions = {},
+): Promise<TestRunResult> {
   let sb: Sandbox | null = null;
+  let removeSandbox: ((sandbox: Sandbox) => void) | undefined;
   let sandboxRetention: SandboxRetentionEvidence | undefined;
   const results: TestRunCommandResult[] = [];
   const cancelled = (): TestRunResult => ({ passed: false, commands: results, skipped: 'cancelled' });
@@ -143,19 +178,8 @@ export async function runTestsDetailed(
   try {
     if (options.signal?.aborted) return cancelled();
 
-    // 1. Load the proposal (lazy import mirrors best-of-n.ts conventions so
-    //    test mocks intercept cleanly).
-    let repo: string | undefined;
-    let diff: string | undefined;
-    try {
-      const { loadProposal } = await import('../inbox/store.js');
-      const proposal = loadProposal(proposalId);
-      repo = proposal?.repo ?? undefined;
-      diff = proposal?.diff ?? undefined;
-    } catch {
-      /* fall through to no-proposal */
-    }
-    if (options.signal?.aborted) return cancelled();
+    const repo = proposal.repo ?? undefined;
+    const diff = proposal.diff ?? undefined;
     if (!repo) return { passed: true, commands: [], skipped: 'no-proposal' };
     if (!diff || diff.trim().length === 0) {
       return { passed: true, commands: [], skipped: 'no-diff' };
@@ -164,7 +188,9 @@ export async function runTestsDetailed(
     // 2. Throwaway worktree via the sandbox machinery (policy-gated: kill
     //    switch + enrollment apply exactly as for any other sandbox).
     try {
-      sb = createSandbox(repo);
+      const worktree = await import('../sandbox/worktree.js');
+      removeSandbox = worktree.removeSandbox;
+      sb = worktree.createSandbox(repo);
     } catch {
       return { passed: true, commands: [], skipped: 'sandbox-failed' };
     }
@@ -258,7 +284,7 @@ export async function runTestsDetailed(
     // Never throws — an infrastructure error is neutral, not a candidate fault.
     return { passed: true, commands: [], skipped: 'sandbox-failed' };
   } finally {
-    if (sb && !sandboxRetention) {
+    if (sb && removeSandbox && !sandboxRetention) {
       try {
         removeSandbox(sb);
       } catch {
