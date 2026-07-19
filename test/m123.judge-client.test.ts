@@ -4,8 +4,8 @@
  * Regression guard for "Cannot read properties of undefined (reading 'replace')"
  * when cfg.models.lmstudio is absent (sparse config, e.g. ollama-only).
  *
- * Also verifies the manager + strategist fall through to the direct
- * buildOpenAICompatibleClient path when getActiveClient throws.
+ * Also verifies the manager fails closed when its independent cloud reviewer
+ * cannot be resolved.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -83,19 +83,19 @@ describe('getProviderRegistry with sparse config', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. runManager falls through to buildOpenAICompatibleClient when
-//    getActiveClient throws (simulates the exact production crash path)
+// 2. runManager fails closed when getActiveClient throws. A local producer
+//    cannot self-review through the direct Ollama path.
 // ---------------------------------------------------------------------------
 
-describe('runManager direct-Ollama fallback', () => {
-  it('uses buildOpenAICompatibleClient when getActiveClient throws', async () => {
+describe('runManager independent-review failure', () => {
+  it('leaves a local proposal in review when the independent provider is unavailable', async () => {
     // M282: reset the module registry so manager.js is re-imported with fresh
     // static bindings for engineInstalled. Without this, a prior import in the
     // same file (or a parallel test) caches manager.js with the real
     // engineInstalled — which returns true on this machine (claude CLI installed)
     // — causing resolveJudgeClient to pick the Claude path instead of local-72b.
     vi.resetModules();
-    // Force engineInstalled to return false → resolveJudgeClient uses local-72b
+    // Force engineInstalled to return false so no frontier CLI reviewer is available.
     vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
       const orig = await importOriginal<typeof import('../src/core/run/engines.js')>();
       return {
@@ -113,7 +113,7 @@ describe('runManager direct-Ollama fallback', () => {
           id: 'openai-compat',
           model: 'qwen2.5:72b-instruct-q4_K_M',
           supportsTools: true,
-          // chat() returns a valid JSON verdict
+          // This local client must never be used to self-review the proposal.
           chat: vi.fn().mockResolvedValue({
             content: JSON.stringify({
               verdict: 'ship',
@@ -156,11 +156,14 @@ describe('runManager direct-Ollama fallback', () => {
     const report = await runManager(SPARSE_CFG, { limit: 1 });
 
     expect(report).toBeDefined();
-    // judgeEngine should be the 72b model name (set when buildOpenAICompatibleClient path fires)
-    expect(report.judgeEngine).toBe('qwen2.5:72b-instruct-q4_K_M');
-    // Should have produced a real verdict (not all 'review' from the null-client fallback)
+    expect(report.judgeEngine).toBe('unavailable');
+    // No same-family fallback: unreviewed work remains non-mergeable.
     expect(report.verdicts).toHaveLength(1);
-    expect(report.verdicts[0]!.rationale).not.toBe('no judge available — defaulting to review');
+    expect(report.verdicts[0]).toMatchObject({
+      verdict: 'review',
+      rationale: 'no judge available — defaulting to review',
+      wouldMerge: false,
+    });
 
     vi.doUnmock('../src/core/run/engines.js');
     vi.doUnmock('../src/core/run/provider-client.js');

@@ -108,6 +108,7 @@ describe('M436 reviewer independence API', () => {
     ['openai/claude-opus-4-8', 'unknown'],
     ['anthropic/gpt-5.5', 'unknown'],
     ['local-coder:qwen3-coder', 'local'],
+    ['moonshotai/kimi-k2.6', 'local'],
     ['xai:grok-4', 'local'],
     ['anthropic/opus-4-8', 'claude'],
     ['mystery:frontier-1', 'unknown'],
@@ -122,6 +123,7 @@ describe('M436 reviewer independence API', () => {
     ['codex:gpt-5.5', 'gpt-5.5', false, 'openai', 'openai'],
     ['codex:gpt-5.5', 'claude-opus-4-8', true, 'openai', 'claude'],
     ['local-coder:qwen3-coder', 'claude-opus-4-8', true, 'local', 'claude'],
+    ['moonshotai/kimi-k2.6', 'claude-opus-4-8', true, 'local', 'claude'],
     ['mystery:frontier-1', 'claude-opus-4-8', false, 'unknown', 'claude'],
     ['codex:gpt-5.5', 'mystery-reviewer', false, 'openai', 'unknown'],
   ] as const)(

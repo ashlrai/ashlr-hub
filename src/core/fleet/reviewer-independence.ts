@@ -30,6 +30,7 @@ const REVIEW_ENGINE_FAMILIES: Readonly<Record<string, ReviewModelFamily>> = {
   gemini: 'local',
   mistral: 'local',
   moonshot: 'local',
+  moonshotai: 'local',
 };
 
 export function reviewModelFamily(value: unknown): ReviewModelFamily {
