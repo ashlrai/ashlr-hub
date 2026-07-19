@@ -6768,6 +6768,39 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }
   });
 
+  it('reports same-family reviewer correlation as a merge-authority blocker', async () => {
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    const proposal = createSignedProposal(cfg, {
+      title: 'Correlated Claude review',
+      diff: docsDiff('correlated reviewer'),
+      engineModel: 'claude:claude-sonnet-4-6',
+      engineTier: 'frontier',
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    recordFrontierShipDecision(proposal);
+    recordDecision({
+      ts: new Date().toISOString(),
+      proposalId: proposal.id,
+      action: 'verified',
+      verdict: 'approved',
+      reason: 'EDV confirmed',
+    });
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.autoMergeReadiness).toMatchObject({
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+      authorityByReason: {
+        'verification gate: reviewer independence denied: producer and reviewer are both claude family': 1,
+      },
+    });
+    expect(status.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+  });
+
   it('expires stale live-protection observations before granting drain authority', async () => {
     const baseHead = '0123456789abcdef0123456789abcdef01234567';
     const cfg = withFoundry({

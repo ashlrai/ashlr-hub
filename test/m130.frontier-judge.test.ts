@@ -79,6 +79,7 @@ function mockEngineInstalledFalse() {
 const CFG_CLAUDE_ALLOWED: AshlrConfig = {
   foundry: {
     allowedBackends: ['builtin', 'claude'],
+    judgeAllowedBackends: ['claude'],
     managerJudgeEngine: 'auto',
   },
   models: { ollama: 'http://127.0.0.1:9' }, // dead port → local fallback fails fast
@@ -118,6 +119,8 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     status: 'pending',
     createdAt: new Date().toISOString(),
     diff: '+const x = 1;\n',
+    engineModel: 'codex:gpt-5.5',
+    engineTier: 'frontier',
     ...overrides,
   } as Proposal;
 }

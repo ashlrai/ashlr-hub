@@ -32,6 +32,12 @@ import {
   defineAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
+import {
+  evaluateReviewerIndependence,
+  producerModelFamily,
+  reviewModelFamily,
+  type ReviewModelFamily,
+} from './reviewer-independence.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -728,7 +734,8 @@ export async function judgeProposal(
 // module which has many side effects)
 // ---------------------------------------------------------------------------
 
-interface MinimalProviderClient {
+export interface MinimalProviderClient {
+  id?: string;
   complete?: JudgeComplete;
   chat?: (
     messages: Array<{ role: string; content: string }>,
@@ -748,7 +755,7 @@ interface MinimalProviderClient {
  * Wrap a ProviderClient into the simple `complete(system, user)` interface
  * the judge needs. Tries several API shapes gracefully.
  */
-function wrapClient(
+export function wrapClient(
   raw: MinimalProviderClient,
 ): { complete: JudgeComplete; model: string } | null {
   // Shape 1: already has a .complete() method (test mocks use this)
@@ -863,7 +870,7 @@ function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
  * back to Opus reports Opus, so the ledger never lies about the answering
  * model. All fields best-effort; absent on local/ollama judge paths.
  */
-interface JudgeCallStats {
+export interface JudgeCallStats {
   model?: string;
   durationMs?: number;
   costUsd?: number;
@@ -1051,6 +1058,12 @@ function resolveJudgeClient(
   const claudeAllowedForJudge = rawJudgeBackends
     ? rawJudgeBackends.includes('claude')
     : true; // default: claude is always allowed as judge when installed
+  const codexAllowedForJudge = rawJudgeBackends
+    ? rawJudgeBackends.includes('codex')
+    : true;
+  const localAllowedForJudge = rawJudgeBackends
+    ? rawJudgeBackends.includes('ollama') || rawJudgeBackends.includes('local')
+    : true;
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const wantCodex = managerJudgeEngine === 'codex';
@@ -1086,7 +1099,7 @@ function resolveJudgeClient(
   // Step 2: M300 Codex CLI judge — explicit 'codex' setting OR auto + claude exhausted.
   // codex is a genuine frontier model (gpt-5.5); its judge attestations pass isFrontierJudge.
   const useCodex = wantCodex || (wantClaude && claudeUnavailableByResource);
-  if (useCodex && engineInstalled('codex', cfg)) {
+  if (useCodex && codexAllowedForJudge && engineInstalled('codex', cfg)) {
     // Use managerJudgeModel if it looks like a codex/gpt model, else the registry default.
     const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-') || judgeModel === 'gpt-5.5';
     const codexDefaultModel = 'gpt-5.5';
@@ -1099,6 +1112,9 @@ function resolveJudgeClient(
   }
 
   // Step 3: Local-72b path (unchanged from original)
+  if (!localAllowedForJudge) {
+    throw new Error('No allowed judge backend is available');
+  }
   const localBaseUrl = ollamaBaseUrl;
   const localModel = judgeModel;
   return {
@@ -1127,23 +1143,73 @@ function resolveJudgeClient(
  * getActiveClient-only path that returns hasComplete=false when
  * cfg.models.providerChain is ["ollama"].
  *
- * Returns { complete, model } in the shape judgeProposal expects, or null
- * when even the local fallback cannot be constructed (never throws).
+ * Returns { complete, model } in the shape judgeProposal expects. When
+ * independence is required, only a known opposite-family Claude/Codex reviewer
+ * is eligible; unavailable or correlated routes return null (never throws).
  */
+export interface FrontierJudgeResolutionOptions {
+  producerModel?: string;
+  requireIndependent?: boolean;
+}
+
+export interface FrontierJudgeClient {
+  complete: JudgeComplete;
+  model: string;
+  stats?: JudgeCallStats;
+}
+
 export function resolveFrontierJudgeClient(
   cfg: AshlrConfig,
-): { complete: JudgeComplete; model: string } | null {
-  try {
-    const judgeModel =
-      ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
-      'qwen2.5:72b-instruct-q4_K_M';
-    const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
-    const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
-    const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
-    return { complete: resolved.complete, model: resolved.judgeEngine };
-  } catch {
-    return null;
+  opts: FrontierJudgeResolutionOptions = {},
+): FrontierJudgeClient | null {
+  const judgeModel =
+    ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
+    'qwen2.5:72b-instruct-q4_K_M';
+  const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
+  const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+  const resolve = (candidate: AshlrConfig): FrontierJudgeClient | null => {
+    try {
+      const result = resolveJudgeClient(candidate, ollamaBaseUrl, judgeModel);
+      return { complete: result.complete, model: result.judgeEngine, stats: result.stats };
+    } catch {
+      return null;
+    }
+  };
+  if (opts.requireIndependent !== true) return resolve(cfg);
+  if (producerModelFamily(opts.producerModel) === 'unknown') return null;
+  const eligible = (resolved: FrontierJudgeClient | null): resolved is FrontierJudgeClient => {
+    if (!resolved) return false;
+    const reviewerFamily = reviewModelFamily(resolved.model);
+    return (reviewerFamily === 'claude' || reviewerFamily === 'openai') &&
+      evaluateReviewerIndependence(opts.producerModel, resolved.model).independent;
+  };
+  const configuredEngine = (cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeEngine'];
+  if (configuredEngine !== undefined && configuredEngine !== 'auto') {
+    const configured = resolve(cfg);
+    return eligible(configured) ? configured : null;
   }
+
+  const withEngine = (engine: 'claude' | 'codex'): AshlrConfig => ({
+    ...cfg,
+    foundry: {
+      ...cfg.foundry,
+      managerJudgeEngine: engine,
+    } as AshlrConfig['foundry'],
+  });
+  const producerFamily = producerModelFamily(opts.producerModel);
+  const candidates = producerFamily === 'claude'
+    ? [cfg, withEngine('codex')]
+    : producerFamily === 'openai'
+      ? [cfg, withEngine('claude')]
+      : [cfg, withEngine('claude'), withEngine('codex')];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const resolved = resolve(candidate);
+    if (!resolved || seen.has(resolved.model)) continue;
+    seen.add(resolved.model);
+    if (eligible(resolved)) return resolved;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1278,57 +1344,59 @@ export async function runManager(
   });
 
   try {
-    // ── Resolve the frontier judge client ──────────────────────────────────
-    // M135 priority order (controlled by cfg.foundry.managerJudgeEngine):
-    //   1. resolveJudgeClient — Claude CLI (subscription) FIRST when managerJudgeEngine
-    //      is 'auto'/'claude' AND claude is in allowedBackends AND engineInstalled('claude').
-    //      Falls to local-72b when claude unavailable or managerJudgeEngine='local'.
-    //   2. getActiveClient — cloud provider key / test mocks (used only when Step 1 yields
-    //      nothing, i.e. resolveJudgeClient returned the local path AND the local fetch fails,
-    //      OR when engineInstalled returns false in the test environment which means the mock
-    //      in m120/m121 tests controls the path via getActiveClient).
-    //
-    // Rationale for reversal: getActiveClient ALWAYS returns a client in production (via its
-    // ollamaDirectComplete fallback), so putting it first meant Claude CLI was NEVER reached.
-    const judgeModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
-    const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
-    const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+    // Reviewer clients are resolved per signed producer family. A global client
+    // would correlate mixed Claude/OpenAI queues and could let a later advisory
+    // decision displace independently produced merge authority.
+    const reviewerClients = new Map<ReviewModelFamily, Promise<FrontierJudgeClient | null>>();
+    const judgeEnginesUsed = new Set<string>();
+    const resolveIndependentReviewer = (proposal: Proposal): Promise<FrontierJudgeClient | null> => {
+      const producerFamily = producerModelFamily(proposal.engineModel);
+      if (producerFamily === 'unknown') return Promise.resolve(null);
+      const cached = reviewerClients.get(producerFamily);
+      if (cached) return cached;
 
-    let judgeClient: { complete: JudgeComplete; model: string } | null = null;
-    let judgeStats: JudgeCallStats | null = null;
+      const resolving = (async (): Promise<FrontierJudgeClient | null> => {
+        const cliClient = resolveFrontierJudgeClient(cfg, {
+          producerModel: proposal.engineModel,
+          requireIndependent: true,
+        });
+        if (cliClient) return cliClient;
 
-    // Step 1: resolveJudgeClient — Claude CLI when allowed+installed, else local-72b.
-    // engineInstalled('claude') is the gating check: real binary must exist on PATH.
-    // Tests that mock engineInstalled (m130) control which path fires.
-    // Tests that don't mock engineInstalled (m120/m121) get false in CI (no real claude),
-    // so they naturally fall through to Step 2 (getActiveClient mock).
-    try {
-      const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
-      judgeClient = { complete: resolved.complete, model: resolved.judgeEngine };
-      judgeEngine = resolved.judgeEngine;
-      judgeStats = resolved.stats;
-    } catch {
-      judgeEngine = 'unavailable';
-      judgeClient = null;
-    }
+        const configuredEngine = (cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeEngine'];
+        if (configuredEngine !== undefined && configuredEngine !== 'auto') return null;
 
-    // Step 2: if resolveJudgeClient chose the local-72b path (judgeEngine = localModel,
-    // not a claude model), try getActiveClient as an additional fallback — this handles
-    // test mocks (m120/m121 mock getActiveClient to return a deterministic client) and
-    // cloud API keys when available.  We only override if getActiveClient succeeds AND
-    // the current resolved engine is NOT a claude model (don't override a working claude path).
-    const resolvedIsClaude = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
-    if (!resolvedIsClaude) {
-      try {
-        const { getActiveClient } = await import('../run/provider-client.js');
-        const rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
-        const wrapped = wrapClient(rawClient);
-        if (wrapped) {
-          judgeClient = wrapped;
-          judgeEngine = wrapped.model ?? 'cloud';
+        const targetModel = producerFamily === 'claude'
+          ? 'gpt-5.5'
+          : defaultClaudeJudgeModel(cfg);
+        const targetBackend = producerFamily === 'claude' ? 'codex' : 'claude';
+        const targetProvider = producerFamily === 'claude' ? 'openai' : 'anthropic';
+        const judgeAllowedBackends = (cfg.foundry as Record<string, unknown> | undefined)?.[
+          'judgeAllowedBackends'
+        ];
+        if (Array.isArray(judgeAllowedBackends) && !judgeAllowedBackends.includes(targetBackend)) {
+          return null;
         }
-      } catch { /* fall through — keep the resolveJudgeClient result */ }
-    }
+        try {
+          const { getActiveClient } = await import('../run/provider-client.js');
+          const rawClient = await getActiveClient(cfg, {
+            allowCloud: true,
+            provider: targetProvider,
+            model: targetModel,
+          }) as MinimalProviderClient;
+          if (rawClient.id !== targetProvider) return null;
+          const wrapped = wrapClient(rawClient);
+          if (!wrapped || reviewModelFamily(wrapped.model) === 'unknown') return null;
+          const reviewerFamily = reviewModelFamily(wrapped.model);
+          if ((reviewerFamily !== 'claude' && reviewerFamily !== 'openai') ||
+            !evaluateReviewerIndependence(proposal, wrapped.model).independent) return null;
+          return wrapped;
+        } catch {
+          return null;
+        }
+      })();
+      reviewerClients.set(producerFamily, resolving);
+      return resolving;
+    };
 
     // ── Load pending proposals ─────────────────────────────────────────────
     let proposals: Proposal[] = [];
@@ -1344,9 +1412,16 @@ export async function runManager(
 
     for (const proposal of proposals) {
       let verdict: ManagerVerdict;
+      const judgeClient = await resolveIndependentReviewer(proposal);
+      let activeJudgeEngine = judgeClient?.model ?? 'unavailable';
+      const judgeStats = judgeClient?.stats;
+      judgeEngine = activeJudgeEngine;
 
       if (judgeClient) {
         verdict = await judgeProposal(proposal, cfg, judgeClient);
+        activeJudgeEngine = judgeStats?.model ?? judgeClient.model;
+        judgeEngine = activeJudgeEngine;
+        judgeEnginesUsed.add(activeJudgeEngine);
       } else {
         // No client — default every proposal to 'review' (never auto-reject).
         const fallbackVerdict: ManagerVerdict = {
@@ -1374,14 +1449,16 @@ export async function runManager(
       const decisionTs = new Date().toISOString();
       // M300: accept codex/gpt-5.5 frontier models in addition to claude-* (mirrors isFrontierJudge in merge.ts)
       const isFrontierJudgeModel =
-        judgeEngine.startsWith('claude') || judgeEngine.includes('claude') ||
-        judgeEngine.startsWith('gpt-5') || judgeEngine.startsWith('codex-') || judgeEngine === 'codex';
-      if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel) {
+        activeJudgeEngine.startsWith('claude') || activeJudgeEngine.includes('claude') ||
+        activeJudgeEngine.startsWith('gpt-5') || activeJudgeEngine.startsWith('codex-') || activeJudgeEngine === 'codex';
+      const reviewerIndependent = evaluateReviewerIndependence(proposal, activeJudgeEngine).independent;
+      if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel &&
+        reviewerIndependent) {
         try {
           const diffHash = hashDiff(proposal.diff ?? '');
           judgeAttestation = signJudgeAttestation({
             proposalId: proposal.id,
-            judgeEngine,
+            judgeEngine: activeJudgeEngine,
             verdict: 'ship',
             diffHash,
             issuedAt: decisionTs,
@@ -1403,20 +1480,20 @@ export async function runManager(
           learningSource: 'decision-ledger',
           labelBasis: 'judge-verdict',
         }),
-        action: 'judged',
-        engine: judgeEngine,
+        action: judgeClient ? 'judged' : 'escalated',
+        engine: activeJudgeEngine,
         // M322: record the model that ACTUALLY answered (fallback-aware — a
         // Fable primary that fell back to Opus reports Opus) plus per-call
         // cost/tokens/latency parsed from the CLI JSON. Judge spend was
         // previously invisible; with Fable 5 judging it must be measured.
-        model: judgeStats?.model ?? judgeEngine,
+        model: judgeStats?.model ?? activeJudgeEngine,
         ...(judgeStats?.durationMs !== undefined ? { durationMs: judgeStats.durationMs } : {}),
         ...(judgeStats?.costUsd !== undefined ? { costUsd: judgeStats.costUsd } : {}),
         ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
         ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
         verdict: verdict.verdict,
         reason: verdict.rationale,
-        detail: verdict.wouldMerge ? 'would-merge' : '',
+        detail: verdict.wouldMerge && reviewerIndependent ? 'would-merge' : '',
         ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
         ...(judgeAttestation !== undefined
@@ -1448,6 +1525,12 @@ export async function runManager(
     const concerns = buildConcerns(verdicts);
     const recommendations = buildRecommendations(metrics, verdicts);
     const narrative = buildNarrative(metrics, verdicts);
+
+    if (judgeEnginesUsed.size > 1) {
+      judgeEngine = `mixed:${[...judgeEnginesUsed].sort().join(',')}`;
+    } else if (judgeEnginesUsed.size === 1) {
+      judgeEngine = [...judgeEnginesUsed][0]!;
+    }
 
     const report: ManagerReport = {
       generatedAt,

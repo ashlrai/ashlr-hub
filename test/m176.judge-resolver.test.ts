@@ -7,14 +7,17 @@
  * Adversarial matrix:
  *
  *  Resolver wiring
- *  [R1]  resolveFrontierJudgeClient (manager.ts export) is called once per pass,
- *        not per proposal (lazy, cached across the loop)
+ *  [R1]  resolveFrontierJudgeClient (manager.ts export) is called once per
+ *        producer family, not per proposal (lazy, family-keyed cache)
  *  [R2]  getActiveClient is NEVER called by runAutoMergePass (old broken path gone)
  *  [R3]  when resolveFrontierJudgeClient returns a client, judgeProposal is called
- *        with that client object
- *  [R4]  when resolveFrontierJudgeClient returns null → fail-closed (judged=0,
- *        no autoMergeProposal call) — same behaviour as today on unavailability
- *  [R5]  resolveFrontierJudgeClient is NOT re-called on second proposal (lazy cache)
+ *        with that opposite-family client object
+ *  [R4]  a same-family producer gets an unavailable resolver result and stays
+ *        pending, while an opposite-family producer can still proceed
+ *  [R5]  resolveFrontierJudgeClient is NOT re-called for a second proposal from
+ *        the same producer family
+ *  [R6]  a mixed local/Claude/OpenAI queue resolves at most once per family
+ *  [R7]  pure evidence mode remains judge-free and never resolves a client
  *
  *  Provenance
  *  [P1]  resolveFrontierJudgeClient is exported from manager.ts
@@ -40,8 +43,10 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const mockAutoMergeProposal = vi.fn();
+const mockVerifyAndPersistProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  verifyAndPersistProposal: (...args: unknown[]) => mockVerifyAndPersistProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
   isFrontierJudge: (engine: string | undefined) =>
     String(engine ?? '').toLowerCase().startsWith('claude'),
@@ -104,6 +109,13 @@ const FRONTIER_CLIENT = {
   ),
 };
 
+const OPENAI_CLIENT = {
+  model: 'gpt-5.5',
+  complete: vi.fn(async () =>
+    '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"m176 independent"}',
+  ),
+};
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m176-'));
   process.env.HOME = tmpHome;
@@ -113,6 +125,26 @@ beforeEach(() => {
   mockListProposals.mockReturnValue([]);
   mockReadDecisions.mockReturnValue([]);
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, branched: false });
+  mockVerifyAndPersistProposal.mockResolvedValue({
+    verify: {
+      ok: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'm176 verification passed',
+    },
+    verifyResult: {
+      passed: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'm176 verification passed',
+      baseBranch: 'main',
+      baseHead: '0'.repeat(40),
+      diffHash: 'm176-diff-hash',
+      verifiedAt: '2026-07-16T00:00:00.000Z',
+      source: 'auto-merge-preflight',
+    },
+    persisted: true,
+    authorityLive: true,
+    reason: 'verification evidence persisted under live authority',
+  });
 
   // Default: frontier resolver returns the claude-opus-4-8 client.
   mockResolveFrontierJudgeClient.mockReturnValue(FRONTIER_CLIENT);
@@ -152,7 +184,11 @@ function enabledCfg(over: Record<string, unknown> = {}): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
-function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier'): Proposal {
+function makeProp(
+  id: string,
+  tier: 'frontier' | 'mid' | 'local' = 'frontier',
+  engineModel = 'local:qwen3-coder',
+): Proposal {
   return {
     id,
     repo: '/tmp/m176-repo',
@@ -162,7 +198,7 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier'): 
     summary: 'test',
     diff: `+fix ${id}\n`,
     diffHash: `hash-${id}`,
-    engineModel: 'local:qwen3-coder',
+    engineModel,
     engineTier: tier,
     status: 'pending',
     createdAt: new Date().toISOString(),
@@ -170,19 +206,24 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier'): 
 }
 
 // ===========================================================================
-// [R1–R5] Resolver wiring
+// [R1–R7] Resolver wiring and producer-family independence
 // ===========================================================================
 
 describe('M176 resolver wiring', () => {
-  it('[R1] resolveFrontierJudgeClient is called once per pass (not per proposal)', async () => {
+  it('[R1] resolveFrontierJudgeClient is called once per producer family (not per proposal)', async () => {
     const proposals = ['r1a', 'r1b', 'r1c'].map((id) => makeProp(id));
     mockListProposals.mockReturnValue(proposals);
     mockReadDecisions.mockReturnValue([]);
 
-    await runAutoMergePass(enabledCfg());
+    const cfg = enabledCfg();
+    await runAutoMergePass(cfg);
 
-    // Three proposals, but resolver only called once (lazy cache).
+    // Three local-family proposals, but resolver only called once (family cache).
     expect(mockResolveFrontierJudgeClient).toHaveBeenCalledOnce();
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg, {
+      producerModel: 'local:qwen3-coder',
+      requireIndependent: true,
+    });
   });
 
   it('[R2] getActiveClient is NEVER called by runAutoMergePass (old broken path removed)', async () => {
@@ -195,7 +236,7 @@ describe('M176 resolver wiring', () => {
     expect(mockGetActiveClient).not.toHaveBeenCalled();
   });
 
-  it('[R3] judgeProposal is called with the client returned by resolveFrontierJudgeClient', async () => {
+  it('[R3] opposite-family resolver client is accepted and passed to judgeProposal', async () => {
     const p = makeProp('r3');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
@@ -205,8 +246,13 @@ describe('M176 resolver wiring', () => {
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
     } satisfies ManagerVerdict);
 
-    await runAutoMergePass(enabledCfg());
+    const cfg = enabledCfg();
+    await runAutoMergePass(cfg);
 
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg, {
+      producerModel: 'local:qwen3-coder',
+      requireIndependent: true,
+    });
     expect(mockJudgeProposal).toHaveBeenCalledOnce();
     // The second argument to judgeProposal is cfg; the third is the client.
     const callArgs = mockJudgeProposal.mock.calls[0];
@@ -214,24 +260,44 @@ describe('M176 resolver wiring', () => {
     expect(callArgs[2]).toBe(FRONTIER_CLIENT);
   });
 
-  it('[R4] resolveFrontierJudgeClient returns null → fail-closed (judged=0, no merge)', async () => {
-    const p = makeProp('r4');
-    mockListProposals.mockReturnValue([p]);
+  it('[R4] same-family unavailability stays pending without poisoning an opposite family', async () => {
+    const sameFamilyA = makeProp('r4-claude-a', 'frontier', 'claude-sonnet-4-6');
+    const sameFamilyB = makeProp('r4-claude-b', 'frontier', 'claude-opus-4-8');
+    const oppositeFamily = makeProp('r4-local', 'frontier', 'local:qwen3-coder');
+    mockListProposals.mockReturnValue([sameFamilyA, sameFamilyB, oppositeFamily]);
     mockReadDecisions.mockReturnValue([]);
 
-    // Simulate frontier judge genuinely unavailable.
-    mockResolveFrontierJudgeClient.mockReturnValue(null);
+    // The configured Claude candidate is not independent for Claude producers.
+    // A local producer may still use it, and null is cached only for Claude.
+    mockResolveFrontierJudgeClient.mockImplementation(
+      (_cfg: AshlrConfig, options: { producerModel?: string }) =>
+        options.producerModel?.startsWith('claude') ? null : FRONTIER_CLIENT,
+    );
 
-    const r = await runAutoMergePass(enabledCfg());
+    const cfg = enabledCfg();
+    const r = await runAutoMergePass(cfg);
 
-    expect(mockJudgeProposal).not.toHaveBeenCalled();
-    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(r.judged).toBe(0);
-    expect(r.attempted).toBe(0);
-    expect(r.merged).toBe(0);
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledTimes(2);
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg, {
+      producerModel: 'claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg, {
+      producerModel: 'local:qwen3-coder',
+      requireIndependent: true,
+    });
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockJudgeProposal.mock.calls[0]?.[0]).toBe(oppositeFamily);
+    expect(mockAutoMergeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith(oppositeFamily.id, cfg);
+    expect(sameFamilyA.status).toBe('pending');
+    expect(sameFamilyB.status).toBe('pending');
+    expect(r.judged).toBe(1);
+    expect(r.attempted).toBe(1);
+    expect(r.merged).toBe(1);
   });
 
-  it('[R5] resolveFrontierJudgeClient is NOT called again on second proposal (lazy cache)', async () => {
+  it('[R5] resolveFrontierJudgeClient is NOT called again for the same producer family', async () => {
     const p1 = makeProp('r5a');
     const p2 = makeProp('r5b');
     mockListProposals.mockReturnValue([p1, p2]);
@@ -244,9 +310,56 @@ describe('M176 resolver wiring', () => {
 
     await runAutoMergePass(enabledCfg());
 
-    // Two proposals → judge called twice, but resolver called only once.
+    // Two local-family proposals → judge called twice, resolver called once.
     expect(mockJudgeProposal).toHaveBeenCalledTimes(2);
     expect(mockResolveFrontierJudgeClient).toHaveBeenCalledOnce();
+  });
+
+  it('[R6] mixed local/Claude/OpenAI queue resolves at most once per distinct family', async () => {
+    const proposals = [
+      makeProp('r6-local-a', 'frontier', 'local:qwen3-coder'),
+      makeProp('r6-claude-a', 'frontier', 'claude-sonnet-4-6'),
+      makeProp('r6-openai-a', 'frontier', 'gpt-5.5-codex'),
+      makeProp('r6-local-b', 'frontier', 'ollama:qwen2.5-coder'),
+      makeProp('r6-claude-b', 'frontier', 'claude-opus-4-8'),
+      makeProp('r6-openai-b', 'frontier', 'openai:gpt-5.4'),
+    ];
+    mockListProposals.mockReturnValue(proposals);
+    mockResolveFrontierJudgeClient.mockImplementation(
+      (_cfg: AshlrConfig, options: { producerModel?: string }) =>
+        options.producerModel?.startsWith('claude') ? OPENAI_CLIENT : FRONTIER_CLIENT,
+    );
+
+    const cfg = enabledCfg();
+    const r = await runAutoMergePass(cfg);
+
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledTimes(3);
+    expect(mockResolveFrontierJudgeClient.mock.calls).toEqual(expect.arrayContaining([
+      [cfg, { producerModel: 'local:qwen3-coder', requireIndependent: true }],
+      [cfg, { producerModel: 'claude-sonnet-4-6', requireIndependent: true }],
+      [cfg, { producerModel: 'gpt-5.5-codex', requireIndependent: true }],
+    ]));
+    expect(mockJudgeProposal).toHaveBeenCalledTimes(6);
+    expect(mockAutoMergeProposal).toHaveBeenCalledTimes(6);
+    expect(r.judged).toBe(6);
+    expect(r.merged).toBe(6);
+  });
+
+  it('[R7] pure evidence mode does not resolve or invoke a frontier judge', async () => {
+    const p = makeProp('r7-evidence', 'local', 'claude-sonnet-4-6');
+    mockListProposals.mockReturnValue([p]);
+
+    const cfg = enabledCfg({
+      autoMerge: { enabled: true, trustBasis: 'evidence' },
+    });
+    const r = await runAutoMergePass(cfg);
+
+    expect(mockResolveFrontierJudgeClient).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).toHaveBeenCalledOnce();
+    expect(r.judged).toBe(0);
+    expect(r.attempted).toBe(1);
   });
 });
 
@@ -271,11 +384,14 @@ describe('M176 provenance — resolveFrontierJudgeClient export', () => {
 
     await runAutoMergePass(enabledCfg());
 
-    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(expect.objectContaining({
-      foundry: expect.objectContaining({
-        autoMerge: expect.objectContaining({ enabled: true, managerGate: true }),
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        foundry: expect.objectContaining({
+          autoMerge: expect.objectContaining({ enabled: true, managerGate: true }),
+        }),
       }),
-    }));
+      { producerModel: 'local:qwen3-coder', requireIndependent: true },
+    );
   });
 
   it('[P2] cfg is passed to resolveFrontierJudgeClient (M135 resolver can read managerJudgeEngine)', async () => {
@@ -287,7 +403,10 @@ describe('M176 provenance — resolveFrontierJudgeClient export', () => {
     await runAutoMergePass(cfg);
 
     // Resolver receives the full cfg so M135 can inspect managerJudgeEngine + allowedBackends.
-    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg);
+    expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(cfg, {
+      producerModel: 'local:qwen3-coder',
+      requireIndependent: true,
+    });
   });
 });
 

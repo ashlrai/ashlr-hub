@@ -19,7 +19,8 @@
 - [x] Retarget and merge operational-projection PR #43 with rerun-backed exact-head and six-job post-merge authority.
 - [x] Retarget and merge projection-transaction PR #44 with exact-head and six-job post-merge authority.
 - [x] Retarget and merge projection-replay-ledger PR #45 with rerun-backed exact-head and six-job post-merge authority.
-- [ ] Retarget and merge bounded-agent-events PR #46, then continue #47-#53, #35, and #37.
+- [x] Retarget and merge bounded-agent-events PR #46 with rerun-backed exact-head and six-job post-merge authority.
+- [ ] Retarget and merge independent-review-policy PR #47, then continue #48-#53, #35, and #37.
 - [ ] Keep production auto-merge and canary enforcement disabled until the integrated immutable release passes activation preflight.
 
 ## Goal
@@ -2617,6 +2618,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve exact occurrence/event identities through outcome/trajectory projection, expose degraded decision and agent-action source quality, and withhold semantic projection from degraded sources.
 - [x] Prove 100,000 seeded raw-content canaries persist zero semantic rows and near-authorized semantic evidence cannot replace cryptographic merge authority.
 - [ ] Add independent post-effect observations and preregistered prediction mapping before enabling calibration metrics.
-- [ ] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
+- [x] Enforce producer/reviewer model-family separation for verification-mode authority and fail pending when no independent frontier reviewer exists.
 - [ ] Repair Best-of-N's null correctness critic and draft-first deterministic test gap before treating candidate selection as independent review.
 - [x] Publish protected draft PR #46 after final independent blocker review returned `SHIP`; require both duplicate protected matrices before promotion.
+
+## Independent Reviewer Family Authority (2026-07-16)
+- [x] Audit verification-mode judge routing and prove frontier status currently permits same-family producer/reviewer correlation.
+- [x] Add a finite provider-family classifier and pure independence verdict over signed producer model plus reviewer model.
+- [x] Require different known families for verification-mode merge authority and manager-gate reviewer authority; fail pending on unknown or same-family routes.
+- [x] Route and cache frontier judges per producer family so mixed queues can use independent reviewers without per-proposal resolver churn.
+- [x] Expose the exact independence blocker through existing readiness/status authority explanations.
+- [x] Pass focused resolver, attestation, verification-gate, manager-gate, automerge, status, static, build, audit, and adversarial review gates.
+- [x] Publish protected draft PR #47 stacked on PR #46 without activating merge or deployment authority.

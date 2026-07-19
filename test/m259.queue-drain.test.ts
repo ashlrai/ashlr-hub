@@ -67,7 +67,7 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
-  isFrontierJudge: (engine: string | undefined) => String(engine ?? '').toLowerCase().includes('claude'),
+  isFrontierJudge: (engine: string | undefined) => /claude|gpt|codex/.test(String(engine ?? '').toLowerCase()),
 }));
 
 // Judge mock — controllable per-proposal verdict.
@@ -205,7 +205,7 @@ function expectAttestedShipDecision(proposalId: string): void {
   expect(entry).toEqual(expect.objectContaining({
     proposalId,
     action: 'judged',
-    engine: 'claude-opus-4-8',
+    engine: 'gpt-5.5',
     verdict: 'ship',
     detail: 'would-merge',
     judgeAttestationIssuedAt: expect.any(String),
@@ -245,7 +245,7 @@ beforeEach(() => {
     reason: `merged ${id}`,
   } as AutoMergeResult));
   mockResolveFrontierJudgeClient.mockReturnValue({
-    model: 'claude-opus-4-8',
+    model: 'gpt-5.5',
     complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
   });
 

@@ -137,7 +137,9 @@ function persistAuthenticatedMergedProposal(
 }
 
 /** Build a mock client that returns reasoning block + JSON verdict. */
-function mockClientWithReasoning(verdict: object): { complete: (s: string, u: string) => Promise<string>; model: string } {
+function mockClientWithReasoning(verdict: object): {
+  id: 'anthropic'; complete: (s: string, u: string) => Promise<string>; model: string;
+} {
   const v = verdict as Record<string, unknown>;
   const reasoning = [
     '<reasoning>',
@@ -152,7 +154,8 @@ function mockClientWithReasoning(verdict: object): { complete: (s: string, u: st
   ].join('\n');
 
   return {
-    model: 'test-judge-m141',
+    id: 'anthropic',
+    model: 'claude-opus-4-8',
     complete: vi.fn().mockResolvedValue(reasoning),
   };
 }
@@ -1147,7 +1150,7 @@ describe('m141 runManager — records judge trace per proposal', () => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue([makeProposal({ id: proposalId })]),
+        listProposals: vi.fn().mockReturnValue([makeProposal({ id: proposalId, engineModel: 'gpt-5.5' })]),
         setStatus: vi.fn(),
       };
     });
@@ -1212,7 +1215,7 @@ describe('m141 runManager — records judge trace per proposal', () => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({ id }))),
+        listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({ id, engineModel: 'gpt-5.5' }))),
         setStatus: vi.fn(),
       };
     });
