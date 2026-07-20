@@ -13,7 +13,10 @@ import {
   validateOperationalProposalStageText,
 } from '../src/core/inbox/operational-projection.js';
 import { inspectOperationalProjectionRecoveryV2 } from '../src/core/inbox/operational-projection-recovery-inspection.js';
-import { prepareOperationalProjectionTransactionJournalOnly } from '../src/core/inbox/operational-projection-transaction.js';
+import {
+  operationalProjectionTransactionPath,
+  prepareOperationalProjectionTransactionJournalOnly,
+} from '../src/core/inbox/operational-projection-transaction.js';
 import {
   advanceOperationalProjectionTransaction,
   prepareOperationalProjectionTransaction,
@@ -126,6 +129,21 @@ describe('M436 operational projection recovery inspection', () => {
       state: 'refused', reason: 'transaction-transaction-invalid',
     });
     expect(fs.readFileSync(active, 'utf8')).toBe(malformed);
+    expect(fs.existsSync(path.join(operationalProposalProjectionDir(), 'staged'))).toBe(false);
+    expect(fs.existsSync(operationalProjectionReplayLedgerPath())).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked active journal without touching its target', () => {
+    const active = operationalProjectionTransactionPath();
+    const outside = path.join(home, 'outside-transaction.json');
+    const content = '{"outside":true}';
+    fs.writeFileSync(outside, content, { mode: 0o600 });
+    fs.symlinkSync(outside, active);
+
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'refused', reason: expect.stringMatching(/^transaction-/),
+    });
+    expect(fs.readFileSync(outside, 'utf8')).toBe(content);
     expect(fs.existsSync(path.join(operationalProposalProjectionDir(), 'staged'))).toBe(false);
     expect(fs.existsSync(operationalProjectionReplayLedgerPath())).toBe(false);
   });
