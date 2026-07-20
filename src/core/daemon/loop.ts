@@ -6358,6 +6358,7 @@ export async function tick(
           });
           const finalRoute = finalizeConcurrentDispatchRoute({
             assignedBackend: _backend,
+            assignedTier: engineTierOf(_backend, routingCfg),
             ...(hintedBackend !== undefined ? { hintedBackend } : {}),
             ...(routeTiers.has(itemKey) ? { hintedTier: routeTiers.get(itemKey) } : {}),
             ...(routeModels.has(itemKey) ? { hintedModel: routeModels.get(itemKey) } : {}),

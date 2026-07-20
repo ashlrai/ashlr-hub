@@ -135,6 +135,8 @@ export interface FinalConcurrentDispatchRoute {
  */
 export function finalizeConcurrentDispatchRoute(fields: {
   assignedBackend: EngineId;
+  /** Resolved with the active routing config at the executor boundary. */
+  assignedTier?: EngineTier | null;
   hintedBackend?: EngineId;
   hintedTier?: EngineTier | null;
   hintedModel?: string | null;
@@ -147,7 +149,9 @@ export function finalizeConcurrentDispatchRoute(fields: {
     fields.hintedBackend === fields.assignedBackend;
   return {
     backend: fields.assignedBackend,
-    tier: gatewayExact ? fields.hintedTier ?? engineTierOf(fields.assignedBackend) : engineTierOf(fields.assignedBackend),
+    tier: gatewayExact
+      ? fields.hintedTier ?? fields.assignedTier ?? engineTierOf(fields.assignedBackend)
+      : fields.assignedTier ?? engineTierOf(fields.assignedBackend),
     model: gatewayExact ? fields.hintedModel ?? null : null,
     ...(fields.reason !== undefined ? { reason: fields.reason } : {}),
     disposition: gatewayExact ? 'gateway-exact' : 'planner-reassigned',

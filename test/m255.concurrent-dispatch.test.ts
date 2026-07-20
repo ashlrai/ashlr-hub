@@ -104,6 +104,22 @@ describe('finalizeConcurrentDispatchRoute', () => {
       reason: 'resource-pause: codex capacity unavailable',
     })).toMatchObject({ model: null, disposition: 'planner-reassigned' });
   });
+
+  it('uses the executor-resolved tier after planner reassignment', () => {
+    expect(finalizeConcurrentDispatchRoute({
+      assignedBackend: 'nim',
+      assignedTier: 'frontier',
+      hintedBackend: 'codex',
+      hintedTier: 'frontier',
+      hintedModel: 'gpt-5.6',
+      reason: 'gateway selected codex; concurrent planner assigned nim',
+    })).toMatchObject({
+      backend: 'nim',
+      tier: 'frontier',
+      model: null,
+      disposition: 'planner-reassigned',
+    });
+  });
 });
 
 describe('planner capacity sidecar', () => {

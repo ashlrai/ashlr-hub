@@ -3121,6 +3121,10 @@
 - A pure constructor now binds one ordinary gateway decision to an unchanged final concurrent route and planner capacity observation. Backend, tier, and model must match exactly; planner reassignment, resource/other trace overrides, and inherited models are rejected before binary-pair eligibility runs.
 - The constructor is still unused by the daemon because the gateway currently produces one legitimate final decision rather than a safe alternate. It has no dispatch, sampling, persistence, or configuration authority.
 
+# Current Concurrent Tier Fidelity
+- Concurrent final-route construction now receives the assigned backend's tier resolved with the active routing configuration. A planner reassignment can therefore no longer report the global/default engine tier when a repository-specific tier override governs the actual executor.
+- Gateway-exact route semantics and model-clearing rules are unchanged; the new tier is only canonical executor metadata. Verification: the full M255 concurrent-dispatch suite passes 43 assertions, plus typechecking and quiet lint.
+
 # Current Best-of-N Proposal Capture Repair
 - Best-of-N no-winner aggregation now applies the same required-capture classification used by direct proposal runs. A candidate reporting `proposal-disabled` with bounded changed-file or changed-line metadata becomes `proposal-capture-error`, rather than a policy-suppressed no-op.
 - The authoritative capture-missing reason is retained when the critique repeats the candidate's original policy-disabled text, so the existing repair scheduler can see the actual diagnostic. Candidates with no changed-work evidence remain `proposal-disabled` and retain their non-cooling semantics.

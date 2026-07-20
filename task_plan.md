@@ -2875,6 +2875,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Extract the dispatch-production storage authority into a dependency leaf and qualify Fleet Status observations through exact signed receipt joins.
 - [x] Carry only process-bound receipt-qualified selection projections into trajectory reconstruction and learning eligibility.
 - [x] Normalize final concurrent backend/tier/model/disposition at the executor boundary without enabling a canary producer.
+- [x] Resolve concurrent fallback tiers with the active routing configuration at the executor boundary.
 - [x] Add a pure, unused binary canary pair eligibility contract with no randomization, reservation, or persistence.
 - [x] Preserve per-assignment planner capacity snapshots as ephemeral sidecar metadata without changing assignments.
 - [x] Define a typed ordinary-gateway predicate that refuses trace-free or overridden decisions without parsing reasons.
