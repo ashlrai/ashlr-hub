@@ -190,6 +190,20 @@ export interface DetailedOutcomeRecordReadDeps {
   readPostMergeObservations?: typeof readPostMergeObservations;
 }
 
+/** Complete pending-proposal snapshot and source-backed activity timestamps. */
+export interface PendingProposalActivityReadResult {
+  pendingProposals: Proposal[];
+  activityAtByProposalId: ReadonlyMap<string, string>;
+  observedAt: string;
+  complete: boolean;
+  sourceQuality: OutcomeRecordsSourceQuality;
+}
+
+export interface PendingProposalActivityReadOptions {
+  now?: Date | number | string;
+  deps?: DetailedOutcomeRecordReadDeps;
+}
+
 export interface ReadyEvidenceOutcomeRecordDeps {
   listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   loadProposal?: (id: string) => Proposal | null;
@@ -242,6 +256,29 @@ function withoutRows<T extends object, K extends keyof T>(
 
 function completeOutcomeSource(value: { sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }): boolean {
   return value.complete && value.sourceState !== 'degraded';
+}
+
+function authorityObservedAt(value: Date | number | string | undefined): { ms: number; iso: string } {
+  const ms = value instanceof Date
+    ? value.getTime()
+    : typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Date.parse(value)
+        : Date.now();
+  const safeMs = Number.isFinite(ms) ? ms : Date.now();
+  return { ms: safeMs, iso: new Date(safeMs).toISOString() };
+}
+
+function activityTimestampWithinProposalLifetime(
+  value: string | undefined,
+  createdMs: number,
+  observedMs: number,
+): string | undefined {
+  if (!Number.isFinite(createdMs) || typeof value !== 'string') return undefined;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || ms < createdMs || ms > observedMs) return undefined;
+  return value;
 }
 
 function byNewestTs<T>(readTs: (value: T) => string | undefined): (a: T, b: T) => number {
@@ -591,6 +628,81 @@ export function listOutcomeRecordsDetailed(
       : activityOrder;
   });
   return { records: records.slice(0, cap), sourceState, complete: true, sourceQuality };
+}
+
+/**
+ * Read one coherent pending-proposal snapshot with activity suitable for
+ * duplicate-suppression callers. Unlike generic outcome records, this emits
+ * no proposal-local mutable timestamps and only admits evidence that still
+ * binds to the live pending proposal at the supplied observation time.
+ */
+export function readPendingProposalActivityDetailed(
+  opts: PendingProposalActivityReadOptions = {},
+): PendingProposalActivityReadResult {
+  const deps = opts.deps ?? {};
+  const observed = authorityObservedAt(opts.now);
+  const proposals = (deps.listProposalsDetailed ?? listProposalsDetailed)({
+    status: 'pending', requireComplete: true,
+  });
+  const decisions = (deps.readDecisionsDetailed ?? readDecisionsDetailed)({ requireComplete: true });
+  const traces = (deps.readJudgeTracesDetailed ?? readJudgeTracesDetailed)({ requireComplete: true });
+  const evidence = (deps.readAutonomyEvidencePacksDetailed ?? readAutonomyEvidencePacksDetailed)(200);
+  const postMerge = (deps.readPostMergeObservations ?? readPostMergeObservations)({ requireComplete: true });
+  const sourceQuality = {
+    proposals: withoutRows(proposals, 'proposals'),
+    decisions: withoutRows(decisions, 'decisions'),
+    judgeTraces: withoutRows(traces, 'traces'),
+    evidencePacks: withoutRows(evidence, 'packs'),
+    postMergeObservations: withoutRows(postMerge, 'observations'),
+  } satisfies OutcomeRecordsSourceQuality;
+  // Proposal membership is the root authority. Auxiliary missing ledgers are
+  // complete known-empty sources; a missing proposal snapshot is not.
+  const complete = proposals.sourceState === 'healthy' && proposals.complete &&
+    [decisions, traces, evidence, postMerge].every(completeOutcomeSource);
+  if (!complete) {
+    return {
+      pendingProposals: [], activityAtByProposalId: new Map(), observedAt: observed.iso,
+      complete: false, sourceQuality,
+    };
+  }
+
+  const byId = new Map(proposals.proposals.map((proposal) => [proposal.id, proposal]));
+  const candidateTimes = new Map<string, string[]>();
+  const record = (proposalId: string, value: string | undefined): void => {
+    const proposal = byId.get(proposalId);
+    if (!proposal) return;
+    const bounded = activityTimestampWithinProposalLifetime(
+      value, Date.parse(proposal.createdAt), observed.ms,
+    );
+    if (!bounded) return;
+    const rows = candidateTimes.get(proposalId) ?? [];
+    rows.push(bounded);
+    candidateTimes.set(proposalId, rows);
+  };
+  for (const decision of decisions.decisions) record(decision.proposalId, decision.ts);
+  for (const trace of traces.traces) {
+    record(trace.proposalId, trace.ts);
+    record(trace.proposalId, trace.outcomeAt);
+  }
+  for (const observation of postMerge.observations) record(observation.proposalId, observation.observedAt);
+  for (const pack of evidence.packs) {
+    const proposal = byId.get(pack.proposal.id);
+    if (proposal && evidencePackMatchesLiveProposal(pack, proposal, { nowMs: observed.ms })) {
+      record(proposal.id, pack.generatedAt);
+    }
+  }
+  const activityAtByProposalId = new Map<string, string>();
+  for (const [proposalId, values] of candidateTimes) {
+    const newest = activityTime(...values);
+    if (newest) activityAtByProposalId.set(proposalId, newest);
+  }
+  return {
+    pendingProposals: proposals.proposals.map((proposal) => ({ ...proposal })),
+    activityAtByProposalId,
+    observedAt: observed.iso,
+    complete: true,
+    sourceQuality,
+  };
 }
 
 /**

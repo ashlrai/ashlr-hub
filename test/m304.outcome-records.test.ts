@@ -24,6 +24,7 @@ import {
   listOutcomeRecords,
   listOutcomeRecordsDetailed,
   listReadyEvidenceOutcomeRecords,
+  readPendingProposalActivityDetailed,
 } from '../src/core/autonomy/outcome-records.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
 import {
@@ -222,6 +223,58 @@ function detailedDeps(
 }
 
 describe('m302 listOutcomeRecords', () => {
+  it('projects only complete, source-backed pending activity within the observed lifetime', () => {
+    const pending = proposal({ id: 'prop-pending-activity', createdAt: '2026-07-03T00:00:00.000Z' });
+    const result = readPendingProposalActivityDetailed({
+      now: '2026-07-04T00:00:00.000Z',
+      deps: detailedDeps({
+        listProposalsDetailed: () => ({
+          proposals: [pending], sourceState: 'healthy', sourcePresent: true, complete: true,
+          stopReasons: [], filesDiscovered: 1, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+        }),
+        readDecisionsDetailed: () => ({
+          decisions: [
+            decision(pending.id, '2026-07-02T23:59:59.000Z'),
+            decision(pending.id, '2026-07-03T01:00:00.000Z'),
+            decision(pending.id, 'invalid'),
+            decision(pending.id, '2026-07-04T00:00:01.000Z'),
+          ],
+          sourceState: 'healthy', sourcePresent: true, complete: true,
+          stopReasons: [], filesRead: 1, bytesRead: 64, rowsScanned: 4, invalidRows: 0, unreadableFiles: 0,
+        }),
+        readJudgeTracesDetailed: () => ({
+          traces: [trace(pending.id, '2026-07-03T01:30:00.000Z', {
+            outcomeAt: '2026-07-03T02:00:00.000Z',
+          })],
+          sourceState: 'healthy', sourcePresent: true, complete: true,
+          stopReasons: [], filesRead: 1, bytesRead: 64, rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+        }),
+      }),
+    });
+
+    expect(result).toMatchObject({ complete: true, observedAt: '2026-07-04T00:00:00.000Z' });
+    expect(result.pendingProposals.map((item) => item.id)).toEqual([pending.id]);
+    expect(result.activityAtByProposalId).toEqual(new Map([[pending.id, '2026-07-03T02:00:00.000Z']]));
+  });
+
+  it('withholds pending proposals and activity together when a source is degraded', () => {
+    const result = readPendingProposalActivityDetailed({ deps: detailedDeps({
+      listProposalsDetailed: () => ({
+        proposals: [proposal({ id: 'prop-degraded-activity', createdAt: '2026-07-03T00:00:00.000Z' })],
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesDiscovered: 1, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+      }),
+      readAutonomyEvidencePacksDetailed: () => ({
+        packs: [], sourceState: 'degraded', sourcePresent: true, complete: false,
+        filesRead: 1, bytesRead: 64, invalidFiles: 1, unreadableFiles: 0, limitExceeded: false,
+      }),
+    }) });
+
+    expect(result).toMatchObject({ complete: false, pendingProposals: [] });
+    expect(result.activityAtByProposalId).toEqual(new Map());
+    expect(result.sourceQuality.evidencePacks).toMatchObject({ sourceState: 'degraded' });
+  });
+
   it('publishes a complete source-qualified join without best-effort worked telemetry', () => {
     const result = listOutcomeRecordsDetailed({ deps: detailedDeps({
       listProposalsDetailed: () => ({

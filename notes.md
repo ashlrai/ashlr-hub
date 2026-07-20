@@ -4,7 +4,8 @@
 - Implementation: `listOutcomeRecordsDetailed()` now composes detailed proposal, decision, judge-trace, evidence-pack, and post-merge readers into a bounded source-qualified result. Any partial or degraded source withholds the entire record set; source qualities remain visible for diagnostics.
 - Authority boundary: the existing `listOutcomeRecords()` remains best-effort for dashboards and learning surfaces. The new reader excludes worked-ledger and racing telemetry because those stores cannot yet prove complete reads. It is not wired into duplicate suppression yet.
 - Verification: `npm test -- --run test/m304.outcome-records.test.ts` passed 11 tests, `npm run typecheck` passed, `npm run lint` exited 0 with the existing 101 warnings, and `git diff --check` passed.
-- Next: add a pending-only activity map which accepts only valid, time-bounded, live-bound evidence before passing it to the existing stale-pending seam.
+- Pending projection: `readPendingProposalActivityDetailed()` now returns a single complete pending snapshot plus an activity map. It admits only source-backed timestamps that fall between immutable proposal creation and the observed time, and evidence must still pass the full signed live-proposal binding. Partial sources return no proposals and an empty map together.
+- Next: wire that coherent snapshot into only the daemon duplicate-suppression path, preserving its existing refusal when duplicate authority cannot be established.
 
 ## Current Stack Integration Cycle
 - Protected PR #30 merged to `master` as `827faf6ee3c8f7311e6824466d3d6b478f46cd27` after 10/10 exact-head checks passed. The merge commit preserves the checked candidate tree.
