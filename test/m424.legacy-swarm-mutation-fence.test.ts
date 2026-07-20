@@ -8,6 +8,10 @@ import type { AshlrConfig, RunState, Sandbox, SwarmPlan } from '../src/core/type
 const mocks = vi.hoisted(() => ({
   createSandbox: vi.fn(),
   sandboxDiff: vi.fn(),
+  inspectSandboxSourceRevision: vi.fn(() => ({
+    ok: true,
+    reason: 'sandbox source revision matches admission baseline',
+  })),
   removeSandbox: vi.fn(),
   removeSandboxWithBorrowedAuthority: vi.fn(),
   createProposal: vi.fn(),
@@ -47,6 +51,7 @@ vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
     ...actual,
     createSandbox: mocks.createSandbox,
     sandboxDiff: mocks.sandboxDiff,
+    inspectSandboxSourceRevision: mocks.inspectSandboxSourceRevision,
     removeSandbox: mocks.removeSandbox,
     removeSandboxWithBorrowedAuthority: mocks.removeSandboxWithBorrowedAuthority,
   };
