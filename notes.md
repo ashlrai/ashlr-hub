@@ -3173,6 +3173,11 @@
 - This remains intentionally inert. The next required step is a `SharedWorkQueueCoordinator` method that accepts only the exact process-minted authority, creates/reads the V2 envelope, binds it durably, re-reads both artifacts, and only then exposes a success result to a future producer. The daemon still discards its authority and does not create V2 receipts.
 - Verification: selection-start receipt coverage passes eight assertions; shared work-queue coverage passes 57 assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
 
+# Current V2 Coordinator Recording Constraints
+- A coordinator recording API must not accept caller-supplied claim metadata or an arbitrary envelope. It must recover the private `QueueClaimRef` from the exact process-minted authority object, derive the public claim itself, and reject copied, local, foreign-coordinator, or settled authority objects.
+- The authoritative order is local immutable V2 envelope write/fsync/readback, then shared binding, then dual readback/join validation. A local-only orphan is recoverable by retry; a shared-only binding without a reconstructible envelope is not sufficient for qualification.
+- V2 needs a separate durable receipt namespace and reader/writer. V1’s reader remains forensic-only, and a machine-local receipt directory alone cannot validate a fleet-wide post-restart learning signal.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
