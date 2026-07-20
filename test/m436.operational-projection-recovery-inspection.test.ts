@@ -14,7 +14,10 @@ import {
 } from '../src/core/inbox/operational-projection.js';
 import { inspectOperationalProjectionRecoveryV2 } from '../src/core/inbox/operational-projection-recovery-inspection.js';
 import { prepareOperationalProjectionTransactionJournalOnly } from '../src/core/inbox/operational-projection-transaction.js';
-import { prepareOperationalProjectionTransaction } from '../src/core/inbox/operational-projection-transaction-coordinator.js';
+import {
+  advanceOperationalProjectionTransaction,
+  prepareOperationalProjectionTransaction,
+} from '../src/core/inbox/operational-projection-transaction-coordinator.js';
 import { operationalProjectionReplayLedgerPath } from '../src/core/inbox/operational-projection-replay-ledger.js';
 import {
   operationalProjectionStagePath,
@@ -334,5 +337,84 @@ describe('M436 operational projection recovery inspection', () => {
       state: 'recoverable-observation', actual: 'proposal-only', next: 'would-attest-proposal-installed',
     });
     expect(fs.existsSync(operationalProposalProjectionPath())).toBe(true);
+  });
+
+  it('observes every remaining phase boundary without installing or advancing state', () => {
+    const proposalId = 'proposal-436-phases';
+    const beforeProposal = proposal('Before phases', proposalId);
+    writeProposal(beforeProposal);
+    expect(migrateOperationalProposalProjection({ proposals: [beforeProposal], storeLock: lock! }).state).toBe('healthy');
+    const before = observeOperationalProjectionArtifacts(proposalId, lock!);
+    expect(before.state).toBe('healthy');
+    if (before.state !== 'healthy') return;
+    const beforeProposalText = fs.readFileSync(path.join(inboxDir(), `${proposalId}.json`));
+    const beforeProjectionText = fs.readFileSync(operationalProposalProjectionPath());
+
+    const afterProposal = proposal('After phases', proposalId);
+    writeProposal(afterProposal);
+    expect(migrateOperationalProposalProjection({ proposals: [afterProposal], storeLock: lock! }).state).toBe('healthy');
+    const after = observeOperationalProjectionArtifacts(proposalId, lock!);
+    expect(after.state).toBe('healthy');
+    if (after.state !== 'healthy') return;
+    const afterProposalText = JSON.stringify(Object.fromEntries(
+      Object.entries(afterProposal).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+    ));
+    const afterProjectionText = fs.readFileSync(operationalProposalProjectionPath(), 'utf8');
+    const key = loadOrCreateKey();
+    const proposalStage = validateOperationalProposalStageText(afterProposalText, proposalId);
+    const projectionStage = validateOperationalProjectionStageText(afterProjectionText, key);
+    expect(proposalStage).not.toBeNull();
+    expect(projectionStage).not.toBeNull();
+    if (!proposalStage || !projectionStage) return;
+
+    fs.writeFileSync(path.join(inboxDir(), `${proposalId}.json`), beforeProposalText, { mode: 0o600 });
+    fs.writeFileSync(operationalProposalProjectionPath(), beforeProjectionText, { mode: 0o600 });
+    const prepared = prepareOperationalProjectionTransaction({
+      proposalId,
+      before: { proposal: before.proposal.digest, projection: before.projection.digest },
+      after: { proposal: after.proposal.digest, projection: after.projection.digest },
+      staged: {
+        proposal: { present: true, ...proposalStage },
+        projection: { present: true, ...projectionStage },
+      },
+      storeLock: lock!, now: new Date('2026-07-20T04:00:00.000Z'),
+    });
+    expect(prepared.state).toBe('healthy');
+    if (prepared.state !== 'healthy') return;
+    expect(writeOperationalProjectionStage(
+      prepared.transaction.transactionId, 'proposal', Buffer.from(afterProposalText),
+      prepared.transaction.staged.proposal,
+      (text) => validateOperationalProposalStageText(text, proposalId),
+    )).toEqual({ ok: true });
+    expect(writeOperationalProjectionStage(
+      prepared.transaction.transactionId, 'projection', Buffer.from(afterProjectionText),
+      prepared.transaction.staged.projection,
+      (text) => validateOperationalProjectionStageText(text, key),
+    )).toEqual({ ok: true });
+
+    fs.writeFileSync(path.join(inboxDir(), `${proposalId}.json`), afterProposalText, { mode: 0o600 });
+    expect(advanceOperationalProjectionTransaction(
+      prepared.transaction.transactionId, 'proposal-installed', lock!, new Date('2026-07-20T04:01:00.000Z'),
+    )).toMatchObject({ state: 'healthy', transaction: { phase: 'proposal-installed' } });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', phase: 'proposal-installed', actual: 'proposal-only', next: 'would-write-projection',
+    });
+
+    fs.writeFileSync(operationalProposalProjectionPath(), afterProjectionText, { mode: 0o600 });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', phase: 'proposal-installed', actual: 'complete', next: 'would-attest-projection-installed',
+    });
+    expect(advanceOperationalProjectionTransaction(
+      prepared.transaction.transactionId, 'projection-installed', lock!, new Date('2026-07-20T04:02:00.000Z'),
+    )).toMatchObject({ state: 'healthy', transaction: { phase: 'projection-installed' } });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', phase: 'projection-installed', actual: 'complete', next: 'would-attest-committed',
+    });
+    expect(advanceOperationalProjectionTransaction(
+      prepared.transaction.transactionId, 'committed', lock!, new Date('2026-07-20T04:03:00.000Z'),
+    )).toMatchObject({ state: 'healthy', transaction: { phase: 'committed' } });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'complete-observation', transactionId: prepared.transaction.transactionId,
+    });
   });
 });
