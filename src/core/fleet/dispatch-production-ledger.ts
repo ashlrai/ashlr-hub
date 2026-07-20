@@ -1288,7 +1288,11 @@ export function withDispatchProductionGenerationAuthority<T>(
         releaseLocalStoreLock(lock);
       }
     });
-  } catch {
+  } catch (error) {
+    // Preserve the one finite saturation condition for the caller's
+    // fail-closed status projection; all other lock/write failures remain
+    // indistinguishable authority refusal.
+    if (isAttemptMembershipSaturatedError(error)) throw error;
     return { ok: false };
   }
 }
@@ -1883,7 +1887,7 @@ export function recordDispatchProduction(
       } catch (error) {
         // Skip only this record; later records in the batch still get a chance.
         result.failed += 1;
-        if (error instanceof AttemptMembershipSaturatedError) {
+        if (isAttemptMembershipSaturatedError(error)) {
           result.failureReasons = [...new Set([
             ...(result.failureReasons ?? []), 'retirement-membership-saturated' as const,
           ])];
@@ -1994,6 +1998,14 @@ class AttemptMembershipSaturatedError extends Error {
     super('attempt retirement membership saturated');
     this.name = 'AttemptMembershipSaturatedError';
   }
+}
+
+function isAttemptMembershipSaturatedError(error: unknown): error is AttemptMembershipSaturatedError {
+  // Isolated runners can materialize this private error through a second module
+  // instance. The finite name is safe to use for failure reporting only; the
+  // underlying write has already failed closed.
+  return error instanceof AttemptMembershipSaturatedError ||
+    (error instanceof Error && error.name === 'AttemptMembershipSaturatedError');
 }
 
 interface AttemptReceiptProtocolActivation {
@@ -2265,7 +2277,7 @@ function addAttemptGenerationMembershipPersistingQuality(
   try {
     return addAttemptGenerationMembership(activation.blockedGenerations, generationIds);
   } catch (error) {
-    if (error instanceof AttemptMembershipSaturatedError && error.membership) {
+    if (isAttemptMembershipSaturatedError(error) && error.membership) {
       writeAttemptReceiptProtocolActivation(dir, {
         ...activation,
         blockedGenerations: error.membership,

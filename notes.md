@@ -3208,3 +3208,8 @@
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
 - The next integration step is a detailed outcome reader that can prove complete healthy sources before the daemon, Fleet Status, and portfolio backlog pass activity maps. Best-effort outcome joins remain insufficient authority.
 - Verification: M344 production-velocity coverage passes eight assertions, with TypeScript typechecking and quiet lint passing. Protected CI remains the promotion authority.
+
+# Current Saturated Receipt-Membership Failure Reporting
+- The generation-authority lock intentionally refuses every persistence error, but it was also swallowing the finite `AttemptMembershipSaturatedError` before `recordDispatchProduction()` could report the explicit `retirement-membership-saturated` result.
+- The lock now rethrows only that already fail-closed condition. All other lock, root, and persistence failures remain opaque `{ ok:false }` authority refusals. This changes no admission, retry, learning, or merge authority.
+- Regression verification: the three saturation migration/capacity cases in M342 pass directly, along with TypeScript typecheck, quiet lint, and `git diff --check`. The prior protected CI head failed only these three assertions after 12,092 passing tests; a fresh matrix is required.

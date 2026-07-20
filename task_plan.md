@@ -2952,3 +2952,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover replay, conflict rejection, restart persistence, privacy, typecheck, and focused lint/tests.
 - [x] Add exact authority-to-private-claim coordinator plumbing with V2 write/readback; keep daemon dispatch inactive.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Saturated Receipt-Membership Failure Reporting (2026-07-20)
+- [x] Diagnose the Ubuntu M342 failure as a swallowed finite saturation condition in the generation-authority lock.
+- [x] Preserve opaque refusal for all other lock/write errors while propagating the one explicit fail-closed saturation result.
+- [x] Verify the three exact regression cases, typecheck, quiet lint, and diff integrity locally.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
