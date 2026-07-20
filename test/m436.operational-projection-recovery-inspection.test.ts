@@ -117,6 +117,19 @@ describe('M436 operational projection recovery inspection', () => {
     expect(fs.existsSync(path.join(operationalProposalProjectionDir(), 'staged'))).toBe(false);
   });
 
+  it('refuses a malformed active journal without changing recovery storage', () => {
+    const active = path.join(operationalProposalProjectionDir(), 'active-transaction.json');
+    const malformed = '{"schemaVersion":2}';
+    fs.writeFileSync(active, malformed, { mode: 0o600 });
+
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'transaction-transaction-invalid',
+    });
+    expect(fs.readFileSync(active, 'utf8')).toBe(malformed);
+    expect(fs.existsSync(path.join(operationalProposalProjectionDir(), 'staged'))).toBe(false);
+    expect(fs.existsSync(operationalProjectionReplayLedgerPath())).toBe(false);
+  });
+
   it('reports a V2 no-effect recovery action without changing canonical artifacts or phases', () => {
     const beforeProposal = proposal('Before stage');
     writeProposal(beforeProposal);

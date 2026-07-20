@@ -2611,6 +2611,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove read-only recovery planning recognizes both absent-to-present creation and present-to-absent deletion, then observes their first proposal-only effect without installing a projection or advancing a phase.
 - [x] Reject symlinked private staging directories before write or deletion-as-absence evaluation, and prove a released real store-lock handle cannot inspect or create recovery state after a successor acquires the fence.
 - [x] Exercise all remaining V2 phase/crash boundaries against real journal, replay, stage, and canonical artifacts: proposal install, projection install, committed attestation, and completed observation remain read-only inspector outputs.
+- [x] Prove the inspector refuses a malformed active journal without modifying its bytes or creating replay/stage recovery state.
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
 - [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
