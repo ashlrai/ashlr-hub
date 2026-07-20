@@ -513,6 +513,27 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)');
   });
 
+  it('renders absent attempt coverage as unavailable without hiding measured zero', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatterStart = src.indexOf('function formatCoverageMetric(metric)');
+    const formatterEnd = src.indexOf('\nfunction renderAttemptCoverageCard', formatterStart);
+    expect(formatterStart).toBeGreaterThanOrEqual(0);
+    expect(formatterEnd).toBeGreaterThan(formatterStart);
+
+    const formatter = new Function(
+      'formatFleetPercent',
+      `${src.slice(formatterStart, formatterEnd)}\nreturn formatCoverageMetric;`,
+    )((rate?: number) => `${Math.round((rate ?? 0) * 100)}%`) as (
+      metric?: { count?: number; rate?: number },
+    ) => string;
+
+    expect(formatter(undefined)).toBe('unavailable');
+    expect(formatter({ count: 0, rate: 0 })).toBe('0 (0%)');
+  });
+
   it('app.js renders activity evidence without a misleading healthy zero', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
