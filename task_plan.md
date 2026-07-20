@@ -2604,6 +2604,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add the authenticated V1|V2 journal union: V2 binds bounded staged metadata, preserves version-specific HMAC domains, and participates in replay and prepared-intent comparison.
 - [x] Add deterministic private staged-artifact storage with injected semantic validation and deletion-as-absence semantics.
 - [x] Export canonical proposal and sealed-projection text validators so staged bytes bind to existing operational identities rather than raw hashes.
+- [x] Add a read-only V2 recovery inspector that requires authenticated journal/replay/stage/artifact evidence and reports only hypothetical next actions.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
 
