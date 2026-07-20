@@ -100,6 +100,17 @@ describe('M111 LocalWorkQueueCoordinator', () => {
     expect(coord.claimItems([], 3, 'machine-1')).toEqual([]);
   });
 
+  it('keeps equal scanner ids from distinct repositories across lanes', () => {
+    const coord = new LocalWorkQueueCoordinator();
+    const first = makeItem('shared-id', path.join(tmpDir, 'repo-a'));
+    const second = makeItem('shared-id', path.join(tmpDir, 'repo-b'));
+
+    expect(coord.claimItemsByLane([
+      { candidates: [first], limit: 1 },
+      { candidates: [second], limit: 1 },
+    ], 2, 'machine-1')).toEqual([first, second]);
+  });
+
   it('release is a no-op — does not throw', () => {
     const coord = new LocalWorkQueueCoordinator();
     expect(() => coord.release(['a', 'b'], 'machine-1')).not.toThrow();

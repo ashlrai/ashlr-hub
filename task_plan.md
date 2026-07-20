@@ -2724,3 +2724,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve local coordinator behavior and shared-store schema compatibility.
 - [x] Prove direct and cross-lane collisions leave the queue unmodified.
 - [x] Pass the focused shared-queue suite, typecheck, scoped lint, and diff checks.
+
+## Local Multi-Lane Repository Identity (2026-07-20)
+- [x] Audit local lane de-duplication against the repository-scoped cooldown and pending-proposal identities.
+- [x] Preserve equal scanner ids from different canonical repositories during local lane selection.
+- [x] Prove two-repository lane selection and pass focused coordinator tests, typecheck, scoped lint, and diff checks.

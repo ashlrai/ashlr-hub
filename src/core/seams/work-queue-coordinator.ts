@@ -32,6 +32,7 @@ import {
 import { SharedStore } from '../fleet/shared-store.js';
 import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-store.js';
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
+import { workItemCoverageKey } from '../fleet/proposal-matching.js';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
@@ -135,13 +136,17 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     _cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
     const claimed: WorkItem[] = [];
+    // Queue lanes can contain equal scanner IDs from distinct repositories.
+    // Keep the same canonical identity used by pending-proposal coverage so a
+    // local fleet never silently drops the second repository's work.
     const seen = new Set<string>();
     for (const lane of lanes) {
       let laneClaims = 0;
       for (const item of lane.candidates) {
         if (claimed.length >= count || laneClaims >= Math.max(0, Math.floor(lane.limit))) break;
-        if (seen.has(item.id)) continue;
-        seen.add(item.id);
+        const identity = workItemCoverageKey(item);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
         claimed.push(item);
         laneClaims++;
       }

@@ -2837,3 +2837,8 @@
   - `SharedStore` only receives raw claim ids, so the coordinator now rejects an entire shared claim batch before that lossy boundary when one raw id maps to two canonical filesystem repositories. Local coordination is unchanged.
   - The fence scans all lanes together, rejects invalid repository identity, and leaves no claim or worked state behind. It prevents cross-repo double-claim, completion, and cooldown corruption while a canonical execution-key protocol is designed.
   - This is intentionally a conservative availability tradeoff. Equal raw ids in shared mode require an upstream identity fix rather than arbitrary first-wins behavior; the permanent solution remains repository-bound claim keys in the shared store schema and coordinator API.
+
+- Local multi-lane repository identity (2026-07-20):
+  - `LocalWorkQueueCoordinator.claimItemsByLane` previously de-duplicated only `item.id`, silently dropping the second of two same-id items from distinct repositories before execution. This was an availability loss even outside shared mode.
+  - Local lane de-duplication now uses the existing repository-scoped `workItemCoverageKey`, including canonical path, item id, and repair generation. It preserves same-repository duplicate suppression while allowing independent enrolled repositories to use common scanner ids.
+  - Focused coordinator coverage proves two equal IDs in separate lanes are both selected. The shared coordinator remains deliberately fail-closed for that input pending the durable execution-key protocol migration.
