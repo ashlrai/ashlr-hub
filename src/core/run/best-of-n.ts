@@ -18,6 +18,7 @@ import type {
   WorkSource,
   EngineId,
   RunProposalOutcome,
+  RunEventSummary,
   RunState,
   SkillCard,
   DelegationScope,
@@ -77,6 +78,8 @@ export interface CandidateResult {
   error?: string;
   /** Structured reason the sandbox run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
+  /** Bounded execution metadata used by downstream capture classification. */
+  runEventSummary?: RunEventSummary;
   /** Durable quarantine evidence when process closure could not be confirmed. */
   sandboxRetention?: SandboxRetentionEvidence;
 }
@@ -245,9 +248,13 @@ function publicCandidate(c: InternalCandidateResult): CandidateResult {
     proposalDraft: _proposalDraft,
     sandbox: _sandbox,
     delegationScope: _delegationScope,
+    state,
     ...rest
   } = c;
-  return rest;
+  return {
+    ...rest,
+    ...(state?.runEventSummary ? { runEventSummary: { ...state.runEventSummary } } : {}),
+  };
 }
 
 function cleanupCandidateSandboxes(candidates: InternalCandidateResult[], removeSandbox?: (sb: Sandbox) => void): void {

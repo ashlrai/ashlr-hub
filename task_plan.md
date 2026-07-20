@@ -2887,6 +2887,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Best-of-N Proposal Capture Repair (2026-07-20)
 - [x] Audit Best-of-N no-winner classification against the direct-run required-capture gate.
 - [x] Promote changed-but-unfiled candidate outcomes to `proposal-capture-error` using bounded diff metadata.
+- [x] Preserve bounded candidate capture-attempt metadata so duplicate-diff suppression remains non-cooling.
 - [x] Preserve policy-disabled behavior for candidates with no capture evidence.
 - [x] Add order-independent capture-repair diagnostic coverage and run focused tests, typecheck, and lint.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.

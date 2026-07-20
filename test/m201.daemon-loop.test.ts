@@ -4478,6 +4478,65 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     },
   );
 
+  it('A1h2a6f: Best-of-N duplicate-diff capture remains policy-suppressed', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'dedupe fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'duplicate diff skipped; existing pending proposal proposal-existing remains authoritative',
+          files: 2,
+          insertions: 5,
+        },
+        runEventSummary: {
+          status: 'done',
+          outcome: 'proposal-disabled',
+          proposalCreated: false,
+          actionCounts: { proposalCaptureAttempts: 1, diffFiles: 2, diffLines: 5 },
+        },
+        error: 'proposal-disabled: duplicate diff skipped; existing pending proposal proposal-existing remains authoritative',
+        costUsd: 0.02,
+      }, {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'cancelled',
+        costUsd: 0,
+      }],
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.02,
+        billableCostUsd: 0.02,
+        noProposalReasons: [{
+          reason: 'proposal-disabled: duplicate diff skipped; existing pending proposal proposal-existing remains authoritative',
+          count: 1,
+        }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-disabled',
+      reason: 'best-of-2: proposal-disabled: duplicate diff skipped; existing pending proposal proposal-existing remains authoritative',
+    });
+  });
+
   it.each([false, true])(
     'A1h2a6b: Best-of-N filed proposals beat failures regardless of candidate order (reversed=%s)',
     async (reversed) => {

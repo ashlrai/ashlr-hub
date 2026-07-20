@@ -2183,7 +2183,7 @@ function bestOfNAuthoritativeNoWinnerProduction(
     const candidateProduction = dispatchProductionFromProposalOutcome(
       candidate.proposalOutcome,
       undefined,
-      undefined,
+      candidate.runEventSummary,
       { proposalRequired: true },
     );
     if (candidateProduction) {

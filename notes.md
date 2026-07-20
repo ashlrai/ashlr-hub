@@ -3127,5 +3127,6 @@
 
 # Current Best-of-N Proposal Capture Repair
 - Best-of-N no-winner aggregation now applies the same required-capture classification used by direct proposal runs. A candidate reporting `proposal-disabled` with bounded changed-file or changed-line metadata becomes `proposal-capture-error`, rather than a policy-suppressed no-op.
+- Best-of-N candidates now retain a bounded `runEventSummary` for this classification, while internal run state remains private. A nonzero `proposalCaptureAttempts` count preserves intentional duplicate-diff suppression; changed work without an attempt remains a capture-repair diagnostic.
 - The authoritative capture-missing reason is retained when the critique repeats the candidate's original policy-disabled text, so the existing repair scheduler can see the actual diagnostic. Candidates with no changed-work evidence remain `proposal-disabled` and retain their non-cooling semantics.
-- Verification: focused Best-of-N capture and structured-outcome coverage passes eight assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
+- Verification: focused Best-of-N capture and structured-outcome coverage passes nine assertions; the M333 multi-model suite passes 22, along with TypeScript typechecking and quiet lint. Protected CI remains the promotion authority.
