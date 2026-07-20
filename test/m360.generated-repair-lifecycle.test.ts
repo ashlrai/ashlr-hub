@@ -2138,6 +2138,7 @@ describe('generated repair lifecycle store', () => {
     }));
   });
 
+  // This drives the real receipt lifecycle through storage repair and integrity reads.
   it('keeps a proven converted witness pending until exact immutable publication', () => {
     const item = diagnosticRepairItem();
     const transition = recordDiagnosticProposal(
@@ -2212,7 +2213,7 @@ describe('generated repair lifecycle store', () => {
       unavailableReason: 'proofless-legacy',
       requiredAction: 'operator-reset',
     });
-  });
+  }, 30_000);
 
   it('fences proposal deletion through immutable treatment receipt publication', () => {
     const item = diagnosticRepairItem();

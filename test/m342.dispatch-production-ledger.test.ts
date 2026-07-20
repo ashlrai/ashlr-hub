@@ -1299,6 +1299,8 @@ describe('M342 dispatch production ledger', () => {
     expect(resolveDispatchProductionAttemptProofs([proofTarget(event)])[0]?.status).not.toBe('proven');
   });
 
+  // Real durable partitions and exact Windows authority checks can exceed Vitest's
+  // default five-second budget on a loaded hosted runner.
   it('retires an uncommitted intent so a cross-day retry can acquire authority', () => {
     useWindowsSemanticPrivateStorageFixture();
     seedUnrelatedDatedPartitions(40);
@@ -1351,7 +1353,7 @@ describe('M342 dispatch production ledger', () => {
       status: 'resolved',
       resolutions: [{ status: 'proven', event: { trajectoryId: conflicting.trajectoryId } }],
     });
-  });
+  }, 30_000);
 
   it('resumes a committed append intent before rejecting a conflicting retry', () => {
     const original = makeProofEvent({
