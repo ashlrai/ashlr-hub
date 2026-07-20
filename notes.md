@@ -2828,3 +2828,7 @@
   - Causal `workItemId`, title/id fallback, and stable-title fallback require authenticated canonical filesystem repository identity. A missing, malformed, or ambiguous proposal repository produces no daemon cooldown; this is deliberately fail-open rather than cooling an unrelated repo.
   - Path aliases such as macOS `/var` and `/private/var` compare through the existing canonical filesystem identity primitive. Tests cover exact collision selection, shared-queue feedback isolation, and the alias boundary.
   - Shared-queue claim reservation itself still has a separate raw-id collision boundary. It needs a dedicated canonical claim-key migration across the coordinator and store; this patch does not claim to solve that broader authority surface.
+
+- Windows failure-receipt test budget (2026-07-20):
+  - The protected Windows native lifecycle shard failed the DACL-heavy `m342` treatment-free failure-receipt materialization test only because Vitest's default five-second test budget elapsed; its assertions did not fail.
+  - That one test now has a local 30-second ceiling. This retains a finite hang detector while accommodating the real private-storage/fsync workload on Windows, without changing global test timing or production behavior.

@@ -2712,3 +2712,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove shared-queue rejected feedback cannot cool an equal-id item in another repo.
 - [x] Pass the focused feedback suite, typecheck, scoped lint, and diff checks.
 - [ ] Migrate shared-queue claims, policy maps, reservations, and post-claim attribution from raw item ids to a canonical execution key; fail closed on collisions until complete.
+
+## Windows Receipt Test Budget (2026-07-20)
+- [x] Diagnose the protected Windows native lifecycle shard failure from the completed job log.
+- [x] Bound only the DACL-heavy failure-receipt materialization case with an explicit 30-second test timeout.
+- [x] Pass the focused receipt materialization regression without changing global CI timing.
