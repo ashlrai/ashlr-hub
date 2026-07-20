@@ -1321,7 +1321,45 @@ describe('M362 durable repair handoff journal', () => {
     mkdirSync(dirname(repairHandoffV2JournalPath()), { recursive: true });
     writeFileSync(repairHandoffV2JournalPath(), `${JSON.stringify(observation)}\n`, { mode: 0o600 });
 
-    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'degraded', observations: [] });
+    const read = readRepairHandoffs();
+    expect(read).toMatchObject({
+      sourceState: 'degraded',
+      observations: [],
+      parentEvidenceQuarantine: {
+        missing: 1,
+        degraded: 0,
+        samples: [{ eventId: observation.eventId, status: 'missing' }],
+      },
+    });
+    expect(read.parentEvidenceQuarantine.samples[0]).not.toHaveProperty('parentItemId');
+    expect(readRepairHandoffSchemaSummary()).toMatchObject({
+      parentEvidenceQuarantine: {
+        missing: 1,
+        degraded: 0,
+        samples: [{ eventId: observation.eventId, status: 'missing' }],
+      },
+    });
+  });
+
+  it('bounds opaque parent-evidence quarantine samples', () => {
+    const repo = fx.makeRepo();
+    const observations = [0, 1, 2, 3].map((index) => repairHandoffFromDispatchEvent(event(repo.dir, {
+      itemId: `repo:self:orphan-parent-${index}`,
+    }))!);
+    mkdirSync(dirname(repairHandoffV2JournalPath()), { recursive: true });
+    writeFileSync(
+      repairHandoffV2JournalPath(),
+      observations.map((observation) => JSON.stringify(observation)).join('\n') + '\n',
+      { mode: 0o600 },
+    );
+
+    const quarantine = readRepairHandoffs().parentEvidenceQuarantine;
+    expect(quarantine).toMatchObject({ missing: 4, degraded: 0 });
+    expect(quarantine.samples).toHaveLength(3);
+    expect(quarantine.samples.map((sample) => sample.eventId)).toEqual(
+      observations.map((observation) => observation.eventId).sort().slice(0, 3),
+    );
+    expect(JSON.stringify(quarantine.samples)).not.toContain('orphan-parent');
   });
 
   it('revokes child authority when its durable parent evidence is removed', () => {

@@ -1,6 +1,7 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
 ## Current Stack Integration Cycle
+- [x] Add bounded parent-evidence quarantine diagnostics without changing repair-generation authority.
 - [x] Merge protected PR #30 with exact-head authority and preserve its merge tree.
 - [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.
 - [x] Port only the five time-stability fixture repairs from the already-green source-revision branch.

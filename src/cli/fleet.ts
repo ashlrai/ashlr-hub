@@ -146,6 +146,9 @@ export function formatFleetStatus(s: FleetStatus): string {
         `current activation=${rollout.currentActivationV2Authorities ?? 'unknown'}, ` +
         `aliases=${rollout.aliasFamilies ?? 'unknown'}, ordinary eligible=${rollout.eligibleOrdinaryItems ?? 'unknown'}, ` +
         `action=${rollout.action}` +
+        (rollout.parentEvidenceQuarantine
+          ? `, parent evidence missing/degraded=${rollout.parentEvidenceQuarantine.missing}/${rollout.parentEvidenceQuarantine.degraded}`
+          : '') +
         (rollout.writerBlockedReason ? `, blocked=${rollout.writerBlockedReason}` : '') +
         (rollout.activatedAt ? `, activated=${rollout.activatedAt}` : '') +
         (rollout.latestCurrentActivationV2At ? `, canary=${rollout.latestCurrentActivationV2At}` : ''),

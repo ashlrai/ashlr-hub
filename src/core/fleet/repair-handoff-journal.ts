@@ -25,6 +25,7 @@ import {
   readDispatchProductionParents,
   sanitizeDispatchProductionEvent,
   type DispatchProductionEvent,
+  type DispatchProductionParentStatus,
 } from './dispatch-production-ledger.js';
 import {
   repairGenerationIdFromHandoffId,
@@ -104,9 +105,17 @@ export interface RepairHandoffReadResult {
   sourceState: 'missing' | 'healthy' | 'degraded';
   invalidRows: number;
   conflictingIds: number;
+  parentEvidenceQuarantine: RepairHandoffParentEvidenceQuarantine;
   limitExceeded: boolean;
   physicalRows: number;
   authorityDigest: string;
+}
+
+export interface RepairHandoffParentEvidenceQuarantine {
+  missing: number;
+  degraded: number;
+  /** Bounded opaque event identities only; no parent content is retained. */
+  samples: Array<{ eventId: string; status: 'missing' | 'degraded' }>;
 }
 
 export interface RepairHandoffCompactionResult {
@@ -124,6 +133,7 @@ export interface RepairHandoffSchemaSummary {
   v2PhysicalRows: number;
   invalidRows: number;
   conflictingIds: number;
+  parentEvidenceQuarantine: RepairHandoffParentEvidenceQuarantine;
   limitExceeded: boolean;
   aliasFamilies: number;
   latestV2At: string | null;
@@ -132,6 +142,28 @@ export interface RepairHandoffSchemaSummary {
   latestCurrentActivationV2At: string | null;
   currentActivationAuthorityDigest: string | null;
   authorityDigest: string;
+}
+
+const MAX_PARENT_EVIDENCE_QUARANTINE_SAMPLES = 3;
+
+function parentEvidenceQuarantine(
+  rows: readonly RepairHandoffObservation[],
+  statuses: readonly DispatchProductionParentStatus[],
+): RepairHandoffParentEvidenceQuarantine {
+  const byId = new Map<string, 'missing' | 'degraded'>();
+  for (let index = 0; index < rows.length; index++) {
+    const status = statuses[index];
+    if (status !== 'missing' && status !== 'degraded') continue;
+    const prior = byId.get(rows[index]!.eventId);
+    byId.set(rows[index]!.eventId, prior === 'degraded' || status === 'degraded' ? 'degraded' : status);
+  }
+  const entries = [...byId.entries()].sort(([left], [right]) => left.localeCompare(right));
+  return {
+    missing: entries.filter(([, status]) => status === 'missing').length,
+    degraded: entries.filter(([, status]) => status === 'degraded').length,
+    samples: entries.slice(0, MAX_PARENT_EVIDENCE_QUARANTINE_SAMPLES)
+      .map(([eventId, status]) => ({ eventId, status })),
+  };
 }
 
 export interface RepairHandoffV2Activation {
@@ -754,7 +786,10 @@ export function recordRepairHandoffs(
   return result;
 }
 
-interface InternalRepairHandoffReadResult extends Omit<RepairHandoffReadResult, 'authorityDigest'> {
+interface InternalRepairHandoffReadResult extends Omit<
+  RepairHandoffReadResult,
+  'authorityDigest' | 'parentEvidenceQuarantine'
+> {
   durableRows: RepairHandoffObservation[];
   compactionRows: RepairHandoffObservation[];
   activeActivationRows: RepairHandoffObservationV2[];
@@ -1066,6 +1101,10 @@ function combineRepairHandoffReads(
   const parentQuarantinedIds = new Set(parentEvidenceRows
     .filter((_row, index) => parentEvidenceStatuses[index] !== 'found')
     .map((row) => row.eventId));
+  const parentEvidenceQuarantineSummary = parentEvidenceQuarantine(
+    parentEvidenceRows,
+    parentEvidenceStatuses,
+  );
   const invalidRows = reads.reduce((sum, read) => sum + read.invalidRows, 0);
   const conflictingIds = new Set([...quarantinedIds, ...parentQuarantinedIds]).size;
   const intrinsicallyDegraded = reads.some((read) => read.sourceState === 'degraded');
@@ -1081,6 +1120,7 @@ function combineRepairHandoffReads(
       : anyPresent ? 'healthy' : 'missing',
     invalidRows,
     conflictingIds,
+    parentEvidenceQuarantine: parentEvidenceQuarantineSummary,
     limitExceeded: reads.some((read) => read.limitExceeded),
     physicalRows: reads.reduce((sum, read) => sum + read.physicalRows, 0),
     authorityDigest,
@@ -1165,6 +1205,7 @@ export function readRepairHandoffSchemaSummary(
     v2PhysicalRows: v2.physicalRows,
     invalidRows: combined.invalidRows,
     conflictingIds: combined.conflictingIds,
+    parentEvidenceQuarantine: combined.parentEvidenceQuarantine,
     limitExceeded: combined.limitExceeded,
     aliasFamilies,
     latestV2At: v2Authorities[0]?.ts ?? null,

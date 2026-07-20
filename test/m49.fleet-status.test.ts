@@ -721,6 +721,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourceState: 'missing',
       v1Authorities: 0,
       v2Authorities: 0,
+      parentEvidenceQuarantine: { missing: 0, degraded: 0, samples: [] },
       eligibleOrdinaryItems: null,
       action: 'inspect-source',
     });

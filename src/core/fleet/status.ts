@@ -952,6 +952,7 @@ export interface FleetRepairHandoffRolloutStatus {
   projectionTickAt: string | null;
   invalidRows: number | null;
   conflictingIds: number | null;
+  parentEvidenceQuarantine: RepairHandoffSchemaSummary['parentEvidenceQuarantine'] | null;
   limitExceeded: boolean | null;
   eligibleOrdinaryItems: number | null;
   action: 'enable-canary' | 'wait-ordinary-parent' | 'observe-writer' | 'observe-projection' | 'retain-writer' | 'inspect-source' | 'repair-writer-config' | 'rollback-writer';
@@ -1025,6 +1026,7 @@ export function buildRepairHandoffRolloutStatus(
     projectionTickAt,
     invalidRows: summary.invalidRows,
     conflictingIds: summary.conflictingIds,
+    parentEvidenceQuarantine: summary.parentEvidenceQuarantine,
     limitExceeded: summary.limitExceeded,
     eligibleOrdinaryItems,
     action,
@@ -2506,6 +2508,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       v2PhysicalRows: null,
       invalidRows: null,
       conflictingIds: null,
+      parentEvidenceQuarantine: null,
       limitExceeded: null,
       aliasFamilies: null,
       latestV2At: null,

@@ -2904,3 +2904,8 @@
   - The fleet's sole fresh admitted item identified `@binshield/config` typecheck failure because its included Vitest test file had no package-local Vitest dependency.
   - An isolated worktree fix declares `vitest` under `packages/config` devDependencies and refreshes `pnpm-lock.yaml`; a frozen-lockfile install followed by `pnpm --filter @binshield/config typecheck` passes.
   - Draft PR https://github.com/ashlrai/binshield/pull/22 was published without touching the user's active binshield worktree.
+# Current Repair-Handoff Parent-Evidence Diagnostics
+- Added additive, bounded diagnostics to repair-handoff status: parent evidence quarantine now distinguishes `missing` from `degraded` authority lookups and retains at most three opaque repair-handoff event hashes.
+- The journal still admits only `found` parent evidence. `sourceState`, `conflictingIds`, compaction, generation identity, and writer activation authority are unchanged; this is operator visibility only.
+- Fleet status and CLI carry the diagnostic summary. No parent item IDs, repository paths, prompts, diffs, command output, or parent-record contents are exposed in samples.
+- Verification: focused orphan-parent + bounded-sample M362 tests and the full M49 fleet-status suite passed. Source-level TypeScript reached only pre-existing blockers in this isolated worktree (missing MCP SDK declarations, existing daemon unused local, legacy receipt narrowing); no diagnostics errors were reported.
