@@ -2816,3 +2816,9 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Source-revision admission capture boundary (2026-07-20):
+  - A sandbox now has a read-only, fail-closed admission proof that checks the expected source repository, recorded source repository, and linked worktree share one physical Git common directory; it then verifies the sandbox base commit remains the source's stable current HEAD across a before/after source read.
+  - Proposal capture applies that proof before reading a diff or creating an inbox row. A stale, mismatched, raced, or unavailable source is reported as `sandbox-unavailable`; it cannot create a durable proposal.
+  - The identity check uses the existing cross-platform canonical path utility rather than introducing a second normalization scheme. API dispatch and cancellation fixture modules explicitly provide a stable admission result, preserving their isolated test contract.
+  - Current-stack checkpoint `478ff56` plus uncommitted capture wiring: typecheck and 17 direct API-dispatch/cancellation assertions pass. Execution-path admission, post-capture persistence recheck, swarm capture, and an integration PR remain pending; no deployment or merge authority changed.

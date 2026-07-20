@@ -1042,6 +1042,17 @@ export async function captureSandboxedProposal(
   try {
     const wt = await import('../sandbox/worktree.js');
     if (opts.signal?.aborted) return cancelledCapture();
+    const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!sourceAdmission.ok) {
+      const outcome = proposalOutcome(
+        'sandbox-unavailable',
+        `sandbox source revision refused: ${sourceAdmission.reason}`,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const diff: SandboxDiff = wt.sandboxDiff(sb);
     setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {

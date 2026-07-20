@@ -34,7 +34,6 @@ import {
   openSync,
   readSync,
   readdirSync,
-  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -1855,8 +1854,7 @@ export type SandboxSourceRevisionAdmission =
 
 function canonicalGitDirectory(repo: string): string | null {
   const common = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  if (!common) return null;
-  try { return realpathSync.native(common); } catch { return null; }
+  return common ? canonicalPathIdentity(common) : null;
 }
 
 /** Read-only, fail-closed proof that a sandbox still represents its source base. */

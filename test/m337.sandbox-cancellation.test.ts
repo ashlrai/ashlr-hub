@@ -86,6 +86,7 @@ function installHarness(opts: {
     borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
     removeSandboxWithBorrowedAuthority: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
     removeSandbox: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
+    inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
     sandboxDiff: () => ({
       files: 1,
       patch: [

@@ -2669,6 +2669,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Publish protected stacked draft PR #50 on PR #49.
 - [ ] Replace remaining durable free-form decision rationale with closed reason codes in a separate compatibility-scoped slice.
 
+## Source-Revision Admission (2026-07-20)
+- [x] Establish a cross-platform, read-only sandbox/source/base admission proof on the current mainline.
+- [x] Refuse proposal capture before diff read or inbox creation when the source admission is not stable.
+- [x] Update sandbox module fixtures and pass direct API-dispatch/cancellation regression tests.
+- [ ] Recheck source admission at execution attempt and after proposal persistence, with dedicated stale-base integration coverage.
+- [ ] Extend the same contract to swarm and orchestrator capture paths without bypassing outward mutation authority.
+
 ## Closed Judge Decision Metadata (2026-07-16)
 - [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.
 - [x] Version new judged decision rows as metadata-only v2 with finite verdict and reason-code registries.

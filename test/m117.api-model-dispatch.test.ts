@@ -244,6 +244,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
       removeSandboxWithBorrowedAuthority: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -398,6 +399,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
       removeSandboxWithBorrowedAuthority: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -492,6 +494,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     let lastCreated: Record<string, unknown> | null = null;
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -608,6 +611,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
       removeSandbox: () => {},
       removeSandboxWithBorrowedAuthority: () => {},
+      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
       sandboxDiff: () => ({
         files: 1,
         patch: [
