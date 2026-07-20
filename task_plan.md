@@ -2788,9 +2788,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Accept only sanitizer-validated v1 learning-label bytes and bounded legacy single-line framing.
 - [x] Prove malformed receipt bytes remain rejected and live dispatch-production evidence becomes healthy.
 - [x] Audit the independent repair-handoff conflict set before enabling its writer.
-- [ ] Add bounded parent-evidence quarantine diagnostics without changing repair-generation authority.
+- [x] Add bounded parent-evidence quarantine diagnostics without changing repair-generation authority.
 
 ## Cross-Repo Admitted Repair (2026-07-20)
 - [x] Reproduce the admitted binshield config typecheck defect in an isolated worktree.
 - [x] Restore package-local Vitest type resolution and regenerate the lockfile.
 - [x] Verify from a frozen-lockfile install and publish binshield PR #22.
+
+## Binshield Action Runtime Packaging (2026-07-20)
+- [x] Diagnose the protected workflow's ESM/CommonJS runtime boundary failure after self-contained bundling.
+- [x] Publish an explicit `.cjs` action entrypoint and remove the obsolete `.js` runtime artifact.
+- [x] Prove the checked-in bundle executes through Node under the action package's ESM boundary without checkout dependencies.
+- [ ] Require the immutable head's Binary Scan and validation workflows to pass before promotion.

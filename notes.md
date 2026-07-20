@@ -2912,3 +2912,8 @@
 - The journal still admits only `found` parent evidence. `sourceState`, `conflictingIds`, compaction, generation identity, and writer activation authority are unchanged; this is operator visibility only.
 - Fleet status and CLI carry the diagnostic summary. No parent item IDs, repository paths, prompts, diffs, command output, or parent-record contents are exposed in samples.
 - Verification: focused orphan-parent + bounded-sample M362 tests and the full M49 fleet-status suite passed. Source-level TypeScript reached only pre-existing blockers in this isolated worktree (missing MCP SDK declarations, existing daemon unused local, legacy receipt narrowing); no diagnostics errors were reported.
+
+# Current Binshield Action Runtime Recovery
+- Protected Binary Scan CI exposed that the checked-in self-contained Action bundle used CommonJS internals while `apps/github-action` declares `type: module`; Node therefore rejected `require` before the Action could run.
+- The Action now declares `dist/index.cjs`, and the bundler emits that exact CommonJS artifact. The obsolete `dist/index.js` runtime artifact was removed so the manifest cannot accidentally return to an ESM-interpreted CommonJS bundle.
+- The bundle contract test verifies both no external Action imports and the manifest entrypoint. A direct Node execution under the package ESM boundary completes and emits the expected no-target notice. Draft Binshield PR #22 head `9022ac1` is awaiting its new protected workflows; no merge or deployment authority changed.
