@@ -345,7 +345,10 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // All recorded items should be from our backlog
     const recordedIds = new Set(ledger.events.map(e => e.itemId));
     for (const id of recordedIds) {
-      expect(backlogItems.map(generatedRepairCooldownKey)).toContain(id);
+      expect(backlogItems.map((item) => item.id)).toContain(id);
+    }
+    for (const event of ledger.events) {
+      expect(backlogItems.map(generatedRepairCooldownKey)).toContain(event.itemKey);
     }
   });
 
@@ -371,12 +374,16 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // item-1 should not get a new ledger entry written by the tick
     // (the pre-existing 'empty' entry is there, but no new one from this tick)
     const ledger = loadWorkedLedger();
-    const item1Events = ledger.events.filter(e => e.itemId === generatedRepairCooldownKey(backlogItems[0]!));
+    const item1Events = ledger.events.filter(e =>
+      (e.itemKey ?? e.itemId) === generatedRepairCooldownKey(backlogItems[0]!),
+    );
     // Only the manually pre-recorded one; tick should not have dispatched it
     // (swarm was not called for item-1)
     const item1DispatchedTs = item1Events[item1Events.length - 1]?.ts;
     // item-2 should have been dispatched instead
-    const item2Events = ledger.events.filter(e => e.itemId === generatedRepairCooldownKey(backlogItems[1]!));
+    const item2Events = ledger.events.filter(e =>
+      e.itemId === backlogItems[1]!.id && e.itemKey === generatedRepairCooldownKey(backlogItems[1]!),
+    );
     expect(item2Events.length).toBeGreaterThan(0);
     // item-1's last event should be the pre-recorded one (not a new tick-recorded one)
     // We verify this by checking the mock call count excludes item-1's repo swarm-skip
@@ -405,7 +412,9 @@ describe('tick() with no sharedQueue (Local path)', () => {
     expect(result.reason).toBe('ok');
     expect(ledger.events.filter((event) => event.itemId === generatedRepairCooldownKey(cooled)))
       .toHaveLength(1);
-    expect(ledger.events.some((event) => event.itemId === generatedRepairCooldownKey(eligible))).toBe(true);
+    expect(ledger.events.some((event) =>
+      event.itemId === eligible.id && event.itemKey === generatedRepairCooldownKey(eligible),
+    )).toBe(true);
   });
 });
 

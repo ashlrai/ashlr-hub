@@ -2858,3 +2858,9 @@
   - The daemon still indexed per-item claim cooldown policies by raw `item.id`, even after the worked ledger and local coordinator became repository-scoped. A same-id item in a second repository could therefore inherit the first item's cooldown policy or have its frozen worked key misattributed.
   - Policy lookup, policy completion, frozen worked-key resolution, selection blocker summaries, and metadata-only generated-repair decision telemetry now use `workItemCoverageKey`. The policy's worked-event keys remain unchanged and repository-scoped.
   - A full local daemon regression pre-cools one repository's `shared-scanner-id` and proves an equal-id item in a separately enrolled repository still executes and records only under its own identity. This is a prerequisite to, not a substitute for, the shared-store claim-key migration.
+
+- Dispatch bookkeeping repository identity (2026-07-20):
+  - Dispatch production attribution now requires the exact repository and, for repairs, generation match before associating a newly pending proposal with an outcome.
+  - Per-tick production-write, handoff, lifecycle, and settlement state is keyed by the repository-qualified coverage key, so a failed write in one repository cannot suppress an equal-id item elsewhere.
+  - Local worked-ledger rows retain their historical raw `itemId` for operator compatibility while an optional `itemKey` carries scoped cooldown authority. Legacy rows without the key remain readable through their raw id.
+  - Focused coordinator/daemon suites, typecheck, scoped lint, and diff checks pass locally. Protected CI must validate the immutable published head.

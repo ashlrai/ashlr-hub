@@ -27,6 +27,7 @@ import type { AshlrConfig, WorkItem } from '../types.js';
 import {
   loadWorkedLedger,
   recordOutcome as localRecord,
+  recordOutcomeWithKey as localRecordWithKey,
   recentlyDeclined as localRecentlyDeclined,
 } from '../fleet/worked-ledger.js';
 import { SharedStore } from '../fleet/shared-store.js';
@@ -159,12 +160,12 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
   }
 
   recordClaimOutcome(
-    _claimItem: WorkItem,
+    claimItem: WorkItem,
     workedItemId: string,
     outcome: WorkedOutcome,
     _machineId: string,
   ): boolean {
-    return localRecord(workedItemId, outcome);
+    return localRecordWithKey(claimItem.id, workedItemId, outcome);
   }
 
   shouldSkip(itemId: string, cooldownMs: number): boolean {

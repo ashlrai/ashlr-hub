@@ -2746,3 +2746,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bind daemon lease controllers, attempt identities, cooldown policies, and post-dispatch claim mutation to the selected WorkItem identity.
 - [x] Remove the temporary cross-repository collision fence and prove equal scanner ids dispatch and settle independently in one shared queue.
 - [x] Pass focused coordinator/two-machine/full-tick coverage, typecheck, scoped lint, and diff checks.
+
+## Dispatch Bookkeeping Repository Identity (2026-07-20)
+- [x] Audit proposal-delta association and post-dispatch per-item state for raw scanner-id joins.
+- [x] Require repository and generation matching before a pending proposal can be attributed to a dispatch outcome.
+- [x] Key production, handoff, lifecycle, and local settlement state by repository-qualified work identity.
+- [x] Preserve raw local ledger ids for compatibility while persisting a scoped cooldown key.
+- [x] Prove local raw-id compatibility and cross-repository cooldown isolation; pass focused coordinator/daemon tests, typecheck, lint, and diff checks.

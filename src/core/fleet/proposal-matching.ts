@@ -29,6 +29,23 @@ export function workItemExecutionKey(
   return repo === null ? null : `${repo}\0${item.id}\0${item.repairGenerationId ?? ''}`;
 }
 
+/**
+ * Finds the pending proposal that is authoritative for one exact work item.
+ * Raw scanner ids are not globally unique: repository and repair generation
+ * must agree before a proposal may be attached to a dispatch outcome.
+ */
+export function pendingProposalForWorkItem<T extends ProposalItemMatch>(
+  item: WorkItem,
+  proposals: ReadonlyArray<T>,
+): T | undefined {
+  return proposals.find((proposal) => {
+    if (proposal.workItemId?.trim() !== item.id) return false;
+    if (!proposalRepoMatchesItem(proposal, item)) return false;
+    return !item.repairGenerationId ||
+      generatedRepairGenerationIds(item).includes(proposal.workItemGenerationId ?? '');
+  });
+}
+
 function exactItemIdRegex(itemId: string): RegExp {
   const escaped = itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
