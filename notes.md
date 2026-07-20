@@ -3146,3 +3146,8 @@
 - `WorkQueueCoordinator.beginExecution` now returns a frozen, process-branded authority object. `isMintedExecutionAuthority` accepts only an object issued by the coordinator in this process; a structurally identical copy is rejected.
 - This is a deliberately non-durable primitive for the future V2 receipt writer. It persists no owner capability, item identity, or additional telemetry, and is not yet consumed by receipt storage, the daemon, or an engine launch path.
 - Verification: M111 shared-queue coverage passes 56 assertions, with TypeScript typechecking and quiet lint passing. Protected CI remains the promotion authority.
+
+# Current Receipt Protocol Narrowing
+- Receipt signing and verification now accept only `binary-uniform-v1` observations with exactly two candidates and `500000` ppm probability. This matches the only enabled canary protocol design and prevents arbitrary, deterministic, or non-binary observations from ever surfacing as future selection propensity.
+- V1 receipts remain unjoined regardless; this protocol validation is an additional V2 prerequisite, not a producer activation.
+- Verification: selection-start receipt coverage and the exact V1-withholding regression pass six assertions; TypeScript typechecking and quiet lint pass.

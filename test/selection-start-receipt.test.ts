@@ -26,11 +26,14 @@ const claim = {
 
 function observation() {
   const value = createDispatchSelectionObservation({
-    candidates: [{ backend: 'codex', tier: 'frontier', model: 'gpt-5' }],
+    candidates: [
+      { backend: 'codex', tier: 'frontier', model: 'gpt-5' },
+      { backend: 'claude', tier: 'frontier', model: 'sonnet' },
+    ],
     selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5' },
     selectionPolicyVersion: 'selection-policy-v1',
     randomizationProtocolVersion: 'binary-uniform-v1',
-    selectionProbabilityPpm: 1_000_000,
+    selectionProbabilityPpm: 500_000,
     trajectoryId: root.trajectoryId,
     runId: root.runId,
     objectiveHash: root.objectiveHash,
@@ -83,6 +86,21 @@ describe('selection start receipt contract', () => {
       claim,
       selectionObservation: observation(),
       ts: '2026-07-20T15:00:00.000Z',
+    }, key)).toBeNull();
+  });
+
+  it('refuses non-binary or non-uniform selection observations', () => {
+    expect(createSelectionStartReceipt({
+      ...input(),
+      selectionObservation: {
+        ...observation(), randomizationProtocolVersion: 'uniform-v1',
+      },
+    }, key)).toBeNull();
+    expect(createSelectionStartReceipt({
+      ...input(),
+      selectionObservation: {
+        ...observation(), selectionProbabilityPpm: 1_000_000,
+      },
     }, key)).toBeNull();
   });
 });

@@ -2886,6 +2886,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 - [ ] Add a coordinator-minted, authority-bound V2 receipt protocol before allowing any signed selection receipt to qualify propensity.
 - [x] Add a process-bound runtime brand for coordinator-minted execution authority, rejecting structural copies.
+- [x] Restrict receipt observations to the sole binary-uniform two-route protocol and exact 50/50 propensity.
 
 ## Best-of-N Proposal Capture Repair (2026-07-20)
 - [x] Audit Best-of-N no-winner classification against the direct-run required-capture gate.

@@ -128,12 +128,12 @@ function validObservation(value: unknown): value is DispatchSelectionObservation
   return observation.schemaVersion === 1 && observation.authority === 'observation-only' &&
     observation.mode === 'randomized-canary' &&
     typeof observation.selectionPolicyVersion === 'string' && observation.selectionPolicyVersion.length > 0 && observation.selectionPolicyVersion.length <= 80 &&
-    typeof observation.randomizationProtocolVersion === 'string' && observation.randomizationProtocolVersion.length > 0 && observation.randomizationProtocolVersion.length <= 80 &&
+    observation.randomizationProtocolVersion === 'binary-uniform-v1' &&
     typeof observation.candidateSetDigest === 'string' && SHA256_RE.test(observation.candidateSetDigest) &&
     typeof observation.assignmentDigest === 'string' && SHA256_RE.test(observation.assignmentDigest) &&
-    typeof candidateCount === 'number' && Number.isSafeInteger(candidateCount) && candidateCount >= 1 && candidateCount <= 64 &&
+    candidateCount === 2 &&
     typeof selectedRank === 'number' && Number.isSafeInteger(selectedRank) && selectedRank >= 0 && selectedRank < candidateCount &&
-    typeof selectionProbabilityPpm === 'number' && Number.isSafeInteger(selectionProbabilityPpm) && selectionProbabilityPpm >= 1 && selectionProbabilityPpm <= 1_000_000 &&
+    selectionProbabilityPpm === 500_000 &&
     typeof observation.selectedBackend === 'string' && observation.selectedBackend !== 'builtin' && ENGINE_IDS.has(observation.selectedBackend as EngineId) &&
     typeof observation.selectedTier === 'string' && ENGINE_TIERS.has(observation.selectedTier as EngineTier) &&
     (observation.selectedModel === undefined || observation.selectedModel === null ||
