@@ -87,6 +87,7 @@ import {
   _setRepairHandoffJournalFaultForTest,
   compactRepairHandoffs,
   captureGateDispatchState,
+  captureGateDispatchStates,
   dispatchEventFromRepairHandoff,
   readRepairHandoffs,
   readRepairHandoffSchemaSummary,
@@ -414,6 +415,19 @@ describe('M362 durable repair handoff journal', () => {
 
     const changedObjective = { ...item, detail: 'capture a different complete patch' };
     expect(captureGateDispatchState(changedObjective)).toEqual({ state: 'active', authoritativeAttempts: 0 });
+
+    const states = captureGateDispatchStates([
+      item,
+      { ...item },
+      changedObjective,
+      { ...item, id: 'repo:self:unrelated-work' },
+    ]);
+    expect([...states.values()]).toEqual([
+      { state: 'terminal', authoritativeAttempts: 2 },
+      { state: 'terminal', authoritativeAttempts: 2 },
+      { state: 'active', authoritativeAttempts: 0 },
+      { state: 'active', authoritativeAttempts: 0 },
+    ]);
   });
 
   it('fails open for parent capture selection when journal evidence is degraded', () => {

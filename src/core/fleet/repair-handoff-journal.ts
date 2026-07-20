@@ -1148,44 +1148,80 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
  * becomes execution authority.
  */
 export function captureGateDispatchState(item: WorkItem): CaptureGateDispatchState {
-  const objectiveHash = existingWorkItemObjectiveHash(item);
-  if (!objectiveHash) return { state: 'unavailable', authoritativeAttempts: 0 };
-  let repo: string;
-  try { repo = resolve(item.repo); } catch { return { state: 'unavailable', authoritativeAttempts: 0 }; }
+  return captureGateDispatchStates([item]).get(item)!;
+}
+
+/**
+ * Bulk variant for daemon selection. It reads each private journal once, so
+ * a large backlog cannot multiply durable journal work by candidate count.
+ */
+export function captureGateDispatchStates(
+  items: readonly WorkItem[],
+): Map<WorkItem, CaptureGateDispatchState> {
+  const states = new Map<WorkItem, CaptureGateDispatchState>();
+  const targets = new Map<string, { items: WorkItem[]; attempts: Map<string, string>; unavailable: boolean }>();
+  for (const item of items) {
+    const objectiveHash = existingWorkItemObjectiveHash(item);
+    let repo: string;
+    try { repo = resolve(item.repo); } catch { repo = ''; }
+    if (!objectiveHash || !repo) {
+      states.set(item, { state: 'unavailable', authoritativeAttempts: 0 });
+      continue;
+    }
+    const key = JSON.stringify([repo, item.id, item.source, objectiveHash]);
+    const target = targets.get(key);
+    if (target) {
+      target.items.push(item);
+      continue;
+    }
+    targets.set(key, { items: [item], attempts: new Map(), unavailable: false });
+  }
+  if (targets.size === 0) return states;
   const reads = [
     readRepairHandoffsInternal(repairHandoffJournalPath(), 1),
     readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2),
   ];
   const combined = combineRepairHandoffReads(reads);
   if (combined.sourceState !== 'healthy' || combined.limitExceeded) {
-    return { state: 'unavailable', authoritativeAttempts: 0 };
+    for (const target of targets.values()) {
+      for (const item of target.items) states.set(item, { state: 'unavailable', authoritativeAttempts: 0 });
+    }
+    return states;
   }
-  const attempts = new Map<string, string>();
   for (const row of reads.flatMap((read) => read.compactionRows)) {
     if (
       row.kind !== 'capture-repair' ||
       (row.parentOutcome !== 'proposal-capture-error' && row.parentOutcome !== 'gate-blocked') ||
-      row.parentItemId !== item.id ||
-      row.parentSource !== item.source ||
-      row.parentObjectiveHash !== objectiveHash
+      row.parentSource === undefined ||
+      row.parentObjectiveHash === undefined
     ) continue;
     let rowRepo: string;
-    try { rowRepo = resolve(row.repo); } catch { return { state: 'unavailable', authoritativeAttempts: 0 }; }
-    if (rowRepo !== repo) continue;
+    try { rowRepo = resolve(row.repo); } catch { continue; }
+    const target = targets.get(JSON.stringify([
+      rowRepo, row.parentItemId, row.parentSource, row.parentObjectiveHash,
+    ]));
+    if (!target) continue;
     const fingerprint = JSON.stringify([
       row.kind, row.repo, row.parentItemId, row.parentSource, row.parentObjectiveHash, row.parentOutcome,
     ]);
-    const previous = attempts.get(row.parentAttemptId);
+    const previous = target.attempts.get(row.parentAttemptId);
     if (previous !== undefined && previous !== fingerprint) {
-      return { state: 'unavailable', authoritativeAttempts: 0 };
+      target.unavailable = true;
+      continue;
     }
-    attempts.set(row.parentAttemptId, fingerprint);
+    target.attempts.set(row.parentAttemptId, fingerprint);
   }
-  const authoritativeAttempts = attempts.size;
-  return {
-    state: authoritativeAttempts >= 2 ? 'terminal' : 'active',
-    authoritativeAttempts,
-  };
+  for (const target of targets.values()) {
+    const authoritativeAttempts = target.attempts.size;
+    const state: CaptureGateDispatchState = target.unavailable
+      ? { state: 'unavailable', authoritativeAttempts: 0 }
+      : {
+          state: authoritativeAttempts >= 2 ? 'terminal' : 'active',
+          authoritativeAttempts,
+        };
+    for (const item of target.items) states.set(item, state);
+  }
+  return states;
 }
 
 /** Stable objective-control family shared by queue and lifecycle authority. */

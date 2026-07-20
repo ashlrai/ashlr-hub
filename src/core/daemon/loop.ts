@@ -169,6 +169,7 @@ import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dis
 import {
   readRepairHandoffSchemaSummary,
   captureGateDispatchState,
+  captureGateDispatchStates,
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
   validRepairHandoffV2Activation,
@@ -4311,6 +4312,9 @@ export async function tick(
   const frozenWorkedItemId = (item: WorkItem): string =>
     claimCooldownPolicies.get(claimKeyForItem(item))?.itemIds[0] ?? workItemCoverageKey(item);
   const captureGateStateByItemKey = new Map<string, ReturnType<typeof captureGateDispatchState>>();
+  for (const [item, state] of captureGateDispatchStates(backlogItems)) {
+    try { captureGateStateByItemKey.set(workItemCoverageKey(item), state); } catch { /* invalid items fail open here */ }
+  }
   const captureGateParentTerminal = (item: WorkItem): boolean => {
     if (isTrustedGeneratedRepairItem(item)) return false;
     let key: string;
