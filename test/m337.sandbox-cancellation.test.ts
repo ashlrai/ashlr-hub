@@ -258,7 +258,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('returns a durably created proposal as filed while the api-model run aborts', async () => {
+  it('keeps a durably created API-model proposal settled after cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-cancel-after-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -288,8 +288,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'done',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId },
       });
@@ -297,10 +296,10 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result.proposalOutcome).toMatchObject({ kind: 'filed', proposalId });
       expect(harness.createCalls).toHaveLength(1);
       expect(harness.actions.at(-1)).toMatchObject({
-        outcome: 'blocked',
+        outcome: 'ok',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'done',
           outcome: 'proposal-created',
           proposalId,
           tokensIn: 13,
@@ -312,7 +311,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('keeps successful cli proposal ownership while reporting post-create cancellation', async () => {
+  it('keeps a successful CLI proposal settled after post-create cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-successful-cli-cancel-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -346,8 +345,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'done',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId },
       });
@@ -355,10 +353,10 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result.proposalOutcome).toMatchObject({ kind: 'filed', proposalId });
       expect(harness.createCalls).toHaveLength(1);
       expect(harness.actions.at(-1)).toMatchObject({
-        outcome: 'blocked',
+        outcome: 'ok',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'done',
           outcome: 'proposal-created',
           proposalId,
           tokensIn: 13,
@@ -367,7 +365,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
       expect(harness.lifecycle).toEqual([
         `durable:${proposalId}`,
-        'action:aborted',
+        'action:done',
         'removed:sb-cancellation',
       ]);
     } finally {
@@ -528,7 +526,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('keeps failed-producer proposal ownership while reporting capture cancellation', async () => {
+  it('keeps failed-producer proposal ownership after capture cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-failed-producer-cancel-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -561,8 +559,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'failed',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId, isPartial: true },
       });
@@ -573,7 +570,7 @@ describe('sandbox proposal cancellation commit point', () => {
         outcome: 'blocked',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'failed',
           proposalId,
           tokensIn: 13,
           tokensOut: 6,

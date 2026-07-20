@@ -1882,7 +1882,7 @@ export async function runEngineSandboxed(
             producerStatus: 'failed',
             actionCounts,
           });
-          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          if (captured.state.status === 'aborted') {
             return cancelledAfterSpawn(captured);
           }
           proposalId = captured.proposalId;
@@ -2188,17 +2188,6 @@ export async function runEngineSandboxed(
               });
             } catch {
               // telemetry is best-effort — never fails the run
-            }
-            if (opts.signal?.aborted) {
-              return cancelledAfterSpawn({
-                state: withProposalOutcome(
-                  mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
-                  proposalOutcomeResult,
-                  actionCounts,
-                ),
-                proposalId,
-                proposalOutcome: proposalOutcomeResult,
-              });
             }
             // M249: RunCache shadow write — record the (key → outcome) entry for
             // measurement. Fire-and-forget, never throws, never changes run behavior.
@@ -2723,7 +2712,7 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+        if (captured.state.status === 'aborted') {
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;
@@ -2791,7 +2780,7 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+        if (captured.state.status === 'aborted') {
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;

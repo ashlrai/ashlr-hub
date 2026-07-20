@@ -2682,6 +2682,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Recheck source admission after durable swarm proposal persistence; reject stale rows before a filed outcome, success audit, or notification can escape.
 - [x] Refuse dirty, raced, stale, or unavailable source admission before strict swarm planning or task execution can spend model capacity.
 - [x] Bring successful CLI proposal filing onto the same durable-reload and post-write source-admission contract as shared/API capture, rejecting unsafe rows instead of blocking queue progress.
+- [x] Preserve durable proposal ownership across post-create cancellation so queue settlement observes the real producer terminal state instead of an orphaning aborted result.
 
 ## Closed Judge Decision Metadata (2026-07-16)
 - [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.
