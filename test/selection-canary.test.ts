@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveSelectionCanary,
   canonicalSelectionCanaryCandidate,
+  drawEligibleBinaryCanaryRoute,
   selectEligibleBinaryCanaryPair,
   type SelectionCanaryCandidate,
 } from '../src/core/fabric/selection-canary.js';
@@ -57,6 +58,24 @@ describe('binary canary pair eligibility', () => {
     expect(result).toEqual({ protocol: 'binary-uniform-v1', candidates: [first, second] });
     expect(first.remainingBefore).toBe(1);
     expect(second.remainingBefore).toBe(1);
+  });
+
+  it('draws only from an already eligible pair at the fixed 50/50 probability', () => {
+    const first = candidate('codex');
+    const second = candidate('claude');
+    const pair = selectEligibleBinaryCanaryPair({
+      candidates: [first, second], context: 'ordinary-direct', snapshotState: 'fresh',
+    });
+    if (!pair) throw new Error('fixture pair was not eligible');
+    const draws = Array.from({ length: 32 }, () => drawEligibleBinaryCanaryRoute(pair));
+    for (const draw of draws) {
+      expect(draw).toMatchObject({
+        protocol: 'binary-uniform-v1', selectionProbabilityPpm: 500_000,
+      });
+      expect([first, second]).toContain(draw.selected);
+      expect([0, 1]).toContain(draw.selectedIndex);
+      expect(draw.selected).toBe(pair.candidates[draw.selectedIndex]);
+    }
   });
 
   it('fails closed for non-ordinary context, stale capacity, invalid pairs, and non-final routes', () => {

@@ -3191,6 +3191,11 @@
 - `receiptMatchesSelectionBindingV2` is the shared strict projection check for a verified V2 envelope and a parsed shared binding. It requires matching receipt/root/selection digests, exact claim authority, and the immutable receipt timestamp; it does not itself authenticate a raw file.
 - Verification: V2 receipt and shared-queue suites pass 69 assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
 
+# Current Binary Canary Draw Primitive
+- An eligible two-route `binary-uniform-v1` pair can now be sampled with a cryptographic random bit, returning only the selected immutable candidate, index, protocol, and fixed `500000` ppm probability. It accepts no seed, weight, route override, retry, or fallback input.
+- This does not activate any runtime route. The daemon still has no authentic two-route population at the pre-effect boundary, so it cannot call the primitive or create selection evidence yet.
+- Verification: selection-canary, V2 receipt, and shared-queue focused suites pass 76 assertions; TypeScript typechecking and quiet lint pass.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.

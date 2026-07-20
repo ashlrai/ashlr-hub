@@ -1,5 +1,6 @@
 /** Strict, side-effect-free selection-canary configuration resolution. */
 
+import { randomBytes } from 'node:crypto';
 import type { FinalConcurrentDispatchRoute } from './concurrent-dispatch.js';
 import { isOrdinaryFleetGatewayDecision, type GatewayDecision } from './gateway.js';
 
@@ -56,6 +57,14 @@ export interface SelectionCanaryEligiblePair {
   candidates: readonly [SelectionCanaryCandidate, SelectionCanaryCandidate];
 }
 
+/** One cryptographic 50/50 choice from an already eligible pair. */
+export interface SelectionCanaryDraw {
+  protocol: typeof SELECTION_CANARY_PROTOCOL;
+  selectedIndex: 0 | 1;
+  selectionProbabilityPpm: 500_000;
+  selected: SelectionCanaryCandidate;
+}
+
 /** Inputs from one real gateway decision and its final concurrent assignment. */
 export interface CanonicalSelectionCanaryCandidateInput {
   gatewayDecision: GatewayDecision;
@@ -108,6 +117,24 @@ export function selectEligibleBinaryCanaryPair(
     second.route.disposition !== 'gateway-exact' || !first.candidateAllowed || !second.candidateAllowed ||
     !hasPositiveCapacity(first) || !hasPositiveCapacity(second)) return null;
   return { protocol: SELECTION_CANARY_PROTOCOL, candidates: [first, second] };
+}
+
+/**
+ * Draw one route with an unbiased cryptographic bit after eligibility has
+ * already excluded every non-ordinary context. There is deliberately no seed,
+ * weighting, retry, or fallback input: callers either launch the selected route
+ * with a matching signed receipt or do not launch a canary at all.
+ */
+export function drawEligibleBinaryCanaryRoute(
+  pair: SelectionCanaryEligiblePair,
+): SelectionCanaryDraw {
+  const selectedIndex: 0 | 1 = (randomBytes(1)[0]! & 1) === 0 ? 0 : 1;
+  return {
+    protocol: pair.protocol,
+    selectedIndex,
+    selectionProbabilityPpm: 500_000,
+    selected: pair.candidates[selectedIndex],
+  };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
