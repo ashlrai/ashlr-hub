@@ -177,6 +177,24 @@ describe('LearningEligibilityV1', () => {
         selectedTier: 'frontier',
         selectedModel: 'gpt-5.6',
       },
+      receiptQualifiedSelectionObservation: {
+        receiptId: 'c'.repeat(64),
+        selectionObservation: {
+          schemaVersion: 1,
+          authority: 'observation-only',
+          mode: 'randomized-canary',
+          selectionPolicyVersion: 'canary-v1',
+          randomizationProtocolVersion: 'uniform-v1',
+          candidateSetDigest: 'a'.repeat(64),
+          assignmentDigest: 'b'.repeat(64),
+          candidateCount: 2,
+          selectedRank: 0,
+          selectionProbabilityPpm: 500_000,
+          selectedBackend: 'codex',
+          selectedTier: 'frontier',
+          selectedModel: 'gpt-5.6',
+        },
+      },
     })], {
       population: population([member]),
     });

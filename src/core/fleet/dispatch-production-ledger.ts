@@ -225,6 +225,12 @@ export interface DispatchSelectionObservationV1 {
   selectedModel?: string | null;
 }
 
+/** Exact receipt-qualified selection evidence for in-process projections only. */
+export interface ReceiptQualifiedDispatchSelectionV1 {
+  receiptId: string;
+  selectionObservation: DispatchSelectionObservationV1;
+}
+
 export interface DispatchSelectionCandidate {
   backend: EngineId;
   tier: EngineTier;
@@ -7462,6 +7468,30 @@ function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | 
   }
 }
 
+export function readReceiptQualifiedDispatchSelection(
+  event: DispatchProductionEvent,
+): ReceiptQualifiedDispatchSelectionV1 | undefined {
+  const receiptId = event.selectionStartReceiptId;
+  const observation = event.selectionObservation;
+  if (!receiptId || !observation) return undefined;
+  const read = readSelectionStartReceipt(receiptId);
+  if (read.status !== 'found') return undefined;
+  const receipt = read.receipt;
+  const eventModel = event.model ?? null;
+  const receiptModel = receipt.selectionObservation.selectedModel ?? null;
+  if (
+    receipt.root.runId !== event.runId ||
+    receipt.root.trajectoryId !== event.trajectoryId ||
+    receipt.root.objectiveHash !== event.objectiveHash ||
+    receipt.selectionObservation.selectedBackend !== event.backend ||
+    receipt.selectionObservation.selectedTier !== event.tier ||
+    receiptModel !== eventModel ||
+    JSON.stringify(receipt.selectionObservation) !== JSON.stringify(observation) ||
+    Date.parse(receipt.ts) > Date.parse(event.ts)
+  ) return undefined;
+  return { receiptId, selectionObservation: receipt.selectionObservation };
+}
+
 function selectionObservationState(events: readonly DispatchProductionEvent[]):
   | 'no-dispatches' | 'not-observed' | 'unjoined' | 'degraded' | 'present' {
   if (events.length === 0) return 'no-dispatches';
@@ -7477,21 +7507,7 @@ function selectionObservationState(events: readonly DispatchProductionEvent[]):
     }
     if (receiptIds.has(receiptId)) return 'degraded';
     receiptIds.add(receiptId);
-    const read = readSelectionStartReceipt(receiptId);
-    if (read.status !== 'found') return 'degraded';
-    const receipt = read.receipt;
-    const eventModel = event.model ?? null;
-    const receiptModel = receipt.selectionObservation.selectedModel ?? null;
-    if (
-      receipt.root.runId !== event.runId ||
-      receipt.root.trajectoryId !== event.trajectoryId ||
-      receipt.root.objectiveHash !== event.objectiveHash ||
-      receipt.selectionObservation.selectedBackend !== event.backend ||
-      receipt.selectionObservation.selectedTier !== event.tier ||
-      receiptModel !== eventModel ||
-      JSON.stringify(receipt.selectionObservation) !== JSON.stringify(event.selectionObservation) ||
-      Date.parse(receipt.ts) > Date.parse(event.ts)
-    ) return 'degraded';
+    if (!readReceiptQualifiedDispatchSelection(event)) return 'degraded';
   }
   return hasUnjoined ? 'unjoined' : 'present';
 }

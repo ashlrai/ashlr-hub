@@ -16,6 +16,7 @@ import type {
 import {
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
+  readReceiptQualifiedDispatchSelection,
 } from '../fleet/dispatch-production-ledger.js';
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { GeneratedRepairRouteReason } from '../fleet/router.js';
@@ -68,6 +69,21 @@ export interface TrajectoryRecordCoverage {
   decision: boolean;
   agentAction: boolean;
   skillUse: boolean;
+}
+
+/** In-process projection of a signed, exact pre-execution assignment receipt. */
+export interface ReceiptQualifiedSelectionObservationV1 {
+  receiptId: string;
+  selectionObservation: DispatchSelectionObservationV1;
+}
+
+const receiptQualifiedSelectionObservations = new WeakSet<ReceiptQualifiedSelectionObservationV1>();
+
+/** Rejects deserialized or caller-injected values; qualification is process-bound. */
+export function hasReceiptQualifiedSelectionObservation(
+  value: ReceiptQualifiedSelectionObservationV1 | undefined,
+): value is ReceiptQualifiedSelectionObservationV1 {
+  return value !== undefined && receiptQualifiedSelectionObservations.has(value);
 }
 
 export interface TrajectoryTimelineEvent {
@@ -151,6 +167,7 @@ export interface TrajectoryRecord {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   selectionObservation?: DispatchSelectionObservationV1;
+  receiptQualifiedSelectionObservation?: ReceiptQualifiedSelectionObservationV1;
   decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
   agentActionSourceQuality?: AgentActionSourceQuality;
   coverage: TrajectoryRecordCoverage;
@@ -727,6 +744,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
 
   const records = new Map<string, MutableTrajectoryRecord>();
   const aliasToRecord = new Map<string, string>();
+  const usedSelectionReceiptIds = new Set<string>();
 
   const processDispatch = (event: DispatchProductionEvent): void => {
     const proposalId = cleanId(event.proposalId, 160);
@@ -768,8 +786,18 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       labelBasis: event.labelBasis,
       routerPolicyVersion: event.routerPolicyVersion,
       learningEpoch: event.learningEpoch,
-      selectionObservation: event.selectionObservation,
     });
+    const qualified = readReceiptQualifiedDispatchSelection(event);
+    if (qualified && !usedSelectionReceiptIds.has(qualified.receiptId) &&
+      !record.receiptQualifiedSelectionObservation) {
+      const projection: ReceiptQualifiedSelectionObservationV1 = {
+        receiptId: qualified.receiptId,
+        selectionObservation: qualified.selectionObservation,
+      };
+      receiptQualifiedSelectionObservations.add(projection);
+      record.receiptQualifiedSelectionObservation = projection;
+      usedSelectionReceiptIds.add(qualified.receiptId);
+    }
     record.coverage.dispatch = true;
     record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, dispatchTerminalOutcome(event));
     noteTimeline(record, {

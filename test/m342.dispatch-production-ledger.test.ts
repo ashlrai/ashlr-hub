@@ -110,6 +110,11 @@ import {
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { writeSelectionStartReceipt } from '../src/core/fleet/selection-start-receipt.js';
+import {
+  hasReceiptQualifiedSelectionObservation,
+  listTrajectoryRecords,
+} from '../src/core/autonomy/trajectory-records.js';
+import { buildLearningEligibilityProjectionV1 } from '../src/core/learning/learning-eligibility.js';
 import { sanitizeProductionAttemptLearningLabel } from '../src/core/learning/attempt-shape.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
@@ -771,6 +776,32 @@ describe('M342 dispatch production ledger', () => {
     })).toMatchObject({ recorded: 1 });
     expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
       .toBe('present');
+    const [trajectory] = listTrajectoryRecords({
+      windowHours: 1,
+      deps: {
+        readDispatchProductionEvents: () => [{
+          ...event, selectionObservation, selectionStartReceiptId: receipt.receipt.receiptId,
+        }],
+        readAgentActions: () => [],
+        readSkillUseEvents: () => [],
+        listOutcomeRecords: () => [],
+        loadProposal: () => null,
+      },
+    });
+    expect(trajectory?.receiptQualifiedSelectionObservation).toMatchObject({
+      receiptId: receipt.receipt.receiptId,
+      selectionObservation: { selectionProbabilityPpm: 500_000 },
+    });
+    expect(hasReceiptQualifiedSelectionObservation(trajectory?.receiptQualifiedSelectionObservation)).toBe(true);
+    if (!trajectory) throw new Error('trajectory was not projected');
+    const eligibility = buildLearningEligibilityProjectionV1({
+      records: [trajectory],
+      trajectorySourceComplete: true,
+      learningEpoch: now.slice(0, 10),
+    }, { identityKey: () => loadOrCreateKey() });
+    expect(eligibility).toMatchObject({ ok: true });
+    if (!eligibility.ok) throw new Error('eligibility projection failed');
+    expect(eligibility.projection.members[0]).toMatchObject({ selectionPropensityAvailable: true });
 
     expect(recordDispatchProduction({
       ...event,
