@@ -169,6 +169,26 @@ describe('M436 operational projection recovery inspection', () => {
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'refused', reason: 'projection-stage-stage-content-invalid',
     });
+    if (process.platform !== 'win32') {
+      const stagedProposal = operationalProjectionStagePath(prepared.transaction.transactionId, 'proposal');
+      const outsideProposal = path.join(home, 'outside-proposal.json');
+      fs.writeFileSync(outsideProposal, afterProposalText, { mode: 0o600 });
+      fs.rmSync(stagedProposal);
+      fs.symlinkSync(outsideProposal, stagedProposal);
+      expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+        state: 'refused', reason: expect.stringMatching(/^proposal-stage-stage-/),
+      });
+      expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
+      expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
+      fs.unlinkSync(stagedProposal);
+      expect(writeOperationalProjectionStage(
+        prepared.transaction.transactionId,
+        'proposal',
+        Buffer.from(afterProposalText),
+        prepared.transaction.staged.proposal,
+        validateProposal,
+      )).toEqual({ ok: true });
+    }
     expect(writeOperationalProjectionStage(
       prepared.transaction.transactionId,
       'projection',

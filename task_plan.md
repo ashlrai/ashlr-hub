@@ -2605,7 +2605,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add deterministic private staged-artifact storage with injected semantic validation and deletion-as-absence semantics.
 - [x] Export canonical proposal and sealed-projection text validators so staged bytes bind to existing operational identities rather than raw hashes.
 - [x] Add a read-only V2 recovery inspector that requires authenticated journal/replay/stage/artifact evidence and reports only hypothetical next actions.
-- [ ] Add deterministic staged-artifact validation and installation under the global writer lock.
+- [x] Prove the recovery inspector refuses a symlinked staged artifact without touching canonical proposal or projection state.
+- [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
+- [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
 
 ## Operational Projection Local Replay Ledger (2026-07-16)
