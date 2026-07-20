@@ -2816,3 +2816,8 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Base-bound draft verification (2026-07-20):
+  - Direct draft verification previously discovered commands after applying a candidate patch, allowing a Best-of-N candidate to add an `ashlr.verify.json` replace-detected no-op contract and self-certify despite a failing base test.
+  - Draft verification now snapshots the base repo execution profile before `git apply` and executes that immutable command list against the patched sandbox. The regression proves the base `npm run test` still fails even when the candidate adds a passing replacement contract.
+  - Focused direct-draft and Best-of-N coverage passes 42 assertions, with typecheck, quiet lint, production build, and diff checks green. This strengthens winner selection only; it changes no merge or deployment authority.

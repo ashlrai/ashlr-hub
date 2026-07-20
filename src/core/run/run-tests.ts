@@ -9,8 +9,8 @@
  * winner-only Best-of-N capture behind the same verification path.
  *
  * Flow: loadProposal → createSandbox (policy-gated, kill-switch aware) →
- * `git apply` the diff → detectRepoExecutionProfile INSIDE the worktree (so a
- * diff that adds a test script counts) → run verify commands cheap-first
+ * detectRepoExecutionProfile on the immutable base worktree → `git apply` the
+ * diff → run the base-derived verify commands cheap-first
  * (typecheck → lint → build → test) → removeSandbox.
  *
  * Semantics: absence of verification (no proposal, no diff, no commands,
@@ -196,6 +196,18 @@ export async function runTestsForProposalDetailed(
     }
     if (options.signal?.aborted) return cancelled();
 
+    // Snapshot the contract from the clean base before applying a candidate.
+    // A draft must never be able to replace its required verifier with a
+    // candidate-supplied manifest or script and self-certify as green.
+    const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
+    const verifyCommands = filterVerifyCommandsForProfile(
+      executionProfile.verifyCommands,
+      profile,
+    ).sort(
+      (a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind],
+    );
+    if (verifyCommands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
+
     // 3. Apply the diff. A diff that does not apply is a REAL negative — the
     //    candidate's patch is broken against the current tree.
     const patchDir = mkdtempSync(join(tmpdir(), 'ashlr-run-tests-'));
@@ -231,18 +243,7 @@ export async function runTestsForProposalDetailed(
     }
 
     if (options.signal?.aborted) return cancelled();
-
-    // 4. Detect verification commands INSIDE the patched worktree.
-    const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
-    const verifyCommands = filterVerifyCommandsForProfile(
-      executionProfile.verifyCommands,
-      profile,
-    ).sort(
-      (a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind],
-    );
-    if (verifyCommands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
-
-    // 5. Run cheap-first; stop at the first failure.
+    // 4. Run base-derived commands cheap-first; stop at the first failure.
     for (const [index, vc] of verifyCommands.entries()) {
       if (options.signal?.aborted) return cancelled();
       const r = await runVerifyCommandAsync(vc, sb.worktreePath, cfg, {
