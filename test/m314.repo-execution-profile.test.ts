@@ -263,6 +263,60 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('does not infer nested same-kind coverage from a root command', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      const nested = join(dir, 'packages', 'sdk');
+      mkdirSync(nested, { recursive: true });
+      writePkg(nested, { scripts: { test: 'vitest' } });
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+      });
+
+      const incomplete = detectRepoExecutionProfile(dir);
+      expect(incomplete.verifyContract).toMatchObject({
+        mergeCoverageComplete: false,
+        uncoveredMergeProjects: [{ kind: 'node', relativeRoot: 'packages/sdk' }],
+      });
+
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] },
+          { id: 'sdk-test', kind: 'test', cmd: ['npm', 'test'], cwd: 'packages/sdk', required: true, profiles: ['merge'] },
+        ],
+      });
+      expect(detectRepoExecutionProfile(dir).verifyContract?.mergeCoverageComplete).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('counts effective detected commands toward augment-detected nested coverage', () => {
+    const dir = makeFixture();
+    try {
+      const python = join(dir, 'packages', 'sdk-python');
+      mkdirSync(join(python, 'tests'), { recursive: true });
+      writeFileSync(join(python, 'pyproject.toml'), '[project]\nname = "sdk-python"\n', 'utf8');
+      writeFileSync(join(python, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'augment-detected',
+        commands: [{ id: 'root-check', kind: 'typecheck', cmd: ['node', '-e', 'process.exit(0)'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+      expect(profile.verifyCommands).toHaveLength(2);
+      expect(profile.verifyContract).toMatchObject({ mergeGradeExplicit: true, mergeCoverageComplete: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes valid contracts from explicit merge-grade contracts', () => {
     const dir = makeFixture();
     try {

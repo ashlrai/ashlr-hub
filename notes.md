@@ -2967,4 +2967,10 @@
 - The initial nested-coverage slice guarded sandbox verification but not the protected auto-merge verifier, which independently detects commands in its base worktree. A root-only contract could therefore have produced merge evidence despite a nested uncovered project.
 - One shared profile predicate now defines a present contract's merge-coverage eligibility. Both sandbox verification and `verifyProposal` refuse before executing any command when that predicate fails. Repositories without a contract retain legacy command detection; this is a fail-closed correction only for an explicit but incomplete contract.
 - Verification: a real Git-worktree M47 regression proves a root Node contract plus nested Python project returns no executed commands and a coverage-incomplete refusal. M314 and M331 remain green; changed-source TypeScript is clean.
+
+# Current Per-Project Merge Coverage
+- The coverage gate now evaluates every detected nested project root, including same-kind packages. A root Node/Cargo command is not assumed to cover a nested Node/Cargo project without an explicit safe-cwd merge command.
+- `augment-detected` coverage now uses its effective command set, including unprofiled detected commands that the verifier actually runs for merge. `replace-detected` remains explicit-command-only.
+- Live status now truthfully reports 15/24 fully covered merge contracts and nine incomplete repos. This is an intentional exposure of real contract debt, not a regression in eligibility accounting. The remaining commands must be added from isolated worktrees because the active source worktrees contain user changes.
+- Verification: M314 has 20 passing profile/coverage tests, M331 has 20 passing sandbox verifier tests, M47 has 49 passing protected-merge tests, and changed-source TypeScript is clean.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

@@ -2840,5 +2840,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Derive per-project merge coverage from safe command cwd and fail merge verification closed when a present contract is incomplete.
 - [x] Surface coverage gaps in fleet status and contract-generation scanning with root/kind-only metadata.
 - [x] Apply the same coverage refusal to protected auto-merge verification before command execution.
+- [x] Require every nested project root while evaluating augment contracts against their effective merge command set.
 - [ ] Add explicit nested verifier commands in isolated worktrees for each live incomplete enrolled repository.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.

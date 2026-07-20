@@ -321,17 +321,14 @@ function summarizeMergeCoverage(
   commands: VerifyCommand[],
 ): RepoVerifyContractSummary {
   if (!summary.mergeGradeExplicit) return summary;
-  const rootKinds = new Set(projects
-    .filter((project) => project.root === repoRoot)
-    .map((project) => project.kind));
   const requiredMergeCwds = new Set(commands
-    .filter((command) => command.required !== false && command.profiles?.includes('merge'))
+    .filter((command) => command.required !== false &&
+      (command.profiles === undefined || command.profiles.includes('merge')))
     .map((command) => resolve(command.cwd ?? repoRoot)));
   const uncoveredMergeProjects = projects
     .filter((project) =>
       project.root !== repoRoot &&
       project.kind !== 'verify-contract' &&
-      !rootKinds.has(project.kind) &&
       !requiredMergeCwds.has(project.root),
     )
     .map((project) => ({ relativeRoot: project.relativeRoot, kind: project.kind }));
@@ -868,9 +865,12 @@ export function detectRepoExecutionProfile(
   const detectedProjectKinds = [...new Set(projects.map((project) => project.kind))].sort();
   let contract = parseVerifyContract(root);
   if (contract) {
+    const coverageCommands = contract.mode === 'augment-detected'
+      ? [...detectedCommands, ...contract.commands]
+      : contract.commands;
     contract = {
       ...contract,
-      summary: summarizeMergeCoverage(root, projects, contract.summary, contract.commands),
+      summary: summarizeMergeCoverage(root, projects, contract.summary, coverageCommands),
     };
   }
   let verifyCommands = detectedCommands;
