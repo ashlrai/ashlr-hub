@@ -38,9 +38,9 @@ function restore(name: 'HOME' | 'USERPROFILE', value: string | undefined): void 
   if (value === undefined) delete process.env[name]; else process.env[name] = value;
 }
 
-function proposal(title: string): Proposal {
+function proposal(title: string, id = 'proposal-436-v2'): Proposal {
   return {
-    id: 'proposal-436-v2', repo, origin: 'agent', kind: 'patch', title,
+    id, repo, origin: 'agent', kind: 'patch', title,
     summary: 'Recovery inspection fixture.', diff: 'diff --git a/a b/a\n',
     status: 'pending', createdAt: '2026-07-20T00:00:00.000Z',
   };
@@ -226,5 +226,97 @@ describe('M436 operational projection recovery inspection', () => {
     });
     expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
     expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
+  });
+
+  it('plans and observes the first creation effect without treating absence as degraded authority', () => {
+    const createProposal = proposal('Created stage', 'proposal-436-create');
+    writeProposal(createProposal);
+    expect(migrateOperationalProposalProjection({ proposals: [createProposal], storeLock: lock! }).state).toBe('healthy');
+    const created = observeOperationalProjectionArtifacts(createProposal.id, lock!);
+    expect(created.state).toBe('healthy');
+    if (created.state !== 'healthy') return;
+    const createProposalText = JSON.stringify(Object.fromEntries(
+      Object.entries(createProposal).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+    ));
+    const createProjectionText = fs.readFileSync(operationalProposalProjectionPath(), 'utf8');
+    const key = loadOrCreateKey();
+    const createProposalStage = validateOperationalProposalStageText(createProposalText, createProposal.id);
+    const createProjectionStage = validateOperationalProjectionStageText(createProjectionText, key);
+    expect(createProposalStage).not.toBeNull();
+    expect(createProjectionStage).not.toBeNull();
+    if (!createProposalStage || !createProjectionStage) return;
+    fs.rmSync(path.join(inboxDir(), `${createProposal.id}.json`));
+    fs.rmSync(operationalProposalProjectionPath());
+    const createPrepared = prepareOperationalProjectionTransaction({
+      proposalId: createProposal.id,
+      before: { proposal: null, projection: null },
+      after: { proposal: created.proposal.digest, projection: created.projection.digest },
+      staged: {
+        proposal: { present: true, ...createProposalStage },
+        projection: { present: true, ...createProjectionStage },
+      },
+      storeLock: lock!, now: new Date('2026-07-20T02:00:00.000Z'),
+    });
+    expect(createPrepared.state).toBe('healthy');
+    if (createPrepared.state !== 'healthy') return;
+    expect(writeOperationalProjectionStage(
+      createPrepared.transaction.transactionId, 'proposal', Buffer.from(createProposalText),
+      createPrepared.transaction.staged.proposal,
+      (text) => validateOperationalProposalStageText(text, createProposal.id),
+    )).toEqual({ ok: true });
+    expect(writeOperationalProjectionStage(
+      createPrepared.transaction.transactionId, 'projection', Buffer.from(createProjectionText),
+      createPrepared.transaction.staged.projection,
+      (text) => validateOperationalProjectionStageText(text, key),
+    )).toEqual({ ok: true });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', actual: 'no-effect', next: 'would-write-proposal',
+    });
+    expect(fs.existsSync(path.join(inboxDir(), `${createProposal.id}.json`))).toBe(false);
+
+    fs.writeFileSync(path.join(inboxDir(), `${createProposal.id}.json`), createProposalText, { mode: 0o600 });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', actual: 'proposal-only', next: 'would-attest-proposal-installed',
+    });
+    expect(fs.existsSync(operationalProposalProjectionPath())).toBe(false);
+  });
+
+  it('plans and observes the first deletion effect without treating absence as degraded authority', () => {
+    const deleteProposal = proposal('Deleted stage', 'proposal-436-delete');
+    writeProposal(deleteProposal);
+    expect(migrateOperationalProposalProjection({ proposals: [deleteProposal], storeLock: lock! }).state).toBe('healthy');
+    const beforeDelete = observeOperationalProjectionArtifacts(deleteProposal.id, lock!);
+    expect(beforeDelete.state).toBe('healthy');
+    if (beforeDelete.state !== 'healthy') return;
+
+    const deletePrepared = prepareOperationalProjectionTransaction({
+      proposalId: deleteProposal.id,
+      before: { proposal: beforeDelete.proposal.digest, projection: beforeDelete.projection.digest },
+      after: { proposal: null, projection: null },
+      staged: {
+        proposal: { present: false, digest: null, bytes: 0 },
+        projection: { present: false, digest: null, bytes: 0 },
+      },
+      storeLock: lock!, now: new Date('2026-07-20T03:00:00.000Z'),
+    });
+    expect(deletePrepared.state).toBe('healthy');
+    if (deletePrepared.state !== 'healthy') return;
+    expect(writeOperationalProjectionStage(
+      deletePrepared.transaction.transactionId, 'proposal', Buffer.alloc(0),
+      deletePrepared.transaction.staged.proposal, () => null,
+    )).toEqual({ ok: true });
+    expect(writeOperationalProjectionStage(
+      deletePrepared.transaction.transactionId, 'projection', Buffer.alloc(0),
+      deletePrepared.transaction.staged.projection, () => null,
+    )).toEqual({ ok: true });
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', actual: 'no-effect', next: 'would-delete-proposal',
+    });
+
+    fs.rmSync(path.join(inboxDir(), `${deleteProposal.id}.json`));
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toMatchObject({
+      state: 'recoverable-observation', actual: 'proposal-only', next: 'would-attest-proposal-installed',
+    });
+    expect(fs.existsSync(operationalProposalProjectionPath())).toBe(true);
   });
 });

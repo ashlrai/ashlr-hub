@@ -2608,6 +2608,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove the recovery inspector refuses a symlinked staged artifact without touching canonical proposal or projection state.
 - [x] Make recovery intents phase-bound and deletion-explicit so a future executor cannot infer an effect from journal phase alone.
 - [x] Observe canonical proposal absence as a valid create/delete endpoint while continuing to reject unsafe existing proposal paths.
+- [x] Prove read-only recovery planning recognizes both absent-to-present creation and present-to-absent deletion, then observes their first proposal-only effect without installing a projection or advancing a phase.
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
 - [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
