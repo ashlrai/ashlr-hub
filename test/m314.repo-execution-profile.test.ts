@@ -317,6 +317,76 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('requires distinct detected verifier signatures for co-located ecosystems', () => {
+    const dir = makeFixture();
+    try {
+      const mixed = join(dir, 'packages', 'mixed');
+      mkdirSync(join(mixed, 'tests'), { recursive: true });
+      writePkg(mixed, { scripts: { test: 'vitest' } });
+      writeFileSync(join(mixed, 'pyproject.toml'), '[project]\nname = "mixed"\n', 'utf8');
+      writeFileSync(join(mixed, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'node-test', kind: 'test', cmd: ['npm', 'run', 'test'], cwd: 'packages/mixed', required: true, profiles: ['merge'] },
+        ],
+      });
+
+      const incomplete = detectRepoExecutionProfile(dir);
+      expect(incomplete.projects
+        .filter((project) => project.relativeRoot === 'packages/mixed')
+        .map((project) => project.kind))
+        .toEqual(['node', 'python']);
+      expect(incomplete.verifyContract).toMatchObject({
+        mergeCoverageComplete: false,
+        uncoveredMergeProjects: [{ kind: 'python', relativeRoot: 'packages/mixed' }],
+      });
+
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'node-test', kind: 'test', cmd: ['npm', 'run', 'test'], cwd: 'packages/mixed', required: true, profiles: ['merge'] },
+          { id: 'python-test', kind: 'test', cmd: ['python', '-m', 'pytest', '-q'], cwd: 'packages/mixed', required: true, profiles: ['merge'] },
+        ],
+      });
+
+      expect(detectRepoExecutionProfile(dir).verifyContract).toMatchObject({
+        mergeCoverageComplete: true,
+        uncoveredMergeProjects: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not exempt co-located root ecosystems from merge coverage', () => {
+    const dir = makeFixture();
+    try {
+      mkdirSync(join(dir, 'tests'), { recursive: true });
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      writeFileSync(join(dir, 'pyproject.toml'), '[project]\nname = "root-mixed"\n', 'utf8');
+      writeFileSync(join(dir, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'node-test', kind: 'test', cmd: ['npm', 'run', 'test'], required: true, profiles: ['merge'] },
+        ],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+      expect(profile.projects.map((project) => project.kind)).toEqual(['node', 'python']);
+      expect(profile.verifyContract).toMatchObject({
+        mergeCoverageComplete: false,
+        uncoveredMergeProjects: [{ kind: 'python', relativeRoot: '.' }],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes valid contracts from explicit merge-grade contracts', () => {
     const dir = makeFixture();
     try {

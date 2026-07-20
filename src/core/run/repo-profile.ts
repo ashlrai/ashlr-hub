@@ -343,15 +343,31 @@ function summarizeMergeCoverage(
   commands: VerifyCommand[],
 ): RepoVerifyContractSummary {
   if (!summary.mergeGradeExplicit) return summary;
-  const requiredMergeCwds = new Set(commands
-    .filter((command) => command.required !== false &&
-      (command.profiles === undefined || command.profiles.includes('merge')))
-    .map((command) => resolve(command.cwd ?? repoRoot)));
+  const requiredMergeCommands = commands.filter((command) =>
+    command.required !== false && (command.profiles === undefined || command.profiles.includes('merge')),
+  );
+  const projectsPerRoot = new Map<string, number>();
+  for (const project of projects) {
+    if (project.kind === 'verify-contract') continue;
+    projectsPerRoot.set(project.root, (projectsPerRoot.get(project.root) ?? 0) + 1);
+  }
+  const commandCoversProject = (command: VerifyCommand, project: RepoProjectProfile): boolean => {
+    if (resolve(command.cwd ?? repoRoot) !== project.root) return false;
+    // A shared working directory alone cannot prove which verifier runs when
+    // several ecosystems coexist there. Bind those commands to the detector's
+    // argv/kind signature instead of silently certifying every ecosystem.
+    if ((projectsPerRoot.get(project.root) ?? 0) <= 1) return true;
+    return project.verifyCommands.some((detected) =>
+      detected.kind === command.kind &&
+      detected.cmd.length === command.cmd.length &&
+      detected.cmd.every((part, index) => part === command.cmd[index]),
+    );
+  };
   const uncoveredMergeProjects = projects
     .filter((project) =>
-      project.root !== repoRoot &&
       project.kind !== 'verify-contract' &&
-      !requiredMergeCwds.has(project.root),
+      (project.root !== repoRoot || (projectsPerRoot.get(project.root) ?? 0) > 1) &&
+      !requiredMergeCommands.some((command) => commandCoversProject(command, project)),
     )
     .map((project) => ({ relativeRoot: project.relativeRoot, kind: project.kind }));
   if (uncoveredMergeProjects.length === 0) return summary;
@@ -821,14 +837,14 @@ function projectWithReplacedVerifyCommands(project: RepoProjectProfile, commands
   };
 }
 
-function projectAt(repoRoot: string, root: string): RepoProjectProfile | null {
-  return (
-    nodeProject(repoRoot, root) ??
-    rustProject(repoRoot, root) ??
-    pythonProject(repoRoot, root) ??
-    homebrewFormulaProject(repoRoot, root) ??
-    shellProject(repoRoot, root)
-  );
+function projectsAt(repoRoot: string, root: string): RepoProjectProfile[] {
+  return [
+    nodeProject(repoRoot, root),
+    rustProject(repoRoot, root),
+    pythonProject(repoRoot, root),
+    homebrewFormulaProject(repoRoot, root),
+    shellProject(repoRoot, root),
+  ].filter((project): project is RepoProjectProfile => project !== null);
 }
 
 function safeDir(path: string): boolean {
@@ -846,7 +862,7 @@ function discoverProjectRoots(repoRoot: string, maxDepth: number): string[] {
   const walk = (dir: string, depth: number): void => {
     if (seen.has(dir) || depth > maxDepth) return;
     seen.add(dir);
-    if (projectAt(repoRoot, dir)) roots.push(dir);
+    if (projectsAt(repoRoot, dir).length > 0) roots.push(dir);
     if (depth === maxDepth) return;
 
     let entries: string[] = [];
@@ -875,12 +891,13 @@ export function detectRepoExecutionProfile(
   const projectRoots = discoverProjectRoots(root, maxDepth);
   const inputState = packageJsonInputState(projectRoots);
   let projects = projectRoots
-    .map((projectRoot) => projectAt(root, projectRoot))
-    .filter((project): project is RepoProjectProfile => project !== null)
-    .sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
+    .flatMap((projectRoot) => projectsAt(root, projectRoot))
+    .sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot) || a.kind.localeCompare(b.kind));
 
   const detectedPrimaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
-  const rootCommands = detectedPrimaryProject?.root === root ? detectedPrimaryProject.verifyCommands : [];
+  const rootCommands = projects
+    .filter((project) => project.root === root)
+    .flatMap((project) => project.verifyCommands);
   const detectedCommands = rootCommands.length > 0
     ? rootCommands
     : projects.flatMap((project) => project.verifyCommands);
@@ -913,7 +930,7 @@ export function detectRepoExecutionProfile(
       if (rootIndex >= 0) projects[rootIndex] = projectWithVerifyContract(projects[rootIndex], contract.commands);
       else projects = [verifyContractProject(root, contract.commands), ...projects];
     }
-    projects = projects.sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
+    projects = projects.sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot) || a.kind.localeCompare(b.kind));
   } else if (contract?.summary.present && projects.length === 0) {
     projects = [verifyContractProject(root, [])];
   }

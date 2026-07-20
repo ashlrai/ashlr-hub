@@ -2978,4 +2978,10 @@
 - Contract `cwd` validation now proves both lexical and physical containment. A repository-local symlink can no longer direct verification outside the repository; missing or nondirectory targets invalidate the contract before any verifier command is selected.
 - The accepted command keeps its lexical repository path after validation, so canonical command metadata and legitimate in-repository symlink entrypoints remain stable. The physical target must resolve beneath the physical repository root.
 - Verification: M314 has 21 passing profile/coverage tests, including an external-symlink escape regression; M331 and M47 have 69 passing downstream verifier and protected-merge tests. Protected CI remains the cross-platform release authority.
+
+# Current Co-Located Ecosystem Coverage
+- Project discovery now preserves every recognized ecosystem at a directory instead of keeping detector precedence's first match. Profile and scanner metadata therefore expose mixed Node/Rust/Python/Homebrew roots rather than silently classifying them as one ecosystem.
+- CWD-only merge coverage remains compatible for a directory with one detected ecosystem. At a co-located root, it is ambiguous, so a required merge command must match that facet's detected argv and verification kind; arbitrary custom commands fail closed rather than certifying all facets.
+- Root-level mixed projects are no longer implicitly exempt. This correction affects verification eligibility only: the existing sandbox and protected-merge gates refuse before command execution when coverage is incomplete.
+- Verification: M314 has 23 passing profile/coverage tests, and M331 plus M47 bring the focused total to 92 passing assertions. Protected CI remains the cross-platform release authority.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.
