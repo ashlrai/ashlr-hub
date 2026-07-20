@@ -2978,3 +2978,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve fresh queued-autonomy authority over stale persisted cache; cover unavailable source behavior and retain host-handoff precedence.
 - [x] Verify Fleet Status coverage, typecheck, quiet lint, and diff integrity locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Queue/Proposal Authority Precedence Hardening (2026-07-20)
+- [x] Audit unknown cached freshness and partial proposal reads against Fleet OS blocker precedence.
+- [x] Make visible unknown cached inventory fail closed as degraded; keep proposal-read authority ahead of queue diagnostics while preserving configuration and host-handoff priority.
+- [x] Add Fleet Status regressions for malformed freshness and degraded-proposal plus degraded-queue composition; run focused tests, typecheck, lint, and diff integrity.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

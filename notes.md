@@ -3232,3 +3232,8 @@
 - Both blockers select `inspect-queue-inventory`, whose commands are read-only. Fresh queued-autonomy work remains actionable even if the persisted backlog snapshot is stale; no queue admission, daemon routing, persistence, configuration, canary, verification, or merge policy changed.
 - Review hardening: queue diagnostics do not preempt host-merge reconciliation, and a total queue-read failure with both sources unavailable is classified `queue-source-unavailable` rather than degraded.
 - Verification: M49 Fleet Status coverage passes 145 assertions, with TypeScript typecheck, quiet lint, and `git diff --check` passing. Fresh protected CI is required on the new head.
+
+# Queue Inventory Authority Hardening (2026-07-20)
+- A cached backlog with visible rows but missing, malformed, or implausibly future freshness metadata is now explicitly degraded. It cannot fall through to the misleading `backlog-cooldown-gated` diagnosis.
+- Proposal-read authority is evaluated before advisory queue diagnostics: a partial proposal source with a visible zero cannot be masked by a queue blocker. Deterministic auto-merge configuration and host-handoff blockers remain ahead of queue diagnostics, while a deliberately disabled auto-merge lane stays behind them so queue repair remains visible.
+- Verification: M49 Fleet Status coverage passes 147 assertions; `npm run typecheck` passes; `npm run lint` exits successfully with existing repository warnings only. Fresh protected CI is required on the new head.

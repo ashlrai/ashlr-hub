@@ -938,6 +938,31 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.merges.sourceQuality?.stopReasons).toContain('invalid-file');
   });
 
+  it('keeps unavailable proposal authority ahead of degraded queue diagnostics', async () => {
+    const inbox = join(tmpHome, '.ashlr', 'inbox');
+    const repo = join(tmpHome, 'proposal-authority-priority-repo');
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, 'broken.json'), '{not-json', 'utf8');
+    writeBacklogSnapshot(
+      tmpHome,
+      repo,
+      [makeBacklogItem(repo, 'repo:goal:stale-queue', 'Stale queue diagnostic', 9)],
+      '2026-07-01T00:00:00.000Z',
+    );
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+    const status = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true } }));
+
+    expect(status.proposals).toMatchObject({
+      pending: 0,
+      authority: { gate: 'unavailable' },
+    });
+    expect(status.autoMergeReadiness).toBeUndefined();
+    expect(status.autonomousShipReadiness).toMatchObject({
+      topBlocker: { id: 'auto-merge-readiness-unavailable', source: 'auto-merge' },
+    });
+  });
+
   it('keeps auto-merge authority available for a complete 513-proposal source', async () => {
     const inbox = join(tmpHome, '.ashlr', 'inbox');
     const proposalRepo = join(tmpHome, 'proposal-file-bound-repo');
@@ -5386,6 +5411,27 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       action: { id: 'inspect-queue-inventory' },
     });
     expect(status.autonomousShipReadiness?.primaryAction?.commands.every((command) => command.safety === 'read-only')).toBe(true);
+  });
+
+  it('treats unknown cached inventory freshness as degraded rather than cooldown authority', async () => {
+    const repo = join(tmpHome, 'repo');
+    const unknown = makeBacklogItem(repo, 'repo:goal:unknown-freshness', 'Unknown freshness work', 9);
+    writeBacklogSnapshot(tmpHome, repo, [unknown], 'not-a-timestamp');
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.queue.sources?.cachedBacklog).toMatchObject({
+      sourceState: 'complete',
+      freshness: 'unknown',
+      visibleItems: 1,
+      actionableItems: 0,
+    });
+    expect(status.autonomousShipReadiness).toMatchObject({
+      topBlocker: { id: 'queue-source-degraded', source: 'queue' },
+      primaryAction: { id: 'inspect-queue-inventory' },
+    });
+    expect(status.autonomousShipReadiness?.topBlocker?.id).not.toBe('backlog-cooldown-gated');
   });
 
   it('keeps fresh queued autonomy actionable independently of a stale cached backlog', async () => {

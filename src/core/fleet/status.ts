@@ -4672,7 +4672,11 @@ function queueInventoryAuthorityState(status: FleetStatus): QueueInventoryAuthor
     (cached.sourceState === 'missing' && queued.sourceState === 'unavailable') ||
     (cached.sourceState === 'unavailable' && queued.sourceState === 'unavailable')
   ) return 'unavailable';
-  if (cached.freshness === 'stale' || queued.sourceState === 'unavailable') return 'degraded';
+  if (
+    cached.freshness === 'stale' ||
+    (cached.freshness === 'unknown' && cached.visibleItems > 0) ||
+    queued.sourceState === 'unavailable'
+  ) return 'degraded';
   return 'unknown';
 }
 
@@ -5424,39 +5428,14 @@ function chooseReadinessBlocker(
   const queueSource = sources.find((source) => source.id === 'queue');
   const queueInventoryAuthority = queueInventoryAuthorityState(status);
   const awaitingHostMerge = status.proposals.awaitingHostMerge ?? 0;
-  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'unavailable') {
-    return readinessBlocker(
-      'queue-source-unavailable',
-      'Queue source unavailable',
-      queueSource.detail,
-      'medium',
-      'queue',
-    );
-  }
-  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'degraded') {
-    return readinessBlocker(
-      'queue-source-degraded',
-      'Queue source degraded',
-      queueSource.detail,
-      'medium',
-      'queue',
-    );
-  }
   const readiness = status.autoMergeReadiness;
+  // A partial proposal read must be surfaced before advisory queue diagnostics.
+  // A visible zero from that source is not authority to downgrade the blocker.
   if (!readiness) {
     return readinessBlocker(
       'auto-merge-readiness-unavailable',
       'Auto-merge status unavailable',
       status.proposals.authority?.detail ?? 'The auto-merge readiness source could not be read.',
-      'high',
-      'auto-merge',
-    );
-  }
-  if (!readiness.enabled) {
-    return readinessBlocker(
-      'auto-merge-disabled',
-      'Auto-merge disabled',
-      'Autonomous shipping cannot drain proposals while auto-merge is disabled.',
       'high',
       'auto-merge',
     );
@@ -5488,6 +5467,33 @@ function chooseReadinessBlocker(
       'host-handoff',
       'Host PR handoff',
       `${status.proposals.awaitingHostMerge} proposal(s) are waiting for host merge reconciliation.`,
+      'high',
+      'auto-merge',
+    );
+  }
+  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'unavailable') {
+    return readinessBlocker(
+      'queue-source-unavailable',
+      'Queue source unavailable',
+      queueSource.detail,
+      'medium',
+      'queue',
+    );
+  }
+  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'degraded') {
+    return readinessBlocker(
+      'queue-source-degraded',
+      'Queue source degraded',
+      queueSource.detail,
+      'medium',
+      'queue',
+    );
+  }
+  if (!readiness.enabled) {
+    return readinessBlocker(
+      'auto-merge-disabled',
+      'Auto-merge disabled',
+      'Autonomous shipping cannot drain proposals while auto-merge is disabled.',
       'high',
       'auto-merge',
     );
