@@ -2105,7 +2105,11 @@ async function runMergeVerifyContractScanner(
       observations: [unavailableObservation(
         descriptor,
         repo,
-        source.inputState === 'malformed' ? 'source-malformed' : 'source-unreadable',
+        source.inputState === 'malformed'
+          ? 'source-malformed'
+          : source.inputState === 'depth-truncated'
+            ? 'source-depth-truncated'
+            : 'source-unreadable',
       )],
     };
   }

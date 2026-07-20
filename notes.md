@@ -2984,4 +2984,10 @@
 - CWD-only merge coverage remains compatible for a directory with one detected ecosystem. At a co-located root, it is ambiguous, so a required merge command must match that facet's detected argv and verification kind; arbitrary custom commands fail closed rather than certifying all facets.
 - Root-level mixed projects are no longer implicitly exempt. This correction affects verification eligibility only: the existing sandbox and protected-merge gates refuse before command execution when coverage is incomplete.
 - Verification: M314 has 23 passing profile/coverage tests, and M331 plus M47 bring the focused total to 92 passing assertions. Protected CI remains the cross-platform release authority.
+
+# Current Bounded Discovery Truthfulness
+- Merge coverage no longer calls a shallow project scan complete by omission. Normal discovery now inspects up to six directory levels (with an eight-level explicit cap); if a non-skipped directory remains below the configured boundary, the profile records `depth-truncated` rather than certifying complete source evidence.
+- A present merge-grade contract becomes coverage-incomplete with a bounded depth reason, so sandbox and protected merge verification refuse before running a partial verifier set. The merge-contract scanner emits `source-depth-truncated` unavailable evidence instead of a healthy absence observation.
+- Fleet readiness therefore remains truthful even while the enrolled fleet has deeper source trees. This is verification eligibility only; it does not apply, merge, deploy, or mutate any repository.
+- Verification: M314, M22, M331, and M47 pass 158 focused assertions; M49 Fleet Status passes 143 assertions. Protected CI remains the cross-platform release authority.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

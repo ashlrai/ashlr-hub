@@ -387,6 +387,28 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('fails merge coverage closed when bounded discovery is truncated', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      mkdirSync(join(dir, 'deeper'), { recursive: true });
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'root-test', kind: 'test', cmd: ['npm', 'run', 'test'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir, { maxDepth: 0 });
+
+      expect(profile.projectDiscoveryTruncated).toBe(true);
+      expect(profile.mergeVerifyContractSource.inputState).toBe('depth-truncated');
+      expect(profile.verifyContract).toMatchObject({ mergeCoverageComplete: false });
+      expect(profile.verifyContract?.mergeGradeReason).toContain('project discovery reached depth limit 0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes valid contracts from explicit merge-grade contracts', () => {
     const dir = makeFixture();
     try {

@@ -68,6 +68,8 @@ export interface RepoProjectProfile {
 export interface RepoExecutionProfile {
   repoRoot: string;
   projects: RepoProjectProfile[];
+  /** True when the bounded project scan saw directories beyond its inspection limit. */
+  projectDiscoveryTruncated: boolean;
   primaryProject: RepoProjectProfile | null;
   verifyCommands: VerifyCommand[];
   verifyCommandSource: 'none' | 'detected' | 'contract' | 'mixed';
@@ -90,7 +92,7 @@ export interface CanonicalVerifyCommand {
 }
 
 export interface MergeVerifyContractScannerSource {
-  inputState: 'complete' | 'malformed' | 'unreadable';
+  inputState: 'complete' | 'depth-truncated' | 'malformed' | 'unreadable';
   detector: {
     maxDepth: number;
     verifyContractFile: typeof VERIFY_CONTRACT_FILE;
@@ -379,6 +381,18 @@ function summarizeMergeCoverage(
     mergeCoverageComplete: false,
     uncoveredMergeProjects,
     mergeGradeReason: `${summary.mergeGradeReason}; missing required merge coverage for ${rendered}`,
+  };
+}
+
+function markMergeCoverageDiscoveryTruncated(
+  summary: RepoVerifyContractSummary,
+  maxDepth: number,
+): RepoVerifyContractSummary {
+  if (!summary.mergeGradeExplicit) return summary;
+  return {
+    ...summary,
+    mergeCoverageComplete: false,
+    mergeGradeReason: `${summary.mergeGradeReason}; project discovery reached depth limit ${maxDepth}; merge coverage cannot be proven`,
   };
 }
 
@@ -856,14 +870,14 @@ function safeDir(path: string): boolean {
   }
 }
 
-function discoverProjectRoots(repoRoot: string, maxDepth: number): string[] {
+function discoverProjectRoots(repoRoot: string, maxDepth: number): { roots: string[]; truncated: boolean } {
   const roots: string[] = [];
   const seen = new Set<string>();
+  let truncated = false;
   const walk = (dir: string, depth: number): void => {
     if (seen.has(dir) || depth > maxDepth) return;
     seen.add(dir);
     if (projectsAt(repoRoot, dir).length > 0) roots.push(dir);
-    if (depth === maxDepth) return;
 
     let entries: string[] = [];
     try {
@@ -871,15 +885,18 @@ function discoverProjectRoots(repoRoot: string, maxDepth: number): string[] {
     } catch {
       return;
     }
-    for (const entry of entries) {
-      if (SKIP_DIRS.has(entry)) continue;
+    const childDirs = entries.filter((entry) => !SKIP_DIRS.has(entry) && safeDir(join(dir, entry)));
+    if (depth === maxDepth) {
+      if (childDirs.length > 0) truncated = true;
+      return;
+    }
+    for (const entry of childDirs) {
       const child = join(dir, entry);
-      if (!safeDir(child)) continue;
       walk(child, depth + 1);
     }
   };
   walk(repoRoot, 0);
-  return roots;
+  return { roots, truncated };
 }
 
 export function detectRepoExecutionProfile(
@@ -887,8 +904,9 @@ export function detectRepoExecutionProfile(
   opts?: { maxDepth?: number },
 ): RepoExecutionProfile {
   const root = resolve(repoRoot);
-  const maxDepth = Math.max(0, Math.min(3, opts?.maxDepth ?? 2));
-  const projectRoots = discoverProjectRoots(root, maxDepth);
+  const maxDepth = Math.max(0, Math.min(8, opts?.maxDepth ?? 6));
+  const discovery = discoverProjectRoots(root, maxDepth);
+  const projectRoots = discovery.roots;
   const inputState = packageJsonInputState(projectRoots);
   let projects = projectRoots
     .flatMap((projectRoot) => projectsAt(root, projectRoot))
@@ -909,7 +927,12 @@ export function detectRepoExecutionProfile(
       : contract.commands;
     contract = {
       ...contract,
-      summary: summarizeMergeCoverage(root, projects, contract.summary, coverageCommands),
+      summary: discovery.truncated
+        ? markMergeCoverageDiscoveryTruncated(
+            summarizeMergeCoverage(root, projects, contract.summary, coverageCommands),
+            maxDepth,
+          )
+        : summarizeMergeCoverage(root, projects, contract.summary, coverageCommands),
     };
   }
   let verifyCommands = detectedCommands;
@@ -948,6 +971,7 @@ export function detectRepoExecutionProfile(
   return {
     repoRoot: root,
     projects,
+    projectDiscoveryTruncated: discovery.truncated,
     primaryProject,
     verifyCommands,
     verifyCommandSource,
@@ -956,7 +980,7 @@ export function detectRepoExecutionProfile(
     ...(contract ? { verifyContract: contract.summary } : {}),
     noVerifyReason: describeNoVerifyCommandReason(projects, verifyCommands, contract?.summary),
     mergeVerifyContractSource: {
-      inputState,
+      inputState: discovery.truncated ? 'depth-truncated' : inputState,
       detector: { maxDepth, verifyContractFile: VERIFY_CONTRACT_FILE },
       projectKinds: detectedProjectKinds,
       detectedVerifyCommands: canonicalizeVerifyCommands(root, detectedCommands),
