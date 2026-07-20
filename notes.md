@@ -2929,3 +2929,9 @@
 - Failed verification is split into capture-completeness-gate failures versus non-capture preflight failures. The fields are metadata-only counters derived from existing `verifyResult` records; no prompts, diffs, command output, environment, or source contents are added to a ledger.
 - The human scorecard prints the ratio and only prints the failure split when failures exist. JSON and native scorecard consumers receive the additive counters through `QualityMetrics`.
 - Verification: all 40 `m119.quality-metrics` tests pass, including the JSON contract. TypeScript emitted no errors for the changed quality-metrics, CLI, or type surfaces; protected CI remains the release authority.
+
+# Current Ecosystem Health Scope
+- `ashlr fleet direction` now passes the enrolled repository registry to the ecosystem doctor. Fleet direction therefore evaluates runtime-enrolled repositories only; generic `ashlr ecosystem doctor` retains its sibling-discovery behavior for exploratory use.
+- The doctor accepts an explicit, resolved, deduplicated repository set and continues to surface malformed selected repositories. Unselected temporary audit/forensic directories cannot turn fleet health into a false failure.
+- Linked Git worktrees resolve their default ecosystem root beside the primary worktree instead of treating `/private/tmp` siblings as an ecosystem. Explicit roots remain unchanged.
+- Verification: 32 focused doctor/resource-strategy tests pass; the source CLI direction report over the live enrollment reports 24 repos, zero ecosystem failures, and retains `verify-only` only for genuine pending/verification conditions. Changed-source TypeScript emitted no matching errors.

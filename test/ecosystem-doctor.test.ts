@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mocks = vi.hoisted(() => ({
@@ -11,7 +11,7 @@ vi.mock('node:child_process', () => ({
   spawnSync: mocks.spawnSync,
 }));
 
-import { runEcosystemDoctor } from '../src/core/ecosystem/doctor.js';
+import { defaultEcosystemRoot, runEcosystemDoctor } from '../src/core/ecosystem/doctor.js';
 import { cmdEcosystem } from '../src/cli/ecosystem.js';
 
 function spawnResult(stdout: string, status = 0, stderr = ''): unknown {
@@ -73,6 +73,23 @@ afterEach(() => {
 });
 
 describe('runEcosystemDoctor', () => {
+  it('uses the main worktree parent when started from a linked worktree', () => {
+    const ecosystem = makeRoot();
+    roots.push(ecosystem);
+    const mainRepo = join(ecosystem, 'main-repo');
+    const worktree = join(makeRoot(), 'linked-worktree');
+    roots.push(dirname(worktree));
+    mkdirSync(join(mainRepo, '.git', 'worktrees', 'linked-worktree'), { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+    writeFileSync(
+      join(worktree, '.git'),
+      `gitdir: ${join(mainRepo, '.git', 'worktrees', 'linked-worktree')}\n`,
+      'utf8',
+    );
+
+    expect(defaultEcosystemRoot(worktree)).toBe(ecosystem);
+  });
+
   it('scans immediate sibling repos and reports git/package/docs health', async () => {
     const root = makeRoot();
     roots.push(root);
@@ -93,6 +110,25 @@ describe('runEcosystemDoctor', () => {
     expect(report.summary.fail).toBe(1);
     expect(report.checks.some((check) => check.id === 'package' && check.status === 'fail')).toBe(true);
     expect(report.checks.some((check) => check.id === 'docs' && check.status === 'warn')).toBe(true);
+  });
+
+  it('scans only an explicit fleet repo set and still surfaces a selected broken repo', async () => {
+    const root = makeRoot();
+    roots.push(root);
+    const healthy = makeRepo(root, 'healthy', {
+      'package.json': JSON.stringify({ name: 'healthy', version: '1.0.0' }),
+      'README.md': '# Healthy\n',
+    });
+    const unselectedBroken = makeRepo(root, 'audit-artifact', { 'package.json': '{ invalid' });
+
+    const selected = await runEcosystemDoctor({ root, repos: [healthy, healthy] });
+    expect(selected.repos.map((repo) => repo.name)).toEqual(['healthy']);
+    expect(selected.summary.fail).toBe(0);
+    expect(selected.checks.find((check) => check.id === 'discovery')?.detail).toBe('1 explicit repo(s) selected');
+
+    const selectedBroken = await runEcosystemDoctor({ root, repos: [unselectedBroken] });
+    expect(selectedBroken.repos.map((repo) => repo.name)).toEqual(['audit-artifact']);
+    expect(selectedBroken.summary.fail).toBeGreaterThan(0);
   });
 
   it('returns a warning-only report for an empty root', async () => {

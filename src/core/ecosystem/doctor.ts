@@ -64,6 +64,8 @@ export interface EcosystemDoctorReport {
 
 export interface EcosystemDoctorOptions {
   root?: string;
+  /** Explicit repository set for fleet-scoped health; bypasses sibling discovery. */
+  repos?: readonly string[];
   deep?: boolean;
   now?: Date;
 }
@@ -126,9 +128,34 @@ function nearestRepoRoot(startDir: string): string | null {
   }
 }
 
+/**
+ * A linked Git worktree has a `.git` file that points into the main worktree's
+ * `.git/worktrees/<name>` directory. Ecosystem discovery should remain rooted
+ * beside that main worktree, not beside an ephemeral worktree under `/tmp`.
+ */
+function linkedWorktreeRepoRoot(repoRoot: string): string | null {
+  const dotGit = join(repoRoot, '.git');
+  try {
+    if (!statSync(dotGit).isFile()) return null;
+    const match = /^gitdir:\s*([^\r\n]+)\s*$/u.exec(readFileSync(dotGit, 'utf8'));
+    if (!match?.[1]) return null;
+    const worktreeGitDir = resolve(repoRoot, match[1]);
+    const worktreesDir = dirname(worktreeGitDir);
+    const commonGitDir = dirname(worktreesDir);
+    if (
+      basename(worktreesDir) !== 'worktrees' ||
+      basename(commonGitDir) !== '.git' ||
+      !isDirectory(commonGitDir)
+    ) return null;
+    return dirname(commonGitDir);
+  } catch {
+    return null;
+  }
+}
+
 export function defaultEcosystemRoot(startDir = process.cwd()): string {
   const repoRoot = nearestRepoRoot(startDir);
-  return dirname(repoRoot ?? resolve(startDir));
+  return dirname(linkedWorktreeRepoRoot(repoRoot ?? '') ?? repoRoot ?? resolve(startDir));
 }
 
 function resolveRoot(root: string | undefined): string {
@@ -150,6 +177,10 @@ function discoverRepos(root: string): string[] {
     .map((entry) => join(root, entry.name))
     .filter((path) => looksLikeRepo(path))
     .sort((a, b) => basename(a).localeCompare(basename(b)));
+}
+
+function explicitRepoPaths(repos: readonly string[]): string[] {
+  return [...new Set(repos.map((repo) => resolve(repo)))].sort((a, b) => a.localeCompare(b));
 }
 
 function runGit(repoPath: string, args: string[]): GitResult {
@@ -465,12 +496,20 @@ export async function runEcosystemDoctor(options: EcosystemDoctorOptions = {}): 
   checks.push(makeCheck('root', 'Root', 'pass', 'root is readable', undefined, root));
 
   try {
-    const repoPaths = discoverRepos(root);
+    const repoPaths = options.repos === undefined
+      ? discoverRepos(root)
+      : explicitRepoPaths(options.repos);
     checks.push(makeCheck(
       'discovery',
       'Discovery',
       repoPaths.length > 0 ? 'pass' : 'warn',
-      repoPaths.length > 0 ? `${repoPaths.length} sibling repo(s) found` : 'no sibling repos found',
+      repoPaths.length > 0
+        ? options.repos === undefined
+          ? `${repoPaths.length} sibling repo(s) found`
+          : `${repoPaths.length} explicit repo(s) selected`
+        : options.repos === undefined
+          ? 'no sibling repos found'
+          : 'no explicit repos selected',
       undefined,
       root,
     ));

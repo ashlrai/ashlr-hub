@@ -231,6 +231,26 @@ function deps(overrides: Partial<ResourceStrategyReadDeps> = {}): ResourceStrate
 }
 
 describe('buildResourceStrategyReport', () => {
+  it('forwards the runtime-truth ecosystem repo set to the doctor', async () => {
+    let received: { root?: string; repos?: readonly string[]; deep?: boolean } | undefined;
+    await buildResourceStrategyReport(cfg(), {
+      ecosystemRoot: '/fleet-root',
+      ecosystemRepos: ['/fleet/repo-a', '/fleet/repo-b'],
+      deps: deps({
+        runEcosystemDoctor: async (options) => {
+          received = options;
+          return doctor();
+        },
+      }),
+    });
+
+    expect(received).toMatchObject({
+      root: '/fleet-root',
+      repos: ['/fleet/repo-a', '/fleet/repo-b'],
+      deep: false,
+    });
+  });
+
   it('recommends pause when guard health is blocked', async () => {
     const report = await buildResourceStrategyReport(cfg(), {
       deps: deps({ diagnoseGuardHealth: () => guard(true) }),

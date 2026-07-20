@@ -33,6 +33,7 @@ import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
 import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
 import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
+import { listEnrolled } from '../core/sandbox/policy.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
@@ -1413,7 +1414,7 @@ async function cmdFleetDirection(args: string[]): Promise<number> {
 
   try {
     const { buildResourceStrategyReport } = await import('../core/autonomy/resource-strategy.js');
-    const report = await buildResourceStrategyReport(cfg);
+    const report = await buildResourceStrategyReport(cfg, { ecosystemRepos: listEnrolled() });
     if (jsonMode) {
       process.stdout.write(JSON.stringify(report, null, 2) + '\n');
       return 0;

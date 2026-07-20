@@ -2812,3 +2812,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Separate capture-gate failures from non-capture preflight failures using existing metadata-only verification records.
 - [x] Lock the additive JSON scorecard contract and pass the focused quality-metrics suite.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Ecosystem Health Runtime Scope (2026-07-20)
+- [x] Audit false fleet-direction ecosystem failures from scratch worktrees and sibling metadata discovery.
+- [x] Scope fleet direction health to the explicit enrolled runtime repository set while preserving generic doctor discovery.
+- [x] Resolve linked-worktree default roots beside the primary checkout and retain selected-repository failure visibility.
+- [x] Verify focused doctor/resource-strategy coverage and the live read-only direction report.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

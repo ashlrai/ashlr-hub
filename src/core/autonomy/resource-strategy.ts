@@ -139,7 +139,7 @@ export interface ResourceStrategyReadDeps {
   getResourceSnapshot?: (cfg: AshlrConfig) => Promise<ResourceSnapshot>;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
   listReadyEvidenceOutcomeRecords?: (opts?: { limit?: number; now?: Date }) => OutcomeRecord[];
-  runEcosystemDoctor?: (opts?: { root?: string; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
+  runEcosystemDoctor?: (opts?: { root?: string; repos?: readonly string[]; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
   diagnoseGuardHealth?: () => GuardHealthDiagnosis;
 }
 
@@ -147,6 +147,8 @@ export interface ResourceStrategyOptions {
   maxOutcomes?: number;
   maxChecks?: number;
   ecosystemRoot?: string;
+  /** Runtime-truth repository set for fleet health, rather than sibling metadata discovery. */
+  ecosystemRepos?: readonly string[];
   now?: Date;
   deps?: ResourceStrategyReadDeps;
 }
@@ -578,7 +580,12 @@ async function defaultReadyEvidenceOutcomeRecordsAsync(
   return listReadyEvidenceOutcomeRecords({ limit, now });
 }
 
-async function defaultEcosystemDoctor(options: { root?: string; deep?: boolean; now?: Date }): Promise<EcosystemDoctorReport> {
+async function defaultEcosystemDoctor(options: {
+  root?: string;
+  repos?: readonly string[];
+  deep?: boolean;
+  now?: Date;
+}): Promise<EcosystemDoctorReport> {
   const { runEcosystemDoctor } = await import('../ecosystem/doctor.js');
   return runEcosystemDoctor(options);
 }
@@ -619,8 +626,8 @@ export async function buildResourceStrategyReport(
     ? deps.listReadyEvidenceOutcomeRecords({ limit: maxOutcomes, now })
     : await defaultReadyEvidenceOutcomeRecordsAsync(maxOutcomes, now);
   const doctor = deps.runEcosystemDoctor
-    ? await deps.runEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now })
-    : await defaultEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now }).catch(() =>
+    ? await deps.runEcosystemDoctor({ root: opts.ecosystemRoot, repos: opts.ecosystemRepos, deep: false, now })
+    : await defaultEcosystemDoctor({ root: opts.ecosystemRoot, repos: opts.ecosystemRepos, deep: false, now }).catch(() =>
         fallbackEcosystem(now, opts.ecosystemRoot),
       );
   const explicitGuard = deps.diagnoseGuardHealth?.();
