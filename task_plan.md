@@ -2872,3 +2872,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve the timeout guard while widening only its hosted-Windows allowance from 15s to 30s.
 - [x] Verify the full doctor suite, typecheck, and lint locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Windows Repair-Handoff Timing Recovery (2026-07-20)
+- [x] Diagnose the subsequent hosted Windows timeout as the durable writer-activation rollover test's default Vitest allowance.
+- [x] Preserve all journal assertions while giving only that test a bounded 30-second cold-runner allowance.
+- [x] Verify the complete M362 journal suite and CI-policy guard locally.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

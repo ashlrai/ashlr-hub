@@ -3032,3 +3032,8 @@
 - The exact-head Windows portability 1/3 lane timed out once in the existing first `runDoctor()` structure check at its explicit 15-second allowance. The suite already documents that even mocked doctor checks shell out and can exceed Vitest's default on Windows; the local isolated suite completes all 16 tests in about seven seconds.
 - The test guard remains enabled and is widened only to 30 seconds for the doctor suite's hosted-Windows cold-start envelope. No production doctor behavior, assertion, command, or acceptance condition was weakened.
 - Verification: the focused doctor suite passes 16 assertions; TypeScript and full lint pass with no errors. A fresh protected matrix is required before promotion.
+
+# Current Windows Repair-Handoff Timing Recovery
+- The follow-up exact-head Windows portability 1/3 run advanced past the doctor suite, then timed out in the durable repair-handoff writer-activation rollover test at Vitest's default five-second allowance. Its hosted log showed the same test assertions otherwise running normally; this is a cold Windows filesystem and lock timing envelope, not a product failure.
+- The affected rollover test now carries its own bounded 30-second timeout. All other repair-handoff tests retain the default guard, and no journal behavior, durability assertion, authority rule, or acceptance condition changed.
+- Verification: the full focused M362 suite passes 87 assertions with one platform-gated skip, and the CI workflow guard suite passes seven assertions. A fresh protected matrix is required before promotion.

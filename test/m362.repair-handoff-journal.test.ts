@@ -2277,6 +2277,9 @@ describe('M362 durable repair handoff journal', () => {
     )).toMatchObject({ disposition: 'quarantined', authoritativeEmptyRuns: 2 });
   });
 
+  // This path intentionally rotates durable writer authority. On a cold
+  // Windows runner its filesystem and lock work can outlive Vitest's 5s
+  // default, while 30s keeps the exception tightly bounded to this scenario.
   it('preserves generation proof across an intentional writer activation rollover', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -2315,7 +2318,7 @@ describe('M362 durable repair handoff journal', () => {
       currentActivationV2Authorities: 1,
       latestCurrentActivationV2At: rollover.ts,
     });
-  });
+  }, 30_000);
 
   it('carries exact hashful v1 control evidence into the v2 objective family', async () => {
     const repo = fx.makeRepo();
