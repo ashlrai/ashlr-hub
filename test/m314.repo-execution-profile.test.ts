@@ -6,6 +6,7 @@ import {
   detectPackageManager,
   detectRepoExecutionProfile,
 } from '../src/core/run/repo-profile.js';
+import { buildVerificationRollout } from '../src/core/fleet/verification-rollout.js';
 
 function makeFixture(): string {
   return mkdtempSync(join(tmpdir(), 'm314-profile-'));
@@ -20,6 +21,43 @@ function writeVerifyContract(dir: string, contract: unknown): void {
 }
 
 describe('repo execution profile', () => {
+  it('projects nested merge-coverage candidates without absolute paths or policy authority', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'root-test', kind: 'test', cmd: ['npm', 'run', 'test'], required: true, profiles: ['merge'] }],
+      });
+      const nested = join(dir, 'apps', 'web');
+      mkdirSync(nested, { recursive: true });
+      writePkg(nested, { scripts: { test: 'vitest' } });
+
+      const rollout = buildVerificationRollout([{ name: 'fixture', profile: detectRepoExecutionProfile(dir) }]);
+
+      expect(rollout).toMatchObject({
+        version: 1,
+        sourceState: 'complete',
+        totals: { reposReady: 0, reposBlocked: 1, uncoveredProjects: 1, candidateCommands: 1 },
+        repos: [{
+          name: 'fixture',
+          state: 'coverage-incomplete',
+          projects: [{
+            root: 'apps/web',
+            kind: 'node',
+            candidates: [{ kind: 'test', cmd: ['npm', 'run', 'test'], cwd: 'apps/web', required: true, profiles: ['merge'] }],
+            blockers: [],
+          }],
+        }],
+      });
+      expect(JSON.stringify(rollout)).not.toContain(dir);
+      expect(JSON.stringify(rollout)).not.toContain('stdout');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('surfaces malformed package metadata to source-bound scanners', () => {
     const dir = makeFixture();
     try {

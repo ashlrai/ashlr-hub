@@ -4548,10 +4548,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         `${missingExplicitMergeContracts} enrolled repo(s) rely on inferred or non-merge verification.` +
         `${sample ? ` First: ${sample}.` : ''}`,
       commands: [
-        nextActionCommand('Inspect merge contracts', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        nextActionCommand('Edit verify contract', ['vi', 'ashlr.verify.json'], 'manual', {
-          ...(missingRepos[0]?.repo && existsSync(missingRepos[0].repo) ? { cwd: missingRepos[0].repo } : {}),
-          note: 'Create a required merge-profile repo-owned verification contract.',
+        nextActionCommand('Plan merge contract coverage', ['ashlr', 'fleet', 'verification-rollout', '--json'], 'read-only', {
+          note: 'Detector candidates are read-only suggestions; inspect and edit only from an isolated repository worktree.',
         }),
       ],
     });

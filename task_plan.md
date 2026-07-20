@@ -2860,3 +2860,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit causal-field persistence across run, dispatch, proposal, decision, evidence, and agent-action records.
 - [ ] Add observation-only per-selection candidate-set provenance and same-tier canary probability support.
 - [ ] Expose selection-propensity availability as non-authoritative Fleet Status telemetry.
+
+## Merge Contract Rollout Planner (2026-07-20)
+- [x] Replace manual verify-contract editing guidance with a read-only rollout planner.
+- [x] Bound detector-derived project roots and candidates, reject parent-relative cwd suggestions, and retain explicit blockers.
+- [x] Add profile/Fleet Status coverage and prove the live Hub projection contains no absolute paths.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

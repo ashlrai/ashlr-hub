@@ -1544,15 +1544,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     expect(mergeContractAction?.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        label: 'Inspect merge contracts',
-        argv: ['ashlr', 'fleet', 'status', '--json'],
+        label: 'Plan merge contract coverage',
+        argv: ['ashlr', 'fleet', 'verification-rollout', '--json'],
         safety: 'read-only',
-      }),
-      expect.objectContaining({
-        label: 'Edit verify contract',
-        argv: ['vi', 'ashlr.verify.json'],
-        cwd: repo,
-        safety: 'manual',
       }),
     ]));
   });

@@ -34,6 +34,8 @@ import type { FleetStatus } from '../core/fleet/status.js';
 import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
 import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 import { listEnrolled } from '../core/sandbox/policy.js';
+import { buildVerificationRollout } from '../core/fleet/verification-rollout.js';
+import { detectRepoExecutionProfile } from '../core/run/repo-profile.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
@@ -1404,6 +1406,54 @@ async function cmdFleetStatus(jsonMode: boolean): Promise<number> {
   return 0;
 }
 
+async function cmdFleetVerificationRollout(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const repoIndex = args.indexOf('--repo');
+  const repoSelector = repoIndex >= 0 ? args[repoIndex + 1] : undefined;
+  if (repoIndex >= 0 && (!repoSelector || repoSelector.startsWith('-'))) {
+    process.stderr.write(red('error: ') + '--repo requires an enrolled repository name.\n');
+    return 2;
+  }
+  const unknownArgs = args.filter((arg, index) =>
+    arg !== '--json' && arg !== '--repo' && index !== repoIndex + 1,
+  );
+  if (unknownArgs.length > 0) {
+    process.stderr.write(red('error: ') + `unknown verification-rollout argument: ${unknownArgs[0]}\n`);
+    return 2;
+  }
+
+  const enrolled = listEnrolled();
+  const selected = repoSelector
+    ? enrolled.filter((repo) => repo.split('/').pop() === repoSelector)
+    : enrolled;
+  if (repoSelector && selected.length !== 1) {
+    process.stderr.write(red('error: ') + `expected exactly one enrolled repository named ${repoSelector}.\n`);
+    return 2;
+  }
+  const profiles = selected.map((repo) => ({
+    name: repo.split('/').pop() ?? repo,
+    profile: detectRepoExecutionProfile(repo),
+  }));
+  const rollout = buildVerificationRollout(profiles);
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(rollout, null, 2) + '\n');
+    return 0;
+  }
+  console.log('');
+  console.log(bold('  Merge contract rollout') + dim(' — read-only detector candidates'));
+  console.log(`  ${rollout.totals.reposBlocked} repo(s) need coverage; ${rollout.totals.uncoveredProjects} project(s); ${rollout.totals.candidateCommands} candidate command(s).`);
+  for (const repo of rollout.repos) {
+    console.log(`  ${repo.name}: ${repo.state} (${repo.sourceDigest.slice(0, 12)})`);
+    for (const project of repo.projects) {
+      const commands = project.candidates.map((command) => command.cmd.join(' ')).join(' | ');
+      const blockers = project.blockers.map((blocker) => blocker.code).join(', ');
+      console.log(`    ${project.kind}@${project.root}: ${commands || blockers || 'no candidate'}`);
+    }
+  }
+  console.log('');
+  return 0;
+}
+
 async function cmdFleetDirection(args: string[]): Promise<number> {
   const jsonMode = args.includes('--json');
   const cfg = await loadCfg();
@@ -1945,6 +1995,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
   switch (sub) {
     case 'status':
       return cmdFleetStatus(rest.includes('--json'));
+    case 'verification-rollout':
+      return cmdFleetVerificationRollout(rest);
     case 'watch':
       return cmdFleetWatch(rest.includes('--json'));
     case 'direction':
@@ -1987,6 +2039,7 @@ function printFleetHelp(): void {
   console.log('  ' + bold('Usage:'));
   console.log('');
   console.log(`    ashlr fleet status [--json]   ${cyan('# read-only fleet snapshot')}`);
+  console.log(`    ashlr fleet verification-rollout [--repo name] [--json] ${cyan('# read-only merge contract candidates')}`);
   console.log(`    ashlr fleet watch  [--json]   ${cyan('# glanceable monitoring summary (actions + errors)')}`);
   console.log(`    ashlr fleet direction [--json] ${cyan('# read-only autonomous direction report')}`);
   console.log(`    ashlr fleet init [--write]    ${cyan('# print/merge a starter cfg.foundry')}`);
