@@ -177,6 +177,16 @@ describe('M432 operational proposal projection', () => {
       proposal: { digest: null, bytes: 0 },
       projection: { digest: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number) },
     });
+
+    if (process.platform !== 'win32') {
+      const target = path.join(inboxDir(), `${value.id}.json`);
+      const outside = path.join(home, 'outside-proposal.json');
+      fs.writeFileSync(outside, JSON.stringify(value), { mode: 0o600 });
+      fs.symlinkSync(outside, target);
+      expect(observeOperationalProjectionArtifacts(value.id, lock)).toEqual({
+        state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null,
+      });
+    }
   });
 
   it('reports a truly empty store as a read-only cold start', () => {
