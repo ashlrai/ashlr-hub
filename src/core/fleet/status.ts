@@ -1377,6 +1377,12 @@ export interface FleetStatus {
   autonomyControlMode: FleetAutonomyControlMode;
   /** Read-only static readiness summary for pending auto-merge candidates. */
   autoMergeReadiness?: FleetAutoMergeReadinessStatus;
+  /**
+   * Recovery executor posture for the dormant proposal/projection transaction
+   * path. This is diagnostic only and deliberately cannot affect shipping
+   * readiness until a real remote monotonic authority exists.
+   */
+  operationalProjectionRecovery?: FleetOperationalProjectionRecoveryStatus;
   /** Observation-only shadow canary state; never consumed by fleet policy. */
   autoMergeCanary?: FleetAutoMergeCanaryStatus;
   /** Read-only resource-aware autonomous operating recommendation. */
@@ -1442,6 +1448,13 @@ export interface FleetStatus {
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
+}
+
+export interface FleetOperationalProjectionRecoveryStatus {
+  executor: 'disabled';
+  authority: 'unavailable';
+  blocker: 'remote-cas-authority-required';
+  detail: string;
 }
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
@@ -2593,6 +2606,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       bestOfNEnabled: (cfg.foundry?.bestOfN ?? 1) > 1,
     },
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
+    operationalProjectionRecovery: {
+      executor: 'disabled',
+      authority: 'unavailable',
+      blocker: 'remote-cas-authority-required',
+      detail: 'Recovery executor is disabled pending authenticated remote compare-and-set authority with durable monotonic epochs.',
+    },
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     ...(goalFocus !== undefined ? { goalFocus } : {}),
     ...(laneLocks !== undefined ? { laneLocks } : {}),
