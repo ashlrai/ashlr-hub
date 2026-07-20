@@ -92,9 +92,37 @@ describe('effective config snapshot', () => {
     expect(snapshot.daemon.contextRollup.minTerminalTrajectories.value).toBe(50);
     expect(snapshot.foundry.enabled.value).toBe(false);
     expect(snapshot.foundry.allowedBackends.value).toEqual(['builtin']);
+    expect(snapshot.foundry.fabric.selectionCanary).toMatchObject({
+      requested: { value: false },
+      configEligible: { value: false, source: 'derived' },
+      enabled: { value: false, source: 'derived' },
+      disabledReason: { value: 'not-requested' },
+    });
     expect(snapshot.backends.map((b) => b.backend)).toEqual(['builtin']);
     expect(snapshot.warnings.join('\n')).toMatch(/cfg\.daemon is missing/);
     expect(snapshot.warnings.join('\n')).toMatch(/cfg\.foundry is missing/);
+  });
+
+  it('reports a valid requested canary as inactive until the receipt producer exists', () => {
+    const cfg = makeCfg({
+      foundry: {
+        fabric: { gateway: true, concurrentDispatch: true, selectionCanary: { enabled: true } },
+      },
+    } as Partial<AshlrConfig>);
+    const snapshot = buildEffectiveConfigSnapshot(cfg, {
+      rawConfig: { foundry: { fabric: { gateway: true, concurrentDispatch: true, selectionCanary: { enabled: true } } } },
+      configPath: join(fx.ashlrDir, 'config.json'),
+      configExists: true,
+      configParsed: true,
+    });
+
+    expect(snapshot.foundry.fabric.selectionCanary).toMatchObject({
+      requested: { value: true, source: 'configured' },
+      protocol: { value: 'binary-uniform-v1' },
+      configEligible: { value: true, source: 'derived' },
+      enabled: { value: false, source: 'derived' },
+      disabledReason: { value: 'producer-unavailable' },
+    });
   });
 
   it('marks configured operator settings and never serializes secret values', () => {

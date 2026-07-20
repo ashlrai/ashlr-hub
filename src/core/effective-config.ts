@@ -18,6 +18,7 @@ import type {
 } from './types.js';
 import { defaultConfig, loadConfig } from './config.js';
 import { resolveAutonomyControlMode } from './fleet/status.js';
+import { resolveSelectionCanary, type SelectionCanaryDisabledReason } from './fabric/selection-canary.js';
 import { resolveEngineRegistry } from './run/engine-registry.js';
 
 export type EffectiveConfigSource = 'configured' | 'default' | 'derived';
@@ -109,6 +110,13 @@ export interface EffectiveConfigSnapshot {
       concurrentDispatch: EffectiveConfigValue<boolean>;
       maxSlotsPerBackend: EffectiveConfigValue<number>;
       workhorseDispatch: EffectiveConfigValue<boolean>;
+      selectionCanary: {
+        requested: EffectiveConfigValue<boolean>;
+        protocol: EffectiveConfigValue<'binary-uniform-v1' | null>;
+        configEligible: EffectiveConfigValue<boolean>;
+        enabled: EffectiveConfigValue<boolean>;
+        disabledReason: EffectiveConfigValue<SelectionCanaryDisabledReason | 'producer-unavailable'>;
+      };
     };
     local: {
       maxConcurrent: EffectiveConfigValue<number>;
@@ -346,6 +354,10 @@ export function buildEffectiveConfigSnapshot(
     : ['builtin'];
   const autoMerge = cfg.foundry?.autoMerge;
   const fabric = cfg.foundry?.fabric;
+  const selectionCanary = resolveSelectionCanary(fabric?.selectionCanary, {
+    gateway: fabric?.gateway === true,
+    concurrentDispatch: fabric?.concurrentDispatch === true,
+  });
   const local = cfg.foundry?.local;
 
   if (!opts.configExists) warnings.push('No config file existed when the snapshot was requested; loadConfig will bootstrap defaults.');
@@ -512,6 +524,24 @@ export function buildEffectiveConfigSnapshot(
         concurrentDispatch: boolValue(raw, 'foundry.fabric.concurrentDispatch', fabric?.concurrentDispatch === true),
         maxSlotsPerBackend: value(raw, 'foundry.fabric.maxSlotsPerBackend', typeof fabric?.maxSlotsPerBackend === 'number' ? fabric.maxSlotsPerBackend : 3),
         workhorseDispatch: boolValue(raw, 'foundry.fabric.workhorseDispatch', fabric?.workhorseDispatch === true),
+        selectionCanary: {
+          requested: boolValue(raw, 'foundry.fabric.selectionCanary.enabled', selectionCanary.requested),
+          protocol: value(
+            raw,
+            'foundry.fabric.selectionCanary.protocol',
+            selectionCanary.protocol,
+            selectionCanary.protocol === null ? 'derived' : undefined,
+          ),
+          configEligible: { value: selectionCanary.eligible, source: 'derived', path: 'foundry.fabric.selectionCanary' },
+          // No caller consumes this config yet: receipt-bound execution remains
+          // mandatory before a canary can become active.
+          enabled: { value: false, source: 'derived', path: 'foundry.fabric.selectionCanary' },
+          disabledReason: {
+            value: selectionCanary.eligible ? 'producer-unavailable' : selectionCanary.disabledReason!,
+            source: 'derived',
+            path: 'foundry.fabric.selectionCanary',
+          },
+        },
       },
       local: {
         maxConcurrent: value(raw, 'foundry.local.maxConcurrent', typeof local?.maxConcurrent === 'number' ? local.maxConcurrent : 1),

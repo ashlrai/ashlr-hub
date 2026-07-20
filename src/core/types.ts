@@ -1235,6 +1235,17 @@ export interface AshlrConfig {
        * DEFAULT false → byte-identical to pre-M256. Requires concurrentDispatch=true.
        */
       workhorseDispatch?: boolean;
+      /**
+       * Observation-only selection assignment canary. DEFAULT absent/off.
+       * This config cannot change a route: a future producer must separately
+       * hold a durable pre-execution authority receipt.
+       */
+      selectionCanary?: {
+        /** Explicit opt-in. Anything except literal true remains disabled. */
+        enabled?: boolean;
+        /** The sole supported assignment protocol. */
+        protocol?: 'binary-uniform-v1';
+      };
     };
     /**
      * Production velocity profile. DEFAULT OFF. When true, or when configured

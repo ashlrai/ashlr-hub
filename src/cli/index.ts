@@ -1428,6 +1428,7 @@ function formatEffectiveConfigSnapshot(snapshot: EffectiveConfigSnapshot): strin
   lines.push(`  min value:  ${formatEffectiveValue(snapshot.foundry.minItemValue)}`);
   lines.push(`  automerge:  ${snapshot.foundry.autoMerge.enabled.value ? 'on' : 'off'} ${dim(`(${snapshot.foundry.autoMerge.enabled.source})`)}, trust=${snapshot.foundry.autoMerge.trustBasis.value}, maxRisk=${snapshot.foundry.autoMerge.maxRisk.value}`);
   lines.push(`  fabric:     gateway=${snapshot.foundry.fabric.gateway.value}, resourceAware=${snapshot.foundry.fabric.resourceAware.value}, concurrent=${snapshot.foundry.fabric.concurrentDispatch.value}`);
+  lines.push(`  canary:     requested=${snapshot.foundry.fabric.selectionCanary.requested.value}, configEligible=${snapshot.foundry.fabric.selectionCanary.configEligible.value}, enabled=${snapshot.foundry.fabric.selectionCanary.enabled.value}, protocol=${snapshot.foundry.fabric.selectionCanary.protocol.value ?? 'none'}, reason=${snapshot.foundry.fabric.selectionCanary.disabledReason.value}`);
   lines.push('');
   lines.push('Backends');
   for (const backend of snapshot.backends) {
