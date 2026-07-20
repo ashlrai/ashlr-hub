@@ -3166,3 +3166,9 @@
 - The future V2 hook must receive the exact process-minted `ExecutionAuthority` returned by `beginQueueExecution` at each existing builtin, Best-of-N, and direct external launch boundary. It must not re-mint, clone, serialize, or place that capability in engine options, manifests, or telemetry.
 - Ordering is fixed: shared claim transition, one-time authority binding, eligible ordinary-direct receipt write plus authenticated reread, dispatch/quota start records, then engine effect. A definite pre-effect receipt refusal launches nothing; an indeterminate durable write retains the current fail-closed executing-claim ambiguity rather than releasing work for duplication.
 - This is a design checkpoint only. V2 storage and daemon integration remain pending, and the canary is still hard-disabled.
+
+# Current Pending Proposal Recency Boundary
+- Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
+- Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
+- The next integration step is a detailed outcome reader that can prove complete healthy sources before the daemon, Fleet Status, and portfolio backlog pass activity maps. Best-effort outcome joins remain insufficient authority.
+- Verification: M344 production-velocity coverage passes eight assertions, with TypeScript typechecking and quiet lint passing. Protected CI remains the promotion authority.

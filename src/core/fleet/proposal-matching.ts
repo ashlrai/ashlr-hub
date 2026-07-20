@@ -11,6 +11,12 @@ type PendingProposalConfig = Pick<AshlrConfig, 'foundry'> | undefined;
 
 export interface PendingProposalBlockingOptions {
   now?: Date | number | string;
+  /**
+   * Optional activity timestamps from a complete, source-qualified joined
+   * outcome read. Callers must omit entries they cannot prove; proposal-local
+   * mutable fields never override the creation-time fallback.
+   */
+  activityAtByProposalId?: ReadonlyMap<string, string>;
 }
 
 export function workItemCoverageKey(item: Pick<WorkItem, 'repo' | 'id' | 'repairGenerationId'>): string {
@@ -73,9 +79,13 @@ export function pendingProposalIsStaleForProductionVelocity(
   if (proposal.status !== undefined && proposal.status !== 'pending') return false;
   const profile = resolveProductionVelocityProfile({ foundry: cfg?.foundry } as AshlrConfig);
   if (!profile.enabled || !Number.isFinite(profile.stalePendingTtlHours)) return false;
-  const activityAt = proposal.createdAt;
-  if (!activityAt) return false;
-  const activityMs = Date.parse(activityAt);
+  const qualifiedActivityAt = opts?.activityAtByProposalId?.get(proposal.id);
+  const qualifiedActivityMs = typeof qualifiedActivityAt === 'string'
+    ? Date.parse(qualifiedActivityAt)
+    : NaN;
+  const activityMs = Number.isFinite(qualifiedActivityMs)
+    ? qualifiedActivityMs
+    : Date.parse(proposal.createdAt ?? '');
   if (!Number.isFinite(activityMs)) return false;
   const ageMs = Math.max(0, nowToMs(opts?.now) - activityMs);
   return ageMs >= profile.stalePendingTtlHours * 60 * 60 * 1000;

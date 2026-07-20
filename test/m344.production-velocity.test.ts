@@ -218,4 +218,40 @@ describe('production velocity profile', () => {
     expect(blockingPendingProposalsForBacklog([stale], cfg(), { now }).map((p) => p.id))
       .toEqual(['prop-stale']);
   });
+
+  it('retains a pending proposal when a caller supplies recent source-qualified activity', () => {
+    const stale = proposal({
+      id: 'prop-active',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    const now = new Date('2026-07-03T00:00:00.000Z');
+    const enabled = cfg({
+      foundry: {
+        productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+      },
+    });
+
+    expect(blockingPendingProposalsForBacklog([stale], enabled, {
+      now,
+      activityAtByProposalId: new Map([[stale.id, '2026-07-02T23:30:00.000Z']]),
+    }).map((p) => p.id)).toEqual(['prop-active']);
+  });
+
+  it('fails closed to proposal creation time for malformed qualified activity', () => {
+    const stale = proposal({
+      id: 'prop-malformed-activity',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    const now = new Date('2026-07-03T00:00:00.000Z');
+    const enabled = cfg({
+      foundry: {
+        productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+      },
+    });
+
+    expect(blockingPendingProposalsForBacklog([stale], enabled, {
+      now,
+      activityAtByProposalId: new Map([[stale.id, 'not-a-timestamp']]),
+    })).toEqual([]);
+  });
 });

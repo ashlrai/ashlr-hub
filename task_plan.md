@@ -2934,3 +2934,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve the full publication, acknowledgement, tamper-detection, and fail-closed assertion path while giving only that test a bounded 30-second allowance.
 - [x] Verify the complete M360 lifecycle suite and CI-policy guard locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Pending Proposal Recency Authority (2026-07-20)
+- [x] Audit stale pending suppression against outcome-record activity authority.
+- [x] Add a fail-closed optional source-qualified activity seam with immutable creation-time fallback.
+- [x] Cover recent qualified activity and malformed timestamp fallback; run focused tests, typecheck, and lint.
+- [ ] Build a complete detailed outcome reader before wiring the seam into duplicate suppression callers.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
