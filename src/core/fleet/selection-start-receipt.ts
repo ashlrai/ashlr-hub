@@ -6,7 +6,7 @@
  * re-read this exact envelope after shared execution authority is acquired.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -37,6 +37,11 @@ import { readStableRegularFile } from '../util/stable-file-read.js';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const RECEIPT_ID_DOMAIN = 'ashlr:selection-start-receipt-id:v1\0';
 const RECEIPT_SIGNATURE_DOMAIN = 'ashlr:selection-start-receipt-signature:v1\0';
+const RECEIPT_V2_ID_DOMAIN = 'ashlr:selection-start-receipt-id:v2\0';
+const RECEIPT_V2_SIGNATURE_DOMAIN = 'ashlr:selection-start-receipt-signature:v2\0';
+const RECEIPT_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-digest:v2\0';
+const ROOT_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-root-digest:v2\0';
+const SELECTION_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-selection-digest:v2\0';
 const RECEIPT_DIRECTORY = 'selection-start-receipts';
 const MAX_RECEIPT_BYTES = 16 * 1024;
 const ENGINE_IDS = new Set<EngineId>([
@@ -68,7 +73,30 @@ export interface SelectionStartReceiptV1 {
   signature: string;
 }
 
+/**
+ * Coordinator-only receipt envelope. This remains an in-memory pure contract:
+ * installing and joining it to durable coordinator state is intentionally owned
+ * by the future shared-queue integration.
+ */
+export interface SelectionStartReceiptV2 {
+  schemaVersion: 2;
+  authority: 'coordinator-minted-v2';
+  receiptId: string;
+  ts: string;
+  root: SelectionStartReceiptRoot;
+  claim: SelectionStartReceiptClaim;
+  selectionObservation: DispatchSelectionObservationV1;
+  signature: string;
+}
+
 export interface CreateSelectionStartReceiptInput {
+  root: SelectionStartReceiptRoot;
+  claim: SelectionStartReceiptClaim;
+  selectionObservation: DispatchSelectionObservationV1;
+  ts: string;
+}
+
+export interface CreateCoordinatorSelectionStartReceiptV2Input {
   root: SelectionStartReceiptRoot;
   claim: SelectionStartReceiptClaim;
   selectionObservation: DispatchSelectionObservationV1;
@@ -140,6 +168,46 @@ function validObservation(value: unknown): value is DispatchSelectionObservation
       (typeof observation.selectedModel === 'string' && observation.selectedModel.length <= 160));
 }
 
+function canonicalRootV2(root: SelectionStartReceiptRoot): readonly [string, string, string] {
+  return [root.runId, root.trajectoryId, root.objectiveHash];
+}
+
+function canonicalClaimV2(claim: SelectionStartReceiptClaim): readonly [string, number, string] {
+  return [claim.queueId, claim.claimEpoch, claim.claimBindingDigest];
+}
+
+function canonicalSelectionV2(observation: DispatchSelectionObservationV1): readonly unknown[] {
+  return [
+    observation.schemaVersion,
+    observation.authority,
+    observation.mode,
+    observation.selectionPolicyVersion,
+    observation.randomizationProtocolVersion,
+    observation.candidateSetDigest,
+    observation.assignmentDigest,
+    observation.candidateCount,
+    observation.selectedRank,
+    observation.selectionProbabilityPpm,
+    observation.selectedBackend,
+    observation.selectedTier,
+    observation.selectedModel ?? null,
+  ];
+}
+
+function sha256Digest(domain: string, payload: readonly unknown[]): string {
+  return createHash('sha256').update(JSON.stringify([domain, ...payload]), 'utf8').digest('hex');
+}
+
+/** Return the deterministic public root digest used by durable V2 coordinator bindings. */
+export function rootDigestV2(root: unknown): string | null {
+  return validRoot(root) ? sha256Digest(ROOT_V2_DIGEST_DOMAIN, canonicalRootV2(root)) : null;
+}
+
+/** Return the deterministic public selection digest used by durable V2 coordinator bindings. */
+export function selectionDigestV2(observation: unknown): string | null {
+  return validObservation(observation) ? sha256Digest(SELECTION_V2_DIGEST_DOMAIN, canonicalSelectionV2(observation)) : null;
+}
+
 function receiptId(key: Buffer, root: SelectionStartReceiptRoot, claim: SelectionStartReceiptClaim): string {
   return createHmac('sha256', key).update(JSON.stringify([
     RECEIPT_ID_DOMAIN, root.runId, root.trajectoryId, root.objectiveHash,
@@ -158,6 +226,38 @@ function signaturePayload(receipt: Omit<SelectionStartReceiptV1, 'signature'>): 
     receipt.claim,
     receipt.selectionObservation,
   ]);
+}
+
+function receiptIdV2(key: Buffer, root: SelectionStartReceiptRoot, claim: SelectionStartReceiptClaim): string {
+  return createHmac('sha256', key).update(JSON.stringify([
+    RECEIPT_V2_ID_DOMAIN, ...canonicalRootV2(root), ...canonicalClaimV2(claim),
+  ]), 'utf8').digest('hex');
+}
+
+function signaturePayloadV2(receipt: Omit<SelectionStartReceiptV2, 'signature'>): string {
+  return JSON.stringify([
+    RECEIPT_V2_SIGNATURE_DOMAIN,
+    receipt.schemaVersion,
+    receipt.authority,
+    receipt.receiptId,
+    receipt.ts,
+    canonicalRootV2(receipt.root),
+    canonicalClaimV2(receipt.claim),
+    canonicalSelectionV2(receipt.selectionObservation),
+  ]);
+}
+
+/** Return the deterministic full-envelope digest used by durable V2 coordinator bindings. */
+export function receiptDigestV2(receipt: unknown): string | null {
+  const verified = validSelectionStartReceiptV2(receipt);
+  return verified ? sha256Digest(RECEIPT_V2_DIGEST_DOMAIN, [
+    verified.receiptId,
+    verified.ts,
+    canonicalRootV2(verified.root),
+    canonicalClaimV2(verified.claim),
+    canonicalSelectionV2(verified.selectionObservation),
+    verified.signature,
+  ]) : null;
 }
 
 function equalDigest(left: string, right: string): boolean {
@@ -211,6 +311,65 @@ export function verifySelectionStartReceipt(value: unknown, key: Buffer): Select
   const expectedSignature = createHmac('sha256', key).update(signaturePayload(unsigned), 'utf8').digest('hex');
   if (!equalDigest(receipt.receiptId, expectedId) || !equalDigest(receipt.signature, expectedSignature)) return null;
   return { ...unsigned, signature: receipt.signature };
+}
+
+function validSelectionStartReceiptV2(value: unknown): SelectionStartReceiptV2 | null {
+  const keys = ['schemaVersion', 'authority', 'receiptId', 'ts', 'root', 'claim', 'selectionObservation', 'signature'];
+  if (!fixedObject(value, keys)) return null;
+  const receipt = value as Record<string, unknown>;
+  if (receipt.schemaVersion !== 2 || receipt.authority !== 'coordinator-minted-v2' ||
+    typeof receipt.receiptId !== 'string' || !SHA256_RE.test(receipt.receiptId) ||
+    typeof receipt.ts !== 'string' || !Number.isFinite(Date.parse(receipt.ts)) ||
+    !validRoot(receipt.root) || !validClaim(receipt.claim) || !validObservation(receipt.selectionObservation) ||
+    typeof receipt.signature !== 'string' || !SHA256_RE.test(receipt.signature)) return null;
+  return {
+    schemaVersion: 2,
+    authority: 'coordinator-minted-v2',
+    receiptId: receipt.receiptId,
+    ts: receipt.ts,
+    root: { ...receipt.root },
+    claim: { ...receipt.claim },
+    selectionObservation: { ...receipt.selectionObservation },
+    signature: receipt.signature,
+  };
+}
+
+/** Create a signed V2 envelope. Durable installation is deliberately not part of this pure API. */
+export function createCoordinatorSelectionStartReceiptV2(
+  input: CreateCoordinatorSelectionStartReceiptV2Input,
+  key: Buffer,
+): SelectionStartReceiptV2 | null {
+  if (!validKey(key) || !validRoot(input.root) || !validClaim(input.claim) ||
+    !validObservation(input.selectionObservation) || typeof input.ts !== 'string' ||
+    !Number.isFinite(Date.parse(input.ts))) return null;
+  const unsigned = {
+    schemaVersion: 2 as const,
+    authority: 'coordinator-minted-v2' as const,
+    receiptId: receiptIdV2(key, input.root, input.claim),
+    ts: input.ts,
+    root: { ...input.root },
+    claim: { ...input.claim },
+    selectionObservation: { ...input.selectionObservation },
+  };
+  return {
+    ...unsigned,
+    signature: createHmac('sha256', key).update(signaturePayloadV2(unsigned), 'utf8').digest('hex'),
+  };
+}
+
+/** Verify a V2 coordinator envelope without durable-binding or daemon-side effects. */
+export function verifyCoordinatorSelectionStartReceiptV2(
+  value: unknown,
+  key: Buffer,
+): SelectionStartReceiptV2 | null {
+  if (!validKey(key)) return null;
+  const receipt = validSelectionStartReceiptV2(value);
+  if (!receipt) return null;
+  const { signature, ...unsigned } = receipt;
+  const expectedId = receiptIdV2(key, receipt.root, receipt.claim);
+  const expectedSignature = createHmac('sha256', key).update(signaturePayloadV2(unsigned), 'utf8').digest('hex');
+  if (!equalDigest(receipt.receiptId, expectedId) || !equalDigest(signature, expectedSignature)) return null;
+  return receipt;
 }
 
 export function selectionStartReceiptDir(): string {

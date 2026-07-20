@@ -3,9 +3,14 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDispatchSelectionObservation } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
+  createCoordinatorSelectionStartReceiptV2,
   createSelectionStartReceipt,
   readSelectionStartReceipt,
+  receiptDigestV2,
+  rootDigestV2,
+  selectionDigestV2,
   selectionStartReceiptDir,
+  verifyCoordinatorSelectionStartReceiptV2,
   verifySelectionStartReceipt,
   writeSelectionStartReceipt,
 } from '../src/core/fleet/selection-start-receipt.js';
@@ -102,6 +107,40 @@ describe('selection start receipt contract', () => {
         ...observation(), selectionProbabilityPpm: 1_000_000,
       },
     }, key)).toBeNull();
+  });
+});
+
+describe('selection start receipt V2 contract', () => {
+  it('signs and verifies an isolated coordinator-minted envelope', () => {
+    const receipt = createCoordinatorSelectionStartReceiptV2(input(), key);
+    expect(receipt).not.toBeNull();
+    expect(receipt).toMatchObject({ schemaVersion: 2, authority: 'coordinator-minted-v2' });
+    expect(verifyCoordinatorSelectionStartReceiptV2(receipt, key)).toEqual(receipt);
+    expect(JSON.stringify(receipt)).not.toContain('ownerToken');
+    expect(JSON.stringify(receipt)).not.toContain('candidates');
+  });
+
+  it('rejects altered V2 signed fields, extra fields, invalid authority, and a different key', () => {
+    const receipt = createCoordinatorSelectionStartReceiptV2(input(), key)!;
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, ts: '2026-07-20T15:00:01.000Z' }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, root: { ...root, objectiveHash: 'c'.repeat(64) } }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, leakedCandidate: 'codex' }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, root: { ...root, extra: true } }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, claim: { ...claim, extra: true } }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, selectionObservation: { ...observation(), extra: true } }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2({ ...receipt, authority: 'observation-only' }, key)).toBeNull();
+    expect(verifyCoordinatorSelectionStartReceiptV2(receipt, Buffer.alloc(32, 8))).toBeNull();
+  });
+
+  it('exports stable public binding digests without accepting malformed metadata', () => {
+    const first = createCoordinatorSelectionStartReceiptV2(input(), key)!;
+    const second = createCoordinatorSelectionStartReceiptV2(input(), key)!;
+    expect(receiptDigestV2(first)).toBe(receiptDigestV2(second));
+    expect(rootDigestV2(root)).toMatch(/^[a-f0-9]{64}$/);
+    expect(selectionDigestV2(observation())).toMatch(/^[a-f0-9]{64}$/);
+    expect(receiptDigestV2({ ...first, extra: true })).toBeNull();
+    expect(rootDigestV2({ ...root, trajectoryId: 'wrong' })).toBeNull();
+    expect(selectionDigestV2({ ...observation(), selectionProbabilityPpm: 1_000_000 })).toBeNull();
   });
 });
 
