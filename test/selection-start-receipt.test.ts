@@ -5,6 +5,8 @@ import { createDispatchSelectionObservation } from '../src/core/fleet/dispatch-p
 import {
   createCoordinatorSelectionStartReceiptV2,
   createSelectionStartReceipt,
+  coordinatorSelectionStartReceiptV2Dir,
+  readCoordinatorSelectionStartReceiptV2,
   readSelectionStartReceipt,
   receiptDigestV2,
   rootDigestV2,
@@ -12,6 +14,7 @@ import {
   selectionStartReceiptDir,
   verifyCoordinatorSelectionStartReceiptV2,
   verifySelectionStartReceipt,
+  writeCoordinatorSelectionStartReceiptV2,
   writeSelectionStartReceipt,
 } from '../src/core/fleet/selection-start-receipt.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
@@ -173,5 +176,50 @@ describe('selection start receipt store', () => {
 
     writeFileSync(path, `${JSON.stringify({ ...first.receipt, signature: '0'.repeat(64) })}\n`, 'utf8');
     expect(readSelectionStartReceipt(first.receipt.receiptId)).toMatchObject({ status: 'degraded' });
+  });
+});
+
+describe('selection start receipt V2 store', () => {
+  let fx: H1Fixture;
+
+  beforeEach(() => {
+    fx = makeFixture();
+    loadOrCreateKey();
+  });
+
+  afterEach(() => fx.cleanup());
+
+  it('durably records and exactly replays an isolated V2 receipt', () => {
+    const first = writeCoordinatorSelectionStartReceiptV2(input());
+    expect(first.status).toBe('recorded');
+    if (first.status !== 'recorded') throw new Error('V2 receipt was not recorded');
+    const path = join(coordinatorSelectionStartReceiptV2Dir(), `${first.receipt.receiptId}.json`);
+    expect(existsSync(path)).toBe(true);
+    expect(readCoordinatorSelectionStartReceiptV2(first.receipt.receiptId)).toEqual({
+      status: 'found', receipt: first.receipt,
+    });
+
+    expect(writeCoordinatorSelectionStartReceiptV2(input('2026-07-20T15:01:00.000Z'))).toEqual({
+      status: 'replayed', receipt: first.receipt,
+    });
+    expect(readFileSync(path, 'utf8')).not.toContain('ownerToken');
+    expect(readFileSync(path, 'utf8')).not.toContain('candidates');
+  });
+
+  it('fails closed when a V2 receipt becomes tampered or unreadable', () => {
+    const first = writeCoordinatorSelectionStartReceiptV2(input());
+    if (first.status !== 'recorded') throw new Error('V2 receipt was not recorded');
+    const path = join(coordinatorSelectionStartReceiptV2Dir(), `${first.receipt.receiptId}.json`);
+    writeFileSync(path, `${JSON.stringify({ ...first.receipt, signature: '0'.repeat(64) })}\n`, 'utf8');
+    expect(readCoordinatorSelectionStartReceiptV2(first.receipt.receiptId)).toMatchObject({ status: 'degraded' });
+  });
+
+  it('keeps V1 and V2 storage namespaces and readers isolated', () => {
+    const v1 = writeSelectionStartReceipt(input());
+    const v2 = writeCoordinatorSelectionStartReceiptV2(input());
+    if (v1.status !== 'recorded' || v2.status !== 'recorded') throw new Error('receipts were not recorded');
+    expect(selectionStartReceiptDir()).not.toBe(coordinatorSelectionStartReceiptV2Dir());
+    expect(readSelectionStartReceipt(v2.receipt.receiptId)).toEqual({ status: 'missing', reason: 'absent' });
+    expect(readCoordinatorSelectionStartReceiptV2(v1.receipt.receiptId)).toEqual({ status: 'missing', reason: 'absent' });
   });
 });

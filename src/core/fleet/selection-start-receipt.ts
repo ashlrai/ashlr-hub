@@ -1,9 +1,8 @@
 /**
  * Immutable selection-start receipt envelope.
  *
- * This is a pure signing/verification contract. It deliberately does not write
- * files or invoke engines; the future durable producer must write, fsync, and
- * re-read this exact envelope after shared execution authority is acquired.
+ * V1 remains an observation-only signing/verification contract. V2 additionally
+ * has a standalone local durable store; coordinator integration remains separate.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -43,6 +42,7 @@ const RECEIPT_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-digest:v2\0';
 const ROOT_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-root-digest:v2\0';
 const SELECTION_V2_DIGEST_DOMAIN = 'ashlr:selection-start-receipt-selection-digest:v2\0';
 const RECEIPT_DIRECTORY = 'selection-start-receipts';
+const RECEIPT_V2_DIRECTORY = 'selection-start-receipts-v2';
 const MAX_RECEIPT_BYTES = 16 * 1024;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
@@ -109,6 +109,14 @@ export type SelectionStartReceiptReadResult =
 
 export type SelectionStartReceiptWriteResult =
   | { status: 'recorded' | 'replayed'; receipt: SelectionStartReceiptV1 }
+  | { status: 'conflicted' | 'unavailable' | 'degraded'; reason: string };
+
+export type CoordinatorSelectionStartReceiptV2ReadResult =
+  | { status: 'found'; receipt: SelectionStartReceiptV2 }
+  | { status: 'missing' | 'degraded'; reason: string };
+
+export type CoordinatorSelectionStartReceiptV2WriteResult =
+  | { status: 'recorded' | 'replayed'; receipt: SelectionStartReceiptV2 }
   | { status: 'conflicted' | 'unavailable' | 'degraded'; reason: string };
 
 function fixedObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -376,11 +384,27 @@ export function selectionStartReceiptDir(): string {
   return join(dispatchProductionDir(), RECEIPT_DIRECTORY);
 }
 
+/** V2 receipts have a separate namespace so V1 readers never observe them. */
+export function coordinatorSelectionStartReceiptV2Dir(): string {
+  return join(dispatchProductionDir(), RECEIPT_V2_DIRECTORY);
+}
+
 function receiptPath(receiptId: string): string | null {
   return SHA256_RE.test(receiptId) ? join(selectionStartReceiptDir(), `${receiptId}.json`) : null;
 }
 
+function receiptPathV2(receiptId: string): string | null {
+  return SHA256_RE.test(receiptId) ? join(coordinatorSelectionStartReceiptV2Dir(), `${receiptId}.json`) : null;
+}
+
 function sameReplay(left: SelectionStartReceiptV1, right: SelectionStartReceiptV1): boolean {
+  return left.receiptId === right.receiptId &&
+    JSON.stringify(left.root) === JSON.stringify(right.root) &&
+    JSON.stringify(left.claim) === JSON.stringify(right.claim) &&
+    JSON.stringify(left.selectionObservation) === JSON.stringify(right.selectionObservation);
+}
+
+function sameReplayV2(left: SelectionStartReceiptV2, right: SelectionStartReceiptV2): boolean {
   return left.receiptId === right.receiptId &&
     JSON.stringify(left.root) === JSON.stringify(right.root) &&
     JSON.stringify(left.claim) === JSON.stringify(right.claim) &&
@@ -403,6 +427,30 @@ export function readSelectionStartReceipt(receiptId: string): SelectionStartRece
     });
     if (!read.ok) return { status: 'degraded', reason: `unsafe-receipt-${read.reason}` };
     const receipt = verifySelectionStartReceipt(JSON.parse(read.text), key);
+    return receipt ? { status: 'found', receipt } : { status: 'degraded', reason: 'invalid-receipt' };
+  } catch {
+    return { status: 'degraded', reason: 'receipt-read-failed' };
+  }
+}
+
+/** Read one installed V2 receipt without creating directories or repairing key state. */
+export function readCoordinatorSelectionStartReceiptV2(
+  receiptId: string,
+): CoordinatorSelectionStartReceiptV2ReadResult {
+  const path = receiptPathV2(receiptId);
+  if (!path) return { status: 'degraded', reason: 'invalid-receipt-id' };
+  const key = loadExistingProvenanceKeyReadOnly();
+  if (!key) return { status: 'degraded', reason: 'provenance-unavailable' };
+  if (!existsSync(path)) return { status: 'missing', reason: 'absent' };
+  try {
+    inspectExactDispatchProductionReceiptFile(path);
+    const read = readStableRegularFile(path, {
+      anchorPath: dispatchProductionDir(),
+      maxFileBytes: MAX_RECEIPT_BYTES,
+      remainingBytes: MAX_RECEIPT_BYTES,
+    });
+    if (!read.ok) return { status: 'degraded', reason: `unsafe-receipt-${read.reason}` };
+    const receipt = verifyCoordinatorSelectionStartReceiptV2(JSON.parse(read.text), key);
     return receipt ? { status: 'found', receipt } : { status: 'degraded', reason: 'invalid-receipt' };
   } catch {
     return { status: 'degraded', reason: 'receipt-read-failed' };
@@ -479,6 +527,71 @@ export function writeSelectionStartReceipt(input: CreateSelectionStartReceiptInp
       fsyncDirectory(directory);
       const installed = readSelectionStartReceipt(receipt.receiptId);
       return installed.status === 'found' && sameReplay(installed.receipt, receipt)
+        ? { status: 'recorded', receipt: installed.receipt }
+        : { status: 'degraded', reason: 'receipt-final-read-failed' };
+    });
+  } catch {
+    return { status: 'degraded', reason: 'receipt-write-failed' };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve write failure */ } }
+    if (temp !== undefined) { try { unlinkSync(temp); } catch { /* exact temp cleanup is best effort */ } }
+  }
+}
+
+/**
+ * Durably install a V2 receipt in a V2-only namespace using the same link-based
+ * no-clobber publication and verified reread as the legacy V1 store.
+ */
+export function writeCoordinatorSelectionStartReceiptV2(
+  input: CreateCoordinatorSelectionStartReceiptV2Input,
+): CoordinatorSelectionStartReceiptV2WriteResult {
+  const key = loadExistingProvenanceKey();
+  if (!key) return { status: 'unavailable', reason: 'provenance-unavailable' };
+  const receipt = createCoordinatorSelectionStartReceiptV2(input, key);
+  if (!receipt) return { status: 'unavailable', reason: 'invalid-receipt-input' };
+  const existing = readCoordinatorSelectionStartReceiptV2(receipt.receiptId);
+  if (existing.status === 'found') return sameReplayV2(existing.receipt, receipt)
+    ? { status: 'replayed', receipt: existing.receipt }
+    : { status: 'conflicted', reason: 'receipt-id-conflict' };
+  if (existing.status === 'degraded' && existing.reason !== 'absent') {
+    return { status: 'degraded', reason: existing.reason };
+  }
+
+  let temp: string | undefined;
+  let fd: number | undefined;
+  try {
+    return withStableDispatchProductionWriteRoot(() => {
+      const directory = coordinatorSelectionStartReceiptV2Dir();
+      ensurePrivateDispatchProductionReceiptDirectory(directory);
+      const target = receiptPathV2(receipt.receiptId)!;
+      const bytes = Buffer.from(`${JSON.stringify(receipt)}\n`, 'utf8');
+      if (bytes.length > MAX_RECEIPT_BYTES) return { status: 'unavailable', reason: 'receipt-too-large' };
+      temp = join(directory, `.${receipt.receiptId}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
+      const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+      fd = openSync(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
+      if (!safeCreatedTemp(fd, temp)) throw new Error('unsafe receipt temporary file');
+      writeAll(fd, bytes);
+      chmodSync(temp, 0o600);
+      fsyncSync(fd);
+      if (!safeCreatedTemp(fd, temp)) throw new Error('receipt temporary changed');
+      closeSync(fd);
+      fd = undefined;
+      try {
+        linkSync(temp, target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const winner = readCoordinatorSelectionStartReceiptV2(receipt.receiptId);
+        return winner.status === 'found'
+          ? sameReplayV2(winner.receipt, receipt)
+            ? { status: 'replayed', receipt: winner.receipt }
+            : { status: 'conflicted', reason: 'receipt-id-conflict' }
+          : { status: 'degraded', reason: 'receipt-install-contended' };
+      }
+      unlinkSync(temp);
+      temp = undefined;
+      fsyncDirectory(directory);
+      const installed = readCoordinatorSelectionStartReceiptV2(receipt.receiptId);
+      return installed.status === 'found' && sameReplayV2(installed.receipt, receipt)
         ? { status: 'recorded', receipt: installed.receipt }
         : { status: 'degraded', reason: 'receipt-final-read-failed' };
     });
