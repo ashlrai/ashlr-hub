@@ -21,6 +21,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import type { WorkItem, AshlrConfig } from '../src/core/types.js';
 import {
   LocalWorkQueueCoordinator,
@@ -70,6 +71,23 @@ function executionKey(item: WorkItem): string {
   const key = workItemExecutionKey(item);
   if (key === null) throw new Error('fixture work item must have an execution identity');
   return key;
+}
+
+function receiptBindingFor(ref: NonNullable<ReturnType<SharedStore['beginClaimExecution']>>) {
+  const claimBindingDigest = createHash('sha256')
+    .update(`ashlr:execution-authority:v1\0${ref.queueId}\0${ref.epoch}\0${ref.ownerKey}`)
+    .digest('hex');
+  return {
+    schemaVersion: 2 as const,
+    receiptId: 'a'.repeat(64),
+    receiptDigest: 'b'.repeat(64),
+    queueId: ref.queueId,
+    claimEpoch: ref.epoch,
+    claimBindingDigest,
+    rootDigest: 'c'.repeat(64),
+    selectionDigest: 'd'.repeat(64),
+    committedAt: '2026-07-20T16:00:00.000Z',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +231,29 @@ describe('M111 WorkItem execution identity', () => {
 // ===========================================================================
 
 describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
+  it('retains one metadata-only V2 receipt binding for an exact executing claim', () => {
+    const store = makeStore(tmpDir);
+    const item = makeItem('receipt-binding-item');
+    const [claimed] = store.claimLeases([executionKey(item)], 1, 'machine-A');
+    expect(claimed).toBeDefined();
+    const executing = store.beginClaimExecution(claimed!);
+    expect(executing).toBeDefined();
+    const binding = receiptBindingFor(executing!);
+
+    expect(store.bindSelectionReceipt(executing!, binding)).toEqual({ status: 'success', value: binding });
+    expect(store.bindSelectionReceipt(executing!, binding)).toEqual({ status: 'success', value: binding });
+    expect(store.bindSelectionReceipt(executing!, { ...binding, rootDigest: 'e'.repeat(64) }))
+      .toEqual({ status: 'authority-lost' });
+    expect(store.readSelectionReceiptBinding(binding.receiptId)).toEqual({ status: 'found', binding });
+    expect(store.settleClaim(executing!)).toBe(true);
+
+    const restarted = makeStore(tmpDir);
+    expect(restarted.readSelectionReceiptBinding(binding.receiptId)).toEqual({ status: 'found', binding });
+    const stored = fs.readFileSync(path.join(tmpDir, 'ashlr-fleet-queue.json'), 'utf8');
+    expect(stored).not.toContain(executing!.ownerToken);
+    expect(stored).not.toContain(executionKey(item));
+  });
+
   it('claimItems returns the requested items', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');

@@ -2941,3 +2941,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover recent qualified activity and malformed timestamp fallback; run focused tests, typecheck, and lint.
 - [ ] Build a complete detailed outcome reader before wiring the seam into duplicate suppression callers.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Coordinator-Minted V2 Receipt Foundations (2026-07-20)
+- [x] Define and test a strict standalone V2 signed receipt envelope while preserving V1 forensic-only behavior.
+- [x] Add bounded metadata-only durable receipt bindings guarded by exact executing shared-queue claim authority.
+- [x] Cover replay, conflict rejection, restart persistence, privacy, typecheck, and focused lint/tests.
+- [ ] Add exact authority-to-private-claim coordinator plumbing with V2 write/readback; keep daemon dispatch inactive.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

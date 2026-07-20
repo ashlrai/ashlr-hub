@@ -101,6 +101,23 @@ export interface UsageEntry {
   resetsAt?: number;
 }
 
+/** Durable, metadata-only proof that an executing shared claim bound one V2 receipt. */
+export interface SelectionReceiptBindingV2 {
+  schemaVersion: 2;
+  receiptId: string;
+  receiptDigest: string;
+  queueId: string;
+  claimEpoch: number;
+  claimBindingDigest: string;
+  rootDigest: string;
+  selectionDigest: string;
+  committedAt: string;
+}
+
+export type SelectionReceiptBindingReadResult =
+  | { status: 'found'; binding: SelectionReceiptBindingV2 }
+  | { status: 'missing' | 'degraded'; reason: string };
+
 /** The on-disk JSON schema for the shared fleet queue. */
 export interface SharedFleetQueue {
   /** Present once modern fenced claims have been created. */
@@ -115,6 +132,8 @@ export interface SharedFleetQueue {
   worked: WorkedEvent[];
   /** Cross-machine subscription/usage ledger. */
   usage: UsageEntry[];
+  /** Retained V2 receipt bindings; never includes item or owner capability data. */
+  selectionReceiptBindings?: SelectionReceiptBindingV2[];
 }
 
 /** Per-machine claim counts for read-only queue health surfaces. */
@@ -223,6 +242,7 @@ const capabilityStatusByPath = new Map<string, CachedCapabilityStatus>();
 const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
 const MAX_CLAIMS = 20_000;
 const MAX_USAGE = 2_000;
+const MAX_SELECTION_RECEIPT_BINDINGS = 2_048;
 const LEGACY_EXECUTING_LEASE = Number.MAX_SAFE_INTEGER;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOFOLLOW_FLAG = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
@@ -286,6 +306,35 @@ function defaultClaimCooldownPolicy(itemId: string): QueueClaimCooldownPolicy {
 
 function emptyQueue(): SharedFleetQueue {
   return { claims: Object.create(null) as Record<string, ItemClaim>, worked: [], usage: [] };
+}
+
+const SHA256_RE = /^[a-f0-9]{64}$/;
+
+function validSelectionReceiptBinding(value: unknown): value is SelectionReceiptBindingV2 {
+  if (!isPlainObject(value) || Object.keys(value).length !== 9) return false;
+  const committedAt = value['committedAt'];
+  return value['schemaVersion'] === 2 &&
+    typeof value['receiptId'] === 'string' && SHA256_RE.test(value['receiptId']) &&
+    typeof value['receiptDigest'] === 'string' && SHA256_RE.test(value['receiptDigest']) &&
+    typeof value['queueId'] === 'string' && UUID_RE.test(value['queueId']) &&
+    typeof value['claimEpoch'] === 'number' && Number.isSafeInteger(value['claimEpoch']) && value['claimEpoch'] > 0 &&
+    typeof value['claimBindingDigest'] === 'string' && SHA256_RE.test(value['claimBindingDigest']) &&
+    typeof value['rootDigest'] === 'string' && SHA256_RE.test(value['rootDigest']) &&
+    typeof value['selectionDigest'] === 'string' && SHA256_RE.test(value['selectionDigest']) &&
+    typeof committedAt === 'string' && committedAt.length <= 128 && Number.isFinite(Date.parse(committedAt));
+}
+
+function receiptBindingMatches(left: SelectionReceiptBindingV2, right: SelectionReceiptBindingV2): boolean {
+  return left.receiptId === right.receiptId && left.receiptDigest === right.receiptDigest &&
+    left.queueId === right.queueId && left.claimEpoch === right.claimEpoch &&
+    left.claimBindingDigest === right.claimBindingDigest && left.rootDigest === right.rootDigest &&
+    left.selectionDigest === right.selectionDigest;
+}
+
+function claimBindingDigest(ref: QueueClaimRef): string {
+  return createHash('sha256')
+    .update(`ashlr:execution-authority:v1\0${ref.queueId}\0${ref.epoch}\0${ref.ownerKey}`)
+    .digest('hex');
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -353,7 +402,10 @@ function parseQueue(raw: string): { queue: SharedFleetQueue; valid: boolean } {
   if (
     Object.keys(claims).length > MAX_CLAIMS ||
     parsed['worked'].length > MAX_WORKED ||
-    parsed['usage'].length > MAX_USAGE
+    parsed['usage'].length > MAX_USAGE ||
+    (parsed['selectionReceiptBindings'] !== undefined &&
+      (!Array.isArray(parsed['selectionReceiptBindings']) ||
+        parsed['selectionReceiptBindings'].length > MAX_SELECTION_RECEIPT_BINDINGS))
   ) return { queue: emptyQueue(), valid: false };
   const validClaims = Object.create(null) as Record<string, ItemClaim>;
   let maxModernEpoch = 0;
@@ -426,12 +478,29 @@ function parseQueue(raw: string): { queue: SharedFleetQueue; valid: boolean } {
   if ((modernClaims > 0 || hasModernMetadata) && !modernMetadataValid) {
     return { queue: emptyQueue(), valid: false };
   }
+  const bindings = parsed['selectionReceiptBindings'];
+  if (bindings !== undefined && !(bindings as unknown[]).every(validSelectionReceiptBinding)) {
+    return { queue: emptyQueue(), valid: false };
+  }
+  const selectionReceiptBindings = bindings === undefined ? [] : bindings as SelectionReceiptBindingV2[];
+  const receiptIds = new Set<string>();
+  const claimBindings = new Set<string>();
+  for (const binding of selectionReceiptBindings) {
+    if (!modernMetadataValid || binding.queueId !== parsed['queueId'] ||
+      receiptIds.has(binding.receiptId) ||
+      claimBindings.has(`${binding.queueId}\0${binding.claimEpoch}\0${binding.claimBindingDigest}`)) {
+      return { queue: emptyQueue(), valid: false };
+    }
+    receiptIds.add(binding.receiptId);
+    claimBindings.add(`${binding.queueId}\0${binding.claimEpoch}\0${binding.claimBindingDigest}`);
+  }
   const queue: SharedFleetQueue = { claims: validClaims, worked, usage };
   if (modernMetadataValid) {
     queue.schemaVersion = MODERN_QUEUE_SCHEMA_VERSION;
     queue.queueId = parsed['queueId'] as string;
     queue.nextClaimEpoch = Number(parsed['nextClaimEpoch']);
   }
+  if (bindings !== undefined) queue.selectionReceiptBindings = selectionReceiptBindings.map((binding) => ({ ...binding }));
   return { queue, valid: true };
 }
 
@@ -1199,6 +1268,64 @@ export class SharedStore {
     return { status: 'authority-lost' };
   }
 
+  /**
+   * Atomically bind one public V2 receipt commitment to an exact executing
+   * claim. Retained bindings survive terminal claim settlement for restart
+   * validation; capacity is fail-closed rather than evicting evidence.
+   */
+  bindSelectionReceipt(
+    ref: QueueClaimRef,
+    binding: SelectionReceiptBindingV2,
+  ): QueueClaimMutationResult<SelectionReceiptBindingV2> {
+    if (!this.ensureDir() || ref.phase !== 'executing' || !validSelectionReceiptBinding(binding)) {
+      return { status: 'authority-lost' };
+    }
+    if (
+      binding.queueId !== ref.queueId || binding.claimEpoch !== ref.epoch ||
+      binding.claimBindingDigest !== claimBindingDigest(ref)
+    ) return { status: 'authority-lost' };
+    const result = this.withLock((q) => {
+      if (!this.claimMatches(q, ref)) return { queue: q, result: null };
+      const bindings = q.selectionReceiptBindings ?? [];
+      const sameReceipt = bindings.find((entry) => entry.receiptId === binding.receiptId);
+      const sameClaim = bindings.find((entry) =>
+        entry.queueId === binding.queueId && entry.claimEpoch === binding.claimEpoch &&
+        entry.claimBindingDigest === binding.claimBindingDigest,
+      );
+      if (sameReceipt || sameClaim) {
+        const existing = sameReceipt ?? sameClaim!;
+        return { queue: q, result: receiptBindingMatches(existing, binding) ? existing : null };
+      }
+      if (bindings.length >= MAX_SELECTION_RECEIPT_BINDINGS) return { queue: q, result: null };
+      const committed = { ...binding };
+      q.selectionReceiptBindings = [...bindings, committed];
+      return { queue: q, result: committed };
+    }, null, { retryLockMs: this.authorityMutationRetryMs() });
+    if (result) return { status: 'success', value: { ...result } };
+    const current = this.readQueueResult();
+    if (!current.readable) return { status: 'contended' };
+    const existing = current.queue.selectionReceiptBindings?.find((entry) => entry.receiptId === binding.receiptId);
+    if (existing && receiptBindingMatches(existing, binding)) return { status: 'success', value: { ...existing } };
+    if (existing || current.queue.selectionReceiptBindings?.some((entry) =>
+      entry.queueId === binding.queueId && entry.claimEpoch === binding.claimEpoch &&
+      entry.claimBindingDigest === binding.claimBindingDigest,
+    )) return { status: 'authority-lost' };
+    const installed = this.readExactClaim(ref);
+    if (!installed.readable || installed.ref) return { status: 'contended' };
+    return { status: 'authority-lost' };
+  }
+
+  /** Read a retained V2 receipt binding without exposing claim capabilities. */
+  readSelectionReceiptBinding(receiptId: string): SelectionReceiptBindingReadResult {
+    if (!SHA256_RE.test(receiptId)) return { status: 'missing', reason: 'invalid-receipt-id' };
+    const current = this.readQueueResult();
+    if (!current.readable) return { status: 'degraded', reason: 'queue-unreadable' };
+    const binding = current.queue.selectionReceiptBindings?.find((entry) => entry.receiptId === receiptId);
+    return binding
+      ? { status: 'found', binding: { ...binding } }
+      : { status: 'missing', reason: 'receipt-binding-not-found' };
+  }
+
   /** Release exact claimed generations. Executing claims require completion. */
   releaseClaims(refs: QueueClaimRef[]): string[] {
     if (!this.ensureDir() || refs.length === 0) return [];
@@ -1416,6 +1543,9 @@ export class SharedStore {
           })(),
         },
       ])),
+      ...(queue.selectionReceiptBindings
+        ? { selectionReceiptBindings: queue.selectionReceiptBindings.map((binding) => ({ ...binding })) }
+        : {}),
     };
   }
 

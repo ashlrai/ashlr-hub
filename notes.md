@@ -3167,6 +3167,12 @@
 - Ordering is fixed: shared claim transition, one-time authority binding, eligible ordinary-direct receipt write plus authenticated reread, dispatch/quota start records, then engine effect. A definite pre-effect receipt refusal launches nothing; an indeterminate durable write retains the current fail-closed executing-claim ambiguity rather than releasing work for duplication.
 - This is a design checkpoint only. V2 storage and daemon integration remain pending, and the canary is still hard-disabled.
 
+# Current V2 Receipt Envelope And Durable Binding
+- The V2 receipt envelope is now a separate, strictly validated `coordinator-minted-v2` signed format. Its canonical digests cover the signed receipt, identity root, and canonical binary selection observation; V1 remains forensic-only and unjoined.
+- Shared queue storage can now retain one bounded metadata-only V2 receipt binding per exact executing claim. The lock-protected mutation checks the queue id, claim epoch, process-authority binding digest, exact replay, and conflict cases; records survive claim settlement for restart validation and never store item identity, machine identity, owner key/token, prompts, diffs, process output, or environment data.
+- This remains intentionally inert. The next required step is a `SharedWorkQueueCoordinator` method that accepts only the exact process-minted authority, creates/reads the V2 envelope, binds it durably, re-reads both artifacts, and only then exposes a success result to a future producer. The daemon still discards its authority and does not create V2 receipts.
+- Verification: selection-start receipt coverage passes eight assertions; shared work-queue coverage passes 57 assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
