@@ -164,7 +164,7 @@ export interface FleetBackendResourceStatus {
 export interface FleetSelectionPropensityStatus {
   authority: 'observation-only';
   source: DispatchProductionSourceQuality;
-  observationState: 'unavailable' | 'degraded' | 'no-dispatches' | 'not-observed' | 'unjoined' | 'present';
+  observationState: 'unavailable' | 'degraded' | 'no-dispatches' | 'not-observed' | 'unjoined' | 'locally-bound' | 'present';
 }
 
 /** A single backend's recent activity + quota standing. */
@@ -1450,7 +1450,7 @@ const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 function selectionPropensityStatus(
   source: DispatchProductionSourceQuality,
-  observed?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'degraded' | 'present',
+  observed?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'locally-bound' | 'degraded' | 'present',
 ): FleetSelectionPropensityStatus {
   const observationState = source.sourceState === 'missing'
     ? 'unavailable'
@@ -2653,10 +2653,24 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     };
   }
   try {
+    let selectionReceiptBindingReader: import('./dispatch-production-ledger.js').SelectionReceiptBindingReader | undefined;
+    const sharedQueueConfig = cfg.fleet?.sharedQueue;
+    if (
+      sharedQueueConfig?.mode === 'filesystem' && sharedQueueConfig.path?.trim() &&
+      sharedQueueConfig.trustedCoherentStorage === true
+    ) {
+      const { SharedStore } = await import('./shared-store.js');
+      const leaseMs = typeof sharedQueueConfig.leaseMs === 'number' && sharedQueueConfig.leaseMs > 0
+        ? Math.floor(sharedQueueConfig.leaseMs)
+        : 5 * 60 * 1000;
+      const store = new SharedStore(sharedQueueConfig.path, leaseMs);
+      selectionReceiptBindingReader = (receiptId) => store.readSelectionReceiptBinding(receiptId);
+    }
     const dispatchRead = readDispatchProductionYieldDetailed({
       windowMs: RECENT_WINDOW_MS,
       limit: 1200,
       limitPerDimension: 8,
+      ...(selectionReceiptBindingReader ? { selectionReceiptBindingReader } : {}),
     });
     status.dispatchProductionSource = dispatchRead.sourceQuality;
     status.selectionPropensity = selectionPropensityStatus(

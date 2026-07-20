@@ -90,7 +90,12 @@ import {
   UNSAFE_RECEIPT_DIRECTORY_REASONS,
   withStableDispatchProductionWriteRoot,
 } from './dispatch-production-storage.js';
-import { readSelectionStartReceipt } from './selection-start-receipt.js';
+import {
+  readCoordinatorSelectionStartReceiptV2,
+  readSelectionStartReceipt,
+  receiptMatchesSelectionBindingV2,
+} from './selection-start-receipt.js';
+import type { SelectionReceiptBindingReadResult } from './shared-store.js';
 
 export {
   dispatchProductionDir,
@@ -500,8 +505,11 @@ export interface DispatchProductionYieldReadResult {
    * A ledger event alone cannot qualify an observation: a future receipt join
    * must bind it to pre-execution authority before it can be reported present.
    */
-  selectionObservationState?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'degraded' | 'present';
+  selectionObservationState?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'locally-bound' | 'degraded' | 'present';
 }
+
+/** Read-only adapter for a configured shared queue's public V2 bindings. */
+export type SelectionReceiptBindingReader = (receiptId: string) => SelectionReceiptBindingReadResult;
 
 export interface DispatchProductionReasonCount {
   reason: string;
@@ -7496,13 +7504,48 @@ export function readReceiptQualifiedDispatchSelection(
   return { receiptId, selectionObservation: receipt.selectionObservation };
 }
 
-function selectionObservationState(events: readonly DispatchProductionEvent[]):
-  | 'no-dispatches' | 'not-observed' | 'unjoined' | 'degraded' | 'present' {
+/**
+ * Verify a V2 envelope against an injected configured shared-queue reader.
+ * This is a local read projection only: it must never be used for learning,
+ * automerge, or fleet-wide/restart qualification.
+ */
+export function readLocallyBoundDispatchSelectionV2(
+  event: DispatchProductionEvent,
+  readBinding: SelectionReceiptBindingReader,
+): ReceiptQualifiedDispatchSelectionV1 | undefined {
+  const receiptId = event.selectionStartReceiptId;
+  const observation = event.selectionObservation;
+  if (!receiptId || !observation) return undefined;
+  const local = readCoordinatorSelectionStartReceiptV2(receiptId);
+  if (local.status !== 'found') return undefined;
+  const binding = readBinding(receiptId);
+  if (binding.status !== 'found' || !receiptMatchesSelectionBindingV2(local.receipt, binding.binding)) {
+    return undefined;
+  }
+  const receiptModel = local.receipt.selectionObservation.selectedModel ?? null;
+  if (
+    local.receipt.root.runId !== event.runId ||
+    local.receipt.root.trajectoryId !== event.trajectoryId ||
+    local.receipt.root.objectiveHash !== event.objectiveHash ||
+    local.receipt.selectionObservation.selectedBackend !== event.backend ||
+    local.receipt.selectionObservation.selectedTier !== event.tier ||
+    receiptModel !== (event.model ?? null) ||
+    JSON.stringify(local.receipt.selectionObservation) !== JSON.stringify(observation) ||
+    Date.parse(local.receipt.ts) > Date.parse(event.ts)
+  ) return undefined;
+  return { receiptId, selectionObservation: local.receipt.selectionObservation };
+}
+
+function selectionObservationState(
+  events: readonly DispatchProductionEvent[],
+  readBinding?: SelectionReceiptBindingReader,
+): 'no-dispatches' | 'not-observed' | 'unjoined' | 'locally-bound' | 'degraded' | 'present' {
   if (events.length === 0) return 'no-dispatches';
   const claimed = events.filter((event) => event.selectionObservation !== undefined);
   if (claimed.length === 0) return 'not-observed';
   const receiptIds = new Set<string>();
   let hasUnjoined = false;
+  let hasLocallyBound = false;
   for (const event of claimed) {
     const receiptId = event.selectionStartReceiptId;
     if (!receiptId) {
@@ -7516,8 +7559,19 @@ function selectionObservationState(events: readonly DispatchProductionEvent[]):
       hasUnjoined = true;
       continue;
     }
+    const localV2 = readCoordinatorSelectionStartReceiptV2(receiptId);
+    if (localV2.status === 'found') {
+      if (!readBinding) {
+        hasUnjoined = true;
+        continue;
+      }
+      if (!readLocallyBoundDispatchSelectionV2(event, readBinding)) return 'degraded';
+      hasLocallyBound = true;
+      continue;
+    }
     if (!readReceiptQualifiedDispatchSelection(event)) return 'degraded';
   }
+  if (hasLocallyBound) return hasUnjoined ? 'unjoined' : 'locally-bound';
   return hasUnjoined ? 'unjoined' : 'present';
 }
 
@@ -7527,6 +7581,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
   limitPerDimension?: number;
   maxBytes?: number;
   maxRows?: number;
+  selectionReceiptBindingReader?: SelectionReceiptBindingReader;
 }): DispatchProductionYieldReadResult {
   const windowMs = opts?.windowMs ?? 24 * 60 * 60 * 1000;
   const sinceMs = Date.now() - windowMs;
@@ -7549,7 +7604,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
     sourceQuality,
     ...(read.sourceState === 'healthy' && read.complete
       ? {
-          selectionObservationState: selectionObservationState(read.events),
+          selectionObservationState: selectionObservationState(read.events, opts?.selectionReceiptBindingReader),
         }
       : {}),
   };

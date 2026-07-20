@@ -99,6 +99,7 @@ import {
   readDispatchProductionParents,
   readDispatchProductionYield,
   readDispatchProductionYieldDetailed,
+  readLocallyBoundDispatchSelectionV2,
   recordDispatchProduction,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
@@ -109,7 +110,13 @@ import {
   type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
-import { writeSelectionStartReceipt } from '../src/core/fleet/selection-start-receipt.js';
+import {
+  receiptDigestV2,
+  rootDigestV2,
+  selectionDigestV2,
+  writeCoordinatorSelectionStartReceiptV2,
+  writeSelectionStartReceipt,
+} from '../src/core/fleet/selection-start-receipt.js';
 import {
   hasReceiptQualifiedSelectionObservation,
   listTrajectoryRecords,
@@ -808,6 +815,80 @@ describe('M342 dispatch production ledger', () => {
     })).toMatchObject({ recorded: 1 });
     expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
       .toBe('degraded');
+  });
+
+  it('reports an exact V2 envelope/shared binding as locally bound without granting learning qualification', () => {
+    const now = new Date().toISOString();
+    const event = makeEvent({
+      ts: now,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.6',
+      runId: 'locally-bound-v2-run',
+      trajectoryId: 'run:locally-bound-v2-run',
+      objectiveHash: '9'.repeat(64),
+      routerPolicyVersion: 'fleet-router-v1',
+      learningEpoch: now.slice(0, 10),
+    });
+    const selectionObservation = createDispatchSelectionObservation({
+      candidates: [
+        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+        { backend: 'claude', tier: 'frontier', model: 'opus' },
+      ],
+      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selectionPolicyVersion: 'canary-v1',
+      randomizationProtocolVersion: 'binary-uniform-v1',
+      selectionProbabilityPpm: 500_000,
+      trajectoryId: event.trajectoryId!,
+      runId: event.runId!,
+      objectiveHash: event.objectiveHash!,
+      routerPolicyVersion: event.routerPolicyVersion!,
+      learningEpoch: event.learningEpoch!,
+    }, loadOrCreateKey());
+    if (!selectionObservation) throw new Error('expected selection observation');
+    const receipt = writeCoordinatorSelectionStartReceiptV2({
+      root: { runId: event.runId!, trajectoryId: event.trajectoryId!, objectiveHash: event.objectiveHash! },
+      claim: {
+        queueId: '8f76ce25-9b10-4ddb-8e94-43a4d880d4fc', claimEpoch: 3, claimBindingDigest: 'a'.repeat(64),
+      },
+      selectionObservation,
+      ts: new Date(Date.now() - 1_000).toISOString(),
+    });
+    if (receipt.status !== 'recorded') throw new Error('expected V2 receipt');
+    const binding = {
+      schemaVersion: 2 as const,
+      receiptId: receipt.receipt.receiptId,
+      receiptDigest: receiptDigestV2(receipt.receipt)!,
+      queueId: receipt.receipt.claim.queueId,
+      claimEpoch: receipt.receipt.claim.claimEpoch,
+      claimBindingDigest: receipt.receipt.claim.claimBindingDigest,
+      rootDigest: rootDigestV2(receipt.receipt.root)!,
+      selectionDigest: selectionDigestV2(receipt.receipt.selectionObservation)!,
+      committedAt: receipt.receipt.ts,
+    };
+    const claimed = { ...event, selectionObservation, selectionStartReceiptId: receipt.receipt.receiptId };
+    expect(recordDispatchProduction(claimed)).toMatchObject({ recorded: 1 });
+    expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
+      .toBe('unjoined');
+    const reader = (receiptId: string) => receiptId === binding.receiptId
+      ? ({ status: 'found' as const, binding })
+      : ({ status: 'missing' as const, reason: 'receipt-binding-not-found' });
+    expect(readLocallyBoundDispatchSelectionV2(claimed, reader)).toMatchObject({
+      receiptId: receipt.receipt.receiptId,
+      selectionObservation,
+    });
+    expect(readDispatchProductionYieldDetailed({
+      windowMs: 60 * 60 * 1000,
+      selectionReceiptBindingReader: reader,
+    }).selectionObservationState).toBe('locally-bound');
+    const [trajectory] = listTrajectoryRecords({
+      windowHours: 1,
+      deps: {
+        readDispatchProductionEvents: () => [claimed],
+        readAgentActions: () => [], readSkillUseEvents: () => [], listOutcomeRecords: () => [], loadProposal: () => null,
+      },
+    });
+    expect(trajectory?.receiptQualifiedSelectionObservation).toBeUndefined();
   });
 
   it('appends and reads dispatch-production events newest first', () => {

@@ -3196,6 +3196,12 @@
 - This does not activate any runtime route. The daemon still has no authentic two-route population at the pre-effect boundary, so it cannot call the primitive or create selection evidence yet.
 - Verification: selection-canary, V2 receipt, and shared-queue focused suites pass 76 assertions; TypeScript typechecking and quiet lint pass.
 
+# Current V2 Local Binding Status Projection
+- The dispatch ledger can now validate a V2 receipt through an injected reader for the configured shared queue's public binding records. It verifies the signed local envelope, all public digests, exact claim fields, immutable timestamp, and dispatch event route/identity before reporting `locally-bound`.
+- Fleet Status supplies that reader only for an explicitly trusted coherent filesystem queue. A missing, degraded, or mismatched binding is fail-closed; without a trusted configured reader, V2 remains `unjoined`.
+- `locally-bound` is deliberately not receipt-qualified trajectory evidence. It does not change learning eligibility, automerge authority, or any fleet-wide/restart claim because the signed envelope is still machine-local.
+- Verification: standalone local-binding, V2 receipt, and selection-canary suites pass 20 assertions; TypeScript typechecking and quiet lint pass. The broad dispatch-ledger runner retains its known non-terminating worker behavior and remains covered by protected CI.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
