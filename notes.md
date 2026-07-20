@@ -3070,3 +3070,8 @@
 - The work-queue coordinator now returns an opaque authority projection when a shared claim atomically crosses from `claimed` to `executing`: queue ID, claim epoch, and a domain-separated SHA-256 binding digest. Owner tokens, encoded owner keys, and item identities stay inside the coordinator.
 - Local execution returns only `{kind:'local'}`. The daemon still uses the value solely as a truthy pre-launch fence; no receipt is written and no trajectory/dispatch evidence changes in this increment.
 - Verification: M111/M113 queue and coordinator suites pass 75 assertions; TypeScript and diff checks pass.
+
+# Current Selection-Start Receipt Contract
+- A standalone pure receipt contract now signs and verifies an exact envelope containing only the observation-only selection commitment, run/trajectory/objective root, opaque shared queue ID/epoch/binding digest, timestamp, receipt ID, and signature. Receipt IDs and signatures use separate HMAC domains.
+- Exact key-set validation rejects tampering, added fields, different keys, malformed roots, malformed shared claim identity, and invalid selection metadata. It stores neither candidate identities nor queue owner credentials. It is not persisted or consumed by the daemon yet, so it cannot create live evidence or alter routing.
+- Verification: selection-start receipt, selection-config, and queue tests pass 61 assertions; TypeScript and diff checks pass.
