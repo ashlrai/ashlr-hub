@@ -116,6 +116,7 @@ import {
   workedLedgerPath,
 } from '../src/core/fleet/worked-ledger.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { generatedRepairCooldownKey } from '../src/core/fleet/generated-repair-lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -405,6 +406,26 @@ describe('M220 sweepJudgedProposals — pure unit', () => {
     expect(recorded).toEqual([{ itemId: item.id, generationId }]);
   });
 
+  it('passes only the proposal repository match when item ids collide', () => {
+    const first = makeItem('shared-item', tmpRepo, { title: 'First repository item' });
+    const secondRepo = path.join(tmpHome, 'second-repo');
+    const second = makeItem('shared-item', secondRepo, { title: 'Second repository item' });
+    const matched: WorkItem[] = [];
+
+    sweepJudgedProposals([{
+      id: 'prop-second-repo',
+      title: 'Second repository proposal',
+      summary: '',
+      repo: secondRepo,
+      status: 'rejected',
+      workItemId: 'shared-item',
+    }], [first, second], undefined, (_itemId, _outcome, _ts, _generationId, item) => {
+      if (item) matched.push(item);
+    });
+
+    expect(matched).toEqual([second]);
+  });
+
   it('records a judged-decline outcome for a rejected proposal matched by item.id', () => {
     const item = makeItem('my-stable-id', tmpRepo, { title: 'CI is failing' });
 
@@ -615,7 +636,7 @@ describe('M220 tick() integration — antiClog default ON', () => {
     // (judged-noise-item's proposal was rejected → sweepJudgedProposals records it →
     //  recentlyDeclined returns true → coordinator.shouldSkip skips it)
     const ledger = loadWorkedLedger();
-    const judgedEvent = ledger.events.find(e => e.itemId === judgedId);
+    const judgedEvent = ledger.events.find(e => e.itemId === generatedRepairCooldownKey(backlogItems[0]!));
     // It should now have a judged-noise entry from the sweep
     expect(judgedEvent).toBeDefined();
     expect(judgedEvent?.outcome).toBe('judged-noise');
@@ -663,10 +684,50 @@ describe('M220 tick() integration — antiClog default ON', () => {
     await tick(cfg, { dryRun: false });
 
     const sharedStore = new SharedStore(sharedDir);
-    const sharedEvents = sharedStore.readSnapshot().worked.filter((event) => event.itemId === judgedId);
+    const cooldownKey = generatedRepairCooldownKey(backlogItems[0]!);
+    const sharedEvents = sharedStore.readSnapshot().worked.filter((event) => event.itemId === cooldownKey);
     expect(sharedEvents.some((event) => event.outcome === 'judged-noise')).toBe(true);
-    expect(sharedStore.recentlyDeclined(judgedId, 6 * 60 * 60 * 1000)).toBe(true);
-    expect(loadWorkedLedger().events.some((event) => event.itemId === judgedId)).toBe(false);
+    expect(sharedStore.recentlyDeclined(cooldownKey, 6 * 60 * 60 * 1000)).toBe(true);
+    expect(loadWorkedLedger().events.some((event) => event.itemId === cooldownKey)).toBe(false);
+  }, 15_000);
+
+  it('does not write rejected feedback onto an equal-id item in another repository', async () => {
+    const itemId = 'shared-judged-item';
+    const otherRepo = path.join(tmpHome, 'other-repo');
+    const sharedDir = path.join(tmpHome, 'shared-queue-isolation');
+    const primary = makeItem(itemId, tmpRepo, { score: 10 });
+    const other = makeItem(itemId, otherRepo, { score: 9 });
+    createRejectedProposal({
+      repo: tmpRepo,
+      title: `Fix ${itemId}`,
+      summary: `Addresses ${itemId}`,
+      decisionReason: 'noise',
+    });
+    backlogItems = [primary, other];
+    mockBuildBacklog.mockImplementation(async () => ({
+      generatedAt: new Date().toISOString(),
+      repos: [tmpRepo, otherRepo],
+      items: backlogItems,
+    }));
+    const cfg = {
+      ...makeCfgWithAntiClog(true),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedDir,
+          machineId: 'machine-A',
+          leaseMs: 10_000,
+          trustedCoherentStorage: true,
+        },
+      },
+    } as AshlrConfig;
+    mockLoadConfig.mockReturnValue(cfg);
+
+    await tick(cfg, { dryRun: true });
+
+    const sharedStore = new SharedStore(sharedDir);
+    expect(sharedStore.recentlyDeclined(generatedRepairCooldownKey(primary), 6 * 60 * 60 * 1000)).toBe(true);
+    expect(sharedStore.recentlyDeclined(generatedRepairCooldownKey(other), 6 * 60 * 60 * 1000)).toBe(false);
   }, 15_000);
 
   it('a fresh substantive item is NOT skipped when antiClog is ON', async () => {
