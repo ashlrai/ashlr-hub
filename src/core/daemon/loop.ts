@@ -6796,7 +6796,6 @@ export async function tick(
         !outcome.value.dispatched ||
         !isTrustedGeneratedRepairItem(outcome.value.item)
       ) continue;
-      const itemId = outcome.value.item.id;
       const itemKey = workItemCoverageKey(outcome.value.item);
       if (
         productionWriteFailedItemKeys.has(itemKey) ||

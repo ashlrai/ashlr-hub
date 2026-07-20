@@ -3520,8 +3520,11 @@ function canonicalTreatmentOutcomeReceiptEvent(
     // sanitizer, which materializes their successor as v2. Immutable v1
     // receipts therefore need byte-preserving recognition without relabeling
     // their historical classifier version.
-    const storedLabel = value['learningLabel'];
-    if (isPlainRecord(storedLabel) && storedLabel['classifierVersion'] === 'attempt-shape-v1') {
+    const storedLabel = (value as Record<string, unknown>)['learningLabel'];
+    const storedClassifierVersion: unknown = isPlainRecord(storedLabel)
+      ? storedLabel['classifierVersion']
+      : undefined;
+    if (isPlainRecord(storedLabel) && storedClassifierVersion === 'attempt-shape-v1') {
       return JSON.stringify({ ...sanitized, learningLabel: storedLabel }) === line;
     }
     return false;
