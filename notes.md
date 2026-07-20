@@ -3226,3 +3226,8 @@
 - Repositories with discovered projects but no detector command are explicitly `detector-blocked`; detector candidates cannot make a repository merge-ready.
 - Review hardening: a valid `replace-detected` contract with only quick/deep commands cannot be relabeled as a merge candidate; root candidates are reconstructed only from preserved detector metadata, while nested project commands remain detector-derived. Invalid-contract marker projects are excluded from executable work entirely.
 - Verification: M314 profile/rollout and M22 scanner suites pass 96 assertions, with TypeScript typecheck, quiet lint, and `git diff --check` passing. Fresh protected CI is required on the new head.
+
+# Current Queue Inventory Readiness Truth
+- Fleet Status now distinguishes stale/degraded or unavailable queue inventory from ordinary backlog cooling when no source has actionable queue authority. The readiness blocker is `queue-source-degraded` or `queue-source-unavailable`, rather than a misleading cooldown state.
+- Both blockers select `inspect-queue-inventory`, whose commands are read-only. Fresh queued-autonomy work remains actionable even if the persisted backlog snapshot is stale; no queue admission, daemon routing, persistence, configuration, canary, verification, or merge policy changed.
+- Verification: M49 Fleet Status coverage passes 145 assertions, with TypeScript typecheck, quiet lint, and `git diff --check` passing. Fresh protected CI is required on the new head.

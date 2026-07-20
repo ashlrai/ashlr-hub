@@ -5377,6 +5377,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       freshness: 'stale',
       sourceQuality: { badge: 'stale-source', sourcePresent: true },
     });
+    expect(status.autonomousShipReadiness).toMatchObject({
+      topBlocker: { id: 'queue-source-degraded', source: 'queue' },
+      primaryAction: { id: 'inspect-queue-inventory' },
+    });
+    expect(status.missionBrief).toMatchObject({
+      directive: 'Inspect queue inventory',
+      action: { id: 'inspect-queue-inventory' },
+    });
+    expect(status.autonomousShipReadiness?.primaryAction?.commands.every((command) => command.safety === 'read-only')).toBe(true);
   });
 
   it('keeps fresh queued autonomy actionable independently of a stale cached backlog', async () => {
@@ -5430,6 +5439,26 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       freshness: 'fresh',
       sourceQuality: { badge: 'degraded-source', sourcePresent: true },
     });
+    expect(status.autonomousShipReadiness?.topBlocker?.id).not.toBe('queue-source-degraded');
+  });
+
+  it('uses read-only queue diagnosis when every queue inventory source is unavailable', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    mkdirSync(join(ashlrDir, 'self-heal-queue.json'));
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.autonomousShipReadiness).toMatchObject({
+      topBlocker: { id: 'queue-source-unavailable', source: 'queue' },
+      primaryAction: { id: 'inspect-queue-inventory' },
+    });
+    expect(status.missionBrief).toMatchObject({ directive: 'Inspect queue inventory' });
+    expect(status.autonomousShipReadiness?.primaryAction?.commands.every((command) => command.safety === 'read-only')).toBe(true);
   });
 
   it('keeps an old durable generated repair actionable from a fresh queued-autonomy observation', async () => {

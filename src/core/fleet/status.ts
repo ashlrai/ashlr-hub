@@ -4186,6 +4186,24 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
   const controlBlocked = status.killed || !status.daemon.running || Boolean(firstGuardBlock);
 
+  const queueInventoryAuthority = queueInventoryAuthorityState(status);
+  if (queueInventoryAuthority === 'degraded' || queueInventoryAuthority === 'unavailable') {
+    add({
+      id: 'inspect-queue-inventory',
+      priority: 'medium',
+      label: 'Inspect queue inventory',
+      detail: queueInventoryAuthority === 'degraded'
+        ? 'Visible queue inventory is stale or degraded and grants no dispatch authority.'
+        : 'Queue inventory is unavailable, so no backlog authority can be established.',
+      commands: [
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        nextActionCommand('Inspect queue sources', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
+          note: 'Read-only source diagnosis; does not refresh, rewrite, or admit queue work.',
+        }),
+      ],
+    });
+  }
+
   const phantomAuditAction = phantomAuditNextAction(status.phantom?.agentReport);
   if (phantomAuditAction) add(phantomAuditAction);
 
@@ -4638,6 +4656,21 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       a.id.localeCompare(b.id),
     )
     .slice(0, 6);
+}
+
+type QueueInventoryAuthorityState = 'actionable' | 'degraded' | 'unavailable' | 'unknown';
+
+/** Source freshness is authority, not presentation: visible stale rows cannot dispatch. */
+function queueInventoryAuthorityState(status: FleetStatus): QueueInventoryAuthorityState {
+  const sources = status.queue.sources;
+  if (!sources) return 'unknown';
+  const entries = Object.values(sources);
+  if (entries.some((source) => source.actionableItems > 0)) return 'actionable';
+  const cached = sources.cachedBacklog;
+  const queued = sources.queuedAutonomy;
+  if (cached.sourceState === 'missing' && queued.sourceState === 'unavailable') return 'unavailable';
+  if (cached.freshness === 'stale' || queued.sourceState === 'unavailable') return 'degraded';
+  return 'unknown';
 }
 
 function formatExecutionProfileSample(row: {
@@ -5385,6 +5418,26 @@ function chooseReadinessBlocker(
       'queue',
     );
   }
+  const queueSource = sources.find((source) => source.id === 'queue');
+  const queueInventoryAuthority = queueInventoryAuthorityState(status);
+  if (status.proposals.pending === 0 && queueSource && queueInventoryAuthority === 'unavailable') {
+    return readinessBlocker(
+      'queue-source-unavailable',
+      'Queue source unavailable',
+      queueSource.detail,
+      'medium',
+      'queue',
+    );
+  }
+  if (status.proposals.pending === 0 && queueSource && queueInventoryAuthority === 'degraded') {
+    return readinessBlocker(
+      'queue-source-degraded',
+      'Queue source degraded',
+      queueSource.detail,
+      'medium',
+      'queue',
+    );
+  }
   const readiness = status.autoMergeReadiness;
   if (!readiness) {
     return readinessBlocker(
@@ -5488,21 +5541,6 @@ function chooseReadinessBlocker(
       topReason ? `${topReason[1]}x ${topReason[0]}` : `${readiness.blocked} proposal(s) are blocked.`,
       'medium',
       'auto-merge',
-    );
-  }
-  const queueSource = sources.find((source) => source.id === 'queue');
-  if (
-    status.queue.backlogItems === 0 &&
-    status.proposals.pending === 0 &&
-    queueSource &&
-    (queueSource.status === 'unknown' || queueSource.status === 'unavailable')
-  ) {
-    return readinessBlocker(
-      'queue-source-unavailable',
-      'Queue source unavailable',
-      queueSource.detail,
-      'medium',
-      'queue',
     );
   }
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
@@ -5642,6 +5680,8 @@ function buildAutonomousShipReadiness(
         ? nextActions.find((action) => action.id === 'repair-enrollment-registry') ?? nextActions[0] ?? null
       : topBlocker?.id === 'auto-merge-disabled' && status.proposals.pending > 0
         ? nextActions.find((action) => action.id === 'inspect-pending-proposals') ?? nextActions[0] ?? null
+      : topBlocker?.id === 'queue-source-unavailable' || topBlocker?.id === 'queue-source-degraded'
+        ? nextActions.find((action) => action.id === 'inspect-queue-inventory') ?? nextActions[0] ?? null
       : nextActions[0] ?? null;
   return {
     verdict: readinessVerdict(status, sourceSummary, topBlocker),
@@ -5738,6 +5778,8 @@ function missionDirective(
       return 'Build the highest-value backlog proposal';
     case 'cooldown-gated-backlog':
       return 'Review the backlog cooldown gate';
+    case 'inspect-queue-inventory':
+      return 'Inspect queue inventory';
     case 'add-repo-verify-contracts':
       return 'Add missing repo verification contracts';
     case 'add-explicit-merge-verify-contracts':
