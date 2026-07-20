@@ -2942,4 +2942,9 @@
 - The bound requires a healthy, complete repair-handoff authority read plus parent-reconciled capture/gate evidence. Missing, malformed, conflicting, or degraded journal input returns `unavailable` and fails open rather than suppressing execution.
 - Daemon selection builds this capture state once for the complete backlog snapshot and reuses it across routing and fairness checks; durable journal reads therefore do not scale with candidate count.
 - A direct regression proves selection with no provenance key returns unavailable and does not create a key file.
+
+# Current Protected CI Recovery
+- The first exact-head protected matrix started successfully after runner capacity returned: all macOS and Windows shards passed, while Ubuntu exposed five deterministic test failures.
+- Four workhorse-dispatch assertions seeded route hints by raw scanner id even though production route lookup is repository-qualified. Fixtures now use `workItemCoverageKey`, matching the actual concurrent dispatcher contract.
+- One legacy treatment-receipt compatibility assertion remains under focused investigation; it is kept separate from the route-key fixture repair.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

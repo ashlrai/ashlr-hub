@@ -39,6 +39,7 @@ import {
   slotsForBackendState,
   type ConcurrentDispatchCfg,
 } from '../src/core/fabric/concurrent-dispatch.js';
+import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,9 +148,9 @@ describe('M256 workhorseDispatch', () => {
       tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
       ts: new Date().toISOString(),
     }));
-    const routeHints = new Map(items.map((item) => [item.id, 'local-coder'] as const));
+    const routeHints = new Map(items.map((item) => [workItemCoverageKey(item), 'local-coder'] as const));
     const routeReasons = new Map(items.map((item) => [
-      item.id,
+      workItemCoverageKey(item),
       'frontier-fallback: generated capture proposal repair -> local-coder',
     ] as const));
 
@@ -177,8 +178,8 @@ describe('M256 workhorseDispatch', () => {
     const items = Array.from({ length: 6 }, makeItem);
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
-    for (const item of items) routeHints.set(item.id, 'local-coder');
-    for (const item of items) routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
+    for (const item of items) routeHints.set(workItemCoverageKey(item), 'local-coder');
+    for (const item of items) routeReasons.set(workItemCoverageKey(item), `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
     const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
@@ -211,8 +212,8 @@ describe('M256 workhorseDispatch', () => {
       repairParentBackend: 'local-coder',
       repairParentTier: 'mid',
     });
-    const routeHints = new Map<string, EngineId>([[repair.id, 'local-coder']]);
-    const routeReasons = new Map<string, string>([[repair.id, 'repair-tier-preserved: mid']]);
+    const routeHints = new Map<string, EngineId>([[workItemCoverageKey(repair), 'local-coder']]);
+    const routeReasons = new Map<string, string>([[workItemCoverageKey(repair), 'repair-tier-preserved: mid']]);
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
     const plan = planConcurrentDispatch([repair], snap, dispatchCfg, routeItem);
@@ -234,8 +235,8 @@ describe('M256 workhorseDispatch', () => {
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
     for (const item of items) {
-      routeHints.set(item.id, 'claude');
-      routeReasons.set(item.id, `frontier: hard/escalation item (source=${item.source}, effort=${item.effort}) -> claude`);
+      routeHints.set(workItemCoverageKey(item), 'claude');
+      routeReasons.set(workItemCoverageKey(item), `frontier: hard/escalation item (source=${item.source}, effort=${item.effort}) -> claude`);
     }
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
@@ -259,9 +260,9 @@ describe('M256 workhorseDispatch', () => {
       source: 'self',
       tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
     });
-    const routeHints = new Map<string, EngineId>([[item.id, 'codex']]);
+    const routeHints = new Map<string, EngineId>([[workItemCoverageKey(item), 'codex']]);
     const routeReasons = new Map<string, string>([[
-      item.id,
+      workItemCoverageKey(item),
       'frontier: generated capture proposal repair (source=self) -> codex',
     ]]);
 
@@ -281,8 +282,8 @@ describe('M256 workhorseDispatch', () => {
       { backend: 'builtin',     availability: 'open' },
     ]);
     const item = makeItem();
-    const routeHints = new Map<string, EngineId>([[item.id, 'codex']]);
-    const routeReasons = new Map<string, string>([[item.id, 'budget-pause: daily budget exhausted']]);
+    const routeHints = new Map<string, EngineId>([[workItemCoverageKey(item), 'codex']]);
+    const routeReasons = new Map<string, string>([[workItemCoverageKey(item), 'budget-pause: daily budget exhausted']]);
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
     const plan = planConcurrentDispatch([item], snap, dispatchCfg, routeItem);
@@ -302,8 +303,8 @@ describe('M256 workhorseDispatch', () => {
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
     for (const item of items) {
-      routeHints.set(item.id, 'local-coder');
-      routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
+      routeHints.set(workItemCoverageKey(item), 'local-coder');
+      routeReasons.set(workItemCoverageKey(item), `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
     }
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
@@ -327,8 +328,8 @@ describe('M256 workhorseDispatch', () => {
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
     for (const item of items) {
-      routeHints.set(item.id, 'local-coder');
-      routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
+      routeHints.set(workItemCoverageKey(item), 'local-coder');
+      routeReasons.set(workItemCoverageKey(item), `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
     }
 
     const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
