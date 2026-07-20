@@ -10,6 +10,7 @@ import {
   createSelectionStartReceipt,
   coordinatorSelectionStartReceiptV2Dir,
   readCoordinatorSelectionStartReceiptV2,
+  receiptMatchesSelectionBindingV2,
   readSelectionStartReceipt,
   receiptDigestV2,
   rootDigestV2,
@@ -260,10 +261,18 @@ describe('selection start receipt V2 store', () => {
     });
     expect(recorded.status).toBe('recorded');
     if (recorded.status !== 'recorded') throw new Error('coordinator receipt was not recorded');
-    expect(store.readSelectionReceiptBinding(recorded.receiptId)).toMatchObject({
+    const binding = store.readSelectionReceiptBinding(recorded.receiptId);
+    expect(binding).toMatchObject({
       status: 'found',
       binding: { receiptId: recorded.receiptId },
     });
+    const receipt = readCoordinatorSelectionStartReceiptV2(recorded.receiptId);
+    if (binding.status !== 'found' || receipt.status !== 'found') throw new Error('durable receipt join was not found');
+    expect(receiptMatchesSelectionBindingV2(receipt.receipt, binding.binding)).toBe(true);
+    expect(receiptMatchesSelectionBindingV2(receipt.receipt, {
+      ...binding.binding,
+      committedAt: '2026-07-20T15:00:01.000Z',
+    })).toBe(false);
     expect(coordinator.recordSelectionStartReceiptV2({ ...authority }, {
       root,
       selectionObservation: observation(),

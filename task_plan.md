@@ -2946,6 +2946,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Define and test a strict standalone V2 signed receipt envelope while preserving V1 forensic-only behavior.
 - [x] Add bounded metadata-only durable receipt bindings guarded by exact executing shared-queue claim authority.
 - [x] Persist V2 envelopes in an isolated private namespace with verified readback and full-envelope replay equality.
+- [x] Add a reusable strict V2 receipt-to-shared-binding projection validator for future restart/status readers.
 - [x] Cover replay, conflict rejection, restart persistence, privacy, typecheck, and focused lint/tests.
 - [x] Add exact authority-to-private-claim coordinator plumbing with V2 write/readback; keep daemon dispatch inactive.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.

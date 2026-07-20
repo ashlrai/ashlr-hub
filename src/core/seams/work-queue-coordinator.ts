@@ -36,6 +36,7 @@ import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { workItemCoverageKey, workItemExecutionKey } from '../fleet/proposal-matching.js';
 import {
   readCoordinatorSelectionStartReceiptV2,
+  receiptMatchesSelectionBindingV2,
   receiptDigestV2,
   rootDigestV2,
   selectionDigestV2,
@@ -527,7 +528,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     if (
       rereadReceipt.status !== 'found' || rereadBinding.status !== 'found' ||
       JSON.stringify(rereadReceipt.receipt) !== JSON.stringify(persisted.receipt) ||
-      JSON.stringify(rereadBinding.binding) !== JSON.stringify(binding)
+      !receiptMatchesSelectionBindingV2(rereadReceipt.receipt, rereadBinding.binding)
     ) return { status: 'degraded', reason: 'receipt-binding-readback-failed' };
     return { status: local.status, receiptId: persisted.receipt.receiptId };
   }

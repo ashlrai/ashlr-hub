@@ -22,6 +22,7 @@ import {
 import { join } from 'node:path';
 import type { EngineId, EngineTier } from '../types.js';
 import type { DispatchSelectionObservationV1 } from './dispatch-production-ledger.js';
+import type { SelectionReceiptBindingV2 } from './shared-store.js';
 import {
   dispatchProductionDir,
   ensurePrivateDispatchProductionReceiptDirectory,
@@ -266,6 +267,30 @@ export function receiptDigestV2(receipt: unknown): string | null {
     canonicalSelectionV2(verified.selectionObservation),
     verified.signature,
   ]) : null;
+}
+
+/**
+ * Check that a parsed shared binding is the exact public projection of a V2
+ * receipt. The receipt must still be authenticated by the caller's reader.
+ */
+export function receiptMatchesSelectionBindingV2(
+  receipt: unknown,
+  binding: SelectionReceiptBindingV2,
+): boolean {
+  const parsed = validSelectionStartReceiptV2(receipt);
+  const receiptDigest = receiptDigestV2(parsed);
+  const rootDigest = rootDigestV2(parsed?.root);
+  const selectionDigest = selectionDigestV2(parsed?.selectionObservation);
+  return !!parsed && !!receiptDigest && !!rootDigest && !!selectionDigest &&
+    binding.schemaVersion === 2 &&
+    binding.receiptId === parsed.receiptId &&
+    binding.receiptDigest === receiptDigest &&
+    binding.queueId === parsed.claim.queueId &&
+    binding.claimEpoch === parsed.claim.claimEpoch &&
+    binding.claimBindingDigest === parsed.claim.claimBindingDigest &&
+    binding.rootDigest === rootDigest &&
+    binding.selectionDigest === selectionDigest &&
+    binding.committedAt === parsed.ts;
 }
 
 function equalDigest(left: string, right: string): boolean {
