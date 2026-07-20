@@ -28,7 +28,7 @@ import {
   selectWorkQueueCoordinator,
 } from '../src/core/seams/work-queue-coordinator.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
-import { workItemExecutionKey } from '../src/core/fleet/proposal-matching.js';
+import { workItemCoverageKey, workItemExecutionKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,6 +63,12 @@ function makeUnusableStorePath(): string {
   const blocker = path.join(tmpDir, 'blocker-file');
   fs.writeFileSync(blocker, 'not a directory');
   return path.join(blocker, 'ashlr-fleet', 'shared');
+}
+
+function executionKey(item: WorkItem): string {
+  const key = workItemExecutionKey(item);
+  if (key === null) throw new Error('fixture work item must have an execution identity');
+  return key;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,12 +120,12 @@ describe('M111 LocalWorkQueueCoordinator', () => {
 
   it('release is a no-op — does not throw', () => {
     const coord = new LocalWorkQueueCoordinator();
-    expect(() => coord.release(['a', 'b'], 'machine-1')).not.toThrow();
+    expect(() => coord.release([makeItem('a'), makeItem('b')], 'machine-1')).not.toThrow();
   });
 
   it('renew is a no-op — does not throw', () => {
     const coord = new LocalWorkQueueCoordinator();
-    expect(coord.renew(['a', 'b'], 'machine-1')).toEqual([]);
+    expect(coord.renew([makeItem('a'), makeItem('b')], 'machine-1')).toEqual([]);
   });
 
   it('recordOutcome writes to local ledger and shouldSkip picks it up', () => {
@@ -186,17 +192,20 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(true);
   });
 
-  it('refuses a shared claim batch when equal ids belong to different repositories', () => {
+  it('claims equal ids independently when they belong to different repositories', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');
     const first = makeItem('shared-id', path.join(tmpDir, 'repo-a'));
     const second = makeItem('shared-id', path.join(tmpDir, 'repo-b'));
 
-    expect(coord.claimItems([first, second], 2, 'machine-A')).toEqual([]);
-    expect(store.readSnapshot().claims).toEqual({});
+    expect(coord.claimItems([first, second], 2, 'machine-A')).toEqual([first, second]);
+    expect(Object.keys(store.readSnapshot().claims)).toEqual([
+      executionKey(first),
+      executionKey(second),
+    ]);
   });
 
-  it('refuses colliding ids split across shared claim lanes', () => {
+  it('claims equal ids independently when split across shared claim lanes', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');
     const first = makeItem('shared-lane-id', path.join(tmpDir, 'repo-a'));
@@ -205,8 +214,11 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(coord.claimItemsByLane([
       { candidates: [first], limit: 1 },
       { candidates: [second], limit: 1 },
-    ], 2, 'machine-A')).toEqual([]);
-    expect(store.readSnapshot().claims).toEqual({});
+    ], 2, 'machine-A')).toEqual([first, second]);
+    expect(Object.keys(store.readSnapshot().claims)).toEqual([
+      executionKey(first),
+      executionKey(second),
+    ]);
   });
 
   it('claimItemsByLane refills contention without exceeding a lane quota', () => {
@@ -263,30 +275,33 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
   it('claimed items appear in the store snapshot', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');
-    coord.claimItems([makeItem('z')], 1, 'machine-A');
+    const item = makeItem('z');
+    coord.claimItems([item], 1, 'machine-A');
     const snap = store.readSnapshot();
-    expect(snap.claims['z']).toBeDefined();
-    expect(snap.claims['z']!.machineId).toBe('machine-A');
+    expect(snap.claims[executionKey(item)]).toBeDefined();
+    expect(snap.claims[executionKey(item)]!.machineId).toBe('machine-A');
   });
 
   it('release removes the claim', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');
-    coord.claimItems([makeItem('r1')], 1, 'machine-A');
-    coord.release(['r1'], 'machine-A');
-    expect(store.readSnapshot().claims['r1']).toBeUndefined();
+    const item = makeItem('r1');
+    coord.claimItems([item], 1, 'machine-A');
+    coord.release([item], 'machine-A');
+    expect(store.readSnapshot().claims[executionKey(item)]).toBeUndefined();
   });
 
   it('renew extends an active claim owned by the same machine', () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(100_000);
     const store = makeStore(tmpDir, 10_000);
     const coord = makeSharedCoordinator(store, 'machine-A', 10_000);
-    coord.claimItems([makeItem('renew-owned')], 1, 'machine-A');
+    const item = makeItem('renew-owned');
+    coord.claimItems([item], 1, 'machine-A');
 
     now.mockReturnValue(100_100);
 
-    expect(coord.renew(['renew-owned'], 'machine-A')).toEqual(['renew-owned']);
-    const renewed = store.readSnapshot().claims['renew-owned'];
+    expect(coord.renew([item], 'machine-A')).toEqual([item]);
+    const renewed = store.readSnapshot().claims[executionKey(item)];
     expect(renewed?.machineId).toBe('machine-A');
     expect(renewed?.leaseUntil ?? 0).toBeGreaterThan(Date.now() + 5_000);
   });
@@ -295,11 +310,12 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     const store = makeStore(tmpDir, 10_000);
     const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
     const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
-    coordA.claimItems([makeItem('renew-other')], 1, 'machine-A');
-    const before = store.readSnapshot().claims['renew-other']!.leaseUntil;
+    const item = makeItem('renew-other');
+    coordA.claimItems([item], 1, 'machine-A');
+    const before = store.readSnapshot().claims[executionKey(item)]!.leaseUntil;
 
-    expect(coordB.renew(['renew-other'], 'machine-B')).toEqual([]);
-    const after = store.readSnapshot().claims['renew-other']!;
+    expect(coordB.renew([item], 'machine-B')).toEqual([]);
+    const after = store.readSnapshot().claims[executionKey(item)]!;
     expect(after.machineId).toBe('machine-A');
     expect(after.leaseUntil).toBe(before);
   });
@@ -314,10 +330,10 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
 
     now.mockReturnValue(210_000);
 
-    expect(coordA.renew(['renew-late'], 'machine-A')).toEqual([]);
+    expect(coordA.renew([item], 'machine-A')).toEqual([]);
     expect(coordB.claimItems([item], 1, 'machine-B').map((claimed) => claimed.id))
       .toEqual(['renew-late']);
-    const reclaimed = store.readSnapshot().claims['renew-late']!;
+    const reclaimed = store.readSnapshot().claims[executionKey(item)]!;
     expect(reclaimed.machineId).toBe('machine-B');
   });
 
@@ -332,18 +348,19 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     now.mockReturnValue(310_000);
 
     expect(coordB.claimItems([item], 1, 'machine-B').map((i) => i.id)).toEqual(['renew-reclaimed']);
-    expect(coordA.renew(['renew-reclaimed'], 'machine-A')).toEqual([]);
-    expect(store.readSnapshot().claims['renew-reclaimed']!.machineId).toBe('machine-B');
+    expect(coordA.renew([item], 'machine-A')).toEqual([]);
+    expect(store.readSnapshot().claims[executionKey(item)]!.machineId).toBe('machine-B');
   });
 
   it('recordOutcome writes to global worked ledger + releases claim', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');
-    coord.claimItems([makeItem('out1')], 1, 'machine-A');
-    coord.recordOutcome('out1', 'diff', 'machine-A');
+    const item = makeItem('out1');
+    coord.claimItems([item], 1, 'machine-A');
+    coord.recordClaimOutcome(item, 'out1', 'diff', 'machine-A');
     const snap = store.readSnapshot();
-    expect(snap.claims['out1']).toBeUndefined(); // claim released
-    expect(snap.worked.some(e => e.itemId === 'out1' && e.outcome === 'diff')).toBe(true);
+    expect(snap.claims[executionKey(item)]).toBeUndefined(); // claim released
+    expect(snap.worked.some((e) => e.itemId === workItemCoverageKey(item) && e.outcome === 'diff')).toBe(true);
   });
 
   it('binds completion to the claim-time cooldown identity', () => {
@@ -351,14 +368,14 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     const coord = makeSharedCoordinator(store, 'machine-A');
     const item = makeItem('frozen-completion-key');
     const policies = new Map([[
-      item.id,
+      executionKey(item),
       { itemIds: ['frozen-completion-key::generation:g1'], cooldownMs: 60_000 },
     ]]);
 
     expect(coord.claimItemsByLane([{ candidates: [item], limit: 1 }], 1, 'machine-A', policies))
       .toEqual([item]);
-    expect(coord.beginExecution(item.id, 'machine-A')).toBe(true);
-    expect(coord.recordClaimOutcome(item.id, 'wrong-recomputed-key', 'diff', 'machine-A')).toBe(true);
+    expect(coord.beginExecution(item, 'machine-A')).toBe(true);
+    expect(coord.recordClaimOutcome(item, 'wrong-recomputed-key', 'diff', 'machine-A')).toBe(true);
 
     expect(store.readSnapshot().worked).toEqual([
       expect.objectContaining({
@@ -578,7 +595,7 @@ describe('M111 SharedStore — expired lease reclaimable', () => {
     expect(claimedB.map(i => i.id)).toContain('failover-item');
 
     const newSnap = store.readSnapshot();
-    expect(newSnap.claims['failover-item']!.machineId).toBe('machine-B');
+    expect(newSnap.claims[executionKey(item)]!.machineId).toBe('machine-B');
   });
 });
 
@@ -690,7 +707,7 @@ describe('M111 SharedStore — degraded / unwritable path', () => {
   it('release never throws on bad path', () => {
     const store = new SharedStore(makeUnusableStorePath());
     const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
-    expect(() => coord.release(['a', 'b'], 'machine-X')).not.toThrow();
+    expect(() => coord.release([makeItem('a'), makeItem('b')], 'machine-X')).not.toThrow();
   });
 
   it('recordOutcome never throws on bad path', () => {
@@ -702,8 +719,8 @@ describe('M111 SharedStore — degraded / unwritable path', () => {
   it('renew returns [] and never throws on bad path', () => {
     const store = new SharedStore(makeUnusableStorePath());
     const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000, true);
-    expect(() => coord.renew(['x'], 'machine-X')).not.toThrow();
-    expect(coord.renew(['x'], 'machine-X')).toEqual([]);
+    expect(() => coord.renew([makeItem('x')], 'machine-X')).not.toThrow();
+    expect(coord.renew([makeItem('x')], 'machine-X')).toEqual([]);
   });
 
   it('shouldSkip returns false (fail-open) on bad path', () => {
@@ -789,6 +806,6 @@ describe('M111 selectWorkQueueCoordinator', () => {
     const coord = selectWorkQueueCoordinator(baseCfg());
     const items = [makeItem('sel-a'), makeItem('sel-b')];
     expect(coord.claimItems(items, 1, 'machine-local')).toHaveLength(1);
-    expect(() => coord.release(['sel-a'], 'machine-local')).not.toThrow();
+    expect(() => coord.release([makeItem('sel-a')], 'machine-local')).not.toThrow();
   });
 });

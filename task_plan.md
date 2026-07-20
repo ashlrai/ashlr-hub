@@ -2739,3 +2739,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Define one nullable canonical WorkItem execution identity that includes repository, item, and repair generation.
 - [x] Adopt it in shared collision fencing and prove alias normalization plus repository separation.
 - [x] Pass focused coordinator coverage, typecheck, scoped lint, and diff checks.
+
+## Shared Queue Execution-Key Migration (2026-07-20)
+- [x] Move shared store claim keys from raw scanner ids to canonical WorkItem execution identities through the coordinator.
+- [x] Require WorkItem capabilities for shared lease, fence, execution, release, settlement, and atomic outcome mutation.
+- [x] Bind daemon lease controllers, attempt identities, cooldown policies, and post-dispatch claim mutation to the selected WorkItem identity.
+- [x] Remove the temporary cross-repository collision fence and prove equal scanner ids dispatch and settle independently in one shared queue.
+- [x] Pass focused coordinator/two-machine/full-tick coverage, typecheck, scoped lint, and diff checks.

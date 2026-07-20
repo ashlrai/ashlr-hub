@@ -43,27 +43,6 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
   summary: 'Work-item claim/skip coordination (LOCAL = per-machine; SHARED = multi-machine filesystem lease).',
 };
 
-/**
- * SharedStore currently uses a raw work-item id as its durable claim key.
- * Refuse a batch that would collapse two different canonical execution
- * identities into one key until the store protocol carries that identity.
- */
-function hasAmbiguousSharedClaimIdentity(
-  lanes: ReadonlyArray<{ candidates: readonly WorkItem[] }>,
-): boolean {
-  const executionKeysByItemId = new Map<string, string>();
-  for (const lane of lanes) {
-    for (const item of lane.candidates) {
-      const executionKey = workItemExecutionKey(item);
-      if (executionKey === null) return true;
-      const previous = executionKeysByItemId.get(item.id);
-      if (previous !== undefined && previous !== executionKey) return true;
-      executionKeysByItemId.set(item.id, executionKey);
-    }
-  }
-  return false;
-}
-
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -90,16 +69,16 @@ export interface WorkQueueCoordinator {
     machineId: string,
     cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[];
-  renew(itemIds: string[], machineId: string): string[];
+  renew(items: WorkItem[], machineId: string): WorkItem[];
   /** Return every item whose current claim still authorizes this coordinator. */
-  fence(itemIds: string[], machineId: string): string[];
-  beginExecution(itemId: string, machineId: string): boolean;
+  fence(items: WorkItem[], machineId: string): WorkItem[];
+  beginExecution(item: WorkItem, machineId: string): boolean;
   /** Clear an exact executing claim after a terminal result with no cooldown. */
-  settleClaim(claimItemId: string, machineId: string): boolean;
-  release(itemIds: string[], machineId: string): void;
+  settleClaim(claimItem: WorkItem, machineId: string): boolean;
+  release(items: WorkItem[], machineId: string): void;
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean;
   recordClaimOutcome(
-    claimItemId: string,
+    claimItem: WorkItem,
     workedItemId: string,
     outcome: WorkedOutcome,
     machineId: string,
@@ -154,24 +133,24 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     return claimed;
   }
 
-  release(_itemIds: string[], _machineId: string): void {
+  release(_items: WorkItem[], _machineId: string): void {
     // Single machine — no cross-machine claim to release.
   }
 
-  renew(_itemIds: string[], _machineId: string): string[] {
+  renew(_items: WorkItem[], _machineId: string): WorkItem[] {
     // Single machine — no cross-machine lease to renew.
     return [];
   }
 
-  fence(itemIds: string[], _machineId: string): string[] {
-    return [...itemIds];
+  fence(items: WorkItem[], _machineId: string): WorkItem[] {
+    return [...items];
   }
 
-  beginExecution(_itemId: string, _machineId: string): boolean {
+  beginExecution(_item: WorkItem, _machineId: string): boolean {
     return true;
   }
 
-  settleClaim(_claimItemId: string, _machineId: string): boolean {
+  settleClaim(_claimItem: WorkItem, _machineId: string): boolean {
     return true;
   }
 
@@ -180,7 +159,7 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
   }
 
   recordClaimOutcome(
-    _claimItemId: string,
+    _claimItem: WorkItem,
     workedItemId: string,
     outcome: WorkedOutcome,
     _machineId: string,
@@ -239,21 +218,44 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return this.store.validateClaims([ref])[0] ?? null;
   }
 
+  private executionKey(item: WorkItem): string | null {
+    return workItemExecutionKey(item);
+  }
+
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
     if (!this.authorityEnabled) return [];
-    if (hasAmbiguousSharedClaimIdentity([{ candidates }])) return [];
+    const candidatesByKey = new Map<string, WorkItem>();
+    for (const item of candidates) {
+      const key = this.executionKey(item);
+      if (key === null) return [];
+      if (candidatesByKey.has(key)) continue;
+      candidatesByKey.set(key, item);
+    }
+    const defaultPolicies = new Map<string, QueueClaimCooldownPolicy>(
+      [...candidatesByKey].map(([key, item]) => [
+        key,
+        { itemIds: [item.id], cooldownMs: 6 * 60 * 60 * 1000 },
+      ]),
+    );
     const claimedRefs = this.store.claimLeases(
-      candidates.map((i) => i.id),
+      [...candidatesByKey.keys()],
       count,
       machineId,
+      defaultPolicies,
     );
     for (const ref of claimedRefs) {
       this.claims.set(ref.itemId, ref);
-      this.claimWorkedItemIds.set(ref.itemId, ref.itemId);
+      this.claimWorkedItemIds.set(ref.itemId, workItemCoverageKey(candidatesByKey.get(ref.itemId)!));
     }
     const claimedIds = claimedRefs.map((ref) => ref.itemId);
     const claimedSet = new Set(claimedIds);
-    return candidates.filter((item) => claimedSet.has(item.id));
+    const returnedKeys = new Set<string>();
+    return candidates.filter((item) => {
+      const key = this.executionKey(item);
+      if (key === null || returnedKeys.has(key) || !claimedSet.has(key)) return false;
+      returnedKeys.add(key);
+      return true;
+    });
   }
 
   claimItemsByLane(
@@ -263,9 +265,20 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
     if (!this.authorityEnabled) return [];
-    if (hasAmbiguousSharedClaimIdentity(lanes)) return [];
+    const byKey = new Map<string, WorkItem>();
+    const sharedLanes = lanes.map((lane) => {
+      const candidateIds: string[] = [];
+      for (const item of lane.candidates) {
+        const key = this.executionKey(item);
+        if (key === null) return null;
+        if (!byKey.has(key)) byKey.set(key, item);
+        candidateIds.push(key);
+      }
+      return { candidateIds, limit: lane.limit };
+    });
+    if (sharedLanes.some((lane) => lane === null)) return [];
     const claimedRefs = this.store.claimLeasesByLane(
-      lanes.map((lane) => ({ candidateIds: lane.candidates.map((item) => item.id), limit: lane.limit })),
+      sharedLanes as Array<{ candidateIds: string[]; limit: number }>,
       count,
       machineId,
       cooldownPolicies,
@@ -278,17 +291,17 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       );
     }
     const claimedIds = claimedRefs.map((ref) => ref.itemId);
-    const byId = new Map(lanes.flatMap((lane) => lane.candidates).map((item) => [item.id, item]));
     return claimedIds.flatMap((id) => {
-      const item = byId.get(id);
+      const item = byKey.get(id);
       return item ? [item] : [];
     });
   }
 
-  release(itemIds: string[], machineId: string): void {
+  release(items: WorkItem[], machineId: string): void {
     if (!this.authorityEnabled) return;
-    const refs = itemIds.flatMap((id) => {
-      const ref = this.claims.get(id);
+    const refs = items.flatMap((item) => {
+      const key = this.executionKey(item);
+      const ref = key === null ? undefined : this.claims.get(key);
       return ref?.machineId === machineId ? [ref] : [];
     });
     for (const id of this.store.releaseClaims(refs)) {
@@ -297,10 +310,14 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     }
   }
 
-  renew(itemIds: string[], machineId: string): string[] {
+  renew(items: WorkItem[], machineId: string): WorkItem[] {
     if (!this.authorityEnabled) return [];
-    const refs = itemIds.flatMap((id) => {
-      const ref = this.claims.get(id);
+    const itemsByKey = new Map(items.flatMap((item) => {
+      const key = this.executionKey(item);
+      return key === null ? [] : [[key, item] as const];
+    }));
+    const refs = [...itemsByKey.keys()].flatMap((key) => {
+      const ref = this.claims.get(key);
       return ref?.machineId === machineId ? [ref] : [];
     });
     const renewed = this.store.renewClaims(refs);
@@ -310,84 +327,90 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     );
     const authoritative = [...renewed, ...validated];
     for (const ref of authoritative) this.claims.set(ref.itemId, ref);
-    return authoritative.map((ref) => ref.itemId);
+    return authoritative.flatMap((ref) => {
+      const item = itemsByKey.get(ref.itemId);
+      return item ? [item] : [];
+    });
   }
 
-  fence(itemIds: string[], machineId: string): string[] {
-    return this.renew(itemIds, machineId);
+  fence(items: WorkItem[], machineId: string): WorkItem[] {
+    return this.renew(items, machineId);
   }
 
-  beginExecution(itemId: string, machineId: string): boolean {
+  beginExecution(item: WorkItem, machineId: string): boolean {
     if (!this.authorityEnabled) return false;
-    let ref = this.claims.get(itemId);
+    const key = this.executionKey(item);
+    if (key === null) return false;
+    let ref = this.claims.get(key);
     if (!ref || ref.machineId !== machineId) return false;
     const deadline = this.mutationDeadline();
     for (;;) {
       const result = this.store.beginClaimExecutionResult(ref);
       if (result.status === 'success') {
-        this.claims.set(itemId, result.value);
+        this.claims.set(key, result.value);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
       const refreshed = this.refreshClaim(ref);
       if (!refreshed) return false;
       ref = refreshed;
-      this.claims.set(itemId, ref);
+      this.claims.set(key, ref);
     }
   }
 
-  settleClaim(claimItemId: string, machineId: string): boolean {
+  settleClaim(claimItem: WorkItem, machineId: string): boolean {
     if (!this.authorityEnabled) return false;
-    let ref = this.claims.get(claimItemId);
+    const key = this.executionKey(claimItem);
+    if (key === null) return false;
+    let ref = this.claims.get(key);
     if (!ref || ref.machineId !== machineId) return false;
     const deadline = this.mutationDeadline();
     for (;;) {
       const result = this.store.settleClaimResult(ref);
       if (result.status === 'success') {
-        this.claims.delete(claimItemId);
-        this.claimWorkedItemIds.delete(claimItemId);
+        this.claims.delete(key);
+        this.claimWorkedItemIds.delete(key);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
       const refreshed = this.refreshClaim(ref);
       if (!refreshed) return false;
       ref = refreshed;
-      this.claims.set(claimItemId, ref);
+      this.claims.set(key, ref);
     }
   }
 
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean {
     if (!this.authorityEnabled) return false;
-    if (this.claims.has(itemId)) {
-      return this.recordClaimOutcome(itemId, itemId, outcome, machineId);
-    }
     return this.store.recordOutcome(itemId, outcome, machineId);
   }
 
   recordClaimOutcome(
-    claimItemId: string,
+    claimItem: WorkItem,
     workedItemId: string,
     outcome: WorkedOutcome,
     machineId: string,
   ): boolean {
     if (!this.authorityEnabled) return false;
-    let ref = this.claims.get(claimItemId);
+    const key = this.executionKey(claimItem);
+    if (key === null) return false;
+    let ref = this.claims.get(key);
     if (!ref || ref.machineId !== machineId) return false;
     const completionId = randomUUID();
     const deadline = this.mutationDeadline();
     for (;;) {
-      const frozenWorkedItemId = this.claimWorkedItemIds.get(claimItemId) ?? workedItemId;
+      const frozenWorkedItemId = this.claimWorkedItemIds.get(key) ?? workedItemId;
       const result = this.store.completeClaimResult(ref, frozenWorkedItemId, outcome, completionId);
       if (result.status === 'success') {
-        this.claims.delete(claimItemId);
-        this.claimWorkedItemIds.delete(claimItemId);
+        this.claims.delete(key);
+        this.claimWorkedItemIds.delete(key);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
       const refreshed = this.refreshClaim(ref);
       if (!refreshed) return false;
       ref = refreshed;
-      this.claims.set(claimItemId, ref);
+      this.claims.set(key, ref);
     }
   }
 

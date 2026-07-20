@@ -2846,7 +2846,13 @@
 - Canonical shared execution-key foundation (2026-07-20):
   - Added `workItemExecutionKey`, a repository-physical, generation-aware execution identity distinct from the compatibility-oriented pending-proposal coverage key. It returns `null` when canonical filesystem identity cannot be established.
   - Shared queue collision detection now consumes this primitive, so its fail-closed decision and the forthcoming claim protocol use one exact definition of repository-qualified work. Normalized aliases collapse to one identity; equal raw ids in distinct repositories remain distinct.
-  - The shared store still persists raw claim ids in this slice. The new helper is an intentionally narrow foundation for the required migration of claim, lease, settlement, reservation, and daemon-attribution handles.
+  - This foundation was immediately consumed by the shared queue migration below; the generic store schema remains string-keyed, but coordinator-managed claims no longer use raw scanner ids.
+
+- Shared queue execution-key migration (2026-07-20):
+  - `SharedWorkQueueCoordinator` now persists canonical `workItemExecutionKey` values as its store claim keys, rather than raw scanner ids. Claim, renew, fence, begin-execution, release, settlement, and atomic claim-outcome APIs take `WorkItem` capabilities and derive the key at the authority boundary.
+  - Daemon lease controllers, attempt identities, fence reconciliation, release, dispatch-blocked settlement, terminal settlement, and post-dispatch release now carry the selected `WorkItem` rather than reconstructing a shared claim from `item.id`. Claim cooldown policies use the same execution key under the store lock; worked outcomes retain their repository-scoped cooldown identity.
+  - The temporary whole-batch collision fence is removed. Shared queues can now independently claim equal scanner ids from distinct repositories and lanes, while missing execution identity remains fail-closed. Direct no-policy coordinator claims retain the legacy raw worked-event cooldown lookup for compatibility.
+  - Focused integration coverage proves two enrolled repositories with the same scanner id both dispatch and settle through one shared queue, leaving no active lease and recording two distinct cooldown keys. Coordinator and two-machine suites, typecheck, scoped lint, and diff checks pass.
 
 - Daemon cooldown-policy repository identity (2026-07-20):
   - The daemon still indexed per-item claim cooldown policies by raw `item.id`, even after the worked ledger and local coordinator became repository-scoped. A same-id item in a second repository could therefore inherit the first item's cooldown policy or have its frozen worked key misattributed.

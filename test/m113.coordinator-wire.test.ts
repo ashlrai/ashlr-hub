@@ -108,6 +108,7 @@ import {
   recordOutcome as localRecord,
 } from '../src/core/fleet/worked-ledger.js';
 import { generatedRepairCooldownKey } from '../src/core/fleet/generated-repair-lifecycle.js';
+import { workItemExecutionKey } from '../src/core/fleet/proposal-matching.js';
 import {
   LocalWorkQueueCoordinator,
   SharedWorkQueueCoordinator,
@@ -308,7 +309,7 @@ describe('LocalWorkQueueCoordinator unit', () => {
 
   it('release is a no-op and does not throw', () => {
     const coord = new LocalWorkQueueCoordinator();
-    expect(() => coord.release(['a', 'b'], 'machine-x')).not.toThrow();
+    expect(() => coord.release([makeItem('a', tmpRepo), makeItem('b', tmpRepo)], 'machine-x')).not.toThrow();
   });
 });
 
@@ -452,7 +453,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
           outcome: 'proposal-disabled',
           reason: 'proposal filing disabled for this sandboxed attempt',
         });
-        expect(settleSpy).toHaveBeenCalledWith('disabled-1', 'A');
+        expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'disabled-1' }), 'A');
         expect(settleSpy.mock.invocationCallOrder[0]).toBeLessThan(
           clearIntervalSpy.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
         );
@@ -493,7 +494,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       const result = await tick(cfg, { dryRun: false });
 
       expect(result.reason).toBe('state-persistence-failed');
-      expect(settleSpy).toHaveBeenCalledWith('disabled-fail-1', 'A');
+      expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'disabled-fail-1' }), 'A');
     } finally {
       settleSpy.mockRestore();
       fs.rmSync(sharedDir, { recursive: true, force: true });
@@ -529,7 +530,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
 
       expect(result.dispatches?.[0]?.production?.outcome).toBe('empty-diff');
       expect(result.reason).toBe('state-persistence-failed');
-      expect(settleSpy).toHaveBeenCalledWith('shared-repairable-1', 'A');
+      expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'shared-repairable-1' }), 'A');
       expect(readAudit()).toContainEqual(expect.objectContaining({
         action: 'daemon:tick',
         result: 'error',
@@ -632,6 +633,8 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       });
       mockLoadConfig.mockReturnValue(cfg);
       backlogItems = [makeItem('fenced-1', tmpRepo, { score: 3 })];
+      const claimKey = workItemExecutionKey(backlogItems[0]!);
+      expect(claimKey).not.toBeNull();
       let expired = false;
       mockRouteBackend.mockImplementation(() => {
         const queuePath = path.join(sharedDir, 'ashlr-fleet-queue.json');
@@ -639,8 +642,8 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
           const queue = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as {
             claims: Record<string, { leaseUntil: number }>;
           };
-          if (queue.claims['fenced-1']) {
-            queue.claims['fenced-1'].leaseUntil = Date.now() - 1;
+          if (claimKey && queue.claims[claimKey]) {
+            queue.claims[claimKey].leaseUntil = Date.now() - 1;
             fs.writeFileSync(queuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
             expired = true;
           }
@@ -798,11 +801,50 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       expect(claimedByB.map(i => i.id)).not.toContain('job-x');
 
       // A releases it
-      coordA.release(['job-x'], 'A');
+      coordA.release(items, 'A');
 
       // Now B can claim it
       const claimedByBAfterRelease = coordB.claimItems(items, 1, 'B');
       expect(claimedByBAfterRelease.map(i => i.id)).toContain('job-x');
+    } finally {
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches and settles equal scanner ids from separate repositories', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-repo-identity-'));
+    try {
+      const first = makeItem('same-scanner-id', tmpRepo, { score: 3 });
+      const second = makeItem('same-scanner-id', tmpOtherRepo, { score: 2 });
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem', path: sharedDir, machineId: 'A', leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [first, second];
+      mockBuildBacklog.mockImplementation(async () => ({
+        generatedAt: new Date().toISOString(),
+        repos: [tmpRepo, tmpOtherRepo],
+        items: backlogItems,
+      }));
+      enroll(tmpRepo);
+      enroll(tmpOtherRepo);
+
+      const result = await tick(cfg, { dryRun: false });
+      const snapshot = new SharedStore(sharedDir, 30_000).readSnapshot();
+
+      expect(result.reason).toBe('ok');
+      expect(result.itemsConsidered).toBe(2);
+      expect(snapshot.claims).toEqual({});
+      expect(snapshot.worked.map((event) => event.itemId)).toEqual(expect.arrayContaining([
+        generatedRepairCooldownKey(first),
+        generatedRepairCooldownKey(second),
+      ]));
     } finally {
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
