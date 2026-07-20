@@ -1932,6 +1932,21 @@ async function runSwarmInternal(
         );
       }
       enforceKillState = true;
+
+      // Do not plan or execute against a source worktree that is already dirty
+      // or has moved since the sandbox was created. Capture rechecks this too,
+      // but this preflight prevents spending swarm capacity on a base that can
+      // never produce admissible proposal evidence.
+      const sourceAdmission = activeSandbox === null
+        ? null
+        : _inspectSandboxSourceRevision?.(activeSandbox, project ?? undefined);
+      if (!sourceAdmission?.ok) {
+        const reason = sourceAdmission
+          ? `sandbox source revision refused: ${sourceAdmission.reason}`
+          : 'sandbox source revision inspection unavailable';
+        finalizeSandbox(false);
+        return abortNoSandbox(reason);
+      }
     }
 
   // -------------------------------------------------------------------------

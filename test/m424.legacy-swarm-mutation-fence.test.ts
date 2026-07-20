@@ -354,6 +354,7 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
     mocks.loadProposal.mockReturnValueOnce(created);
     mocks.inspectSandboxSourceRevision
       .mockReturnValueOnce({ ok: true, reason: 'sandbox source revision matches admission baseline' })
+      .mockReturnValueOnce({ ok: true, reason: 'sandbox source revision matches admission baseline' })
       .mockReturnValueOnce({ ok: false, reason: 'source-revision-stale' });
 
     const result = await runSwarm(
@@ -380,6 +381,43 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
       'Source revision changed during proposal capture.',
       'source revision admission refused',
     );
+    expect(mocks.removeSandboxWithBorrowedAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a dirty source before swarm planning or task execution', async () => {
+    const project = join(home, 'repo');
+    expect(enroll(project)).toMatchObject({ ok: true, quiesced: true });
+    mocks.inspectSandboxSourceRevision.mockReturnValueOnce({
+      ok: false,
+      reason: 'source-worktree-dirty',
+    });
+
+    const result = await runSwarm(
+      { goal: plan.goal },
+      config(),
+      {
+        runId: 'm424-dirty-source-preflight',
+        project,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+      },
+      () => {},
+    );
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      result: expect.stringMatching(/source-worktree-dirty/i),
+      proposalOutcome: {
+        kind: 'sandbox-unavailable',
+        reason: expect.stringContaining('source-worktree-dirty'),
+      },
+    });
+    expect(mocks.planSwarm).not.toHaveBeenCalled();
+    expect(mocks.runGoal).not.toHaveBeenCalled();
+    expect(mocks.createProposal).not.toHaveBeenCalled();
+    expect(mocks.removeSandbox).not.toHaveBeenCalled();
     expect(mocks.removeSandboxWithBorrowedAuthority).toHaveBeenCalledOnce();
   });
 
