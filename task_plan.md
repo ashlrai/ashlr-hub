@@ -2958,3 +2958,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve opaque refusal for all other lock/write errors while propagating the one explicit fail-closed saturation result.
 - [x] Verify the three exact regression cases, typecheck, quiet lint, and diff integrity locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Pre-Assignment Canary Offer Contract (2026-07-20)
+- [x] Model a typed, metadata-only two-route offer without final-route or gateway provenance claims.
+- [x] Add pure exact-pair eligibility and unbiased draw helpers while leaving daemon, receipts, config, learning, and merge behavior unchanged.
+- [x] Cover invalid contexts, stale capacity, malformed/duplicate/disallowed offers, fixed-probability draws, and disabled effective configuration.
+- [ ] Require the protected CI matrix on the immutable draft head before any integration work.

@@ -3213,3 +3213,9 @@
 - The generation-authority lock intentionally refuses every persistence error, but it was also swallowing the finite `AttemptMembershipSaturatedError` before `recordDispatchProduction()` could report the explicit `retirement-membership-saturated` result.
 - The lock now rethrows only that already fail-closed condition. All other lock, root, and persistence failures remain opaque `{ ok:false }` authority refusals. This changes no admission, retry, learning, or merge authority.
 - Regression verification: the three saturation migration/capacity cases in M342 pass directly, along with TypeScript typecheck, quiet lint, and `git diff --check`. The prior protected CI head failed only these three assertions after 12,092 passing tests; a fresh matrix is required.
+
+# Current Pre-Assignment Canary Offer Contract
+- A future selection canary can now represent exactly two same-tier, distinct non-builtin route offers without claiming either is a gateway-final route. Offers contain only backend, tier, model, allowability, and ephemeral fresh capacity; they exclude route reasons, dispositions, gateway traces, execution authority, receipts, and selection observations.
+- The new eligibility and fixed-probability draw helpers are pure and inert. They do not construct offers from a gateway decision, turn an offer into a final route, reserve capacity, write evidence, invoke the daemon, or affect learning/automerge/config activation.
+- Existing final-route candidate validation remains unchanged for the separate single-route provenance boundary. Effective configuration remains hard-disabled with `producer-unavailable`.
+- Verification: selection-canary (9 assertions), effective-config (8 assertions), TypeScript typecheck, quiet lint, and `git diff --check` pass locally. Fresh protected CI is required on the new head.

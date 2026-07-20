@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveSelectionCanary,
   canonicalSelectionCanaryCandidate,
+  drawEligibleBinaryCanaryOffer,
   drawEligibleBinaryCanaryRoute,
+  selectEligibleBinaryCanaryOfferPair,
   selectEligibleBinaryCanaryPair,
   type SelectionCanaryCandidate,
+  type SelectionCanaryRouteOffer,
 } from '../src/core/fabric/selection-canary.js';
 
 const ready = { gateway: true, concurrentDispatch: true };
@@ -12,6 +15,16 @@ const ready = { gateway: true, concurrentDispatch: true };
 function candidate(backend: 'codex' | 'claude' | 'builtin' = 'codex', overrides: Partial<SelectionCanaryCandidate> = {}): SelectionCanaryCandidate {
   return {
     route: { backend, tier: 'frontier', model: backend === 'codex' ? 'gpt-5.6' : 'opus', disposition: 'gateway-exact' },
+    candidateAllowed: true,
+    slotsAtPlan: 2,
+    remainingBefore: 1,
+    ...overrides,
+  };
+}
+
+function offer(backend: 'codex' | 'claude' = 'codex', overrides: Partial<SelectionCanaryRouteOffer> = {}): SelectionCanaryRouteOffer {
+  return {
+    route: { backend, tier: 'frontier', model: backend === 'codex' ? 'gpt-5.6' : 'opus' },
     candidateAllowed: true,
     slotsAtPlan: 2,
     remainingBefore: 1,
@@ -100,6 +113,50 @@ describe('binary canary pair eligibility', () => {
     })).toBeNull();
     expect(selectEligibleBinaryCanaryPair({
       candidates: [candidate('codex', { route: { backend: 'codex', tier: 'frontier', model: null, disposition: 'planner-reassigned' } }), candidate('claude')],
+      context: 'ordinary-direct', snapshotState: 'fresh',
+    })).toBeNull();
+  });
+});
+
+describe('binary canary offer eligibility', () => {
+  it('preserves two fresh, distinct same-tier offers without inventing final-route provenance', () => {
+    const first = offer('codex');
+    const second = offer('claude');
+    const pair = selectEligibleBinaryCanaryOfferPair({
+      offers: [first, second], context: 'ordinary-direct', snapshotState: 'fresh',
+    });
+    expect(pair).toEqual({ protocol: 'binary-uniform-v1', offers: [first, second] });
+    if (!pair) throw new Error('fixture offers were not eligible');
+    for (const draw of Array.from({ length: 32 }, () => drawEligibleBinaryCanaryOffer(pair))) {
+      expect(draw).toMatchObject({ protocol: 'binary-uniform-v1', selectionProbabilityPpm: 500_000 });
+      expect(draw.selected).toBe(pair.offers[draw.selectedIndex]);
+    }
+    expect(Object.keys(first.route)).toEqual(['backend', 'tier', 'model']);
+  });
+
+  it('fails closed for every non-ordinary, stale, malformed, duplicate, or capacity-invalid offer pair', () => {
+    const valid = [offer('codex'), offer('claude')] as const;
+    for (const context of [
+      'best-of-n', 'generated-repair', 'diagnostic-reslice', 'retry', 'quota-fallback',
+      'resource-fallback', 'budget-pause', 'local-only', 'executor-substitution',
+    ] as const) {
+      expect(selectEligibleBinaryCanaryOfferPair({ offers: valid, context, snapshotState: 'fresh' })).toBeNull();
+    }
+    for (const snapshotState of ['stale', 'missing', 'unknown'] as const) {
+      expect(selectEligibleBinaryCanaryOfferPair({ offers: valid, context: 'ordinary-direct', snapshotState })).toBeNull();
+    }
+    expect(selectEligibleBinaryCanaryOfferPair({ offers: [offer('codex')], context: 'ordinary-direct', snapshotState: 'fresh' })).toBeNull();
+    expect(selectEligibleBinaryCanaryOfferPair({ offers: [offer('codex'), offer('codex')], context: 'ordinary-direct', snapshotState: 'fresh' })).toBeNull();
+    expect(selectEligibleBinaryCanaryOfferPair({
+      offers: [offer('codex'), offer('claude', { route: { backend: 'claude', tier: 'mid', model: 'opus' } })],
+      context: 'ordinary-direct', snapshotState: 'fresh',
+    })).toBeNull();
+    expect(selectEligibleBinaryCanaryOfferPair({
+      offers: [offer('codex', { candidateAllowed: false }), offer('claude')],
+      context: 'ordinary-direct', snapshotState: 'fresh',
+    })).toBeNull();
+    expect(selectEligibleBinaryCanaryOfferPair({
+      offers: [offer('codex', { remainingBefore: 0 }), offer('claude')],
       context: 'ordinary-direct', snapshotState: 'fresh',
     })).toBeNull();
   });

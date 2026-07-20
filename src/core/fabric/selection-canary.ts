@@ -1,6 +1,7 @@
 /** Strict, side-effect-free selection-canary configuration resolution. */
 
 import { randomBytes } from 'node:crypto';
+import type { EngineId, EngineTier } from '../types.js';
 import type { FinalConcurrentDispatchRoute } from './concurrent-dispatch.js';
 import { isOrdinaryFleetGatewayDecision, type GatewayDecision } from './gateway.js';
 
@@ -57,6 +58,39 @@ export interface SelectionCanaryEligiblePair {
   candidates: readonly [SelectionCanaryCandidate, SelectionCanaryCandidate];
 }
 
+/**
+ * A pre-assignment route offer for a future trusted producer. Unlike a final
+ * concurrent route, an offer makes no gateway, executor, or receipt claim.
+ */
+export interface SelectionCanaryRouteOffer {
+  route: Readonly<{
+    backend: Exclude<EngineId, 'builtin'>;
+    tier: EngineTier;
+    model: string | null;
+  }>;
+  candidateAllowed: boolean;
+  slotsAtPlan: number;
+  remainingBefore: number;
+}
+
+export interface SelectionCanaryOfferPairInput {
+  offers: readonly SelectionCanaryRouteOffer[];
+  context: SelectionCanaryContext;
+  snapshotState: 'fresh' | 'stale' | 'missing' | 'unknown';
+}
+
+export interface SelectionCanaryEligibleOfferPair {
+  protocol: typeof SELECTION_CANARY_PROTOCOL;
+  offers: readonly [SelectionCanaryRouteOffer, SelectionCanaryRouteOffer];
+}
+
+export interface SelectionCanaryOfferDraw {
+  protocol: typeof SELECTION_CANARY_PROTOCOL;
+  selectedIndex: 0 | 1;
+  selectionProbabilityPpm: 500_000;
+  selected: SelectionCanaryRouteOffer;
+}
+
 /** One cryptographic 50/50 choice from an already eligible pair. */
 export interface SelectionCanaryDraw {
   protocol: typeof SELECTION_CANARY_PROTOCOL;
@@ -95,10 +129,40 @@ export function canonicalSelectionCanaryCandidate(
   };
 }
 
-function hasPositiveCapacity(candidate: SelectionCanaryCandidate): boolean {
+function hasPositiveCapacity(candidate: Pick<SelectionCanaryCandidate, 'slotsAtPlan' | 'remainingBefore'>): boolean {
   return Number.isSafeInteger(candidate.slotsAtPlan) && candidate.slotsAtPlan >= 1 &&
     Number.isSafeInteger(candidate.remainingBefore) && candidate.remainingBefore >= 1 &&
     candidate.remainingBefore <= candidate.slotsAtPlan;
+}
+
+/**
+ * Pure eligibility classification for an unclaimed future route offer. This
+ * cannot construct offers from gateway/final-route data or activate a canary.
+ */
+export function selectEligibleBinaryCanaryOfferPair(
+  input: SelectionCanaryOfferPairInput,
+): SelectionCanaryEligibleOfferPair | null {
+  if (input.context !== 'ordinary-direct' || input.snapshotState !== 'fresh' || input.offers.length !== 2) {
+    return null;
+  }
+  const [first, second] = input.offers;
+  if (!first || !second || first.route.backend === second.route.backend ||
+    first.route.tier !== second.route.tier || !first.candidateAllowed || !second.candidateAllowed ||
+    !hasPositiveCapacity(first) || !hasPositiveCapacity(second)) return null;
+  return { protocol: SELECTION_CANARY_PROTOCOL, offers: [first, second] };
+}
+
+/** Draw from an already eligible offer pair without turning it into a route. */
+export function drawEligibleBinaryCanaryOffer(
+  pair: SelectionCanaryEligibleOfferPair,
+): SelectionCanaryOfferDraw {
+  const selectedIndex: 0 | 1 = (randomBytes(1)[0]! & 1) === 0 ? 0 : 1;
+  return {
+    protocol: pair.protocol,
+    selectedIndex,
+    selectionProbabilityPpm: 500_000,
+    selected: pair.offers[selectedIndex],
+  };
 }
 
 /**
