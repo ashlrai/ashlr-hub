@@ -3104,3 +3104,7 @@
 - Concurrent execution now normalizes its final `{backend, tier, model, reason, disposition}` at the executor boundary. Gateway model and tier metadata survive only when the planner keeps the exact gateway backend; planner reassignment and pause paths clear the model and are marked `planner-reassigned`.
 - This record remains in-memory task-bound metadata. It creates no canary candidates, randomization, receipt, manifest field, routing change, or engine call. `selectionCanary.enabled` remains false with `producer-unavailable`.
 - The eventual producer still needs a fresh shared execution authority plus an exactly-two same-tier, ordinary, capacity-open candidate pair at the direct external-engine pre-effect boundary. Repairs, reslices, Best-of-N, quota/learned/router fallbacks, local clamps, pauses, and executor substitution remain excluded.
+
+# Current Binary Pair Eligibility Boundary
+- A pure, unused helper now accepts only exactly two distinct non-builtin, same-tier, `gateway-exact`, candidate-allowed routes in an `ordinary-direct` context with fresh positive planner-capacity observations. It preserves input order and makes no random choice, capacity mutation, reservation, receipt, manifest update, or config change.
+- Planner capacity remains an eligibility snapshot, never a reservation. The daemon does not yet construct a second candidate or invoke this helper; a future lease-bound producer must revalidate final route and authority immediately before the external engine effect.
