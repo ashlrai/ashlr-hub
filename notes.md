@@ -3085,3 +3085,8 @@
 - Reusing the same root/claim/selection assignment returns the immutable existing receipt as `replayed`; a different assignment under the same deterministic root/claim receipt ID is `conflicted`. Missing keys, unsafe paths, malformed files, uncertain installation, or final-read failure are unavailable/degraded, never successful evidence.
 - The daemon does not call this store yet. It remains a durable primitive until the exactly-two-route planner and receipt-before-engine integration are complete.
 - Verification: receipt-store plus full M342 ledger coverage passes 144 tests with four platform-gated skips; TypeScript and lint pass with zero errors, and diff checks pass.
+
+# Current Live Canary Integration Gap
+- The concurrent planner can fall back after a preferred route loses capacity. A valid propensity therefore cannot be chosen from a precomputed fleet-wide candidate list or reconstructed from free-form routing reasons after planning.
+- The live producer must run immediately before the per-item concurrent assignment commits and carry the exact gateway `{backend, tier, model, disposition}` plus remaining slot state. It must require exactly two distinct, non-builtin, candidate-allowed, capacity-open routes in the gateway-selected tier and include the normal gateway-selected route. Repairs, reslices, fallbacks, retries, Best-of-N, quota/resource/protected decisions, stale/ambiguous snapshots, and any route loss disqualify the observation.
+- A standalone selection helper was intentionally discarded rather than committing a misleading foundation. Candidate identities stay planner-memory-only; only the existing commitment can enter the signed receipt after exact final route binding.
