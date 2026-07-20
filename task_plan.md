@@ -2866,6 +2866,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit strict activation configuration and the durable shared-queue execution authority boundary.
 - [x] Define the receipt-first canary design: opaque execution authority, immutable signed start receipt, then engine invocation.
 - [x] Add a strict default-off canary configuration resolver and effective-config visibility that remains producer-disabled.
+- [x] Preserve an opaque, digest-bound shared-queue execution-authority projection across the pre-effect coordinator seam.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 
 ## Merge Contract Rollout Planner (2026-07-20)

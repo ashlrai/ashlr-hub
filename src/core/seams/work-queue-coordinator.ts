@@ -35,7 +35,7 @@ import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-st
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { workItemCoverageKey, workItemExecutionKey } from '../fleet/proposal-matching.js';
 import { hostname } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
   id: 'workQueueCoordinator' as const,
@@ -43,6 +43,30 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
   delegatesTo: 'core/fleet/worked-ledger.ts + core/fleet/shared-store.ts',
   summary: 'Work-item claim/skip coordination (LOCAL = per-machine; SHARED = multi-machine filesystem lease).',
 };
+
+/**
+ * A non-capability projection of the exact authority that crossed the durable
+ * pre-effect boundary. It intentionally omits owner tokens and item identity.
+ */
+export type ExecutionAuthority =
+  | { kind: 'local' }
+  | {
+      kind: 'shared-queue-v1';
+      queueId: string;
+      claimEpoch: number;
+      claimBindingDigest: string;
+    };
+
+function executionAuthority(ref: QueueClaimRef): ExecutionAuthority {
+  return {
+    kind: 'shared-queue-v1',
+    queueId: ref.queueId,
+    claimEpoch: ref.epoch,
+    claimBindingDigest: createHash('sha256')
+      .update(`ashlr:execution-authority:v1\0${ref.queueId}\0${ref.epoch}\0${ref.ownerKey}`)
+      .digest('hex'),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -73,7 +97,7 @@ export interface WorkQueueCoordinator {
   renew(items: WorkItem[], machineId: string): WorkItem[];
   /** Return every item whose current claim still authorizes this coordinator. */
   fence(items: WorkItem[], machineId: string): WorkItem[];
-  beginExecution(item: WorkItem, machineId: string): boolean;
+  beginExecution(item: WorkItem, machineId: string): ExecutionAuthority | null;
   /** Clear an exact executing claim after a terminal result with no cooldown. */
   settleClaim(claimItem: WorkItem, machineId: string): boolean;
   release(items: WorkItem[], machineId: string): void;
@@ -147,8 +171,8 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     return [...items];
   }
 
-  beginExecution(_item: WorkItem, _machineId: string): boolean {
-    return true;
+  beginExecution(_item: WorkItem, _machineId: string): ExecutionAuthority {
+    return { kind: 'local' };
   }
 
   settleClaim(_claimItem: WorkItem, _machineId: string): boolean {
@@ -338,22 +362,22 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return this.renew(items, machineId);
   }
 
-  beginExecution(item: WorkItem, machineId: string): boolean {
-    if (!this.authorityEnabled) return false;
+  beginExecution(item: WorkItem, machineId: string): ExecutionAuthority | null {
+    if (!this.authorityEnabled) return null;
     const key = this.executionKey(item);
-    if (key === null) return false;
+    if (key === null) return null;
     let ref = this.claims.get(key);
-    if (!ref || ref.machineId !== machineId) return false;
+    if (!ref || ref.machineId !== machineId) return null;
     const deadline = this.mutationDeadline();
     for (;;) {
       const result = this.store.beginClaimExecutionResult(ref);
       if (result.status === 'success') {
         this.claims.set(key, result.value);
-        return true;
+        return executionAuthority(result.value);
       }
-      if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
+      if (result.status === 'authority-lost' || Date.now() >= deadline) return null;
       const refreshed = this.refreshClaim(ref);
-      if (!refreshed) return false;
+      if (!refreshed) return null;
       ref = refreshed;
       this.claims.set(key, ref);
     }

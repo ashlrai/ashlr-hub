@@ -128,6 +128,11 @@ describe('M111 LocalWorkQueueCoordinator', () => {
     expect(coord.renew([makeItem('a'), makeItem('b')], 'machine-1')).toEqual([]);
   });
 
+  it('projects only local authority at the pre-execution boundary', () => {
+    expect(new LocalWorkQueueCoordinator().beginExecution(makeItem('local'), 'machine-1'))
+      .toEqual({ kind: 'local' });
+  });
+
   it('recordOutcome writes to local ledger and shouldSkip picks it up', () => {
     const coord = new LocalWorkQueueCoordinator();
     // Override HOME to tmpDir so the local ledger stays isolated.
@@ -398,7 +403,14 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
 
     expect(coord.claimItemsByLane([{ candidates: [item], limit: 1 }], 1, 'machine-A', policies))
       .toEqual([item]);
-    expect(coord.beginExecution(item, 'machine-A')).toBe(true);
+    const authority = coord.beginExecution(item, 'machine-A');
+    expect(authority).toMatchObject({
+      kind: 'shared-queue-v1',
+      claimEpoch: expect.any(Number),
+      claimBindingDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(JSON.stringify(authority)).not.toContain('ownerToken');
+    expect(JSON.stringify(authority)).not.toContain(executionKey(item));
     expect(coord.recordClaimOutcome(item, 'wrong-recomputed-key', 'diff', 'machine-A')).toBe(true);
 
     expect(store.readSnapshot().worked).toEqual([

@@ -3065,3 +3065,8 @@
 - `foundry.fabric.selectionCanary` now has a deliberately tiny strict configuration contract: literal `enabled:true`, optional `binary-uniform-v1`, and no unknown keys. Non-plain values, coercions, unknown fields, unsupported protocols, or missing gateway/concurrent-dispatch prerequisites are rejected by a side-effect-free resolver.
 - Effective config and the CLI distinguish a requested/config-eligible canary from an enabled one. The result is always `enabled:false` with `producer-unavailable` until the signed, lease-bound selection-start receipt producer exists; configuration imports no dispatch module and cannot alter a route.
 - Verification: resolver and effective-config focused tests pass (10 assertions), as does TypeScript typechecking.
+
+# Current Queue Execution Authority Projection
+- The work-queue coordinator now returns an opaque authority projection when a shared claim atomically crosses from `claimed` to `executing`: queue ID, claim epoch, and a domain-separated SHA-256 binding digest. Owner tokens, encoded owner keys, and item identities stay inside the coordinator.
+- Local execution returns only `{kind:'local'}`. The daemon still uses the value solely as a truthy pre-launch fence; no receipt is written and no trajectory/dispatch evidence changes in this increment.
+- Verification: M111/M113 queue and coordinator suites pass 75 assertions; TypeScript and diff checks pass.
