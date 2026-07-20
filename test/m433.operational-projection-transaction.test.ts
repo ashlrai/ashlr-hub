@@ -33,6 +33,7 @@ import {
   operationalProjectionTransactionPath,
   prepareOperationalProjectionTransactionJournalOnly,
   readOperationalProjectionTransaction,
+  validOperationalProjectionStagedArtifactsV2,
 } from '../src/core/inbox/operational-projection-transaction.js';
 import { operationalProposalProjectionDir } from '../src/core/inbox/operational-projection.js';
 import {
@@ -91,6 +92,30 @@ afterEach(() => {
 });
 
 describe('M433 operational projection transaction journal', () => {
+  it('validates bounded metadata-only V2 staged artifacts against the authenticated after digests', () => {
+    const valid = {
+      proposal: { present: true, digest: AFTER.proposal, bytes: 1 },
+      projection: { present: true, digest: AFTER.projection, bytes: 4 * 1024 * 1024 },
+    };
+    expect(validOperationalProjectionStagedArtifactsV2(valid, AFTER)).toBe(true);
+    expect(validOperationalProjectionStagedArtifactsV2({
+      proposal: { present: false, digest: null, bytes: 0 },
+      projection: { present: false, digest: null, bytes: 0 },
+    }, { proposal: null, projection: null })).toBe(true);
+    expect(validOperationalProjectionStagedArtifactsV2({
+      proposal: { present: true, digest: BEFORE.proposal, bytes: 1 },
+      projection: valid.projection,
+    }, AFTER)).toBe(false);
+    expect(validOperationalProjectionStagedArtifactsV2({
+      proposal: { present: false, digest: null, bytes: 1 },
+      projection: valid.projection,
+    }, AFTER)).toBe(false);
+    expect(validOperationalProjectionStagedArtifactsV2({
+      proposal: { present: true, digest: AFTER.proposal, bytes: 4 * 1024 * 1024 + 1 },
+      projection: valid.projection,
+    }, AFTER)).toBe(false);
+  });
+
   it('reads a missing journal without creating storage', () => {
     fs.rmSync(path.join(home, '.ashlr'), { recursive: true, force: true });
     expect(readOperationalProjectionTransaction()).toEqual({

@@ -2601,7 +2601,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Operational Projection Recovery Foundation (2026-07-20)
 - [x] Audit dormant projection authority and preserve the no-hot-consumer boundary.
 - [x] Add a read-only, lock-required observation seam for canonical proposal and projection artifacts.
-- [ ] Add authenticated staged-artifact metadata without raw proposal or projection contents in the journal.
+- [x] Define and prove the bounded metadata-only staged-artifact invariant; wire it into the authenticated V2 journal next.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
 

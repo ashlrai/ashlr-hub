@@ -3,6 +3,7 @@
 ## Operational Projection Recovery Foundation
 - Boundary: operational projection remains dormant. No hot consumer can move until every proposal persistence path participates in crash-recoverable projection publication and an external monotonic authority exists.
 - Implementation: `observeOperationalProjectionArtifacts()` now reads canonical proposal and sealed projection identities only while the caller owns the global proposal-store lock. It returns domain-bound digest and byte metadata without writing files, changing authority, or exposing raw artifact contents.
+- Staged-artifact contract: `validOperationalProjectionStagedArtifactsV2()` accepts only exact, bounded `{present,digest,bytes}` metadata whose present digest agrees with the authenticated target digest. It contains neither artifact paths nor contents; a later executor must derive paths and revalidate stable bytes while holding the global writer lock.
 - Verification: focused M432 projection coverage passed 12 tests, typecheck passed, lint exited 0 with the existing 101 warnings, and `git diff --check` passed.
 - Next: V2 transaction metadata will name bounded staged artifacts by transaction ID; the journal will retain only presence/digest/byte metadata, never raw proposal or projection contents.
 

@@ -17,6 +17,8 @@ import {
 
 const SCHEMA_VERSION = 1 as const;
 const MAX_TRANSACTION_BYTES = 64 * 1024;
+const MAX_STAGED_PROPOSAL_BYTES = 4 * 1024 * 1024;
+const MAX_STAGED_PROJECTION_BYTES = 4 * 1024 * 1024;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const PROPOSAL_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const KEY_DOMAIN = 'ashlr.operational-projection-transaction.key.v1';
@@ -32,6 +34,18 @@ export type OperationalProjectionTransactionPhase =
 export interface OperationalProjectionTransactionDigestsV1 {
   proposal: string | null;
   projection: string | null;
+}
+
+/** Metadata-only description of a deterministic private staged artifact. */
+export interface OperationalProjectionTransactionStagedArtifactV2 {
+  present: boolean;
+  digest: string | null;
+  bytes: number;
+}
+
+export interface OperationalProjectionTransactionStagedArtifactsV2 {
+  proposal: OperationalProjectionTransactionStagedArtifactV2;
+  projection: OperationalProjectionTransactionStagedArtifactV2;
 }
 
 export interface OperationalProjectionTransactionV1 {
@@ -89,6 +103,34 @@ function validDigestPair(value: unknown): value is OperationalProjectionTransact
   const record = value as Record<string, unknown>;
   return Object.keys(record).sort().join(',') === 'projection,proposal' &&
     validDigest(record['proposal']) && validDigest(record['projection']);
+}
+
+/**
+ * Validates only bounded metadata. Artifact paths and bytes are intentionally
+ * absent: a later recovery executor derives paths from a transaction id and
+ * revalidates stable-read bytes under the global writer lock.
+ */
+export function validOperationalProjectionStagedArtifactsV2(
+  value: unknown,
+  after: OperationalProjectionTransactionDigestsV1,
+): value is OperationalProjectionTransactionStagedArtifactsV2 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const staged = value as Record<string, unknown>;
+  if (Object.keys(staged).sort().join(',') !== 'projection,proposal') return false;
+  const validArtifact = (artifact: unknown, digest: string | null, maxBytes: number): boolean => {
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return false;
+    const record = artifact as Record<string, unknown>;
+    const present = record['present'];
+    const artifactDigest = record['digest'];
+    const bytes = record['bytes'];
+    if (Object.keys(record).sort().join(',') !== 'bytes,digest,present' ||
+      typeof present !== 'boolean' || typeof bytes !== 'number' || !Number.isSafeInteger(bytes)) return false;
+    if (present === false) return artifactDigest === null && bytes === 0 && digest === null;
+    return typeof artifactDigest === 'string' && DIGEST_RE.test(artifactDigest) &&
+      artifactDigest === digest && bytes > 0 && bytes <= maxBytes;
+  };
+  return validArtifact(staged['proposal'], after.proposal, MAX_STAGED_PROPOSAL_BYTES) &&
+    validArtifact(staged['projection'], after.projection, MAX_STAGED_PROJECTION_BYTES);
 }
 
 function validProposalId(value: unknown): value is string {
