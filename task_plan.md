@@ -2863,6 +2863,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove the caller-injected propensity-ID escape hatch from learning eligibility.
 - [x] Keep all selection data observation-only; no routing, merge, verification, or recursive-learning authority changes.
 - [x] Surface categorical selection-propensity source quality in Fleet Status, CLI, and Mission Control.
+- [x] Audit strict activation configuration and the durable shared-queue execution authority boundary.
+- [x] Define the receipt-first canary design: opaque execution authority, immutable signed start receipt, then engine invocation.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 
 ## Merge Contract Rollout Planner (2026-07-20)
