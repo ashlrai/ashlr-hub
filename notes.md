@@ -3130,3 +3130,8 @@
 - Best-of-N candidates now retain a bounded `runEventSummary` for this classification, while internal run state remains private. A nonzero `proposalCaptureAttempts` count preserves intentional duplicate-diff suppression; changed work without an attempt remains a capture-repair diagnostic.
 - The authoritative capture-missing reason is retained when the critique repeats the candidate's original policy-disabled text, so the existing repair scheduler can see the actual diagnostic. Candidates with no changed-work evidence remain `proposal-disabled` and retain their non-cooling semantics.
 - Verification: focused Best-of-N capture and structured-outcome coverage passes nine assertions; the M333 multi-model suite passes 22, along with TypeScript typechecking and quiet lint. Protected CI remains the promotion authority.
+
+# Current Terminal Route Reconstruction
+- Trajectory records now promote route and bounded execution metadata from a dispatch production event only when its terminal outcome is at least as strong as the record's current terminal fact. This replaces provisional dispatch-start routing with the actual executor route, including executor fallback.
+- Every source observation remains in the timeline. A later cancellation cannot regress a previous failure/no-proposal terminal route or its metadata, so Fleet Status and learning summaries see the terminal route-to-outcome pairing.
+- Verification: the M354 trajectory suite passes 34 assertions, with typechecking and quiet lint also passing. Protected CI remains the promotion authority.

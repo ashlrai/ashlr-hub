@@ -664,6 +664,29 @@ function fillRecordMetadata(
   // the receipt-qualified join can prove pre-execution assignment authority.
 }
 
+/** Terminal dispatch metadata describes the executor, unlike a dispatch-start action. */
+function promoteTerminalDispatchMetadata(
+  record: MutableTrajectoryRecord,
+  event: DispatchProductionEvent,
+  fields: { proposalId?: string; runId?: string; trajectoryId?: string },
+): void {
+  if (fields.proposalId) record.proposalId = fields.proposalId;
+  if (fields.runId) record.runId = fields.runId;
+  if (fields.trajectoryId && !isDerivedWorkTrajectory(fields.trajectoryId)) {
+    record.trajectoryId = fields.trajectoryId;
+  }
+  record.backend = sanitizeMetadata(event.backend);
+  record.tier = sanitizeMetadata(event.tier);
+  record.model = sanitizeMetadata(event.model ?? null);
+  record.routeSnapshot = event.routeSnapshot ? sanitizeMetadata(event.routeSnapshot) : undefined;
+  record.runEventSummary = event.runEventSummary ? sanitizeMetadata(event.runEventSummary) : undefined;
+  record.evidenceOutcome = event.evidenceOutcome ? sanitizeMetadata(event.evidenceOutcome) : undefined;
+  if (event.learningSource) record.learningSource = event.learningSource;
+  if (event.labelBasis) record.labelBasis = event.labelBasis;
+  if (event.routerPolicyVersion) record.routerPolicyVersion = bounded(event.routerPolicyVersion, 120);
+  if (event.learningEpoch) record.learningEpoch = bounded(event.learningEpoch, 120);
+}
+
 function evidenceEvent(evidence: OutcomeRecordEvidence, proposalId: string, tsFallback: string): TrajectoryTimelineEvent {
   const verification = evidence.verification;
   return {
@@ -798,8 +821,12 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       record.receiptQualifiedSelectionObservation = projection;
       usedSelectionReceiptIds.add(qualified.receiptId);
     }
+    const terminal = dispatchTerminalOutcome(event);
+    if (betterTerminalOutcome(record.terminalOutcome, terminal) === terminal) {
+      promoteTerminalDispatchMetadata(record, event, { proposalId, runId, trajectoryId });
+    }
     record.coverage.dispatch = true;
-    record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, dispatchTerminalOutcome(event));
+    record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, terminal);
     noteTimeline(record, {
       ts: event.ts,
       kind: 'dispatch',

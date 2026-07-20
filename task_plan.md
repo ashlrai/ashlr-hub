@@ -2892,6 +2892,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add order-independent capture-repair diagnostic coverage and run focused tests, typecheck, and lint.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
 
+## Terminal Route Reconstruction (2026-07-20)
+- [x] Audit planned action metadata against terminal dispatch production routes.
+- [x] Promote equal-or-stronger terminal dispatch metadata over provisional action metadata.
+- [x] Preserve planned and cancellation observations in the timeline without letting weaker terminal facts regress the final route.
+- [x] Add executor-fallback and later-cancellation regression coverage; run focused tests, typecheck, and lint.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
 ## Merge Contract Rollout Planner (2026-07-20)
 - [x] Replace manual verify-contract editing guidance with a read-only rollout planner.
 - [x] Bound detector-derived project roots and candidates, reject parent-relative cwd suggestions, and retain explicit blockers.

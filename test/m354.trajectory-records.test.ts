@@ -261,6 +261,68 @@ function deps(overrides: Partial<TrajectoryRecordReadDeps> = {}): TrajectoryReco
 }
 
 describe('Trajectory records', () => {
+  it('promotes stronger terminal dispatch route metadata over an earlier planned action', () => {
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            ts: TS2,
+            backend: 'builtin',
+            tier: 'local',
+            model: null,
+            assignedBy: 'executor-fallback',
+            routeSnapshot: {
+              backend: 'builtin', tier: 'local', model: null,
+              assignedBy: 'executor-fallback', reason: 'fallback after executor refusal',
+              routerPolicyVersion: ROUTER_POLICY_VERSION,
+            },
+            runEventSummary: { runId: 'run-1', status: 'failed', outcome: 'engine-failed', proposalCreated: false },
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            proposalId: undefined,
+          }),
+          dispatch({
+            ts: TS4,
+            backend: 'local-coder',
+            tier: 'mid',
+            model: 'planned-model',
+            outcome: 'cancelled',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: { runId: 'run-1', status: 'aborted', outcome: 'cancelled', proposalCreated: false },
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          ts: TS1,
+          backend: 'local-coder',
+          tier: 'mid',
+          model: 'planned-model',
+          routeSnapshot: {
+            backend: 'local-coder', tier: 'mid', model: 'planned-model',
+            assignedBy: 'router', reason: 'planned route', routerPolicyVersion: ROUTER_POLICY_VERSION,
+          },
+          runEventSummary: { runId: 'run-1', status: 'running', outcome: 'running', proposalCreated: false },
+        })],
+      }),
+    });
+
+    expect(record).toMatchObject({
+      backend: 'builtin',
+      tier: 'local',
+      model: null,
+      terminalOutcome: 'failed',
+      routeSnapshot: expect.objectContaining({ assignedBy: 'executor-fallback' }),
+      runEventSummary: expect.objectContaining({ status: 'failed', outcome: 'engine-failed' }),
+    });
+    expect(record?.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'agent-action', backend: 'local-coder', model: 'planned-model' }),
+      expect.objectContaining({ kind: 'dispatch', backend: 'builtin', model: null }),
+      expect.objectContaining({ kind: 'dispatch', outcome: 'cancelled', backend: 'local-coder' }),
+    ]));
+  });
+
   it('materializes preclaim route infeasibility as an action-only trajectory', () => {
     const attemptId = 'attempt-12345678-1234-4123-8123-123456789abc';
     const [record] = listTrajectoryRecords({
