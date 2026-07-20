@@ -199,8 +199,11 @@ describe('selection start receipt V2 store', () => {
       status: 'found', receipt: first.receipt,
     });
 
-    expect(writeCoordinatorSelectionStartReceiptV2(input('2026-07-20T15:01:00.000Z'))).toEqual({
+    expect(writeCoordinatorSelectionStartReceiptV2(input())).toEqual({
       status: 'replayed', receipt: first.receipt,
+    });
+    expect(writeCoordinatorSelectionStartReceiptV2(input('2026-07-20T15:01:00.000Z'))).toEqual({
+      status: 'conflicted', reason: 'receipt-id-conflict',
     });
     expect(readFileSync(path, 'utf8')).not.toContain('ownerToken');
     expect(readFileSync(path, 'utf8')).not.toContain('candidates');

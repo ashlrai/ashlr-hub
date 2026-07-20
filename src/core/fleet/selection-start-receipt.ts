@@ -405,10 +405,14 @@ function sameReplay(left: SelectionStartReceiptV1, right: SelectionStartReceiptV
 }
 
 function sameReplayV2(left: SelectionStartReceiptV2, right: SelectionStartReceiptV2): boolean {
-  return left.receiptId === right.receiptId &&
+  return left.schemaVersion === right.schemaVersion &&
+    left.authority === right.authority &&
+    left.receiptId === right.receiptId &&
+    left.ts === right.ts &&
     JSON.stringify(left.root) === JSON.stringify(right.root) &&
     JSON.stringify(left.claim) === JSON.stringify(right.claim) &&
-    JSON.stringify(left.selectionObservation) === JSON.stringify(right.selectionObservation);
+    JSON.stringify(left.selectionObservation) === JSON.stringify(right.selectionObservation) &&
+    left.signature === right.signature;
 }
 
 /** Read one installed receipt without creating directories or repairing key state. */

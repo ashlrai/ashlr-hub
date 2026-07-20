@@ -3178,6 +3178,11 @@
 - The authoritative order is local immutable V2 envelope write/fsync/readback, then shared binding, then dual readback/join validation. A local-only orphan is recoverable by retry; a shared-only binding without a reconstructible envelope is not sufficient for qualification.
 - V2 needs a separate durable receipt namespace and reader/writer. V1’s reader remains forensic-only, and a machine-local receipt directory alone cannot validate a fleet-wide post-restart learning signal.
 
+# Current V2 Local Receipt Persistence
+- V2 receipts now use a dedicated `selection-start-receipts-v2` private directory with the same no-clobber, fsync, and verified-readback protocol as V1; V1 readers cannot observe V2 files and V1 qualification behavior is unchanged.
+- V2 replay equality covers the complete signed envelope, including schema, authority, timestamp, signature, root, claim, and selection observation. The deterministic receipt id alone is not enough to turn a different signed envelope into a replay.
+- This remains a local durable prerequisite only. It is not fleet-qualified until the coordinator derives the claim from its exact minted authority and joins the receipt to the shared binding with dual readback.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.
