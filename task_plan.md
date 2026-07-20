@@ -2828,3 +2828,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Apply the bound only to ordinary selection; preserve repair child routing and fail open on degraded evidence.
 - [x] Add focused terminalization, changed-objective, and degraded-source coverage.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Capture-Repair Autonomous Drain (2026-07-20)
+- [x] Audit capture repair generation, route feasibility, and live selection priority.
+- [x] Add a bounded capture-repair drain lane ahead of diagnostic reslices, preserving lifecycle/route guards and ordinary-work fairness.
+- [x] Add automatic priority and two-slot fairness regressions.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

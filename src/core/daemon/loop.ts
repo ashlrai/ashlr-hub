@@ -36,7 +36,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
+import {
+  DEFAULT_CAPTURE_REPAIR_DRAIN_LIMIT,
+  DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT,
+} from '../types.js';
 import type {
   AshlrConfig,
   DaemonConfig,
@@ -1686,6 +1689,8 @@ function drainTag(mode: DaemonDrainMode): string {
 
 function isDrainCandidate(item: WorkItem, mode: DaemonDrainMode): boolean {
   switch (mode) {
+    case 'capture-repairs':
+      return isTrustedCaptureRepairItem(item);
     case 'diagnostic-reslices':
       return isTrustedDiagnosticResliceItem(item);
   }
@@ -1705,6 +1710,10 @@ function resolveDrainLimit(
   const explicit = normalizeDrainLimit(explicitLimit);
   if (explicit !== undefined) return explicit;
   switch (mode) {
+    case 'capture-repairs': {
+      const configured = normalizeDrainLimit(cfg.daemon?.drainLimits?.captureRepairs);
+      return configured ?? DEFAULT_CAPTURE_REPAIR_DRAIN_LIMIT;
+    }
     case 'diagnostic-reslices': {
       const configured = normalizeDrainLimit(cfg.daemon?.drainLimits?.diagnosticReslices);
       return configured ?? DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT;
@@ -1712,7 +1721,7 @@ function resolveDrainLimit(
   }
 }
 
-function canAutoDrainDiagnosticReslices(
+function canAutoDrainRepairs(
   opts: TickOptions,
   plan: ResourceStrategyDaemonPlan | null,
 ): boolean {
@@ -4372,8 +4381,14 @@ export async function tick(
     !isSelectionBlocked(item) && hasFeasibleClaimRoute(item);
 
   const explicitDrainMode = opts.drain;
-  const autoDrainMode: DaemonDrainMode | undefined =
-    explicitDrainMode === undefined && canAutoDrainDiagnosticReslices(opts, directionPlan)
+  const canAutoDrain = explicitDrainMode === undefined && canAutoDrainRepairs(opts, directionPlan);
+  // Capture failures are the production-yield recovery lane. Prefer them to
+  // diagnostic reslices, but retain the existing single-lane cap and ordinary
+  // work fairness below so recovery cannot consume all available capacity.
+  const autoDrainMode: DaemonDrainMode | undefined = canAutoDrain &&
+    backlogItems.some((item) => isDrainCandidate(item, 'capture-repairs'))
+    ? 'capture-repairs'
+    : canAutoDrain && backlogItems.some((item) => isDrainCandidate(item, 'diagnostic-reslices'))
       ? 'diagnostic-reslices'
       : undefined;
   const autoDrainAvailableItems = autoDrainMode

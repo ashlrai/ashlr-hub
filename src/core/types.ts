@@ -4169,6 +4169,7 @@ export interface DaemonConfig {
    * available worker slot just because the machine has capacity.
    */
   drainLimits?: {
+    captureRepairs?: number;
     diagnosticReslices?: number;
   };
   /**
@@ -4296,8 +4297,9 @@ export interface DaemonDispatchManifestSummary {
   resourceSnapshotAt?: string;
 }
 
-export type DaemonDrainMode = 'diagnostic-reslices';
+export type DaemonDrainMode = 'capture-repairs' | 'diagnostic-reslices';
 
+export const DEFAULT_CAPTURE_REPAIR_DRAIN_LIMIT = 3;
 export const DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 3;
 
 export interface DaemonDrainSummary {

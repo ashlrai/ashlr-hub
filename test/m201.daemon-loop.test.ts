@@ -734,6 +734,51 @@ function makeDiagnosticResliceItem(
   };
 }
 
+async function makeCaptureRepairItem(
+  repoDir: string,
+  hash = 'abcdef123456',
+  score = 1,
+  parentTier: EngineTier = 'local',
+): Promise<WorkItem> {
+  const ts = new Date().toISOString();
+  const parentItemId = `repo:goal:capture:${hash}`;
+  const objectiveHash = hash.repeat(6).slice(0, 64);
+  const parentEvent: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: parentItemId,
+    source: 'goal',
+    repo: repoDir,
+    title: `Repair capture failure ${hash}`,
+    backend: parentTier === 'mid' ? 'local-coder' : 'builtin',
+    tier: parentTier,
+    assignedBy: 'router',
+    routeReason: 'test capture parent route',
+    outcome: 'proposal-capture-error',
+    proposalCreated: false,
+    runId: `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`,
+    objectiveHash,
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+    reason: 'proposal-capture-error: src/app.ts:12 expected ready state',
+  };
+  expect(recordRepairHandoffs(parentEvent, {
+    schemaVersion: 2,
+    activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
+  })).toMatchObject({ recorded: 1, failed: 0 });
+  const handoff = repairHandoffFromDispatchEvent(parentEvent)!;
+  const { captureGateRepairWorkItem } = await vi.importActual<
+    typeof import('../src/core/fleet/proposal-repair-work.js')
+  >('../src/core/fleet/proposal-repair-work.js');
+  const repair = captureGateRepairWorkItem({
+    ...parentEvent,
+    repairHandoffId: handoff.eventId,
+    repairGenerationId: handoff.generationId,
+  }, new Date(ts));
+  if (!repair) throw new Error('expected trusted capture repair');
+  return { ...repair, score };
+}
+
 function addLegacyGenerationAlias(item: WorkItem, hash: string, parentTier: EngineTier): string {
   const parentEvent: DispatchProductionEvent = {
     schemaVersion: 1,
@@ -1589,6 +1634,90 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
     });
     expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(true);
+  });
+
+  it('A1-capture-drain-auto: live ticks prioritize feasible capture repairs before reslices and ordinary backlog', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 50, 'mid');
+    const capture = await makeCaptureRepairItem(repo.dir, 'fedcba654321', 1, 'mid');
+    const { isTrustedCaptureRepairItem } = await vi.importActual<
+      typeof import('../src/core/fleet/self-heal-trust.js')
+    >('../src/core/fleet/self-heal-trust.js');
+    expect(isTrustedCaptureRepairItem(capture)).toBe(true);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, reslice, capture],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'capture drain route' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+      id: (options as { runId: string }).runId,
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'proposal-capture-error', reason: 'capture drain regression fixture' },
+    }));
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toMatchObject({
+      mode: 'capture-repairs',
+      available: 1,
+      selected: 1,
+      automatic: true,
+      selectedItemIds: [capture.id],
+    });
+    expect(selection?.tags).toEqual(expect.arrayContaining(['drain:capture-repairs', 'auto-drain']));
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ workItemId: capture.id });
+  });
+
+  it('A1-capture-drain-auto-fairness: capture drain honors its cap and retains one ordinary slot', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    const firstCapture = await makeCaptureRepairItem(repo.dir, 'abcdef123456', 2, 'mid');
+    const secondCapture = await makeCaptureRepairItem(repo.dir, 'fedcba654321', 1, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, firstCapture, secondCapture],
+    });
+    const config = cfgBuiltin({ perTickItems: 2, parallel: 2 });
+    config.daemon = { ...config.daemon, drainLimits: { captureRepairs: 1 } };
+    config.foundry = { allowedBackends: ['local-coder', 'kimi'] };
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'capture drain route' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementation(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
+      id: (options as { runId: string }).runId,
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'proposal-capture-error', reason: 'capture drain regression fixture' },
+    }));
+
+    const result = await tick(config, { dryRun: false });
+    const dispatchedIds = mockRunGoal.mock.calls.map((call) => call[2]?.workItemId);
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toMatchObject({
+      mode: 'capture-repairs',
+      selected: 1,
+      automatic: true,
+      selectedItemIds: [firstCapture.id],
+    });
+    expect(dispatchedIds).toEqual(expect.arrayContaining([firstCapture.id, generic.id]));
+    expect(dispatchedIds).not.toContain(secondCapture.id);
   });
 
   it.each([

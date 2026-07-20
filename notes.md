@@ -2949,4 +2949,10 @@
 - The remaining legacy treatment-receipt assertion was an analytics-reader compatibility gap: a direct immutable artifact with a sanitizer-validated v1 label passed byte framing admission but was compared only against the v2-materialized event.
 - Direct artifacts now retain exact-event matching by default and accept the narrow legacy shape only when its label normalizes through the shared sanitizer to the expected canonical label. Retired and compacted receipt paths remain digest-bound.
 - Verification: both legacy receipt regressions pass, all 16 workhorse-dispatch tests pass, and changed-source TypeScript emits no matching errors. A new protected matrix is required before promotion.
+
+# Current Capture-Repair Drain
+- Capture-gate repairs were already generated, trusted, lifecycle-fenced, and route-checked, but live automatic draining only prioritized diagnostic no-diff reslices. High-scoring ordinary backlog could therefore repeatedly delay the fleet's dominant capture-repair failure class.
+- The daemon now gives trusted capture repairs a distinct bounded `capture-repairs` lane. When both repair lanes are available, capture repair wins; generated-repair route/lifecycle/pending guards, bounded per-lane caps, and the one ordinary-work fairness slot remain unchanged.
+- Operators can invoke the same proposal-only lane with `ashlr daemon start --once --drain capture-repairs --limit 3`; config supports `daemon.drainLimits.captureRepairs`.
+- Verification: focused automatic priority and two-slot fairness regressions pass, with changed-source TypeScript clean. The full M201 suite passes 217 tests; two existing process/claim fixtures fail in this isolated dependency attachment (`A1-shared-production-failure`, `A1h5b3c-process`) and are left for protected CI rather than being counted as green.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.
