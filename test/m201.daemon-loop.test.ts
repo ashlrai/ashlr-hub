@@ -398,6 +398,7 @@ import {
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome, recordOutcomeWithKey } from '../src/core/fleet/worked-ledger.js';
+import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { generatedRepairLifecycleAttemptHash } from '../src/core/fleet/generated-repair-identity.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -8191,6 +8192,48 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       expect(mockRunSwarm).toHaveBeenCalledTimes(2);
       expect(dispatchedItemIds).toContain(items[0]!.id);
       expect(dispatchedItemIds).toContain(items[1]!.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('A7c1: source-qualified recent decision activity keeps an old pending proposal blocking', async () => {
+    const { repo, items } = enrollWithItems(2);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-01T00:00:00.000Z'));
+      const pending = createProposal({
+        repo: repo.dir,
+        origin: 'swarm',
+        kind: 'patch',
+        title: `old active pending for ${items[0]!.id}`,
+        summary: `covers ${items[0]!.id}`,
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        workItemId: items[0]!.id,
+      });
+      recordDecision({ proposalId: pending.id, ts: '2026-07-02T23:30:00.000Z', action: 'judged' });
+      vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'));
+
+      const dispatchedItemIds: string[] = [];
+      mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
+        const workItemId = (opts as Record<string, unknown>)?.workItemId as string | undefined;
+        if (workItemId) dispatchedItemIds.push(workItemId);
+        return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
+      });
+
+      const result = await tick(
+        {
+          ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+          foundry: {
+            autonomyControlLoop: false,
+            productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+          },
+        } as AshlrConfig,
+        { dryRun: false },
+      );
+
+      expect(result.reason).toBe('ok');
+      expect(dispatchedItemIds).toEqual([items[1]!.id]);
     } finally {
       vi.useRealTimers();
     }

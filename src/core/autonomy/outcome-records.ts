@@ -281,6 +281,29 @@ function activityTimestampWithinProposalLifetime(
   return value;
 }
 
+function pendingProposalAuthorityBinding(proposal: Proposal): string {
+  const verify = proposal.verifyResult;
+  return JSON.stringify([
+    proposal.id, proposal.status, proposal.repo, proposal.kind, proposal.origin, proposal.createdAt,
+    proposal.title, proposal.summary, proposal.workItemId, proposal.workItemGenerationId,
+    proposal.engineModel, proposal.engineTier, proposal.diffHash, proposal.diff,
+    verify?.passed, verify?.diffHash, verify?.baseBranch, verify?.baseHead,
+    verify?.source, verify?.verifiedAt,
+  ]);
+}
+
+function samePendingProposalAuthoritySnapshot(
+  before: ReadonlyArray<Proposal>,
+  after: ReadonlyArray<Proposal>,
+): boolean {
+  if (before.length !== after.length) return false;
+  const left = [...before].sort((a, b) => a.id.localeCompare(b.id));
+  const right = [...after].sort((a, b) => a.id.localeCompare(b.id));
+  return left.every((proposal, index) =>
+    pendingProposalAuthorityBinding(proposal) === pendingProposalAuthorityBinding(right[index]!),
+  );
+}
+
 function byNewestTs<T>(readTs: (value: T) => string | undefined): (a: T, b: T) => number {
   return (a, b) => {
     const ams = Date.parse(readTs(a) ?? '');
@@ -646,7 +669,9 @@ export function readPendingProposalActivityDetailed(
   });
   const decisions = (deps.readDecisionsDetailed ?? readDecisionsDetailed)({ requireComplete: true });
   const traces = (deps.readJudgeTracesDetailed ?? readJudgeTracesDetailed)({ requireComplete: true });
-  const evidence = (deps.readAutonomyEvidencePacksDetailed ?? readAutonomyEvidencePacksDetailed)(200);
+  // Read the full bounded evidence population. A smaller presentation cap is
+  // not authority-safe because an older pending proposal could be omitted.
+  const evidence = (deps.readAutonomyEvidencePacksDetailed ?? readAutonomyEvidencePacksDetailed)(Number.MAX_SAFE_INTEGER);
   const postMerge = (deps.readPostMergeObservations ?? readPostMergeObservations)({ requireComplete: true });
   const sourceQuality = {
     proposals: withoutRows(proposals, 'proposals'),
@@ -655,11 +680,27 @@ export function readPendingProposalActivityDetailed(
     evidencePacks: withoutRows(evidence, 'packs'),
     postMergeObservations: withoutRows(postMerge, 'observations'),
   } satisfies OutcomeRecordsSourceQuality;
-  // Proposal membership is the root authority. Auxiliary missing ledgers are
-  // complete known-empty sources; a missing proposal snapshot is not.
-  const complete = proposals.sourceState === 'healthy' && proposals.complete &&
-    [decisions, traces, evidence, postMerge].every(completeOutcomeSource);
+  // A missing inbox directory is the established complete known-empty inbox
+  // state; malformed or partial proposal reads remain unavailable authority.
+  const complete = [proposals, decisions, traces, evidence, postMerge]
+    .every(completeOutcomeSource);
   if (!complete) {
+    return {
+      pendingProposals: [], activityAtByProposalId: new Map(), observedAt: observed.iso,
+      complete: false, sourceQuality,
+    };
+  }
+
+  // The source ledgers were read after the proposal snapshot. Re-read the
+  // exact pending identity before returning authority so a status, work-item,
+  // diff, verification, or membership race cannot refresh stale work.
+  const confirmed = (deps.listProposalsDetailed ?? listProposalsDetailed)({
+    status: 'pending', requireComplete: true,
+  });
+  if (
+    !completeOutcomeSource(confirmed) ||
+    !samePendingProposalAuthoritySnapshot(proposals.proposals, confirmed.proposals)
+  ) {
     return {
       pendingProposals: [], activityAtByProposalId: new Map(), observedAt: observed.iso,
       complete: false, sourceQuality,

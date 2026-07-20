@@ -235,7 +235,11 @@ import {
   daemonQueueSelectionLimit,
   resolveProductionVelocityProfile,
 } from '../fabric/production-velocity.js';
-import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
+import {
+  listOutcomeRecords,
+  listReadyEvidenceOutcomeRecords,
+  readPendingProposalActivityDetailed,
+} from '../autonomy/outcome-records.js';
 import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
 import {
   isTrustedCaptureRepairItem,
@@ -4284,23 +4288,36 @@ export async function tick(
   // matching. Never throws.
   let pendingItemKeys = new Set<string>();
   try {
+    const velocityProfile = resolveProductionVelocityProfile(routingCfg);
     const proposalRead = listProposalsDetailed({ status: 'pending', requireComplete: true });
-    if (!proposalRead.complete || proposalRead.sourceState === 'degraded') {
+    const pendingActivity = velocityProfile.enabled
+      ? readPendingProposalActivityDetailed()
+      : undefined;
+    if (
+      !proposalRead.complete || proposalRead.sourceState === 'degraded' ||
+      (pendingActivity !== undefined && !pendingActivity.complete)
+    ) {
       proposalDuplicateAuthorityUnavailable = true;
       for (const item of backlogItems) pendingItemKeys.add(workItemCoverageKey(item));
       console.warn('[ashlr] daemon:tick proposal duplicate authority unavailable');
     }
+    const pendingProposals = pendingActivity?.pendingProposals ?? proposalRead.proposals;
     const blockingPendingProposals = blockingPendingProposalsForBacklog(
-      proposalRead.proposals,
+      pendingProposals,
       routingCfg,
+      pendingActivity ? {
+        now: pendingActivity.observedAt,
+        activityAtByProposalId: pendingActivity.activityAtByProposalId,
+      } : undefined,
     );
-    if (proposalRead.complete && proposalRead.sourceState !== 'degraded') {
+    if (proposalRead.complete && proposalRead.sourceState !== 'degraded' &&
+      (pendingActivity === undefined || pendingActivity.complete)) {
       pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, blockingPendingProposals);
     }
     for (const item of backlogItems) {
       if (!isTrustedDiagnosticResliceItem(item)) continue;
       const key = workItemCoverageKey(item);
-      const authorities = proposalRead.proposals
+      const authorities = pendingProposals
         .map((proposal) => generatedRepairProposalDispatchAuthority(item, proposal))
         .filter((authority) => authority !== 'not-applicable');
       if (authorities.some((authority) => authority === 'unavailable')) {

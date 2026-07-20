@@ -275,6 +275,37 @@ describe('m302 listOutcomeRecords', () => {
     expect(result.sourceQuality.evidencePacks).toMatchObject({ sourceState: 'degraded' });
   });
 
+  it('withholds pending activity when the authoritative snapshot changes during ledger reads', () => {
+    const first = proposal({
+      id: 'prop-raced-activity', createdAt: '2026-07-03T00:00:00.000Z', summary: 'first snapshot',
+    });
+    const second = { ...first, summary: 'changed work-item binding snapshot' };
+    let proposalReads = 0;
+    const evidenceLimits: number[] = [];
+    const result = readPendingProposalActivityDetailed({ deps: detailedDeps({
+      listProposalsDetailed: () => {
+        proposalReads++;
+        return {
+          proposals: [proposalReads === 1 ? first : second],
+          sourceState: 'healthy', sourcePresent: true, complete: true,
+          stopReasons: [], filesDiscovered: 1, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+        };
+      },
+      readAutonomyEvidencePacksDetailed: (limit) => {
+        evidenceLimits.push(limit);
+        return {
+          packs: [], sourceState: 'missing', sourcePresent: false, complete: true,
+          filesRead: 0, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+        };
+      },
+    }) });
+
+    expect(proposalReads).toBe(2);
+    expect(evidenceLimits).toEqual([Number.MAX_SAFE_INTEGER]);
+    expect(result).toMatchObject({ complete: false, pendingProposals: [] });
+    expect(result.activityAtByProposalId).toEqual(new Map());
+  });
+
   it('publishes a complete source-qualified join without best-effort worked telemetry', () => {
     const result = listOutcomeRecordsDetailed({ deps: detailedDeps({
       listProposalsDetailed: () => ({
