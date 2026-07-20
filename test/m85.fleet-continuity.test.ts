@@ -86,12 +86,14 @@ import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 import {
   recordOutcome,
+  recordOutcomeWithKey,
   recentlyDeclined,
   loadWorkedLedger,
   latestWorkedEventForKeys,
   workedEventIsCooling,
   workedLedgerPath,
 } from '../src/core/fleet/worked-ledger.js';
+import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -392,14 +394,13 @@ describe('M85 cooldown skip — recentlyDeclined items are skipped', () => {
     const cooledId = 'cooled-item';
     const freshId  = 'fresh-item';
 
-    // Mark cooledId as recently empty (1 second ago, well within any cooldown).
-    const recent = new Date(Date.now() - 1000).toISOString();
-    recordOutcome(cooledId, 'empty', recent);
-
     backlogItems = [
       makeItem(cooledId, tmpRepo, { score: 10 }), // high score but cooled down
       makeItem(freshId,  tmpRepo, { score: 5  }), // lower score but fresh
     ];
+    // Mark cooledId as recently empty (1 second ago, well within any cooldown).
+    const recent = new Date(Date.now() - 1000).toISOString();
+    recordOutcomeWithKey(cooledId, workItemCoverageKey(backlogItems[0]!), 'empty', recent);
 
     const dispatched: string[] = [];
     mockRunSwarm.mockImplementation(async (_input: unknown, _cfg: unknown, opts: unknown) => {

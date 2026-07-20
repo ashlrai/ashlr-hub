@@ -2776,3 +2776,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a direct two-repository, same-scanner-id gateway-hint regression for the pure concurrent route planner.
 - [x] Prove repository-qualified route hints remain isolated without requiring a full daemon loop.
 - [x] Run the focused regression and retain the protected-CI failure as a separate investigation.
+
+## Repository-Scoped CI Fixture Alignment (2026-07-20)
+- [x] Update shared-queue contention fixtures to use the canonical execution key.
+- [x] Update cooldown fixtures to persist a public raw id and an authoritative scoped key.
+- [x] Run complete daemon-loop and fleet-continuity suites plus diff checks.

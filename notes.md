@@ -2884,3 +2884,8 @@
   - The pure concurrent route planner now has direct coverage for two repositories sharing one scanner id but carrying different gateway hints.
   - The regression proves coverage-keyed hints select each repository's own backend, so future map regressions fail before concurrent dispatch can cross-contaminate route identity.
   - The targeted test passes locally; the stacked protected CI currently has an independently reproducible Ubuntu failure under investigation.
+
+- Repository-scoped CI fixture alignment (2026-07-20):
+  - Shared-queue fixtures now contend on canonical execution keys, matching production claim authority rather than a raw scanner id that no longer participates in shared leasing.
+  - Cooldown fixtures explicitly persist raw `itemId` with their repository-qualified `itemKey`; this preserves operator-readable ledgers while proving selection cannot be cooled by unscoped legacy data.
+  - The complete daemon-loop and fleet-continuity suites pass locally after the fixture alignment, including concurrent forensic attempt identities carried by the later stacked route fix.
