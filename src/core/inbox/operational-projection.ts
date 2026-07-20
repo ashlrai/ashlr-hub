@@ -125,6 +125,19 @@ export interface MigrateOperationalProposalProjectionOptions {
   nowMs?: number;
 }
 
+export interface OperationalProjectionArtifactDigest {
+  digest: string | null;
+  bytes: number;
+}
+
+export type OperationalProjectionArtifactObservation =
+  | {
+    state: 'healthy';
+    proposal: OperationalProjectionArtifactDigest;
+    projection: OperationalProjectionArtifactDigest;
+  }
+  | { state: 'degraded'; reason: OperationalProposalProjectionDegradedReason | 'proposal-id-invalid'; proposal: null; projection: null };
+
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 function canonicalize(value: unknown, ancestors: Set<object>): JsonValue | undefined {
@@ -586,6 +599,70 @@ function projectionMember(proposal: Proposal, nowMs: number):
 
 function degraded(reason: OperationalProposalProjectionDegradedReason): OperationalProposalsReadResult {
   return { state: 'degraded', reason, proposals: [], projection: null };
+}
+
+/**
+ * Observe the two artifacts used by a future projection transaction while the
+ * caller owns the global proposal-store writer fence. This performs no writes
+ * and intentionally does not grant runtime projection authority.
+ */
+export function observeOperationalProjectionArtifacts(
+  proposalId: string,
+  storeLock: ProposalStoreMutationLock,
+): OperationalProjectionArtifactObservation {
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  if (!validProposalId(proposalId)) {
+    return { state: 'degraded', reason: 'proposal-id-invalid', proposal: null, projection: null };
+  }
+  const proposalPath = join(inboxDir(), `${proposalId}.json`);
+  if (!safePrivatePath(dirname(inboxDir()), 'directory', 0o700) ||
+    !safePrivatePath(inboxDir(), 'directory', 0o700) ||
+    !safePrivatePath(proposalPath, 'file', 0o600)) {
+    return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+  }
+  const proposalRead = readStableRegularFile(proposalPath, {
+    anchorPath: homedir(),
+    maxFileBytes: MAX_PROPOSAL_BYTES,
+    remainingBytes: MAX_PROPOSAL_BYTES,
+  });
+  if (!proposalRead.ok) {
+    return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+  }
+  let proposalBytes: number;
+  let proposalDigest: string;
+  try {
+    const parsed: unknown = JSON.parse(proposalRead.text);
+    if (!isPlainRecord(parsed) || parsed.id !== proposalId) throw new TypeError('proposal identity mismatch');
+    const canonical = canonicalJson(parsed);
+    proposalBytes = Buffer.byteLength(canonical, 'utf8');
+    if (proposalBytes <= 0 || proposalBytes > MAX_PROPOSAL_BYTES) throw new TypeError('proposal too large');
+    proposalDigest = sha256(PROPOSAL_DIGEST_DOMAIN, parsed);
+  } catch {
+    return { state: 'degraded', reason: 'proposal-member-mismatch', proposal: null, projection: null };
+  }
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  const projectionRead = readProjectionFile();
+  if (projectionRead.state === 'degraded') {
+    return { state: 'degraded', reason: projectionRead.reason, proposal: null, projection: null };
+  }
+  const projection = projectionRead.state === 'ok'
+    ? {
+      digest: projectionRead.projection.projectionDigest,
+      bytes: Buffer.byteLength(`${canonicalJson(projectionRead.projection)}\n`, 'utf8'),
+    }
+    : { digest: null, bytes: 0 };
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  return {
+    state: 'healthy',
+    proposal: { digest: proposalDigest, bytes: proposalBytes },
+    projection,
+  };
 }
 
 /**

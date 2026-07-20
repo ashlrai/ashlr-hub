@@ -1,5 +1,11 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Operational Projection Recovery Foundation
+- Boundary: operational projection remains dormant. No hot consumer can move until every proposal persistence path participates in crash-recoverable projection publication and an external monotonic authority exists.
+- Implementation: `observeOperationalProjectionArtifacts()` now reads canonical proposal and sealed projection identities only while the caller owns the global proposal-store lock. It returns domain-bound digest and byte metadata without writing files, changing authority, or exposing raw artifact contents.
+- Verification: focused M432 projection coverage passed 12 tests, typecheck passed, lint exited 0 with the existing 101 warnings, and `git diff --check` passed.
+- Next: V2 transaction metadata will name bounded staged artifacts by transaction ID; the journal will retain only presence/digest/byte metadata, never raw proposal or projection contents.
+
 ## Current Complete Outcome Reader
 - Implementation: `listOutcomeRecordsDetailed()` now composes detailed proposal, decision, judge-trace, evidence-pack, and post-merge readers into a bounded source-qualified result. Any partial or degraded source withholds the entire record set; source qualities remain visible for diagnostics.
 - Authority boundary: the existing `listOutcomeRecords()` remains best-effort for dashboards and learning surfaces. The new reader excludes worked-ledger and racing telemetry because those stores cannot yet prove complete reads. It is not wired into duplicate suppression yet.

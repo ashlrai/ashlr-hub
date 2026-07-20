@@ -2598,6 +2598,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
 - [x] Publish draft stacked PR #44 on #43 with valid-record replay called out as a merge blocker.
 
+## Operational Projection Recovery Foundation (2026-07-20)
+- [x] Audit dormant projection authority and preserve the no-hot-consumer boundary.
+- [x] Add a read-only, lock-required observation seam for canonical proposal and projection artifacts.
+- [ ] Add authenticated staged-artifact metadata without raw proposal or projection contents in the journal.
+- [ ] Add deterministic staged-artifact validation and installation under the global writer lock.
+- [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
+
 ## Operational Projection Local Replay Ledger (2026-07-16)
 - [x] Add a separately keyed, atomically published bounded phase ledger and authenticated logical root under the global proposal-store mutation lock.
 - [x] Bind every floor advance to the exact authenticated active transaction record and reject fabricated, stale, skipped-phase, cross-lineage, and clock-regressing inputs.
