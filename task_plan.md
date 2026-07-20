@@ -2819,3 +2819,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Resolve linked-worktree default roots beside the primary checkout and retain selected-repository failure visibility.
 - [x] Verify focused doctor/resource-strategy coverage and the live read-only direction report.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Parent Capture Repeat Bound (2026-07-20)
+- [x] Audit ordinary-parent versus generated-repair capture failure suppression authority.
+- [x] Add a healthy-source, parent-reconciled two-attempt bound keyed by repository, item, source, and objective.
+- [x] Apply the bound only to ordinary selection; preserve repair child routing and fail open on degraded evidence.
+- [x] Add focused terminalization, changed-objective, and degraded-source coverage.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

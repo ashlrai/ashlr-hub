@@ -18,7 +18,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   canonicalDispatchRepoIdentity,
   recordDispatchProduction,
@@ -32,7 +32,8 @@ import {
   repairTreatmentForUnitId,
   repairTreatmentUnitId,
 } from './generated-repair-identity.js';
-import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
+import type { EngineId, EngineTier, RepairTreatment, WorkItem, WorkSource } from '../types.js';
+import { workItemObjectiveHash } from './work-item-objective.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
@@ -142,6 +143,12 @@ export interface RepairHandoffSchemaSummary {
   latestCurrentActivationV2At: string | null;
   currentActivationAuthorityDigest: string | null;
   authorityDigest: string;
+}
+
+/** Read-only selection state for repeated authoritative parent capture failures. */
+export interface CaptureGateDispatchState {
+  state: 'active' | 'terminal' | 'unavailable';
+  authoritativeAttempts: number;
 }
 
 const MAX_PARENT_EVIDENCE_QUARANTINE_SAMPLES = 3;
@@ -1132,6 +1139,53 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
     readRepairHandoffsInternal(repairHandoffJournalPath(), 1),
     readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2),
   ]);
+}
+
+/**
+ * Suppress an ordinary parent only after two independently recorded capture
+ * failures for its exact repository, work item, and objective. Missing or
+ * degraded evidence intentionally fails open so observability loss never
+ * becomes execution authority.
+ */
+export function captureGateDispatchState(item: WorkItem): CaptureGateDispatchState {
+  const objectiveHash = workItemObjectiveHash(item);
+  if (!objectiveHash) return { state: 'unavailable', authoritativeAttempts: 0 };
+  let repo: string;
+  try { repo = resolve(item.repo); } catch { return { state: 'unavailable', authoritativeAttempts: 0 }; }
+  const reads = [
+    readRepairHandoffsInternal(repairHandoffJournalPath(), 1),
+    readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2),
+  ];
+  const combined = combineRepairHandoffReads(reads);
+  if (combined.sourceState !== 'healthy' || combined.limitExceeded) {
+    return { state: 'unavailable', authoritativeAttempts: 0 };
+  }
+  const attempts = new Map<string, string>();
+  for (const row of reads.flatMap((read) => read.compactionRows)) {
+    if (
+      row.kind !== 'capture-repair' ||
+      (row.parentOutcome !== 'proposal-capture-error' && row.parentOutcome !== 'gate-blocked') ||
+      row.parentItemId !== item.id ||
+      row.parentSource !== item.source ||
+      row.parentObjectiveHash !== objectiveHash
+    ) continue;
+    let rowRepo: string;
+    try { rowRepo = resolve(row.repo); } catch { return { state: 'unavailable', authoritativeAttempts: 0 }; }
+    if (rowRepo !== repo) continue;
+    const fingerprint = JSON.stringify([
+      row.kind, row.repo, row.parentItemId, row.parentSource, row.parentObjectiveHash, row.parentOutcome,
+    ]);
+    const previous = attempts.get(row.parentAttemptId);
+    if (previous !== undefined && previous !== fingerprint) {
+      return { state: 'unavailable', authoritativeAttempts: 0 };
+    }
+    attempts.set(row.parentAttemptId, fingerprint);
+  }
+  const authoritativeAttempts = attempts.size;
+  return {
+    state: authoritativeAttempts >= 2 ? 'terminal' : 'active',
+    authoritativeAttempts,
+  };
 }
 
 /** Stable objective-control family shared by queue and lifecycle authority. */

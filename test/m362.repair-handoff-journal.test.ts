@@ -86,6 +86,7 @@ import {
 import {
   _setRepairHandoffJournalFaultForTest,
   compactRepairHandoffs,
+  captureGateDispatchState,
   dispatchEventFromRepairHandoff,
   readRepairHandoffs,
   readRepairHandoffSchemaSummary,
@@ -391,6 +392,44 @@ function recordDiagnosticProposal(
 }
 
 describe('M362 durable repair handoff journal', () => {
+  it('terminalizes only the second authoritative capture failure for an exact parent objective', () => {
+    const repo = fx.makeRepo();
+    const item: WorkItem = {
+      id: 'repo:self:parent-work', source: 'self', repo: repo.dir,
+      title: 'Parent capture work', detail: 'capture the complete patch',
+      ts: '2026-07-10T12:00:00.000Z', priority: 1, tags: [],
+    };
+    const first = event(repo.dir, { outcome: 'proposal-capture-error', objectiveHash: workItemObjectiveHash(item)!, });
+    expect(recordRepairHandoffs(first)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(captureGateDispatchState(item)).toEqual({ state: 'active', authoritativeAttempts: 1 });
+
+    const second = {
+      ...first,
+      ts: '2026-07-10T13:00:00.000Z',
+      runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc',
+    };
+    expect(recordRepairHandoffs(second)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(captureGateDispatchState(item)).toEqual({ state: 'terminal', authoritativeAttempts: 2 });
+
+    const changedObjective = { ...item, detail: 'capture a different complete patch' };
+    expect(captureGateDispatchState(changedObjective)).toEqual({ state: 'active', authoritativeAttempts: 0 });
+  });
+
+  it('fails open for parent capture selection when journal evidence is degraded', () => {
+    const repo = fx.makeRepo();
+    const item: WorkItem = {
+      id: 'repo:self:parent-work', source: 'self', repo: repo.dir,
+      title: 'Parent capture work', detail: 'capture the complete patch',
+      ts: '2026-07-10T12:00:00.000Z', priority: 1, tags: [],
+    };
+    const input = event(repo.dir, { outcome: 'proposal-capture-error', objectiveHash: workItemObjectiveHash(item)! });
+    expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1, failed: 0 });
+    writeFileSync(repairHandoffV2JournalPath(), `${readFileSync(repairHandoffV2JournalPath(), 'utf8')}{malformed}\n`, 'utf8');
+
+    expect(captureGateDispatchState(item)).toEqual({ state: 'unavailable', authoritativeAttempts: 0 });
+  });
+
   it('does not assign diagnostic treatment metadata to capture repairs', () => {
     const repo = fx.makeRepo();
     const observation = repairHandoffFromDispatchEvent(event(repo.dir, {

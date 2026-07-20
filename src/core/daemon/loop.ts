@@ -168,6 +168,7 @@ import {
 import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dispatch-manifest.js';
 import {
   readRepairHandoffSchemaSummary,
+  captureGateDispatchState,
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
   validRepairHandoffV2Activation,
@@ -4309,9 +4310,19 @@ export async function tick(
   );
   const frozenWorkedItemId = (item: WorkItem): string =>
     claimCooldownPolicies.get(claimKeyForItem(item))?.itemIds[0] ?? workItemCoverageKey(item);
+  const captureGateStateByItemKey = new Map<string, ReturnType<typeof captureGateDispatchState>>();
+  const captureGateParentTerminal = (item: WorkItem): boolean => {
+    if (isTrustedGeneratedRepairItem(item)) return false;
+    let key: string;
+    try { key = workItemCoverageKey(item); } catch { return false; }
+    const state = captureGateStateByItemKey.get(key) ?? captureGateDispatchState(item);
+    captureGateStateByItemKey.set(key, state);
+    return state.state === 'terminal';
+  };
   const isSelectionBlocked = (item: WorkItem): boolean =>
     generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(claimKeyForItem(item))!) ||
-    pendingItemKeys.has(workItemCoverageKey(item));
+    pendingItemKeys.has(workItemCoverageKey(item)) ||
+    captureGateParentTerminal(item);
   const claimRepairQueue = (() => {
     try {
       return readGeneratedRepairQueueSnapshot();
