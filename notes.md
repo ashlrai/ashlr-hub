@@ -9,6 +9,7 @@
 - Semantic validation: `validateOperationalProposalStageText()` requires exact canonical JSON and proposal identity; `validateOperationalProjectionStageText()` requires canonical sealed manifest text and the existing provenance-derived seal. Both return the same digest/byte identities used by observation, keeping stage metadata coupled to operational truth.
 - Recovery inspection: `inspectOperationalProjectionRecoveryV2()` is intentionally non-mutating. It refuses V1, degraded/replayed evidence, unsafe or semantically invalid stages, lock loss, and inconsistent actual artifacts; otherwise it reports only what an eventual installer would do. It never writes canonical state or advances a phase.
 - Positive recovery proof: a signed V2 transaction with replay evidence, a canonical staged proposal, and a sealed staged projection is inspected against restored before-state artifacts as `no-effect` / `would-install-proposal`; the inspector leaves both canonical artifacts byte-identical.
+- Refusal proof: removing a required stage yields an explicit `stage-missing` refusal; removing the local replay ledger yields `replay-missing-local-ledger`. Neither condition is treated as recoverable authority.
 - Verification: focused M432 projection coverage passed 12 tests, typecheck passed, lint exited 0 with the existing 101 warnings, and `git diff --check` passed.
 - Next: V2 transaction metadata will name bounded staged artifacts by transaction ID; the journal will retain only presence/digest/byte metadata, never raw proposal or projection contents.
 

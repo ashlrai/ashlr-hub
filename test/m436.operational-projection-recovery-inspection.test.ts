@@ -15,7 +15,11 @@ import {
 import { inspectOperationalProjectionRecoveryV2 } from '../src/core/inbox/operational-projection-recovery-inspection.js';
 import { prepareOperationalProjectionTransactionJournalOnly } from '../src/core/inbox/operational-projection-transaction.js';
 import { prepareOperationalProjectionTransaction } from '../src/core/inbox/operational-projection-transaction-coordinator.js';
-import { writeOperationalProjectionStage } from '../src/core/inbox/operational-projection-staging.js';
+import { operationalProjectionReplayLedgerPath } from '../src/core/inbox/operational-projection-replay-ledger.js';
+import {
+  operationalProjectionStagePath,
+  writeOperationalProjectionStage,
+} from '../src/core/inbox/operational-projection-staging.js';
 import {
   acquireProposalStoreMutationLock,
   releaseProposalStoreMutationLock,
@@ -153,6 +157,24 @@ describe('M436 operational projection recovery inspection', () => {
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'recoverable-observation', transactionId: prepared.transaction.transactionId,
       phase: 'prepared', actual: 'no-effect', next: 'would-install-proposal',
+    });
+    expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
+    expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
+
+    fs.rmSync(operationalProjectionStagePath(prepared.transaction.transactionId, 'proposal'));
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'proposal-stage-stage-missing',
+    });
+    expect(writeOperationalProjectionStage(
+      prepared.transaction.transactionId,
+      'proposal',
+      Buffer.from(afterProposalText),
+      prepared.transaction.staged.proposal,
+      validateProposal,
+    )).toEqual({ ok: true });
+    fs.rmSync(operationalProjectionReplayLedgerPath());
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'replay-missing-local-ledger',
     });
     expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
     expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);

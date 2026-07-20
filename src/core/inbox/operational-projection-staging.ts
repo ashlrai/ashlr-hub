@@ -183,6 +183,12 @@ export function readOperationalProjectionStage(
   }
   if (!expected.present) return stageAbsent(path)
     ? { state: 'absent' } : { state: 'degraded', reason: 'stage-expected-absent' };
+  try { lstatSync(path); }
+  catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'degraded', reason: 'stage-missing' }
+      : { state: 'degraded', reason: 'stage-unavailable' };
+  }
   const read = readStableRegularFile(path, {
     anchorPath: directory,
     maxFileBytes: MAX_STAGE_BYTES,
