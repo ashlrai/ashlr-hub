@@ -102,6 +102,17 @@ export interface GatewayCtx {
   subscriptionMaxPercent?: number;
 }
 
+/**
+ * True only for an untouched, typed fleet routing decision. This deliberately
+ * treats trace absence and every override as non-ordinary; callers must not
+ * infer safety from the free-form reason text.
+ */
+export function isOrdinaryFleetGatewayDecision(decision: GatewayDecision): boolean {
+  const [base] = decision.trace;
+  return decision.source === 'fleet' && decision.trace.length === 1 && base !== undefined &&
+    base.stage === 'routeBackend' && base.backend === decision.backend && base.tier === decision.tier;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

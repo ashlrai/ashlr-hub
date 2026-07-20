@@ -3112,3 +3112,7 @@
 # Current Assignment Capacity Sidecar
 - Concurrent planning now retains object-identity keyed metadata for each chosen assignment: backend, original slots at plan time, and remaining slots immediately before that assignment. Existing assignment objects, plan ordering, manifest shape, and dispatch behavior are unchanged.
 - This sidecar is in-memory, planner-local capacity observation only. It neither claims a route nor survives into a receipt, ledger, or status surface; the future producer must still acquire and retain fresh shared execution authority before any engine effect.
+
+# Current Ordinary Gateway Boundary
+- Gateway decisions now expose a pure typed predicate for an untouched fleet `routeBackend` result. It accepts only one structured base trace matching the final backend/tier; trace-free pass-through decisions, resource/quota/budget/subscription/learned overrides, and any trace ambiguity are all non-ordinary without parsing free-form reasons.
+- The predicate is not yet consumed by candidate assembly. It is a strict prerequisite for the future daemon seam that will combine ordinary gateway decisions with final planner routes and ephemeral capacity observations.

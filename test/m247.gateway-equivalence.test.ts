@@ -30,7 +30,7 @@ import { join } from 'node:path';
 
 import type { AshlrConfig, EngineId, WorkItem, WorkSource } from '../src/core/types.js';
 import { routeBackend } from '../src/core/fleet/router.js';
-import { decide, type GatewayDecision } from '../src/core/fabric/gateway.js';
+import { decide, isOrdinaryFleetGatewayDecision, type GatewayDecision } from '../src/core/fabric/gateway.js';
 import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 
 // ---------------------------------------------------------------------------
@@ -588,8 +588,24 @@ describe('M247 InferenceGateway', () => {
     });
   });
 
+  describe('ordinary fleet decision predicate', () => {
+    it('accepts only a single untouched routeBackend trace', () => {
+      const ordinary: GatewayDecision = {
+        backend: 'codex', tier: 'frontier', source: 'fleet', reason: 'base',
+        trace: [{ stage: 'routeBackend', backend: 'codex', tier: 'frontier', reason: 'base' }],
+      };
+      expect(isOrdinaryFleetGatewayDecision(ordinary)).toBe(true);
+      expect(isOrdinaryFleetGatewayDecision({ ...ordinary, trace: [] })).toBe(false);
+      expect(isOrdinaryFleetGatewayDecision({
+        ...ordinary,
+        trace: [...ordinary.trace, { stage: 'resourceDemote', backend: 'claude', tier: 'frontier', reason: 'demoted' }],
+        backend: 'claude',
+      })).toBe(false);
+    });
+  });
+
   // ── 7. GatewayDecision shape ─────────────────────────────────────────────
-  describe('GatewayDecision shape', () => {
+describe('GatewayDecision shape', () => {
     it('flag-OFF decision has required fields', async () => {
       const cfg = withFoundry({ allowedBackends: ['builtin'] as EngineId[] });
       const item = makeItem('issue');
