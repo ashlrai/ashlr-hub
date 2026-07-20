@@ -2968,6 +2968,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Verification Rollout Contract Discovery (2026-07-20)
 - [x] Audit the no-contract detector blind spot in the read-only verifier rollout planner.
 - [x] Project bounded typed detector candidates for all discovered projects when no merge-grade contract exists.
-- [x] Preserve narrower explicit-contract gaps, safe cwd/argv-only output, detector-blocked truth, and non-authority.
+- [x] Preserve narrower explicit-contract gaps, safe cwd/argv-only output, detector-blocked truth, and non-authority; reject contract-command relabeling and synthetic marker projects.
 - [x] Verify profile and scanner suites, typecheck, quiet lint, and diff integrity locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.

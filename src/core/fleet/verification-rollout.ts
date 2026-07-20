@@ -70,6 +70,24 @@ function candidate(
   };
 }
 
+function detectedCommandsForProject(
+  profile: RepoExecutionProfile,
+  project: { relativeRoot: string; verifyCommands: VerifyCommand[] },
+): VerifyCommand[] {
+  // replace-detected only replaces the root profile. Nested project commands
+  // remain detector-derived and preserve their project-specific cwd.
+  if (project.relativeRoot !== '.') return project.verifyCommands;
+  return profile.mergeVerifyContractSource.detectedVerifyCommands
+    .filter((command) => (command.cwd ?? '.') === '.')
+    .map((command) => ({
+      ...command,
+      // Scanner sources deliberately canonicalize cwd to a relative path. The
+      // rollout candidate converter independently revalidates the absolute
+      // reconstruction against the repository root.
+      cwd: resolve(profile.repoRoot, command.cwd ?? '.'),
+    }));
+}
+
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
@@ -93,7 +111,7 @@ export function buildVerificationRollout(profiles: ReadonlyArray<{ name: string;
     // this gives a proposal factory a bounded, repo-scoped starting point.
     const gaps = contract?.mergeGradeExplicit
       ? contract.uncoveredMergeProjects
-      : profile.projects.map((project) => ({
+      : profile.projects.filter((project) => project.kind !== 'verify-contract').map((project) => ({
         relativeRoot: project.relativeRoot,
         kind: project.kind,
       }));
@@ -104,13 +122,15 @@ export function buildVerificationRollout(profiles: ReadonlyArray<{ name: string;
       const project = profile.projects.find((entry) =>
         entry.relativeRoot === gap.relativeRoot && entry.kind === gap.kind,
       );
+      const detectedCommands = project ? detectedCommandsForProject(profile, project) : [];
       const candidates = project
-        ? project.verifyCommands.slice(0, Math.max(0, MAX_COMMANDS_PER_REPO - commandCount))
+        ? detectedCommands
+          .slice(0, Math.max(0, MAX_COMMANDS_PER_REPO - commandCount))
           .map((command) => candidate(profile.repoRoot, project, command))
           .filter((command): command is VerificationRolloutCandidate => command !== null)
         : [];
       commandCount += candidates.length;
-      const commandsTruncated = Boolean(project && candidates.length < project.verifyCommands.length);
+      const commandsTruncated = candidates.length < detectedCommands.length;
       truncated ||= commandsTruncated;
       projects.push({
         root: gap.relativeRoot,

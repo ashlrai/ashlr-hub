@@ -75,6 +75,47 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('uses detector evidence rather than relabeling a replace-detected quick-only contract as merge-grade', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'quick-only', kind: 'test', cmd: ['node', 'quick.js'], required: true, profiles: ['quick'] }],
+      });
+
+      const rollout = buildVerificationRollout([{ name: 'fixture', profile: detectRepoExecutionProfile(dir) }]);
+
+      expect(rollout).toMatchObject({
+        totals: { reposReady: 0, reposBlocked: 1, uncoveredProjects: 1, candidateCommands: 1 },
+        repos: [{
+          state: 'coverage-incomplete',
+          projects: [{ root: '.', candidates: [{ cmd: ['npm', 'run', 'test'], cwd: '.' }] }],
+        }],
+      });
+      expect(JSON.stringify(rollout)).not.toContain('quick.js');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not turn an invalid contract marker into executable proposal work', () => {
+    const dir = makeFixture();
+    try {
+      writeFileSync(join(dir, 'ashlr.verify.json'), '{', 'utf8');
+
+      const rollout = buildVerificationRollout([{ name: 'fixture', profile: detectRepoExecutionProfile(dir) }]);
+
+      expect(rollout).toMatchObject({
+        totals: { reposReady: 0, reposBlocked: 1, uncoveredProjects: 0, candidateCommands: 0 },
+        repos: [{ state: 'coverage-incomplete', projects: [] }],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('projects nested merge-coverage candidates without absolute paths or policy authority', () => {
     const dir = makeFixture();
     try {
