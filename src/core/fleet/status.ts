@@ -160,6 +160,13 @@ export interface FleetBackendResourceStatus {
   snapshotAt: string | null;
 }
 
+/** Read-only source quality for randomized selection propensity observations. */
+export interface FleetSelectionPropensityStatus {
+  authority: 'observation-only';
+  source: DispatchProductionSourceQuality;
+  observationState: 'unavailable' | 'degraded' | 'no-dispatches' | 'not-observed' | 'present';
+}
+
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
   /** The backend id (e.g. 'builtin', 'claude', 'codex'). */
@@ -1394,6 +1401,8 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Randomized-selection observability. Never affects routing, merge, or readiness. */
+  selectionPropensity?: FleetSelectionPropensityStatus;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -1438,6 +1447,18 @@ export interface FleetStatus {
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function selectionPropensityStatus(
+  source: DispatchProductionSourceQuality,
+  observed?: 'no-dispatches' | 'not-observed' | 'present',
+): FleetSelectionPropensityStatus {
+  const observationState = source.sourceState === 'missing'
+    ? 'unavailable'
+    : source.sourceState !== 'healthy' || !source.complete
+      ? 'degraded'
+      : observed ?? 'no-dispatches';
+  return { authority: 'observation-only', source, observationState };
+}
 
 function queueInventoryFreshness(
   observedAt: string | null,
@@ -2638,6 +2659,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitPerDimension: 8,
     });
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    status.selectionPropensity = selectionPropensityStatus(
+      dispatchRead.sourceQuality,
+      dispatchRead.selectionObservationState,
+    );
     const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
@@ -2648,6 +2673,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
     // and available even when the append-only ledger is absent or corrupt.
+    const source: DispatchProductionSourceQuality = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, datedFilesRead: 0, looseFilesRead: 0,
+      bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
+    };
+    status.dispatchProductionSource = source;
+    status.selectionPropensity = selectionPropensityStatus(source);
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();

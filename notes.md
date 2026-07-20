@@ -3049,3 +3049,8 @@
 - Trajectory records carry the resulting metadata-only observation. Learning eligibility no longer accepts an arbitrary caller-supplied trajectory-ID set; only a recorded randomized observation can surface selection propensity, while `policyEligible:false`, `recursiveLearningEligible:false`, and denominator incompleteness remain unchanged.
 - This foundation does not activate randomized routing. A future producer must capture an explicit randomized assignment before execution under the dispatch lease; deterministic routes and retries/fallbacks intentionally have no implied propensity.
 - Verification: focused dispatch-ledger, trajectory, and learning-eligibility suites pass; TypeScript passes; lint has no errors and retains the existing 102 warnings.
+
+# Current Selection-Propensity Source Quality
+- Fleet Status now exposes an observation-only `selectionPropensity` source with five categorical states: unavailable, degraded, no dispatches, not observed, and present. It is computed from the same bounded canonical dispatch read as yield telemetry and does not enter ship readiness, mission brief, evidence matrix, routing, verification, merge, or learning-policy decisions.
+- Mission Control's Trajectory Learning card and the CLI show the categorical state rather than a misleading healthy-zero metric. A complete dispatch history with no randomized assignments is explicitly `not-observed`; degraded input withholds observations; no candidate route, candidate-set digest, model/backend tuple, seed, prompt, capacity, or policy input is exposed.
+- Verification: Fleet Status and dashboard/SSE coverage passes 181 assertions, TypeScript passes, and diff checks pass. A protected CI matrix is required after publishing this follow-up revision.

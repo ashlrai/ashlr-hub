@@ -40,8 +40,13 @@ import {
   signLocalMergeIntent,
   signLocalRealizedMergeReceipt,
   signProvenance,
+  loadOrCreateKey,
 } from '../src/core/foundry/provenance.js';
-import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  createDispatchSelectionObservation,
+  recordDispatchProduction,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
@@ -2895,6 +2900,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       filesRead: 1,
       invalidRows: 0,
     });
+    expect(s.selectionPropensity).toMatchObject({
+      authority: 'observation-only',
+      observationState: 'not-observed',
+      source: { sourceState: 'healthy', complete: true },
+    });
     expect(s.dispatchProduction).toMatchObject({
       events: 3,
       attempts: 3,
@@ -2993,8 +3003,68 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       complete: false,
       invalidRows: 1,
     });
+    expect(s.selectionPropensity).toMatchObject({
+      authority: 'observation-only',
+      observationState: 'degraded',
+      source: { sourceState: 'degraded', complete: false },
+    });
     expect(s.dispatchYieldDiagnostics).toBeUndefined();
     expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
+  });
+
+  it('reports a valid randomized selection observation without changing fleet readiness', async () => {
+    const now = new Date().toISOString();
+    const event: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'selection-observation',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Observe a binary assignment',
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.6',
+      assignedBy: 'daemon',
+      routeReason: 'concurrent candidate placement',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'selection-observation-run',
+      trajectoryId: 'run:selection-observation-run',
+      routerPolicyVersion: 'fleet-router-v1',
+      learningEpoch: now.slice(0, 10),
+      objectiveHash: 'c'.repeat(64),
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    };
+    const observation = createDispatchSelectionObservation({
+      candidates: [
+        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+        { backend: 'claude', tier: 'frontier', model: 'opus' },
+      ],
+      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selectionPolicyVersion: 'canary-v1',
+      randomizationProtocolVersion: 'uniform-v1',
+      selectionProbabilityPpm: 500_000,
+      trajectoryId: event.trajectoryId!,
+      runId: event.runId!,
+      objectiveHash: event.objectiveHash!,
+      routerPolicyVersion: event.routerPolicyVersion!,
+      learningEpoch: event.learningEpoch!,
+    }, loadOrCreateKey());
+    expect(observation).not.toBeNull();
+    if (!observation) throw new Error('expected observation');
+    expect(recordDispatchProduction({ ...event, selectionObservation: observation })).toMatchObject({ recorded: 1 });
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.selectionPropensity).toMatchObject({
+      authority: 'observation-only',
+      observationState: 'present',
+      source: { sourceState: 'healthy', complete: true },
+    });
+    expect(status.autonomousShipReadiness ?? {}).not.toHaveProperty('selectionPropensity');
+    expect(JSON.stringify(status.selectionPropensity)).not.toContain('claude');
+    expect(formatFleetStatus(status)).toContain('Selection propensity:');
+    expect(formatFleetStatus(status)).toContain('state:     present');
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {

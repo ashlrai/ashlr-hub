@@ -2862,8 +2862,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bind the commitment to exact selected route, run/trajectory, objective, router policy, and learning epoch.
 - [x] Remove the caller-injected propensity-ID escape hatch from learning eligibility.
 - [x] Keep all selection data observation-only; no routing, merge, verification, or recursive-learning authority changes.
+- [x] Surface categorical selection-propensity source quality in Fleet Status, CLI, and Mission Control.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
-- [ ] Expose selection-propensity availability as non-authoritative Fleet Status telemetry.
 
 ## Merge Contract Rollout Planner (2026-07-20)
 - [x] Replace manual verify-contract editing guidance with a read-only rollout planner.

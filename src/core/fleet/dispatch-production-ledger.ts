@@ -469,6 +469,8 @@ export interface DispatchProductionEventsReadResult extends DispatchProductionSo
 export interface DispatchProductionYieldReadResult {
   summary?: DispatchProductionYieldSummary;
   sourceQuality: DispatchProductionSourceQuality;
+  /** Completeness-aware randomized assignment observation state for status only. */
+  selectionObservationState?: 'no-dispatches' | 'not-observed' | 'present';
 }
 
 export interface DispatchProductionReasonCount {
@@ -7641,6 +7643,15 @@ export function readDispatchProductionYieldDetailed(opts?: {
   return {
     ...(summary ? { summary } : {}),
     sourceQuality,
+    ...(read.sourceState === 'healthy' && read.complete
+      ? {
+          selectionObservationState: read.events.length === 0
+            ? 'no-dispatches' as const
+            : read.events.some((event) => event.selectionObservation !== undefined)
+              ? 'present' as const
+              : 'not-observed' as const,
+        }
+      : {}),
   };
 }
 

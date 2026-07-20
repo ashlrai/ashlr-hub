@@ -3024,7 +3024,17 @@ function skillCorpusReadinessRows(skillCorpusReadiness) {
   return rows;
 }
 
-function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null) {
+function selectionPropensityText(selectionPropensity) {
+  const state = selectionPropensity?.observationState;
+  if (state === 'unavailable') return 'selection source unavailable';
+  if (state === 'degraded') return 'selection source degraded; observations withheld';
+  if (state === 'no-dispatches') return 'no dispatches observed';
+  if (state === 'not-observed') return 'no randomized-canary observations';
+  if (state === 'present') return 'randomized-canary observations present';
+  return 'selection source unavailable';
+}
+
+function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null, selectionPropensity = null) {
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
   const terminal = trajectoryLearning?.terminalOutcomes ?? {};
   const skill = trajectoryLearning?.skillObservation ?? {};
@@ -3047,16 +3057,17 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
     ['Observation sample', skillEventsPresent && skill.sampleState === 'none' ? 'no joined sample' : skill.sampleState ?? 'unavailable'],
     ['Observed selections', skillObserved ? (skill.joined ?? 0) : skillNone ? 'none' : skillAwaitingJoin ? 'present; counts withheld' : 'withheld'],
     ['Observation join gaps', skillObserved ? (skill.unjoined ?? 0) + (skill.conflicting ?? 0) : skillNone ? 'not applicable' : skillAwaitingJoin ? 'present; counts withheld' : 'withheld'],
+    ['Selection propensity', selectionPropensityText(selectionPropensity)],
     ...skillCorpusReadinessRows(skillCorpusReadiness),
     ['Top gap', formatTrajectoryLearningGap(trajectoryLearning)],
   ];
 }
 
-function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card') {
+function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, selectionPropensity = null, cls = 'ctrl-card card') {
   if (!trajectoryLearning && !skillCorpusReadiness) return null;
   const trajectories = trajectoryLearning?.trajectories ?? 0;
   const rows = trajectoryLearning
-    ? trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)
+    ? trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness, selectionPropensity)
     : skillCorpusReadinessRows(skillCorpusReadiness);
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
@@ -4166,7 +4177,11 @@ function renderControl() {
   const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
 
-  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness);
+  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(
+    trajectoryLearning,
+    skillCorpusReadiness,
+    d.fleet?.selectionPropensity ?? fleet.selectionPropensity ?? null,
+  );
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
 
   const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);

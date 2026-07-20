@@ -681,7 +681,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderTrajectoryLearningCard');
     expect(src).toContain("const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null");
     expect(src).toContain("const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null");
-    expect(src).toContain('renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness)');
+    expect(src).toContain('renderTrajectoryLearningCard(\n    trajectoryLearning,');
+    expect(src).toContain('d.fleet?.selectionPropensity ?? fleet.selectionPropensity ?? null');
     expect(src).toContain("trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'");
     expect(src).toContain("trajectoryLearning || skillCorpusReadiness");
     expect(src).toContain('snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning');
@@ -835,12 +836,30 @@ describe('M213 Dashboard SSE — /api/events', () => {
     )(() => 'coverage')({
       trajectories: 4,
       skillObservation: { sampleState: 'none' },
-    }) as Array<[string, string | number]>;
+    }, null, { observationState: 'not-observed' }) as Array<[string, string | number]>;
     const values = Object.fromEntries(rows);
 
     expect(values['Skill-observed trajectories']).toBe('none');
     expect(values['Observed selections']).toBe('none');
     expect(values['Observation join gaps']).toBe('not applicable');
+    expect(values['Selection propensity']).toBe('no randomized-canary observations');
+  });
+
+  it('app.js withholds selection-propensity observations when their source is degraded', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({ trajectories: 1 }, null, { observationState: 'degraded' }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+
+    expect(values['Selection propensity']).toBe('selection source degraded; observations withheld');
   });
 
   it('app.js reports orphaned observation presence without exposing its count', () => {

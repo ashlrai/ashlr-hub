@@ -605,6 +605,19 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Randomized selection propensity is observational only and deliberately
+  // separate from ship readiness and learning-policy eligibility.
+  const selectionPropensity = s.selectionPropensity;
+  lines.push('Selection propensity:');
+  if (!selectionPropensity) {
+    lines.push('  unavailable (legacy snapshot)');
+  } else {
+    lines.push(`  authority: observation-only`);
+    lines.push(`  source:    ${selectionPropensity.source.sourceState}${selectionPropensity.source.complete ? '' : ' (partial)'}`);
+    lines.push(`  state:     ${selectionPropensity.observationState}`);
+  }
+  lines.push('');
+
   // Trajectory learning
   const trajectoryLearning = s.trajectoryLearning;
   lines.push('Trajectory learning:');
