@@ -155,6 +155,30 @@ describe('M432 operational proposal projection', () => {
     });
   });
 
+  it('observes an absent proposal as a valid create/delete endpoint without accepting unsafe files', () => {
+    fs.mkdirSync(inboxDir(), { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') fs.chmodSync(inboxDir(), 0o700);
+    const lock = acquireLock();
+    expect(observeOperationalProjectionArtifacts('absent-proposal', lock)).toEqual({
+      state: 'healthy',
+      proposal: { digest: null, bytes: 0 },
+      projection: { digest: null, bytes: 0 },
+    });
+
+    const value = proposal('absent-proposal');
+    writeProposal(value);
+    loadOrCreateKey();
+    expect(migrateOperationalProposalProjection({ proposals: [value], storeLock: lock, nowMs: NOW_MS }).state)
+      .toBe('healthy');
+    fs.rmSync(path.join(inboxDir(), `${value.id}.json`));
+    const observed = observeOperationalProjectionArtifacts(value.id, lock);
+    expect(observed).toMatchObject({
+      state: 'healthy',
+      proposal: { digest: null, bytes: 0 },
+      projection: { digest: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number) },
+    });
+  });
+
   it('reports a truly empty store as a read-only cold start', () => {
     expect(readOperationalProposals()).toEqual({
       state: 'cold-start',

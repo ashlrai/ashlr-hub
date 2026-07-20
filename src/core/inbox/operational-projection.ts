@@ -411,6 +411,16 @@ function safePrivatePath(path: string, kind: 'file' | 'directory', exactMode: nu
   }
 }
 
+/** A missing deterministic proposal path is a valid transaction endpoint, never a safe file. */
+function pathIsMissing(path: string): boolean {
+  try {
+    lstatSync(path, { bigint: true });
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
 function legacyState(): OperationalProposalsReadResult {
   const legacy = listProposalsDetailed({ maxFiles: 1, requireComplete: false });
   if (legacy.filesDiscovered > 0) {
@@ -666,29 +676,34 @@ export function observeOperationalProjectionArtifacts(
   }
   const proposalPath = join(inboxDir(), `${proposalId}.json`);
   if (!safePrivatePath(dirname(inboxDir()), 'directory', 0o700) ||
-    !safePrivatePath(inboxDir(), 'directory', 0o700) ||
-    !safePrivatePath(proposalPath, 'file', 0o600)) {
+    !safePrivatePath(inboxDir(), 'directory', 0o700)) {
     return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
   }
-  const proposalRead = readStableRegularFile(proposalPath, {
-    anchorPath: homedir(),
-    maxFileBytes: MAX_PROPOSAL_BYTES,
-    remainingBytes: MAX_PROPOSAL_BYTES,
-  });
-  if (!proposalRead.ok) {
-    return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
-  }
-  let proposalBytes: number;
-  let proposalDigest: string;
-  try {
-    const parsed: unknown = JSON.parse(proposalRead.text);
-    if (!isPlainRecord(parsed) || parsed.id !== proposalId) throw new TypeError('proposal identity mismatch');
-    const canonical = canonicalJson(parsed);
-    proposalBytes = Buffer.byteLength(canonical, 'utf8');
-    if (proposalBytes <= 0 || proposalBytes > MAX_PROPOSAL_BYTES) throw new TypeError('proposal too large');
-    proposalDigest = sha256(PROPOSAL_DIGEST_DOMAIN, parsed);
-  } catch {
-    return { state: 'degraded', reason: 'proposal-member-mismatch', proposal: null, projection: null };
+  let proposal: OperationalProjectionArtifactDigest;
+  if (pathIsMissing(proposalPath)) {
+    proposal = { digest: null, bytes: 0 };
+  } else {
+    if (!safePrivatePath(proposalPath, 'file', 0o600)) {
+      return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+    }
+    const proposalRead = readStableRegularFile(proposalPath, {
+      anchorPath: homedir(),
+      maxFileBytes: MAX_PROPOSAL_BYTES,
+      remainingBytes: MAX_PROPOSAL_BYTES,
+    });
+    if (!proposalRead.ok) {
+      return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+    }
+    try {
+      const parsed: unknown = JSON.parse(proposalRead.text);
+      if (!isPlainRecord(parsed) || parsed.id !== proposalId) throw new TypeError('proposal identity mismatch');
+      const canonical = canonicalJson(parsed);
+      const bytes = Buffer.byteLength(canonical, 'utf8');
+      if (bytes <= 0 || bytes > MAX_PROPOSAL_BYTES) throw new TypeError('proposal too large');
+      proposal = { digest: sha256(PROPOSAL_DIGEST_DOMAIN, parsed), bytes };
+    } catch {
+      return { state: 'degraded', reason: 'proposal-member-mismatch', proposal: null, projection: null };
+    }
   }
   if (!ownsProposalStoreMutationLock(storeLock)) {
     return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
@@ -708,7 +723,7 @@ export function observeOperationalProjectionArtifacts(
   }
   return {
     state: 'healthy',
-    proposal: { digest: proposalDigest, bytes: proposalBytes },
+    proposal,
     projection,
   };
 }
