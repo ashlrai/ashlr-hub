@@ -1,9 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createDispatchSelectionObservation } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   createSelectionStartReceipt,
+  readSelectionStartReceipt,
+  selectionStartReceiptDir,
   verifySelectionStartReceipt,
+  writeSelectionStartReceipt,
 } from '../src/core/fleet/selection-start-receipt.js';
+import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 const key = Buffer.alloc(32, 7);
 const root = {
@@ -32,6 +39,10 @@ function observation() {
   }, key);
   if (!value) throw new Error('fixture observation failed');
   return value;
+}
+
+function input(ts = '2026-07-20T15:00:00.000Z') {
+  return { root, claim, selectionObservation: observation(), ts };
 }
 
 describe('selection start receipt contract', () => {
@@ -73,5 +84,37 @@ describe('selection start receipt contract', () => {
       selectionObservation: observation(),
       ts: '2026-07-20T15:00:00.000Z',
     }, key)).toBeNull();
+  });
+});
+
+describe('selection start receipt store', () => {
+  let fx: H1Fixture;
+
+  beforeEach(() => {
+    fx = makeFixture();
+    loadOrCreateKey();
+  });
+
+  afterEach(() => fx.cleanup());
+
+  it('installs a private immutable receipt, replays it, and refuses tampered authority', () => {
+    const first = writeSelectionStartReceipt(input());
+    expect(first.status).toBe('recorded');
+    if (first.status !== 'recorded') throw new Error('receipt was not recorded');
+    const path = join(selectionStartReceiptDir(), `${first.receipt.receiptId}.json`);
+    expect(existsSync(path)).toBe(true);
+    expect(readSelectionStartReceipt(first.receipt.receiptId)).toEqual({ status: 'found', receipt: first.receipt });
+
+    const replay = writeSelectionStartReceipt(input('2026-07-20T15:01:00.000Z'));
+    expect(replay).toEqual({ status: 'replayed', receipt: first.receipt });
+    expect(writeSelectionStartReceipt({
+      ...input('2026-07-20T15:02:00.000Z'),
+      selectionObservation: { ...observation(), assignmentDigest: 'c'.repeat(64) },
+    })).toEqual({ status: 'conflicted', reason: 'receipt-id-conflict' });
+    expect(readFileSync(path, 'utf8')).not.toContain('ownerToken');
+    expect(readFileSync(path, 'utf8')).not.toContain('candidates');
+
+    writeFileSync(path, `${JSON.stringify({ ...first.receipt, signature: '0'.repeat(64) })}\n`, 'utf8');
+    expect(readSelectionStartReceipt(first.receipt.receiptId)).toMatchObject({ status: 'degraded' });
   });
 });

@@ -3079,3 +3079,9 @@
 # Current Receipt Storage Foundation
 - Selection-start persistence will use the existing dispatch-production identity-pinned write-root, private-receipt-directory, and exact-leaf inspection primitives. They are now exported with narrow receipt-store names, so the implementation inherits root FD pinning, identity/realpath checks, secure permissions, Windows ACL checks, and directory durability instead of recreating them.
 - Verification: the full M342 dispatch-production ledger suite passes 140 tests with four platform-gated skips; TypeScript and diff checks pass.
+
+# Current Durable Selection-Start Store
+- Selection-start receipts now persist beneath `dispatch-production/selection-start-receipts` through the pinned private-root authority. The writer requires an existing durable provenance key, writes a private temporary file, file-syncs it, installs it with `linkSync` (never replacement), directory-syncs it, then strictly re-reads and authenticates the installed receipt.
+- Reusing the same root/claim/selection assignment returns the immutable existing receipt as `replayed`; a different assignment under the same deterministic root/claim receipt ID is `conflicted`. Missing keys, unsafe paths, malformed files, uncertain installation, or final-read failure are unavailable/degraded, never successful evidence.
+- The daemon does not call this store yet. It remains a durable primitive until the exactly-two-route planner and receipt-before-engine integration are complete.
+- Verification: receipt-store plus full M342 ledger coverage passes 144 tests with four platform-gated skips; TypeScript and lint pass with zero errors, and diff checks pass.

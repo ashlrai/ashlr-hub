@@ -6,14 +6,39 @@
  * re-read this exact envelope after shared execution authority is acquired.
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import type { EngineId, EngineTier } from '../types.js';
-import type { DispatchSelectionObservationV1 } from './dispatch-production-ledger.js';
+import {
+  dispatchProductionDir,
+  ensurePrivateDispatchProductionReceiptDirectory,
+  inspectExactDispatchProductionReceiptFile,
+  withStableDispatchProductionWriteRoot,
+  type DispatchSelectionObservationV1,
+} from './dispatch-production-ledger.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
+import { loadExistingProvenanceKey, loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
+import { fsyncDirectory } from '../util/durability.js';
+import { readStableRegularFile } from '../util/stable-file-read.js';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const RECEIPT_ID_DOMAIN = 'ashlr:selection-start-receipt-id:v1\0';
 const RECEIPT_SIGNATURE_DOMAIN = 'ashlr:selection-start-receipt-signature:v1\0';
+const RECEIPT_DIRECTORY = 'selection-start-receipts';
+const MAX_RECEIPT_BYTES = 16 * 1024;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
   'kimi', 'nim', 'opencode', 'grok',
@@ -49,6 +74,14 @@ export interface CreateSelectionStartReceiptInput {
   selectionObservation: DispatchSelectionObservationV1;
   ts: string;
 }
+
+export type SelectionStartReceiptReadResult =
+  | { status: 'found'; receipt: SelectionStartReceiptV1 }
+  | { status: 'missing' | 'degraded'; reason: string };
+
+export type SelectionStartReceiptWriteResult =
+  | { status: 'recorded' | 'replayed'; receipt: SelectionStartReceiptV1 }
+  | { status: 'conflicted' | 'unavailable' | 'degraded'; reason: string };
 
 function fixedObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -178,4 +211,122 @@ export function verifySelectionStartReceipt(value: unknown, key: Buffer): Select
   const expectedSignature = createHmac('sha256', key).update(signaturePayload(unsigned), 'utf8').digest('hex');
   if (!equalDigest(receipt.receiptId, expectedId) || !equalDigest(receipt.signature, expectedSignature)) return null;
   return { ...unsigned, signature: receipt.signature };
+}
+
+export function selectionStartReceiptDir(): string {
+  return join(dispatchProductionDir(), RECEIPT_DIRECTORY);
+}
+
+function receiptPath(receiptId: string): string | null {
+  return SHA256_RE.test(receiptId) ? join(selectionStartReceiptDir(), `${receiptId}.json`) : null;
+}
+
+function sameReplay(left: SelectionStartReceiptV1, right: SelectionStartReceiptV1): boolean {
+  return left.receiptId === right.receiptId &&
+    JSON.stringify(left.root) === JSON.stringify(right.root) &&
+    JSON.stringify(left.claim) === JSON.stringify(right.claim) &&
+    JSON.stringify(left.selectionObservation) === JSON.stringify(right.selectionObservation);
+}
+
+/** Read one installed receipt without creating directories or repairing key state. */
+export function readSelectionStartReceipt(receiptId: string): SelectionStartReceiptReadResult {
+  const path = receiptPath(receiptId);
+  if (!path) return { status: 'degraded', reason: 'invalid-receipt-id' };
+  const key = loadExistingProvenanceKeyReadOnly();
+  if (!key) return { status: 'degraded', reason: 'provenance-unavailable' };
+  if (!existsSync(path)) return { status: 'missing', reason: 'absent' };
+  try {
+    inspectExactDispatchProductionReceiptFile(path);
+    const read = readStableRegularFile(path, {
+      anchorPath: dispatchProductionDir(),
+      maxFileBytes: MAX_RECEIPT_BYTES,
+      remainingBytes: MAX_RECEIPT_BYTES,
+    });
+    if (!read.ok) return { status: 'degraded', reason: `unsafe-receipt-${read.reason}` };
+    const receipt = verifySelectionStartReceipt(JSON.parse(read.text), key);
+    return receipt ? { status: 'found', receipt } : { status: 'degraded', reason: 'invalid-receipt' };
+  } catch {
+    return { status: 'degraded', reason: 'receipt-read-failed' };
+  }
+}
+
+function safeCreatedTemp(fd: number, path: string): boolean {
+  const opened = fstatSync(fd, { bigint: true });
+  const named = lstatSync(path, { bigint: true });
+  return opened.isFile() && named.isFile() && !named.isSymbolicLink() &&
+    opened.dev === named.dev && opened.ino === named.ino && opened.nlink === 1n && named.nlink === 1n &&
+    (process.platform === 'win32' || (opened.mode & 0o022n) === 0n);
+}
+
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset, offset);
+    if (written <= 0) throw new Error('receipt write made no progress');
+    offset += written;
+  }
+}
+
+/**
+ * Durably install an immutable receipt using link-based no-clobber publication.
+ * This is not called by the daemon yet; a future producer must invoke it after
+ * shared execution authority and before any engine side effect.
+ */
+export function writeSelectionStartReceipt(input: CreateSelectionStartReceiptInput): SelectionStartReceiptWriteResult {
+  const key = loadExistingProvenanceKey();
+  if (!key) return { status: 'unavailable', reason: 'provenance-unavailable' };
+  const receipt = createSelectionStartReceipt(input, key);
+  if (!receipt) return { status: 'unavailable', reason: 'invalid-receipt-input' };
+  const existing = readSelectionStartReceipt(receipt.receiptId);
+  if (existing.status === 'found') return sameReplay(existing.receipt, receipt)
+    ? { status: 'replayed', receipt: existing.receipt }
+    : { status: 'conflicted', reason: 'receipt-id-conflict' };
+  if (existing.status === 'degraded' && existing.reason !== 'absent') {
+    return { status: 'degraded', reason: existing.reason };
+  }
+
+  let temp: string | undefined;
+  let fd: number | undefined;
+  try {
+    return withStableDispatchProductionWriteRoot(() => {
+      const directory = selectionStartReceiptDir();
+      ensurePrivateDispatchProductionReceiptDirectory(directory);
+      const target = receiptPath(receipt.receiptId)!;
+      const bytes = Buffer.from(`${JSON.stringify(receipt)}\n`, 'utf8');
+      if (bytes.length > MAX_RECEIPT_BYTES) return { status: 'unavailable', reason: 'receipt-too-large' };
+      temp = join(directory, `.${receipt.receiptId}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
+      const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+      fd = openSync(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
+      if (!safeCreatedTemp(fd, temp)) throw new Error('unsafe receipt temporary file');
+      writeAll(fd, bytes);
+      chmodSync(temp, 0o600);
+      fsyncSync(fd);
+      if (!safeCreatedTemp(fd, temp)) throw new Error('receipt temporary changed');
+      closeSync(fd);
+      fd = undefined;
+      try {
+        linkSync(temp, target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const winner = readSelectionStartReceipt(receipt.receiptId);
+        return winner.status === 'found'
+          ? sameReplay(winner.receipt, receipt)
+            ? { status: 'replayed', receipt: winner.receipt }
+            : { status: 'conflicted', reason: 'receipt-id-conflict' }
+          : { status: 'degraded', reason: 'receipt-install-contended' };
+      }
+      unlinkSync(temp);
+      temp = undefined;
+      fsyncDirectory(directory);
+      const installed = readSelectionStartReceipt(receipt.receiptId);
+      return installed.status === 'found' && sameReplay(installed.receipt, receipt)
+        ? { status: 'recorded', receipt: installed.receipt }
+        : { status: 'degraded', reason: 'receipt-final-read-failed' };
+    });
+  } catch {
+    return { status: 'degraded', reason: 'receipt-write-failed' };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve write failure */ } }
+    if (temp !== undefined) { try { unlinkSync(temp); } catch { /* exact temp cleanup is best effort */ } }
+  }
 }

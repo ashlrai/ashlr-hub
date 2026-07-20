@@ -2869,6 +2869,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve an opaque, digest-bound shared-queue execution-authority projection across the pre-effect coordinator seam.
 - [x] Define and test the immutable signed selection-start receipt envelope and verifier before adding persistence.
 - [x] Expose the existing pinned dispatch-production private-root primitives for the future receipt store.
+- [x] Add durable no-clobber selection-start receipt installation, authenticated reads, replay/conflict handling, and tamper refusal.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 
 ## Merge Contract Rollout Planner (2026-07-20)
