@@ -142,6 +142,30 @@ describe('M111 LocalWorkQueueCoordinator', () => {
     }
   });
 
+  it('keeps the raw ledger id while cooling only the matching repository work key', () => {
+    const coord = new LocalWorkQueueCoordinator();
+    const first = makeItem('shared-id', path.join(tmpDir, 'repo-a'));
+    const second = makeItem('shared-id', path.join(tmpDir, 'repo-b'));
+    const origHome = process.env.HOME;
+    process.env.HOME = tmpDir;
+    try {
+      expect(coord.recordClaimOutcome(
+        first,
+        workItemCoverageKey(first),
+        'empty',
+        'machine-1',
+      )).toBe(true);
+
+      expect(coord.readWorkedEvents()).toEqual([
+        expect.objectContaining({ itemId: 'shared-id', itemKey: workItemCoverageKey(first) }),
+      ]);
+      expect(coord.shouldSkip(workItemCoverageKey(first), 6 * 60 * 60 * 1000)).toBe(true);
+      expect(coord.shouldSkip(workItemCoverageKey(second), 6 * 60 * 60 * 1000)).toBe(false);
+    } finally {
+      process.env.HOME = origHome;
+    }
+  });
+
   it('shouldSkip returns false for unknown item', () => {
     const coord = new LocalWorkQueueCoordinator();
     expect(coord.shouldSkip('no-such-item', 1000)).toBe(false);

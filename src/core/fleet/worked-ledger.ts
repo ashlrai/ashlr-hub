@@ -69,6 +69,8 @@ export type WorkedOutcome =
 export interface WorkedEvent {
   /** The WorkItem id that was run. */
   itemId: string;
+  /** Repository-qualified identity used for cooldown authority when available. */
+  itemKey?: string;
   /** Whether the run produced a real diff ('diff') or nothing ('empty'). */
   outcome: WorkedOutcome;
   /** ISO timestamp of the outcome. */
@@ -160,6 +162,7 @@ export function loadWorkedLedger(): WorkedLedger {
             outcome: e.outcome,
             ts: e.ts,
             ...(typeof raw['proposalId'] === 'string' ? { proposalId: raw['proposalId'] } : {}),
+            ...(typeof raw['itemKey'] === 'string' ? { itemKey: raw['itemKey'] } : {}),
           };
         })
       : [];
@@ -228,11 +231,25 @@ export function recordOutcome(
   return recordOutcomeEvent(itemId, outcome, ts);
 }
 
+/**
+ * Records a human-compatible raw item id while preserving a repository-scoped
+ * cooldown key. Older ledger readers safely ignore the optional key.
+ */
+export function recordOutcomeWithKey(
+  itemId: string,
+  itemKey: string,
+  outcome: WorkedOutcome,
+  ts?: string,
+): boolean {
+  return recordOutcomeEvent(itemId, outcome, ts, undefined, itemKey);
+}
+
 function recordOutcomeEvent(
   itemId: string,
   outcome: WorkedOutcome,
   ts?: string,
   proposalId?: string,
+  itemKey?: string,
 ): boolean {
   try {
     const l = loadWorkedLedger();
@@ -241,6 +258,7 @@ function recordOutcomeEvent(
       outcome,
       ts: ts ?? new Date().toISOString(),
       ...(proposalId ? { proposalId } : {}),
+      ...(itemKey ? { itemKey } : {}),
     });
     return saveWorkedLedger(l);
   } catch {
@@ -332,7 +350,7 @@ export function latestWorkedEventForKeys(
   let latest: WorkedEvent | undefined;
   let latestMs = Number.NEGATIVE_INFINITY;
   for (const event of events) {
-    if (!keys.has(event.itemId)) continue;
+    if (!keys.has(event.itemKey ?? event.itemId)) continue;
     const eventMs = Date.parse(event.ts);
     if (!Number.isFinite(eventMs)) continue;
     // Equal timestamps resolve to the later append, matching ledger order.

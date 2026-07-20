@@ -210,6 +210,7 @@ import {
 } from '../fleet/worked-ledger.js';
 import {
   blockingPendingProposalsForBacklog,
+  pendingProposalForWorkItem,
   pendingProposalItemKeysForBacklog,
   workItemCoverageKey,
   workItemExecutionKey,
@@ -6458,56 +6459,63 @@ export async function tick(
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch (err) { console.warn('[ashlr] daemon:tick proposalDelta count failed:', (err as Error)?.message ?? err); proposalsCreated = 0; }
   const proposalProduction = proposalProductionSummary(selected.length, workedSet.length, outcomes, proposalsCreated);
 
-  const newPendingProposalsByItemId = new Map<string, Proposal>();
+  const newPendingProposals: Proposal[] = [];
   let pendingProposalDeltaReadFailed = false;
   try {
     for (const proposal of listProposals({ status: 'pending' })) {
       if (pendingBeforeIds.has(proposal.id)) continue;
-      if (proposal.workItemId && !newPendingProposalsByItemId.has(proposal.workItemId)) {
-        newPendingProposalsByItemId.set(proposal.workItemId, proposal);
-      }
+      newPendingProposals.push(proposal);
     }
   } catch {
     pendingProposalDeltaReadFailed = true;
   }
 
   const productionCompletedAt = new Date().toISOString();
+  const productionEventItemKeys = new Map<DispatchProductionEvent, string>();
+  const productionEventsByItemKey = new Map<string, DispatchProductionEvent>();
   const productionEvents = outcomes.flatMap((outcome): DispatchProductionEvent[] => {
     if (outcome.status !== 'fulfilled' || !outcome.value.dispatched) return [];
+    const itemKey = workItemCoverageKey(outcome.value.item);
     const event = dispatchProductionEventFromOutcome(
       outcome.value,
-      newPendingProposalsByItemId.get(outcome.value.item.id),
+      pendingProposalForWorkItem(outcome.value.item, newPendingProposals),
       machineId,
       productionCompletedAt,
       routingCfg,
       generatedRepairReservations.get(outcome.value.item.id)?.record,
     );
+    if (event) {
+      productionEventItemKeys.set(event, itemKey);
+      productionEventsByItemKey.set(itemKey, event);
+    }
     return event ? [event] : [];
   });
-  const handoffFailedItemIds = new Set<string>();
-  const productionWriteFailedItemIds = new Set<string>();
-  const workedOutcomeFailedItemIds = new Set<string>();
-  const generatedRepairLifecycleSucceededItemIds = new Set<string>();
-  const generatedRepairCooldownItemIds = new Set<string>();
-  const generatedRepairFailedAttemptWitnessItemIds = new Set<string>();
+  const handoffFailedItemKeys = new Set<string>();
+  const productionWriteFailedItemKeys = new Set<string>();
+  const workedOutcomeFailedItemKeys = new Set<string>();
+  const generatedRepairLifecycleSucceededItemKeys = new Set<string>();
+  const generatedRepairCooldownItemKeys = new Set<string>();
+  const generatedRepairFailedAttemptWitnessItemKeys = new Set<string>();
   const generatedRepairItemsById = new Map(
     outcomes.flatMap((outcome) => outcome.status === 'fulfilled' &&
       isTrustedGeneratedRepairItem(outcome.value.item)
-      ? [[outcome.value.item.id, outcome.value.item] as const]
+      ? [[workItemCoverageKey(outcome.value.item), outcome.value.item] as const]
       : []),
   );
   const sharedQueueMode = liveCfg.fleet?.sharedQueue?.mode === 'filesystem';
   const ownershipLostBeforeDispatchWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeDispatchWrites) return ownershipLostBeforeDispatchWrites;
   for (const event of productionEvents) {
+    const itemKey = productionEventItemKeys.get(event);
+    if (!itemKey) continue;
     const repairable = repairHandoffFromDispatchEvent(event) !== null;
     let canonicalProductionRecorded = false;
     if (sharedQueueMode) {
       const parentWrite = recordDispatchProduction(event);
       canonicalProductionRecorded = parentWrite.recorded === 1;
-      if (parentWrite.recorded !== 1) productionWriteFailedItemIds.add(event.itemId);
-      if (parentWrite.recorded !== 1 && repairable) handoffFailedItemIds.add(event.itemId);
-      if (repairable) handoffFailedItemIds.add(event.itemId);
+      if (parentWrite.recorded !== 1) productionWriteFailedItemKeys.add(itemKey);
+      if (parentWrite.recorded !== 1 && repairable) handoffFailedItemKeys.add(itemKey);
+      if (repairable) handoffFailedItemKeys.add(itemKey);
     } else if (repairable) {
       const v2Requested = liveCfg.foundry?.repairHandoffV2Write === true;
       const activationRaw = (liveCfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
@@ -6516,7 +6524,7 @@ export async function tick(
       if (v2Requested) {
         if (!activation) {
           const parentWrite = recordDispatchProduction(event);
-          if (parentWrite.recorded !== 1) productionWriteFailedItemIds.add(event.itemId);
+          if (parentWrite.recorded !== 1) productionWriteFailedItemKeys.add(itemKey);
           handoff = { attempted: 1, recorded: 0, failed: 1 };
         } else {
           handoff = recordRepairHandoffs(event, { schemaVersion: 2, activation });
@@ -6525,12 +6533,12 @@ export async function tick(
         handoff = recordRepairHandoffs(event, { schemaVersion: 1 });
       }
       canonicalProductionRecorded = handoff.recorded === 1 && handoff.failed === 0;
-      if (handoff.failed > 0) handoffFailedItemIds.add(event.itemId);
+      if (handoff.failed > 0) handoffFailedItemKeys.add(itemKey);
     } else {
       const productionWrite = recordDispatchProduction(event);
       canonicalProductionRecorded = productionWrite.recorded === 1;
       if (productionWrite.recorded !== 1) {
-        productionWriteFailedItemIds.add(event.itemId);
+        productionWriteFailedItemKeys.add(itemKey);
         console.warn(
           '[ashlr] daemon:tick canonical dispatch production persistence unavailable',
           productionWrite.failureReasons,
@@ -6540,17 +6548,17 @@ export async function tick(
     if (
       !sharedQueueMode &&
       repairable &&
-      generatedRepairItemsById.has(event.itemId) &&
+      generatedRepairItemsById.has(itemKey) &&
       !canonicalProductionRecorded
     ) {
       const witnessWrite = recordDispatchProduction(event);
       canonicalProductionRecorded = witnessWrite.recorded === 1;
       if (!canonicalProductionRecorded) {
-        productionWriteFailedItemIds.add(event.itemId);
+        productionWriteFailedItemKeys.add(itemKey);
         console.warn('[ashlr] daemon:tick failed-attempt witness persistence unavailable', witnessWrite.failureReasons);
       }
     }
-    const failedRepairItem = generatedRepairItemsById.get(event.itemId);
+    const failedRepairItem = generatedRepairItemsById.get(itemKey);
     const failedRepairReservation = generatedRepairReservations.get(event.itemId)?.record;
     if (
       canonicalProductionRecorded &&
@@ -6559,7 +6567,7 @@ export async function tick(
       GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome) &&
       event.proposalCreated === false &&
       exactFailedAttemptReceiptMatchesReservation(failedRepairItem, event, failedRepairReservation)
-    ) generatedRepairFailedAttemptWitnessItemIds.add(event.itemId);
+    ) generatedRepairFailedAttemptWitnessItemKeys.add(itemKey);
   }
 
   // M85/M305: record item-accurate outcomes to the worked ledger. New proposals
@@ -6571,32 +6579,39 @@ export async function tick(
   if (ownershipLostBeforeWorkedWrites) return ownershipLostBeforeWorkedWrites;
   if (dispatchedCount > 0) {
     try {
-      const proposalItemIds = new Set<string>(newPendingProposalsByItemId.keys());
+      const proposalItemKeys = new Set<string>();
+      for (const outcome of outcomes) {
+        if (outcome.status !== 'fulfilled' || !outcome.value.dispatched) continue;
+        if (pendingProposalForWorkItem(outcome.value.item, newPendingProposals)) {
+          proposalItemKeys.add(workItemCoverageKey(outcome.value.item));
+        }
+      }
       if (pendingProposalDeltaReadFailed) {
         // Fallback preserves the old conservative behavior if the inbox cannot
         // be read after dispatch.
         if (proposalsCreated >= dispatchedCount) {
           for (const outcome of outcomes) {
             if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-              proposalItemIds.add(outcome.value.item.id);
+              proposalItemKeys.add(workItemCoverageKey(outcome.value.item));
             }
           }
         }
       }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          if (productionWriteFailedItemIds.has(outcome.value.item.id)) {
+          const itemKey = workItemCoverageKey(outcome.value.item);
+          if (productionWriteFailedItemKeys.has(itemKey)) {
             if (sharedQueueMode) coordinator.settleClaim(outcome.value.item, machineId);
-            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            workedOutcomeFailedItemKeys.add(itemKey);
             continue;
           }
           if (isTrustedGeneratedRepairItem(outcome.value.item)) continue;
-          if (handoffFailedItemIds.has(outcome.value.item.id)) {
+          if (handoffFailedItemKeys.has(itemKey)) {
             // The parent attempt is terminal, but failed repair projection grants
             // no cooldown authority. Clear only this exact executing generation
             // and keep the parent immediately retryable.
             if (sharedQueueMode) coordinator.settleClaim(outcome.value.item, machineId);
-            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            workedOutcomeFailedItemKeys.add(itemKey);
             continue;
           }
           const production = outcome.value.dispatch?.production;
@@ -6605,20 +6620,20 @@ export async function tick(
           if (production?.runEventSummary?.status === 'aborted') continue;
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             if (!coordinator.settleClaim(outcome.value.item, machineId)) {
-              workedOutcomeFailedItemIds.add(outcome.value.item.id);
+              workedOutcomeFailedItemKeys.add(itemKey);
             }
             continue;
           }
           const outcomeLabel =
             (duplicateDiff ? 'empty' : workedOutcomeFromDispatchProduction(production)) ??
-            (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
+            (proposalItemKeys.has(itemKey) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
           if (!coordinator.recordClaimOutcome(
             outcome.value.item,
             frozenWorkedItemId(outcome.value.item),
             outcomeLabel,
             machineId,
-          )) workedOutcomeFailedItemIds.add(outcome.value.item.id);
+          )) workedOutcomeFailedItemKeys.add(itemKey);
         }
       }
     } catch (err) {
@@ -6626,7 +6641,7 @@ export async function tick(
       console.warn('[ashlr] daemon:tick ledger recordOutcome failed:', (err as Error)?.message ?? err);
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          workedOutcomeFailedItemIds.add(outcome.value.item.id);
+          workedOutcomeFailedItemKeys.add(workItemCoverageKey(outcome.value.item));
         }
       }
     }
@@ -6643,18 +6658,17 @@ export async function tick(
         if (
           outcome.status !== 'fulfilled' ||
           !outcome.value.dispatched ||
-          handoffFailedItemIds.has(outcome.value.item.id) ||
-          productionWriteFailedItemIds.has(outcome.value.item.id) ||
-          workedOutcomeFailedItemIds.has(outcome.value.item.id) ||
+          handoffFailedItemKeys.has(workItemCoverageKey(outcome.value.item)) ||
+          productionWriteFailedItemKeys.has(workItemCoverageKey(outcome.value.item)) ||
+          workedOutcomeFailedItemKeys.has(workItemCoverageKey(outcome.value.item)) ||
           !isTrustedGeneratedRepairItem(outcome.value.item)
         ) continue;
         const trace = outcome.value.dispatch;
         const production = trace?.production;
         const attemptId = trace?.trajectoryId ?? trace?.runId ?? production?.runId;
         if (!production || !attemptId) continue;
-        const productionEvent = productionEvents.find((event) =>
-          event.itemId === outcome.value.item.id
-        );
+        const itemKey = workItemCoverageKey(outcome.value.item);
+        const productionEvent = productionEventsByItemKey.get(itemKey);
         if (!productionEvent) continue;
         const proofCapableDiagnostic = isTrustedDiagnosticResliceItem(outcome.value.item);
         const treatmentCandidate = proofCapableDiagnostic &&
@@ -6666,7 +6680,7 @@ export async function tick(
             } satisfies DispatchProductionEvent
           : undefined;
         if (production.outcome !== 'empty-diff' && production.outcome !== 'proposal-created') {
-          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          generatedRepairCooldownItemKeys.add(itemKey);
           continue;
         }
         if (
@@ -6692,7 +6706,7 @@ export async function tick(
           if (
             transition.available &&
             transition.authoritativeEmptyRuns >= (productionEvent.repairAttemptOrdinal ?? 1)
-          ) generatedRepairLifecycleSucceededItemIds.add(outcome.value.item.id);
+          ) generatedRepairLifecycleSucceededItemKeys.add(itemKey);
           const witness = transition.treatmentOutcomeWitness;
           if (
             witness && proofCapableDiagnostic &&
@@ -6708,10 +6722,10 @@ export async function tick(
           continue;
         }
         if (production.outcome !== 'proposal-created') {
-          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          generatedRepairCooldownItemKeys.add(itemKey);
           continue;
         }
-        const proposal = newPendingProposalsByItemId.get(outcome.value.item.id);
+        const proposal = pendingProposalForWorkItem(outcome.value.item, newPendingProposals);
         if (
           !proposal ||
           proposal.status !== 'pending' ||
@@ -6730,7 +6744,7 @@ export async function tick(
           !proposal.trajectoryId ||
           trace.trajectoryId !== proposal.trajectoryId
         ) {
-          generatedRepairCooldownItemIds.add(outcome.value.item.id);
+          generatedRepairCooldownItemKeys.add(itemKey);
           continue;
         }
         const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
@@ -6741,7 +6755,7 @@ export async function tick(
           ...(treatmentCandidate ? { treatmentCandidate } : {}),
         });
         if (transition.available && transition.disposition === 'retired') {
-          generatedRepairLifecycleSucceededItemIds.add(outcome.value.item.id);
+          generatedRepairLifecycleSucceededItemKeys.add(itemKey);
         }
         const witness = transition.treatmentOutcomeWitness;
         if (
@@ -6775,22 +6789,23 @@ export async function tick(
         !isTrustedGeneratedRepairItem(outcome.value.item)
       ) continue;
       const itemId = outcome.value.item.id;
+      const itemKey = workItemCoverageKey(outcome.value.item);
       if (
-        productionWriteFailedItemIds.has(itemId) ||
-        (handoffFailedItemIds.has(itemId) && !generatedRepairFailedAttemptWitnessItemIds.has(itemId))
+        productionWriteFailedItemKeys.has(itemKey) ||
+        (handoffFailedItemKeys.has(itemKey) && !generatedRepairFailedAttemptWitnessItemKeys.has(itemKey))
       ) {
         console.warn('[ashlr] daemon:tick generated repair authority incomplete', {
-          production: productionWriteFailedItemIds.has(itemId),
-          handoff: handoffFailedItemIds.has(itemId),
-          lifecycle: generatedRepairLifecycleSucceededItemIds.has(itemId),
+          production: productionWriteFailedItemKeys.has(itemKey),
+          handoff: handoffFailedItemKeys.has(itemKey),
+          lifecycle: generatedRepairLifecycleSucceededItemKeys.has(itemKey),
         });
-        workedOutcomeFailedItemIds.add(itemId);
+        workedOutcomeFailedItemKeys.add(itemKey);
         continue;
       }
-      if (generatedRepairCooldownItemIds.has(itemId)) {
-        if (!generatedRepairFailedAttemptWitnessItemIds.has(itemId)) {
+      if (generatedRepairCooldownItemKeys.has(itemKey)) {
+        if (!generatedRepairFailedAttemptWitnessItemKeys.has(itemKey)) {
           console.warn('[ashlr] daemon:tick failed repair attempt receipt unavailable');
-          workedOutcomeFailedItemIds.add(itemId);
+          workedOutcomeFailedItemKeys.add(itemKey);
           continue;
         }
         if (!coordinator.recordClaimOutcome(
@@ -6798,28 +6813,28 @@ export async function tick(
           frozenWorkedItemId(outcome.value.item),
           'dispatch-blocked',
           machineId,
-        )) workedOutcomeFailedItemIds.add(itemId);
+        )) workedOutcomeFailedItemKeys.add(itemKey);
         if (
-          generatedRepairFailedAttemptWitnessItemIds.has(itemId) &&
+          generatedRepairFailedAttemptWitnessItemKeys.has(itemKey) &&
           !settleGeneratedRepairExecution(itemId)
         ) {
           console.warn('[ashlr] daemon:tick failed repair attempt reservation settlement incomplete');
-          workedOutcomeFailedItemIds.add(itemId);
+          workedOutcomeFailedItemKeys.add(itemKey);
         }
         continue;
       }
-      if (!generatedRepairLifecycleSucceededItemIds.has(itemId)) {
+      if (!generatedRepairLifecycleSucceededItemKeys.has(itemKey)) {
         console.warn('[ashlr] daemon:tick generated repair lifecycle persistence incomplete');
-        workedOutcomeFailedItemIds.add(itemId);
+        workedOutcomeFailedItemKeys.add(itemKey);
         continue;
       }
       if (sharedQueueMode && !coordinator.settleClaim(outcome.value.item, machineId)) {
-        workedOutcomeFailedItemIds.add(itemId);
+        workedOutcomeFailedItemKeys.add(itemKey);
         continue;
       }
       if (!settleGeneratedRepairExecution(itemId)) {
         console.warn('[ashlr] daemon:tick generated repair durable reservation settlement incomplete');
-        workedOutcomeFailedItemIds.add(itemId);
+        workedOutcomeFailedItemKeys.add(itemKey);
       }
     }
   }
@@ -6962,7 +6977,7 @@ export async function tick(
     (itemId) => !settledGeneratedRepairReservationItemIds.has(itemId),
   );
   const residentSafeTreatmentFailure = repairTreatmentPublicationFailed &&
-    workedOutcomeFailedItemIds.size === 0 &&
+    workedOutcomeFailedItemKeys.size === 0 &&
     !proposalDuplicateAuthorityUnavailable &&
     !hasUnsettledGeneratedRepairReservation;
   const tickRecord: DaemonTick = {
@@ -6972,7 +6987,7 @@ export async function tick(
     spentUsd: tickSpent,
     reason: stopRequested()
       ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
-      : workedOutcomeFailedItemIds.size > 0 ||
+      : workedOutcomeFailedItemKeys.size > 0 ||
           repairTreatmentPublicationFailed ||
           proposalDuplicateAuthorityUnavailable ||
           hasUnsettledGeneratedRepairReservation
