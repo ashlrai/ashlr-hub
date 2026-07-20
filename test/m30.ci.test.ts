@@ -88,7 +88,7 @@ describe('M30 CI workflow', () => {
       "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\n",
     );
     expect(ciYml.match(/^\s{2,}permissions:/gm) ?? []).toHaveLength(0);
-    expect(ciYml).toMatch(/^concurrency:\n  group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n  cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$/m);
+    expect(ciYml).toMatch(/^concurrency:\n {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$/m);
   });
 
   it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {
