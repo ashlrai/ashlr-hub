@@ -235,5 +235,7 @@ describe('M408 createSandbox outward mutation fence', () => {
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  }, 15_000);
+  // Windows may spend most of this integration path in real Git worktree and
+  // ACL cleanup. The production fence still fails closed after two seconds.
+  }, 30_000);
 });
