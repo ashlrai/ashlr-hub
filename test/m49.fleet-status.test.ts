@@ -7374,6 +7374,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       byBackend: [],
       entropy: { action: 0, outcome: 0, repo: 0 },
       recentActions: [],
+      runLifecycle: { state: 'available' as const, tracked: 2, completed: 1, blocked: 1, unknown: 0 },
     };
 
     const degraded = formatFleetStatus({
@@ -7383,12 +7384,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         sourceQuality: {
           sourceState: 'degraded', sourcePresent: true, complete: false,
           stopReasons: ['byte-limit'], filesRead: 1, bytesRead: 1024,
-          rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+          rowsScanned: 0, invalidRows: 0, semanticRejectedRows: 2, unreadableFiles: 0,
         },
+        runLifecycle: { state: 'partial', tracked: 2, completed: 1, blocked: 1, unknown: 0 },
       },
     });
     expect(degraded).toContain('source:    degraded (partial); files 1, bytes 1024, rows 0');
+    expect(degraded).toContain('semantic-rejected 2');
     expect(degraded).toContain('stopped:   byte-limit');
+    expect(degraded).toContain('lifecycle: 2 tracked, 1 completed, 1 blocked, 0 unknown (partial)');
     expect(degraded).toContain('events:    0 observed (partial)');
     expect(degraded).toContain('diagnostic proposal rate partial');
     expect(degraded).not.toContain('diagnostic proposal rate 0%');
@@ -7402,10 +7406,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           stopReasons: [], filesRead: 0, bytesRead: 0,
           rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
         },
+        runLifecycle: { state: 'withheld', tracked: 0, completed: 0, blocked: 0, unknown: 0 },
       },
     });
     expect(missing).toContain('source:    missing');
     expect(missing).toContain('events:    unavailable');
+    expect(missing).toContain('lifecycle: 0 tracked, 0 completed, 0 blocked, 0 unknown (withheld)');
     expect(missing).toContain('diagnostic proposal rate unavailable');
   });
 

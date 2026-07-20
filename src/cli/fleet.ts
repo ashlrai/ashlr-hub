@@ -501,6 +501,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
     const policySuppressed = workspace.policySuppressedEvents ?? 0;
     const source = workspace.sourceQuality;
+    const lifecycle = workspace.runLifecycle;
     lines.push(`  window:    ${formatProductionWindow(workspace.windowHours)}`);
     if (source) {
       lines.push(`  source:    ${formatWorkspaceSource(source)}`);
@@ -515,6 +516,13 @@ export function formatFleetStatus(s: FleetStatus): string {
         `policy-suppressed ${formatWorkspaceObserved(workspace, policySuppressed)}, ` +
         `spend ${formatWorkspaceObserved(workspace, `$${spendUsd.toFixed(4)}`)}`,
     );
+    if (lifecycle) {
+      const lifecycleState = lifecycle.state === 'available' ? '' : ` (${lifecycle.state})`;
+      lines.push(
+        `  lifecycle: ${lifecycle.tracked} tracked, ${lifecycle.completed} completed, ` +
+          `${lifecycle.blocked} blocked, ${lifecycle.unknown} unknown${lifecycleState}`,
+      );
+    }
     if (workspace.diagnosticProposalRate !== undefined) {
       lines.push(`  learning:  diagnostic proposal rate ${formatWorkspaceRate(workspace, workspace.diagnosticProposalRate)}`);
     }
@@ -1181,7 +1189,8 @@ function formatWorkspaceSource(source: WorkspaceSource): string {
   if (source.sourceState === 'missing') return 'missing';
   return `${source.sourceState}${source.complete ? '' : ' (partial)'}; ` +
     `files ${source.filesRead}, bytes ${source.bytesRead}, rows ${source.rowsScanned}, ` +
-    `invalid ${source.invalidRows}, unreadable ${source.unreadableFiles}`;
+    `invalid ${source.invalidRows}, semantic-rejected ${source.semanticRejectedRows ?? 0}, ` +
+    `unreadable ${source.unreadableFiles}`;
 }
 
 function formatWorkspaceObserved(

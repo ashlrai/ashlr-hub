@@ -958,7 +958,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     const formatterSource = src.slice(start, end);
     const helpers = new Function(
-      `${formatterSource}\nreturn { workspaceSourceText, workspaceReadText, workspaceObservedValue };`,
+      `${formatterSource}\nreturn { workspaceSourceText, workspaceReadText, workspaceLifecycleText, workspaceObservedValue };`,
     )() as Record<string, (...args: any[]) => string>;
     const degraded = {
       sourceQuality: {
@@ -967,7 +967,13 @@ describe('M213 Dashboard SSE — /api/events', () => {
       },
     };
     expect(helpers.workspaceSourceText!(degraded)).toBe('degraded (row-limit)');
-    expect(helpers.workspaceReadText!(degraded)).toBe('2 files · 2048 bytes · 10 rows · 1 invalid · 0 unreadable');
+    expect(helpers.workspaceReadText!(degraded)).toBe(
+      '2 files · 2048 bytes · 10 rows · 1 invalid · 0 semantic rejected · 0 unreadable',
+    );
+    expect(helpers.workspaceLifecycleText!({ runLifecycle: {
+      state: 'partial', tracked: 3, completed: 1, blocked: 1, unknown: 1,
+    } })).toBe('3 tracked · 1 completed · 1 blocked · 1 unknown (partial)');
+    expect(helpers.workspaceLifecycleText!({})).toBe('unavailable');
     expect(helpers.workspaceObservedValue!(degraded, 0)).toBe('0 observed (partial)');
     expect(helpers.workspaceObservedValue!(degraded, '0%', true)).toBe('partial');
 

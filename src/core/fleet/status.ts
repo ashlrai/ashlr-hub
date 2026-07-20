@@ -489,6 +489,7 @@ export interface FleetReadinessEvidenceQuality {
   bytesRead: number;
   rowsScanned: number;
   invalidRows: number;
+  semanticRejectedRows?: number;
   unreadableFiles: number;
 }
 
@@ -4890,11 +4891,14 @@ function evidenceReadinessSource(input: {
         : 'eligible';
   const status: FleetReadinessSourceStatus = degraded ? 'degraded' : missing ? 'unavailable' : 'healthy';
   const stop = quality && quality.stopReasons.length > 0 ? `; stopped: ${quality.stopReasons.join(', ')}` : '';
+  const semanticRejected = quality?.semanticRejectedRows && quality.semanticRejectedRows > 0
+    ? `; ${quality.semanticRejectedRows} semantic batch(es) rejected; lifecycle partial`
+    : '';
   const detail = quality
     ? missing
       ? `${input.role} evidence has no ledger yet; consumers remain in cold-start mode`
       : `${input.role} evidence ${eligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
-        `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${stop}`
+        `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${semanticRejected}${stop}`
     : `${input.role} evidence diagnostics are unavailable; consumers fail closed`;
   const source = readinessSource(
     input.id,

@@ -277,6 +277,15 @@ export interface AgentWorkspaceRunSignal {
   latestAt: string;
 }
 
+/** Count-only lifecycle projection for the Global Workspace. */
+export interface AgentWorkspaceRunLifecycle {
+  state: 'available' | 'partial' | 'withheld';
+  tracked: number;
+  completed: number;
+  blocked: number;
+  unknown: number;
+}
+
 export interface AgentWorkspaceStatus {
   generatedAt: string;
   windowHours: number;
@@ -307,7 +316,9 @@ export interface AgentWorkspaceStatus {
   recentActions: AgentWorkspaceRecentAction[];
   /** Advisory closed work-state projection. Never grants dispatch or merge authority. */
   runSignals?: AgentWorkspaceRunSignal[];
-  runSignalsState?: 'available' | 'withheld';
+  runSignalsState?: 'available' | 'partial' | 'withheld';
+  /** Aggregate-only lifecycle projection; contains no run identifiers or payload text. */
+  runLifecycle?: AgentWorkspaceRunLifecycle;
   sourceQuality?: AgentActionSourceQuality;
 }
 
@@ -1117,7 +1128,10 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
   };
 }
 
-function agentWorkspaceRunSignals(events: AgentActionEvent[]): AgentWorkspaceRunSignal[] {
+function agentWorkspaceRunSignals(
+  events: AgentActionEvent[],
+  limit = 50,
+): AgentWorkspaceRunSignal[] {
   const byRun = new Map<string, {
     terminal: Set<'completed' | 'blocked'>;
     proposal: Set<'created' | 'not-created'>;
@@ -1171,7 +1185,26 @@ function agentWorkspaceRunSignals(events: AgentActionEvent[]): AgentWorkspaceRun
     }))
     .sort((left, right) => Date.parse(right.latestAt) - Date.parse(left.latestAt) ||
       left.runId.localeCompare(right.runId))
-    .slice(0, 50);
+    .slice(0, Math.max(0, limit));
+}
+
+function agentWorkspaceRunLifecycle(
+  signals: readonly AgentWorkspaceRunSignal[],
+  state: AgentWorkspaceRunLifecycle['state'] = 'available',
+): AgentWorkspaceRunLifecycle {
+  const lifecycle: AgentWorkspaceRunLifecycle = {
+    state,
+    tracked: signals.length,
+    completed: 0,
+    blocked: 0,
+    unknown: 0,
+  };
+  for (const signal of signals) {
+    if (signal.terminal === 'completed') lifecycle.completed++;
+    else if (signal.terminal === 'blocked') lifecycle.blocked++;
+    else lifecycle.unknown++;
+  }
+  return lifecycle;
 }
 
 function isAgentWorkspaceProductionEvent(event: AgentActionEvent): boolean {
@@ -1311,6 +1344,8 @@ export function summarizeAgentWorkspace(
     ...attentionFromCounts('source', sourceRows, 'source events', 1),
   ].slice(0, 8);
 
+  const lifecycleSignals = agentWorkspaceRunSignals(semanticEvents, Number.MAX_SAFE_INTEGER);
+  const runSignals = lifecycleSignals.slice(0, 50);
   return {
     generatedAt: new Date().toISOString(),
     windowHours: opts?.windowHours ?? 24,
@@ -1343,8 +1378,9 @@ export function summarizeAgentWorkspace(
       repo: entropy(repoRows),
     },
     recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
-    runSignals: agentWorkspaceRunSignals(semanticEvents),
+    runSignals,
     runSignalsState: 'available',
+    runLifecycle: agentWorkspaceRunLifecycle(lifecycleSignals),
   };
 }
 
@@ -1388,12 +1424,17 @@ export function readAgentWorkspaceDetailed(opts?: {
     bytesRead: read.bytesRead,
     rowsScanned: read.rowsScanned,
     invalidRows: read.invalidRows,
+    semanticRejectedRows: read.semanticRejectedRows,
     unreadableFiles: read.unreadableFiles,
   };
   workspace.sourceQuality = sourceQuality;
   if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
     workspace.runSignals = [];
     workspace.runSignalsState = 'withheld';
+    workspace.runLifecycle = agentWorkspaceRunLifecycle([], 'withheld');
+  } else if ((sourceQuality.semanticRejectedRows ?? 0) > 0) {
+    workspace.runSignalsState = 'partial';
+    workspace.runLifecycle = agentWorkspaceRunLifecycle(workspace.runSignals ?? [], 'partial');
   }
   return { workspace, events, sourceQuality };
 }

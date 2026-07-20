@@ -240,6 +240,9 @@ describe('M435 metadata-only agent semantic events', () => {
       proposal: 'not-created',
       latestAt: base.ts,
     }]);
+    expect(summarizeAgentWorkspace([base]).runLifecycle).toEqual({
+      state: 'available', tracked: 1, completed: 1, blocked: 0, unknown: 0,
+    });
 
     const blocked = agentRunSemanticEvents({
       runId,
@@ -260,6 +263,34 @@ describe('M435 metadata-only agent semantic events', () => {
     expect(JSON.stringify(conflicted.runSignals)).not.toMatch(
       /summary|prompt|reasoning|rationale|diff|stdout|stderr|environment|file.?content/i,
     );
+  });
+
+  it('keeps lifecycle totals complete when the run-signal display is bounded', () => {
+    const events: AgentActionEvent[] = Array.from({ length: 51 }, (_, index) => {
+      const runId = `run-m435-bounded-${String(index).padStart(2, '0')}`;
+      return {
+        schemaVersion: 1,
+        ts: `2026-07-16T20:00:${String(index % 60).padStart(2, '0')}.000Z`,
+        actor: 'agent',
+        kind: 'maintenance',
+        outcome: 'no-proposal',
+        action: 'sandboxed-engine:run',
+        summary: 'closed metadata carrier',
+        runId,
+        model: 'ollama/qwen3-coder',
+        semanticEvents: agentRunSemanticEvents({
+          runId,
+          model: 'ollama/qwen3-coder',
+          status: 'done',
+        }),
+      } satisfies AgentActionEvent;
+    });
+
+    const workspace = summarizeAgentWorkspace(events);
+    expect(workspace.runSignals).toHaveLength(50);
+    expect(workspace.runLifecycle).toEqual({
+      state: 'available', tracked: 51, completed: 51, blocked: 0, unknown: 0,
+    });
   });
 
   it('excludes mismatched run subjects from the workspace signal projection', () => {
@@ -312,6 +343,41 @@ describe('M435 metadata-only agent semantic events', () => {
     expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
     expect(detailed.workspace.runSignalsState).toBe('withheld');
     expect(detailed.workspace.runSignals).toEqual([]);
+    expect(detailed.workspace.runLifecycle).toEqual({
+      state: 'withheld', tracked: 0, completed: 0, blocked: 0, unknown: 0,
+    });
+  });
+
+  it('marks lifecycle partial when a valid carrier has a rejected semantic batch', () => {
+    const runId = 'run-m435-rejected-lifecycle';
+    const semanticEvents = agentRunSemanticEvents({
+      runId,
+      model: 'gpt-5.5-codex',
+      status: 'done',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: 'ok',
+      action: 'sandboxed-engine:run',
+      summary: 'metadata carrier',
+      runId,
+      model: 'gpt-5.5-codex',
+      semanticEvents: [{ ...semanticEvents[0]!, prompt: 'must-not-persist' } as AgentSemanticEventV1],
+    });
+
+    const detailed = readAgentWorkspaceDetailed({ windowMs: 48 * 60 * 60 * 1000 });
+    expect(detailed.sourceQuality).toMatchObject({
+      sourceState: 'healthy', complete: true, semanticRejectedRows: 1,
+    });
+    expect(detailed.workspace).toMatchObject({
+      runSignalsState: 'partial',
+      runSignals: [],
+      runLifecycle: { state: 'partial', tracked: 0, completed: 0, blocked: 0, unknown: 0 },
+    });
+    expect(JSON.stringify(detailed)).not.toContain('must-not-persist');
   });
 
   it('drops malformed nested events without dropping legacy carrier rows', () => {

@@ -2697,3 +2697,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Metadata-Only Agent Lifecycle Projection (2026-07-20)
+- [x] Preserve semantic-batch rejection counts from the bounded action-ledger reader into Global Workspace source quality.
+- [x] Project aggregate-only tracked/completed/blocked/unknown run state with explicit available/partial/withheld truthfulness.
+- [x] Surface lifecycle state in CLI, Mission Control, Fleet, and production workspace views without granting routing, verification, or merge authority.
+- [x] Pass semantic-event, Fleet status, dashboard, typecheck, lint, build, and diff checks.

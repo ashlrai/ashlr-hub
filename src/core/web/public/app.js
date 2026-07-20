@@ -2707,7 +2707,16 @@ function workspaceReadText(workspace) {
   const source = workspace?.sourceQuality;
   if (!source || source.sourceState === 'missing') return '—';
   return `${source.filesRead ?? 0} files · ${source.bytesRead ?? 0} bytes · ${source.rowsScanned ?? 0} rows · ` +
-    `${source.invalidRows ?? 0} invalid · ${source.unreadableFiles ?? 0} unreadable`;
+    `${source.invalidRows ?? 0} invalid · ${source.semanticRejectedRows ?? 0} semantic rejected · ` +
+    `${source.unreadableFiles ?? 0} unreadable`;
+}
+
+function workspaceLifecycleText(workspace) {
+  const lifecycle = workspace?.runLifecycle;
+  if (!lifecycle) return 'unavailable';
+  const suffix = lifecycle.state === 'available' ? '' : ` (${lifecycle.state})`;
+  return `${lifecycle.tracked ?? 0} tracked · ${lifecycle.completed ?? 0} completed · ` +
+    `${lifecycle.blocked ?? 0} blocked · ${lifecycle.unknown ?? 0} unknown${suffix}`;
 }
 
 function workspaceObservedValue(workspace, value, rate = false) {
@@ -2861,6 +2870,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   body.appendChild(infoGrid([
     ['Source', workspaceSourceText(workspace)],
     ['Read', workspaceReadText(workspace)],
+    ['Lifecycle', workspaceLifecycleText(workspace)],
     ['Latest', workspace.latestAt ? fmtRelative(workspace.latestAt) : '—'],
     ['Machines', workspaceObservedValue(workspace, Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0)],
     ['Proposals', workspaceObservedValue(workspace, workspace.proposalEvents ?? 0)],
@@ -5551,6 +5561,7 @@ function fdRenderProductionPanel(snap) {
       ['Window', proposalProductionWindowLabel(workspace)],
       ['Source', workspaceSourceText(workspace)],
       ['Read', workspaceReadText(workspace)],
+      ['Lifecycle', workspaceLifecycleText(workspace)],
       ['Events', workspaceObservedValue(workspace, workspace.eventCount ?? 0)],
       ['Proposals', workspaceObservedValue(workspace, workspace.proposalEvents ?? 0)],
       ['No-proposal', workspaceObservedValue(workspace, diagnosticNoProposal)],
