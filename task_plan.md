@@ -2888,6 +2888,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Add a coordinator-minted, authority-bound V2 receipt protocol before allowing any signed selection receipt to qualify propensity.
 - [x] Add a process-bound runtime brand for coordinator-minted execution authority, rejecting structural copies.
 - [x] Restrict receipt observations to the sole binary-uniform two-route protocol and exact 50/50 propensity.
+- [x] Specify the V2 pre-effect ordering: retain one minted authority at each existing launch boundary, then receipt write/readback, then engine effect.
 
 ## Best-of-N Proposal Capture Repair (2026-07-20)
 - [x] Audit Best-of-N no-winner classification against the direct-run required-capture gate.

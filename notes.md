@@ -3161,3 +3161,8 @@
 - Best-of-N now consumes the detailed quick-verification result. A candidate is `testsPassed:true` only when verification actually ran and passed; an apply failure is `false`; unavailable, no-command, sandbox, cleanup, or cancellation skips stay `undefined`.
 - This changes candidate ranking quality only. It neither makes skipped verification fail merge-grade checks nor grants any merge authority.
 - Verification: M333 multi-model coverage passes 23 assertions, with TypeScript typechecking and quiet lint passing.
+
+# Current V2 Launch Contract
+- The future V2 hook must receive the exact process-minted `ExecutionAuthority` returned by `beginQueueExecution` at each existing builtin, Best-of-N, and direct external launch boundary. It must not re-mint, clone, serialize, or place that capability in engine options, manifests, or telemetry.
+- Ordering is fixed: shared claim transition, one-time authority binding, eligible ordinary-direct receipt write plus authenticated reread, dispatch/quota start records, then engine effect. A definite pre-effect receipt refusal launches nothing; an indeterminate durable write retains the current fail-closed executing-claim ambiguity rather than releasing work for duplication.
+- This is a design checkpoint only. V2 storage and daemon integration remain pending, and the canary is still hard-disabled.
