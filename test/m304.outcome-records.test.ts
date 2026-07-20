@@ -275,6 +275,35 @@ describe('m302 listOutcomeRecords', () => {
     expect(result.sourceQuality.evidencePacks).toMatchObject({ sourceState: 'degraded' });
   });
 
+  it('does not let evidence that no longer binds to the live proposal refresh activity', () => {
+    const generatedAt = '2026-07-03T03:00:00.000Z';
+    const live = proposal({
+      id: 'prop-replayed-evidence', createdAt: '2026-07-02T23:59:00.000Z',
+      diff: TEST_DIFF, diffHash: 'sha256:changed-after-evidence',
+      engineModel: 'codex:gpt-5.5', engineTier: 'frontier',
+      verifyResult: {
+        passed: true, baseBranch: 'main', baseHead: 'a'.repeat(40),
+        diffHash: 'sha256:changed-after-evidence', verifiedAt: generatedAt, source: 'auto-merge',
+      },
+    });
+    const result = readPendingProposalActivityDetailed({
+      now: '2026-07-03T03:30:00.000Z',
+      deps: detailedDeps({
+        listProposalsDetailed: () => ({
+          proposals: [live], sourceState: 'healthy', sourcePresent: true, complete: true,
+          stopReasons: [], filesDiscovered: 1, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+        }),
+        readAutonomyEvidencePacksDetailed: () => ({
+          packs: [evidence(live.id, generatedAt)], sourceState: 'healthy', sourcePresent: true, complete: true,
+          filesRead: 1, bytesRead: 512, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+        }),
+      }),
+    });
+
+    expect(result).toMatchObject({ complete: true, pendingProposals: [expect.objectContaining({ id: live.id })] });
+    expect(result.activityAtByProposalId).toEqual(new Map());
+  });
+
   it('withholds pending activity when the authoritative snapshot changes during ledger reads', () => {
     const first = proposal({
       id: 'prop-raced-activity', createdAt: '2026-07-03T00:00:00.000Z', summary: 'first snapshot',
