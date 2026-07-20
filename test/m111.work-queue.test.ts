@@ -158,6 +158,29 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(true);
   });
 
+  it('refuses a shared claim batch when equal ids belong to different repositories', () => {
+    const store = makeStore(tmpDir);
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const first = makeItem('shared-id', path.join(tmpDir, 'repo-a'));
+    const second = makeItem('shared-id', path.join(tmpDir, 'repo-b'));
+
+    expect(coord.claimItems([first, second], 2, 'machine-A')).toEqual([]);
+    expect(store.readSnapshot().claims).toEqual({});
+  });
+
+  it('refuses colliding ids split across shared claim lanes', () => {
+    const store = makeStore(tmpDir);
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const first = makeItem('shared-lane-id', path.join(tmpDir, 'repo-a'));
+    const second = makeItem('shared-lane-id', path.join(tmpDir, 'repo-b'));
+
+    expect(coord.claimItemsByLane([
+      { candidates: [first], limit: 1 },
+      { candidates: [second], limit: 1 },
+    ], 2, 'machine-A')).toEqual([]);
+    expect(store.readSnapshot().claims).toEqual({});
+  });
+
   it('claimItemsByLane refills contention without exceeding a lane quota', () => {
     const store = makeStore(tmpDir);
     const other = makeSharedCoordinator(store, 'machine-other');

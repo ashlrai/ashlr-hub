@@ -34,6 +34,7 @@ import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-st
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
   id: 'workQueueCoordinator' as const,
@@ -41,6 +42,27 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
   delegatesTo: 'core/fleet/worked-ledger.ts + core/fleet/shared-store.ts',
   summary: 'Work-item claim/skip coordination (LOCAL = per-machine; SHARED = multi-machine filesystem lease).',
 };
+
+/**
+ * SharedStore currently uses a raw work-item id as its durable claim key.
+ * Refuse a batch that would collapse two different repositories into one key
+ * until the shared-store protocol carries a canonical execution identity.
+ */
+function hasAmbiguousSharedClaimIdentity(
+  lanes: ReadonlyArray<{ candidates: readonly WorkItem[] }>,
+): boolean {
+  const reposByItemId = new Map<string, string>();
+  for (const lane of lanes) {
+    for (const item of lane.candidates) {
+      const repo = canonicalFilesystemPathIdentity(item.repo, { foldWindowsCase: false });
+      if (repo === null) return true;
+      const previous = reposByItemId.get(item.id);
+      if (previous !== undefined && previous !== repo) return true;
+      reposByItemId.set(item.id, repo);
+    }
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -215,6 +237,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
 
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
     if (!this.authorityEnabled) return [];
+    if (hasAmbiguousSharedClaimIdentity([{ candidates }])) return [];
     const claimedRefs = this.store.claimLeases(
       candidates.map((i) => i.id),
       count,
@@ -236,6 +259,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
     if (!this.authorityEnabled) return [];
+    if (hasAmbiguousSharedClaimIdentity(lanes)) return [];
     const claimedRefs = this.store.claimLeasesByLane(
       lanes.map((lane) => ({ candidateIds: lane.candidates.map((item) => item.id), limit: lane.limit })),
       count,

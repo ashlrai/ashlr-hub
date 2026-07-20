@@ -2717,3 +2717,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Diagnose the protected Windows native lifecycle shard failure from the completed job log.
 - [x] Bound only the DACL-heavy failure-receipt materialization case with an explicit 30-second test timeout.
 - [x] Pass the focused receipt materialization regression without changing global CI timing.
+
+## Shared-Queue Cross-Repository Collision Fence (2026-07-20)
+- [x] Audit the lossy WorkItem-to-raw-id boundary in shared queue claims.
+- [x] Refuse whole claim batches containing one raw id from multiple canonical repositories.
+- [x] Preserve local coordinator behavior and shared-store schema compatibility.
+- [x] Prove direct and cross-lane collisions leave the queue unmodified.
+- [x] Pass the focused shared-queue suite, typecheck, scoped lint, and diff checks.

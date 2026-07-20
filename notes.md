@@ -2832,3 +2832,8 @@
 - Windows failure-receipt test budget (2026-07-20):
   - The protected Windows native lifecycle shard failed the DACL-heavy `m342` treatment-free failure-receipt materialization test only because Vitest's default five-second test budget elapsed; its assertions did not fail.
   - That one test now has a local 30-second ceiling. This retains a finite hang detector while accommodating the real private-storage/fsync workload on Windows, without changing global test timing or production behavior.
+
+- Shared-queue cross-repository collision fence (2026-07-20):
+  - `SharedStore` only receives raw claim ids, so the coordinator now rejects an entire shared claim batch before that lossy boundary when one raw id maps to two canonical filesystem repositories. Local coordination is unchanged.
+  - The fence scans all lanes together, rejects invalid repository identity, and leaves no claim or worked state behind. It prevents cross-repo double-claim, completion, and cooldown corruption while a canonical execution-key protocol is designed.
+  - This is intentionally a conservative availability tradeoff. Equal raw ids in shared mode require an upstream identity fix rather than arbitrary first-wins behavior; the permanent solution remains repository-bound claim keys in the shared store schema and coordinator API.
