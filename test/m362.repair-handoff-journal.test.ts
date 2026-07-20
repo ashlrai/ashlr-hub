@@ -120,6 +120,7 @@ import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-ide
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { inboxDir } from '../src/core/inbox/store.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import { provenanceKeyPath } from '../src/core/foundry/provenance.js';
 
 let fx: H1Fixture;
 
@@ -442,6 +443,20 @@ describe('M362 durable repair handoff journal', () => {
     writeFileSync(repairHandoffV2JournalPath(), `${readFileSync(repairHandoffV2JournalPath(), 'utf8')}{malformed}\n`, 'utf8');
 
     expect(captureGateDispatchState(item)).toEqual({ state: 'unavailable', authoritativeAttempts: 0 });
+  });
+
+  it('does not create provenance key material while reading capture selection state', () => {
+    const repo = fx.makeRepo();
+    const keyPath = provenanceKeyPath();
+    if (existsSync(keyPath)) unlinkSync(keyPath);
+    const item: WorkItem = {
+      id: 'repo:self:parent-work', source: 'self', repo: repo.dir,
+      title: 'Parent capture work', detail: 'capture the complete patch',
+      ts: '2026-07-10T12:00:00.000Z', priority: 1, tags: [],
+    };
+
+    expect(captureGateDispatchState(item)).toEqual({ state: 'unavailable', authoritativeAttempts: 0 });
+    expect(existsSync(keyPath)).toBe(false);
   });
 
   it('does not assign diagnostic treatment metadata to capture repairs', () => {
