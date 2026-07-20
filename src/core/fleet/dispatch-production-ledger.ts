@@ -688,7 +688,12 @@ function openDispatchProductionWriteRoot(): DispatchProductionWriteRoot {
   }
 }
 
-function withStableDispatchProductionWriteRoot<T>(consume: () => T): T {
+/**
+ * Execute one metadata-store write while the dispatch-production root remains
+ * identity-pinned. Receipt stores use this instead of reimplementing a second
+ * private-root authority model.
+ */
+export function withStableDispatchProductionWriteRoot<T>(consume: () => T): T {
   if (dispatchProductionWriteRoots.length > 0) {
     assertStableDispatchProductionWriteRoot();
     const value = consume();
@@ -748,6 +753,11 @@ function ensurePrivateReceiptDirectory(dir: string): void {
   assertStableDispatchProductionWriteRoot();
 }
 
+/** Ensure a private receipt subdirectory beneath the pinned production root. */
+export function ensurePrivateDispatchProductionReceiptDirectory(dir: string): void {
+  ensurePrivateReceiptDirectory(dir);
+}
+
 function secureCreatedReceiptTempFile(path: string): void {
   assertStableDispatchProductionWriteRoot();
   if (!/(?:\.\d+\.tmp|\.[a-f0-9]{32}\.stage)$/.test(basename(path))) {
@@ -763,6 +773,11 @@ function inspectExactReceiptAuthorityFile(path: string): void {
   if (process.platform === 'win32' && !assurePrivateStoragePath(
     path, 'file', 'inspect-existing', { anchorPath: dispatchProductionDir() },
   ).ok) throw new Error('unsafe Windows receipt authority file');
+}
+
+/** Re-check an existing production receipt leaf before it becomes authority. */
+export function inspectExactDispatchProductionReceiptFile(path: string): void {
+  inspectExactReceiptAuthorityFile(path);
 }
 
 class ReceiptDirectoryAuthorityError extends Error {

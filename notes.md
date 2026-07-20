@@ -3075,3 +3075,7 @@
 - A standalone pure receipt contract now signs and verifies an exact envelope containing only the observation-only selection commitment, run/trajectory/objective root, opaque shared queue ID/epoch/binding digest, timestamp, receipt ID, and signature. Receipt IDs and signatures use separate HMAC domains.
 - Exact key-set validation rejects tampering, added fields, different keys, malformed roots, malformed shared claim identity, and invalid selection metadata. It stores neither candidate identities nor queue owner credentials. It is not persisted or consumed by the daemon yet, so it cannot create live evidence or alter routing.
 - Verification: selection-start receipt, selection-config, and queue tests pass 61 assertions; TypeScript and diff checks pass.
+
+# Current Receipt Storage Foundation
+- Selection-start persistence will use the existing dispatch-production identity-pinned write-root, private-receipt-directory, and exact-leaf inspection primitives. They are now exported with narrow receipt-store names, so the implementation inherits root FD pinning, identity/realpath checks, secure permissions, Windows ACL checks, and directory durability instead of recreating them.
+- Verification: the full M342 dispatch-production ledger suite passes 140 tests with four platform-gated skips; TypeScript and diff checks pass.
