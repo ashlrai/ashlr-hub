@@ -17,14 +17,23 @@ import {
   type ProposalStoreMutationLock,
 } from './proposal-mutation-lock.js';
 
+export type OperationalProjectionRecoveryNext =
+  | 'would-write-proposal'
+  | 'would-delete-proposal'
+  | 'would-write-projection'
+  | 'would-delete-projection'
+  | 'would-attest-proposal-installed'
+  | 'would-attest-projection-installed'
+  | 'would-attest-committed';
+
 export type OperationalProjectionRecoveryInspection =
   | { state: 'no-active-v2-transaction' }
   | {
       state: 'recoverable-observation';
       transactionId: string;
       phase: OperationalProjectionTransactionPhase;
-      actual: Exclude<OperationalProjectionRecoveryState, 'complete' | 'unknown' | 'projection-only'>;
-      next: 'would-install-proposal' | 'would-install-projection';
+      actual: Exclude<OperationalProjectionRecoveryState, 'unknown' | 'projection-only'>;
+      next: OperationalProjectionRecoveryNext;
     }
   | { state: 'complete-observation'; transactionId: string }
   | { state: 'refused'; reason: string };
@@ -38,6 +47,41 @@ function expectedStageState(
   present: boolean,
 ): boolean {
   return present ? result.state === 'present' : result.state === 'absent';
+}
+
+function applyAction(
+  artifact: 'proposal' | 'projection',
+  present: boolean,
+): OperationalProjectionRecoveryNext {
+  return present
+    ? `would-write-${artifact}`
+    : `would-delete-${artifact}`;
+}
+
+/**
+ * Maps only a phase-compatible observed state to one precise hypothetical
+ * recovery action. A future remote-CAS executor must bind this action to its
+ * exact authority epoch; journal advancement alone is never effect evidence.
+ */
+export function nextOperationalProjectionRecoveryAction(
+  phase: OperationalProjectionTransactionPhase,
+  actual: OperationalProjectionRecoveryState,
+  staged: { proposal: { present: boolean }; projection: { present: boolean } },
+): Extract<OperationalProjectionRecoveryInspection, { state: 'recoverable-observation' }>['next'] | null {
+  if (phase === 'prepared') {
+    if (actual === 'no-effect') return applyAction('proposal', staged.proposal.present);
+    if (actual === 'proposal-only') return 'would-attest-proposal-installed';
+    return null;
+  }
+  if (phase === 'proposal-installed') {
+    if (actual === 'proposal-only') return applyAction('projection', staged.projection.present);
+    if (actual === 'complete') return 'would-attest-projection-installed';
+    return null;
+  }
+  if (phase === 'projection-installed') {
+    return actual === 'complete' ? 'would-attest-committed' : null;
+  }
+  return null;
 }
 
 /**
@@ -89,14 +133,20 @@ export function inspectOperationalProjectionRecoveryV2(
     projection: actual.projection.digest,
   });
   if (recovery === 'unknown' || recovery === 'projection-only') return refused(`artifact-state-${recovery}`);
-  if (recovery === 'complete') {
+  if (recovery === 'complete' && current.transaction.phase === 'committed') {
     return { state: 'complete-observation', transactionId: current.transaction.transactionId };
   }
+  const next = nextOperationalProjectionRecoveryAction(
+    current.transaction.phase,
+    recovery,
+    current.transaction.staged,
+  );
+  if (!next) return refused(`phase-artifact-mismatch:${current.transaction.phase}:${recovery}`);
   return {
     state: 'recoverable-observation',
     transactionId: current.transaction.transactionId,
     phase: current.transaction.phase,
     actual: recovery,
-    next: recovery === 'no-effect' ? 'would-install-proposal' : 'would-install-projection',
+    next,
   };
 }

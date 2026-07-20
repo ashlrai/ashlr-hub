@@ -156,7 +156,7 @@ describe('M436 operational projection recovery inspection', () => {
 
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'recoverable-observation', transactionId: prepared.transaction.transactionId,
-      phase: 'prepared', actual: 'no-effect', next: 'would-install-proposal',
+      phase: 'prepared', actual: 'no-effect', next: 'would-write-proposal',
     });
     expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
     expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
