@@ -1639,7 +1639,7 @@ function buildQueueEligibility(
     }
     let cooldownKeys: string[];
     try {
-      cooldownKeys = repairQueue?.cooldownKeys(item) ?? [item.id];
+      cooldownKeys = repairQueue?.cooldownKeys(item) ?? [workItemCoverageKey(item)];
     } catch {
       if (isTrustedGeneratedRepairItem(item)) {
         recordInspectionUnavailable(item);
@@ -1649,7 +1649,7 @@ function buildQueueEligibility(
         repairControlBlockedItems++;
         continue;
       }
-      cooldownKeys = [item.id];
+      cooldownKeys = [workItemCoverageKey(item)];
     }
     const lastEvent = latestWorkedEventForKeys(workedEvents, cooldownKeys);
     const lastMs = lastEvent ? Date.parse(lastEvent.ts) : Number.NaN;

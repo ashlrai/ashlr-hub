@@ -2111,6 +2111,25 @@ describe('M362 durable repair handoff journal', () => {
       .toBe(firstCooldownKey);
   });
 
+  it('scopes ordinary cooldown identities to their repository', () => {
+    const base: Omit<WorkItem, 'repo'> = {
+      id: 'shared-scanner-item',
+      source: 'self',
+      title: 'Shared scanner item',
+      detail: 'Two enrolled repositories may produce the same scanner item id.',
+      value: 3,
+      effort: 1,
+      score: 3,
+      tags: [],
+      ts: '2026-07-10T12:00:00.000Z',
+    };
+    const first = { ...base, repo: '/tmp/ashlr-cooldown-a' };
+    const second = { ...base, repo: '/tmp/ashlr-cooldown-b' };
+
+    expect(generatedRepairCooldownKey(first)).not.toBe(generatedRepairCooldownKey(second));
+    expect(generatedRepairCooldownKeys(first)).not.toContain(generatedRepairCooldownKey(second));
+  });
+
   it('preserves empty-attempt memory across unchanged parent recurrence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

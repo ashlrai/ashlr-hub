@@ -596,9 +596,8 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
 }
 
 export function generatedRepairCooldownKey(item: WorkItem): string {
-  if (item.repairHandoffId === undefined && item.repairGenerationId === undefined) return item.id;
   const generationId = generatedRepairGenerationId(item);
-  return generationId ? `${item.id}::generation:${generationId}` : item.id;
+  return `${resolve(item.repo)}\0${item.id}\0${generationId ?? ''}`;
 }
 
 /** Current generation plus objective-control generations in either rollout direction. */
@@ -623,10 +622,10 @@ function generatedRepairGenerationIdsFromAuthority(
 
 export function generatedRepairCooldownKeys(item: WorkItem): string[] {
   const generations = generatedRepairGenerationIds(item);
-  if (generations.length === 0) return [item.id];
-  const generationKeys = generations.map((generationId) => `${item.id}::generation:${generationId}`);
+  if (generations.length === 0) return [generatedRepairCooldownKey(item)];
+  const generationKeys = generations.map((generationId) => `${resolve(item.repo)}\0${item.id}\0${generationId}`);
   return item.repairHandoffId === undefined && item.repairGenerationId === undefined
-    ? [item.id, ...generationKeys]
+    ? [generatedRepairCooldownKey(item), ...generationKeys]
     : generationKeys;
 }
 
@@ -3318,10 +3317,11 @@ export function readGeneratedRepairQueueSnapshot(): GeneratedRepairQueueReaderSn
     },
     cooldownKeys(item) {
       const generations = generationIdsFor(item);
-      if (generations.length === 0) return [item.id];
-      const generationKeys = generations.map((generationId) => `${item.id}::generation:${generationId}`);
+      const baseKey = `${resolve(item.repo)}\0${item.id}\0`;
+      if (generations.length === 0) return [baseKey];
+      const generationKeys = generations.map((generationId) => `${resolve(item.repo)}\0${item.id}\0${generationId}`);
       return item.repairHandoffId === undefined && item.repairGenerationId === undefined
-        ? [item.id, ...generationKeys]
+        ? [baseKey, ...generationKeys]
         : generationKeys;
     },
   };
