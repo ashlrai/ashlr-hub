@@ -491,10 +491,18 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedProposalArgs: unknown[] = [];
     const setStatus = vi.fn();
     let returnMismatchedPending = false;
+    let returnDurablePending = false;
+    let rejectAfterPersist = false;
+    let sourceAdmissionCalls = 0;
     let lastCreated: Record<string, unknown> | null = null;
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
-      inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
+      inspectSandboxSourceRevision: () => {
+        sourceAdmissionCalls += 1;
+        return rejectAfterPersist && sourceAdmissionCalls % 2 === 0
+          ? { ok: false, reason: 'source-revision-stale' }
+          : { ok: true, baseHead: 'fixture', currentHead: 'fixture' };
+      },
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
@@ -518,7 +526,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         },
         load: () => returnMismatchedPending && lastCreated
           ? { ...lastCreated, repo: '/mismatched-repo' }
-          : null,
+          : returnDurablePending ? lastCreated : null,
         setStatus,
       }),
     }));
@@ -592,6 +600,32 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       'rejected',
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
       PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+    );
+
+    returnMismatchedPending = false;
+    returnDurablePending = true;
+    rejectAfterPersist = true;
+    sourceAdmissionCalls = 0;
+    setStatus.mockClear();
+    const staleAfterPersist = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: { models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' } },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-test', worktreePath: tmpRepo, sourceRepo: tmpRepo, branch: 'ashlr-sandbox-test',
+      },
+      runId: 'run-m117-stale-after-persist',
+    });
+    expect(staleAfterPersist.proposalId).toBeUndefined();
+    expect(staleAfterPersist.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: 'sandbox source revision refused: source-revision-stale',
+    });
+    expect(setStatus).toHaveBeenCalledWith(
+      'optimistic-only-prop',
+      'rejected',
+      'Source revision changed during proposal capture.',
+      'source revision admission refused',
     );
 
     vi.resetModules();

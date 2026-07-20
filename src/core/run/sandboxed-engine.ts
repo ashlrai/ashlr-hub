@@ -1239,6 +1239,24 @@ export async function captureSandboxedProposal(
         proposalOutcome: outcome,
       };
     }
+    const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!persistedAdmission.ok) {
+      inbox.setStatus(
+        proposal.id,
+        'rejected',
+        'Source revision changed during proposal capture.',
+        'source revision admission refused',
+      );
+      const outcome = proposalOutcome(
+        'sandbox-unavailable',
+        `sandbox source revision refused: ${persistedAdmission.reason}`,
+        diff,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const outcome = proposalOutcome(
       'filed',
       opts.isPartial ? 'partial proposal filed' : 'proposal filed',
