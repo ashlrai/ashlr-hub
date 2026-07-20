@@ -171,6 +171,7 @@ const SKIP_DIRS = new Set([
 
 const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
 const CONTRACT_MAX_TIMEOUT_MS = 600_000;
+const PROJECT_DISCOVERY_SENTINEL_MAX_DIRECTORIES = 4_000;
 const VERIFY_COMMAND_KINDS = new Set<VerifyCommand['kind']>(['typecheck', 'lint', 'build', 'test']);
 const VERIFY_CONTRACT_MODES = new Set<RepoVerifyContractMode>(['replace-detected', 'augment-detected']);
 const VERIFY_COMMAND_PROFILES = new Set<VerifyCommandProfile>(['quick', 'merge', 'deep']);
@@ -881,30 +882,51 @@ function safeDir(path: string): boolean {
   }
 }
 
-function discoverProjectRoots(repoRoot: string, maxDepth: number): { roots: string[]; truncated: boolean } {
+function discoverProjectRoots(
+  repoRoot: string,
+  maxDepth: number,
+  strictDepth: boolean,
+): { roots: string[]; truncated: boolean } {
   const roots: string[] = [];
   const seen = new Set<string>();
   let truncated = false;
+  let sentinelDirectoriesRemaining = PROJECT_DISCOVERY_SENTINEL_MAX_DIRECTORIES;
+  const appendProjectRoot = (dir: string): void => {
+    if (projectsAt(repoRoot, dir).length > 0) roots.push(dir);
+  };
+  const childDirectories = (dir: string): string[] => {
+    try {
+      return readdirSync(dir)
+        .filter((entry) => !SKIP_DIRS.has(entry) && safeDir(join(dir, entry)))
+        .map((entry) => join(dir, entry));
+    } catch {
+      return [];
+    }
+  };
+  const scanBeyondDepth = (dir: string): void => {
+    if (truncated || seen.has(dir)) return;
+    seen.add(dir);
+    if (sentinelDirectoriesRemaining-- <= 0) {
+      truncated = true;
+      return;
+    }
+    appendProjectRoot(dir);
+    for (const child of childDirectories(dir)) scanBeyondDepth(child);
+  };
   const walk = (dir: string, depth: number): void => {
     if (seen.has(dir) || depth > maxDepth) return;
     seen.add(dir);
-    if (projectsAt(repoRoot, dir).length > 0) roots.push(dir);
-
-    let entries: string[] = [];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    const childDirs = entries.filter((entry) => !SKIP_DIRS.has(entry) && safeDir(join(dir, entry)));
+    appendProjectRoot(dir);
+    const childDirs = childDirectories(dir);
     if (depth === maxDepth) {
-      if (childDirs.length > 0) truncated = true;
+      if (strictDepth) {
+        if (childDirs.length > 0) truncated = true;
+      } else {
+        for (const child of childDirs) scanBeyondDepth(child);
+      }
       return;
     }
-    for (const entry of childDirs) {
-      const child = join(dir, entry);
-      walk(child, depth + 1);
-    }
+    for (const child of childDirs) walk(child, depth + 1);
   };
   walk(repoRoot, 0);
   return { roots, truncated };
@@ -916,7 +938,7 @@ export function detectRepoExecutionProfile(
 ): RepoExecutionProfile {
   const root = resolve(repoRoot);
   const maxDepth = Math.max(0, Math.min(8, opts?.maxDepth ?? 6));
-  const discovery = discoverProjectRoots(root, maxDepth);
+  const discovery = discoverProjectRoots(root, maxDepth, opts?.maxDepth !== undefined);
   const projectRoots = discovery.roots;
   const inputState = packageJsonInputState(projectRoots);
   let projects = projectRoots

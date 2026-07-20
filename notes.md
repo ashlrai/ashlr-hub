@@ -2986,13 +2986,18 @@
 - Verification: M314 has 23 passing profile/coverage tests, and M331 plus M47 bring the focused total to 92 passing assertions. Protected CI remains the cross-platform release authority.
 
 # Current Bounded Discovery Truthfulness
-- Merge coverage no longer calls a shallow project scan complete by omission. Normal discovery now inspects up to six directory levels (with an eight-level explicit cap); if a non-skipped directory remains below the configured boundary, the profile records `depth-truncated` rather than certifying complete source evidence.
+- Merge coverage no longer calls a shallow project scan complete by omission. Normal discovery inspects six directory levels (with an eight-level explicit cap), then performs a bounded manifest-sentinel scan below that boundary. Deep non-project directories no longer create artificial debt; deep project manifests become visible coverage targets; exhausting the sentinel budget records `depth-truncated` rather than certifying complete source evidence.
 - A present merge-grade contract becomes coverage-incomplete with a bounded depth reason, so sandbox and protected merge verification refuse before running a partial verifier set. The merge-contract scanner emits `source-depth-truncated` unavailable evidence instead of a healthy absence observation.
 - Fleet readiness therefore remains truthful even while the enrolled fleet has deeper source trees. This is verification eligibility only; it does not apply, merge, deploy, or mutate any repository.
-- Verification: M314, M22, M331, and M47 pass 158 focused assertions; M49 Fleet Status passes 143 assertions. Protected CI remains the cross-platform release authority.
+- Live read-only Fleet Status now reports 15/24 merge-covered repos and nine concrete source-tree gaps, with no agent-worktree or fixture pollution. Verification: 303 focused profile, scanner, merge, sandbox-verifier, and Fleet Status assertions pass. Protected CI remains the cross-platform release authority.
 
 # Current Discovery Repository Boundary
 - The expanded project scanner now ignores hidden agent state (`.agents`, `.ashlr`, `.claude`, `.codex`) and fixture/example/test trees. Those directories can contain independent package manifests, but they are not production project roots and must not create artificial merge-contract debt or make an enrolled repository appear depth-truncated.
 - Real source, package, integration, application, desktop, and crate directories remain discoverable. The depth boundary therefore protects merge authority without treating local Codex/Claude worktrees or intentionally adversarial test apps as shipped components.
 - Verification: 302 focused profile, scanner, merge, sandbox-verifier, and Fleet Status assertions pass. Protected CI remains the cross-platform release authority.
+
+# Current CI Matrix Efficiency
+- Feature branches previously started one full six-platform matrix for `push` and another for `pull_request`. The workflow now validates feature revisions through their PR merge ref only, preserving the authority-relevant checkout while eliminating the duplicate matrix.
+- PR concurrency is keyed by PR number and cancels only superseded PR revisions. Direct `master` pushes and reusable release workflow calls keep their independent full verification runs rather than being cancelled by a branch update.
+- Verification: the CI workflow parses successfully as YAML and `git diff --check` passes. The next protected PR revision is the integration proof for GitHub event and cancellation behavior.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

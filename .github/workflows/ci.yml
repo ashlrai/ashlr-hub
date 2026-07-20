@@ -2,13 +2,20 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
     branches: ["**"]
   workflow_call:
 
 permissions:
   contents: read
+
+# Feature-branch updates are validated through the PR merge ref, not an
+# equivalent push checkout. Superseded PR revisions can stop safely; default
+# branch pushes and reusable release callers retain independent full matrices.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:

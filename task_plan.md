@@ -2845,5 +2845,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve co-located ecosystem facets and require detector-bound merge coverage where a shared cwd is ambiguous.
 - [x] Mark depth-limited project discovery unavailable and refuse merge coverage when deeper directories remain unscanned.
 - [x] Exclude agent sandboxes and fixture/example/test trees from production project discovery.
+- [x] Remove duplicate feature-branch CI matrices while retaining PR merge-ref and default-branch verification.
 - [ ] Add explicit nested verifier commands in isolated worktrees for each live incomplete enrolled repository.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
