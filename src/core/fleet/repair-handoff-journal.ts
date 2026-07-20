@@ -33,7 +33,7 @@ import {
   repairTreatmentUnitId,
 } from './generated-repair-identity.js';
 import type { EngineId, EngineTier, RepairTreatment, WorkItem, WorkSource } from '../types.js';
-import { workItemObjectiveHash } from './work-item-objective.js';
+import { existingWorkItemObjectiveHash } from './work-item-objective.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
@@ -1148,7 +1148,7 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
  * becomes execution authority.
  */
 export function captureGateDispatchState(item: WorkItem): CaptureGateDispatchState {
-  const objectiveHash = workItemObjectiveHash(item);
+  const objectiveHash = existingWorkItemObjectiveHash(item);
   if (!objectiveHash) return { state: 'unavailable', authoritativeAttempts: 0 };
   let repo: string;
   try { repo = resolve(item.repo); } catch { return { state: 'unavailable', authoritativeAttempts: 0 }; }

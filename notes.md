@@ -2937,7 +2937,7 @@
 - Verification: 32 focused doctor/resource-strategy tests pass; the source CLI direction report over the live enrollment reports 24 repos, zero ecosystem failures, and retains `verify-only` only for genuine pending/verification conditions. Changed-source TypeScript emitted no matching errors.
 
 # Current Parent Capture Repeat Bound
-- Ordinary parent selection now consults a metadata-only repair-handoff state keyed by canonical repository, item id, source, and current objective hash. One authoritative capture-qualified failure remains retryable; two distinct parent attempts make only that objective terminal.
+- Ordinary parent selection now consults a metadata-only repair-handoff state keyed by canonical repository, item id, source, and an existing current objective hash. It never creates provenance key material while selecting. One authoritative capture-qualified failure remains retryable; two distinct parent attempts make only that objective terminal.
 - Generated repair children retain their existing lifecycle policy and are excluded from this parent bound. Changed objectives are independent, and there is no merge, apply, deployment, cooldown, or routing authority change.
 - The bound requires a healthy, complete repair-handoff authority read plus parent-reconciled capture/gate evidence. Missing, malformed, conflicting, or degraded journal input returns `unavailable` and fails open rather than suppressing execution.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.
