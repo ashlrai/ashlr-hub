@@ -94,6 +94,7 @@ import {
   readCoordinatorSelectionStartReceiptV2,
   readSelectionStartReceipt,
   receiptMatchesSelectionBindingV2,
+  selectionDigestV2,
 } from './selection-start-receipt.js';
 import type { SelectionReceiptBindingReadResult } from './shared-store.js';
 
@@ -7535,6 +7536,8 @@ export function readLocallyBoundDispatchSelectionV2(
     return undefined;
   }
   const receiptModel = local.receipt.selectionObservation.selectedModel ?? null;
+  const receiptSelectionDigest = selectionDigestV2(local.receipt.selectionObservation);
+  const eventSelectionDigest = selectionDigestV2(observation);
   if (
     local.receipt.root.runId !== event.runId ||
     local.receipt.root.trajectoryId !== event.trajectoryId ||
@@ -7542,7 +7545,8 @@ export function readLocallyBoundDispatchSelectionV2(
     local.receipt.selectionObservation.selectedBackend !== event.backend ||
     local.receipt.selectionObservation.selectedTier !== event.tier ||
     receiptModel !== (event.model ?? null) ||
-    JSON.stringify(local.receipt.selectionObservation) !== JSON.stringify(observation) ||
+    !receiptSelectionDigest ||
+    receiptSelectionDigest !== eventSelectionDigest ||
     Date.parse(local.receipt.ts) > Date.parse(event.ts)
   ) return undefined;
   return { receiptId, selectionObservation: local.receipt.selectionObservation };

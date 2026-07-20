@@ -328,7 +328,7 @@ function receiptBindingMatches(left: SelectionReceiptBindingV2, right: Selection
   return left.receiptId === right.receiptId && left.receiptDigest === right.receiptDigest &&
     left.queueId === right.queueId && left.claimEpoch === right.claimEpoch &&
     left.claimBindingDigest === right.claimBindingDigest && left.rootDigest === right.rootDigest &&
-    left.selectionDigest === right.selectionDigest;
+    left.selectionDigest === right.selectionDigest && left.committedAt === right.committedAt;
 }
 
 function claimBindingDigest(ref: QueueClaimRef): string {

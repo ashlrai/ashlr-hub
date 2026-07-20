@@ -3237,3 +3237,8 @@
 - A cached backlog with visible rows but missing, malformed, or implausibly future freshness metadata is now explicitly degraded. It cannot fall through to the misleading `backlog-cooldown-gated` diagnosis.
 - Proposal-read authority is evaluated before advisory queue diagnostics: a partial proposal source with a visible zero cannot be masked by a queue blocker. Deterministic auto-merge configuration and host-handoff blockers remain ahead of queue diagnostics, while a deliberately disabled auto-merge lane stays behind them so queue repair remains visible.
 - Verification: M49 Fleet Status coverage passes 147 assertions; `npm run typecheck` passes; `npm run lint` exits successfully with existing repository warnings only. Fresh protected CI is required on the new head.
+
+# V2 Receipt Projection and Replay Hardening (2026-07-20)
+- Local V2 receipt/event selection equality now uses the receipt contract's canonical selection digest, so omitted and explicit-null model metadata are semantically equal and object key order cannot create a false `degraded` projection.
+- Shared receipt-binding replay equality now includes `committedAt`. A timestamp-divergent replay is rejected at the shared-store mutation boundary instead of being accepted and only failing during later local readback.
+- Verification: M49 Fleet Status, local V2 binding, and shared work-queue suites pass 206 assertions; TypeScript typecheck and diff integrity pass. Lint remains successful with existing repository warnings only. Fresh protected CI is required on the new head.

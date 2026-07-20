@@ -244,6 +244,8 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(store.bindSelectionReceipt(executing!, binding)).toEqual({ status: 'success', value: binding });
     expect(store.bindSelectionReceipt(executing!, { ...binding, rootDigest: 'e'.repeat(64) }))
       .toEqual({ status: 'authority-lost' });
+    expect(store.bindSelectionReceipt(executing!, { ...binding, committedAt: '2026-07-20T16:00:01.000Z' }))
+      .toEqual({ status: 'authority-lost' });
     expect(store.readSelectionReceiptBinding(binding.receiptId)).toEqual({ status: 'found', binding });
     expect(store.settleClaim(executing!)).toBe(true);
 

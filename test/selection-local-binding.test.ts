@@ -38,10 +38,10 @@ describe('local V2 selection binding projection', () => {
     };
     const selectionObservation = createDispatchSelectionObservation({
       candidates: [
-        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
-        { backend: 'claude', tier: 'frontier', model: 'opus' },
+        { backend: 'codex', tier: 'frontier' },
+        { backend: 'claude', tier: 'frontier' },
       ],
-      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selected: { backend: 'codex', tier: 'frontier' },
       selectionPolicyVersion: 'canary-v1',
       randomizationProtocolVersion: 'binary-uniform-v1',
       selectionProbabilityPpm: 500_000,
@@ -52,6 +52,7 @@ describe('local V2 selection binding projection', () => {
       learningEpoch: ts.slice(0, 10),
     }, loadOrCreateKey());
     if (!selectionObservation) throw new Error('selection observation was not created');
+    const receiptSelectionObservation = { ...selectionObservation, selectedModel: null };
     const receipt = writeCoordinatorSelectionStartReceiptV2({
       root,
       claim: {
@@ -59,7 +60,7 @@ describe('local V2 selection binding projection', () => {
         claimEpoch: 1,
         claimBindingDigest: 'b'.repeat(64),
       },
-      selectionObservation,
+      selectionObservation: receiptSelectionObservation,
       ts: new Date(Date.now() - 1_000).toISOString(),
     });
     if (receipt.status !== 'recorded') throw new Error('V2 receipt was not recorded');
@@ -72,7 +73,6 @@ describe('local V2 selection binding projection', () => {
       title: 'local binding projection',
       backend: 'codex',
       tier: 'frontier',
-      model: 'gpt-5.6',
       assignedBy: 'concurrent-planner',
       routeReason: 'ordinary route',
       outcome: 'empty-diff',
@@ -104,7 +104,7 @@ describe('local V2 selection binding projection', () => {
 
     expect(readLocallyBoundDispatchSelectionV2(event, reader)).toEqual({
       receiptId: receipt.receipt.receiptId,
-      selectionObservation,
+      selectionObservation: receiptSelectionObservation,
     });
     expect(readLocallyBoundDispatchSelectionV2(event, () => ({
       status: 'missing', reason: 'receipt-binding-not-found',

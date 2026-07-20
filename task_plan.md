@@ -2984,3 +2984,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make visible unknown cached inventory fail closed as degraded; keep proposal-read authority ahead of queue diagnostics while preserving configuration and host-handoff priority.
 - [x] Add Fleet Status regressions for malformed freshness and degraded-proposal plus degraded-queue composition; run focused tests, typecheck, lint, and diff integrity.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## V2 Receipt Replay Hardening (2026-07-20)
+- [x] Audit local V2 projection and shared-binding replay equivalence under optional model metadata and timestamp divergence.
+- [x] Canonicalize local selection comparisons through the signed receipt contract and require `committedAt` for exact shared binding replays.
+- [x] Add null-versus-omitted model and timestamp-divergent replay regressions; run focused suites, typecheck, lint, and diff integrity.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
