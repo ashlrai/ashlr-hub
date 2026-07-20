@@ -3631,6 +3631,7 @@ export type ScannerObservationReason =
   | 'source-unavailable'
   | 'source-unreadable'
   | 'source-malformed'
+  | 'source-depth-truncated'
   | 'source-unsafe'
   | 'source-raced'
   | 'source-dirty'

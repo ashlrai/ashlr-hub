@@ -3000,4 +3000,9 @@
 - Feature branches previously started one full six-platform matrix for `push` and another for `pull_request`. The workflow now validates feature revisions through their PR merge ref only, preserving the authority-relevant checkout while eliminating the duplicate matrix.
 - PR concurrency is keyed by PR number and cancels only superseded PR revisions. Direct `master` pushes and reusable release workflow calls keep their independent full verification runs rather than being cancelled by a branch update.
 - Verification: the CI workflow parses successfully as YAML and `git diff --check` passes. The next protected PR revision is the integration proof for GitHub event and cancellation behavior.
+
+# Current CI Typecheck Recovery
+- The first single-matrix exact-head run reached TypeScript on Ubuntu and macOS, where it found two deterministic integration omissions: the new `source-depth-truncated` scanner refusal was absent from the closed scanner-reason vocabulary, and co-located discovery left a retired primary-project local unused.
+- The vocabulary now includes the closed degraded-source reason and the dead local is removed. This preserves fail-closed scanner semantics; no observation, merge, deployment, or policy authority was broadened.
+- Verification: the 303 focused profile, scanner, merge, sandbox-verifier, and Fleet Status assertions remain green. The next exact-head matrix must pass TypeScript before broader CI evidence is counted.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

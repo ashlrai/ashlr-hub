@@ -945,7 +945,6 @@ export function detectRepoExecutionProfile(
     .flatMap((projectRoot) => projectsAt(root, projectRoot))
     .sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot) || a.kind.localeCompare(b.kind));
 
-  const detectedPrimaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
   const rootCommands = projects
     .filter((project) => project.root === root)
     .flatMap((project) => project.verifyCommands);
