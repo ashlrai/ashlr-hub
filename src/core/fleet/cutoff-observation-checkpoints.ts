@@ -45,6 +45,7 @@ const MAX_ROWS = 256;
 const MAX_ROW_BYTES = 8 * 1024 * 1024;
 const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
 const MAX_ROOT_BYTES = 16 * 1024;
+const MAX_ROTATION_BYTES = 16 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENTRY_KEYS = new Set([
   'schemaVersion', 'recordType', 'authority', 'cutoffAuthority',
@@ -57,6 +58,21 @@ const ROOT_KEYS = new Set([
   'denominatorComplete', 'policyEligible', 'rollbackProtected', 'historicalAuthority',
   'sequence', 'entryDigest',
   'ledgerBytes', 'updatedAt', 'rootDigest',
+]);
+const RETENTION_CERTIFICATE_KEYS = new Set([
+  'schemaVersion', 'recordType', 'authority', 'cutoffAuthority', 'denominatorComplete',
+  'policyEligible', 'rollbackProtected', 'historicalAuthority', 'generation',
+  'legacyRootDigest', 'legacyEntryDigest', 'legacySequence', 'activeRootDigest',
+  'activeEntryDigest', 'activeSequence', 'certificateDigest',
+]);
+const GENERATION_HEAD_KEYS = new Set([
+  'schemaVersion', 'recordType', 'authority', 'cutoffAuthority', 'denominatorComplete',
+  'policyEligible', 'rollbackProtected', 'historicalAuthority', 'generation',
+  'certificateDigest', 'headDigest',
+]);
+const GENERATION_INTENT_KEYS = new Set([
+  'schemaVersion', 'recordType', 'authority', 'cutoffAuthority', 'denominatorComplete',
+  'policyEligible', 'rollbackProtected', 'historicalAuthority', 'generation', 'phase', 'intentDigest',
 ]);
 
 type KeyProvider = () => Buffer | null;
@@ -93,6 +109,58 @@ export interface CutoffObservationRootV1 {
   ledgerBytes: number;
   updatedAt: string;
   rootDigest: string;
+}
+
+/**
+ * V1 retention is deliberately one-generation only. This certificate is a
+ * metadata-only bridge between the immutable legacy ledger and generation 1;
+ * it never grants cutoff, historical, denominator, or policy authority.
+ */
+interface CutoffObservationRetentionCertificateV1 {
+  schemaVersion: 1;
+  recordType: 'cutoff-observation-retention-certificate';
+  authority: 'observation-only';
+  cutoffAuthority: false;
+  denominatorComplete: false;
+  policyEligible: false;
+  rollbackProtected: false;
+  historicalAuthority: false;
+  generation: 1;
+  legacyRootDigest: string;
+  legacyEntryDigest: string;
+  legacySequence: number;
+  activeRootDigest: string;
+  activeEntryDigest: string;
+  activeSequence: number;
+  certificateDigest: string;
+}
+
+interface CutoffObservationGenerationHeadV1 {
+  schemaVersion: 1;
+  recordType: 'cutoff-observation-generation-head';
+  authority: 'observation-only';
+  cutoffAuthority: false;
+  denominatorComplete: false;
+  policyEligible: false;
+  rollbackProtected: false;
+  historicalAuthority: false;
+  generation: 1;
+  certificateDigest: string;
+  headDigest: string;
+}
+
+interface CutoffObservationGenerationIntentV1 {
+  schemaVersion: 1;
+  recordType: 'cutoff-observation-generation-intent';
+  authority: 'observation-only';
+  cutoffAuthority: false;
+  denominatorComplete: false;
+  policyEligible: false;
+  rollbackProtected: false;
+  historicalAuthority: false;
+  generation: 1;
+  phase: 'building' | 'committed';
+  intentDigest: string;
 }
 
 export type CutoffObservationStopReason =
@@ -201,6 +269,26 @@ export function cutoffObservationCheckpointRootPath(): string {
   return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.root.json');
 }
 
+function generationOneLedgerPath(): string {
+  return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.g1.jsonl');
+}
+
+function generationOneRootPath(): string {
+  return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.g1.root.json');
+}
+
+function retentionCertificatePath(): string {
+  return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.retention.g1.json');
+}
+
+function generationHeadPath(): string {
+  return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.generations.head.json');
+}
+
+function generationIntentPath(): string {
+  return join(storageRoot(), 'fleet', 'cutoff-observation-checkpoints.g1.intent.json');
+}
+
 function lockPath(): string {
   return join(storageRoot(), 'fleet', '.cutoff-observation-checkpoints.lock');
 }
@@ -284,6 +372,148 @@ function rootPayload(root: Omit<CutoffObservationRootV1, 'rootDigest'>): unknown
     root.rollbackProtected, root.historicalAuthority,
     root.sequence, root.entryDigest, root.ledgerBytes, root.updatedAt,
   ];
+}
+
+function retentionCertificatePayload(
+  value: Omit<CutoffObservationRetentionCertificateV1, 'certificateDigest'>,
+): unknown[] {
+  return [
+    'retention-certificate', value.schemaVersion, value.recordType, value.authority,
+    value.cutoffAuthority, value.denominatorComplete, value.policyEligible,
+    value.rollbackProtected, value.historicalAuthority, value.generation,
+    value.legacyRootDigest, value.legacyEntryDigest, value.legacySequence,
+    value.activeRootDigest, value.activeEntryDigest, value.activeSequence,
+  ];
+}
+
+function generationHeadPayload(value: Omit<CutoffObservationGenerationHeadV1, 'headDigest'>): unknown[] {
+  return [
+    'generation-head', value.schemaVersion, value.recordType, value.authority,
+    value.cutoffAuthority, value.denominatorComplete, value.policyEligible,
+    value.rollbackProtected, value.historicalAuthority, value.generation,
+    value.certificateDigest,
+  ];
+}
+
+function generationIntentPayload(value: Omit<CutoffObservationGenerationIntentV1, 'intentDigest'>): unknown[] {
+  return [
+    'generation-intent', value.schemaVersion, value.recordType, value.authority,
+    value.cutoffAuthority, value.denominatorComplete, value.policyEligible,
+    value.rollbackProtected, value.historicalAuthority, value.generation, value.phase,
+  ];
+}
+
+function buildGenerationIntent(
+  phase: CutoffObservationGenerationIntentV1['phase'],
+  key: KeyProvider,
+): CutoffObservationGenerationIntentV1 | null {
+  const base = {
+    schemaVersion: 1 as const,
+    recordType: 'cutoff-observation-generation-intent' as const,
+    authority: 'observation-only' as const,
+    cutoffAuthority: false as const,
+    denominatorComplete: false as const,
+    policyEligible: false as const,
+    rollbackProtected: false as const,
+    historicalAuthority: false as const,
+    generation: 1 as const,
+    phase,
+  };
+  const intentDigest = createCutoffCheckpointDigestV1(generationIntentPayload(base), key);
+  return intentDigest ? { ...base, intentDigest } : null;
+}
+
+function verifyGenerationIntent(value: unknown, key: KeyProvider): value is CutoffObservationGenerationIntentV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const intent = value as CutoffObservationGenerationIntentV1;
+  if (Object.keys(intent).length !== GENERATION_INTENT_KEYS.size ||
+    Object.keys(intent).some((name) => !GENERATION_INTENT_KEYS.has(name)) ||
+    intent.schemaVersion !== 1 || intent.recordType !== 'cutoff-observation-generation-intent' ||
+    intent.authority !== 'observation-only' || intent.cutoffAuthority !== false ||
+    intent.denominatorComplete !== false || intent.policyEligible !== false ||
+    intent.rollbackProtected !== false || intent.historicalAuthority !== false || intent.generation !== 1 ||
+    (intent.phase !== 'building' && intent.phase !== 'committed') || !SHA256_RE.test(intent.intentDigest)) return false;
+  const { intentDigest: _intentDigest, ...base } = intent;
+  return verifyCutoffCheckpointDigestV1(generationIntentPayload(base), intent.intentDigest, key);
+}
+
+function buildRetentionCertificate(
+  legacy: CutoffObservationRootV1,
+  active: CutoffObservationRootV1,
+  key: KeyProvider,
+): CutoffObservationRetentionCertificateV1 | null {
+  const base = {
+    schemaVersion: 1 as const,
+    recordType: 'cutoff-observation-retention-certificate' as const,
+    authority: 'observation-only' as const,
+    cutoffAuthority: false as const,
+    denominatorComplete: false as const,
+    policyEligible: false as const,
+    rollbackProtected: false as const,
+    historicalAuthority: false as const,
+    generation: 1 as const,
+    legacyRootDigest: legacy.rootDigest,
+    legacyEntryDigest: legacy.entryDigest,
+    legacySequence: legacy.sequence,
+    activeRootDigest: active.rootDigest,
+    activeEntryDigest: active.entryDigest,
+    activeSequence: active.sequence,
+  };
+  const certificateDigest = createCutoffCheckpointDigestV1(retentionCertificatePayload(base), key);
+  return certificateDigest ? { ...base, certificateDigest } : null;
+}
+
+function verifyRetentionCertificate(value: unknown, key: KeyProvider): value is CutoffObservationRetentionCertificateV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const certificate = value as CutoffObservationRetentionCertificateV1;
+  if (Object.keys(certificate).length !== RETENTION_CERTIFICATE_KEYS.size ||
+    Object.keys(certificate).some((name) => !RETENTION_CERTIFICATE_KEYS.has(name)) ||
+    certificate.schemaVersion !== 1 || certificate.recordType !== 'cutoff-observation-retention-certificate' ||
+    certificate.authority !== 'observation-only' || certificate.cutoffAuthority !== false ||
+    certificate.denominatorComplete !== false || certificate.policyEligible !== false ||
+    certificate.rollbackProtected !== false || certificate.historicalAuthority !== false ||
+    certificate.generation !== 1 || !SHA256_RE.test(certificate.legacyRootDigest) ||
+    !SHA256_RE.test(certificate.legacyEntryDigest) || !Number.isSafeInteger(certificate.legacySequence) ||
+    certificate.legacySequence !== MAX_ROWS || !SHA256_RE.test(certificate.activeRootDigest) ||
+    !SHA256_RE.test(certificate.activeEntryDigest) || !Number.isSafeInteger(certificate.activeSequence) ||
+    certificate.activeSequence < 1 || certificate.activeSequence > MAX_ROWS ||
+    !SHA256_RE.test(certificate.certificateDigest)) return false;
+  const { certificateDigest: _certificateDigest, ...base } = certificate;
+  return verifyCutoffCheckpointDigestV1(retentionCertificatePayload(base), certificate.certificateDigest, key);
+}
+
+function buildGenerationHead(
+  certificate: CutoffObservationRetentionCertificateV1,
+  key: KeyProvider,
+): CutoffObservationGenerationHeadV1 | null {
+  const base = {
+    schemaVersion: 1 as const,
+    recordType: 'cutoff-observation-generation-head' as const,
+    authority: 'observation-only' as const,
+    cutoffAuthority: false as const,
+    denominatorComplete: false as const,
+    policyEligible: false as const,
+    rollbackProtected: false as const,
+    historicalAuthority: false as const,
+    generation: 1 as const,
+    certificateDigest: certificate.certificateDigest,
+  };
+  const headDigest = createCutoffCheckpointDigestV1(generationHeadPayload(base), key);
+  return headDigest ? { ...base, headDigest } : null;
+}
+
+function verifyGenerationHead(value: unknown, key: KeyProvider): value is CutoffObservationGenerationHeadV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const head = value as CutoffObservationGenerationHeadV1;
+  if (Object.keys(head).length !== GENERATION_HEAD_KEYS.size ||
+    Object.keys(head).some((name) => !GENERATION_HEAD_KEYS.has(name)) ||
+    head.schemaVersion !== 1 || head.recordType !== 'cutoff-observation-generation-head' ||
+    head.authority !== 'observation-only' || head.cutoffAuthority !== false ||
+    head.denominatorComplete !== false || head.policyEligible !== false ||
+    head.rollbackProtected !== false || head.historicalAuthority !== false || head.generation !== 1 ||
+    !SHA256_RE.test(head.certificateDigest) || !SHA256_RE.test(head.headDigest)) return false;
+  const { headDigest: _headDigest, ...base } = head;
+  return verifyCutoffCheckpointDigestV1(generationHeadPayload(base), head.headDigest, key);
 }
 
 function buildEntry(
@@ -436,6 +666,52 @@ function readRoot(
   } catch { return 'invalid-root'; }
 }
 
+function readSignedJson<T>(
+  path: string,
+  key: KeyProvider,
+  verify: (value: unknown, key: KeyProvider) => value is T,
+): T | null | 'io-error' | 'invalid-root' {
+  const bytes = readPrivateFile(path, MAX_ROTATION_BYTES);
+  if (bytes === null) return null;
+  if (bytes === 'degraded') return 'io-error';
+  try {
+    const value: unknown = JSON.parse(bytes.toString('utf8'));
+    return verify(value, key) ? value : 'invalid-root';
+  } catch { return 'invalid-root'; }
+}
+
+function writeSignedJson(path: string, value: object, directories: DirectoryState): boolean {
+  const bytes = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
+  if (bytes.length > MAX_ROTATION_BYTES) return false;
+  const tmp = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+  let fd: number | undefined;
+  try {
+    verifyDirectories(directories);
+    if (existsSync(path) && !privateFile(lstatSync(path))) return false;
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const opened = fstatSync(fd);
+    if (!privateFile(opened)) return false;
+    writeAll(fd, bytes);
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    const written = fstatSync(fd);
+    if (!privateFile(written) || !sameNode(opened, written) || written.size !== bytes.length) return false;
+    closeSync(fd);
+    fd = undefined;
+    verifyDirectories(directories);
+    renameSync(tmp, path);
+    const installed = lstatSync(path);
+    if (!privateFile(installed) || !sameNode(written, installed)) return false;
+    fsyncDirectory(dirname(path));
+    verifyDirectories(directories);
+    return true;
+  } catch { return false; }
+  finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
 function writeRoot(path: string, root: CutoffObservationRootV1, directories: DirectoryState): boolean {
   const bytes = Buffer.from(`${JSON.stringify(root)}\n`, 'utf8');
   if (bytes.length > MAX_ROOT_BYTES) return false;
@@ -482,6 +758,80 @@ function emptyRead(
   };
 }
 
+interface ReleasedLedger {
+  parsed: ParsedLedger;
+  root: CutoffObservationRootV1;
+  entries: CutoffObservationCheckpointV1[];
+}
+
+function readReleasedLedger(
+  ledgerPath: string,
+  rootPath: string,
+  key: KeyProvider,
+): ReleasedLedger | null | 'degraded' {
+  const ledgerBytes = readPrivateFile(ledgerPath, MAX_LEDGER_BYTES);
+  const root = readRoot(rootPath, key);
+  if (ledgerBytes === null || root === null || ledgerBytes === 'degraded' ||
+    root === 'io-error' || root === 'invalid-root') return 'degraded';
+  const parsed = parseLedger(ledgerBytes, key);
+  const released = root.ledgerBytes <= ledgerBytes.length
+    ? parseLedger(ledgerBytes.subarray(0, root.ledgerBytes), key) : null;
+  const rootIndex = root.sequence - 1;
+  const rootEntry = released?.entries[rootIndex];
+  const rootEnd = released?.lineEnds[rootIndex];
+  if (parsed.invalid || released?.invalid || !released || released.entries.length !== root.sequence ||
+    !rootEntry || rootEnd !== root.ledgerBytes || rootEntry.entryDigest !== root.entryDigest ||
+    parsed.entries.length !== root.sequence) return 'degraded';
+  return { parsed, root, entries: released.entries };
+}
+
+function readRotatedCheckpoints(
+  key: KeyProvider,
+): CutoffObservationCheckpointReadResult | null {
+  const head = readSignedJson(generationHeadPath(), key, verifyGenerationHead);
+  const intent = readSignedJson(generationIntentPath(), key, verifyGenerationIntent);
+  if (head === null) {
+    if (intent === null) {
+      const orphaned = [generationOneLedgerPath(), generationOneRootPath(), retentionCertificatePath()]
+        .some((path) => existsSync(path));
+      return orphaned ? emptyRead('degraded', { sourcePresent: true, stopReasons: ['invalid-root'] }) : null;
+    }
+    if (intent === 'io-error' || intent === 'invalid-root' || intent.phase === 'committed') {
+      return emptyRead('degraded', { sourcePresent: true, stopReasons: ['invalid-root'] });
+    }
+    // A signed building marker makes these artifacts explicitly unpublished.
+    return null;
+  }
+  if (head === 'io-error' || head === 'invalid-root') {
+    return emptyRead('degraded', { sourcePresent: true, stopReasons: ['invalid-root'] });
+  }
+  const legacy = readReleasedLedger(cutoffObservationCheckpointLedgerPath(), cutoffObservationCheckpointRootPath(), key);
+  const active = readReleasedLedger(generationOneLedgerPath(), generationOneRootPath(), key);
+  const certificate = readSignedJson(retentionCertificatePath(), key, verifyRetentionCertificate);
+  if (!legacy || !active || legacy === 'degraded' || active === 'degraded' || intent === null ||
+    intent === 'io-error' || intent === 'invalid-root' || intent.phase !== 'committed' || certificate === null ||
+    certificate === 'io-error' || certificate === 'invalid-root' ||
+    certificate.certificateDigest !== head.certificateDigest ||
+    certificate.legacyRootDigest !== legacy.root.rootDigest ||
+    certificate.legacyEntryDigest !== legacy.root.entryDigest ||
+    certificate.legacySequence !== legacy.root.sequence ||
+    certificate.activeRootDigest !== active.root.rootDigest ||
+    certificate.activeEntryDigest !== active.root.entryDigest ||
+    certificate.activeSequence !== active.root.sequence) {
+    return emptyRead('degraded', { sourcePresent: true, stopReasons: ['invalid-root'] });
+  }
+  const checkpoints = [...legacy.entries, ...active.entries];
+  return {
+    checkpoints, root: active.root, sourceState: 'healthy', sourcePresent: true,
+    complete: true, stopReasons: [], physicalRows: checkpoints.length,
+    releasedRows: checkpoints.length, unreleasedRows: 0,
+    bytesRead: legacy.parsed.bytes.length + active.parsed.bytes.length,
+    latestCapturedAt: checkpoints[checkpoints.length - 1]?.snapshot.capturedAt ?? null,
+    cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
+    rollbackProtected: false, historicalAuthority: false,
+  };
+}
+
 function readCutoffObservationCheckpointsOnce(
   key: KeyProvider,
 ): CutoffObservationCheckpointReadResult {
@@ -500,6 +850,9 @@ function readCutoffObservationCheckpointsOnce(
   try {
     const pinnedKey = pinKey(key);
     if (!pinnedKey) return emptyRead('degraded', { sourcePresent: true, stopReasons: ['io-error'] });
+    verifyDirectories(directories);
+    const rotated = readRotatedCheckpoints(pinnedKey);
+    if (rotated) return rotated;
     verifyDirectories(directories);
     const ledgerBytes = readPrivateFile(cutoffObservationCheckpointLedgerPath(), MAX_LEDGER_BYTES);
     const root = readRoot(cutoffObservationCheckpointRootPath(), pinnedKey);
@@ -604,6 +957,132 @@ export function readCutoffObservationCheckpoints(
   }
 }
 
+function writeFreshLedger(path: string, row: Buffer, directories: DirectoryState): boolean {
+  let fd: number | undefined;
+  try {
+    verifyDirectories(directories);
+    if (existsSync(path)) return false;
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const opened = fstatSync(fd);
+    if (!privateFile(opened)) return false;
+    writeAll(fd, row);
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    const written = fstatSync(fd);
+    const named = lstatSync(path);
+    if (!privateFile(written) || !privateFile(named) || !sameNode(opened, written) ||
+      !sameNode(written, named) || written.size !== row.length) return false;
+    fsyncDirectory(dirname(path));
+    verifyDirectories(directories);
+    return true;
+  } catch { return false; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } } }
+}
+
+/** Remove only known private orphan artifacts before the first head exists. */
+function removePrivateOrphan(path: string, directories: DirectoryState): boolean {
+  try {
+    if (!existsSync(path)) return true;
+    verifyDirectories(directories);
+    const named = lstatSync(path);
+    if (!privateFile(named)) return false;
+    unlinkSync(path);
+    fsyncDirectory(dirname(path));
+    verifyDirectories(directories);
+    return true;
+  } catch { return false; }
+}
+
+function discardUnpublishedGenerationOne(directories: DirectoryState): boolean {
+  // No head means no generation-one state was ever released. Discarding the
+  // bounded artifacts prevents an interrupted root-required capture from
+  // becoming visible on a later retry.
+  return [generationOneLedgerPath(), generationOneRootPath(), retentionCertificatePath(), generationIntentPath()]
+    .every((path) => removePrivateOrphan(path, directories));
+}
+
+function hasGenerationOneArtifacts(): boolean {
+  return [generationOneLedgerPath(), generationOneRootPath(), retentionCertificatePath(), generationIntentPath()]
+    .some((path) => existsSync(path));
+}
+
+function publishGenerationHead(
+  legacyRoot: CutoffObservationRootV1,
+  activeRoot: CutoffObservationRootV1,
+  key: KeyProvider,
+  directories: DirectoryState,
+): boolean {
+  const certificate = buildRetentionCertificate(legacyRoot, activeRoot, key);
+  if (!certificate || !writeSignedJson(retentionCertificatePath(), certificate, directories)) return false;
+  const head = buildGenerationHead(certificate, key);
+  return Boolean(head && writeSignedJson(generationHeadPath(), head, directories));
+}
+
+function startGenerationOne(
+  snapshot: EnrollmentCutoffSnapshotV2,
+  legacyRoot: CutoffObservationRootV1,
+  recordedAt: string,
+  key: KeyProvider,
+  directories: DirectoryState,
+  recoveryPolicy?: 'root-required',
+  captureAttemptId?: string,
+): boolean {
+  const building = buildGenerationIntent('building', key);
+  if (!building || !writeSignedJson(generationIntentPath(), building, directories)) return false;
+  const entry = buildEntry(snapshot, 1, null, recordedAt, key, recoveryPolicy, captureAttemptId);
+  if (!entry) return false;
+  const row = Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8');
+  if (row.length > MAX_ROW_BYTES || !writeFreshLedger(generationOneLedgerPath(), row, directories)) return false;
+  const activeRoot = buildRoot(entry, row.length, recordedAt, key);
+  if (!activeRoot || !writeRoot(generationOneRootPath(), activeRoot, directories)) return false;
+  const committed = buildGenerationIntent('committed', key);
+  if (!committed || !writeSignedJson(generationIntentPath(), committed, directories)) return false;
+  // The head is published last. Orphan generation files are intentionally invisible.
+  return publishGenerationHead(legacyRoot, activeRoot, key, directories);
+}
+
+function appendGenerationOne(
+  snapshot: EnrollmentCutoffSnapshotV2,
+  recordedAt: string,
+  key: KeyProvider,
+  directories: DirectoryState,
+  recoveryPolicy?: 'root-required',
+  captureAttemptId?: string,
+): 'recorded' | 'replayed' | 'failed' {
+  const published = readRotatedCheckpoints(key);
+  if (!published || published.sourceState !== 'healthy' || !published.complete) return 'failed';
+  const legacy = readReleasedLedger(cutoffObservationCheckpointLedgerPath(), cutoffObservationCheckpointRootPath(), key);
+  const active = readReleasedLedger(generationOneLedgerPath(), generationOneRootPath(), key);
+  if (!legacy || !active || legacy === 'degraded' || active === 'degraded' || active.entries.length >= MAX_ROWS ||
+    legacy.entries.length !== MAX_ROWS) return 'failed';
+  const all = [...legacy.entries, ...active.entries];
+  if (all.some((candidate) => candidate.snapshot.snapshotDigest === snapshot.snapshotDigest &&
+    (!captureAttemptId || candidate.captureAttemptId === captureAttemptId))) return 'replayed';
+  const entry = buildEntry(snapshot, active.entries.length + 1,
+    active.entries[active.entries.length - 1]?.entryDigest ?? null, recordedAt, key, recoveryPolicy, captureAttemptId);
+  if (!entry) return 'failed';
+  const row = Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8');
+  if (row.length > MAX_ROW_BYTES || active.parsed.bytes.length + row.length > MAX_LEDGER_BYTES) return 'failed';
+  let fd: number | undefined;
+  try {
+    const path = generationOneLedgerPath();
+    const named = lstatSync(path);
+    if (!privateFile(named)) return 'failed';
+    fd = openSync(path, fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== active.parsed.bytes.length) return 'failed';
+    writeAll(fd, row);
+    fsyncSync(fd);
+    const persisted = fstatSync(fd);
+    if (!privateFile(persisted) || !sameNode(opened, persisted) || persisted.size !== opened.size + row.length) return 'failed';
+    const root = buildRoot(entry, persisted.size, recordedAt, key);
+    if (!root || !writeRoot(generationOneRootPath(), root, directories) ||
+      !publishGenerationHead(legacy.root, root, key, directories)) return 'failed';
+    return 'recorded';
+  } catch { return 'failed'; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } } }
+}
+
 export function recordCutoffObservationCheckpoint(
   snapshot: EnrollmentCutoffSnapshotV2,
   options: {
@@ -631,6 +1110,26 @@ export function recordCutoffObservationCheckpoint(
   let fd: number | undefined;
   try {
     verifyDirectories(directories);
+    const publishedHead = readSignedJson(generationHeadPath(), key, verifyGenerationHead);
+    const intent = readSignedJson(generationIntentPath(), key, verifyGenerationIntent);
+    if (publishedHead === 'io-error' || publishedHead === 'invalid-root') {
+      throw new Error('invalid checkpoint generation head');
+    }
+    if (intent === 'io-error' || intent === 'invalid-root') {
+      throw new Error('invalid checkpoint generation intent');
+    }
+    if (publishedHead) {
+      const appended = appendGenerationOne(snapshot, options.now?.() ?? new Date().toISOString(), key,
+        directories, options.recoveryPolicy, options.captureAttemptId);
+      if (appended === 'recorded') result.recorded = 1;
+      else if (appended === 'replayed') result.replayed = 1;
+      else result.failed = 1;
+      return result;
+    }
+    if (intent?.phase === 'committed' || (intent === null && hasGenerationOneArtifacts()) ||
+      (intent?.phase === 'building' && !discardUnpublishedGenerationOne(directories))) {
+      throw new Error('unsafe unpublished checkpoint generation');
+    }
     const ledgerPath = cutoffObservationCheckpointLedgerPath();
     const rootPath = cutoffObservationCheckpointRootPath();
     const priorFile = existsSync(ledgerPath) ? lstatSync(ledgerPath) : null;
@@ -704,7 +1203,15 @@ export function recordCutoffObservationCheckpoint(
         return result;
       }
     }
-    if (parsed.entries.length >= MAX_ROWS) throw new Error('checkpoint row limit');
+    if (parsed.entries.length >= MAX_ROWS) {
+      if (!root || root.sequence !== MAX_ROWS ||
+        !startGenerationOne(snapshot, root, options.now?.() ?? new Date().toISOString(), key,
+          directories, options.recoveryPolicy, options.captureAttemptId)) {
+        throw new Error('checkpoint rotation failed');
+      }
+      result.recorded = 1;
+      return result;
+    }
     const recordedAt = options.now?.() ?? new Date().toISOString();
     const previous = parsed.entries[parsed.entries.length - 1]?.entryDigest ?? null;
     const entry = buildEntry(

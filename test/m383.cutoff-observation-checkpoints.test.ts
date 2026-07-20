@@ -456,7 +456,7 @@ describe('M383 authenticated cutoff observation checkpoints', () => {
     expect(record(second)).toMatchObject({ recorded: 1, failed: 0 });
   });
 
-  it('recovers and replays at capacity but refuses a new 257th checkpoint', { timeout: 30_000 }, () => {
+  it('rotates a full legacy ledger into a signed generation one history', { timeout: 30_000 }, () => {
     const values = Array.from({ length: 257 }, (_, index) =>
       snapshot(new Date(Date.UTC(2026, 6, 13, 0, index)).toISOString()));
     for (const value of values.slice(0, 255)) {
@@ -470,9 +470,55 @@ describe('M383 authenticated cutoff observation checkpoints', () => {
       recorded: 0, replayed: 1, recoveredRows: 1, failed: 0,
     });
     expect(record(values[0]!)).toMatchObject({ recorded: 0, replayed: 1, failed: 0 });
-    expect(record(values[256]!)).toMatchObject({ recorded: 0, replayed: 0, failed: 1 });
+    expect(record(values[256]!)).toMatchObject({ recorded: 1, replayed: 0, failed: 0 });
     expect(read()).toMatchObject({
-      sourceState: 'healthy', complete: true, releasedRows: 256, unreleasedRows: 0,
+      sourceState: 'healthy', complete: true, releasedRows: 257, unreleasedRows: 0,
+      cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
+      rollbackProtected: false, historicalAuthority: false,
     });
+    expect(read().checkpoints.map((entry) => entry.snapshot.snapshotDigest)).toEqual(
+      values.map((value) => value.snapshotDigest),
+    );
+    expect(record(values[0]!)).toMatchObject({ recorded: 0, replayed: 1, failed: 0 });
+    writeFileSync(
+      join(home, '.ashlr', 'fleet', 'cutoff-observation-checkpoints.generations.head.json'),
+      '{}\n',
+      { mode: 0o600 },
+    );
+    expect(read()).toMatchObject({
+      sourceState: 'degraded', releasedRows: 0, stopReasons: ['invalid-root'],
+      cutoffAuthority: false, denominatorComplete: false, policyEligible: false,
+      rollbackProtected: false, historicalAuthority: false,
+    });
+    rmSync(join(home, '.ashlr', 'fleet', 'cutoff-observation-checkpoints.generations.head.json'));
+    expect(read()).toMatchObject({ sourceState: 'degraded', stopReasons: ['invalid-root'] });
+    expect(record(values[0]!)).toMatchObject({ recorded: 0, failed: 1 });
+  });
+
+  it('keeps the legacy history healthy until a signed generation head is published', { timeout: 30_000 }, () => {
+    const values = Array.from({ length: 257 }, (_, index) =>
+      snapshot(new Date(Date.UTC(2026, 6, 14, 0, index)).toISOString()));
+    for (const value of values.slice(0, 256)) expect(record(value)).toMatchObject({ recorded: 1 });
+
+    const fleet = join(home, '.ashlr', 'fleet');
+    writeFileSync(join(fleet, 'cutoff-observation-checkpoints.g1.jsonl'), 'orphan\n', { mode: 0o600 });
+    writeFileSync(join(fleet, 'cutoff-observation-checkpoints.g1.root.json'), '{}\n', { mode: 0o600 });
+    writeFileSync(join(fleet, 'cutoff-observation-checkpoints.retention.g1.json'), '{}\n', { mode: 0o600 });
+
+    expect(read()).toMatchObject({ sourceState: 'degraded', stopReasons: ['invalid-root'] });
+    expect(record(values[256]!)).toMatchObject({ recorded: 0, failed: 1 });
+    expect(read()).toMatchObject({ sourceState: 'degraded', stopReasons: ['invalid-root'] });
+  });
+
+  it('refuses to repair a published generation whose certificate no longer binds it', { timeout: 30_000 }, () => {
+    const values = Array.from({ length: 258 }, (_, index) =>
+      snapshot(new Date(Date.UTC(2026, 6, 15, 0, index)).toISOString()));
+    for (const value of values.slice(0, 257)) expect(record(value)).toMatchObject({ recorded: 1 });
+
+    const certificate = join(home, '.ashlr', 'fleet', 'cutoff-observation-checkpoints.retention.g1.json');
+    writeFileSync(certificate, '{}\n', { mode: 0o600 });
+    expect(read()).toMatchObject({ sourceState: 'degraded', stopReasons: ['invalid-root'] });
+    expect(record(values[257]!)).toMatchObject({ recorded: 0, failed: 1 });
+    expect(read()).toMatchObject({ sourceState: 'degraded', stopReasons: ['invalid-root'] });
   });
 });
