@@ -409,8 +409,13 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
       claimEpoch: expect.any(Number),
       claimBindingDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(authority && Object.keys(authority).sort()).toEqual([
+      'claimBindingDigest', 'claimEpoch', 'kind', 'queueId',
+    ]);
     expect(JSON.stringify(authority)).not.toContain('ownerToken');
     expect(JSON.stringify(authority)).not.toContain(executionKey(item));
+    expect(coord.beginExecution(item, 'machine-A')).toEqual(authority);
+    expect(coord.beginExecution(item, 'machine-B')).toBeNull();
     expect(coord.recordClaimOutcome(item, 'wrong-recomputed-key', 'diff', 'machine-A')).toBe(true);
 
     expect(store.readSnapshot().worked).toEqual([

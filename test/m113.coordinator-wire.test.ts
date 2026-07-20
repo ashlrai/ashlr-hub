@@ -679,7 +679,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
   it('does not consume frontier quota when the pre-launch queue fence refuses execution', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-quota-'));
     const beginSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'beginExecution')
-      .mockReturnValue(false);
+      .mockReturnValue(null);
     try {
       const cfg = makeCfg({
         daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
