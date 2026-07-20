@@ -2676,7 +2676,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Recheck source admission before CLI retry attempts and prove source advancement stops further model spend using real Git worktrees.
 - [x] Recheck source admission before API provider invocation and after proposal persistence; reject a proposal that becomes stale during its write.
 - [x] Extend the same contract to swarm capture without bypassing outward mutation authority.
-- [ ] Extend the same contract to orchestrator capture paths without bypassing outward mutation authority.
+- [x] Extend the same contract to direct orchestrator engineer capture without bypassing outward mutation authority.
 
 ## Closed Judge Decision Metadata (2026-07-16)
 - [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.

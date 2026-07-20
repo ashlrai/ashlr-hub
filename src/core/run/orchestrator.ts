@@ -3094,6 +3094,15 @@ async function runGoalInternal(
       if (opts.signal?.aborted || state.status === 'aborted' || state.terminationReason === 'cancelled') {
         return;
       }
+      const sourceAdmission = wt.inspectSandboxSourceRevision(sb, sb.sourceRepo);
+      if (!sourceAdmission.ok) {
+        state.proposalOutcome = {
+          kind: 'sandbox-unavailable',
+          reason: `sandbox source revision refused: ${sourceAdmission.reason}`,
+        };
+        process.stderr.write(`[ashlr run] ${state.proposalOutcome.reason}\n`);
+        return;
+      }
       const diff = wt.sandboxDiff(sb);
       if (diff.files > 0 && diff.patch.trim().length > 0) {
         try {
