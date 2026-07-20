@@ -16,8 +16,15 @@ import {
   type AutonomyEvidencePackLegacy,
   type SignedAutonomyEvidencePackV3,
 } from '../src/core/autonomy/evidence-pack.js';
-import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
-import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
+import type {
+  DetailedOutcomeRecordReadDeps,
+  OutcomeRecordReadDeps,
+} from '../src/core/autonomy/outcome-records.js';
+import {
+  listOutcomeRecords,
+  listOutcomeRecordsDetailed,
+  listReadyEvidenceOutcomeRecords,
+} from '../src/core/autonomy/outcome-records.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
 import {
   agentSemanticSubjectRef,
@@ -185,7 +192,72 @@ function deps(overrides: Partial<OutcomeRecordReadDeps> = {}): OutcomeRecordRead
   };
 }
 
+function detailedDeps(
+  overrides: Partial<DetailedOutcomeRecordReadDeps> = {},
+): DetailedOutcomeRecordReadDeps {
+  return {
+    listProposalsDetailed: () => ({
+      proposals: [], sourceState: 'healthy', sourcePresent: true, complete: true,
+      stopReasons: [], filesDiscovered: 0, filesRead: 0, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0,
+    }),
+    readDecisionsDetailed: () => ({
+      decisions: [], sourceState: 'missing', sourcePresent: false, complete: true,
+      stopReasons: [], filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+    }),
+    readJudgeTracesDetailed: () => ({
+      traces: [], sourceState: 'missing', sourcePresent: false, complete: true,
+      stopReasons: [], filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+    }),
+    readAutonomyEvidencePacksDetailed: () => ({
+      packs: [], sourceState: 'missing', sourcePresent: false, complete: true,
+      filesRead: 0, bytesRead: 0, invalidFiles: 0, unreadableFiles: 0, limitExceeded: false,
+    }),
+    readPostMergeObservations: () => ({
+      observations: [], sourceState: 'missing', sourcePresent: false, complete: true,
+      stopReasons: [], filesRead: 0, bytesRead: 0, physicalRows: 0, invalidRows: 0,
+      conflictingEvents: 0, duplicateRows: 0, supersededRows: 0, limitExceeded: false,
+    }),
+    ...overrides,
+  };
+}
+
 describe('m302 listOutcomeRecords', () => {
+  it('publishes a complete source-qualified join without best-effort worked telemetry', () => {
+    const result = listOutcomeRecordsDetailed({ deps: detailedDeps({
+      listProposalsDetailed: () => ({
+        proposals: [proposal({ id: 'prop-detailed', createdAt: '2026-07-03T00:00:00.000Z' })],
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesDiscovered: 1, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+      }),
+      readDecisionsDetailed: () => ({
+        decisions: [decision('prop-detailed', '2026-07-03T02:00:00.000Z')],
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesRead: 1, bytesRead: 64, rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+      }),
+    }) });
+
+    expect(result).toMatchObject({ complete: true, sourceState: 'healthy' });
+    expect(result.records).toHaveLength(1);
+    expect(result.records[0]).toMatchObject({
+      lastActivityAt: '2026-07-03T02:00:00.000Z', workedEvents: [],
+    });
+    expect(result.sourceQuality.proposals).toMatchObject({ complete: true, filesRead: 1 });
+  });
+
+  it('withholds all detailed records when any source is partial or degraded', () => {
+    const result = listOutcomeRecordsDetailed({ deps: detailedDeps({
+      listProposalsDetailed: () => ({
+        proposals: [proposal({ id: 'prop-partial', createdAt: '2026-07-03T00:00:00.000Z' })],
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['file-limit'], filesDiscovered: 2, filesRead: 1, bytesRead: 64, invalidFiles: 0, unreadableFiles: 0,
+      }),
+    }) });
+
+    expect(result.records).toEqual([]);
+    expect(result).toMatchObject({ complete: false, sourceState: 'degraded' });
+    expect(result.sourceQuality.proposals).toMatchObject({ stopReasons: ['file-limit'] });
+  });
+
   it('joins proposal outcomes across existing read-only stores', () => {
     const worked: WorkedEvent = {
       itemId: 'prop-new',

@@ -2939,7 +2939,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit stale pending suppression against outcome-record activity authority.
 - [x] Add a fail-closed optional source-qualified activity seam with immutable creation-time fallback.
 - [x] Cover recent qualified activity and malformed timestamp fallback; run focused tests, typecheck, and lint.
-- [ ] Build a complete detailed outcome reader before wiring the seam into duplicate suppression callers.
+- [x] Build a complete detailed outcome reader before wiring the seam into duplicate suppression callers.
+- [ ] Add a pending-only, replay-bound activity projection from the complete reader before connecting duplicate suppression callers.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
 
 ## Coordinator-Minted V2 Receipt Foundations (2026-07-20)

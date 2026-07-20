@@ -13,14 +13,24 @@ import {
   type PostMergeObservation,
   type PostMergeObservationReadResult,
 } from '../fleet/post-merge-observations.js';
-import { listProposals, loadProposal } from '../inbox/store.js';
-import type { JudgeTrace } from '../fleet/judge-trace.js';
-import { readJudgeTraces } from '../fleet/judge-trace.js';
+import {
+  listProposals,
+  listProposalsDetailed,
+  loadProposal,
+  type ProposalsReadResult,
+} from '../inbox/store.js';
+import type { JudgeTrace, JudgeTracesReadResult } from '../fleet/judge-trace.js';
+import { readJudgeTraces, readJudgeTracesDetailed } from '../fleet/judge-trace.js';
 import type { WorkedEvent } from '../fleet/worked-ledger.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import type { RacingStats } from '../fleet/model-racing.js';
 import { racingStats } from '../fleet/model-racing.js';
-import { readDecisions, type DecisionSourceQuality } from '../fleet/decisions-ledger.js';
+import {
+  readDecisions,
+  readDecisionsDetailed,
+  type DecisionsReadResult,
+  type DecisionSourceQuality,
+} from '../fleet/decisions-ledger.js';
 import {
   agentSemanticProposalSubjectRef,
   agentSemanticModelFamily,
@@ -29,11 +39,13 @@ import {
 import type {
   AutonomyEvidencePack,
   AutonomyEvidencePackList,
+  AutonomyEvidencePacksReadResult,
   AutonomyEvidenceSourceQuality,
 } from './evidence-pack.js';
 import {
   evidencePackMatchesLiveProposal,
   listAutonomyEvidencePacks,
+  readAutonomyEvidencePacksDetailed,
 } from './evidence-pack.js';
 
 const MAX_JOINED_EVENTS_PER_RECORD = 20;
@@ -148,6 +160,36 @@ export interface OutcomeRecordReadDeps {
   readPostMergeObservations?: typeof readPostMergeObservations;
 }
 
+/**
+ * Provenance-preserving source qualities for a complete outcome join.
+ *
+ * This is deliberately separate from the best-effort `listOutcomeRecords()`
+ * API. Consumers that would make a scheduling or suppression decision need a
+ * clear answer when any ledger could not be read completely.
+ */
+export interface OutcomeRecordsSourceQuality {
+  proposals: Omit<ProposalsReadResult, 'proposals'>;
+  decisions: Omit<DecisionsReadResult, 'decisions'>;
+  judgeTraces: Omit<JudgeTracesReadResult, 'traces'>;
+  evidencePacks: Omit<AutonomyEvidencePacksReadResult, 'packs'>;
+  postMergeObservations: Omit<PostMergeObservationReadResult, 'observations'>;
+}
+
+export interface OutcomeRecordsReadResult {
+  records: OutcomeRecord[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+  sourceQuality: OutcomeRecordsSourceQuality;
+}
+
+export interface DetailedOutcomeRecordReadDeps {
+  listProposalsDetailed?: typeof listProposalsDetailed;
+  readDecisionsDetailed?: typeof readDecisionsDetailed;
+  readJudgeTracesDetailed?: typeof readJudgeTracesDetailed;
+  readAutonomyEvidencePacksDetailed?: typeof readAutonomyEvidencePacksDetailed;
+  readPostMergeObservations?: typeof readPostMergeObservations;
+}
+
 export interface ReadyEvidenceOutcomeRecordDeps {
   listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   loadProposal?: (id: string) => Proposal | null;
@@ -188,6 +230,18 @@ function activityTime(...values: Array<string | undefined>): string {
     }
   }
   return newest;
+}
+
+function withoutRows<T extends object, K extends keyof T>(
+  value: T,
+  rows: K,
+): Omit<T, K> {
+  const { [rows]: _rows, ...quality } = value;
+  return quality as Omit<T, K>;
+}
+
+function completeOutcomeSource(value: { sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }): boolean {
+  return value.complete && value.sourceState !== 'degraded';
 }
 
 function byNewestTs<T>(readTs: (value: T) => string | undefined): (a: T, b: T) => number {
@@ -437,6 +491,106 @@ export function listOutcomeRecords(
   } catch {
     return [];
   }
+}
+
+/**
+ * Return source-qualified outcome records for authority-sensitive callers.
+ *
+ * A missing store is a complete empty source; a degraded or partial store
+ * withholds the entire join. Worked-ledger and racing statistics are excluded
+ * here because neither has a complete-read contract yet. This prevents an
+ * authority caller from treating best-effort operational telemetry as proof
+ * that a pending proposal is still active.
+ */
+export function listOutcomeRecordsDetailed(
+  opts?: { limit?: number; deps?: DetailedOutcomeRecordReadDeps },
+): OutcomeRecordsReadResult {
+  const deps = opts?.deps ?? {};
+  const cap = boundedLimit(opts?.limit);
+  const proposals = (deps.listProposalsDetailed ?? listProposalsDetailed)();
+  const decisions = (deps.readDecisionsDetailed ?? readDecisionsDetailed)({ requireComplete: true });
+  const traces = (deps.readJudgeTracesDetailed ?? readJudgeTracesDetailed)({ requireComplete: true });
+  const evidence = (deps.readAutonomyEvidencePacksDetailed ?? readAutonomyEvidencePacksDetailed)(Math.max(cap * 4, 200));
+  const postMerge = (deps.readPostMergeObservations ?? readPostMergeObservations)({ requireComplete: true });
+  const sourceQuality = {
+    proposals: withoutRows(proposals, 'proposals'),
+    decisions: withoutRows(decisions, 'decisions'),
+    judgeTraces: withoutRows(traces, 'traces'),
+    evidencePacks: withoutRows(evidence, 'packs'),
+    postMergeObservations: withoutRows(postMerge, 'observations'),
+  } satisfies OutcomeRecordsSourceQuality;
+  const sources = [proposals, decisions, traces, evidence, postMerge];
+  const complete = sources.every(completeOutcomeSource);
+  const sourceState: OutcomeRecordsReadResult['sourceState'] = !complete
+    ? 'degraded'
+    : sources.every((source) => source.sourceState === 'missing')
+      ? 'missing'
+      : 'healthy';
+  if (!complete) return { records: [], sourceState, complete: false, sourceQuality };
+
+  const decisionsByProposal = new Map<string, DecisionEntry[]>();
+  for (const decision of decisions.decisions) {
+    const rows = decisionsByProposal.get(decision.proposalId) ?? [];
+    rows.push(decision);
+    decisionsByProposal.set(decision.proposalId, rows);
+  }
+  const tracesByProposal = new Map<string, JudgeTrace[]>();
+  for (const trace of traces.traces) {
+    const rows = tracesByProposal.get(trace.proposalId) ?? [];
+    rows.push(trace);
+    tracesByProposal.set(trace.proposalId, rows);
+  }
+  const evidenceByProposal = new Map<string, AutonomyEvidencePack[]>();
+  for (const pack of evidence.packs) {
+    const rows = evidenceByProposal.get(pack.proposal.id) ?? [];
+    rows.push(pack);
+    evidenceByProposal.set(pack.proposal.id, rows);
+  }
+  const postMergeByProposal = new Map<string, PostMergeObservation[]>();
+  for (const observation of postMerge.observations) {
+    const rows = postMergeByProposal.get(observation.proposalId) ?? [];
+    rows.push(observation);
+    postMergeByProposal.set(observation.proposalId, rows);
+  }
+
+  const records = proposals.proposals.map((proposal): OutcomeRecord => {
+    const proposalDecisions = (decisionsByProposal.get(proposal.id) ?? [])
+      .sort(byNewestTs((decision) => decision.ts)).slice(0, MAX_JOINED_EVENTS_PER_RECORD);
+    const proposalTraces = (tracesByProposal.get(proposal.id) ?? [])
+      .sort(byNewestTs((trace) => trace.outcomeAt ?? trace.ts)).slice(0, MAX_JOINED_EVENTS_PER_RECORD);
+    const proposalEvidence = (evidenceByProposal.get(proposal.id) ?? [])
+      .sort(byNewestTs((pack) => pack.generatedAt)).slice(0, MAX_JOINED_EVENTS_PER_RECORD);
+    const proposalPostMerge = (postMergeByProposal.get(proposal.id) ?? [])
+      .sort(byNewestTs((observation) => observation.observedAt)).slice(0, MAX_JOINED_EVENTS_PER_RECORD);
+    return {
+      version: 1,
+      proposal: proposalSnapshot(proposal),
+      lastActivityAt: activityTime(
+        proposal.decidedAt,
+        proposal.createdAt,
+        proposalDecisions[0]?.ts,
+        proposalTraces[0]?.outcomeAt,
+        proposalTraces[0]?.ts,
+        proposalEvidence[0]?.generatedAt,
+        proposalPostMerge[0]?.observedAt,
+      ),
+      decisions: proposalDecisions.map((decision) => decisionSnapshot(decision, proposal.id, true)),
+      judgeTraces: proposalTraces.map(judgeTraceSnapshot),
+      evidencePacks: proposalEvidence.map(evidenceSnapshot),
+      workedEvents: [],
+      ...(proposalPostMerge.length > 0 ? { postMergeObservations: proposalPostMerge } : {}),
+      postMergeObservationSourceQuality: sourceQuality.postMergeObservations,
+      evidenceSourceQuality: sourceQuality.evidencePacks,
+      decisionSourceQuality: sourceQuality.decisions,
+    };
+  });
+  records.sort((a, b) => {
+    const activityOrder = Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt);
+    return Number.isNaN(activityOrder) || activityOrder === 0
+      ? b.proposal.id.localeCompare(a.proposal.id)
+      : activityOrder;
+  });
+  return { records: records.slice(0, cap), sourceState, complete: true, sourceQuality };
 }
 
 /**
