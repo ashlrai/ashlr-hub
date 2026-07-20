@@ -52,7 +52,7 @@
  *     flag-ON path.
  */
 
-import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
+import type { EngineId, EngineTier, WorkItem, AshlrConfig } from '../types.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import { generatedRepairCandidateAllowed } from '../fleet/router.js';
 import { workItemCoverageKey } from '../fleet/proposal-matching.js';
@@ -108,6 +108,41 @@ export interface DispatchResult {
   attempted: boolean;
   /** Settled result from the injected dispatchFn; null when kill-halted. */
   settled: PromiseSettledResult<unknown> | null;
+}
+
+/** Canonical final route at the concurrent executor boundary; no policy authority. */
+export interface FinalConcurrentDispatchRoute {
+  backend: EngineId;
+  tier: EngineTier | null;
+  model: string | null;
+  reason?: string;
+  disposition: 'gateway-exact' | 'planner-reassigned';
+}
+
+/**
+ * Normalize the route that will actually enter the existing task runner.
+ * Gateway model/tier metadata survives only when its backend survived planning;
+ * capacity reassignment must never inherit the original model.
+ */
+export function finalizeConcurrentDispatchRoute(fields: {
+  assignedBackend: EngineId;
+  hintedBackend?: EngineId;
+  hintedTier?: EngineTier | null;
+  hintedModel?: string | null;
+  reason?: string;
+}): FinalConcurrentDispatchRoute {
+  const paused = fields.reason?.startsWith('throttled:') === true ||
+    fields.reason?.startsWith('budget-pause:') === true ||
+    fields.reason?.startsWith('resource-pause:') === true;
+  const gatewayExact = !paused && fields.hintedBackend !== undefined &&
+    fields.hintedBackend === fields.assignedBackend;
+  return {
+    backend: fields.assignedBackend,
+    tier: gatewayExact ? fields.hintedTier ?? engineTierOf(fields.assignedBackend) : engineTierOf(fields.assignedBackend),
+    model: gatewayExact ? fields.hintedModel ?? null : null,
+    ...(fields.reason !== undefined ? { reason: fields.reason } : {}),
+    disposition: gatewayExact ? 'gateway-exact' : 'planner-reassigned',
+  };
 }
 
 export function concurrentAssignedRouteReason(fields: {

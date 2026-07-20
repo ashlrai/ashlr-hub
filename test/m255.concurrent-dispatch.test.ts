@@ -26,6 +26,7 @@ import {
   buildConcurrentDispatchRouteItem,
   buildGatewayDispatchPlan,
   concurrentAssignedRouteReason,
+  finalizeConcurrentDispatchRoute,
   runConcurrentDispatch,
   type ConcurrentDispatchCfg,
   type DispatchPlan,
@@ -81,6 +82,29 @@ function makeSnapshot(
 }
 
 const defaultCfg: ConcurrentDispatchCfg = { maxSlotsPerBackend: 3 };
+
+describe('finalizeConcurrentDispatchRoute', () => {
+  it('preserves gateway tier and model only when the planned backend is exact', () => {
+    expect(finalizeConcurrentDispatchRoute({
+      assignedBackend: 'codex', hintedBackend: 'codex', hintedTier: 'frontier', hintedModel: 'gpt-5.6',
+      reason: 'gateway selected codex',
+    })).toEqual({
+      backend: 'codex', tier: 'frontier', model: 'gpt-5.6', reason: 'gateway selected codex',
+      disposition: 'gateway-exact',
+    });
+  });
+
+  it('clears gateway model metadata after capacity reassignment or a paused route', () => {
+    expect(finalizeConcurrentDispatchRoute({
+      assignedBackend: 'nim', hintedBackend: 'codex', hintedTier: 'frontier', hintedModel: 'gpt-5.6',
+      reason: 'gateway selected codex; concurrent planner assigned nim',
+    })).toMatchObject({ backend: 'nim', model: null, disposition: 'planner-reassigned' });
+    expect(finalizeConcurrentDispatchRoute({
+      assignedBackend: 'codex', hintedBackend: 'codex', hintedTier: 'frontier', hintedModel: 'gpt-5.6',
+      reason: 'resource-pause: codex capacity unavailable',
+    })).toMatchObject({ model: null, disposition: 'planner-reassigned' });
+  });
+});
 
 function makeTrustedCaptureRepair(): WorkItem {
   return makeItem({

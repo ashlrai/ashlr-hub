@@ -121,6 +121,7 @@ import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: Inferen
 import {
   buildConcurrentDispatchRouteItem,
   concurrentAssignedRouteReason,
+  finalizeConcurrentDispatchRoute,
   planConcurrentDispatch,
   runConcurrentDispatch,
 } from '../fabric/concurrent-dispatch.js'; // M255/M256
@@ -6264,6 +6265,7 @@ export async function tick(
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
     const routeModels = new Map<string, string | null>();
+    const routeTiers = new Map<string, EngineTier | null>();
     if (routingCfg.foundry?.fabric?.gateway === true) {
       const gds = await Promise.allSettled(
         workedSet.map((item) => gatewayDecide(item, routingCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
@@ -6275,6 +6277,7 @@ export async function tick(
           routeHints.set(itemKey, d.value.backend);
           routeReasons.set(itemKey, d.value.reason);
           routeModels.set(itemKey, d.value.model ?? null);
+          routeTiers.set(itemKey, d.value.tier);
         }
       }
     }
@@ -6338,8 +6341,14 @@ export async function tick(
             diagnosticRepair: isTrustedDiagnosticResliceItem(item),
             candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg),
           });
-          const assignedModel = hintedBackend === _backend ? routeModels.get(itemKey) : undefined;
-          return taskEntry.run(_backend, assignedReason, assignedModel);
+          const finalRoute = finalizeConcurrentDispatchRoute({
+            assignedBackend: _backend,
+            ...(hintedBackend !== undefined ? { hintedBackend } : {}),
+            ...(routeTiers.has(itemKey) ? { hintedTier: routeTiers.get(itemKey) } : {}),
+            ...(routeModels.has(itemKey) ? { hintedModel: routeModels.get(itemKey) } : {}),
+            ...(assignedReason !== undefined ? { reason: assignedReason } : {}),
+          });
+          return taskEntry.run(finalRoute.backend, finalRoute.reason, finalRoute.model);
         }
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
 	        return {

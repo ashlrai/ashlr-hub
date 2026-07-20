@@ -9581,16 +9581,18 @@ describe('M201 — Group F: buildItemGoal purity', () => {
 // ===========================================================================
 
 describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
-  it('G1: concurrent dispatch passes assigned backend and gateway reason into task runner', () => {
+  it('G1: concurrent dispatch canonicalizes the final planner route before task execution', () => {
     const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
 
     expect(source).toContain('const routeReasons = new Map<string, string>();');
     expect(source).toContain('const routeModels = new Map<string, string | null>();');
+    expect(source).toContain('const routeTiers = new Map<string, EngineTier | null>();');
     expect(source).toContain('routeReasons.set(itemKey, d.value.reason);');
     expect(source).toContain('routeModels.set(itemKey, d.value.model ?? null);');
+    expect(source).toContain('routeTiers.set(itemKey, d.value.tier);');
     expect(source).toContain('routeReasons,');
-    expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(itemKey) : undefined;');
-    expect(source).toContain('return taskEntry.run(_backend, assignedReason, assignedModel);');
+    expect(source).toContain('const finalRoute = finalizeConcurrentDispatchRoute({');
+    expect(source).toContain('return taskEntry.run(finalRoute.backend, finalRoute.reason, finalRoute.model);');
     expect(source).toContain('buildConcurrentDispatchRouteItem(');
   });
 

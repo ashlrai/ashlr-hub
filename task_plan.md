@@ -2874,6 +2874,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Withhold raw selection observations from trajectory and learning-eligibility projections pending receipt qualification.
 - [x] Extract the dispatch-production storage authority into a dependency leaf and qualify Fleet Status observations through exact signed receipt joins.
 - [x] Carry only process-bound receipt-qualified selection projections into trajectory reconstruction and learning eligibility.
+- [x] Normalize final concurrent backend/tier/model/disposition at the executor boundary without enabling a canary producer.
 - [x] Audit the concurrent-planner seam and reject a precomputed canary helper that could diverge from the final route.
 - [ ] Carry exact gateway route disposition and model tuple into the per-item concurrent commit point before enabling a binary canary producer.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
