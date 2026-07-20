@@ -78,10 +78,16 @@ function declaredTestTitles(file: string): string[] {
 describe('M30 CI workflow', () => {
   it('is reusable as the canonical release verification authority', () => {
     expect(ciYml).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
-    expect(ciYml.match(/^permissions:\n[\s\S]*?(?=^jobs:)/m)?.[0]).toBe(
-      'permissions:\n  contents: read\n\n',
+    expect(ciYml.match(/^permissions:\n(?: {2}[^\n]+\n)+/m)?.[0]).toBe(
+      'permissions:\n  contents: read\n',
     );
     expect(ciYml.match(/^\s{2,}permissions:/gm) ?? []).toHaveLength(0);
+  });
+
+  it('cancels only superseded runs from the same event and branch', () => {
+    const concurrency = ciYml.match(/^concurrency:\n(?: {2}[^\n]+\n)+/m)?.[0] ?? '';
+    expect(concurrency).toContain('group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}');
+    expect(concurrency).toContain('cancel-in-progress: true');
   });
 
   it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {

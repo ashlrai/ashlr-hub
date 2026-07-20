@@ -2701,3 +2701,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## CI Supersession (2026-07-20)
 - [x] Preserve independent push and pull-request protected matrices while canceling obsolete runs within each event/branch stream.
 - [x] Verify watchdog coverage and publish as a separate protected draft.
+- [x] Make the CI workflow contract tolerate root-level scheduling policy and assert exact event-and-branch supersession grouping after the initial Ubuntu matrix exposed the stale header assertion.
