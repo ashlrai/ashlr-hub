@@ -2816,3 +2816,9 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Partial artifact shared-claim settlement (2026-07-20):
+  - A durable partial proposal is immutable review evidence: it remains pending to suppress duplicate paid execution, and cannot acquire apply, merge, cooldown, or learning authority. That contract is retained.
+  - An aborted producer previously bypassed ordinary outcome recording, which could leave its filesystem shared-queue claim executing until lease expiry even after durable partial capture. The daemon now settles only that exact owned claim when the normalized terminal record is `gate-blocked` and names the partial proposal.
+  - The shared-queue regression proves the claim is released while no worked/cooldown row is written and the partial remains pending. Focused daemon coverage, typecheck, quiet lint, build, and diff checks pass.
+  - Shared-mode autonomous proposal-repair recovery remains a separate integrity-sensitive design: it must bind exact proposal/run/generation identity and never treat a review artifact as authority to redispatch the original item.
