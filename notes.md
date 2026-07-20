@@ -2864,3 +2864,8 @@
   - Per-tick production-write, handoff, lifecycle, and settlement state is keyed by the repository-qualified coverage key, so a failed write in one repository cannot suppress an equal-id item elsewhere.
   - Local worked-ledger rows retain their historical raw `itemId` for operator compatibility while an optional `itemKey` carries scoped cooldown authority. Legacy rows without the key remain readable through their raw id.
   - Focused coordinator/daemon suites, typecheck, scoped lint, and diff checks pass locally. Protected CI must validate the immutable published head.
+
+- Route and preflight repository identity (2026-07-20):
+  - Automatic-drain route feasibility, capacity/preflight verdicts, blocked-repair filtering, and fairness accounting now key by `workItemCoverageKey`, not raw scanner id.
+  - A route-blocked repair in one repository can no longer remove an equal-id repair or ordinary item in another repository from selection, or distort the ordinary-turn fairness state.
+  - The focused automatic-drain route and fairness suite passes. Full typecheck in this worktree is blocked by its incomplete dependency attachment; protected CI is the authoritative verification gate.
