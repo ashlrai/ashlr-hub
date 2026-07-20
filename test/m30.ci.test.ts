@@ -102,15 +102,23 @@ describe('M30 CI workflow', () => {
   });
 
   it('runs Ubuntu exhaustively with fixed Windows and macOS portability partitions', () => {
-    expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
+    expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(2);
     expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(4);
     expect(ciYml.match(/os:\s*macos-latest/g)).toHaveLength(1);
     for (const partition of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
     expect(ciYml).toContain('label: windows, portability overflow');
-    expect(ciYml).toContain('test_args: ""');
-    expect(ciYml).not.toContain('--shard=');
+    expect(ciYml).toContain('label: ubuntu, exhaustive 1/2');
+    expect(ciYml).toContain('label: ubuntu, exhaustive 2/2');
+    expect(ciYml).toContain('test_args: --shard=1/2');
+    expect(ciYml).toContain('test_args: --shard=2/2');
+    expect(ciYml.match(/pack_smoke:\s*true/g)).toHaveLength(1);
+    expect(ciYml).toContain("if: matrix.pack_smoke == true");
+    expect(ciYml).toContain('name: CI (Node 22, ubuntu)');
+    expect(ciYml).toContain('needs: ci');
+    expect(ciYml).toContain('MATRIX_RESULT: ${{ needs.ci.result }}');
+    expect(ciYml).toContain('run: test "$MATRIX_RESULT" = "success"');
 
     const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
     const nativeMatrixEntries =

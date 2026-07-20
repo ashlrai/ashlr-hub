@@ -22,8 +22,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            label: ubuntu
-            test_args: ""
+            label: ubuntu, exhaustive 1/2
+            test_args: --shard=1/2
+            pack_smoke: true
+          - os: ubuntu-latest
+            label: ubuntu, exhaustive 2/2
+            test_args: --shard=2/2
+            pack_smoke: false
           - os: windows-latest
             label: windows, portability 1/3
             test_args: >-
@@ -140,7 +145,7 @@ jobs:
       # M83: ubuntu-only — the tarball-exports check is OS-independent, and the
       # bash heredoc (mktemp/$PWD/.bin shims) is not worth porting to Windows.
       - name: Pack smoke (exports map)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.pack_smoke == true
         shell: bash
         run: |
           npm pack
@@ -152,3 +157,16 @@ jobs:
           ./node_modules/.bin/ashlr help > /dev/null
           node -e "import('@ashlr/hub/types').then(() => console.log('exports map ok'))"
           node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"
+
+  # Branch protection retains this exact context. It passes only after every
+  # matrix member succeeds, so both exhaustive Ubuntu shards remain required.
+  ubuntu-authority:
+    name: CI (Node 22, ubuntu)
+    needs: ci
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete matrix evidence
+        env:
+          MATRIX_RESULT: ${{ needs.ci.result }}
+        run: test "$MATRIX_RESULT" = "success"
