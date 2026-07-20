@@ -3120,3 +3120,8 @@
 # Current Canonical Candidate Boundary
 - A pure constructor now binds one ordinary gateway decision to an unchanged final concurrent route and planner capacity observation. Backend, tier, and model must match exactly; planner reassignment, resource/other trace overrides, and inherited models are rejected before binary-pair eligibility runs.
 - The constructor is still unused by the daemon because the gateway currently produces one legitimate final decision rather than a safe alternate. It has no dispatch, sampling, persistence, or configuration authority.
+
+# Current Best-of-N Proposal Capture Repair
+- Best-of-N no-winner aggregation now applies the same required-capture classification used by direct proposal runs. A candidate reporting `proposal-disabled` with bounded changed-file or changed-line metadata becomes `proposal-capture-error`, rather than a policy-suppressed no-op.
+- The authoritative capture-missing reason is retained when the critique repeats the candidate's original policy-disabled text, so the existing repair scheduler can see the actual diagnostic. Candidates with no changed-work evidence remain `proposal-disabled` and retain their non-cooling semantics.
+- Verification: focused Best-of-N capture and structured-outcome coverage passes eight assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.

@@ -4402,6 +4402,83 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   );
 
   it.each([false, true])(
+    'A1h2a6e: Best-of-N changed-but-unfiled candidates become capture repair diagnostics (reversed=%s)',
+    async (reversed) => {
+      const { items } = enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'capture fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const unfiledCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled after sandbox changes',
+          files: 2,
+          insertions: 5,
+        },
+        error: 'proposal-disabled: proposal filing disabled after sandbox changes',
+        costUsd: 0.02,
+      };
+      const cancelledCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'cancelled',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [cancelledCandidate, unfiledCandidate]
+          : [unfiledCandidate, cancelledCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 0,
+          judged: 0,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [
+            { reason: 'proposal-disabled: proposal filing disabled after sandbox changes', count: 1 },
+            { reason: 'selection cancelled', count: 1 },
+          ],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-capture-error',
+        reason: 'best-of-2: capture-missing: required proposal dispatch produced changes without proposal filing',
+        diffFiles: 2,
+        diffLines: 5,
+        runEventSummary: {
+          status: 'failed',
+          outcome: 'proposal-capture-error',
+          proposalCreated: false,
+          costUsd: 0.03,
+        },
+      });
+      expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+        itemId: items[0]!.id,
+        outcome: 'proposal-capture-error',
+        learningLabel: {
+          learningKind: 'diagnostic-no-proposal',
+          policySuppressed: false,
+          diagnosticAttempt: true,
+        },
+      });
+    },
+  );
+
+  it.each([false, true])(
     'A1h2a6b: Best-of-N filed proposals beat failures regardless of candidate order (reversed=%s)',
     async (reversed) => {
       enrollWithItems(1);

@@ -2176,7 +2176,16 @@ function bestOfNAuthoritativeNoWinnerProduction(
   const structuredErrorAuthorities = new Map<string, DaemonDispatchProduction>();
 
   for (const candidate of result.candidates) {
-    const candidateProduction = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
+    // A Best-of-N candidate can finish with a real diff even when proposal
+    // filing was disabled. Preserve the direct-run capture contract here so a
+    // changed-but-unfiled candidate reaches capture repair instead of being
+    // mistaken for a harmless policy suppression.
+    const candidateProduction = dispatchProductionFromProposalOutcome(
+      candidate.proposalOutcome,
+      undefined,
+      undefined,
+      { proposalRequired: true },
+    );
     if (candidateProduction) {
       addAuthority(candidateProduction, `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}`);
     }
@@ -2197,7 +2206,13 @@ function bestOfNAuthoritativeNoWinnerProduction(
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
     const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason));
     const outcome = structuredAuthority?.outcome ?? noProposalOutcomeFromReason(reason);
-    addAuthority({ ...(structuredAuthority ?? { outcome }), reason }, `critique:${outcome}:${reason}`);
+    const authoritativeReason = structuredAuthority?.outcome === 'proposal-capture-error'
+      ? structuredAuthority.reason ?? reason
+      : reason;
+    addAuthority(
+      { ...(structuredAuthority ?? { outcome }), reason: authoritativeReason },
+      `critique:${outcome}:${authoritativeReason}`,
+    );
   }
 
   const selected = authorities.sort((left, right) =>
