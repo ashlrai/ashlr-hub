@@ -103,6 +103,20 @@ export interface MergeVerifyContractScannerSource {
   };
 }
 
+/**
+ * A present contract that lacks merge coverage must never be treated as
+ * merge-grade verification. Repositories without a contract retain their
+ * legacy detection behavior; rollout policy decides whether that is eligible.
+ */
+export function mergeContractCoverageFailure(profile: RepoExecutionProfile): string | null {
+  const contract = profile.verifyContract;
+  if (!contract?.present) return null;
+  // Advisory-only contracts retain the existing command-level refusal so the
+  // caller can distinguish "no required verifier" from missing nested scope.
+  if (!contract.mergeGradeExplicit || contract.mergeCoverageComplete) return null;
+  return contract.mergeGradeReason;
+}
+
 function packageJsonInputState(projectRoots: readonly string[]): MergeVerifyContractScannerSource['inputState'] {
   for (const projectRoot of projectRoots) {
     const path = join(projectRoot, 'package.json');

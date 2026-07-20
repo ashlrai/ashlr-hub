@@ -321,6 +321,32 @@ describe('M47 verifyProposal', () => {
     expect(res.baseHead).toBe(baseHead);
   });
 
+  it('refuses before running root-only merge verification when a nested Python project is uncovered', async () => {
+    initRepo(tmpRepo);
+    writePackageJson(tmpRepo, 'exit 0');
+    const python = path.join(tmpRepo, 'packages', 'sdk-python');
+    fs.mkdirSync(path.join(python, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(python, 'pyproject.toml'), '[project]\nname = "sdk-python"\n', 'utf8');
+    fs.writeFileSync(path.join(python, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{
+        id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'],
+      }],
+    }, null, 2), 'utf8');
+    git(tmpRepo, ['add', 'ashlr.verify.json', 'packages']);
+    git(tmpRepo, ['commit', '-m', 'add incomplete merge contract']);
+
+    const result = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/covered.md', 'coverage gate') }),
+      cfgWith({ autoMerge: { enabled: true, maxRisk: 'low', allowWithoutVerification: true } }),
+    );
+
+    expect(result).toMatchObject({ ok: false, ran: [] });
+    expect(result.detail).toMatch(/contract coverage incomplete.*python@packages\/sdk-python/i);
+  });
+
   it('browserVerify=true attaches browser and visual evidence from the patched worktree', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 0');

@@ -162,6 +162,7 @@ import {
   runVerifyCommandAsync,
   type VerifyCommand,
 } from '../run/verify-commands.js';
+import { detectRepoExecutionProfile, mergeContractCoverageFailure } from '../run/repo-profile.js';
 import {
   isWebApp,
   verifyInBrowser,
@@ -2210,6 +2211,17 @@ export async function verifyProposal(
     // manifest guard above already refuses package.json/lockfile/CI changes, but
     // base-tree detection is the defense-in-depth that makes self-certification
     // structurally impossible regardless of which files the diff touches.
+    const executionProfile = detectRepoExecutionProfile(tmpDir);
+    const coverageFailure = mergeContractCoverageFailure(executionProfile);
+    if (coverageFailure !== null) {
+      return {
+        ok: false,
+        ran: [],
+        detail: `merge verification contract coverage incomplete: ${coverageFailure}`,
+        baseBranch: base,
+        baseHead,
+      };
+    }
     const commands = detectVerifyCommands(tmpDir, 'merge');
     if (commands.length === 0) {
       const allow = cfg.foundry?.autoMerge?.allowWithoutVerification === true;

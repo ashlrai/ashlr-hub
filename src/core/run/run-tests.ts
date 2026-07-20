@@ -29,7 +29,7 @@ import { join } from 'node:path';
 
 import type { AshlrConfig, Proposal, Sandbox } from '../types.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
-import { detectRepoExecutionProfile } from './repo-profile.js';
+import { detectRepoExecutionProfile, mergeContractCoverageFailure } from './repo-profile.js';
 import {
   filterVerifyCommandsForProfile,
   runVerifyCommandAsync,
@@ -235,12 +235,7 @@ export async function runTestsForProposalDetailed(
 
     // 4. Detect verification commands INSIDE the patched worktree.
     const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
-    const contract = executionProfile.verifyContract;
-    if (
-      profile === 'merge' &&
-      contract?.present === true &&
-      (contract.mergeGradeExplicit !== true || contract.mergeCoverageComplete !== true)
-    ) {
+    if (profile === 'merge' && mergeContractCoverageFailure(executionProfile) !== null) {
       return { passed: false, commands: [], skipped: 'merge-contract-coverage-incomplete' };
     }
     const verifyCommands = filterVerifyCommandsForProfile(
