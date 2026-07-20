@@ -2821,3 +2821,4 @@
   - Cooldown identity now binds normalized repository path, work-item id, and optional repair generation with NUL-delimited fields. Dispatch selection, the generated-repair snapshot, and Fleet Status share this representation.
   - This prevents an outcome for `id` in one enrolled repository from suppressing an equal-id item in another. Lifecycle and Fleet Status tests cover both the direct identity boundary and the two-repository status projection.
   - Legacy raw cooldown rows are intentionally not read as compatibility aliases: they lack repository provenance, so honoring them would recreate the collision. This can make an old cooldown expire early after upgrade, but it cannot falsely block unrelated repository work.
+  - Windows CI exposed stale local-coordinator fixtures that seeded and asserted raw ledger ids. They now use the canonical identity helper, proving ordinary local selection observes the same repository scope as the production daemon.
