@@ -109,6 +109,7 @@ import {
   type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import { writeSelectionStartReceipt } from '../src/core/fleet/selection-start-receipt.js';
 import { sanitizeProductionAttemptLearningLabel } from '../src/core/learning/attempt-shape.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
@@ -721,6 +722,64 @@ describe('M342 dispatch production ledger', () => {
     expect(readDispatchProductionEventsDetailed()).toMatchObject({
       sourceState: 'degraded', complete: false, invalidRows: 1,
     });
+  });
+
+  it('qualifies only an exact signed selection-start receipt and degrades a missing claimed receipt', () => {
+    const now = new Date().toISOString();
+    const event = makeEvent({
+      ts: now,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.6',
+      runId: 'receipt-qualified-run',
+      trajectoryId: 'run:receipt-qualified-run',
+      objectiveHash: 'd'.repeat(64),
+      routerPolicyVersion: 'fleet-router-v1',
+      learningEpoch: now.slice(0, 10),
+    });
+    const selectionObservation = createDispatchSelectionObservation({
+      candidates: [
+        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+        { backend: 'claude', tier: 'frontier', model: 'opus' },
+      ],
+      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selectionPolicyVersion: 'canary-v1',
+      randomizationProtocolVersion: 'uniform-v1',
+      selectionProbabilityPpm: 500_000,
+      trajectoryId: event.trajectoryId!,
+      runId: event.runId!,
+      objectiveHash: event.objectiveHash!,
+      routerPolicyVersion: event.routerPolicyVersion!,
+      learningEpoch: event.learningEpoch!,
+    }, loadOrCreateKey());
+    expect(selectionObservation).not.toBeNull();
+    if (!selectionObservation) throw new Error('expected selection observation');
+    const receipt = writeSelectionStartReceipt({
+      root: {
+        runId: event.runId!, trajectoryId: event.trajectoryId!, objectiveHash: event.objectiveHash!,
+      },
+      claim: {
+        queueId: '8f76ce25-9b10-4ddb-8e94-43a4d880d4fc', claimEpoch: 1, claimBindingDigest: 'e'.repeat(64),
+      },
+      selectionObservation,
+      ts: new Date(Date.now() - 1_000).toISOString(),
+    });
+    expect(receipt.status).toBe('recorded');
+    if (receipt.status !== 'recorded') throw new Error('receipt was not recorded');
+    expect(recordDispatchProduction({
+      ...event, selectionObservation, selectionStartReceiptId: receipt.receipt.receiptId,
+    })).toMatchObject({ recorded: 1 });
+    expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
+      .toBe('present');
+
+    expect(recordDispatchProduction({
+      ...event,
+      itemId: 'missing-receipt',
+      selectionObservation,
+      selectionStartReceiptId: 'f'.repeat(64),
+    })).toMatchObject({ recorded: 1 });
+    expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
+      .toBe('degraded');
   });
 
   it('appends and reads dispatch-production events newest first', () => {

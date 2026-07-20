@@ -1450,7 +1450,7 @@ const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 function selectionPropensityStatus(
   source: DispatchProductionSourceQuality,
-  observed?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'present',
+  observed?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'degraded' | 'present',
 ): FleetSelectionPropensityStatus {
   const observationState = source.sourceState === 'missing'
     ? 'unavailable'

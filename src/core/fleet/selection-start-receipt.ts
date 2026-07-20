@@ -22,13 +22,13 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import type { EngineId, EngineTier } from '../types.js';
+import type { DispatchSelectionObservationV1 } from './dispatch-production-ledger.js';
 import {
   dispatchProductionDir,
   ensurePrivateDispatchProductionReceiptDirectory,
   inspectExactDispatchProductionReceiptFile,
   withStableDispatchProductionWriteRoot,
-  type DispatchSelectionObservationV1,
-} from './dispatch-production-ledger.js';
+} from './dispatch-production-storage.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { loadExistingProvenanceKey, loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
 import { fsyncDirectory } from '../util/durability.js';
