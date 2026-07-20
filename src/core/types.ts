@@ -5547,6 +5547,14 @@ export interface QualityMetrics {
   rejectRate: number;
   /** verifyResult.passed / proposals with verifyResult present */
   verifyPassRate: number;
+  /** Proposals carrying a verification result; denominator for verifyPassRate. */
+  verificationAttempts?: number;
+  /** Proposals with a passing verification result; numerator for verifyPassRate. */
+  verificationPassed?: number;
+  /** Failed verification results produced by the capture completeness gate. */
+  captureGateFailures?: number;
+  /** Failed verification results from all non-capture verification paths. */
+  preflightVerificationFailures?: number;
   /** Average diff lines across proposals that have a diff. */
   avgDiffLines: number;
   /** Per-engine breakdown keyed by engineModel (or '(unknown)'). */

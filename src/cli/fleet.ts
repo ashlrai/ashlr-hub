@@ -1883,7 +1883,14 @@ async function cmdFleetScorecard(args: string[]): Promise<number> {
   console.log(`    accept rate:        ${acceptColor(pct(metrics.acceptRate))}`);
   console.log(`    reject rate:        ${pct(metrics.rejectRate)}`);
   if (metrics.verifyPassRate > 0 || metrics.proposalsCreated > 0) {
-    console.log(`    verify pass rate:   ${pct(metrics.verifyPassRate)}`);
+    const attempts = metrics.verificationAttempts ?? 0;
+    const passed = metrics.verificationPassed ?? 0;
+    console.log(`    verify pass rate:   ${pct(metrics.verifyPassRate)} (${passed}/${attempts})`);
+    const captureFailures = metrics.captureGateFailures ?? 0;
+    const preflightFailures = metrics.preflightVerificationFailures ?? 0;
+    if (captureFailures > 0 || preflightFailures > 0) {
+      console.log(`    verify failures:    capture=${captureFailures}  preflight=${preflightFailures}`);
+    }
   }
   console.log(`    trivial ratio:      ${pct(metrics.trivialRatio)}`);
   console.log(`    empty-diff rate:    ${pct(metrics.emptyRate)}`);

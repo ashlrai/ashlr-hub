@@ -181,6 +181,8 @@ export function computeQualityMetrics(
     // verify pass/fail from verifyResult (only proposals that have one)
     let verifyTotal = 0;
     let verifyPassed = 0;
+    let captureGateFailures = 0;
+    let preflightVerificationFailures = 0;
 
     // per-engine accumulators
     const byEngine: Record<string, {
@@ -217,6 +219,8 @@ export function computeQualityMetrics(
       if (p.verifyResult !== undefined) {
         verifyTotal++;
         if (p.verifyResult.passed) verifyPassed++;
+        else if (p.verifyResult.source === 'capture-gate') captureGateFailures++;
+        else preflightVerificationFailures++;
       }
 
       // Per-engine
@@ -273,6 +277,10 @@ export function computeQualityMetrics(
       acceptRate,
       rejectRate,
       verifyPassRate,
+      verificationAttempts: verifyTotal,
+      verificationPassed: verifyPassed,
+      captureGateFailures,
+      preflightVerificationFailures,
       avgDiffLines,
       byEngine: byEngineQuality,
       byRepo,
@@ -378,6 +386,10 @@ function zeroMetrics(window: string): QualityMetrics {
     acceptRate: 0,
     rejectRate: 0,
     verifyPassRate: 0,
+    verificationAttempts: 0,
+    verificationPassed: 0,
+    captureGateFailures: 0,
+    preflightVerificationFailures: 0,
     avgDiffLines: 0,
     byEngine: {},
     byRepo: {},

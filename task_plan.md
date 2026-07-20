@@ -2805,4 +2805,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit the durable proposal failure distribution without retaining raw prompts or diffs.
 - [x] Preserve known verification failures while allowing unrelated backlog only after every pending proposal is stale under the explicit production-velocity TTL.
 - [x] Prove stale failed proposals select `backlog-build`, while fresh pending failures remain `verify-only`.
-- [ ] Publish the protected draft update and require the complete CI matrix.
+- [x] Publish the protected draft update and require the complete CI matrix.
+
+## Verification Yield Telemetry (2026-07-20)
+- [x] Make scorecard verification rates denominator-complete with explicit attempt and pass counters.
+- [x] Separate capture-gate failures from non-capture preflight failures using existing metadata-only verification records.
+- [x] Lock the additive JSON scorecard contract and pass the focused quality-metrics suite.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

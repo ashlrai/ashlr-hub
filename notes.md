@@ -2923,3 +2923,9 @@
 - Existing repair generation is active: the live queue contains 42 proposal-repair work items, 35 of which are route-feasible. The immediate control-plane issue is broader: fresh failed proposals force global `verify-only`, and stale failures previously did the same even when the explicit production-velocity policy had proved all pending work was beyond its TTL.
 - Resource strategy now keeps those stale failures visible and counted, but treats the all-stale proof as sufficient to return `backlog-build` under the explicit profile. Fresh/incomplete/off-profile states remain fail-closed `verify-only`; matching work remains blocked by existing repository/work-item/generation proposal matching. This adds no merge, apply, or deployment authority.
 - Focused resource-strategy and daemon control tests pass. A broad local M201 run stalled in the isolated dependency attachment and was terminated rather than treated as verification; protected CI remains authoritative.
+
+# Current Verification Yield Telemetry
+- Fleet scorecards now expose the verification denominator and numerator alongside `verifyPassRate`, so a rate is not misread as applying to every created proposal.
+- Failed verification is split into capture-completeness-gate failures versus non-capture preflight failures. The fields are metadata-only counters derived from existing `verifyResult` records; no prompts, diffs, command output, environment, or source contents are added to a ledger.
+- The human scorecard prints the ratio and only prints the failure split when failures exist. JSON and native scorecard consumers receive the additive counters through `QualityMetrics`.
+- Verification: all 40 `m119.quality-metrics` tests pass, including the JSON contract. TypeScript emitted no errors for the changed quality-metrics, CLI, or type surfaces; protected CI remains the release authority.

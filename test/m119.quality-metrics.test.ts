@@ -334,14 +334,27 @@ describe('m119 computeQualityMetrics', () => {
   it('verifyPassRate: computed from verifyResult fields', async () => {
     mockProposals.push(
       makeProposal({ status: 'applied', createdAt: daysAgo(1), verifyResult: { passed: true } }),
-      makeProposal({ status: 'applied', createdAt: daysAgo(1), verifyResult: { passed: false, failed: ['test-a'] } }),
+      makeProposal({
+        status: 'applied',
+        createdAt: daysAgo(1),
+        verifyResult: { passed: false, source: 'capture-gate', failed: ['test-a'] },
+      }),
+      makeProposal({
+        status: 'applied',
+        createdAt: daysAgo(1),
+        verifyResult: { passed: false, source: 'auto-merge-preflight', failed: ['test-b'] },
+      }),
       makeProposal({ status: 'pending', createdAt: daysAgo(1) }), // no verifyResult — excluded from rate
     );
 
     const { computeQualityMetrics } = await import('../src/core/fleet/quality-metrics.js');
     const m = computeQualityMetrics('7d');
 
-    expect(m.verifyPassRate).toBeCloseTo(0.5); // 1/2
+    expect(m.verifyPassRate).toBeCloseTo(1 / 3);
+    expect(m.verificationAttempts).toBe(3);
+    expect(m.verificationPassed).toBe(1);
+    expect(m.captureGateFailures).toBe(1);
+    expect(m.preflightVerificationFailures).toBe(1);
   });
 
   it('byEngine breakdown: keyed by engineModel', async () => {
@@ -1088,6 +1101,10 @@ describe('m119 scorecard --json shape', () => {
     expect(typeof json.acceptRate).toBe('number');
     expect(typeof json.rejectRate).toBe('number');
     expect(typeof json.verifyPassRate).toBe('number');
+    expect(typeof json.verificationAttempts).toBe('number');
+    expect(typeof json.verificationPassed).toBe('number');
+    expect(typeof json.captureGateFailures).toBe('number');
+    expect(typeof json.preflightVerificationFailures).toBe('number');
     expect(typeof json.avgDiffLines).toBe('number');
     expect(typeof json.byEngine).toBe('object');
     expect(typeof json.byRepo).toBe('object');
