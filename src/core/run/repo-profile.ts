@@ -7,7 +7,7 @@
  * routing can all ask one question here instead of re-learning package roots.
  */
 
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
@@ -226,18 +226,40 @@ function safeRelative(root: string, child: string): string | null {
 }
 
 function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label: string): string | null {
-  if (cwd === undefined) return resolve(repoRoot);
   if (typeof cwd !== 'string' || cwd.trim().length === 0) {
-    errors.push(`${label}.cwd must be a non-empty string when provided`);
+    if (cwd !== undefined) {
+      errors.push(`${label}.cwd must be a non-empty string when provided`);
+      return null;
+    }
+  }
+  const requestedCwd = cwd === undefined ? '.' : cwd;
+  const lexicalRoot = resolve(repoRoot);
+  const lexicalResolved = resolve(lexicalRoot, requestedCwd);
+  const lexicalRelative = relative(lexicalRoot, lexicalResolved);
+  if (lexicalRelative !== '' && (lexicalRelative.startsWith('..') || isAbsolute(lexicalRelative))) {
+    errors.push(`${label}.cwd must stay inside the repo`);
     return null;
   }
-  const resolved = resolve(repoRoot, cwd);
-  const rel = relative(resolve(repoRoot), resolved);
+
+  let physicalRoot: string;
+  let physicalResolved: string;
+  try {
+    physicalRoot = realpathSync(repoRoot);
+    physicalResolved = realpathSync(lexicalResolved);
+  } catch {
+    errors.push(`${label}.cwd must resolve to an existing directory inside the repo`);
+    return null;
+  }
+  if (!lstatSync(physicalResolved).isDirectory()) {
+    errors.push(`${label}.cwd must resolve to a directory inside the repo`);
+    return null;
+  }
+  const rel = relative(physicalRoot, physicalResolved);
   if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) {
     errors.push(`${label}.cwd must stay inside the repo`);
     return null;
   }
-  return resolved;
+  return lexicalResolved;
 }
 
 function parseContractProfiles(raw: unknown, errors: string[], label: string): VerifyCommandProfile[] | undefined {

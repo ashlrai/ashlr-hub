@@ -2973,4 +2973,9 @@
 - `augment-detected` coverage now uses its effective command set, including unprofiled detected commands that the verifier actually runs for merge. `replace-detected` remains explicit-command-only.
 - Live status now truthfully reports 15/24 fully covered merge contracts and nine incomplete repos. This is an intentional exposure of real contract debt, not a regression in eligibility accounting. The remaining commands must be added from isolated worktrees because the active source worktrees contain user changes.
 - Verification: M314 has 20 passing profile/coverage tests, M331 has 20 passing sandbox verifier tests, M47 has 49 passing protected-merge tests, and changed-source TypeScript is clean.
+
+# Current Contract Working-Directory Containment
+- Contract `cwd` validation now proves both lexical and physical containment. A repository-local symlink can no longer direct verification outside the repository; missing or nondirectory targets invalidate the contract before any verifier command is selected.
+- The accepted command keeps its lexical repository path after validation, so canonical command metadata and legitimate in-repository symlink entrypoints remain stable. The physical target must resolve beneath the physical repository root.
+- Verification: M314 has 21 passing profile/coverage tests, including an external-symlink escape regression; M331 and M47 have 69 passing downstream verifier and protected-merge tests. Protected CI remains the cross-platform release authority.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.
