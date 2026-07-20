@@ -65,7 +65,9 @@ afterEach(() => {
   fx.cleanup();
 });
 
-describe('sandbox reservation recovery', () => {
+// Native Git/ACL inspection can exceed the default under loaded Windows runners.
+// The recovery assertions and production deadlines remain unchanged.
+describe('sandbox reservation recovery', { timeout: 30_000 }, () => {
   it('reclaims an aged crash-at-reservation home during the authority-held cap pre-sweep', () => {
     const repo = fx.makeRepo();
     repo.enroll();

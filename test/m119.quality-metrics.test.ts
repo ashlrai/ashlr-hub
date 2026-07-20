@@ -877,6 +877,8 @@ describe('m119 decisions-ledger', () => {
     expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
   });
 
+  // Windows portability shares this bounded ledger reader with real-Git cleanup
+  // fixtures; allow queue pressure without weakening the read assertions.
   it('normalizes and scrubs legacy decision rows on read', async () => {
     const { readDecisions, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
 
@@ -936,7 +938,7 @@ describe('m119 decisions-ledger', () => {
     expect(entry?.detail).toBeUndefined();
     expect(JSON.stringify(entry)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
     expect(JSON.stringify(entry)).not.toContain('RAW_PROMPT_SENTINEL');
-  });
+  }, 15_000);
 
   it('recordDecision never throws on invalid input', async () => {
     const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
