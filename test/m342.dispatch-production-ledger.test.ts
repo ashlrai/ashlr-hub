@@ -729,7 +729,7 @@ describe('M342 dispatch production ledger', () => {
     });
   });
 
-  it('qualifies only an exact signed selection-start receipt and degrades a missing claimed receipt', () => {
+  it('keeps V1 signed selection-start receipts unjoined and degrades a missing claimed receipt', () => {
     const now = new Date().toISOString();
     const event = makeEvent({
       ts: now,
@@ -775,7 +775,7 @@ describe('M342 dispatch production ledger', () => {
       ...event, selectionObservation, selectionStartReceiptId: receipt.receipt.receiptId,
     })).toMatchObject({ recorded: 1 });
     expect(readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000 }).selectionObservationState)
-      .toBe('present');
+      .toBe('unjoined');
     const [trajectory] = listTrajectoryRecords({
       windowHours: 1,
       deps: {
@@ -788,11 +788,8 @@ describe('M342 dispatch production ledger', () => {
         loadProposal: () => null,
       },
     });
-    expect(trajectory?.receiptQualifiedSelectionObservation).toMatchObject({
-      receiptId: receipt.receipt.receiptId,
-      selectionObservation: { selectionProbabilityPpm: 500_000 },
-    });
-    expect(hasReceiptQualifiedSelectionObservation(trajectory?.receiptQualifiedSelectionObservation)).toBe(true);
+    expect(trajectory?.receiptQualifiedSelectionObservation).toBeUndefined();
+    expect(hasReceiptQualifiedSelectionObservation(trajectory?.receiptQualifiedSelectionObservation)).toBe(false);
     if (!trajectory) throw new Error('trajectory was not projected');
     const eligibility = buildLearningEligibilityProjectionV1({
       records: [trajectory],
@@ -801,7 +798,7 @@ describe('M342 dispatch production ledger', () => {
     }, { identityKey: () => loadOrCreateKey() });
     expect(eligibility).toMatchObject({ ok: true });
     if (!eligibility.ok) throw new Error('eligibility projection failed');
-    expect(eligibility.projection.members[0]).toMatchObject({ selectionPropensityAvailable: true });
+    expect(eligibility.projection.members[0]).toMatchObject({ selectionPropensityAvailable: false });
 
     expect(recordDispatchProduction({
       ...event,

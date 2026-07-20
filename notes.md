@@ -3135,3 +3135,9 @@
 - Trajectory records now promote route and bounded execution metadata from a dispatch production event only when its terminal outcome is at least as strong as the record's current terminal fact. This replaces provisional dispatch-start routing with the actual executor route, including executor fallback.
 - Every source observation remains in the timeline. A later cancellation cannot regress a previous failure/no-proposal terminal route or its metadata, so Fleet Status and learning summaries see the terminal route-to-outcome pairing.
 - Verification: the M354 trajectory suite passes 34 assertions, with typechecking and quiet lint also passing. Protected CI remains the promotion authority.
+
+# Current Selection Receipt Authority Boundary
+- Audit confirmed that a V1 selection-start receipt authenticates only a signed claim-shaped assertion; it does not prove the work-queue coordinator minted that claim after its atomic lease transition. No live producer exists, but treating this evidence as propensity-qualified would be unsound.
+- V1 receipts are now retained as authenticated forensic evidence but render `unjoined`. They cannot create a trajectory receipt-qualified marker or make selection propensity available. Missing or malformed claimed receipts remain degraded.
+- A future V2 protocol must accept an opaque coordinator-minted authority only, bind one authority to one root/assignment, and complete durable write/re-read before an engine effect. The canary remains hard-disabled throughout.
+- Verification: the exact M342 V1-withholding regression passes, along with TypeScript typechecking and quiet lint. The broader M342 runner was stopped after its existing non-terminating worker behavior; protected CI remains the promotion authority.

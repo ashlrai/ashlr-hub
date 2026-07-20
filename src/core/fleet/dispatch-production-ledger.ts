@@ -7476,6 +7476,10 @@ export function readReceiptQualifiedDispatchSelection(
   if (!receiptId || !observation) return undefined;
   const read = readSelectionStartReceipt(receiptId);
   if (read.status !== 'found') return undefined;
+  // V1 authenticates an asserted claim shape but does not prove that the
+  // coordinator minted it after an atomic lease transition. Keep it forensic
+  // only until the future authority-bound receipt protocol is available.
+  if (read.receipt.schemaVersion === 1) return undefined;
   const receipt = read.receipt;
   const eventModel = event.model ?? null;
   const receiptModel = receipt.selectionObservation.selectedModel ?? null;
@@ -7507,6 +7511,11 @@ function selectionObservationState(events: readonly DispatchProductionEvent[]):
     }
     if (receiptIds.has(receiptId)) return 'degraded';
     receiptIds.add(receiptId);
+    const read = readSelectionStartReceipt(receiptId);
+    if (read.status === 'found' && read.receipt.schemaVersion === 1) {
+      hasUnjoined = true;
+      continue;
+    }
     if (!readReceiptQualifiedDispatchSelection(event)) return 'degraded';
   }
   return hasUnjoined ? 'unjoined' : 'present';

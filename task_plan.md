@@ -2874,6 +2874,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Withhold raw selection observations from trajectory and learning-eligibility projections pending receipt qualification.
 - [x] Extract the dispatch-production storage authority into a dependency leaf and qualify Fleet Status observations through exact signed receipt joins.
 - [x] Carry only process-bound receipt-qualified selection projections into trajectory reconstruction and learning eligibility.
+- [x] Demote legacy V1 signed claim assertions to unjoined forensic evidence until coordinator-issued lease authority is durably bound.
 - [x] Normalize final concurrent backend/tier/model/disposition at the executor boundary without enabling a canary producer.
 - [x] Resolve concurrent fallback tiers with the active routing configuration at the executor boundary.
 - [x] Add a pure, unused binary canary pair eligibility contract with no randomization, reservation, or persistence.
@@ -2883,6 +2884,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit the concurrent-planner seam and reject a precomputed canary helper that could diverge from the final route.
 - [ ] Carry exact gateway route disposition and model tuple into the per-item concurrent commit point before enabling a binary canary producer.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
+- [ ] Add a coordinator-minted, authority-bound V2 receipt protocol before allowing any signed selection receipt to qualify propensity.
 
 ## Best-of-N Proposal Capture Repair (2026-07-20)
 - [x] Audit Best-of-N no-winner classification against the direct-run required-capture gate.
