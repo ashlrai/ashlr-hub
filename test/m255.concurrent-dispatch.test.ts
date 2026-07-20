@@ -23,12 +23,14 @@ import {
   slotsForAvailability,
   slotsForBackendState,
   planConcurrentDispatch,
+  buildConcurrentDispatchRouteItem,
   buildGatewayDispatchPlan,
   concurrentAssignedRouteReason,
   runConcurrentDispatch,
   type ConcurrentDispatchCfg,
   type DispatchPlan,
 } from '../src/core/fabric/concurrent-dispatch.js';
+import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -662,6 +664,24 @@ describe('runConcurrentDispatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-off parity', () => {
+  it('keeps same-id gateway hints isolated by repository identity', () => {
+    const first = makeItem({ id: 'shared-id', repo: '/tmp/repo-a' });
+    const second = makeItem({ id: 'shared-id', repo: '/tmp/repo-b' });
+    const hints = new Map([
+      [workItemCoverageKey(first), 'claude' as const],
+      [workItemCoverageKey(second), 'codex' as const],
+    ]);
+    const routeItem = buildConcurrentDispatchRouteItem(
+      makeSnapshot([{ backend: 'claude', availability: 'open' }]),
+      defaultCfg,
+      { foundry: { fabric: { concurrentDispatch: true } } } as never,
+      hints,
+    );
+
+    expect(routeItem(first)).toBe('claude');
+    expect(routeItem(second)).toBe('codex');
+  });
+
   it('slotsForAvailability with exhausted/throttled/unreachable always returns 0', () => {
     for (const avail of ['exhausted', 'throttled', 'unreachable'] as BackendAvailability[]) {
       expect(slotsForAvailability(avail, 10)).toBe(0);

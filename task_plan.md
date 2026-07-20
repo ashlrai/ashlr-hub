@@ -2771,3 +2771,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Key all reservation lifecycle bookkeeping by repository-qualified work identity.
 - [x] Preserve raw event identifiers while binding reservation lookup to the selected WorkItem.
 - [x] Pass focused generated-repair lifecycle/reservation coverage and diff checks.
+
+## Concurrent Route Same-ID Regression (2026-07-20)
+- [x] Add a direct two-repository, same-scanner-id gateway-hint regression for the pure concurrent route planner.
+- [x] Prove repository-qualified route hints remain isolated without requiring a full daemon loop.
+- [x] Run the focused regression and retain the protected-CI failure as a separate investigation.
