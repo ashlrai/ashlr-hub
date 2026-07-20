@@ -2704,3 +2704,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Raise only the measured Windows runner budgets for the legacy decision-read and reservation-recovery integrations after one duplicate matrix exceeded their test deadlines while its twin passed.
 - [x] Make the CI workflow contract tolerate root-level scheduling policy and assert exact event-and-branch supersession grouping after the initial Ubuntu matrix exposed the stale header assertion.
 - [x] Give two observed Windows-only durability integrations explicit 30-second test budgets after the other duplicate matrix passed, without changing product behavior or the default suite budget.
+- [x] Keep the remaining measured Windows-only process-tree and Pulse latency checks bounded without weakening their correctness assertions.
