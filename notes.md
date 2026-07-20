@@ -3183,6 +3183,12 @@
 - V2 replay equality covers the complete signed envelope, including schema, authority, timestamp, signature, root, claim, and selection observation. The deterministic receipt id alone is not enough to turn a different signed envelope into a replay.
 - This remains a local durable prerequisite only. It is not fleet-qualified until the coordinator derives the claim from its exact minted authority and joins the receipt to the shared binding with dual readback.
 
+# Current V2 Coordinator Binding Primitive
+- `SharedWorkQueueCoordinator.recordSelectionStartReceiptV2` accepts only the exact frozen, process-minted shared execution authority. A private weak capability map recovers the queue claim; callers provide only the root, canonical selection observation, and immutable timestamp. Structural copies, local authority, foreign authority, and settled authority fail closed.
+- Repeated `beginExecution` calls for the same exact executing claim return the same authority object. The coordinator retires that object on settlement, completion, release, or authority loss.
+- The primitive writes and rereads the V2 local envelope first, derives every shared binding field from that reread envelope, binds it to the exact executing claim, then rereads both artifacts before reporting success. The daemon does not call it, selection canaries remain disabled, and no learning or merge authority has changed.
+- Verification: V2 receipt and shared-queue suites pass 69 assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
+
 # Current Pending Proposal Recency Boundary
 - Production-velocity duplicate suppression now has an explicit optional seam for activity timestamps from a complete, source-qualified joined-outcome read. The default remains the immutable proposal creation timestamp, so all current callers retain existing behavior until they can supply authoritative joined activity.
 - Invalid or absent supplied activity falls back to creation time. The seam intentionally does not add mutable activity to a proposal record and does not apply the velocity TTL to partial/failed proposal repair eligibility; unresolved repair work remains recoverable regardless of age.

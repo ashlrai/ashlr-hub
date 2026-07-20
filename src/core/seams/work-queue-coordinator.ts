@@ -31,9 +31,20 @@ import {
   recentlyDeclined as localRecentlyDeclined,
 } from '../fleet/worked-ledger.js';
 import { SharedStore } from '../fleet/shared-store.js';
-import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-store.js';
+import type { QueueClaimCooldownPolicy, QueueClaimRef, SelectionReceiptBindingV2 } from '../fleet/shared-store.js';
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { workItemCoverageKey, workItemExecutionKey } from '../fleet/proposal-matching.js';
+import {
+  readCoordinatorSelectionStartReceiptV2,
+  receiptDigestV2,
+  rootDigestV2,
+  selectionDigestV2,
+  writeCoordinatorSelectionStartReceiptV2,
+} from '../fleet/selection-start-receipt.js';
+import type {
+  SelectionStartReceiptRoot,
+} from '../fleet/selection-start-receipt.js';
+import type { DispatchSelectionObservationV1 } from '../fleet/dispatch-production-ledger.js';
 import { hostname } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -56,6 +67,16 @@ export type ExecutionAuthority =
       claimEpoch: number;
       claimBindingDigest: string;
     };
+
+export interface RecordSelectionStartReceiptV2Input {
+  root: SelectionStartReceiptRoot;
+  selectionObservation: DispatchSelectionObservationV1;
+  ts: string;
+}
+
+export type RecordSelectionStartReceiptV2Result =
+  | { status: 'recorded' | 'replayed'; receiptId: string }
+  | { status: 'authority-lost' | 'contended' | 'conflicted' | 'unavailable' | 'degraded'; reason: string };
 
 const mintedExecutionAuthorities = new WeakSet<object>();
 
@@ -241,6 +262,8 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
   private readonly store: SharedStore;
   private readonly claims = new Map<string, QueueClaimRef>();
   private readonly claimWorkedItemIds = new Map<string, string>();
+  private readonly authorityRefs = new WeakMap<object, QueueClaimRef>();
+  private readonly authoritiesByClaim = new Map<string, ExecutionAuthority>();
   private readonly authorityEnabled: boolean;
   private readonly leaseMs: number;
 
@@ -262,6 +285,24 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
 
   private executionKey(item: WorkItem): string | null {
     return workItemExecutionKey(item);
+  }
+
+  private clearExecutionAuthority(key: string): void {
+    const authority = this.authoritiesByClaim.get(key);
+    if (authority) this.authorityRefs.delete(authority);
+    this.authoritiesByClaim.delete(key);
+  }
+
+  private cacheExecutionAuthority(key: string, ref: QueueClaimRef): ExecutionAuthority {
+    const existing = this.authoritiesByClaim.get(key);
+    if (existing && this.authorityRefs.has(existing)) {
+      this.authorityRefs.set(existing, ref);
+      return existing;
+    }
+    const authority = executionAuthority(ref);
+    this.authoritiesByClaim.set(key, authority);
+    this.authorityRefs.set(authority, ref);
+    return authority;
   }
 
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
@@ -349,6 +390,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     for (const id of this.store.releaseClaims(refs)) {
       this.claims.delete(id);
       this.claimWorkedItemIds.delete(id);
+      this.clearExecutionAuthority(id);
     }
   }
 
@@ -368,7 +410,11 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       refs.filter((ref) => !renewedIds.has(ref.itemId)),
     );
     const authoritative = [...renewed, ...validated];
-    for (const ref of authoritative) this.claims.set(ref.itemId, ref);
+    for (const ref of authoritative) {
+      this.claims.set(ref.itemId, ref);
+      const authority = this.authoritiesByClaim.get(ref.itemId);
+      if (authority) this.authorityRefs.set(authority, ref);
+    }
     return authoritative.flatMap((ref) => {
       const item = itemsByKey.get(ref.itemId);
       return item ? [item] : [];
@@ -390,7 +436,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       const result = this.store.beginClaimExecutionResult(ref);
       if (result.status === 'success') {
         this.claims.set(key, result.value);
-        return executionAuthority(result.value);
+        return this.cacheExecutionAuthority(key, result.value);
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return null;
       const refreshed = this.refreshClaim(ref);
@@ -398,6 +444,69 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       ref = refreshed;
       this.claims.set(key, ref);
     }
+  }
+
+  /**
+   * Join one exact process-minted execution authority to a durable V2 receipt.
+   * This is deliberately inert until a future daemon producer can supply a
+   * canonical eligible selection observation at the external-engine boundary.
+   */
+  recordSelectionStartReceiptV2(
+    authority: ExecutionAuthority,
+    input: RecordSelectionStartReceiptV2Input,
+  ): RecordSelectionStartReceiptV2Result {
+    if (!isMintedExecutionAuthority(authority) || authority.kind !== 'shared-queue-v1') {
+      return { status: 'authority-lost', reason: 'unminted-or-local-authority' };
+    }
+    const ref = this.authorityRefs.get(authority);
+    if (!ref || ref.phase !== 'executing') return { status: 'authority-lost', reason: 'foreign-or-settled-authority' };
+    const local = writeCoordinatorSelectionStartReceiptV2({
+      ...input,
+      claim: {
+        queueId: ref.queueId,
+        claimEpoch: ref.epoch,
+        claimBindingDigest: createHash('sha256')
+          .update(`ashlr:execution-authority:v1\0${ref.queueId}\0${ref.epoch}\0${ref.ownerKey}`)
+          .digest('hex'),
+      },
+    });
+    if ('reason' in local) {
+      return { status: local.status, reason: local.reason };
+    }
+    const persisted = readCoordinatorSelectionStartReceiptV2(local.receipt.receiptId);
+    if (persisted.status !== 'found') return { status: 'degraded', reason: 'receipt-readback-failed' };
+    const receiptDigest = receiptDigestV2(persisted.receipt);
+    const rootDigest = rootDigestV2(persisted.receipt.root);
+    const selectionDigest = selectionDigestV2(persisted.receipt.selectionObservation);
+    if (!receiptDigest || !rootDigest || !selectionDigest) {
+      return { status: 'degraded', reason: 'receipt-digest-invalid' };
+    }
+    const binding: SelectionReceiptBindingV2 = {
+      schemaVersion: 2,
+      receiptId: persisted.receipt.receiptId,
+      receiptDigest,
+      queueId: ref.queueId,
+      claimEpoch: ref.epoch,
+      claimBindingDigest: persisted.receipt.claim.claimBindingDigest,
+      rootDigest,
+      selectionDigest,
+      committedAt: persisted.receipt.ts,
+    };
+    const bound = this.store.bindSelectionReceipt(ref, binding);
+    if (bound.status !== 'success') {
+      if (bound.status === 'authority-lost') this.clearExecutionAuthority(ref.itemId);
+      return bound.status === 'contended'
+        ? { status: 'contended', reason: 'binding-contended' }
+        : { status: 'authority-lost', reason: 'binding-authority-lost' };
+    }
+    const rereadReceipt = readCoordinatorSelectionStartReceiptV2(persisted.receipt.receiptId);
+    const rereadBinding = this.store.readSelectionReceiptBinding(persisted.receipt.receiptId);
+    if (
+      rereadReceipt.status !== 'found' || rereadBinding.status !== 'found' ||
+      JSON.stringify(rereadReceipt.receipt) !== JSON.stringify(persisted.receipt) ||
+      JSON.stringify(rereadBinding.binding) !== JSON.stringify(binding)
+    ) return { status: 'degraded', reason: 'receipt-binding-readback-failed' };
+    return { status: local.status, receiptId: persisted.receipt.receiptId };
   }
 
   settleClaim(claimItem: WorkItem, machineId: string): boolean {
@@ -412,6 +521,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       if (result.status === 'success') {
         this.claims.delete(key);
         this.claimWorkedItemIds.delete(key);
+        this.clearExecutionAuthority(key);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
@@ -446,6 +556,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       if (result.status === 'success') {
         this.claims.delete(key);
         this.claimWorkedItemIds.delete(key);
+        this.clearExecutionAuthority(key);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;

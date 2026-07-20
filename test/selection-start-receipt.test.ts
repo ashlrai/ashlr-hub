@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDispatchSelectionObservation } from '../src/core/fleet/dispatch-production-ledger.js';
+import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { SharedWorkQueueCoordinator } from '../src/core/seams/work-queue-coordinator.js';
+import type { WorkItem } from '../src/core/types.js';
 import {
   createCoordinatorSelectionStartReceiptV2,
   createSelectionStartReceipt,
@@ -54,6 +57,21 @@ function observation() {
 
 function input(ts = '2026-07-20T15:00:00.000Z') {
   return { root, claim, selectionObservation: observation(), ts };
+}
+
+function workItem(id: string): WorkItem {
+  return {
+    id,
+    repo: '/tmp/selection-receipt-fixture',
+    source: 'todo',
+    title: id,
+    detail: id,
+    value: 1,
+    effort: 1,
+    score: 1,
+    tags: [],
+    ts: '2026-07-20T15:00:00.000Z',
+  };
 }
 
 describe('selection start receipt contract', () => {
@@ -224,5 +242,43 @@ describe('selection start receipt V2 store', () => {
     expect(selectionStartReceiptDir()).not.toBe(coordinatorSelectionStartReceiptV2Dir());
     expect(readSelectionStartReceipt(v2.receipt.receiptId)).toEqual({ status: 'missing', reason: 'absent' });
     expect(readCoordinatorSelectionStartReceiptV2(v1.receipt.receiptId)).toEqual({ status: 'missing', reason: 'absent' });
+  });
+
+  it('records only through the exact shared coordinator execution authority', () => {
+    const store = new SharedStore(join(fx.home, 'shared-queue'), 30_000);
+    const coordinator = new SharedWorkQueueCoordinator(store, 'machine-a', 30_000, true);
+    const item = workItem('coordinator-receipt');
+    expect(coordinator.claimItems([item], 1, 'machine-a')).toEqual([item]);
+    const authority = coordinator.beginExecution(item, 'machine-a');
+    if (!authority) throw new Error('execution authority was not minted');
+    expect(coordinator.beginExecution(item, 'machine-a')).toBe(authority);
+
+    const recorded = coordinator.recordSelectionStartReceiptV2(authority, {
+      root,
+      selectionObservation: observation(),
+      ts: '2026-07-20T15:00:00.000Z',
+    });
+    expect(recorded.status).toBe('recorded');
+    if (recorded.status !== 'recorded') throw new Error('coordinator receipt was not recorded');
+    expect(store.readSelectionReceiptBinding(recorded.receiptId)).toMatchObject({
+      status: 'found',
+      binding: { receiptId: recorded.receiptId },
+    });
+    expect(coordinator.recordSelectionStartReceiptV2({ ...authority }, {
+      root,
+      selectionObservation: observation(),
+      ts: '2026-07-20T15:00:00.000Z',
+    })).toMatchObject({ status: 'authority-lost' });
+    expect(coordinator.recordSelectionStartReceiptV2(authority, {
+      root,
+      selectionObservation: observation(),
+      ts: '2026-07-20T15:00:00.000Z',
+    })).toEqual({ status: 'replayed', receiptId: recorded.receiptId });
+    expect(coordinator.settleClaim(item, 'machine-a')).toBe(true);
+    expect(coordinator.recordSelectionStartReceiptV2(authority, {
+      root,
+      selectionObservation: observation(),
+      ts: '2026-07-20T15:00:00.000Z',
+    })).toMatchObject({ status: 'authority-lost' });
   });
 });
