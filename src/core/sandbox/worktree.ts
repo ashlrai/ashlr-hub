@@ -1845,6 +1845,8 @@ export type SandboxSourceRevisionRefusal =
   | 'source-repo-mismatch'
   | 'sandbox-worktree-mismatch'
   | 'base-revision-unavailable'
+  | 'source-worktree-dirty'
+  | 'source-worktree-raced'
   | 'source-revision-stale'
   | 'source-revision-raced';
 
@@ -1863,6 +1865,11 @@ export function inspectSandboxSourceRevision(
   expectedSourceRepo: string = sb.sourceRepo,
 ): SandboxSourceRevisionAdmission {
   try {
+    const sourceWorktreeBefore = gitTry(expectedSourceRepo, [
+      'status', '--porcelain=v1', '--untracked-files=all',
+    ]);
+    if (sourceWorktreeBefore === null) return { ok: false, reason: 'source-repo-unavailable' };
+    if (sourceWorktreeBefore !== '') return { ok: false, reason: 'source-worktree-dirty' };
     const sourceHeadBefore = gitTry(expectedSourceRepo, ['rev-parse', '--verify', 'HEAD^{commit}']);
     if (!sourceHeadBefore) return { ok: false, reason: 'source-repo-unavailable' };
     const expectedCommon = canonicalGitDirectory(expectedSourceRepo);
@@ -1875,6 +1882,13 @@ export function inspectSandboxSourceRevision(
     if (!baseHead) return { ok: false, reason: 'base-revision-unavailable', currentHead: sourceHeadBefore };
     const sourceHeadAfter = gitTry(expectedSourceRepo, ['rev-parse', '--verify', 'HEAD^{commit}']);
     if (!sourceHeadAfter) return { ok: false, reason: 'source-repo-unavailable', baseHead };
+    const sourceWorktreeAfter = gitTry(expectedSourceRepo, [
+      'status', '--porcelain=v1', '--untracked-files=all',
+    ]);
+    if (sourceWorktreeAfter === null) return { ok: false, reason: 'source-repo-unavailable', baseHead };
+    if (sourceWorktreeAfter !== sourceWorktreeBefore) {
+      return { ok: false, reason: 'source-worktree-raced', baseHead, currentHead: sourceHeadAfter };
+    }
     if (sourceHeadBefore !== sourceHeadAfter) return { ok: false, reason: 'source-revision-raced', baseHead, currentHead: sourceHeadAfter };
     if (baseHead !== sourceHeadAfter) return { ok: false, reason: 'source-revision-stale', baseHead, currentHead: sourceHeadAfter };
     return { ok: true, baseHead, currentHead: sourceHeadAfter };

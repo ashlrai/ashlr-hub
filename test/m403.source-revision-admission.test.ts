@@ -164,6 +164,17 @@ describe('M403 source-revision admission', () => {
     });
   });
 
+  it('rejects an uncommitted source checkout that the sandbox cannot represent', () => {
+    const repo = initRepo(root, 'repo');
+    const sb = sandbox(repo);
+    writeFileSync(join(repo, 'uncommitted.txt'), 'not in sandbox\n', 'utf8');
+
+    expect(inspectSandboxSourceRevision(sb, repo)).toEqual({
+      ok: false,
+      reason: 'source-worktree-dirty',
+    });
+  });
+
   it('spends no CLI or API model call for a stale existing sandbox', async () => {
     const repo = initRepo(root, 'repo');
     const sb = sandbox(repo);
@@ -190,6 +201,35 @@ describe('M403 source-revision admission', () => {
     expect(api.proposalOutcome).toMatchObject({
       kind: 'sandbox-unavailable',
       reason: expect.stringContaining('source-revision-stale'),
+    });
+  });
+
+  it('spends no CLI or API model call for a dirty source checkout', async () => {
+    const repo = initRepo(root, 'repo');
+    const sb = sandbox(repo);
+    writeFileSync(join(repo, 'uncommitted.txt'), 'not in sandbox\n', 'utf8');
+
+    const cli = await runEngineSandboxed('claude', 'dirty cli task', cfg, {
+      sourceRepo: repo,
+      existingWorktree: sb,
+      runId: 'run-m403-dirty-cli',
+    });
+    const api = await runApiModelSandboxed('local-coder', 'dirty api task', cfg, {
+      sourceRepo: repo,
+      existingWorktree: sb,
+      runId: 'run-m403-dirty-api',
+    });
+
+    expect(mocks.spawnEngine).not.toHaveBeenCalled();
+    expect(mocks.buildProvider).not.toHaveBeenCalled();
+    expect(mocks.runTask).not.toHaveBeenCalled();
+    expect(cli.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-worktree-dirty'),
+    });
+    expect(api.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-worktree-dirty'),
     });
   });
 
