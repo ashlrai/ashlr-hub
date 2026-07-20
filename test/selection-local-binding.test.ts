@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDispatchSelectionObservation, readLocallyBoundDispatchSelectionV2, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  createDispatchSelectionObservation,
+  readLocallyBoundDispatchSelectionV2,
+  recordDispatchProduction,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   receiptDigestV2,
   rootDigestV2,
@@ -7,6 +12,11 @@ import {
   writeCoordinatorSelectionStartReceiptV2,
 } from '../src/core/fleet/selection-start-receipt.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { SharedWorkQueueCoordinator } from '../src/core/seams/work-queue-coordinator.js';
+import { buildFleetStatus } from '../src/core/fleet/status.js';
+import type { AshlrConfig, WorkItem } from '../src/core/types.js';
+import { join } from 'node:path';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
 describe('local V2 selection binding projection', () => {
@@ -102,5 +112,59 @@ describe('local V2 selection binding projection', () => {
     expect(readLocallyBoundDispatchSelectionV2(event, () => ({
       status: 'found', binding: { ...binding, committedAt: ts },
     }))).toBeUndefined();
+  });
+
+  it('surfaces exact configured shared bindings as local-only Fleet Status evidence', async () => {
+    const ts = new Date().toISOString();
+    const root = {
+      runId: 'status-v2-binding-run',
+      trajectoryId: 'run:status-v2-binding-run',
+      objectiveHash: 'c'.repeat(64),
+    };
+    const selectionObservation = createDispatchSelectionObservation({
+      candidates: [
+        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+        { backend: 'claude', tier: 'frontier', model: 'opus' },
+      ],
+      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selectionPolicyVersion: 'canary-v1', randomizationProtocolVersion: 'binary-uniform-v1',
+      selectionProbabilityPpm: 500_000, trajectoryId: root.trajectoryId, runId: root.runId,
+      objectiveHash: root.objectiveHash, routerPolicyVersion: 'router-v1', learningEpoch: ts.slice(0, 10),
+    }, loadOrCreateKey());
+    if (!selectionObservation) throw new Error('selection observation was not created');
+    const queuePath = join(fixture.home, 'trusted-queue');
+    const store = new SharedStore(queuePath, 30_000);
+    const coordinator = new SharedWorkQueueCoordinator(store, 'status-machine', 30_000, true);
+    const item: WorkItem = {
+      id: 'status-v2-binding-item', repo: fixture.home, source: 'todo', title: 'status binding',
+      detail: 'status binding', value: 1, effort: 1, score: 1, tags: [], ts,
+    };
+    expect(coordinator.claimItems([item], 1, 'status-machine')).toEqual([item]);
+    const authority = coordinator.beginExecution(item, 'status-machine');
+    if (!authority) throw new Error('execution authority was not minted');
+    const recorded = coordinator.recordSelectionStartReceiptV2(authority, {
+      root, selectionObservation, ts: new Date(Date.now() - 1_000).toISOString(),
+    });
+    if (recorded.status !== 'recorded') throw new Error('V2 receipt was not bound');
+    const event: DispatchProductionEvent = {
+      schemaVersion: 1, ts, itemId: item.id, source: item.source, repo: item.repo, title: item.title,
+      backend: 'codex', tier: 'frontier', model: 'gpt-5.6', assignedBy: 'concurrent-planner',
+      routeReason: 'ordinary route', outcome: 'empty-diff', proposalCreated: false,
+      runId: root.runId, trajectoryId: root.trajectoryId, objectiveHash: root.objectiveHash,
+      routerPolicyVersion: 'router-v1', learningEpoch: ts.slice(0, 10), selectionObservation,
+      selectionStartReceiptId: recorded.receiptId, spentUsd: 0, basis: 'run-proposal-outcome',
+    };
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1 });
+    const status = await buildFleetStatus({
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem', path: queuePath, machineId: 'status-machine', leaseMs: 30_000,
+          trustedCoherentStorage: true,
+        },
+      },
+    } as AshlrConfig);
+    expect(status.selectionPropensity).toMatchObject({
+      authority: 'observation-only', observationState: 'locally-bound',
+    });
   });
 });
