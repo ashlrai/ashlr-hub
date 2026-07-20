@@ -2138,6 +2138,9 @@ describe('generated repair lifecycle store', () => {
     }));
   });
 
+  // This durable publication path performs several exact storage reads and
+  // writes. A cold Windows runner can exceed Vitest's 5s default; keep the
+  // allowance local to this full immutable-publication scenario.
   it('keeps a proven converted witness pending until exact immutable publication', () => {
     const item = diagnosticRepairItem();
     const transition = recordDiagnosticProposal(
@@ -2212,7 +2215,7 @@ describe('generated repair lifecycle store', () => {
       unavailableReason: 'proofless-legacy',
       requiredAction: 'operator-reset',
     });
-  });
+  }, 30_000);
 
   it('fences proposal deletion through immutable treatment receipt publication', () => {
     const item = diagnosticRepairItem();

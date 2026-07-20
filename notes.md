@@ -3037,3 +3037,8 @@
 - The follow-up exact-head Windows portability 1/3 run advanced past the doctor suite, then timed out in the durable repair-handoff writer-activation rollover test at Vitest's default five-second allowance. Its hosted log showed the same test assertions otherwise running normally; this is a cold Windows filesystem and lock timing envelope, not a product failure.
 - The affected rollover test now carries its own bounded 30-second timeout. All other repair-handoff tests retain the default guard, and no journal behavior, durability assertion, authority rule, or acceptance condition changed.
 - Verification: the full focused M362 suite passes 87 assertions with one platform-gated skip, and the CI workflow guard suite passes seven assertions. A fresh protected matrix is required before promotion.
+
+# Current Windows Lifecycle Publication Timing Recovery
+- The subsequent exact-head Windows portability 1/3 run passed the doctor and repair-handoff timing recoveries, then timed out at Vitest's five-second default in the generated-repair lifecycle test that publishes and acknowledges an exact immutable converted-witness receipt. The other five matrix lanes, including Ubuntu, completed successfully.
+- That test now has its own bounded 30-second allowance. It still executes the same durable outcome candidate, exact receipt append, acknowledgement, tamper mutation, fail-closed terminal read, and lifecycle assertion path; no lifecycle, routing, merge, or deployment behavior changed.
+- Verification: the full focused M360 lifecycle suite passes locally, as does the seven-assertion CI guard suite. A new protected matrix is required before promotion.

@@ -2878,3 +2878,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve all journal assertions while giving only that test a bounded 30-second cold-runner allowance.
 - [x] Verify the complete M362 journal suite and CI-policy guard locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Windows Lifecycle Publication Timing Recovery (2026-07-20)
+- [x] Diagnose the next Windows native-lifecycle timeout as the immutable converted-witness publication test's default Vitest allowance.
+- [x] Preserve the full publication, acknowledgement, tamper-detection, and fail-closed assertion path while giving only that test a bounded 30-second allowance.
+- [x] Verify the complete M360 lifecycle suite and CI-policy guard locally.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
