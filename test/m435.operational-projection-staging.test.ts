@@ -75,10 +75,25 @@ describe('M435 operational projection staging', () => {
 
   it('accepts the real canonical proposal identity validator through the storage boundary', () => {
     const proposalId = 'stage-real-proposal';
-    const text = JSON.stringify({ id: proposalId, title: 'Canonical staged proposal' });
+    const proposal = {
+      id: proposalId,
+      kind: 'patch',
+      origin: 'agent',
+      repo: null,
+      status: 'pending',
+      summary: 'Canonical staged proposal summary.',
+      title: 'Canonical staged proposal',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    };
+    const text = JSON.stringify(Object.fromEntries(
+      Object.entries(proposal).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+    ));
     const validation = validateOperationalProposalStageText(text, proposalId);
     expect(validation).not.toBeNull();
     if (!validation) return;
+    expect(validateOperationalProposalStageText(
+      JSON.stringify({ id: proposalId, title: 'Missing proposal fields' }), proposalId,
+    )).toBeNull();
     const expected = { present: true, ...validation } as const;
     const validateProposal = (candidate: string) =>
       validateOperationalProposalStageText(candidate, proposalId);

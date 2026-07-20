@@ -20,6 +20,7 @@ import {
 } from './operational-membership.js';
 import {
   inboxDir,
+  isValidProposal,
   listProposalsDetailed,
   loadProposal,
 } from './store.js';
@@ -498,7 +499,7 @@ export function validateOperationalProposalStageText(
   if (!validProposalId(proposalId)) return null;
   try {
     const parsed: unknown = JSON.parse(text);
-    if (!isPlainRecord(parsed) || parsed.id !== proposalId) return null;
+    if (!isPlainRecord(parsed) || !isValidProposal(parsed) || parsed.id !== proposalId) return null;
     const canonical = canonicalJson(parsed);
     if (text !== canonical) return null;
     const bytes = Buffer.byteLength(canonical, 'utf8');
