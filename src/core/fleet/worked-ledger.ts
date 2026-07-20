@@ -28,8 +28,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join } from 'node:path';
 import type { WorkItem } from '../types.js';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { fsyncDirectory } from '../util/durability.js';
 
 // ---------------------------------------------------------------------------
@@ -270,14 +271,16 @@ function recordSweptProposalOutcome(
     outcome: WorkedOutcome,
     ts?: string,
     workItemGenerationId?: string,
+    matchedItem?: WorkItem,
   ) => void,
   workItemGenerationId?: string,
+  matchedItem?: WorkItem,
 ): void {
   if (record === recordOutcome) {
     recordOutcomeEvent(itemId, outcome, ts, proposalId);
     return;
   }
-  record(itemId, outcome, ts, workItemGenerationId);
+  record(itemId, outcome, ts, workItemGenerationId, matchedItem);
   recordOutcomeEvent(sweptProposalMarkerItemId(proposalId), outcome, ts, proposalId);
 }
 
@@ -417,9 +420,17 @@ export function recordVerdict(itemId: string, verdict: string, ts?: string): voi
  * Normalisation: lowercase, collapse whitespace, strip punctuation.
  */
 export function stableItemSig(repo: string, title: string): string {
-  const repoName = basename(repo);
+  const canonicalRepo = canonicalFilesystemPathIdentity(repo, { foldWindowsCase: false });
+  if (canonicalRepo === null) return '';
   const normTitle = title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-  return `${repoName}::${normTitle}`;
+  return `${canonicalRepo}::${normTitle}`;
+}
+
+function sameWorkItemRepo(left: string, right: string | null): boolean {
+  if (right === null) return false;
+  const leftCanonical = canonicalFilesystemPathIdentity(left, { foldWindowsCase: false });
+  const rightCanonical = canonicalFilesystemPathIdentity(right, { foldWindowsCase: false });
+  return leftCanonical !== null && leftCanonical === rightCanonical;
 }
 
 /**
@@ -465,6 +476,7 @@ export function sweepJudgedProposals(
     outcome: WorkedOutcome,
     ts?: string,
     workItemGenerationId?: string,
+    matchedItem?: WorkItem,
   ) => void = recordOutcome,
 ): number {
   let recorded = 0;
@@ -492,6 +504,10 @@ export function sweepJudgedProposals(
       }
 
       if (prop.workItemId) {
+        const candidates = backlogItems.filter((item) => item.id === prop.workItemId);
+        const matched = prop.repo !== null
+          ? candidates.find((item) => sameWorkItemRepo(item.repo, prop.repo))
+          : candidates.length === 1 ? candidates[0] : undefined;
         recordSweptProposalOutcome(
           prop.workItemId,
           outcome,
@@ -499,6 +515,7 @@ export function sweepJudgedProposals(
           ts,
           record,
           prop.workItemGenerationId,
+          matched,
         );
         recorded++;
         continue;
@@ -507,7 +524,10 @@ export function sweepJudgedProposals(
       // Try primary match: item.id as exact token in the proposal text.
       const haystack = `${prop.title} ${prop.summary}`;
       let matched: WorkItem | undefined;
-      for (const item of backlogItems) {
+      const candidates = prop.repo === null
+        ? backlogItems
+        : backlogItems.filter((item) => sameWorkItemRepo(item.repo, prop.repo));
+      for (const item of candidates) {
         const escaped = item.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
         if (re.test(haystack)) {
@@ -517,7 +537,7 @@ export function sweepJudgedProposals(
       }
 
       // Fallback: stable-sig match (repo + normalised title).
-      if (!matched) {
+      if (!matched && prop.repo !== null) {
         const propSig = stableItemSig(prop.repo ?? '', prop.title);
         matched = sigIndex.get(propSig);
       }
@@ -531,6 +551,7 @@ export function sweepJudgedProposals(
         ts,
         record,
         prop.workItemGenerationId,
+        matched,
       );
       recorded++;
     }

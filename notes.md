@@ -2822,3 +2822,9 @@
   - This prevents an outcome for `id` in one enrolled repository from suppressing an equal-id item in another. Lifecycle and Fleet Status tests cover both the direct identity boundary and the two-repository status projection.
   - Legacy raw cooldown rows are intentionally not read as compatibility aliases: they lack repository provenance, so honoring them would recreate the collision. This can make an old cooldown expire early after upgrade, but it cannot falsely block unrelated repository work.
   - Windows CI exposed stale local-coordinator fixtures that seeded and asserted raw ledger ids. They now use the canonical identity helper, proving ordinary local selection observes the same repository scope as the production daemon.
+
+- Repository-qualified judged-feedback cooldowns (2026-07-20):
+  - Rejected-proposal sweeping now carries the exact matched backlog item to the daemon rather than resolving a bare work-item id a second time. The daemon writes the same repository-scoped cooldown key used by normal dispatch selection and Fleet Status.
+  - Causal `workItemId`, title/id fallback, and stable-title fallback require authenticated canonical filesystem repository identity. A missing, malformed, or ambiguous proposal repository produces no daemon cooldown; this is deliberately fail-open rather than cooling an unrelated repo.
+  - Path aliases such as macOS `/var` and `/private/var` compare through the existing canonical filesystem identity primitive. Tests cover exact collision selection, shared-queue feedback isolation, and the alias boundary.
+  - Shared-queue claim reservation itself still has a separate raw-id collision boundary. It needs a dedicated canonical claim-key migration across the coordinator and store; this patch does not claim to solve that broader authority surface.

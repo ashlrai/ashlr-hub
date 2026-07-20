@@ -4223,18 +4223,21 @@ export async function tick(
           rejected,
           backlogItems,
           undefined,
-          (itemId, outcome, _ts, proposalGenerationId) => {
-            const item = backlogItems.find((candidate) => candidate.id === itemId);
-            const currentGenerationId = item ? generatedRepairGenerationId(item) : null;
+          (_itemId, outcome, _ts, proposalGenerationId, item) => {
+            // A repository-qualified backlog match is required before feedback
+            // can become a cooldown. Missing or ambiguous historical proposal
+            // identity must not suppress an equal-id item in another repo.
+            if (!item) return;
+            const currentGenerationId = generatedRepairGenerationId(item);
             if (currentGenerationId !== null) {
-              if (!generatedRepairGenerationIds(item!).includes(proposalGenerationId ?? '')) return;
-              coordinator.recordOutcome(generatedRepairCooldownKey(item!), outcome, machineId);
+              if (!generatedRepairGenerationIds(item).includes(proposalGenerationId ?? '')) return;
+              coordinator.recordOutcome(generatedRepairCooldownKey(item), outcome, machineId);
               return;
             }
             // A generation-bearing proposal with no exact current authority is
             // stale feedback; never project it onto a new objective by child ID.
             if (proposalGenerationId !== undefined) return;
-            coordinator.recordOutcome(itemId, outcome, machineId);
+            coordinator.recordOutcome(generatedRepairCooldownKey(item), outcome, machineId);
           },
         );
       }

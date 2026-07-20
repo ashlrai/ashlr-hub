@@ -2704,3 +2704,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refuse ambiguous legacy raw-key compatibility aliases rather than recreating cross-repository suppression.
 - [x] Prove direct helper isolation and Fleet Status isolation for two repositories with the same item id.
 - [x] Pass lifecycle/status focused tests, typecheck, scoped lint, and diff checks.
+
+## Repository-Qualified Judged Feedback (2026-07-20)
+- [x] Carry the exact matched WorkItem through rejected-proposal sweep callbacks.
+- [x] Require canonical proposal/backlog repository identity for causal and legacy matching.
+- [x] Write daemon judged outcomes through canonical scoped cooldown keys only.
+- [x] Prove shared-queue rejected feedback cannot cool an equal-id item in another repo.
+- [x] Pass the focused feedback suite, typecheck, scoped lint, and diff checks.
+- [ ] Migrate shared-queue claims, policy maps, reservations, and post-claim attribution from raw item ids to a canonical execution key; fail closed on collisions until complete.
