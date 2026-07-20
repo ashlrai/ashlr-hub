@@ -2869,3 +2869,8 @@
   - Automatic-drain route feasibility, capacity/preflight verdicts, blocked-repair filtering, and fairness accounting now key by `workItemCoverageKey`, not raw scanner id.
   - A route-blocked repair in one repository can no longer remove an equal-id repair or ordinary item in another repository from selection, or distort the ordinary-turn fairness state.
   - The focused automatic-drain route and fairness suite passes. Full typecheck in this worktree is blocked by its incomplete dependency attachment; protected CI is the authoritative verification gate.
+
+- Concurrent route repository identity (2026-07-20):
+  - Gateway route hints, reasons, model annotations, concurrent task lookup, fallback attempt lookup, concurrent planner hint consumption, and dispatch-manifest annotation lookup now use `workItemCoverageKey`.
+  - Equal scanner IDs can therefore run concurrently in separate repositories without receiving each other's backend, model, task closure, route reason, or manifest attempt identity.
+  - Focused concurrent manifest, fallback, and routing-wire coverage passes; protected CI remains required for the stacked head.

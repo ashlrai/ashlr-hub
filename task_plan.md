@@ -2759,3 +2759,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Key route and preflight state by repository-qualified work identity.
 - [x] Preserve ordinary-turn fairness when a same-id repair is claimed in another repository.
 - [x] Pass the focused automatic-drain route/fairness suite and record the isolated-worktree typecheck limitation for protected CI.
+
+## Concurrent Route Repository Identity (2026-07-20)
+- [x] Audit concurrent gateway hint, task lookup, fallback attempt, and manifest annotation maps for raw scanner-id joins.
+- [x] Key concurrent routing and task lookup by repository-qualified work identity.
+- [x] Carry the same key through planner hint consumption and persisted dispatch-manifest annotations.
+- [x] Pass focused concurrent manifest/fallback/routing coverage and diff checks.

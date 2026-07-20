@@ -9450,10 +9450,10 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
 
     expect(source).toContain('const routeReasons = new Map<string, string>();');
     expect(source).toContain('const routeModels = new Map<string, string | null>();');
-    expect(source).toContain('routeReasons.set(workedSet[i]!.id, d.value.reason);');
-    expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
+    expect(source).toContain('routeReasons.set(itemKey, d.value.reason);');
+    expect(source).toContain('routeModels.set(itemKey, d.value.model ?? null);');
     expect(source).toContain('routeReasons,');
-    expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;');
+    expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(itemKey) : undefined;');
     expect(source).toContain('return taskEntry.run(_backend, assignedReason, assignedModel);');
     expect(source).toContain('buildConcurrentDispatchRouteItem(');
   });

@@ -30,6 +30,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { workItemCoverageKey } from './proposal-matching.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const DEFAULT_READ_MAX_FILES = 32;
@@ -210,9 +211,10 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
   const ts = eventTimestamp(input.ts);
   const claimedItemIds = input.plan.assignments.map(({ item }) => item.id).concat(input.plan.unassigned.map((item) => item.id));
   const assignments = input.plan.assignments.slice(0, MAX_ITEMS).map(({ item, backend }) => {
-    const routeReason = boundedOptionalText(input.routeReasons?.get(item.id), MAX_TEXT.reason);
-    const model = boundedNullableText(input.routeModels?.get(item.id), MAX_TEXT.model);
-    const attemptId = boundedOptionalText(input.attemptIds?.get(item.id), 160);
+    const itemKey = workItemCoverageKey(item);
+    const routeReason = boundedOptionalText(input.routeReasons?.get(itemKey), MAX_TEXT.reason);
+    const model = boundedNullableText(input.routeModels?.get(itemKey), MAX_TEXT.model);
+    const attemptId = boundedOptionalText(input.attemptIds?.get(itemKey), 160);
     return {
       itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'),
       ...(attemptId ? { attemptId } : {}),

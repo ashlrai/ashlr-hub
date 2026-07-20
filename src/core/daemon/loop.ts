@@ -6239,9 +6239,10 @@ export async function tick(
       for (let i = 0; i < workedSet.length; i++) {
         const d = gds[i];
         if (d?.status === 'fulfilled') {
-          routeHints.set(workedSet[i]!.id, d.value.backend);
-          routeReasons.set(workedSet[i]!.id, d.value.reason);
-          routeModels.set(workedSet[i]!.id, d.value.model ?? null);
+          const itemKey = workItemCoverageKey(workedSet[i]!);
+          routeHints.set(itemKey, d.value.backend);
+          routeReasons.set(itemKey, d.value.reason);
+          routeModels.set(itemKey, d.value.model ?? null);
         }
       }
     }
@@ -6289,12 +6290,15 @@ export async function tick(
         // Each dispatched item flows through the FULL task run function.
         // Find the pre-built task for this item (same gate logic: kill-switch,
         // budget short-circuit, gateway/serial routing, sandbox, judge, etc.).
-        // We look up by item.id to reuse the existing tasks[] entries which
+        // We look up by repository-qualified work identity to reuse the existing tasks[] entries which
         // already capture tickSpent/state/liveCfg via closure.
-        const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
+        const itemKey = workItemCoverageKey(item);
+        const taskEntry = tasks.find((_t, idx) =>
+          workedSet[idx] !== undefined && workItemCoverageKey(workedSet[idx]!) === itemKey,
+        );
         if (taskEntry) {
-          const hintedBackend = routeHints.get(item.id);
-          const baseReason = routeReasons.get(item.id);
+          const hintedBackend = routeHints.get(itemKey);
+          const baseReason = routeReasons.get(itemKey);
           const assignedReason = concurrentAssignedRouteReason({
             baseReason,
             hintedBackend,
@@ -6302,7 +6306,7 @@ export async function tick(
             diagnosticRepair: isTrustedDiagnosticResliceItem(item),
             candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg),
           });
-          const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
+          const assignedModel = hintedBackend === _backend ? routeModels.get(itemKey) : undefined;
           return taskEntry.run(_backend, assignedReason, assignedModel);
         }
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
@@ -6332,7 +6336,7 @@ export async function tick(
       const inner = r.settled?.status === 'fulfilled'
         ? (r.settled.value as ItemOutcome | undefined)
         : undefined;
-	      const attemptId = attemptIds.get(r.item.id);
+	      const attemptId = attemptIds.get(workItemCoverageKey(r.item));
 	      return {
 	        status: 'fulfilled',
 	        value: inner ?? {
