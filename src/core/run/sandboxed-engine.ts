@@ -1479,6 +1479,23 @@ export async function runEngineSandboxed(
     };
   }
 
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', `sandbox source revision refused: ${sourceAdmission.reason}`);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
+    };
+  }
+
   // Hold authority through the complete agent lifecycle. Creation has its own
   // short fence; this second acquisition closes the gap before agent writes and
   // makes kill/unenroll wait for execution, proposal capture, and cleanup.
@@ -1655,6 +1672,15 @@ export async function runEngineSandboxed(
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (opts.signal?.aborted) {
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
+        break;
+      }
+      const attemptAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+      if (!attemptAdmission.ok) {
+        res = {
+          ok: false,
+          output: '',
+          error: `sandbox source revision refused: ${attemptAdmission.reason}`,
+        };
         break;
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
@@ -2422,6 +2448,23 @@ export async function runApiModelSandboxed(
         undefined,
         actionCounts,
       ),
+    };
+  }
+
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', `sandbox source revision refused: ${sourceAdmission.reason}`);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
     };
   }
 

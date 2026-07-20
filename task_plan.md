@@ -2673,7 +2673,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Establish a cross-platform, read-only sandbox/source/base admission proof on the current mainline.
 - [x] Refuse proposal capture before diff read or inbox creation when the source admission is not stable.
 - [x] Update sandbox module fixtures and pass direct API-dispatch/cancellation regression tests.
-- [ ] Recheck source admission at execution attempt and after proposal persistence, with dedicated stale-base integration coverage.
+- [x] Recheck source admission before CLI retry attempts and prove source advancement stops further model spend using real Git worktrees.
+- [ ] Recheck source admission before API provider attempts and after proposal persistence, with dedicated stale-base integration coverage.
 - [ ] Extend the same contract to swarm and orchestrator capture paths without bypassing outward mutation authority.
 
 ## Closed Judge Decision Metadata (2026-07-16)
