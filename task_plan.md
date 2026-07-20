@@ -2734,3 +2734,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit raw-id policy lookup through selection, cooldown settlement, and generated-repair decision telemetry.
 - [x] Key all daemon claim cooldown-policy lookups by repository-scoped work identity.
 - [x] Prove a cooled same-id item cannot block a second enrolled repository's item; pass focused daemon/coordinator tests, typecheck, scoped lint, and diff checks.
+
+## Canonical Shared Execution-Key Foundation (2026-07-20)
+- [x] Define one nullable canonical WorkItem execution identity that includes repository, item, and repair generation.
+- [x] Adopt it in shared collision fencing and prove alias normalization plus repository separation.
+- [x] Pass focused coordinator coverage, typecheck, scoped lint, and diff checks.

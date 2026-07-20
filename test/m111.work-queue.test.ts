@@ -28,6 +28,7 @@ import {
   selectWorkQueueCoordinator,
 } from '../src/core/seams/work-queue-coordinator.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { workItemExecutionKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,6 +151,22 @@ describe('M111 LocalWorkQueueCoordinator', () => {
     } finally {
       process.env.HOME = origHome;
     }
+  });
+});
+
+describe('M111 WorkItem execution identity', () => {
+  it('is canonical across normalized repository aliases and distinct across repositories', () => {
+    const canonicalRepo = path.join(tmpDir, 'canonical-repo');
+    const aliasRoot = path.join(tmpDir, 'alias-root');
+    fs.mkdirSync(canonicalRepo);
+    fs.mkdirSync(aliasRoot);
+    const aliasRepo = path.join(aliasRoot, '..', 'canonical-repo');
+    const same = makeItem('same-id', canonicalRepo);
+    const alias = makeItem('same-id', aliasRepo);
+    const other = makeItem('same-id', path.join(tmpDir, 'other-repo'));
+
+    expect(workItemExecutionKey(alias)).toBe(workItemExecutionKey(same));
+    expect(workItemExecutionKey(other)).not.toBe(workItemExecutionKey(same));
   });
 });
 

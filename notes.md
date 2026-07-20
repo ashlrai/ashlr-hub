@@ -2843,6 +2843,11 @@
   - Local lane de-duplication now uses the existing repository-scoped `workItemCoverageKey`, including canonical path, item id, and repair generation. It preserves same-repository duplicate suppression while allowing independent enrolled repositories to use common scanner ids.
   - Focused coordinator coverage proves two equal IDs in separate lanes are both selected. The shared coordinator remains deliberately fail-closed for that input pending the durable execution-key protocol migration.
 
+- Canonical shared execution-key foundation (2026-07-20):
+  - Added `workItemExecutionKey`, a repository-physical, generation-aware execution identity distinct from the compatibility-oriented pending-proposal coverage key. It returns `null` when canonical filesystem identity cannot be established.
+  - Shared queue collision detection now consumes this primitive, so its fail-closed decision and the forthcoming claim protocol use one exact definition of repository-qualified work. Normalized aliases collapse to one identity; equal raw ids in distinct repositories remain distinct.
+  - The shared store still persists raw claim ids in this slice. The new helper is an intentionally narrow foundation for the required migration of claim, lease, settlement, reservation, and daemon-attribution handles.
+
 - Daemon cooldown-policy repository identity (2026-07-20):
   - The daemon still indexed per-item claim cooldown policies by raw `item.id`, even after the worked ledger and local coordinator became repository-scoped. A same-id item in a second repository could therefore inherit the first item's cooldown policy or have its frozen worked key misattributed.
   - Policy lookup, policy completion, frozen worked-key resolution, selection blocker summaries, and metadata-only generated-repair decision telemetry now use `workItemCoverageKey`. The policy's worked-event keys remain unchanged and repository-scoped.

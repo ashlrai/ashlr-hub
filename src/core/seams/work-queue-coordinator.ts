@@ -32,10 +32,9 @@ import {
 import { SharedStore } from '../fleet/shared-store.js';
 import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-store.js';
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
-import { workItemCoverageKey } from '../fleet/proposal-matching.js';
+import { workItemCoverageKey, workItemExecutionKey } from '../fleet/proposal-matching.js';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
   id: 'workQueueCoordinator' as const,
@@ -46,20 +45,20 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
 
 /**
  * SharedStore currently uses a raw work-item id as its durable claim key.
- * Refuse a batch that would collapse two different repositories into one key
- * until the shared-store protocol carries a canonical execution identity.
+ * Refuse a batch that would collapse two different canonical execution
+ * identities into one key until the store protocol carries that identity.
  */
 function hasAmbiguousSharedClaimIdentity(
   lanes: ReadonlyArray<{ candidates: readonly WorkItem[] }>,
 ): boolean {
-  const reposByItemId = new Map<string, string>();
+  const executionKeysByItemId = new Map<string, string>();
   for (const lane of lanes) {
     for (const item of lane.candidates) {
-      const repo = canonicalFilesystemPathIdentity(item.repo, { foldWindowsCase: false });
-      if (repo === null) return true;
-      const previous = reposByItemId.get(item.id);
-      if (previous !== undefined && previous !== repo) return true;
-      reposByItemId.set(item.id, repo);
+      const executionKey = workItemExecutionKey(item);
+      if (executionKey === null) return true;
+      const previous = executionKeysByItemId.get(item.id);
+      if (previous !== undefined && previous !== executionKey) return true;
+      executionKeysByItemId.set(item.id, executionKey);
     }
   }
   return false;
