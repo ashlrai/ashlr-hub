@@ -88,6 +88,7 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
 
 import {
   _setDispatchProductionLedgerRetentionHooksForTest,
+  createDispatchSelectionObservation,
   dispatchProductionDir,
   hasExactDispatchProductionTreatmentOutcomeReceipt,
   readDispatchProductionEvents,
@@ -107,6 +108,7 @@ import {
   type DispatchProductionEvent,
   type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { sanitizeProductionAttemptLearningLabel } from '../src/core/learning/attempt-shape.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
@@ -653,6 +655,8 @@ beforeEach(() => {
   prevUserProfile = process.env.USERPROFILE;
   home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m342-dispatch-production-')));
   process.env.ASHLR_HOME = home;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
 });
 
 afterEach(() => {
@@ -668,6 +672,57 @@ afterEach(() => {
 });
 
 describe('M342 dispatch production ledger', () => {
+  it('persists only an authenticated metadata-only randomized selection commitment', () => {
+    const event = makeEvent({
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.6',
+      runId: 'selection-run',
+      trajectoryId: 'run:selection-run',
+      objectiveHash: 'c'.repeat(64),
+      routerPolicyVersion: 'fleet-router-v1',
+      learningEpoch: '2026-07-08',
+    });
+    const selectionObservation = createDispatchSelectionObservation({
+      candidates: [
+        { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+        { backend: 'claude', tier: 'frontier', model: 'opus' },
+      ],
+      selected: { backend: 'codex', tier: 'frontier', model: 'gpt-5.6' },
+      selectionPolicyVersion: 'canary-v1',
+      randomizationProtocolVersion: 'uniform-v1',
+      selectionProbabilityPpm: 500_000,
+      trajectoryId: event.trajectoryId!,
+      runId: event.runId!,
+      objectiveHash: event.objectiveHash!,
+      routerPolicyVersion: event.routerPolicyVersion!,
+      learningEpoch: event.learningEpoch!,
+    }, loadOrCreateKey());
+    expect(selectionObservation).not.toBeNull();
+    if (!selectionObservation) throw new Error('expected selection observation');
+
+    expect(recordDispatchProduction({ ...event, selectionObservation })).toEqual({
+      attempted: 1, recorded: 1, failed: 0,
+    });
+    const stored = readDispatchProductionEvents();
+    expect(stored[0]?.selectionObservation).toMatchObject({
+      authority: 'observation-only',
+      mode: 'randomized-canary',
+      candidateCount: 2,
+      selectionProbabilityPpm: 500_000,
+      selectedBackend: 'codex',
+    });
+    expect(JSON.stringify(stored[0])).not.toContain('claude');
+
+    const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+    const tampered = JSON.parse(readFileSync(path, 'utf8').trim()) as Record<string, unknown>;
+    (tampered['selectionObservation'] as Record<string, unknown>)['selectedRank'] = 0;
+    writeFileSync(path, `${JSON.stringify(tampered)}\n`, 'utf8');
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, invalidRows: 1,
+    });
+  });
+
   it('appends and reads dispatch-production events newest first', () => {
     const written = recordDispatchProduction([
       makeEvent({ itemId: 'old', ts: '2026-07-07T23:59:00.000Z' }),

@@ -2856,9 +2856,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove optional evidence does not inflate required evidence counts in dashboard formatter coverage.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
 
-## Selection Assignment Provenance (planned)
+## Selection Assignment Provenance (2026-07-20)
 - [x] Audit causal-field persistence across run, dispatch, proposal, decision, evidence, and agent-action records.
-- [ ] Add observation-only per-selection candidate-set provenance and same-tier canary probability support.
+- [x] Add an authenticated, metadata-only randomized-canary commitment to canonical dispatch events.
+- [x] Bind the commitment to exact selected route, run/trajectory, objective, router policy, and learning epoch.
+- [x] Remove the caller-injected propensity-ID escape hatch from learning eligibility.
+- [x] Keep all selection data observation-only; no routing, merge, verification, or recursive-learning authority changes.
+- [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 - [ ] Expose selection-propensity availability as non-authoritative Fleet Status telemetry.
 
 ## Merge Contract Rollout Planner (2026-07-20)

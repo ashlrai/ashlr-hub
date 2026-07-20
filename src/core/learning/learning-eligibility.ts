@@ -79,8 +79,6 @@ export interface LearningEligibilityProjectionInput {
   population?: PostMergePopulationV2;
   trajectorySourceComplete: boolean;
   learningEpoch: string;
-  /** Exact trajectory identities with a recorded selection probability. */
-  selectionPropensityTrajectoryIds?: ReadonlySet<string>;
   maxMembers?: number;
 }
 
@@ -121,6 +119,15 @@ function sourceComplete(record: TrajectoryRecord): {
   const agentAction = record.agentActionSourceQuality === undefined ||
     (record.agentActionSourceQuality.sourceState !== 'degraded' && record.agentActionSourceQuality.complete);
   return { decision, agentAction };
+}
+
+function hasRecordedSelectionPropensity(record: TrajectoryRecord): boolean {
+  const observation = record.selectionObservation;
+  return observation?.schemaVersion === 1 &&
+    observation.authority === 'observation-only' &&
+    observation.mode === 'randomized-canary' &&
+    Number.isSafeInteger(observation.selectionProbabilityPpm) &&
+    observation.selectionProbabilityPpm >= 1 && observation.selectionProbabilityPpm <= 1_000_000;
 }
 
 function verificationStage(record: TrajectoryRecord): LearningEligibilityStagesV1['verification'] {
@@ -264,7 +271,7 @@ export function buildLearningEligibilityProjectionV1(
       terminal: terminalStage(record.terminalOutcome, populationMember),
       postMerge: populationMember?.classification ?? 'unobserved',
     };
-    const selectionPropensityAvailable = input.selectionPropensityTrajectoryIds?.has(identity) === true;
+    const selectionPropensityAvailable = hasRecordedSelectionPropensity(record);
     const codes = refusalCodes({
       record,
       stages,

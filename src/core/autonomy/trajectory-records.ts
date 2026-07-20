@@ -9,7 +9,10 @@
 
 import { createHash } from 'node:crypto';
 import { readAgentActions, type AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
-import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
+import type {
+  DispatchProductionEvent,
+  DispatchSelectionObservationV1,
+} from '../fleet/dispatch-production-ledger.js';
 import {
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
@@ -89,6 +92,8 @@ export interface TrajectoryTimelineEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  /** Authenticated, metadata-only randomized assignment; never policy authority. */
+  selectionObservation?: DispatchSelectionObservationV1;
   semanticEvents?: OutcomeRecordDecision['semanticEvents'];
   evidence?: {
     target: string;
@@ -145,6 +150,7 @@ export interface TrajectoryRecord {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  selectionObservation?: DispatchSelectionObservationV1;
   decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
   agentActionSourceQuality?: AgentActionSourceQuality;
   coverage: TrajectoryRecordCoverage;
@@ -636,6 +642,7 @@ function fillRecordMetadata(
   if (!record.labelBasis && meta.labelBasis) record.labelBasis = meta.labelBasis;
   if (!record.routerPolicyVersion && meta.routerPolicyVersion) record.routerPolicyVersion = bounded(meta.routerPolicyVersion, 120);
   if (!record.learningEpoch && meta.learningEpoch) record.learningEpoch = bounded(meta.learningEpoch, 120);
+  if (!record.selectionObservation && meta.selectionObservation) record.selectionObservation = meta.selectionObservation;
 }
 
 function evidenceEvent(evidence: OutcomeRecordEvidence, proposalId: string, tsFallback: string): TrajectoryTimelineEvent {
@@ -759,6 +766,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       labelBasis: event.labelBasis,
       routerPolicyVersion: event.routerPolicyVersion,
       learningEpoch: event.learningEpoch,
+      selectionObservation: event.selectionObservation,
     });
     record.coverage.dispatch = true;
     record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, dispatchTerminalOutcome(event));

@@ -161,9 +161,24 @@ describe('LearningEligibilityV1', () => {
 
   it('gives deterministic adverse evidence precedence without positive authority', () => {
     const member = populationMember('proposal-secret-1', 'adverse');
-    const result = build([trajectory()], {
+    const result = build([trajectory({
+      selectionObservation: {
+        schemaVersion: 1,
+        authority: 'observation-only',
+        mode: 'randomized-canary',
+        selectionPolicyVersion: 'canary-v1',
+        randomizationProtocolVersion: 'uniform-v1',
+        candidateSetDigest: 'a'.repeat(64),
+        assignmentDigest: 'b'.repeat(64),
+        candidateCount: 2,
+        selectedRank: 0,
+        selectionProbabilityPpm: 500_000,
+        selectedBackend: 'codex',
+        selectedTier: 'frontier',
+        selectedModel: 'gpt-5.6',
+      },
+    })], {
       population: population([member]),
-      selectionPropensityTrajectoryIds: new Set(['trajectory-secret-1']),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -174,6 +189,20 @@ describe('LearningEligibilityV1', () => {
     });
     expect(result.projection.members[0]?.refusalCodes)
       .not.toContain('selection-propensity-unavailable');
+  });
+
+  it('does not accept caller-injected propensity identities without a dispatch observation', () => {
+    const result = build([trajectory()], {
+      selectionPropensityTrajectoryIds: new Set(['trajectory-secret-1']),
+    } as never);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.projection.members[0]).toMatchObject({
+      selectionPropensityAvailable: false,
+      refusalCodes: expect.arrayContaining(['selection-propensity-unavailable']),
+      policyEligible: false,
+      recursiveLearningEligible: false,
+    });
   });
 
   it('records no-proposal, rejection, verification, and source gaps explicitly', () => {

@@ -6,7 +6,7 @@
  * cooldown ledger: never truncate, never rewrite, never throw.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -79,6 +79,7 @@ import {
   type StableFileReadFailureReason,
 } from '../util/stable-file-read.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
+import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_READ_LIMIT = 2_000;
@@ -141,6 +142,10 @@ const ATTEMPT_FAILURE_RECEIPT_INTENT_FILE_RE = /^([a-f0-9]{64})-([12])-([a-f0-9]
 const TREATMENT_RECEIPT_FILE_RE = /^([a-f0-9]{64})-([a-f0-9]{64})\.json$/;
 const ATTEMPT_RECEIPT_STAGE_FILE_RE = /^(?:[a-f0-9]{64}-[12](?:-[a-f0-9]{64}\.failure)?\.(?:json|intent\.json)|\.(?:retention|protocol)\.json)(?:\.\d+\.tmp|\.[a-f0-9]{32}\.stage)$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_SELECTION_CANDIDATES = 64;
+const MAX_SELECTION_VERSION = 80;
+const SELECTION_CANDIDATE_DIGEST_DOMAIN = 'ashlr:selection-candidate-set:v1\0';
+const SELECTION_ASSIGNMENT_DIGEST_DOMAIN = 'ashlr:selection-assignment:v1\0';
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
   'kimi', 'nim', 'opencode', 'grok',
@@ -163,7 +168,7 @@ const DISPATCH_PRODUCTION_EVENT_KEYS = new Set([
   'tier', 'model', 'assignedBy', 'routeReason', 'outcome', 'proposalCreated',
   'proposalId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
   'evidenceOutcome', 'learningSource', 'labelBasis', 'routerPolicyVersion',
-  'learningEpoch', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
+  'learningEpoch', 'selectionObservation', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
   'diffLines', 'reason', 'basis', 'repairHandoffId', 'repairGenerationId',
   'repairTreatmentUnitId', 'repairTreatment', 'repairTreatmentOutcome',
   'repairTreatmentAttemptHash', 'repairAttemptOrdinal', 'repairPreviousBackend',
@@ -181,6 +186,45 @@ export type DispatchProductionBasis =
   | 'repair-lifecycle-candidate'
   | 'repair-lifecycle-outcome'
   | 'unknown';
+
+/**
+ * Metadata-only record of a pre-execution randomized assignment. This is an
+ * analytic commitment, never routing or merge authority.
+ */
+export interface DispatchSelectionObservationV1 {
+  schemaVersion: 1;
+  authority: 'observation-only';
+  mode: 'randomized-canary';
+  selectionPolicyVersion: string;
+  randomizationProtocolVersion: string;
+  candidateSetDigest: string;
+  assignmentDigest: string;
+  candidateCount: number;
+  selectedRank: number;
+  selectionProbabilityPpm: number;
+  selectedBackend: EngineId;
+  selectedTier: EngineTier;
+  selectedModel?: string | null;
+}
+
+export interface DispatchSelectionCandidate {
+  backend: EngineId;
+  tier: EngineTier;
+  model?: string | null;
+}
+
+export interface CreateDispatchSelectionObservationInput {
+  candidates: readonly DispatchSelectionCandidate[];
+  selected: DispatchSelectionCandidate;
+  selectionPolicyVersion: string;
+  randomizationProtocolVersion: string;
+  selectionProbabilityPpm: number;
+  trajectoryId: string;
+  runId: string;
+  objectiveHash: string;
+  routerPolicyVersion: string;
+  learningEpoch: string;
+}
 
 export interface DispatchProductionEvent {
   schemaVersion: 1;
@@ -207,6 +251,7 @@ export interface DispatchProductionEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  selectionObservation?: DispatchSelectionObservationV1;
   /** Scrubbed metadata-only hash of the dispatched work item's objective. */
   objectiveHash?: string;
   learningLabel?: ProductionAttemptLearningLabel;
@@ -1417,6 +1462,213 @@ function boundedNullableText(value: unknown, max: number): string | null | undef
   return boundedOptionalText(value, max);
 }
 
+function selectionRouteTuple(value: DispatchSelectionCandidate): [EngineId, EngineTier, string | null] | null {
+  if (!ENGINE_IDS.has(value.backend) || value.backend === 'builtin' || !ENGINE_TIERS.has(value.tier)) return null;
+  const model = boundedNullableText(value.model, 160);
+  return model === undefined ? [value.backend, value.tier, null] : [value.backend, value.tier, model];
+}
+
+function selectionTupleKey(tuple: readonly [EngineId, EngineTier, string | null]): string {
+  return JSON.stringify(tuple);
+}
+
+function hmacSelection(key: Buffer, domain: string, value: unknown): string {
+  return createHmac('sha256', key).update(JSON.stringify([domain, value]), 'utf8').digest('hex');
+}
+
+function selectionAssignmentPayload(input: {
+  candidateSetDigest: string;
+  candidateCount: number;
+  selectedRank: number;
+  selectionProbabilityPpm: number;
+  selectedRoute: readonly [EngineId, EngineTier, string | null];
+  selectionPolicyVersion: string;
+  randomizationProtocolVersion: string;
+  trajectoryId: string;
+  runId: string;
+  objectiveHash: string;
+  routerPolicyVersion: string;
+  learningEpoch: string;
+}): unknown[] {
+  return [
+    input.candidateSetDigest,
+    input.candidateCount,
+    input.selectedRank,
+    input.selectionProbabilityPpm,
+    input.selectedRoute,
+    input.selectionPolicyVersion,
+    input.randomizationProtocolVersion,
+    input.trajectoryId,
+    input.runId,
+    input.objectiveHash,
+    input.routerPolicyVersion,
+    input.learningEpoch,
+  ];
+}
+
+/**
+ * Commit a pre-selection canary population without retaining any candidate
+ * identities. Callers must hold the private provenance key only in memory.
+ */
+export function createDispatchSelectionObservation(
+  input: CreateDispatchSelectionObservationInput,
+  key: Buffer,
+): DispatchSelectionObservationV1 | null {
+  if (!Buffer.isBuffer(key) || key.length !== 32 ||
+    !Number.isSafeInteger(input.selectionProbabilityPpm) ||
+    input.selectionProbabilityPpm < 1 || input.selectionProbabilityPpm > 1_000_000 ||
+    !SHA256_RE.test(input.objectiveHash) ||
+    !isSafeExecutionIdentity(input.runId) ||
+    input.trajectoryId !== `run:${input.runId}` ||
+    typeof input.selectionPolicyVersion !== 'string' || input.selectionPolicyVersion.length < 1 ||
+    input.selectionPolicyVersion.length > MAX_SELECTION_VERSION || scrubSecrets(input.selectionPolicyVersion) !== input.selectionPolicyVersion ||
+    typeof input.randomizationProtocolVersion !== 'string' || input.randomizationProtocolVersion.length < 1 ||
+    input.randomizationProtocolVersion.length > MAX_SELECTION_VERSION || scrubSecrets(input.randomizationProtocolVersion) !== input.randomizationProtocolVersion ||
+    typeof input.routerPolicyVersion !== 'string' || input.routerPolicyVersion.length < 1 ||
+    input.routerPolicyVersion.length > MAX_SELECTION_VERSION || scrubSecrets(input.routerPolicyVersion) !== input.routerPolicyVersion ||
+    typeof input.learningEpoch !== 'string' || input.learningEpoch.length < 1 || input.learningEpoch.length > 40 ||
+    scrubSecrets(input.learningEpoch) !== input.learningEpoch ||
+    !Array.isArray(input.candidates) || input.candidates.length < 1 || input.candidates.length > MAX_SELECTION_CANDIDATES) {
+    return null;
+  }
+  const candidates = input.candidates.map(selectionRouteTuple);
+  const selected = selectionRouteTuple(input.selected);
+  if (!selected || candidates.some((candidate) => candidate === null)) return null;
+  const canonicalCandidates = (candidates as Array<[EngineId, EngineTier, string | null]>)
+    .sort((left, right) => selectionTupleKey(left).localeCompare(selectionTupleKey(right)));
+  if (new Set(canonicalCandidates.map(selectionTupleKey)).size !== canonicalCandidates.length) return null;
+  const selectedRank = canonicalCandidates.findIndex((candidate) => selectionTupleKey(candidate) === selectionTupleKey(selected));
+  if (selectedRank < 0) return null;
+  const candidateSetDigest = hmacSelection(key, SELECTION_CANDIDATE_DIGEST_DOMAIN, [
+    canonicalCandidates,
+    input.selectionPolicyVersion,
+    input.routerPolicyVersion,
+    input.learningEpoch,
+  ]);
+  const assignmentDigest = hmacSelection(key, SELECTION_ASSIGNMENT_DIGEST_DOMAIN, selectionAssignmentPayload({
+    candidateSetDigest,
+    candidateCount: canonicalCandidates.length,
+    selectedRank,
+    selectionProbabilityPpm: input.selectionProbabilityPpm,
+    selectedRoute: selected,
+    selectionPolicyVersion: input.selectionPolicyVersion,
+    randomizationProtocolVersion: input.randomizationProtocolVersion,
+    trajectoryId: input.trajectoryId,
+    runId: input.runId,
+    objectiveHash: input.objectiveHash,
+    routerPolicyVersion: input.routerPolicyVersion,
+    learningEpoch: input.learningEpoch,
+  }));
+  return {
+    schemaVersion: 1,
+    authority: 'observation-only',
+    mode: 'randomized-canary',
+    selectionPolicyVersion: input.selectionPolicyVersion,
+    randomizationProtocolVersion: input.randomizationProtocolVersion,
+    candidateSetDigest,
+    assignmentDigest,
+    candidateCount: canonicalCandidates.length,
+    selectedRank,
+    selectionProbabilityPpm: input.selectionProbabilityPpm,
+    selectedBackend: selected[0],
+    selectedTier: selected[1],
+    ...(selected[2] !== null ? { selectedModel: selected[2] } : {}),
+  };
+}
+
+function constantTimeDigestEquals(left: string, right: string): boolean {
+  if (!SHA256_RE.test(left) || !SHA256_RE.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
+function sanitizeDispatchSelectionObservation(
+  value: unknown,
+  binding: {
+    backend: EngineId | null | undefined;
+    tier: EngineTier | null | undefined;
+    model: string | null | undefined;
+    trajectoryId?: string;
+    runId?: string;
+    objectiveHash?: string;
+    routerPolicyVersion?: string;
+    learningEpoch?: string;
+  },
+): DispatchSelectionObservationV1 | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid selection observation');
+  const observation = value as Record<string, unknown>;
+  const allowed = new Set([
+    'schemaVersion', 'authority', 'mode', 'selectionPolicyVersion', 'randomizationProtocolVersion',
+    'candidateSetDigest', 'assignmentDigest', 'candidateCount', 'selectedRank',
+    'selectionProbabilityPpm', 'selectedBackend', 'selectedTier', 'selectedModel',
+  ]);
+  if (!hasOnlyKeys(observation, allowed) || observation['schemaVersion'] !== 1 ||
+    observation['authority'] !== 'observation-only' || observation['mode'] !== 'randomized-canary' ||
+    typeof observation['selectionPolicyVersion'] !== 'string' || observation['selectionPolicyVersion'].length < 1 ||
+    observation['selectionPolicyVersion'].length > MAX_SELECTION_VERSION || scrubSecrets(observation['selectionPolicyVersion']) !== observation['selectionPolicyVersion'] ||
+    typeof observation['randomizationProtocolVersion'] !== 'string' || observation['randomizationProtocolVersion'].length < 1 ||
+    observation['randomizationProtocolVersion'].length > MAX_SELECTION_VERSION || scrubSecrets(observation['randomizationProtocolVersion']) !== observation['randomizationProtocolVersion'] ||
+    !SHA256_RE.test(observation['candidateSetDigest'] as string) || !SHA256_RE.test(observation['assignmentDigest'] as string) ||
+    !Number.isSafeInteger(observation['candidateCount']) || (observation['candidateCount'] as number) < 1 ||
+    (observation['candidateCount'] as number) > MAX_SELECTION_CANDIDATES ||
+    !Number.isSafeInteger(observation['selectedRank']) || (observation['selectedRank'] as number) < 0 ||
+    (observation['selectedRank'] as number) >= (observation['candidateCount'] as number) ||
+    !Number.isSafeInteger(observation['selectionProbabilityPpm']) ||
+    (observation['selectionProbabilityPpm'] as number) < 1 || (observation['selectionProbabilityPpm'] as number) > 1_000_000 ||
+    !ENGINE_IDS.has(observation['selectedBackend'] as EngineId) || observation['selectedBackend'] === 'builtin' ||
+    !ENGINE_TIERS.has(observation['selectedTier'] as EngineTier) ||
+    observation['selectedBackend'] !== binding.backend || observation['selectedTier'] !== binding.tier ||
+    (observation['selectedModel'] !== undefined && observation['selectedModel'] !== null &&
+      !boundedStoredText(observation['selectedModel'], 160)) ||
+    (observation['selectedModel'] ?? null) !== (binding.model ?? null) ||
+    !binding.trajectoryId || !binding.runId || binding.trajectoryId !== `run:${binding.runId}` ||
+    !SHA256_RE.test(binding.objectiveHash ?? '') || !binding.routerPolicyVersion || !binding.learningEpoch) {
+    throw new Error('invalid selection observation');
+  }
+  let key: Buffer | null;
+  try { key = loadExistingProvenanceKeyReadOnly(); } catch { key = null; }
+  if (!key) throw new Error('selection observation provenance unavailable');
+  const selectedRoute: [EngineId, EngineTier, string | null] = [
+    observation['selectedBackend'] as EngineId,
+    observation['selectedTier'] as EngineTier,
+    (observation['selectedModel'] ?? null) as string | null,
+  ];
+  const expectedAssignment = hmacSelection(key, SELECTION_ASSIGNMENT_DIGEST_DOMAIN, selectionAssignmentPayload({
+    candidateSetDigest: observation['candidateSetDigest'] as string,
+    candidateCount: observation['candidateCount'] as number,
+    selectedRank: observation['selectedRank'] as number,
+    selectionProbabilityPpm: observation['selectionProbabilityPpm'] as number,
+    selectedRoute,
+    selectionPolicyVersion: observation['selectionPolicyVersion'] as string,
+    randomizationProtocolVersion: observation['randomizationProtocolVersion'] as string,
+    trajectoryId: binding.trajectoryId,
+    runId: binding.runId,
+    objectiveHash: binding.objectiveHash!,
+    routerPolicyVersion: binding.routerPolicyVersion,
+    learningEpoch: binding.learningEpoch,
+  }));
+  if (!constantTimeDigestEquals(observation['assignmentDigest'] as string, expectedAssignment)) {
+    throw new Error('invalid selection observation');
+  }
+  return {
+    schemaVersion: 1,
+    authority: 'observation-only',
+    mode: 'randomized-canary',
+    selectionPolicyVersion: observation['selectionPolicyVersion'] as string,
+    randomizationProtocolVersion: observation['randomizationProtocolVersion'] as string,
+    candidateSetDigest: observation['candidateSetDigest'] as string,
+    assignmentDigest: observation['assignmentDigest'] as string,
+    candidateCount: observation['candidateCount'] as number,
+    selectedRank: observation['selectedRank'] as number,
+    selectionProbabilityPpm: observation['selectionProbabilityPpm'] as number,
+    selectedBackend: observation['selectedBackend'] as EngineId,
+    selectedTier: observation['selectedTier'] as EngineTier,
+    ...(observation['selectedModel'] !== undefined && observation['selectedModel'] !== null
+      ? { selectedModel: observation['selectedModel'] as string }
+      : {}),
+  };
+}
+
 export function canonicalDispatchRepoIdentity(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 500 || !isAbsolute(value)) return null;
   if (scrubSecrets(value) !== value) return null;
@@ -1588,6 +1840,16 @@ export function sanitizeDispatchProductionEvent(
     routerPolicyVersion,
     learningEpoch,
   });
+  const selectionObservation = sanitizeDispatchSelectionObservation(event.selectionObservation, {
+    backend,
+    tier,
+    model,
+    trajectoryId: causal.trajectoryId,
+    runId,
+    objectiveHash,
+    routerPolicyVersion: causal.routerPolicyVersion,
+    learningEpoch: causal.learningEpoch,
+  });
   const learningLabel = opts.materializeLearningLabel
     ? productionAttemptLearningLabelFromSignals({
         outcome,
@@ -1617,6 +1879,7 @@ export function sanitizeDispatchProductionEvent(
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
+    ...(selectionObservation ? { selectionObservation } : {}),
     ...(learningLabel ? { learningLabel } : {}),
     ...(objectiveHash ? { objectiveHash } : {}),
     ...(repairLineageInvalid
