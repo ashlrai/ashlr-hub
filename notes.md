@@ -2946,5 +2946,7 @@
 # Current Protected CI Recovery
 - The first exact-head protected matrix started successfully after runner capacity returned: all macOS and Windows shards passed, while Ubuntu exposed five deterministic test failures.
 - Four workhorse-dispatch assertions seeded route hints by raw scanner id even though production route lookup is repository-qualified. Fixtures now use `workItemCoverageKey`, matching the actual concurrent dispatcher contract.
-- One legacy treatment-receipt compatibility assertion remains under focused investigation; it is kept separate from the route-key fixture repair.
+- The remaining legacy treatment-receipt assertion was an analytics-reader compatibility gap: a direct immutable artifact with a sanitizer-validated v1 label passed byte framing admission but was compared only against the v2-materialized event.
+- Direct artifacts now retain exact-event matching by default and accept the narrow legacy shape only when its label normalizes through the shared sanitizer to the expected canonical label. Retired and compacted receipt paths remain digest-bound.
+- Verification: both legacy receipt regressions pass, all 16 workhorse-dispatch tests pass, and changed-source TypeScript emits no matching errors. A new protected matrix is required before promotion.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

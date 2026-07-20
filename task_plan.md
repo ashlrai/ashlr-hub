@@ -2789,6 +2789,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove malformed receipt bytes remain rejected and live dispatch-production evidence becomes healthy.
 - [x] Audit the independent repair-handoff conflict set before enabling its writer.
 - [x] Add bounded parent-evidence quarantine diagnostics without changing repair-generation authority.
+- [x] Recover the protected-CI v1 receipt assertion with sanitizer-gated semantic comparison while preserving digest-bound retired/compacted reads.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
 
 ## Cross-Repo Admitted Repair (2026-07-20)
 - [x] Reproduce the admitted binshield config typecheck defect in an isolated worktree.

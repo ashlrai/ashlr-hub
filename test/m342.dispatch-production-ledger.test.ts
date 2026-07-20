@@ -107,6 +107,7 @@ import {
   type DispatchProductionEvent,
   type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { sanitizeProductionAttemptLearningLabel } from '../src/core/learning/attempt-shape.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairLifecycleAttemptHash,
@@ -5465,6 +5466,7 @@ describe('M342 dispatch production ledger', () => {
       learningLabel: { classifierVersion: string };
     };
     legacy.learningLabel.classifierVersion = 'attempt-shape-v1';
+    expect(sanitizeProductionAttemptLearningLabel(legacy.learningLabel)).toBeDefined();
     writeFileSync(receiptPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
     protectWindowsFixtureTree(dirname(receiptPath));
 

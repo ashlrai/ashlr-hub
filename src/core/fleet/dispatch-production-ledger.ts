@@ -1264,6 +1264,24 @@ function treatmentReceiptLockPath(): string {
   return join(treatmentOutcomeReceiptDir(), '.receipts.lock');
 }
 
+function treatmentReceiptEventMatchesExpected(
+  stored: DispatchProductionEvent,
+  expected: DispatchProductionEvent,
+): boolean {
+  if (JSON.stringify(stored) === JSON.stringify(expected)) return true;
+  const storedLabel: unknown = stored.learningLabel;
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(storedLabel);
+  if (
+    !isPlainRecord(storedLabel) ||
+    storedLabel['classifierVersion'] !== 'attempt-shape-v1' ||
+    normalizedLabel === undefined
+  ) return false;
+  return JSON.stringify({
+    ...stored,
+    learningLabel: normalizedLabel,
+  }) === JSON.stringify(expected);
+}
+
 /** Verify an exact immutable terminal-outcome receipt without writing or repairing storage. */
 export function hasExactDispatchProductionTreatmentOutcomeReceipt(
   expected: DispatchProductionEvent,
@@ -1304,8 +1322,7 @@ export function hasExactDispatchProductionTreatmentOutcomeReceipt(
         JSON.stringify(artifact.event) === JSON.stringify(canonical);
     }
     if (retention && Date.parse(artifact.ts) <= Date.parse(retention.droppedThrough)) return false;
-    return artifact.receiptDigest === wantedDigest &&
-      JSON.stringify(artifact.event) === JSON.stringify(canonical);
+    return treatmentReceiptEventMatchesExpected(artifact.event, canonical);
   } catch {
     return false;
   }
@@ -3524,8 +3541,21 @@ function canonicalTreatmentOutcomeReceiptEvent(
     const storedClassifierVersion: unknown = isPlainRecord(storedLabel)
       ? storedLabel['classifierVersion']
       : undefined;
-    if (isPlainRecord(storedLabel) && storedClassifierVersion === 'attempt-shape-v1') {
-      return JSON.stringify({ ...sanitized, learningLabel: storedLabel }) === line;
+    if (
+      isPlainRecord(storedLabel) &&
+      storedClassifierVersion === 'attempt-shape-v1' &&
+      sanitizeProductionAttemptLearningLabel(storedLabel) !== undefined
+    ) {
+      if (JSON.stringify({ ...sanitized, learningLabel: storedLabel }) === line) return true;
+      // Some earliest immutable v1 receipts retained a trajectory id that the
+      // current canonical hash path intentionally elides. Revalidate the
+      // original envelope for byte compatibility, while retaining the shared
+      // sanitizer as the semantic admission gate.
+      const legacyEnvelope = sanitizeDispatchProductionEvent(
+        value as DispatchProductionEvent,
+        { materializeLearningLabel: true },
+      );
+      return JSON.stringify({ ...legacyEnvelope, learningLabel: storedLabel }) === line;
     }
     return false;
   } catch {
