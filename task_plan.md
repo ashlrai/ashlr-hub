@@ -2602,6 +2602,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit dormant projection authority and preserve the no-hot-consumer boundary.
 - [x] Add a read-only, lock-required observation seam for canonical proposal and projection artifacts.
 - [x] Add the authenticated V1|V2 journal union: V2 binds bounded staged metadata, preserves version-specific HMAC domains, and participates in replay and prepared-intent comparison.
+- [x] Add deterministic private staged-artifact storage with injected semantic validation and deletion-as-absence semantics.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
 
