@@ -64,6 +64,7 @@ export interface TestRunResult {
     | 'sandbox-failed'
     | 'apply-failed'
     | 'no-commands'
+    | 'merge-contract-coverage-incomplete'
     | 'cancelled'
     | 'process-cleanup-unconfirmed';
   /** Present when the worktree remains intact because subprocess closure was not proven. */
@@ -234,6 +235,14 @@ export async function runTestsForProposalDetailed(
 
     // 4. Detect verification commands INSIDE the patched worktree.
     const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
+    const contract = executionProfile.verifyContract;
+    if (
+      profile === 'merge' &&
+      contract?.present === true &&
+      (contract.mergeGradeExplicit !== true || contract.mergeCoverageComplete !== true)
+    ) {
+      return { passed: false, commands: [], skipped: 'merge-contract-coverage-incomplete' };
+    }
     const verifyCommands = filterVerifyCommandsForProfile(
       executionProfile.verifyCommands,
       profile,

@@ -213,6 +213,56 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('requires replace-detected merge contracts to cover nested distinct ecosystems at their own cwd', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      const python = join(dir, 'packages', 'sdk-python');
+      const formula = join(dir, 'integrations', 'homebrew');
+      mkdirSync(join(python, 'tests'), { recursive: true });
+      mkdirSync(join(formula, 'Formula'), { recursive: true });
+      writeFileSync(join(python, 'pyproject.toml'), '[project]\nname = "sdk-python"\n', 'utf8');
+      writeFileSync(join(python, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+      writeFileSync(join(formula, 'Formula', 'ashlr.rb'), 'class Ashlr < Formula\nend\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{
+          id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'],
+        }],
+      });
+
+      const incomplete = detectRepoExecutionProfile(dir);
+      expect(incomplete.verifyContract).toMatchObject({
+        mergeGradeExplicit: true,
+        mergeCoverageComplete: false,
+        uncoveredMergeProjects: [
+          { kind: 'homebrew-formula', relativeRoot: 'integrations/homebrew' },
+          { kind: 'python', relativeRoot: 'packages/sdk-python' },
+        ],
+      });
+      expect(incomplete.verifyContract?.mergeGradeReason).toContain('missing required merge coverage');
+
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] },
+          { id: 'python-test', kind: 'test', cmd: ['python', '-m', 'pytest', '-q'], cwd: 'packages/sdk-python', required: true, profiles: ['merge'] },
+          { id: 'formula-syntax', kind: 'typecheck', cmd: ['ruby', '-c', 'Formula/ashlr.rb'], cwd: 'integrations/homebrew', required: true, profiles: ['merge'] },
+        ],
+      });
+
+      expect(detectRepoExecutionProfile(dir).verifyContract).toMatchObject({
+        mergeGradeExplicit: true,
+        mergeCoverageComplete: true,
+        uncoveredMergeProjects: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes valid contracts from explicit merge-grade contracts', () => {
     const dir = makeFixture();
     try {

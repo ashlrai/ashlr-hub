@@ -19,7 +19,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,6 +136,25 @@ function repoWithContract(commands: Array<Record<string, unknown>>, diff = ADD_F
   fixtureProposal = { repo: fixtureRepo, diff };
 }
 
+function repoWithIncompleteNestedMergeContract(): void {
+  fixtureRepo = makeRepo(
+    { name: 'fx', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } },
+    {
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{ id: 'root-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+    },
+  );
+  const python = join(fixtureRepo, 'packages', 'sdk-python');
+  mkdirSync(join(python, 'tests'), { recursive: true });
+  writeFileSync(join(python, 'pyproject.toml'), '[project]\nname = "sdk-python"\n', 'utf8');
+  writeFileSync(join(python, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: fixtureRepo, stdio: 'pipe' });
+  execFileSync('git', ['commit', '--quiet', '-m', 'nested python'], { cwd: fixtureRepo, stdio: 'pipe', env: GIT_ENV });
+  created.push(fixtureRepo);
+  fixtureProposal = { repo: fixtureRepo, diff: ADD_FILE_DIFF };
+}
+
 // ---------------------------------------------------------------------------
 // runTestsDetailed
 // ---------------------------------------------------------------------------
@@ -219,6 +238,18 @@ describe('M331 runTestsDetailed', () => {
     expect(detailed.skipped).toBeUndefined();
     expect(detailed.commands.some((command) => command.kind === 'test' && command.ok)).toBe(true);
     expect(await runTestsForProposal(proposal, cfg, 'quick')).toBe(true);
+  }, 30_000);
+
+  it('refuses merge verification when a present contract omits a nested distinct project', async () => {
+    repoWithIncompleteNestedMergeContract();
+
+    const result = await runTestsDetailed('p-coverage-incomplete', cfg, 'merge');
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'merge-contract-coverage-incomplete',
+    });
   }, 30_000);
 
   it('failing test script → passed:false with the failing command recorded', async () => {

@@ -45,6 +45,12 @@ export interface RepoVerifyContractSummary {
   mergeProfileCommandCount: number;
   requiredMergeProfileCommandCount: number;
   mergeGradeExplicit: boolean;
+  /** Every distinct non-root detected ecosystem has a required merge command rooted at it. */
+  mergeCoverageComplete: boolean;
+  uncoveredMergeProjects: Array<{
+    relativeRoot: string;
+    kind: RepoProjectKind;
+  }>;
   mergeGradeReason: string;
   errors: string[];
 }
@@ -287,8 +293,43 @@ function summarizeVerifyContract(
     mergeProfileCommandCount,
     requiredMergeProfileCommandCount,
     mergeGradeExplicit,
+    mergeCoverageComplete: mergeGradeExplicit,
+    uncoveredMergeProjects: [],
     mergeGradeReason,
     errors: opts.errors,
+  };
+}
+
+function summarizeMergeCoverage(
+  repoRoot: string,
+  projects: RepoProjectProfile[],
+  summary: RepoVerifyContractSummary,
+  commands: VerifyCommand[],
+): RepoVerifyContractSummary {
+  if (!summary.mergeGradeExplicit) return summary;
+  const rootKinds = new Set(projects
+    .filter((project) => project.root === repoRoot)
+    .map((project) => project.kind));
+  const requiredMergeCwds = new Set(commands
+    .filter((command) => command.required !== false && command.profiles?.includes('merge'))
+    .map((command) => resolve(command.cwd ?? repoRoot)));
+  const uncoveredMergeProjects = projects
+    .filter((project) =>
+      project.root !== repoRoot &&
+      project.kind !== 'verify-contract' &&
+      !rootKinds.has(project.kind) &&
+      !requiredMergeCwds.has(project.root),
+    )
+    .map((project) => ({ relativeRoot: project.relativeRoot, kind: project.kind }));
+  if (uncoveredMergeProjects.length === 0) return summary;
+  const rendered = uncoveredMergeProjects
+    .map((project) => `${project.kind}@${project.relativeRoot}`)
+    .join(', ');
+  return {
+    ...summary,
+    mergeCoverageComplete: false,
+    uncoveredMergeProjects,
+    mergeGradeReason: `${summary.mergeGradeReason}; missing required merge coverage for ${rendered}`,
   };
 }
 
@@ -811,7 +852,13 @@ export function detectRepoExecutionProfile(
     ? rootCommands
     : projects.flatMap((project) => project.verifyCommands);
   const detectedProjectKinds = [...new Set(projects.map((project) => project.kind))].sort();
-  const contract = parseVerifyContract(root);
+  let contract = parseVerifyContract(root);
+  if (contract) {
+    contract = {
+      ...contract,
+      summary: summarizeMergeCoverage(root, projects, contract.summary, contract.commands),
+    };
+  }
   let verifyCommands = detectedCommands;
   let effectiveDetectedVerifyCommandCount = detectedCommands.length;
   let effectiveContractVerifyCommandCount = 0;

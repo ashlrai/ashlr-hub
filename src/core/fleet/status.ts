@@ -5969,7 +5969,8 @@ async function buildAutoMergeReadinessStatus(
     verifierContracts.pendingNeedingVerification++;
     const profile = profileForRepo(proposal.repo);
     const withoutVerifyCommands = !profile || profile.verifyCommands.length === 0;
-    const withoutExplicitMergeContract = profile?.verifyContract?.mergeGradeExplicit !== true;
+    const withoutExplicitMergeContract = profile?.verifyContract?.mergeGradeExplicit !== true ||
+      profile.verifyContract.mergeCoverageComplete !== true;
     if (!withoutVerifyCommands && !withoutExplicitMergeContract) return;
     if (withoutVerifyCommands) verifierContracts.withoutVerifyCommands++;
     if (withoutExplicitMergeContract) verifierContracts.withoutExplicitMergeContract++;
@@ -6381,7 +6382,9 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
       }
       if (profile.verifyContract?.present) reposWithVerifyContracts++;
       if (profile.verifyContract?.valid) reposWithValidVerifyContracts++;
-      if (profile.verifyContract?.mergeGradeExplicit) reposWithExplicitMergeContracts++;
+      if (profile.verifyContract?.mergeGradeExplicit && profile.verifyContract.mergeCoverageComplete) {
+        reposWithExplicitMergeContracts++;
+      }
       else {
         missingExplicitMergeContracts.push({
           repo,

@@ -716,7 +716,10 @@ export async function scanExplicitMergeVerifyContracts(repo: string): Promise<Wo
 }
 
 function mergeVerifyContractItems(repo: string, profile: RepoExecutionProfile): WorkItem[] {
-  if (profile.verifyContract?.mergeGradeExplicit === true) return [];
+  if (
+    profile.verifyContract?.mergeGradeExplicit === true &&
+    profile.verifyContract.mergeCoverageComplete === true
+  ) return [];
   if (profile.detectedVerifyCommandCount === 0) return [];
   return [
       makeItem(
