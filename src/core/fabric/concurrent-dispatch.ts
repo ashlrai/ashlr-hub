@@ -55,6 +55,7 @@
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import { generatedRepairCandidateAllowed } from '../fleet/router.js';
+import { workItemCoverageKey } from '../fleet/proposal-matching.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
@@ -580,8 +581,8 @@ export function buildConcurrentDispatchRouteItem(
   if (cfg.foundry?.fabric?.workhorseDispatch === true) {
     const spreadBulkItem = buildWorkhorseSpreader(snapshot, dispatchCfg);
     return (item: WorkItem): EngineId => {
-      const hinted = routeHints.get(item.id);
-      const reason = routeReasons?.get(item.id);
+      const hinted = routeHints.get(workItemCoverageKey(item));
+      const reason = routeReasons?.get(workItemCoverageKey(item));
       if (isTrustedDiagnosticResliceItem(item) && item.repairParentTier != null) {
         return hinted ?? 'builtin';
       }
@@ -591,7 +592,7 @@ export function buildConcurrentDispatchRouteItem(
       return spreadBulkItem(item);
     };
   }
-  return (item: WorkItem): EngineId => routeHints.get(item.id) ?? 'builtin';
+  return (item: WorkItem): EngineId => routeHints.get(workItemCoverageKey(item)) ?? 'builtin';
 }
 
 function shouldPreserveWorkhorseRouteHint(hinted: EngineId, reason: string | undefined): boolean {
