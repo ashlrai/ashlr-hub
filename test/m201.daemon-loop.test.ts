@@ -76,7 +76,7 @@ import type {
   WorkItem,
 } from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
-import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
+import { workItemCoverageKey, workItemExecutionKey } from '../src/core/fleet/proposal-matching.js';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
@@ -397,7 +397,7 @@ import {
   recordSkillCard,
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
-import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { loadWorkedLedger, recordOutcome, recordOutcomeWithKey } from '../src/core/fleet/worked-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { generatedRepairLifecycleAttemptHash } from '../src/core/fleet/generated-repair-identity.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -2001,7 +2001,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     const sharedPath = join(fx.ashlrDir, 'shared-refill');
     const other = new SharedStore(sharedPath, 60_000);
-    expect(other.claimItems([items[0]!.id], 1, 'other-machine')).toEqual([items[0]!.id]);
+    const contendedKey = workItemExecutionKey(items[0]!);
+    expect(contendedKey).not.toBeNull();
+    if (!contendedKey) throw new Error('expected canonical shared claim key');
+    expect(other.claimItems([contendedKey], 1, 'other-machine')).toEqual([contendedKey]);
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
@@ -2027,6 +2030,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const item = items[0]!;
     const sharedPath = join(fx.ashlrDir, 'shared-production-failure');
     const observer = new SharedStore(sharedPath, 60_000);
+    const itemExecutionKey = workItemExecutionKey(item);
+    expect(itemExecutionKey).not.toBeNull();
+    if (!itemExecutionKey) throw new Error('expected canonical shared claim key');
     const unrelatedItemId = `${repo.dir}:unrelated-shared-claim`;
     expect(observer.claimItems([unrelatedItemId], 1, 'other-machine')).toEqual([unrelatedItemId]);
     const dailyLedgerPath = join(dispatchProductionDir(), `${today()}.jsonl`);
@@ -2036,7 +2042,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       expect(observer.readHealth({ machineId: 'm201-production-failure' }).claimSamples).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            itemId: item.id,
+            itemId: itemExecutionKey,
             machineId: 'm201-production-failure',
             state: 'executing',
             phase: 'executing',
@@ -2073,7 +2079,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const afterFailure = observer.readSnapshot();
 
     expect(failed.reason).toBe('state-persistence-failed');
-    expect(afterFailure.claims).not.toHaveProperty(item.id);
+    expect(afterFailure.claims).not.toHaveProperty(itemExecutionKey);
     expect(afterFailure.claims).toHaveProperty(unrelatedItemId);
     expect(afterFailure.worked.some((event) => event.itemId === item.id)).toBe(false);
 
@@ -2083,7 +2089,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(retried.reason).toBe('ok');
     expect(executions).toBe(2);
-    expect(afterRetry.claims).not.toHaveProperty(item.id);
+    expect(afterRetry.claims).not.toHaveProperty(itemExecutionKey);
     expect(afterRetry.claims).toHaveProperty(unrelatedItemId);
     expect(afterRetry.worked.some((event) => event.itemId === item.id)).toBe(false);
   });
@@ -6108,7 +6114,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       }],
     });
     expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
-      itemId: generatedRepairCooldownKey(repair),
+      itemId: repair.id,
+      itemKey: generatedRepairCooldownKey(repair),
       outcome: 'dispatch-blocked',
     }));
   });
@@ -7696,7 +7703,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       diff: 'diff --git a/x.ts b/x.ts\n',
       workItemId: items[0]!.id,
     });
-    recordOutcome(items[1]!.id, 'empty');
+    recordOutcomeWithKey(items[1]!.id, workItemCoverageKey(items[1]!), 'empty');
 
     const result = await tick(cfgBuiltin({ perTickItems: 3, parallel: 3 }), { dryRun: true });
     const selection = readAgentActions().find((event) => event.action === 'daemon:selection');
