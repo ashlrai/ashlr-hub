@@ -3141,3 +3141,8 @@
 - V1 receipts are now retained as authenticated forensic evidence but render `unjoined`. They cannot create a trajectory receipt-qualified marker or make selection propensity available. Missing or malformed claimed receipts remain degraded.
 - A future V2 protocol must accept an opaque coordinator-minted authority only, bind one authority to one root/assignment, and complete durable write/re-read before an engine effect. The canary remains hard-disabled throughout.
 - Verification: the exact M342 V1-withholding regression passes, along with TypeScript typechecking and quiet lint. The broader M342 runner was stopped after its existing non-terminating worker behavior; protected CI remains the promotion authority.
+
+# Current Process-Bound Execution Authority
+- `WorkQueueCoordinator.beginExecution` now returns a frozen, process-branded authority object. `isMintedExecutionAuthority` accepts only an object issued by the coordinator in this process; a structurally identical copy is rejected.
+- This is a deliberately non-durable primitive for the future V2 receipt writer. It persists no owner capability, item identity, or additional telemetry, and is not yet consumed by receipt storage, the daemon, or an engine launch path.
+- Verification: M111 shared-queue coverage passes 56 assertions, with TypeScript typechecking and quiet lint passing. Protected CI remains the promotion authority.

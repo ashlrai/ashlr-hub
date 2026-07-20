@@ -2885,6 +2885,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Carry exact gateway route disposition and model tuple into the per-item concurrent commit point before enabling a binary canary producer.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
 - [ ] Add a coordinator-minted, authority-bound V2 receipt protocol before allowing any signed selection receipt to qualify propensity.
+- [x] Add a process-bound runtime brand for coordinator-minted execution authority, rejecting structural copies.
 
 ## Best-of-N Proposal Capture Repair (2026-07-20)
 - [x] Audit Best-of-N no-winner classification against the direct-run required-capture gate.

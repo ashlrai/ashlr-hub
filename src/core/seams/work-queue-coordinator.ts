@@ -57,15 +57,32 @@ export type ExecutionAuthority =
       claimBindingDigest: string;
     };
 
+const mintedExecutionAuthorities = new WeakSet<object>();
+
+function mintExecutionAuthority(authority: ExecutionAuthority): ExecutionAuthority {
+  const minted = Object.freeze({ ...authority }) as ExecutionAuthority;
+  mintedExecutionAuthorities.add(minted);
+  return minted;
+}
+
+/**
+ * Runtime-only proof that an authority came from this coordinator's successful
+ * pre-effect transition. This is deliberately process-bound and not durable;
+ * a future receipt protocol must consume it before persisting any projection.
+ */
+export function isMintedExecutionAuthority(value: unknown): value is ExecutionAuthority {
+  return !!value && typeof value === 'object' && mintedExecutionAuthorities.has(value);
+}
+
 function executionAuthority(ref: QueueClaimRef): ExecutionAuthority {
-  return {
+  return mintExecutionAuthority({
     kind: 'shared-queue-v1',
     queueId: ref.queueId,
     claimEpoch: ref.epoch,
     claimBindingDigest: createHash('sha256')
       .update(`ashlr:execution-authority:v1\0${ref.queueId}\0${ref.epoch}\0${ref.ownerKey}`)
       .digest('hex'),
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +189,7 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
   }
 
   beginExecution(_item: WorkItem, _machineId: string): ExecutionAuthority {
-    return { kind: 'local' };
+    return mintExecutionAuthority({ kind: 'local' });
   }
 
   settleClaim(_claimItem: WorkItem, _machineId: string): boolean {

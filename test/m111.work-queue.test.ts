@@ -25,6 +25,7 @@ import type { WorkItem, AshlrConfig } from '../src/core/types.js';
 import {
   LocalWorkQueueCoordinator,
   SharedWorkQueueCoordinator,
+  isMintedExecutionAuthority,
   selectWorkQueueCoordinator,
 } from '../src/core/seams/work-queue-coordinator.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -129,8 +130,10 @@ describe('M111 LocalWorkQueueCoordinator', () => {
   });
 
   it('projects only local authority at the pre-execution boundary', () => {
-    expect(new LocalWorkQueueCoordinator().beginExecution(makeItem('local'), 'machine-1'))
-      .toEqual({ kind: 'local' });
+    const authority = new LocalWorkQueueCoordinator().beginExecution(makeItem('local'), 'machine-1');
+    expect(authority).toEqual({ kind: 'local' });
+    expect(isMintedExecutionAuthority(authority)).toBe(true);
+    expect(isMintedExecutionAuthority({ ...authority })).toBe(false);
   });
 
   it('recordOutcome writes to local ledger and shouldSkip picks it up', () => {
@@ -409,6 +412,8 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
       claimEpoch: expect.any(Number),
       claimBindingDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(isMintedExecutionAuthority(authority)).toBe(true);
+    expect(isMintedExecutionAuthority({ ...authority! })).toBe(false);
     expect(authority && Object.keys(authority).sort()).toEqual([
       'claimBindingDigest', 'claimEpoch', 'kind', 'queueId',
     ]);
