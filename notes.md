@@ -2879,3 +2879,8 @@
   - In-memory generated-repair reservation, launch, settlement, failure-receipt, and unsettled-state bookkeeping now key by `workItemCoverageKey`.
   - Durable event records retain raw scanner IDs, but their reservation lookup is bound to the exact selected repository and generation, preventing same-tick cross-repository reservation consumption.
   - Focused generated-repair lifecycle/reservation coverage and diff checks pass; protected CI remains the authoritative stack gate.
+
+- Concurrent route two-repository regression (2026-07-20):
+  - The pure concurrent route planner now has direct coverage for two repositories sharing one scanner id but carrying different gateway hints.
+  - The regression proves coverage-keyed hints select each repository's own backend, so future map regressions fail before concurrent dispatch can cross-contaminate route identity.
+  - The targeted test passes locally; the stacked protected CI currently has an independently reproducible Ubuntu failure under investigation.
