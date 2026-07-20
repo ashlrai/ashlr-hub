@@ -469,8 +469,12 @@ export interface DispatchProductionEventsReadResult extends DispatchProductionSo
 export interface DispatchProductionYieldReadResult {
   summary?: DispatchProductionYieldSummary;
   sourceQuality: DispatchProductionSourceQuality;
-  /** Completeness-aware randomized assignment observation state for status only. */
-  selectionObservationState?: 'no-dispatches' | 'not-observed' | 'present';
+  /**
+   * Completeness-aware randomized assignment observation state for status only.
+   * A ledger event alone cannot qualify an observation: a future receipt join
+   * must bind it to pre-execution authority before it can be reported present.
+   */
+  selectionObservationState?: 'no-dispatches' | 'not-observed' | 'unjoined';
 }
 
 export interface DispatchProductionReasonCount {
@@ -7663,7 +7667,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
           selectionObservationState: read.events.length === 0
             ? 'no-dispatches' as const
             : read.events.some((event) => event.selectionObservation !== undefined)
-              ? 'present' as const
+              ? 'unjoined' as const
               : 'not-observed' as const,
         }
       : {}),

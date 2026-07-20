@@ -3030,6 +3030,7 @@ function selectionPropensityText(selectionPropensity) {
   if (state === 'degraded') return 'selection source degraded; observations withheld';
   if (state === 'no-dispatches') return 'no dispatches observed';
   if (state === 'not-observed') return 'no randomized-canary observations';
+  if (state === 'unjoined') return 'selection observations awaiting signed receipt join';
   if (state === 'present') return 'randomized-canary observations present';
   return 'selection source unavailable';
 }

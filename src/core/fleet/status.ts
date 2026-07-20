@@ -164,7 +164,7 @@ export interface FleetBackendResourceStatus {
 export interface FleetSelectionPropensityStatus {
   authority: 'observation-only';
   source: DispatchProductionSourceQuality;
-  observationState: 'unavailable' | 'degraded' | 'no-dispatches' | 'not-observed' | 'present';
+  observationState: 'unavailable' | 'degraded' | 'no-dispatches' | 'not-observed' | 'unjoined' | 'present';
 }
 
 /** A single backend's recent activity + quota standing. */
@@ -1450,7 +1450,7 @@ const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 function selectionPropensityStatus(
   source: DispatchProductionSourceQuality,
-  observed?: 'no-dispatches' | 'not-observed' | 'present',
+  observed?: 'no-dispatches' | 'not-observed' | 'unjoined' | 'present',
 ): FleetSelectionPropensityStatus {
   const observationState = source.sourceState === 'missing'
     ? 'unavailable'

@@ -3012,7 +3012,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
   });
 
-  it('reports a valid randomized selection observation without changing fleet readiness', async () => {
+  it('withholds a randomized selection observation until a signed receipt join exists', async () => {
     const now = new Date().toISOString();
     const event: DispatchProductionEvent = {
       schemaVersion: 1,
@@ -3058,13 +3058,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const status = await buildFleetStatus(baseConfig());
     expect(status.selectionPropensity).toMatchObject({
       authority: 'observation-only',
-      observationState: 'present',
+      observationState: 'unjoined',
       source: { sourceState: 'healthy', complete: true },
     });
     expect(status.autonomousShipReadiness ?? {}).not.toHaveProperty('selectionPropensity');
     expect(JSON.stringify(status.selectionPropensity)).not.toContain('claude');
     expect(formatFleetStatus(status)).toContain('Selection propensity:');
-    expect(formatFleetStatus(status)).toContain('state:     present');
+    expect(formatFleetStatus(status)).toContain('state:     unjoined');
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {
