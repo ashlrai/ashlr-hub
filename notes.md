@@ -3187,6 +3187,7 @@
 - `SharedWorkQueueCoordinator.recordSelectionStartReceiptV2` accepts only the exact frozen, process-minted shared execution authority. A private weak capability map recovers the queue claim; callers provide only the root, canonical selection observation, and immutable timestamp. Structural copies, local authority, foreign authority, and settled authority fail closed.
 - Repeated `beginExecution` calls for the same exact executing claim return the same authority object. The coordinator retires that object on settlement, completion, release, or authority loss.
 - The primitive writes and rereads the V2 local envelope first, derives every shared binding field from that reread envelope, binds it to the exact executing claim, then rereads both artifacts before reporting success. The daemon does not call it, selection canaries remain disabled, and no learning or merge authority has changed.
+- A private per-authority intent reservation now permits only one root/selection/timestamp tuple for the executing generation. Exact retries remain replayable, while divergent calls fail before they can create additional unjoined local receipt files.
 - Verification: V2 receipt and shared-queue suites pass 69 assertions; TypeScript typechecking and quiet lint pass. Protected CI remains the promotion authority.
 
 # Current Pending Proposal Recency Boundary

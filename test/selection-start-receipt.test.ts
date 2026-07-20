@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDispatchSelectionObservation } from '../src/core/fleet/dispatch-production-ledger.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -274,6 +274,15 @@ describe('selection start receipt V2 store', () => {
       selectionObservation: observation(),
       ts: '2026-07-20T15:00:00.000Z',
     })).toEqual({ status: 'replayed', receiptId: recorded.receiptId });
+    expect(coordinator.recordSelectionStartReceiptV2(authority, {
+      root,
+      selectionObservation: observation(),
+      ts: '2026-07-20T15:01:00.000Z',
+    })).toEqual({
+      status: 'conflicted', reason: 'authority-already-bound-to-different-receipt',
+    });
+    expect(readdirSync(coordinatorSelectionStartReceiptV2Dir()).filter((name) => name.endsWith('.json')))
+      .toEqual([`${recorded.receiptId}.json`]);
     expect(coordinator.settleClaim(item, 'machine-a')).toBe(true);
     expect(coordinator.recordSelectionStartReceiptV2(authority, {
       root,

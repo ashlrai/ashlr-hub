@@ -264,6 +264,7 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
   private readonly claimWorkedItemIds = new Map<string, string>();
   private readonly authorityRefs = new WeakMap<object, QueueClaimRef>();
   private readonly authoritiesByClaim = new Map<string, ExecutionAuthority>();
+  private readonly receiptIntentByAuthority = new WeakMap<object, string>();
   private readonly authorityEnabled: boolean;
   private readonly leaseMs: number;
 
@@ -289,7 +290,10 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
 
   private clearExecutionAuthority(key: string): void {
     const authority = this.authoritiesByClaim.get(key);
-    if (authority) this.authorityRefs.delete(authority);
+    if (authority) {
+      this.authorityRefs.delete(authority);
+      this.receiptIntentByAuthority.delete(authority);
+    }
     this.authoritiesByClaim.delete(key);
   }
 
@@ -303,6 +307,22 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     this.authoritiesByClaim.set(key, authority);
     this.authorityRefs.set(authority, ref);
     return authority;
+  }
+
+  private reserveReceiptIntent(
+    authority: ExecutionAuthority,
+    input: RecordSelectionStartReceiptV2Input,
+  ): 'reserved' | 'replay' | 'invalid' | 'conflicted' {
+    const rootDigest = rootDigestV2(input.root);
+    const selectionDigest = selectionDigestV2(input.selectionObservation);
+    if (!rootDigest || !selectionDigest || !Number.isFinite(Date.parse(input.ts))) return 'invalid';
+    const intent = createHash('sha256').update(JSON.stringify([
+      'ashlr:selection-start-receipt-intent:v2', rootDigest, selectionDigest, input.ts,
+    ]), 'utf8').digest('hex');
+    const existing = this.receiptIntentByAuthority.get(authority);
+    if (existing) return existing === intent ? 'replay' : 'conflicted';
+    this.receiptIntentByAuthority.set(authority, intent);
+    return 'reserved';
   }
 
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
@@ -460,6 +480,9 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     }
     const ref = this.authorityRefs.get(authority);
     if (!ref || ref.phase !== 'executing') return { status: 'authority-lost', reason: 'foreign-or-settled-authority' };
+    const intent = this.reserveReceiptIntent(authority, input);
+    if (intent === 'invalid') return { status: 'unavailable', reason: 'invalid-receipt-input' };
+    if (intent === 'conflicted') return { status: 'conflicted', reason: 'authority-already-bound-to-different-receipt' };
     const local = writeCoordinatorSelectionStartReceiptV2({
       ...input,
       claim: {
