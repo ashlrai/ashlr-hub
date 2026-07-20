@@ -2832,3 +2832,29 @@
 - Windows failure-receipt test budget (2026-07-20):
   - The protected Windows native lifecycle shard failed the DACL-heavy `m342` treatment-free failure-receipt materialization test only because Vitest's default five-second test budget elapsed; its assertions did not fail.
   - That one test now has a local 30-second ceiling. This retains a finite hang detector while accommodating the real private-storage/fsync workload on Windows, without changing global test timing or production behavior.
+
+- Shared-queue cross-repository collision fence (2026-07-20):
+  - `SharedStore` only receives raw claim ids, so the coordinator now rejects an entire shared claim batch before that lossy boundary when one raw id maps to two canonical filesystem repositories. Local coordination is unchanged.
+  - The fence scans all lanes together, rejects invalid repository identity, and leaves no claim or worked state behind. It prevents cross-repo double-claim, completion, and cooldown corruption while a canonical execution-key protocol is designed.
+  - This is intentionally a conservative availability tradeoff. Equal raw ids in shared mode require an upstream identity fix rather than arbitrary first-wins behavior; the permanent solution remains repository-bound claim keys in the shared store schema and coordinator API.
+
+- Local multi-lane repository identity (2026-07-20):
+  - `LocalWorkQueueCoordinator.claimItemsByLane` previously de-duplicated only `item.id`, silently dropping the second of two same-id items from distinct repositories before execution. This was an availability loss even outside shared mode.
+  - Local lane de-duplication now uses the existing repository-scoped `workItemCoverageKey`, including canonical path, item id, and repair generation. It preserves same-repository duplicate suppression while allowing independent enrolled repositories to use common scanner ids.
+  - Focused coordinator coverage proves two equal IDs in separate lanes are both selected. The shared coordinator remains deliberately fail-closed for that input pending the durable execution-key protocol migration.
+
+- Canonical shared execution-key foundation (2026-07-20):
+  - Added `workItemExecutionKey`, a repository-physical, generation-aware execution identity distinct from the compatibility-oriented pending-proposal coverage key. It returns `null` when canonical filesystem identity cannot be established.
+  - Shared queue collision detection now consumes this primitive, so its fail-closed decision and the forthcoming claim protocol use one exact definition of repository-qualified work. Normalized aliases collapse to one identity; equal raw ids in distinct repositories remain distinct.
+  - This foundation was immediately consumed by the shared queue migration below; the generic store schema remains string-keyed, but coordinator-managed claims no longer use raw scanner ids.
+
+- Shared queue execution-key migration (2026-07-20):
+  - `SharedWorkQueueCoordinator` now persists canonical `workItemExecutionKey` values as its store claim keys, rather than raw scanner ids. Claim, renew, fence, begin-execution, release, settlement, and atomic claim-outcome APIs take `WorkItem` capabilities and derive the key at the authority boundary.
+  - Daemon lease controllers, attempt identities, fence reconciliation, release, dispatch-blocked settlement, terminal settlement, and post-dispatch release now carry the selected `WorkItem` rather than reconstructing a shared claim from `item.id`. Claim cooldown policies use the same execution key under the store lock; worked outcomes retain their repository-scoped cooldown identity.
+  - The temporary whole-batch collision fence is removed. Shared queues can now independently claim equal scanner ids from distinct repositories and lanes, while missing execution identity remains fail-closed. Direct no-policy coordinator claims retain the legacy raw worked-event cooldown lookup for compatibility.
+  - Focused integration coverage proves two enrolled repositories with the same scanner id both dispatch and settle through one shared queue, leaving no active lease and recording two distinct cooldown keys. Coordinator and two-machine suites, typecheck, scoped lint, and diff checks pass.
+
+- Daemon cooldown-policy repository identity (2026-07-20):
+  - The daemon still indexed per-item claim cooldown policies by raw `item.id`, even after the worked ledger and local coordinator became repository-scoped. A same-id item in a second repository could therefore inherit the first item's cooldown policy or have its frozen worked key misattributed.
+  - Policy lookup, policy completion, frozen worked-key resolution, selection blocker summaries, and metadata-only generated-repair decision telemetry now use `workItemCoverageKey`. The policy's worked-event keys remain unchanged and repository-scoped.
+  - A full local daemon regression pre-cools one repository's `shared-scanner-id` and proves an equal-id item in a separately enrolled repository still executes and records only under its own identity. This is a prerequisite to, not a substitute for, the shared-store claim-key migration.

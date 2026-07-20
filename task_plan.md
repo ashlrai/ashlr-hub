@@ -2717,3 +2717,32 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Diagnose the protected Windows native lifecycle shard failure from the completed job log.
 - [x] Bound only the DACL-heavy failure-receipt materialization case with an explicit 30-second test timeout.
 - [x] Pass the focused receipt materialization regression without changing global CI timing.
+
+## Shared-Queue Cross-Repository Collision Fence (2026-07-20)
+- [x] Audit the lossy WorkItem-to-raw-id boundary in shared queue claims.
+- [x] Refuse whole claim batches containing one raw id from multiple canonical repositories.
+- [x] Preserve local coordinator behavior and shared-store schema compatibility.
+- [x] Prove direct and cross-lane collisions leave the queue unmodified.
+- [x] Pass the focused shared-queue suite, typecheck, scoped lint, and diff checks.
+
+## Local Multi-Lane Repository Identity (2026-07-20)
+- [x] Audit local lane de-duplication against the repository-scoped cooldown and pending-proposal identities.
+- [x] Preserve equal scanner ids from different canonical repositories during local lane selection.
+- [x] Prove two-repository lane selection and pass focused coordinator tests, typecheck, scoped lint, and diff checks.
+
+## Daemon Cooldown-Policy Repository Identity (2026-07-20)
+- [x] Audit raw-id policy lookup through selection, cooldown settlement, and generated-repair decision telemetry.
+- [x] Key all daemon claim cooldown-policy lookups by repository-scoped work identity.
+- [x] Prove a cooled same-id item cannot block a second enrolled repository's item; pass focused daemon/coordinator tests, typecheck, scoped lint, and diff checks.
+
+## Canonical Shared Execution-Key Foundation (2026-07-20)
+- [x] Define one nullable canonical WorkItem execution identity that includes repository, item, and repair generation.
+- [x] Adopt it in shared collision fencing and prove alias normalization plus repository separation.
+- [x] Pass focused coordinator coverage, typecheck, scoped lint, and diff checks.
+
+## Shared Queue Execution-Key Migration (2026-07-20)
+- [x] Move shared store claim keys from raw scanner ids to canonical WorkItem execution identities through the coordinator.
+- [x] Require WorkItem capabilities for shared lease, fence, execution, release, settlement, and atomic outcome mutation.
+- [x] Bind daemon lease controllers, attempt identities, cooldown policies, and post-dispatch claim mutation to the selected WorkItem identity.
+- [x] Remove the temporary cross-repository collision fence and prove equal scanner ids dispatch and settle independently in one shared queue.
+- [x] Pass focused coordinator/two-machine/full-tick coverage, typecheck, scoped lint, and diff checks.

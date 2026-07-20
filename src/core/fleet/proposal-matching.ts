@@ -1,5 +1,6 @@
 import type { AshlrConfig, Proposal, WorkItem } from '../types.js';
 import { resolve } from 'node:path';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { resolveProductionVelocityProfile } from '../fabric/production-velocity.js';
 import { generatedRepairGenerationIds } from './generated-repair-lifecycle.js';
 
@@ -14,6 +15,18 @@ export interface PendingProposalBlockingOptions {
 
 export function workItemCoverageKey(item: Pick<WorkItem, 'repo' | 'id' | 'repairGenerationId'>): string {
   return `${resolve(item.repo)}\0${item.id}\0${item.repairGenerationId ?? ''}`;
+}
+
+/**
+ * Canonical identity for execution authority, distinct from the compatibility
+ * coverage key. Shared queue claims must fail closed when a repository path
+ * cannot be physically identified, rather than inventing a durable alias.
+ */
+export function workItemExecutionKey(
+  item: Pick<WorkItem, 'repo' | 'id' | 'repairGenerationId'>,
+): string | null {
+  const repo = canonicalFilesystemPathIdentity(item.repo, { foldWindowsCase: false });
+  return repo === null ? null : `${repo}\0${item.id}\0${item.repairGenerationId ?? ''}`;
 }
 
 function exactItemIdRegex(itemId: string): RegExp {

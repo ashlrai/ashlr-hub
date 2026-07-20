@@ -212,6 +212,7 @@ import {
   blockingPendingProposalsForBacklog,
   pendingProposalItemKeysForBacklog,
   workItemCoverageKey,
+  workItemExecutionKey,
 } from '../fleet/proposal-matching.js';
 import { loadConfig } from '../config.js';
 import { hostname as osHostname } from 'node:os';
@@ -1875,20 +1876,21 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
   routeEvaluationByItem?: Map<WorkItem, GeneratedRepairRouteEvaluation>;
 }): void {
-  const selectedIds = new Set(fields.selectedItems.map((item) => item.id));
-  const claimedIds = new Set(fields.claimedItems.map((item) => item.id));
+  const selectedKeys = new Set(fields.selectedItems.map(workItemCoverageKey));
+  const claimedKeys = new Set(fields.claimedItems.map(workItemCoverageKey));
   const allGeneratedItems = fields.items.filter((item) => isTrustedGeneratedRepairItem(item));
   const generatedItems = allGeneratedItems.slice(0, MAX_GENERATED_REPAIR_DECISION_EVENTS);
   const droppedDecisionCount = Math.max(0, allGeneratedItems.length - generatedItems.length);
   if (generatedItems.length === 0) return;
   recordAgentAction(generatedItems.map((item): AgentActionEvent => {
     const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
-    const policy = fields.cooldownPolicies.get(item.id) ??
+    const itemKey = workItemExecutionKey(item) ?? workItemCoverageKey(item);
+    const policy = fields.cooldownPolicies.get(itemKey) ??
       claimCooldownPolicyForSelectionItem(item, fields.baseCooldownMs, fields.repairRecoveryHealthy);
     const effectiveCooldownMs = cooldownMsForSelectionItem(fields.workedEvents, policy);
     const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, policy);
-    const selected = selectedIds.has(item.id);
-    const claimed = claimedIds.has(item.id);
+    const selected = selectedKeys.has(itemKey);
+    const claimed = claimedKeys.has(itemKey);
     const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
     const routeEvaluation = fields.routeEvaluationByItem?.get(item);
     const inspectedRoute = routeEvaluation?.feasibility;
@@ -4296,16 +4298,18 @@ export async function tick(
   }
 
   const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
+  const claimKeyForItem = (item: WorkItem): string =>
+    workItemExecutionKey(item) ?? workItemCoverageKey(item);
   const claimCooldownPolicies = new Map<string, QueueClaimCooldownPolicy>(
     backlogItems.map((item) => [
-      item.id,
+      claimKeyForItem(item),
       claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
     ]),
   );
   const frozenWorkedItemId = (item: WorkItem): string =>
-    claimCooldownPolicies.get(item.id)?.itemIds[0] ?? item.id;
+    claimCooldownPolicies.get(claimKeyForItem(item))?.itemIds[0] ?? workItemCoverageKey(item);
   const isSelectionBlocked = (item: WorkItem): boolean =>
-    generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(item.id)!) ||
+    generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(claimKeyForItem(item))!) ||
     pendingItemKeys.has(workItemCoverageKey(item));
   const claimRepairQueue = (() => {
     try {
@@ -4474,7 +4478,7 @@ export async function tick(
     let fastRepairCooldown = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
-      const itemPolicy = claimCooldownPolicies.get(item.id)!;
+      const itemPolicy = claimCooldownPolicies.get(claimKeyForItem(item))!;
       const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, itemPolicy);
       const cooling = generatedRepairShouldSkip(selectionWorkedEvents, itemPolicy);
       if (pending) pendingBlocked++;
@@ -4653,9 +4657,10 @@ export async function tick(
   // cross-machine contention. Cooldown evidence is re-read under the same lock
   // so a completion that raced selection cannot be immediately reclaimed.
   for (const item of claimLanes.flatMap((lane) => lane.candidates)) {
-    if (!claimCooldownPolicies.has(item.id)) {
+    const itemKey = claimKeyForItem(item);
+    if (!claimCooldownPolicies.has(itemKey)) {
       claimCooldownPolicies.set(
-        item.id,
+        itemKey,
         claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
       );
     }
@@ -4754,8 +4759,7 @@ export async function tick(
       return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
     }
     try {
-      const claimedIds = workedSet.map((i) => i.id);
-      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+      if (workedSet.length > 0) coordinator.release(workedSet, machineId);
     } catch (err) {
       console.warn('[ashlr] daemon:tick dry-run coordinator release failed:', (err as Error)?.message ?? err);
     }
@@ -4779,24 +4783,26 @@ export async function tick(
   }
 
   const workedSetIds = workedSet.map((i) => i.id);
+  const leaseKey = (item: WorkItem): string => workItemCoverageKey(item);
   const leaseAbortControllers = new Map(
-    workedSetIds.map((itemId) => [itemId, new AbortController()] as const),
+    workedSet.map((item) => [leaseKey(item), new AbortController()] as const),
   );
   let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
-  const abortLostClaims = (renewedIds: string[]): void => {
-    const renewed = new Set(renewedIds);
-    for (const itemId of workedSetIds) {
-      if (renewed.has(itemId)) continue;
-      const controller = leaseAbortControllers.get(itemId);
+  const abortLostClaims = (renewedItems: WorkItem[]): void => {
+    const renewed = new Set(renewedItems.map(leaseKey));
+    for (const item of workedSet) {
+      const key = leaseKey(item);
+      if (renewed.has(key)) continue;
+      const controller = leaseAbortControllers.get(key);
       if (controller && !controller.signal.aborted) {
-        controller.abort(new Error(`shared queue claim authority lost for ${itemId}`));
+        controller.abort(new Error(`shared queue claim authority lost for ${item.id}`));
       }
     }
   };
-  const renewClaimLeases = (): string[] => {
+  const renewClaimLeases = (): WorkItem[] => {
     if (workedSetIds.length === 0 || !stillOwnsTick()) return [];
     try {
-      const renewed = coordinator.fence(workedSetIds, machineId);
+      const renewed = coordinator.fence(workedSet, machineId);
       abortLostClaims(renewed);
       return renewed;
     } catch (err) {
@@ -4805,7 +4811,7 @@ export async function tick(
       return [];
     }
   };
-  const startLeaseRenewer = (): string[] => {
+  const startLeaseRenewer = (): WorkItem[] => {
     if (workedSetIds.length === 0) return [];
     const renewed = renewClaimLeases();
     const intervalMs = Math.max(1, Math.min(60_000, Math.floor(sharedQueueLeaseMs / 3)));
@@ -4874,7 +4880,7 @@ export async function tick(
   try {
   const initiallyRenewed = startLeaseRenewer();
   if (workedSetIds.length > 0 && initiallyRenewed.length === 0) {
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try { coordinator.release(workedSet, machineId); } catch { /* exact release is best effort */ }
     return persistenceRefusal('tick refused: shared queue claim authority unavailable after selection');
   }
 
@@ -4889,7 +4895,7 @@ export async function tick(
 
   if (!stillOwnsTick()) {
     stopLeaseRenewer();
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try { coordinator.release(workedSet, machineId); } catch { /* exact release is best effort */ }
     return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
@@ -4897,7 +4903,7 @@ export async function tick(
   if (!spendGuard.ok) {
     stopLeaseRenewer();
     try {
-      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+      if (workedSet.length > 0) coordinator.release(workedSet, machineId);
     } catch (err) {
       console.warn('[ashlr] daemon:tick coordinator release after spend-guard failure failed:', (err as Error)?.message ?? err);
     }
@@ -4992,7 +4998,7 @@ export async function tick(
     return poolTierOf(engineTier);
   });
 
-  const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  const attemptIds = new Map(workedSet.map((item) => [leaseKey(item), createOuterAttemptIdentity()] as const));
   class QueueClaimAuthorityError extends Error {
     constructor(itemId: string) {
       super(`shared queue claim authority unavailable for ${itemId}`);
@@ -5042,13 +5048,13 @@ export async function tick(
     }),
   });
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
-    const attemptId = attemptIds.get(item.id)!;
-    const leaseController = leaseAbortControllers.get(item.id)!;
+    const attemptId = attemptIds.get(leaseKey(item))!;
+    const leaseController = leaseAbortControllers.get(leaseKey(item))!;
     const dispatchSignal = opts.signal
       ? AbortSignal.any([opts.signal, leaseController.signal])
       : leaseController.signal;
     const beginQueueExecution = (): void => {
-      if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
+      if (dispatchSignal.aborted || !coordinator.beginExecution(item, machineId)) {
         if (!leaseController.signal.aborted) {
           leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
         }
@@ -6425,18 +6431,18 @@ export async function tick(
   const ownershipLostBeforeCooldown = postDispatchOwnershipLost();
   if (ownershipLostBeforeCooldown) return ownershipLostBeforeCooldown;
   if (automaticDrain && drainSelectedItems.length > 0) {
-    const dispatchedItemIds = new Set(
+    const dispatchedItemKeys = new Set(
       outcomes.flatMap((outcome) =>
         outcome.status === 'fulfilled' && outcome.value.dispatched
-          ? [outcome.value.item.id]
+          ? [leaseKey(outcome.value.item)]
           : [],
       ),
     );
     try {
       for (const item of drainSelectedItems) {
-        if (dispatchedItemIds.has(item.id)) continue;
+        if (dispatchedItemKeys.has(leaseKey(item))) continue;
         coordinator.recordClaimOutcome(
-          item.id,
+          item,
           frozenWorkedItemId(item),
           'dispatch-blocked',
           machineId,
@@ -6580,7 +6586,7 @@ export async function tick(
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
           if (productionWriteFailedItemIds.has(outcome.value.item.id)) {
-            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item.id, machineId);
+            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item, machineId);
             workedOutcomeFailedItemIds.add(outcome.value.item.id);
             continue;
           }
@@ -6589,7 +6595,7 @@ export async function tick(
             // The parent attempt is terminal, but failed repair projection grants
             // no cooldown authority. Clear only this exact executing generation
             // and keep the parent immediately retryable.
-            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item.id, machineId);
+            if (sharedQueueMode) coordinator.settleClaim(outcome.value.item, machineId);
             workedOutcomeFailedItemIds.add(outcome.value.item.id);
             continue;
           }
@@ -6598,7 +6604,7 @@ export async function tick(
             production.reason?.startsWith('duplicate diff skipped;') === true;
           if (production?.runEventSummary?.status === 'aborted') continue;
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
-            if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+            if (!coordinator.settleClaim(outcome.value.item, machineId)) {
               workedOutcomeFailedItemIds.add(outcome.value.item.id);
             }
             continue;
@@ -6608,7 +6614,7 @@ export async function tick(
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
           if (!coordinator.recordClaimOutcome(
-            outcome.value.item.id,
+            outcome.value.item,
             frozenWorkedItemId(outcome.value.item),
             outcomeLabel,
             machineId,
@@ -6788,7 +6794,7 @@ export async function tick(
           continue;
         }
         if (!coordinator.recordClaimOutcome(
-          itemId,
+          outcome.value.item,
           frozenWorkedItemId(outcome.value.item),
           'dispatch-blocked',
           machineId,
@@ -6807,7 +6813,7 @@ export async function tick(
         workedOutcomeFailedItemIds.add(itemId);
         continue;
       }
-      if (sharedQueueMode && !coordinator.settleClaim(itemId, machineId)) {
+      if (sharedQueueMode && !coordinator.settleClaim(outcome.value.item, machineId)) {
         workedOutcomeFailedItemIds.add(itemId);
         continue;
       }
@@ -6876,13 +6882,13 @@ export async function tick(
   const ownershipLostBeforeClaimRelease = postDispatchOwnershipLost();
   if (ownershipLostBeforeClaimRelease) return ownershipLostBeforeClaimRelease;
   try {
-    const dispatchedIds = new Set(
+    const dispatchedKeys = new Set(
       outcomes
         .filter((o): o is PromiseFulfilledResult<ItemOutcome> => o.status === 'fulfilled' && o.value.dispatched)
-        .map(o => o.value.item.id),
+        .map(o => leaseKey(o.value.item)),
     );
-    const unworkedIds = workedSet.map(i => i.id).filter(id => !dispatchedIds.has(id));
-    if (unworkedIds.length > 0) coordinator.release(unworkedIds, machineId);
+    const unworkedItems = workedSet.filter((item) => !dispatchedKeys.has(leaseKey(item)));
+    if (unworkedItems.length > 0) coordinator.release(unworkedItems, machineId);
   } catch (err) {
     // Release must never crash the tick.
     console.warn('[ashlr] daemon:tick coordinator release failed:', (err as Error)?.message ?? err);
