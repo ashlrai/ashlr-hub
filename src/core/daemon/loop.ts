@@ -4843,7 +4843,8 @@ export async function tick(
     tier: EngineTier | null,
   ): boolean => {
     if (!isTrustedGeneratedRepairItem(item)) return true;
-    if (generatedRepairReservations.has(item.id)) return false;
+    const itemKey = workItemCoverageKey(item);
+    if (generatedRepairReservations.has(itemKey)) return false;
     if (readDispatchProductionAttemptProtocolQuality().status !== 'healthy') {
       return false;
     }
@@ -4858,19 +4859,20 @@ export async function tick(
       retryPolicy.requireAlternative ? retryPolicy.excludedBackend : null,
     );
     if (!reservation) return false;
-    generatedRepairReservations.set(item.id, reservation);
+    generatedRepairReservations.set(itemKey, reservation);
     return true;
   };
-  const settleGeneratedRepairExecution = (itemId: string): boolean => {
-    const reservation = generatedRepairReservations.get(itemId);
+  const settleGeneratedRepairExecution = (item: WorkItem): boolean => {
+    const itemKey = workItemCoverageKey(item);
+    const reservation = generatedRepairReservations.get(itemKey);
     if (!reservation) return false;
     if (!clearGeneratedRepairExecutionReservation(reservation)) return false;
-    settledGeneratedRepairReservationItemIds.add(itemId);
+    settledGeneratedRepairReservationItemIds.add(itemKey);
     return true;
   };
   const markGeneratedRepairExecutionLaunched = (item: WorkItem): boolean => {
     if (!isTrustedGeneratedRepairItem(item)) return true;
-    const reservation = generatedRepairReservations.get(item.id);
+    const reservation = generatedRepairReservations.get(workItemCoverageKey(item));
     if (!reservation || reservation.record.phase !== 'prepared') return false;
     const launched: GeneratedRepairExecutionReservationRecord = {
       ...reservation.record,
@@ -6488,7 +6490,7 @@ export async function tick(
       machineId,
       productionCompletedAt,
       routingCfg,
-      generatedRepairReservations.get(outcome.value.item.id)?.record,
+      generatedRepairReservations.get(itemKey)?.record,
     );
     if (event) {
       productionEventItemKeys.set(event, itemKey);
@@ -6565,7 +6567,7 @@ export async function tick(
       }
     }
     const failedRepairItem = generatedRepairItemsById.get(itemKey);
-    const failedRepairReservation = generatedRepairReservations.get(event.itemId)?.record;
+    const failedRepairReservation = generatedRepairReservations.get(itemKey)?.record;
     if (
       canonicalProductionRecorded &&
       failedRepairItem !== undefined &&
@@ -6822,7 +6824,7 @@ export async function tick(
         )) workedOutcomeFailedItemKeys.add(itemKey);
         if (
           generatedRepairFailedAttemptWitnessItemKeys.has(itemKey) &&
-          !settleGeneratedRepairExecution(itemId)
+          !settleGeneratedRepairExecution(outcome.value.item)
         ) {
           console.warn('[ashlr] daemon:tick failed repair attempt reservation settlement incomplete');
           workedOutcomeFailedItemKeys.add(itemKey);
@@ -6838,7 +6840,7 @@ export async function tick(
         workedOutcomeFailedItemKeys.add(itemKey);
         continue;
       }
-      if (!settleGeneratedRepairExecution(itemId)) {
+      if (!settleGeneratedRepairExecution(outcome.value.item)) {
         console.warn('[ashlr] daemon:tick generated repair durable reservation settlement incomplete');
         workedOutcomeFailedItemKeys.add(itemKey);
       }

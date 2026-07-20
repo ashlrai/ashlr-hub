@@ -2765,3 +2765,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Key concurrent routing and task lookup by repository-qualified work identity.
 - [x] Carry the same key through planner hint consumption and persisted dispatch-manifest annotations.
 - [x] Pass focused concurrent manifest/fallback/routing coverage and diff checks.
+
+## Generated-Repair Reservation Repository Identity (2026-07-20)
+- [x] Audit in-memory generated-repair reservation, settlement, and receipt lookups for raw scanner-id collisions.
+- [x] Key all reservation lifecycle bookkeeping by repository-qualified work identity.
+- [x] Preserve raw event identifiers while binding reservation lookup to the selected WorkItem.
+- [x] Pass focused generated-repair lifecycle/reservation coverage and diff checks.
