@@ -2703,3 +2703,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Project aggregate-only tracked/completed/blocked/unknown run state with explicit available/partial/withheld truthfulness.
 - [x] Surface lifecycle state in CLI, Mission Control, Fleet, and production workspace views without granting routing, verification, or merge authority.
 - [x] Pass semantic-event, Fleet status, dashboard, typecheck, lint, build, and diff checks.
+
+## Dashboard Coverage Truthfulness (2026-07-20)
+- [x] Render absent or malformed coverage metrics as unavailable while preserving explicit zero coverage as `0 (0%)`.
+- [ ] Run the focused dashboard regression after the local formatter change (blocked locally: `vitest` is not installed in this isolated worktree).

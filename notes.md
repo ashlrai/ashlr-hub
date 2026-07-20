@@ -2824,3 +2824,8 @@
   - Regression coverage proves a rejected semantic batch on an otherwise healthy action ledger produces `runSignalsState:"partial"` with aggregate lifecycle counts, while the raw canary remains absent from the projection.
   - The 50-entry opaque run-signal display cap never truncates lifecycle totals: counts are derived from the complete bounded source read before display slicing, with a 51-run regression proving truthful `tracked` and terminal totals.
   - CLI regression coverage exercises available, partial, and withheld lifecycle output together with semantic-rejection diagnostics in the Agent Actions source detail.
+
+- Dashboard coverage truthfulness (2026-07-20):
+  - The browser dashboard shared coverage formatter previously converted missing or malformed metric objects into `0 (0%)`, which made unavailable Fleet evidence look like a measured empty result.
+  - The display-only formatter now returns `unavailable` for absent or malformed metrics while preserving explicit `{ count: 0, rate: 0 }` as a truthful observed zero. No source-quality, routing, verification, or merge policy changes are involved.
+  - Focused verification was attempted with `npm test -- --run test/m213.dashboard-sse.test.ts`, but this isolated worktree has no `vitest` binary installed (`sh: vitest: command not found`); no dependency installation was performed.

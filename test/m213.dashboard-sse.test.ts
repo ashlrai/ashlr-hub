@@ -982,6 +982,25 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
   });
 
+  it('app.js distinguishes unavailable coverage from an observed zero', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function formatFleetPercent(rate)');
+    const end = src.indexOf('\nfunction renderAttemptCoverageCard', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const formatter = new Function(
+      `${src.slice(start, end)}\nreturn formatCoverageMetric;`,
+    )() as (metric: unknown) => string;
+    expect(formatter(undefined)).toBe('unavailable');
+    expect(formatter(null)).toBe('unavailable');
+    expect(formatter('not-a-metric')).toBe('unavailable');
+    expect(formatter({})).toBe('unavailable');
+    expect(formatter({ count: -1, rate: 0 })).toBe('unavailable');
+    expect(formatter({ count: 0, rate: 0 })).toBe('0 (0%)');
+  });
+
   it('renders cutoff checkpoints outside readiness and labels evidence source quality honestly', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

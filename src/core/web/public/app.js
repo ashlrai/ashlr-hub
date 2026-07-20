@@ -2906,8 +2906,13 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
 }
 
 function formatCoverageMetric(metric) {
-  if (!metric || typeof metric !== 'object') return '0 (0%)';
-  return `${Number(metric.count ?? 0)} (${formatFleetPercent(metric.rate)})`;
+  if (!metric || typeof metric !== 'object') return 'unavailable';
+  const count = Number(metric.count);
+  const rate = Number(metric.rate);
+  if (!Number.isFinite(count) || count < 0 || !Number.isFinite(rate) || rate < 0) {
+    return 'unavailable';
+  }
+  return `${count} (${formatFleetPercent(rate)})`;
 }
 
 function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
