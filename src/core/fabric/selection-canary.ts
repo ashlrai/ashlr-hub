@@ -1,6 +1,7 @@
 /** Strict, side-effect-free selection-canary configuration resolution. */
 
 import type { FinalConcurrentDispatchRoute } from './concurrent-dispatch.js';
+import { isOrdinaryFleetGatewayDecision, type GatewayDecision } from './gateway.js';
 
 export const SELECTION_CANARY_PROTOCOL = 'binary-uniform-v1' as const;
 
@@ -53,6 +54,36 @@ export interface SelectionCanaryEligibilityInput {
 export interface SelectionCanaryEligiblePair {
   protocol: typeof SELECTION_CANARY_PROTOCOL;
   candidates: readonly [SelectionCanaryCandidate, SelectionCanaryCandidate];
+}
+
+/** Inputs from one real gateway decision and its final concurrent assignment. */
+export interface CanonicalSelectionCanaryCandidateInput {
+  gatewayDecision: GatewayDecision;
+  finalRoute: FinalConcurrentDispatchRoute;
+  candidateAllowed: boolean;
+  slotsAtPlan: number;
+  remainingBefore: number;
+}
+
+/**
+ * Construct a candidate only when gateway intent survived planning unchanged.
+ * It creates no alternative route and never infers ordinary status from text.
+ */
+export function canonicalSelectionCanaryCandidate(
+  input: CanonicalSelectionCanaryCandidateInput,
+): SelectionCanaryCandidate | null {
+  const gatewayModel = input.gatewayDecision.model ?? null;
+  if (!isOrdinaryFleetGatewayDecision(input.gatewayDecision) ||
+    input.finalRoute.disposition !== 'gateway-exact' ||
+    input.finalRoute.backend !== input.gatewayDecision.backend ||
+    input.finalRoute.tier !== input.gatewayDecision.tier ||
+    input.finalRoute.model !== gatewayModel) return null;
+  return {
+    route: input.finalRoute,
+    candidateAllowed: input.candidateAllowed,
+    slotsAtPlan: input.slotsAtPlan,
+    remainingBefore: input.remainingBefore,
+  };
 }
 
 function hasPositiveCapacity(candidate: SelectionCanaryCandidate): boolean {

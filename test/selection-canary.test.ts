@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   resolveSelectionCanary,
+  canonicalSelectionCanaryCandidate,
   selectEligibleBinaryCanaryPair,
   type SelectionCanaryCandidate,
 } from '../src/core/fabric/selection-canary.js';
@@ -81,6 +82,39 @@ describe('binary canary pair eligibility', () => {
     expect(selectEligibleBinaryCanaryPair({
       candidates: [candidate('codex', { route: { backend: 'codex', tier: 'frontier', model: null, disposition: 'planner-reassigned' } }), candidate('claude')],
       context: 'ordinary-direct', snapshotState: 'fresh',
+    })).toBeNull();
+  });
+});
+
+describe('canonical selection candidate', () => {
+  it('binds only an ordinary gateway decision to its unchanged final route', () => {
+    const route = candidate('codex').route;
+    expect(canonicalSelectionCanaryCandidate({
+      gatewayDecision: {
+        backend: 'codex', tier: 'frontier', model: 'gpt-5.6', source: 'fleet', reason: 'base',
+        trace: [{ stage: 'routeBackend', backend: 'codex', tier: 'frontier', reason: 'base' }],
+      },
+      finalRoute: route,
+      candidateAllowed: true,
+      slotsAtPlan: 2,
+      remainingBefore: 2,
+    })).toEqual(candidate('codex', { remainingBefore: 2 }));
+  });
+
+  it('refuses trace overrides, route changes, and model inheritance', () => {
+    const decision = {
+      backend: 'codex' as const, tier: 'frontier' as const, model: 'gpt-5.6', source: 'fleet' as const, reason: 'base',
+      trace: [{ stage: 'routeBackend', backend: 'codex' as const, tier: 'frontier' as const, reason: 'base' }],
+    };
+    expect(canonicalSelectionCanaryCandidate({
+      gatewayDecision: decision,
+      finalRoute: { backend: 'nim', tier: 'frontier', model: null, disposition: 'planner-reassigned' },
+      candidateAllowed: true, slotsAtPlan: 2, remainingBefore: 2,
+    })).toBeNull();
+    expect(canonicalSelectionCanaryCandidate({
+      gatewayDecision: { ...decision, trace: [...decision.trace, { stage: 'resourceDemote', backend: 'nim', tier: 'frontier', reason: 'demoted' }] },
+      finalRoute: candidate('codex').route,
+      candidateAllowed: true, slotsAtPlan: 2, remainingBefore: 2,
     })).toBeNull();
   });
 });

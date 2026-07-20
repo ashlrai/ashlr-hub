@@ -3116,3 +3116,7 @@
 # Current Ordinary Gateway Boundary
 - Gateway decisions now expose a pure typed predicate for an untouched fleet `routeBackend` result. It accepts only one structured base trace matching the final backend/tier; trace-free pass-through decisions, resource/quota/budget/subscription/learned overrides, and any trace ambiguity are all non-ordinary without parsing free-form reasons.
 - The predicate is not yet consumed by candidate assembly. It is a strict prerequisite for the future daemon seam that will combine ordinary gateway decisions with final planner routes and ephemeral capacity observations.
+
+# Current Canonical Candidate Boundary
+- A pure constructor now binds one ordinary gateway decision to an unchanged final concurrent route and planner capacity observation. Backend, tier, and model must match exactly; planner reassignment, resource/other trace overrides, and inherited models are rejected before binary-pair eligibility runs.
+- The constructor is still unused by the daemon because the gateway currently produces one legitimate final decision rather than a safe alternate. It has no dispatch, sampling, persistence, or configuration authority.

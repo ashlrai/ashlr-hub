@@ -2878,6 +2878,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a pure, unused binary canary pair eligibility contract with no randomization, reservation, or persistence.
 - [x] Preserve per-assignment planner capacity snapshots as ephemeral sidecar metadata without changing assignments.
 - [x] Define a typed ordinary-gateway predicate that refuses trace-free or overridden decisions without parsing reasons.
+- [x] Bind an ordinary gateway decision to an unchanged final route as an ephemeral canonical candidate.
 - [x] Audit the concurrent-planner seam and reject a precomputed canary helper that could diverge from the final route.
 - [ ] Carry exact gateway route disposition and model tuple into the per-item concurrent commit point before enabling a binary canary producer.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.
