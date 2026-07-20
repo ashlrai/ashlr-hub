@@ -78,11 +78,22 @@ function ensurePrivateDirectory(path: string, anchorPath: string): boolean {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
     }
+    const entry = lstatSync(path);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
     if (!assurePrivateStoragePath(path, 'directory', created ? 'secure-created' : 'inspect-existing', {
       anchorPath,
     }).ok) return false;
     if (created) fsyncDirectory(anchorPath);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function isNonSymlinkDirectory(path: string): boolean {
+  try {
+    const entry = lstatSync(path);
+    return entry.isDirectory() && !entry.isSymbolicLink();
   } catch {
     return false;
   }
@@ -176,9 +187,11 @@ export function readOperationalProjectionStage(
       : { state: 'degraded', reason: 'stage-directory-unsafe' };
   }
   const root = operationalProposalProjectionDir();
-  if (!assurePrivateStoragePath(root, 'directory', 'inspect-existing', { anchorPath: homedir() }).ok ||
-    !assurePrivateStoragePath(stageRoot(), 'directory', 'inspect-existing', { anchorPath: root }).ok ||
-    !assurePrivateStoragePath(directory, 'directory', 'inspect-existing', { anchorPath: stageRoot() }).ok) {
+  const stagedRoot = stageRoot();
+  if (!isNonSymlinkDirectory(root) || !isNonSymlinkDirectory(stagedRoot) || !isNonSymlinkDirectory(directory) ||
+    !assurePrivateStoragePath(root, 'directory', 'inspect-existing', { anchorPath: homedir() }).ok ||
+    !assurePrivateStoragePath(stagedRoot, 'directory', 'inspect-existing', { anchorPath: root }).ok ||
+    !assurePrivateStoragePath(directory, 'directory', 'inspect-existing', { anchorPath: stagedRoot }).ok) {
     return { state: 'degraded', reason: 'stage-directory-unsafe' };
   }
   if (!expected.present) return stageAbsent(path)

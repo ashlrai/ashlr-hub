@@ -85,6 +85,22 @@ describe('M436 operational projection recovery inspection', () => {
     expect(fs.existsSync(path.join(operationalProposalProjectionDir(), 'active-transaction.json'))).toBe(false);
   });
 
+  it('refuses a released store lock before observing or writing recovery state', () => {
+    const staleLock = lock!;
+    const projectionDir = operationalProposalProjectionDir();
+    const beforeEntries = fs.readdirSync(projectionDir).sort();
+    releaseProposalStoreMutationLock(staleLock);
+    lock = acquireProposalStoreMutationLock();
+    expect(lock).not.toBeNull();
+
+    expect(inspectOperationalProjectionRecoveryV2(staleLock)).toEqual({
+      state: 'refused', reason: 'store-lock-not-owned',
+    });
+    expect(fs.readdirSync(projectionDir).sort()).toEqual(beforeEntries);
+    expect(fs.existsSync(path.join(projectionDir, 'active-transaction.json'))).toBe(false);
+    expect(fs.existsSync(path.join(projectionDir, 'staged'))).toBe(false);
+  });
+
   it('refuses authenticated V1 journal records without creating replay or staging state', () => {
     const result = prepareOperationalProjectionTransactionJournalOnly({
       proposalId: 'proposal-436',

@@ -146,4 +146,22 @@ describe('M435 operational projection staging', () => {
     expect(readOperationalProjectionStage(TRANSACTION_ID, 'proposal', expected, validate))
       .toMatchObject({ state: 'degraded' });
   });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked transaction directory for writes and absence reads', () => {
+    const text = '{"proposal":"directory-link"}';
+    const expected = metadata(text);
+    const directory = operationalProjectionStageDir(TRANSACTION_ID);
+    const outside = path.join(home, 'outside-stage');
+    fs.mkdirSync(path.dirname(directory), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(outside, { mode: 0o700 });
+    fs.symlinkSync(outside, directory);
+
+    expect(writeOperationalProjectionStage(
+      TRANSACTION_ID, 'proposal', Buffer.from(text), expected, validate,
+    )).toEqual({ ok: false, reason: 'stage-directory-unsafe' });
+    expect(readOperationalProjectionStage(
+      TRANSACTION_ID, 'projection', { present: false, digest: null, bytes: 0 }, validate,
+    )).toEqual({ state: 'degraded', reason: 'stage-directory-unsafe' });
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
 });
