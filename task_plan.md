@@ -2781,3 +2781,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Update shared-queue contention fixtures to use the canonical execution key.
 - [x] Update cooldown fixtures to persist a public raw id and an authoritative scoped key.
 - [x] Run complete daemon-loop and fleet-continuity suites plus diff checks.
+
+## Legacy Dispatch-Treatment Receipt Compatibility (2026-07-20)
+- [x] Diagnose the live analytics degradation without mutating immutable ledger evidence.
+- [x] Accept only sanitizer-validated v1 learning-label bytes and bounded legacy single-line framing.
+- [x] Prove malformed receipt bytes remain rejected and live dispatch-production evidence becomes healthy.
+- [x] Audit the independent repair-handoff conflict set before enabling its writer.
+- [ ] Add bounded parent-evidence quarantine diagnostics without changing repair-generation authority.
+
+## Cross-Repo Admitted Repair (2026-07-20)
+- [x] Reproduce the admitted binshield config typecheck defect in an isolated worktree.
+- [x] Restore package-local Vitest type resolution and regenerate the lockfile.
+- [x] Verify from a frozen-lockfile install and publish binshield PR #22.

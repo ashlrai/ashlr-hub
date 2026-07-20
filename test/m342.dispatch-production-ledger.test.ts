@@ -5433,6 +5433,47 @@ describe('M342 dispatch production ledger', () => {
     }
   });
 
+  it('accepts an otherwise canonical legacy treatment receipt without a terminal newline', () => {
+    const witness = treatmentEvents().find((event) =>
+      event.basis === 'repair-lifecycle-outcome' && event.repairTreatmentOutcome === 'converted')!;
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const canonicalLine = readFileSync(receiptPath, 'utf8').trimEnd();
+    writeFileSync(receiptPath, canonicalLine, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'healthy', complete: true, invalidRows: 0,
+    });
+  });
+
+  it('accepts a sanitizer-validated v1 learning label without relabeling immutable receipt bytes', () => {
+    const witness = treatmentEvents().find((event) =>
+      event.basis === 'repair-lifecycle-outcome' && event.repairTreatmentOutcome === 'converted')!;
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const legacy = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
+      learningLabel: { classifierVersion: string };
+    };
+    legacy.learningLabel.classifierVersion = 'attempt-shape-v1';
+    writeFileSync(receiptPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'healthy', complete: true, invalidRows: 0,
+    });
+  });
+
   it.skipIf(process.platform !== 'win32')(
     'exact-inspects receipt directory DACLs during pure authority reads',
     () => {

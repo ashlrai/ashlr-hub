@@ -3510,14 +3510,36 @@ function canonicalTreatmentOutcomeReceiptEvent(
     const canonicalInput = hashUsesRunId && value.trajectoryId !== undefined
       ? { ...value, trajectoryId: undefined }
       : value;
-    const canonical = JSON.stringify(sanitizeDispatchProductionEvent(
+    const sanitized = sanitizeDispatchProductionEvent(
       canonicalInput,
       { materializeLearningLabel: true },
-    ));
-    return canonical === line;
+    );
+    if (JSON.stringify(sanitized) === line) return true;
+
+    // v1 learning labels remain semantically validated by the shared
+    // sanitizer, which materializes their successor as v2. Immutable v1
+    // receipts therefore need byte-preserving recognition without relabeling
+    // their historical classifier version.
+    const storedLabel = value['learningLabel'];
+    if (isPlainRecord(storedLabel) && storedLabel['classifierVersion'] === 'attempt-shape-v1') {
+      return JSON.stringify({ ...sanitized, learningLabel: storedLabel }) === line;
+    }
+    return false;
   } catch {
     return false;
   }
+}
+
+/**
+ * Current receipts use one canonical JSON line plus a terminal newline. The
+ * earliest private receipt writer omitted that final delimiter, so accept only
+ * an otherwise canonical single-line object as a legacy framing variant.
+ */
+function treatmentOutcomeReceiptLine(text: string): string | null {
+  if (text.endsWith('\n')) {
+    return text.indexOf('\n') === text.length - 1 ? text.slice(0, -1) : null;
+  }
+  return text.length > 0 && !text.includes('\n') ? text : null;
 }
 
 function readTreatmentOutcomeReceiptArtifact(
@@ -3532,12 +3554,11 @@ function readTreatmentOutcomeReceiptArtifact(
     remainingBytes: MAX_TREATMENT_RECEIPT_BYTES,
     ...(batchAssurance ? { batchAssurance } : {}),
   });
-  if (!loaded.ok || !loaded.text.endsWith('\n') ||
-    loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+  const line = loaded.ok ? treatmentOutcomeReceiptLine(loaded.text) : null;
+  if (line === null) {
     throw new Error('invalid treatment outcome receipt');
   }
   if (!batchAssurance) inspectExactReceiptAuthorityFile(path);
-  const line = loaded.text.slice(0, -1);
   const parsed: unknown = JSON.parse(line);
   if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
     throw new Error('unbound treatment outcome receipt');
@@ -6306,10 +6327,10 @@ function mergeTreatmentOutcomeReceipts(
     result.rowsScanned++;
     try {
       inspectExactReceiptAuthorityFile(path);
-      if (!loaded.text.endsWith('\n') || loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+      const line = treatmentOutcomeReceiptLine(loaded.text);
+      if (line === null) {
         throw new Error('invalid receipt');
       }
-      const line = loaded.text.slice(0, -1);
       const parsed: unknown = JSON.parse(line);
       if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
         throw new Error('invalid receipt');

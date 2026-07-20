@@ -2889,3 +2889,18 @@
   - Shared-queue fixtures now contend on canonical execution keys, matching production claim authority rather than a raw scanner id that no longer participates in shared leasing.
   - Cooldown fixtures explicitly persist raw `itemId` with their repository-qualified `itemKey`; this preserves operator-readable ledgers while proving selection cannot be cooled by unscoped legacy data.
   - The complete daemon-loop and fleet-continuity suites pass locally after the fixture alignment, including concurrent forensic attempt identities carried by the later stacked route fix.
+
+- Legacy dispatch-treatment receipt compatibility (2026-07-20):
+  - The live dispatch-production analytics reader was fail-closed on four immutable treatment receipts whose only drift was a sanitizer-validated `attempt-shape-v1` learning label; they otherwise retained canonical receipt identity and terminal semantics.
+  - Receipt validation now recognizes that exact legacy label byte form only after the shared sanitizer validates it, without rewriting historical classifier metadata. It also recognizes the earlier single-line framing variant without a terminal newline while rejecting multiline and noncanonical bytes.
+  - Live fleet status now reports dispatch-production evidence healthy and eligible (four rows, zero invalid), restoring analytical learning visibility. Repair-handoff remains separately degraded and keeps its writer fail-closed.
+
+- Repair-handoff degradation audit (2026-07-20):
+  - Schema-v2 intentionally keeps one handoff generation per objective across repeated parent attempts; repeated v2 IDs are therefore not by themselves conflicting evidence.
+  - The live journal has seven such repeated objective families. Its degradation is caused by historical parent execution evidence no longer resolving for those rows, so the combined authority reader quarantines them rather than allowing an unverifiable replay to mint repair authority.
+  - Follow-up should improve bounded quarantine visibility and parent-evidence retention diagnostics. Do not change v2 identity to include attempts or collapse the historical rows: either would change the generation/control contract and could make stale evidence authoritative.
+
+- Binshield admitted repair (2026-07-20):
+  - The fleet's sole fresh admitted item identified `@binshield/config` typecheck failure because its included Vitest test file had no package-local Vitest dependency.
+  - An isolated worktree fix declares `vitest` under `packages/config` devDependencies and refreshes `pnpm-lock.yaml`; a frozen-lockfile install followed by `pnpm --filter @binshield/config typecheck` passes.
+  - Draft PR https://github.com/ashlrai/binshield/pull/22 was published without touching the user's active binshield worktree.
