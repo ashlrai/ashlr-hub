@@ -3006,3 +3006,8 @@
 - The vocabulary now includes the closed degraded-source reason and the dead local is removed. This preserves fail-closed scanner semantics; no observation, merge, deployment, or policy authority was broadened.
 - Verification: the 303 focused profile, scanner, merge, sandbox-verifier, and Fleet Status assertions remain green. The next exact-head matrix must pass TypeScript before broader CI evidence is counted.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.
+
+# Current CI Concurrency Contract Recovery
+- The first protected matrix for feature-branch deduplication passed every macOS and Windows lane and all Ubuntu build stages, then failed two deterministic workflow-guard assertions. The guard had correctly protected the former header, but was not updated when the top-level concurrency block was added; its broad no-public-action regex also matched an explanatory workflow comment containing a reserved lifecycle word.
+- The workflow comment now describes reusable callers without that reserved word. The guard treats the concurrency block as part of the exact authority header and independently asserts its PR-keyed group plus PR-only cancellation rule. This makes accidental removal or broadening of the efficiency policy a test failure while retaining the no-public-action invariant.
+- Verification: `m30.ci.test.ts` passes seven assertions, `npm run typecheck` passes, and `git diff --check` passes. A fresh protected matrix is required before promotion.

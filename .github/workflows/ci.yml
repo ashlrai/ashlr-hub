@@ -12,7 +12,7 @@ permissions:
 
 # Feature-branch updates are validated through the PR merge ref, not an
 # equivalent push checkout. Superseded PR revisions can stop safely; default
-# branch pushes and reusable release callers retain independent full matrices.
+# branch pushes and reusable workflow callers retain independent full matrices.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
