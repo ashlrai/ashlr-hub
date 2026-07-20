@@ -2975,6 +2975,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Queue Inventory Readiness Truth (2026-07-20)
 - [x] Audit stale/degraded queue evidence being misrepresented as ordinary cooldown.
 - [x] Add fail-closed queue-source readiness blockers and inspection-only primary action/directive.
-- [x] Preserve fresh queued-autonomy authority over stale persisted cache; cover unavailable source behavior.
+- [x] Preserve fresh queued-autonomy authority over stale persisted cache; cover unavailable source behavior and retain host-handoff precedence.
 - [x] Verify Fleet Status coverage, typecheck, quiet lint, and diff integrity locally.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.

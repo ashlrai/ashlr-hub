@@ -4668,7 +4668,10 @@ function queueInventoryAuthorityState(status: FleetStatus): QueueInventoryAuthor
   if (entries.some((source) => source.actionableItems > 0)) return 'actionable';
   const cached = sources.cachedBacklog;
   const queued = sources.queuedAutonomy;
-  if (cached.sourceState === 'missing' && queued.sourceState === 'unavailable') return 'unavailable';
+  if (
+    (cached.sourceState === 'missing' && queued.sourceState === 'unavailable') ||
+    (cached.sourceState === 'unavailable' && queued.sourceState === 'unavailable')
+  ) return 'unavailable';
   if (cached.freshness === 'stale' || queued.sourceState === 'unavailable') return 'degraded';
   return 'unknown';
 }
@@ -5420,7 +5423,8 @@ function chooseReadinessBlocker(
   }
   const queueSource = sources.find((source) => source.id === 'queue');
   const queueInventoryAuthority = queueInventoryAuthorityState(status);
-  if (status.proposals.pending === 0 && queueSource && queueInventoryAuthority === 'unavailable') {
+  const awaitingHostMerge = status.proposals.awaitingHostMerge ?? 0;
+  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'unavailable') {
     return readinessBlocker(
       'queue-source-unavailable',
       'Queue source unavailable',
@@ -5429,7 +5433,7 @@ function chooseReadinessBlocker(
       'queue',
     );
   }
-  if (status.proposals.pending === 0 && queueSource && queueInventoryAuthority === 'degraded') {
+  if (status.proposals.pending === 0 && awaitingHostMerge === 0 && queueSource && queueInventoryAuthority === 'degraded') {
     return readinessBlocker(
       'queue-source-degraded',
       'Queue source degraded',

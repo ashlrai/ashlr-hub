@@ -3230,4 +3230,5 @@
 # Current Queue Inventory Readiness Truth
 - Fleet Status now distinguishes stale/degraded or unavailable queue inventory from ordinary backlog cooling when no source has actionable queue authority. The readiness blocker is `queue-source-degraded` or `queue-source-unavailable`, rather than a misleading cooldown state.
 - Both blockers select `inspect-queue-inventory`, whose commands are read-only. Fresh queued-autonomy work remains actionable even if the persisted backlog snapshot is stale; no queue admission, daemon routing, persistence, configuration, canary, verification, or merge policy changed.
+- Review hardening: queue diagnostics do not preempt host-merge reconciliation, and a total queue-read failure with both sources unavailable is classified `queue-source-unavailable` rather than degraded.
 - Verification: M49 Fleet Status coverage passes 145 assertions, with TypeScript typecheck, quiet lint, and `git diff --check` passing. Fresh protected CI is required on the new head.
