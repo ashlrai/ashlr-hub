@@ -2866,3 +2866,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bound detector-derived project roots and candidates, reject parent-relative cwd suggestions, and retain explicit blockers.
 - [x] Add profile/Fleet Status coverage and prove the live Hub projection contains no absolute paths.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Windows Doctor Timing Recovery (2026-07-20)
+- [x] Isolate the Windows portability timeout to the existing doctor report structure probe.
+- [x] Preserve the timeout guard while widening only its hosted-Windows allowance from 15s to 30s.
+- [x] Verify the full doctor suite, typecheck, and lint locally.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.

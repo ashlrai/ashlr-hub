@@ -127,8 +127,10 @@ import { runDoctor } from '../src/core/doctor.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
-// spend more than Vitest's 5s default in process startup across a single probe.
-vi.setConfig({ testTimeout: 15_000 });
+// spend more than Vitest's 5s default in process startup across a single probe;
+// 30s keeps that platform allowance bounded while avoiding a false timeout on
+// a cold hosted runner.
+vi.setConfig({ testTimeout: 30_000 });
 
 // ---------------------------------------------------------------------------
 // Helpers

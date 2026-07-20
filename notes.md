@@ -3027,3 +3027,8 @@
 - Coverage-complete repositories are counted ready. Coverage gaps with candidates are `coverage-incomplete`; missing detector candidates, discovery truncation, or bounded output are explicitly blocked/degraded. A parent-relative working directory is discarded rather than presented as a candidate.
 - Fleet Status replaces the previous generic editor shortcut with this read-only planning command. Candidate output is labeled as detector-derived guidance, not verified policy or a merge-authorizing manifest.
 - Verification: 170 focused execution-profile/Fleet Status assertions, TypeScript typechecking, and a live Hub-only rollout invocation pass; that invocation reports three uncovered Hub facets and six candidate commands with no absolute paths. Protected CI remains the release authority.
+
+# Current Windows Doctor Timing Recovery
+- The exact-head Windows portability 1/3 lane timed out once in the existing first `runDoctor()` structure check at its explicit 15-second allowance. The suite already documents that even mocked doctor checks shell out and can exceed Vitest's default on Windows; the local isolated suite completes all 16 tests in about seven seconds.
+- The test guard remains enabled and is widened only to 30 seconds for the doctor suite's hosted-Windows cold-start envelope. No production doctor behavior, assertion, command, or acceptance condition was weakened.
+- Verification: the focused doctor suite passes 16 assertions; TypeScript and full lint pass with no errors. A fresh protected matrix is required before promotion.
