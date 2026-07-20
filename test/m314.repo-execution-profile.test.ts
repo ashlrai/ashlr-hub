@@ -21,6 +21,60 @@ function writeVerifyContract(dir: string, contract: unknown): void {
 }
 
 describe('repo execution profile', () => {
+  it('surfaces detector candidates for every discovered project when no merge contract exists', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      const python = join(dir, 'packages', 'sdk-python');
+      mkdirSync(join(python, 'tests'), { recursive: true });
+      writeFileSync(join(python, 'pyproject.toml'), '[project]\nname = "sdk-python"\n', 'utf8');
+      writeFileSync(join(python, 'tests', 'test_smoke.py'), 'def test_smoke():\n    assert True\n', 'utf8');
+
+      const rollout = buildVerificationRollout([{ name: 'fixture', profile: detectRepoExecutionProfile(dir) }]);
+
+      expect(rollout).toMatchObject({
+        sourceState: 'complete',
+        totals: { reposReady: 0, reposBlocked: 1, uncoveredProjects: 2, candidateCommands: 2 },
+        repos: [{
+          name: 'fixture',
+          state: 'coverage-incomplete',
+          projects: [
+            { root: '.', kind: 'node', candidates: [{ cmd: ['npm', 'run', 'test'], cwd: '.' }], blockers: [] },
+            {
+              root: 'packages/sdk-python', kind: 'python',
+              candidates: [
+                { cmd: ['python', '-m', 'pytest', '-q'], cwd: 'packages/sdk-python' },
+              ],
+              blockers: [],
+            },
+          ],
+        }],
+      });
+      expect(JSON.stringify(rollout)).not.toContain(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a no-command contract gap detector-blocked and non-authoritative', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, {});
+      const rollout = buildVerificationRollout([{ name: 'fixture', profile: detectRepoExecutionProfile(dir) }]);
+
+      expect(rollout).toMatchObject({
+        sourceState: 'complete',
+        totals: { reposReady: 0, reposBlocked: 1, uncoveredProjects: 1, candidateCommands: 0 },
+        repos: [{
+          state: 'detector-blocked',
+          projects: [{ root: '.', kind: 'node', candidates: [], blockers: [{ code: 'no-detected-command' }] }],
+        }],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('projects nested merge-coverage candidates without absolute paths or policy authority', () => {
     const dir = makeFixture();
     try {

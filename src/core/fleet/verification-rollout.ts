@@ -88,7 +88,15 @@ export function buildVerificationRollout(profiles: ReadonlyArray<{ name: string;
       reposReady++;
       continue;
     }
-    const gaps = contract?.uncoveredMergeProjects ?? [];
+    // Without an explicit merge-grade contract, every discovered project is
+    // uncovered. Detector output remains a non-authoritative suggestion, but
+    // this gives a proposal factory a bounded, repo-scoped starting point.
+    const gaps = contract?.mergeGradeExplicit
+      ? contract.uncoveredMergeProjects
+      : profile.projects.map((project) => ({
+        relativeRoot: project.relativeRoot,
+        kind: project.kind,
+      }));
     const projects: VerificationRolloutProject[] = [];
     let commandCount = 0;
     let truncated = false;

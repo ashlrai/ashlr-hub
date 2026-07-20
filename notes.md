@@ -3219,3 +3219,9 @@
 - The new eligibility and fixed-probability draw helpers are pure and inert. They do not construct offers from a gateway decision, turn an offer into a final route, reserve capacity, write evidence, invoke the daemon, or affect learning/automerge/config activation.
 - Existing final-route candidate validation remains unchanged for the separate single-route provenance boundary. Effective configuration remains hard-disabled with `producer-unavailable`.
 - Verification: selection-canary (9 assertions), effective-config (8 assertions), TypeScript typecheck, quiet lint, and `git diff --check` pass locally. Fresh protected CI is required on the new head.
+
+# Current Verification Rollout Contract Discovery
+- The read-only verification rollout planner now treats every discovered project as uncovered when a repository has no explicit merge-grade contract. It projects only the existing detector's bounded argv-only commands and repository-relative cwd values, giving proposal generation a concrete verifier recipe rather than a generic contract task.
+- Explicit merge-grade but incomplete contracts retain their narrower uncovered-project set. Invalid/missing contracts remain non-authoritative, no detector output is executed or written, and there is no merge/automerge policy change.
+- Repositories with discovered projects but no detector command are explicitly `detector-blocked`; detector candidates cannot make a repository merge-ready.
+- Verification: M314 profile/rollout and M22 scanner suites pass 94 assertions, with TypeScript typecheck, quiet lint, and `git diff --check` passing. Fresh protected CI is required on the new head.

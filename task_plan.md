@@ -2964,3 +2964,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add pure exact-pair eligibility and unbiased draw helpers while leaving daemon, receipts, config, learning, and merge behavior unchanged.
 - [x] Cover invalid contexts, stale capacity, malformed/duplicate/disallowed offers, fixed-probability draws, and disabled effective configuration.
 - [ ] Require the protected CI matrix on the immutable draft head before any integration work.
+
+## Verification Rollout Contract Discovery (2026-07-20)
+- [x] Audit the no-contract detector blind spot in the read-only verifier rollout planner.
+- [x] Project bounded typed detector candidates for all discovered projects when no merge-grade contract exists.
+- [x] Preserve narrower explicit-contract gaps, safe cwd/argv-only output, detector-blocked truth, and non-authority.
+- [x] Verify profile and scanner suites, typecheck, quiet lint, and diff integrity locally.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
