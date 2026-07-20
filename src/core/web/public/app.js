@@ -4950,6 +4950,24 @@ function fdReadinessDataText(readiness) {
   const quality = readiness.sourceQualitySummary ?? {};
   const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
   const evidenceState = readiness.evidenceMatrix?.state;
+  const evidenceSources = Array.isArray(readiness.evidenceMatrix?.sources)
+    ? readiness.evidenceMatrix.sources
+    : [];
+  const requiredEvidenceParts = [
+    ['withheld', 'withheld'],
+    ['cold-start', 'cold-start'],
+  ]
+    .map(([eligibility, label]) => [
+      label,
+      evidenceSources.filter((source) =>
+        source?.applicability === 'required' && source?.eligibility === eligibility,
+      ).length,
+    ])
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => `${count} required ${label}`);
+  const requiredEvidenceSuffix = requiredEvidenceParts.length > 0
+    ? ` · ${requiredEvidenceParts.join(' / ')}`
+    : '';
   const evidenceSuffix = evidenceState ? ` · evidence ${evidenceState}` : '';
   const sourceNamesForBadge = (badge) => {
     const names = sources
@@ -4974,13 +4992,13 @@ function fdReadinessDataText(readiness) {
         const sourceNames = sourceNamesForBadge(key);
         return `${count} ${label}${sourceNames ? ` (${sourceNames})` : ''}`;
       });
-    return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}${evidenceSuffix}`;
+    return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}${requiredEvidenceSuffix}${evidenceSuffix}`;
   }
   const summary = readiness.sourceSummary ?? {};
   const healthy = summary.healthy ?? 0;
   const degraded = summary.degraded ?? 0;
   const blocked = summary.blocked ?? 0;
-  return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked${evidenceSuffix}`;
+  return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked${requiredEvidenceSuffix}${evidenceSuffix}`;
 }
 
 function fdReadinessDataTitle(readiness) {

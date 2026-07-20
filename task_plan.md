@@ -2849,3 +2849,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Restore the closed scanner-reason vocabulary and no-unused-local TypeScript invariants after discovery expansion.
 - [ ] Add explicit nested verifier commands in isolated worktrees for each live incomplete enrolled repository.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Required Evidence Visibility (2026-07-20)
+- [x] Audit whether compact Fleet OS data quality hides required evidence failures behind an aggregate state.
+- [x] Surface required withheld and cold-start evidence counts without changing readiness or merge authority.
+- [x] Prove optional evidence does not inflate required evidence counts in dashboard formatter coverage.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Selection Assignment Provenance (planned)
+- [x] Audit causal-field persistence across run, dispatch, proposal, decision, evidence, and agent-action records.
+- [ ] Add observation-only per-selection candidate-set provenance and same-tier canary probability support.
+- [ ] Expose selection-propensity availability as non-authoritative Fleet Status telemetry.

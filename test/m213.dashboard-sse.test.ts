@@ -946,6 +946,20 @@ describe('M213 Dashboard SSE — /api/events', () => {
       sources: [],
       evidenceMatrix: { state: 'degraded', sources: [], summary: { withheld: 1 } },
     })).toBe('fresh · 0 healthy / 0 degraded / 0 blocked · evidence degraded');
+
+    expect(formatter({
+      freshness: { overall: 'fresh' },
+      sourceQualitySummary: { 'healthy-source': 1 },
+      sources: [],
+      evidenceMatrix: {
+        state: 'degraded',
+        sources: [
+          { applicability: 'required', eligibility: 'withheld' },
+          { applicability: 'required', eligibility: 'cold-start' },
+          { applicability: 'optional', eligibility: 'withheld' },
+        ],
+      },
+    })).toBe('fresh · healthy sources · 1 required withheld / 1 required cold-start · evidence degraded');
   });
 
   it('app.js keeps unhealthy workspace zeroes distinct from healthy telemetry', () => {
