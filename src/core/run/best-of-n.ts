@@ -34,7 +34,7 @@ import {
 import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
-import { runTests, runTestsForProposal } from './run-tests.js';
+import { runTestsDetailed, runTestsForProposalDetailed, type TestRunResult } from './run-tests.js';
 import {
   abandonExecutionAuthority,
   acquireExecutionAuthority,
@@ -114,6 +114,11 @@ export interface BestOfNResult {
     /** Top terminal reasons for candidates that produced no proposal. */
     noProposalReasons?: Array<{ reason: string; count: number }>;
   };
+}
+
+function selectionVerificationResult(result: TestRunResult): boolean | undefined {
+  if (!result.skipped) return result.passed;
+  return result.skipped === 'apply-failed' ? false : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -881,19 +886,20 @@ async function runBestOfNInternal(
         // Deterministic quick verification. Infrastructure errors remain neutral.
         if (c.proposalDraft || c.proposalId) {
           try {
-            testsPassed = c.proposalDraft
-              ? await runTestsForProposal(
+            const verification = c.proposalDraft
+              ? await runTestsForProposalDetailed(
                   c.proposalDraft,
                   cfg,
                   'quick',
                   opts?.signal ? { signal: opts.signal } : undefined,
                 )
-              : await runTests(
+              : await runTestsDetailed(
                   c.proposalId as string,
                   cfg,
                   'quick',
                   opts?.signal ? { signal: opts.signal } : undefined,
                 );
+            testsPassed = selectionVerificationResult(verification);
           } catch {
             // test runner unavailable — don't penalise
           }

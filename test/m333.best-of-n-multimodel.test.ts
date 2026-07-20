@@ -110,6 +110,8 @@ async function harness(opts: {
   judgeScores?: number[];
   runTests?: ReturnType<typeof vi.fn>;
   runTestsForProposal?: ReturnType<typeof vi.fn>;
+  runTestsDetailed?: ReturnType<typeof vi.fn>;
+  runTestsForProposalDetailed?: ReturnType<typeof vi.fn>;
   subscriptionEngines?: string[];
   draftMode?: boolean;
 }): Promise<Harness> {
@@ -214,12 +216,20 @@ async function harness(opts: {
   vi.doMock('../src/core/fleet/manager.js', () => ({
     judgeProposal,
   }));
-  if (opts.runTests || opts.runTestsForProposal || opts.draftMode) {
+  if (opts.runTests || opts.runTestsForProposal || opts.runTestsDetailed || opts.runTestsForProposalDetailed || opts.draftMode) {
     const runTests = opts.runTests ?? vi.fn(async () => true);
     const runTestsForProposal = opts.runTestsForProposal ?? vi.fn(async () => true);
+    const runTestsDetailed = opts.runTestsDetailed ?? vi.fn(async (...args: unknown[]) => ({
+      passed: await runTests(...args), commands: [{}],
+    }));
+    const runTestsForProposalDetailed = opts.runTestsForProposalDetailed ?? vi.fn(async (...args: unknown[]) => ({
+      passed: await runTestsForProposal(...args), commands: [{}],
+    }));
     const runTestsModule = () => ({
       runTests,
       runTestsForProposal,
+      runTestsDetailed,
+      runTestsForProposalDetailed,
     });
     vi.doMock('../src/core/run/run-tests.js', runTestsModule);
   }
@@ -674,6 +684,30 @@ describe('M333 — file-once proposal capture', () => {
     expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([undefined, true]);
     expect(result.winner).toMatchObject({ index: 1, proposalId: 'proposal-sb-1' });
     expect(h.filedProposals?.size).toBe(1);
+  });
+
+  it('keeps skipped quick verification neutral rather than ranking it as green', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const runTestsForProposalDetailed = vi.fn(async (proposal: { diff?: string }) =>
+      proposal.diff === 'DRAFT_DIFF_0'
+        ? { passed: true, commands: [], skipped: 'no-commands' }
+        : { passed: true, commands: [{}] },
+    );
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 3],
+      draftMode: true,
+      runTestsForProposalDetailed,
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([undefined, true]);
+    expect(result.winner).toMatchObject({ index: 1, proposalId: 'proposal-sb-1' });
   });
 
   it('retains the sandbox handle for cleanup when draft capture throws', async () => {

@@ -3156,3 +3156,8 @@
 - Gateway decisions now expose a typed `budget-paused` disposition. The ordinary fleet predicate rejects that disposition directly, so a budget pause cannot be misclassified as an untouched route solely because it retains the initial routing trace.
 - This is an in-memory eligibility guard only; budget routing behavior, reason strings, canary configuration, and producer state are unchanged.
 - Verification: the M247 gateway suite passes 76 assertions, with TypeScript typechecking and quiet lint passing.
+
+# Current Best-of-N Verification Signal
+- Best-of-N now consumes the detailed quick-verification result. A candidate is `testsPassed:true` only when verification actually ran and passed; an apply failure is `false`; unavailable, no-command, sandbox, cleanup, or cancellation skips stay `undefined`.
+- This changes candidate ranking quality only. It neither makes skipped verification fail merge-grade checks nor grants any merge authority.
+- Verification: M333 multi-model coverage passes 23 assertions, with TypeScript typechecking and quiet lint passing.

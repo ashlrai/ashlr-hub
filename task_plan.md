@@ -2904,6 +2904,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add executor-fallback and later-cancellation regression coverage; run focused tests, typecheck, and lint.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
 
+## Best-of-N Verification Signal (2026-07-20)
+- [x] Audit quick-verification handling in Best-of-N candidate ranking.
+- [x] Use detailed verification outcomes: executed pass=true, actual apply/check failure=false, unavailable/no-command skip=undefined.
+- [x] Add a skipped-verification winner-selection regression and run focused tests, typecheck, and lint.
+- [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
 ## Merge Contract Rollout Planner (2026-07-20)
 - [x] Replace manual verify-contract editing guidance with a read-only rollout planner.
 - [x] Bound detector-derived project roots and candidates, reject parent-relative cwd suggestions, and retain explicit blockers.
