@@ -12,6 +12,7 @@
 - Refusal proof: removing a required stage yields an explicit `stage-missing` refusal; removing the local replay ledger yields `replay-missing-local-ledger`. Neither condition is treated as recoverable authority.
 - State-machine proof: an asymmetric `projection-only` live state and a third, unbound live proposal both refuse rather than causing the inspector to infer a repair order.
 - Review hardening: staged proposal validation now reuses the canonical store's structural proposal guard, rejecting canonical JSON that has a matching ID but lacks required proposal fields.
+- Projection-stage proof: corrupting a staged projection is refused by the full recovery inspector as `projection-stage-stage-content-invalid` before live artifact classification.
 - Verification: focused M432 projection coverage passed 12 tests, typecheck passed, lint exited 0 with the existing 101 warnings, and `git diff --check` passed.
 - Next: V2 transaction metadata will name bounded staged artifacts by transaction ID; the journal will retain only presence/digest/byte metadata, never raw proposal or projection contents.
 

@@ -161,6 +161,22 @@ describe('M436 operational projection recovery inspection', () => {
     expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
     expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
 
+    fs.writeFileSync(
+      operationalProjectionStagePath(prepared.transaction.transactionId, 'projection'),
+      '{}',
+      { mode: 0o600 },
+    );
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'projection-stage-stage-content-invalid',
+    });
+    expect(writeOperationalProjectionStage(
+      prepared.transaction.transactionId,
+      'projection',
+      Buffer.from(afterProjectionText),
+      prepared.transaction.staged.projection,
+      (text) => validateOperationalProjectionStageText(text, key),
+    )).toEqual({ ok: true });
+
     fs.writeFileSync(operationalProposalProjectionPath(), afterProjectionText, { mode: 0o600 });
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'refused', reason: 'artifact-state-projection-only',
