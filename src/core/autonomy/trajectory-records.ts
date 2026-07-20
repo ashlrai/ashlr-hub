@@ -642,7 +642,9 @@ function fillRecordMetadata(
   if (!record.labelBasis && meta.labelBasis) record.labelBasis = meta.labelBasis;
   if (!record.routerPolicyVersion && meta.routerPolicyVersion) record.routerPolicyVersion = bounded(meta.routerPolicyVersion, 120);
   if (!record.learningEpoch && meta.learningEpoch) record.learningEpoch = bounded(meta.learningEpoch, 120);
-  if (!record.selectionObservation && meta.selectionObservation) record.selectionObservation = meta.selectionObservation;
+  // Dispatch rows retain the authenticated metadata-only observation for
+  // forensic history, but trajectories must not project it into learning until
+  // the receipt-qualified join can prove pre-execution assignment authority.
 }
 
 function evidenceEvent(evidence: OutcomeRecordEvidence, proposalId: string, tsFallback: string): TrajectoryTimelineEvent {

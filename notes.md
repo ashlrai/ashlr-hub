@@ -3093,4 +3093,4 @@
 
 # Current Selection Evidence Qualification Boundary
 - A complete dispatch ledger containing a valid metadata-only selection observation no longer renders as `present` by itself. Fleet Status reports it as `unjoined`, and Mission Control explains that a signed receipt join is still required. This avoids presenting outcome-time telemetry as proof of a pre-execution randomized assignment.
-- The planned join must verify the persisted receipt, identity root, shared-claim binding, exact final route, canonical observation, event ordering, and one-to-one receipt use. This increment withholds raw observations from Fleet Status; trajectory and learning-eligibility projection still require the subsequent receipt-qualification refactor before they may use the same standard.
+- The planned join must verify the persisted receipt, identity root, shared-claim binding, exact final route, canonical observation, event ordering, and one-to-one receipt use. Raw observations are now withheld from Fleet Status, trajectory reconstruction, and learning eligibility until that receipt-qualified projection exists.

@@ -159,7 +159,7 @@ describe('LearningEligibilityV1', () => {
     });
   });
 
-  it('gives deterministic adverse evidence precedence without positive authority', () => {
+  it('withholds raw randomized observations pending receipt qualification', () => {
     const member = populationMember('proposal-secret-1', 'adverse');
     const result = build([trajectory({
       selectionObservation: {
@@ -184,11 +184,11 @@ describe('LearningEligibilityV1', () => {
     if (!result.ok) return;
     expect(result.projection.members[0]).toMatchObject({
       stages: { postMerge: 'adverse' },
-      selectionPropensityAvailable: true,
-      refusalCodes: expect.arrayContaining(['post-merge-adverse', 'denominator-incomplete']),
+      selectionPropensityAvailable: false,
+      refusalCodes: expect.arrayContaining([
+        'post-merge-adverse', 'denominator-incomplete', 'selection-propensity-unavailable',
+      ]),
     });
-    expect(result.projection.members[0]?.refusalCodes)
-      .not.toContain('selection-propensity-unavailable');
   });
 
   it('does not accept caller-injected propensity identities without a dispatch observation', () => {

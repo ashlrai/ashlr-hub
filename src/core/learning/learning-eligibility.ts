@@ -122,12 +122,11 @@ function sourceComplete(record: TrajectoryRecord): {
 }
 
 function hasRecordedSelectionPropensity(record: TrajectoryRecord): boolean {
-  const observation = record.selectionObservation;
-  return observation?.schemaVersion === 1 &&
-    observation.authority === 'observation-only' &&
-    observation.mode === 'randomized-canary' &&
-    Number.isSafeInteger(observation.selectionProbabilityPpm) &&
-    observation.selectionProbabilityPpm >= 1 && observation.selectionProbabilityPpm <= 1_000_000;
+  // A raw trajectory observation is outcome-time metadata, not proof that a
+  // randomized assignment was durably recorded before execution. Keep the
+  // learning projection unavailable until the receipt-qualified join exists.
+  void record;
+  return false;
 }
 
 function verificationStage(record: TrajectoryRecord): LearningEligibilityStagesV1['verification'] {
