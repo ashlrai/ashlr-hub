@@ -537,6 +537,52 @@ describe('buildResourceStrategyReport', () => {
     expect(report.reasons.join(' ')).toContain('will not starve new dispatch');
   });
 
+  it('does not let known verification failures freeze unrelated backlog once every pending proposal is stale', async () => {
+    const staleFailed = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-stale-failed',
+        title: 'Stale failed proposal',
+        verifyResult: { passed: false },
+      },
+      evidencePacks: [],
+      lastActivityAt: '2026-06-30T00:00:00.000Z',
+    });
+    const stalePending = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-stale-pending',
+        title: 'Stale pending proposal',
+        verifyResult: undefined,
+      },
+      evidencePacks: [],
+      lastActivityAt: '2026-06-30T01:00:00.000Z',
+    });
+
+    const report = await buildResourceStrategyReport(
+      cfg({
+        foundry: {
+          productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+        } as NonNullable<AshlrConfig['foundry']>,
+      }),
+      {
+        now: new Date('2026-07-02T12:00:00.000Z'),
+        deps: deps({
+          buildFleetStatus: async () => fleet({
+            queue: { backlogItems: 4 },
+            proposals: proposals({ pending: 2 }),
+          }),
+          listOutcomeRecords: () => [staleFailed, stalePending],
+        }),
+      },
+    );
+
+    expect(report.mode).toBe('backlog-build');
+    expect(report.outcomes.verificationFailures).toBe(1);
+    expect(report.outcomes.stalePending).toBe(2);
+    expect(report.reasons.join(' ')).toContain('still have known verification failures');
+  });
+
   it('keeps fresh pending proposals in verify-only under production velocity', async () => {
     const fresh = outcome({
       proposal: {

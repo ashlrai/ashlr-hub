@@ -515,12 +515,11 @@ function recommendMode(
     fleet.queue.backlogItems > 0 &&
     fleet.proposals.pending > 0 &&
     outcomes.stalePending >= fleet.proposals.pending &&
-    outcomes.verificationFailures === 0 &&
     ecosystem.posture !== 'fail';
 
   if (
     (proposalSource.gate === 'ready' && fleet.proposals.pending > 0 && !stalePendingOnly) ||
-    outcomes.verificationFailures > 0 ||
+    (outcomes.verificationFailures > 0 && !stalePendingOnly) ||
     ecosystem.posture === 'fail'
   ) {
     if (proposalSource.gate === 'ready' && fleet.proposals.pending > 0) {
@@ -535,6 +534,9 @@ function recommendMode(
   if (fleet.queue.backlogItems > 0) {
     if (stalePendingOnly) {
       reasons.push(`${outcomes.stalePending} stale pending proposal(s) are past the production velocity TTL and will not starve new dispatch`);
+      if (outcomes.verificationFailures > 0) {
+        reasons.push(`${outcomes.verificationFailures} stale pending proposal(s) still have known verification failures`);
+      }
       actions.push('archive, reject, or refresh stale pending proposals while keeping proposal production moving');
     }
     reasons.push(`${fleet.queue.backlogItems} backlog item(s) are available and no hard stop is active`);

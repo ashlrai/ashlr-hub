@@ -2799,4 +2799,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Diagnose the protected workflow's ESM/CommonJS runtime boundary failure after self-contained bundling.
 - [x] Publish an explicit `.cjs` action entrypoint and remove the obsolete `.js` runtime artifact.
 - [x] Prove the checked-in bundle executes through Node under the action package's ESM boundary without checkout dependencies.
-- [ ] Require the immutable head's Binary Scan and validation workflows to pass before promotion.
+- [x] Require the immutable head's Binary Scan and validation workflows to pass before promotion.
+
+## Stale Proposal Throughput Gate (2026-07-20)
+- [x] Audit the durable proposal failure distribution without retaining raw prompts or diffs.
+- [x] Preserve known verification failures while allowing unrelated backlog only after every pending proposal is stale under the explicit production-velocity TTL.
+- [x] Prove stale failed proposals select `backlog-build`, while fresh pending failures remain `verify-only`.
+- [ ] Publish the protected draft update and require the complete CI matrix.
