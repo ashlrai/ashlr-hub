@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# Keep the final push and pull-request matrices independent evidence, while
+# freeing runners from superseded commits on the same branch and event stream.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     # Node 22 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.

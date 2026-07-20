@@ -2816,3 +2816,8 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- CI supersession policy (2026-07-20):
+  - CI groups runs by event stream and branch identity, with in-progress cancellation enabled. A new push cancels only older push CI for that branch; a new pull-request update cancels only older pull-request CI for that branch.
+  - Push and pull-request matrices intentionally remain separate groups, preserving duplicate protected evidence for the immutable final head while preventing superseded commits from occupying cross-platform runners.
+  - The watchdog suite passes six assertions and diff hygiene is clean. This changes verification scheduling only; it does not change merge, deployment, sandbox, or learning authority.

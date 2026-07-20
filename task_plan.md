@@ -2697,3 +2697,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## CI Supersession (2026-07-20)
+- [x] Preserve independent push and pull-request protected matrices while canceling obsolete runs within each event/branch stream.
+- [x] Verify watchdog coverage and publish as a separate protected draft.
