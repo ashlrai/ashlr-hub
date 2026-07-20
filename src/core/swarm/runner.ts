@@ -148,6 +148,10 @@ async function loadM17(): Promise<void> {
 
 type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
+type InspectSandboxSourceRevisionFn = (
+  sb: Sandbox,
+  expectedSourceRepo?: string,
+) => import('../sandbox/worktree.js').SandboxSourceRevisionAdmission;
 type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult | void;
 type BorrowedSandboxCleanupAuthority =
   import('../sandbox/worktree.js').BorrowedSandboxCleanupAuthority;
@@ -174,6 +178,7 @@ type SetProposalStatusFn = (
 
 let _createSandbox:  CreateSandboxFn  | null = null;
 let _sandboxDiff:    SandboxDiffFn    | null = null;
+let _inspectSandboxSourceRevision: InspectSandboxSourceRevisionFn | null = null;
 let _removeSandbox:  RemoveSandboxFn  | null = null;
 let _borrowSandboxCleanupAuthority: BorrowSandboxCleanupAuthorityFn | null = null;
 let _removeSandboxWithBorrowedAuthority: RemoveSandboxWithBorrowedAuthorityFn | null = null;
@@ -194,12 +199,14 @@ async function loadM21(): Promise<void> {
     const wt = await import(/* @vite-ignore */ wtSpec) as {
       createSandbox: CreateSandboxFn;
       sandboxDiff: SandboxDiffFn;
+      inspectSandboxSourceRevision?: InspectSandboxSourceRevisionFn;
       removeSandbox: RemoveSandboxFn;
       borrowSandboxCleanupAuthority?: BorrowSandboxCleanupAuthorityFn;
       removeSandboxWithBorrowedAuthority?: RemoveSandboxWithBorrowedAuthorityFn;
     };
     _createSandbox = wt.createSandbox;
     _sandboxDiff   = wt.sandboxDiff;
+    _inspectSandboxSourceRevision = wt.inspectSandboxSourceRevision ?? null;
     _removeSandbox = wt.removeSandbox;
     _borrowSandboxCleanupAuthority = wt.borrowSandboxCleanupAuthority ?? null;
     _removeSandboxWithBorrowedAuthority = wt.removeSandboxWithBorrowedAuthority ?? null;
@@ -1105,7 +1112,13 @@ function captureSandboxAndCleanup(
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
   let captureFailureReason = 'sandbox diff capture unavailable';
-  if (_sandboxDiff !== null) {
+  const sourceAdmission = _inspectSandboxSourceRevision?.(sb, sb.sourceRepo);
+  if (!sourceAdmission?.ok) {
+    captureFailureReason = sourceAdmission
+      ? `sandbox source revision refused: ${sourceAdmission.reason}`
+      : 'sandbox source revision inspection unavailable';
+    emitLog(sink, `[M21] ${captureFailureReason}`);
+  } else if (_sandboxDiff !== null) {
     try {
       diff = _sandboxDiff(sb);
     } catch (err) {
