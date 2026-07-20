@@ -4,7 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { operationalProposalProjectionDir } from '../src/core/inbox/operational-projection.js';
+import {
+  operationalProposalProjectionDir,
+  validateOperationalProposalStageText,
+} from '../src/core/inbox/operational-projection.js';
 import {
   operationalProjectionStageDir,
   operationalProjectionStagePath,
@@ -68,6 +71,22 @@ describe('M435 operational projection staging', () => {
       expect(fs.statSync(operationalProjectionStageDir(TRANSACTION_ID)).mode & 0o777).toBe(0o700);
       expect(fs.statSync(operationalProjectionStagePath(TRANSACTION_ID, 'proposal')).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it('accepts the real canonical proposal identity validator through the storage boundary', () => {
+    const proposalId = 'stage-real-proposal';
+    const text = JSON.stringify({ id: proposalId, title: 'Canonical staged proposal' });
+    const validation = validateOperationalProposalStageText(text, proposalId);
+    expect(validation).not.toBeNull();
+    if (!validation) return;
+    const expected = { present: true, ...validation } as const;
+    const validateProposal = (candidate: string) =>
+      validateOperationalProposalStageText(candidate, proposalId);
+    expect(writeOperationalProjectionStage(
+      TRANSACTION_ID, 'proposal', Buffer.from(text, 'utf8'), expected, validateProposal,
+    )).toEqual({ ok: true });
+    expect(readOperationalProjectionStage(TRANSACTION_ID, 'proposal', expected, validateProposal))
+      .toEqual({ state: 'present', text });
   });
 
   it('refuses malformed identity, metadata mismatch, and a stale deletion artifact', () => {

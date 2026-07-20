@@ -10,6 +10,8 @@ import {
   operationalProposalProjectionDir,
   operationalProposalProjectionPath,
   readOperationalProposals,
+  validateOperationalProjectionStageText,
+  validateOperationalProposalStageText,
 } from '../src/core/inbox/operational-projection.js';
 import {
   acquireProposalStoreMutationLock,
@@ -100,6 +102,32 @@ afterEach(() => {
 });
 
 describe('M432 operational proposal projection', () => {
+  it('validates canonical staged proposal and sealed projection text with operational identities', () => {
+    const value = proposal('stage-validation');
+    writeProposal(value);
+    const key = loadOrCreateKey();
+    const migrated = migrate([value]);
+    expect(migrated.state).toBe('healthy');
+    const observed = observeOperationalProjectionArtifacts(value.id, heldLock!);
+    expect(observed.state).toBe('healthy');
+    if (observed.state !== 'healthy') return;
+
+    const proposalText = JSON.stringify(Object.fromEntries(Object.entries(value).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0)));
+    expect(validateOperationalProposalStageText(proposalText, value.id)).toEqual(observed.proposal);
+    expect(validateOperationalProposalStageText(`${proposalText}\n`, value.id)).toBeNull();
+    expect(validateOperationalProposalStageText(proposalText, 'other-proposal')).toBeNull();
+    expect(validateOperationalProposalStageText('{broken', value.id)).toBeNull();
+
+    const projectionText = fs.readFileSync(operationalProposalProjectionPath(), 'utf8');
+    expect(validateOperationalProjectionStageText(projectionText, key)).toEqual(observed.projection);
+    expect(validateOperationalProjectionStageText(projectionText.trimEnd(), key)).toBeNull();
+    expect(validateOperationalProjectionStageText(projectionText, Buffer.alloc(32, 9))).toBeNull();
+    const tampered = JSON.parse(projectionText) as Record<string, unknown>;
+    tampered['projectionDigest'] = '0'.repeat(64);
+    expect(validateOperationalProjectionStageText(`${JSON.stringify(tampered)}\n`, key)).toBeNull();
+  });
+
   it('observes canonical proposal and projection artifacts only while the store lock is held', () => {
     const value = proposal('observe-active');
     writeProposal(value);

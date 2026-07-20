@@ -130,6 +130,12 @@ export interface OperationalProjectionArtifactDigest {
   bytes: number;
 }
 
+/** A canonical staged artifact identity, using the same domains as live observation. */
+export interface OperationalProjectionStageTextValidation {
+  digest: string;
+  bytes: number;
+}
+
 export type OperationalProjectionArtifactObservation =
   | {
     state: 'healthy';
@@ -479,6 +485,47 @@ function readProjectionFile():
 function proposalIdentityMatches(proposal: Proposal, member: OperationalProposalProjectionMemberV1): boolean {
   return proposal.id === member.proposalId && proposal.status === member.status &&
     proposal.createdAt === member.createdAt;
+}
+
+/**
+ * Validate canonical proposal text for a specific proposal identity without
+ * reading or writing the proposal store.
+ */
+export function validateOperationalProposalStageText(
+  text: string,
+  proposalId: string,
+): OperationalProjectionStageTextValidation | null {
+  if (!validProposalId(proposalId)) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!isPlainRecord(parsed) || parsed.id !== proposalId) return null;
+    const canonical = canonicalJson(parsed);
+    if (text !== canonical) return null;
+    const bytes = Buffer.byteLength(canonical, 'utf8');
+    if (bytes <= 0 || bytes > MAX_PROPOSAL_BYTES) return null;
+    return { digest: sha256(PROPOSAL_DIGEST_DOMAIN, parsed), bytes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate canonical sealed projection text without consulting projection
+ * storage. The provenance key is required to bind the manifest seal.
+ */
+export function validateOperationalProjectionStageText(
+  text: string,
+  provenanceKey: Buffer,
+): OperationalProjectionStageTextValidation | null {
+  if (!Buffer.isBuffer(provenanceKey) || provenanceKey.length !== 32) return null;
+  const projection = parseManifest(text);
+  if (!projection || !verifyManifest(projection, projectionSigningKey(provenanceKey))) return null;
+  const canonical = `${canonicalJson(projection)}\n`;
+  if (text !== canonical) return null;
+  const bytes = Buffer.byteLength(canonical, 'utf8');
+  return bytes > 0 && bytes <= MAX_MANIFEST_BYTES
+    ? { digest: projection.projectionDigest, bytes }
+    : null;
 }
 
 function readOperationalProposalsAt(
