@@ -3108,3 +3108,7 @@
 # Current Binary Pair Eligibility Boundary
 - A pure, unused helper now accepts only exactly two distinct non-builtin, same-tier, `gateway-exact`, candidate-allowed routes in an `ordinary-direct` context with fresh positive planner-capacity observations. It preserves input order and makes no random choice, capacity mutation, reservation, receipt, manifest update, or config change.
 - Planner capacity remains an eligibility snapshot, never a reservation. The daemon does not yet construct a second candidate or invoke this helper; a future lease-bound producer must revalidate final route and authority immediately before the external engine effect.
+
+# Current Assignment Capacity Sidecar
+- Concurrent planning now retains object-identity keyed metadata for each chosen assignment: backend, original slots at plan time, and remaining slots immediately before that assignment. Existing assignment objects, plan ordering, manifest shape, and dispatch behavior are unchanged.
+- This sidecar is in-memory, planner-local capacity observation only. It neither claims a route nor survives into a receipt, ledger, or status surface; the future producer must still acquire and retain fresh shared execution authority before any engine effect.

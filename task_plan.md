@@ -2876,6 +2876,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Carry only process-bound receipt-qualified selection projections into trajectory reconstruction and learning eligibility.
 - [x] Normalize final concurrent backend/tier/model/disposition at the executor boundary without enabling a canary producer.
 - [x] Add a pure, unused binary canary pair eligibility contract with no randomization, reservation, or persistence.
+- [x] Preserve per-assignment planner capacity snapshots as ephemeral sidecar metadata without changing assignments.
 - [x] Audit the concurrent-planner seam and reject a precomputed canary helper that could diverge from the final route.
 - [ ] Carry exact gateway route disposition and model tuple into the per-item concurrent commit point before enabling a binary canary producer.
 - [ ] Add a real pre-execution randomized-canary producer only with an explicit assignment protocol and lease-bound capture point.

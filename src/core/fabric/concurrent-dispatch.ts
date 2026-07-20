@@ -87,6 +87,13 @@ export interface DispatchAssignment {
   backend: EngineId;
 }
 
+/** Ephemeral capacity observation made immediately before one planner assignment. */
+export interface DispatchAssignmentCapacity {
+  backend: EngineId;
+  slotsAtPlan: number;
+  remainingBefore: number;
+}
+
 /** Plan output: concrete assignments + any items that could not be placed. */
 export interface DispatchPlan {
   /** Items assigned to a backend (backend had headroom at plan time). */
@@ -98,6 +105,8 @@ export interface DispatchPlan {
    * Keyed by backend; includes all backends from the snapshot.
    */
   slotsMap: Map<EngineId, number>;
+  /** Object-identity keyed sidecar; capacity observation only, never a reservation. */
+  assignmentCapacity?: ReadonlyMap<WorkItem, DispatchAssignmentCapacity>;
 }
 
 /** Outcome of a single dispatched item. */
@@ -317,7 +326,18 @@ export function planConcurrentDispatch(
   const remaining = new Map<EngineId, number>(slotsMap);
 
   const assignments: DispatchAssignment[] = [];
+  const assignmentCapacity = new Map<WorkItem, DispatchAssignmentCapacity>();
   const unassigned: WorkItem[] = [];
+
+  const assign = (item: WorkItem, backend: EngineId, remainingBefore: number): void => {
+    assignments.push({ item, backend });
+    assignmentCapacity.set(item, {
+      backend,
+      slotsAtPlan: slotsMap.get(backend) ?? 0,
+      remainingBefore,
+    });
+    remaining.set(backend, remainingBefore - 1);
+  };
 
   // Round-robin cursor for spreading across backends.
   let rrCursor = 0;
@@ -334,8 +354,7 @@ export function planConcurrentDispatch(
       (!requiresEditingBackend || preferred !== 'builtin') &&
       candidateAllowed(item, preferred)
     ) {
-      assignments.push({ item, backend: preferred });
-      remaining.set(preferred, prefRem - 1);
+      assign(item, preferred, prefRem);
       continue;
     }
 
@@ -350,8 +369,7 @@ export function planConcurrentDispatch(
         resolveTier(candidate) === item.repairParentTier,
       );
       if (substitute) {
-        assignments.push({ item, backend: substitute });
-        remaining.set(substitute, (remaining.get(substitute) ?? 0) - 1);
+        assign(item, substitute, remaining.get(substitute) ?? 0);
         continue;
       }
       unassigned.push(item);
@@ -368,8 +386,7 @@ export function planConcurrentDispatch(
       if (!candidateAllowed(item, candidate)) continue;
       const rem = remaining.get(candidate) ?? 0;
       if (rem > 0) {
-        assignments.push({ item, backend: candidate });
-        remaining.set(candidate, rem - 1);
+        assign(item, candidate, rem);
         rrCursor = (idx + 1) % n;
         placed = true;
         break;
@@ -381,7 +398,7 @@ export function planConcurrentDispatch(
     }
   }
 
-  return { assignments, unassigned, slotsMap };
+  return { assignments, unassigned, slotsMap, assignmentCapacity };
 }
 
 // ---------------------------------------------------------------------------

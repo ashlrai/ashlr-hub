@@ -106,6 +106,23 @@ describe('finalizeConcurrentDispatchRoute', () => {
   });
 });
 
+describe('planner capacity sidecar', () => {
+  it('records capacity immediately before assignment without changing assignment shape', () => {
+    const first = makeItem();
+    const second = makeItem();
+    const plan = planConcurrentDispatch(
+      [first, second],
+      makeSnapshot([{ backend: 'codex', availability: 'open' }]),
+      { maxSlotsPerBackend: 2 },
+      () => 'codex',
+    );
+    expect(plan.assignments).toEqual([{ item: first, backend: 'codex' }, { item: second, backend: 'codex' }]);
+    expect(plan.assignmentCapacity?.get(first)).toEqual({ backend: 'codex', slotsAtPlan: 2, remainingBefore: 2 });
+    expect(plan.assignmentCapacity?.get(second)).toEqual({ backend: 'codex', slotsAtPlan: 2, remainingBefore: 1 });
+    expect(plan.slotsMap.get('codex')).toBe(2);
+  });
+});
+
 function makeTrustedCaptureRepair(): WorkItem {
   return makeItem({
     id: 'repo:proposal-repair-capture:abcdef123456',
