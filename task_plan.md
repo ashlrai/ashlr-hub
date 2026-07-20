@@ -2729,3 +2729,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit local lane de-duplication against the repository-scoped cooldown and pending-proposal identities.
 - [x] Preserve equal scanner ids from different canonical repositories during local lane selection.
 - [x] Prove two-repository lane selection and pass focused coordinator tests, typecheck, scoped lint, and diff checks.
+
+## Daemon Cooldown-Policy Repository Identity (2026-07-20)
+- [x] Audit raw-id policy lookup through selection, cooldown settlement, and generated-repair decision telemetry.
+- [x] Key all daemon claim cooldown-policy lookups by repository-scoped work identity.
+- [x] Prove a cooled same-id item cannot block a second enrolled repository's item; pass focused daemon/coordinator tests, typecheck, scoped lint, and diff checks.

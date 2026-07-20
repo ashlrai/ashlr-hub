@@ -50,6 +50,7 @@ const origInSwarm = process.env.ASHLR_IN_SWARM;
 
 let tmpHome: string;
 let tmpRepo: string;
+let tmpOtherRepo: string;
 
 // ---------------------------------------------------------------------------
 // Mocks — declared before lazy imports (same pattern as m85 / m106)
@@ -190,6 +191,7 @@ function swarmStub(repo: string) {
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-repo-'));
+  tmpOtherRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-other-repo-'));
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
@@ -210,6 +212,8 @@ beforeEach(() => {
 
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
+  initBareGitDir(tmpOtherRepo);
+  fs.writeFileSync(path.join(tmpOtherRepo, 'package.json'), JSON.stringify({ name: 'other-r' }), 'utf8');
 
   mockRunSwarm.mockReset();
   mockRunGoal.mockReset();
@@ -242,10 +246,12 @@ beforeEach(() => {
 
 afterEach(() => {
   try { unenroll(tmpRepo); } catch { /* ignore */ }
+  try { unenroll(tmpOtherRepo); } catch { /* ignore */ }
   try { setKill(false); } catch { /* ignore */ }
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
+  fs.rmSync(tmpOtherRepo, { recursive: true, force: true });
 
   if (origHome !== undefined) process.env.HOME = origHome;
   else delete process.env.HOME;
@@ -375,6 +381,30 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // We verify this by checking the mock call count excludes item-1's repo swarm-skip
     expect(item1Events.length).toBe(1); // only the pre-recorded entry
     void item1DispatchedTs; // used above
+  });
+
+  it('does not apply one repository cooldown policy to an equal-id item in another repository', async () => {
+    const cfg = makeCfg({ daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 } });
+    mockLoadConfig.mockReturnValue(cfg);
+    const cooled = makeItem('shared-scanner-id', tmpRepo, { score: 5 });
+    const eligible = makeItem('shared-scanner-id', tmpOtherRepo, { score: 4 });
+    backlogItems = [cooled, eligible];
+    mockBuildBacklog.mockImplementation(async () => ({
+      generatedAt: new Date().toISOString(),
+      repos: [tmpRepo, tmpOtherRepo],
+      items: backlogItems,
+    }));
+    localRecord(generatedRepairCooldownKey(cooled), 'empty');
+    enroll(tmpRepo);
+    enroll(tmpOtherRepo);
+
+    const result = await tick(cfg, { dryRun: false });
+    const ledger = loadWorkedLedger();
+
+    expect(result.reason).toBe('ok');
+    expect(ledger.events.filter((event) => event.itemId === generatedRepairCooldownKey(cooled)))
+      .toHaveLength(1);
+    expect(ledger.events.some((event) => event.itemId === generatedRepairCooldownKey(eligible))).toBe(true);
   });
 });
 

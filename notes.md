@@ -2842,3 +2842,8 @@
   - `LocalWorkQueueCoordinator.claimItemsByLane` previously de-duplicated only `item.id`, silently dropping the second of two same-id items from distinct repositories before execution. This was an availability loss even outside shared mode.
   - Local lane de-duplication now uses the existing repository-scoped `workItemCoverageKey`, including canonical path, item id, and repair generation. It preserves same-repository duplicate suppression while allowing independent enrolled repositories to use common scanner ids.
   - Focused coordinator coverage proves two equal IDs in separate lanes are both selected. The shared coordinator remains deliberately fail-closed for that input pending the durable execution-key protocol migration.
+
+- Daemon cooldown-policy repository identity (2026-07-20):
+  - The daemon still indexed per-item claim cooldown policies by raw `item.id`, even after the worked ledger and local coordinator became repository-scoped. A same-id item in a second repository could therefore inherit the first item's cooldown policy or have its frozen worked key misattributed.
+  - Policy lookup, policy completion, frozen worked-key resolution, selection blocker summaries, and metadata-only generated-repair decision telemetry now use `workItemCoverageKey`. The policy's worked-event keys remain unchanged and repository-scoped.
+  - A full local daemon regression pre-cools one repository's `shared-scanner-id` and proves an equal-id item in a separately enrolled repository still executes and records only under its own identity. This is a prerequisite to, not a substitute for, the shared-store claim-key migration.

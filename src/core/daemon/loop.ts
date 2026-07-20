@@ -1875,20 +1875,21 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
   routeEvaluationByItem?: Map<WorkItem, GeneratedRepairRouteEvaluation>;
 }): void {
-  const selectedIds = new Set(fields.selectedItems.map((item) => item.id));
-  const claimedIds = new Set(fields.claimedItems.map((item) => item.id));
+  const selectedKeys = new Set(fields.selectedItems.map(workItemCoverageKey));
+  const claimedKeys = new Set(fields.claimedItems.map(workItemCoverageKey));
   const allGeneratedItems = fields.items.filter((item) => isTrustedGeneratedRepairItem(item));
   const generatedItems = allGeneratedItems.slice(0, MAX_GENERATED_REPAIR_DECISION_EVENTS);
   const droppedDecisionCount = Math.max(0, allGeneratedItems.length - generatedItems.length);
   if (generatedItems.length === 0) return;
   recordAgentAction(generatedItems.map((item): AgentActionEvent => {
     const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
-    const policy = fields.cooldownPolicies.get(item.id) ??
+    const itemKey = workItemCoverageKey(item);
+    const policy = fields.cooldownPolicies.get(itemKey) ??
       claimCooldownPolicyForSelectionItem(item, fields.baseCooldownMs, fields.repairRecoveryHealthy);
     const effectiveCooldownMs = cooldownMsForSelectionItem(fields.workedEvents, policy);
     const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, policy);
-    const selected = selectedIds.has(item.id);
-    const claimed = claimedIds.has(item.id);
+    const selected = selectedKeys.has(itemKey);
+    const claimed = claimedKeys.has(itemKey);
     const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
     const routeEvaluation = fields.routeEvaluationByItem?.get(item);
     const inspectedRoute = routeEvaluation?.feasibility;
@@ -4298,14 +4299,14 @@ export async function tick(
   const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
   const claimCooldownPolicies = new Map<string, QueueClaimCooldownPolicy>(
     backlogItems.map((item) => [
-      item.id,
+      workItemCoverageKey(item),
       claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
     ]),
   );
   const frozenWorkedItemId = (item: WorkItem): string =>
-    claimCooldownPolicies.get(item.id)?.itemIds[0] ?? item.id;
+    claimCooldownPolicies.get(workItemCoverageKey(item))?.itemIds[0] ?? workItemCoverageKey(item);
   const isSelectionBlocked = (item: WorkItem): boolean =>
-    generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(item.id)!) ||
+    generatedRepairShouldSkip(selectionWorkedEvents, claimCooldownPolicies.get(workItemCoverageKey(item))!) ||
     pendingItemKeys.has(workItemCoverageKey(item));
   const claimRepairQueue = (() => {
     try {
@@ -4474,7 +4475,7 @@ export async function tick(
     let fastRepairCooldown = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
-      const itemPolicy = claimCooldownPolicies.get(item.id)!;
+      const itemPolicy = claimCooldownPolicies.get(workItemCoverageKey(item))!;
       const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, itemPolicy);
       const cooling = generatedRepairShouldSkip(selectionWorkedEvents, itemPolicy);
       if (pending) pendingBlocked++;
@@ -4653,9 +4654,10 @@ export async function tick(
   // cross-machine contention. Cooldown evidence is re-read under the same lock
   // so a completion that raced selection cannot be immediately reclaimed.
   for (const item of claimLanes.flatMap((lane) => lane.candidates)) {
-    if (!claimCooldownPolicies.has(item.id)) {
+    const itemKey = workItemCoverageKey(item);
+    if (!claimCooldownPolicies.has(itemKey)) {
       claimCooldownPolicies.set(
-        item.id,
+        itemKey,
         claimCooldownPolicyForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
       );
     }
