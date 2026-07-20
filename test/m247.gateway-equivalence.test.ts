@@ -596,6 +596,7 @@ describe('M247 InferenceGateway', () => {
       };
       expect(isOrdinaryFleetGatewayDecision(ordinary)).toBe(true);
       expect(isOrdinaryFleetGatewayDecision({ ...ordinary, trace: [] })).toBe(false);
+      expect(isOrdinaryFleetGatewayDecision({ ...ordinary, routingDisposition: 'budget-paused' })).toBe(false);
       expect(isOrdinaryFleetGatewayDecision({
         ...ordinary,
         trace: [...ordinary.trace, { stage: 'resourceDemote', backend: 'claude', tier: 'frontier', reason: 'demoted' }],

@@ -3151,3 +3151,8 @@
 - Receipt signing and verification now accept only `binary-uniform-v1` observations with exactly two candidates and `500000` ppm probability. This matches the only enabled canary protocol design and prevents arbitrary, deterministic, or non-binary observations from ever surfacing as future selection propensity.
 - V1 receipts remain unjoined regardless; this protocol validation is an additional V2 prerequisite, not a producer activation.
 - Verification: selection-start receipt coverage and the exact V1-withholding regression pass six assertions; TypeScript typechecking and quiet lint pass.
+
+# Current Ordinary Gateway Pause Guard
+- Gateway decisions now expose a typed `budget-paused` disposition. The ordinary fleet predicate rejects that disposition directly, so a budget pause cannot be misclassified as an untouched route solely because it retains the initial routing trace.
+- This is an in-memory eligibility guard only; budget routing behavior, reason strings, canary configuration, and producer state are unchanged.
+- Verification: the M247 gateway suite passes 76 assertions, with TypeScript typechecking and quiet lint passing.

@@ -87,6 +87,8 @@ export interface GatewayDecision {
    * Populated only when a demotion occurred.
    */
   demotedFrom?: EngineId;
+  /** Typed non-ordinary disposition; never infer this from a free-form reason. */
+  routingDisposition?: 'budget-paused';
 }
 
 /** Context passed by the caller for budget / cost-recovery decisions. */
@@ -110,6 +112,7 @@ export interface GatewayCtx {
 export function isOrdinaryFleetGatewayDecision(decision: GatewayDecision): boolean {
   const [base] = decision.trace;
   return decision.source === 'fleet' && decision.trace.length === 1 && base !== undefined &&
+    decision.routingDisposition === undefined &&
     base.stage === 'routeBackend' && base.backend === decision.backend && base.tier === decision.tier;
 }
 
@@ -287,6 +290,7 @@ export async function decide(
             model: current.model,
             source: 'fleet',
             trace,
+            routingDisposition: 'budget-paused',
             reason: `budget-pause: ${recovery.reason}`,
           };
         } else if (recovery.decision.backend !== current.backend) {
