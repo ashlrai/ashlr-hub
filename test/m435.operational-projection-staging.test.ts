@@ -87,6 +87,12 @@ describe('M435 operational projection staging', () => {
       .toEqual({ state: 'degraded', reason: 'stage-expected-absent' });
   });
 
+  it('does not treat a missing transaction stage directory as a valid deletion', () => {
+    const deletion = { present: false, digest: null, bytes: 0 } as const;
+    expect(readOperationalProjectionStage(TRANSACTION_ID, 'proposal', deletion, validate))
+      .toEqual({ state: 'degraded', reason: 'stage-missing' });
+  });
+
   it('fails closed when a staged artifact is replaced after publication', () => {
     const text = '{"proposal":"gamma"}';
     const expected = metadata(text);

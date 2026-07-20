@@ -169,8 +169,6 @@ export function readOperationalProjectionStage(
   }
   const directory = operationalProjectionStageDir(transactionId);
   const path = operationalProjectionStagePath(transactionId, kind);
-  if (!expected.present) return stageAbsent(path)
-    ? { state: 'absent' } : { state: 'degraded', reason: 'stage-expected-absent' };
   try { lstatSync(directory); }
   catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
@@ -183,6 +181,8 @@ export function readOperationalProjectionStage(
     !assurePrivateStoragePath(directory, 'directory', 'inspect-existing', { anchorPath: stageRoot() }).ok) {
     return { state: 'degraded', reason: 'stage-directory-unsafe' };
   }
+  if (!expected.present) return stageAbsent(path)
+    ? { state: 'absent' } : { state: 'degraded', reason: 'stage-expected-absent' };
   const read = readStableRegularFile(path, {
     anchorPath: directory,
     maxFileBytes: MAX_STAGE_BYTES,
