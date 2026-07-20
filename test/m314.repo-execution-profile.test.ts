@@ -409,6 +409,32 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('ignores agent worktrees and fixture projects during merge coverage discovery', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      const agentWorktree = join(dir, '.claude', 'worktrees', 'agent', 'app');
+      const fixtureProject = join(dir, 'test', 'fixtures', 'sample-app');
+      mkdirSync(agentWorktree, { recursive: true });
+      mkdirSync(fixtureProject, { recursive: true });
+      writePkg(agentWorktree, { scripts: { test: 'vitest' } });
+      writePkg(fixtureProject, { scripts: { test: 'vitest' } });
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'root-test', kind: 'test', cmd: ['npm', 'run', 'test'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.projects.map((project) => project.relativeRoot)).toEqual(['.']);
+      expect(profile.projectDiscoveryTruncated).toBe(false);
+      expect(profile.verifyContract?.mergeCoverageComplete).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes valid contracts from explicit merge-grade contracts', () => {
     const dir = makeFixture();
     try {

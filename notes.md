@@ -2990,4 +2990,9 @@
 - A present merge-grade contract becomes coverage-incomplete with a bounded depth reason, so sandbox and protected merge verification refuse before running a partial verifier set. The merge-contract scanner emits `source-depth-truncated` unavailable evidence instead of a healthy absence observation.
 - Fleet readiness therefore remains truthful even while the enrolled fleet has deeper source trees. This is verification eligibility only; it does not apply, merge, deploy, or mutate any repository.
 - Verification: M314, M22, M331, and M47 pass 158 focused assertions; M49 Fleet Status passes 143 assertions. Protected CI remains the cross-platform release authority.
+
+# Current Discovery Repository Boundary
+- The expanded project scanner now ignores hidden agent state (`.agents`, `.ashlr`, `.claude`, `.codex`) and fixture/example/test trees. Those directories can contain independent package manifests, but they are not production project roots and must not create artificial merge-contract debt or make an enrolled repository appear depth-truncated.
+- Real source, package, integration, application, desktop, and crate directories remain discoverable. The depth boundary therefore protects merge authority without treating local Codex/Claude worktrees or intentionally adversarial test apps as shipped components.
+- Verification: 302 focused profile, scanner, merge, sandbox-verifier, and Fleet Status assertions pass. Protected CI remains the cross-platform release authority.
 - Verification: targeted M362 terminalization and degraded-source regressions pass; changed-source TypeScript emitted no matching errors. The broader M362 suite's three concurrent-process fixtures cannot find this isolated worktree's local `tsx` binary and were not counted as passing; protected CI remains authoritative.

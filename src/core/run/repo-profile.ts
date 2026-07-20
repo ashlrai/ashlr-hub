@@ -147,6 +147,10 @@ interface PackageJsonSubset {
 }
 
 const SKIP_DIRS = new Set([
+  '.agents',
+  '.ashlr',
+  '.claude',
+  '.codex',
   '.git',
   '.next',
   '.turbo',
@@ -154,8 +158,15 @@ const SKIP_DIRS = new Set([
   'build',
   'coverage',
   'dist',
+  'example',
+  'examples',
+  'fixture',
+  'fixtures',
   'node_modules',
   'target',
+  'test',
+  'tests',
+  '__fixtures__',
 ]);
 
 const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
