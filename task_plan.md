@@ -2753,3 +2753,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Key production, handoff, lifecycle, and local settlement state by repository-qualified work identity.
 - [x] Preserve raw local ledger ids for compatibility while persisting a scoped cooldown key.
 - [x] Prove local raw-id compatibility and cross-repository cooldown isolation; pass focused coordinator/daemon tests, typecheck, lint, and diff checks.
+
+## Route And Preflight Repository Identity (2026-07-20)
+- [x] Audit automatic-drain route, preflight, blocked-selection, and fairness maps for raw scanner-id collisions.
+- [x] Key route and preflight state by repository-qualified work identity.
+- [x] Preserve ordinary-turn fairness when a same-id repair is claimed in another repository.
+- [x] Pass the focused automatic-drain route/fairness suite and record the isolated-worktree typecheck limitation for protected CI.

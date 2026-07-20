@@ -1892,7 +1892,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
     const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, policy);
     const selected = selectedKeys.has(itemKey);
     const claimed = claimedKeys.has(itemKey);
-    const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
+    const dispatchPreflight = fields.dispatchPreflightByItemId?.get(workItemCoverageKey(item));
     const routeEvaluation = fields.routeEvaluationByItem?.get(item);
     const inspectedRoute = routeEvaluation?.feasibility;
     const blockedRouteEvaluation = inspectedRoute && !inspectedRoute.feasible
@@ -4350,7 +4350,7 @@ export async function tick(
         : {}),
       feasibility,
     });
-    if (!feasibility.feasible) claimRouteUnavailableIds.add(item.id);
+    if (!feasibility.feasible) claimRouteUnavailableIds.add(workItemCoverageKey(item));
     return feasibility.feasible;
   };
   const isClaimEligible = (item: WorkItem): boolean =>
@@ -4395,15 +4395,15 @@ export async function tick(
         ).assignments.map((assignment) => assignment.item)
       : []
     : serialDispatchableRepairs;
-  const autoDrainDispatchableIds = new Set(autoDrainDispatchableItems.map((item) => item.id));
+  const autoDrainDispatchableIds = new Set(autoDrainDispatchableItems.map(workItemCoverageKey));
   const dispatchPreflightByItemId = new Map<string, DispatchPreflightState>();
   for (const item of autoDrainAvailableItems) {
     if (isSelectionBlocked(item)) continue;
     dispatchPreflightByItemId.set(
-      item.id,
-      claimRouteUnavailableIds.has(item.id)
+      workItemCoverageKey(item),
+      claimRouteUnavailableIds.has(workItemCoverageKey(item))
         ? 'route-unavailable'
-        : autoDrainDispatchableIds.has(item.id)
+        : autoDrainDispatchableIds.has(workItemCoverageKey(item))
         ? 'dispatchable'
         : concurrentDispatchEnabled
           ? selectionResourceSnapshot
@@ -4422,14 +4422,14 @@ export async function tick(
   }
   for (const item of claimRouteCandidateItems) {
     if (
-      claimRouteUnavailableIds.has(item.id) &&
-      !dispatchPreflightByItemId.has(item.id)
-    ) dispatchPreflightByItemId.set(item.id, 'route-unavailable');
+      claimRouteUnavailableIds.has(workItemCoverageKey(item)) &&
+      !dispatchPreflightByItemId.has(workItemCoverageKey(item))
+    ) dispatchPreflightByItemId.set(workItemCoverageKey(item), 'route-unavailable');
   }
   const dispatchBlockedRepairIds = new Set([
     ...autoDrainEligibleItems
-      .filter((item) => !autoDrainDispatchableIds.has(item.id))
-      .map((item) => item.id),
+      .filter((item) => !autoDrainDispatchableIds.has(workItemCoverageKey(item)))
+      .map(workItemCoverageKey),
     ...claimRouteUnavailableIds,
   ]);
   const drainAvailableItems = drainMode
@@ -4438,7 +4438,7 @@ export async function tick(
       : backlogItems.filter((item) => isDrainCandidate(item, drainMode))
     : [];
   const ordinarySelectionItems = dispatchBlockedRepairIds.size > 0
-    ? backlogItems.filter((item) => !dispatchBlockedRepairIds.has(item.id))
+    ? backlogItems.filter((item) => !dispatchBlockedRepairIds.has(workItemCoverageKey(item)))
     : backlogItems;
   const automaticOrdinarySelectionItems = automaticDrain && drainMode
     ? ordinarySelectionItems.filter((item) => !isDrainCandidate(item, drainMode))
@@ -4677,8 +4677,10 @@ export async function tick(
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
     : [];
   if (automaticDrain) {
-    const claimedIds = new Set(workedSet.map((item) => item.id));
-    const claimedOrdinary = automaticOrdinaryEligibleItems.some((item) => claimedIds.has(item.id));
+    const claimedIds = new Set(workedSet.map(workItemCoverageKey));
+    const claimedOrdinary = automaticOrdinaryEligibleItems.some((item) =>
+      claimedIds.has(workItemCoverageKey(item)),
+    );
     const claimedRepair = drainSelectedItems.length > 0;
     if (claimedOrdinary) {
       automaticDrainOrdinaryTurnDue = false;

@@ -2275,7 +2275,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       skipReason: 'repair-tier-unavailable',
     });
     expect(loadWorkedLedger().events.at(-1)).toMatchObject({
-      itemId: generatedRepairCooldownKey(reslice),
+      itemId: reslice.id,
+      itemKey: generatedRepairCooldownKey(reslice),
       outcome: 'dispatch-blocked',
     });
 
