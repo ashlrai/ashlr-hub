@@ -1310,34 +1310,52 @@ function captureSandboxAndCleanup(
             };
             emitLog(sink, `[M24] Proposal ${created.id} failed durable persistence verification`);
           } else {
-            outcome = {
-              kind: 'filed',
-              reason: isPartialCapture
-                ? `builtin swarm partial proposal filed after ${run.status} producer`
-                : 'builtin swarm proposal filed',
-              ...(isPartialCapture ? { isPartial: true } : {}),
-              proposalId: created.id,
-              ...diffCounts,
-            };
-            emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
-            // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
-            // webhook notification. Fire-and-forget; metadata only; never blocks.
-            void (async () => {
+            const persistedAdmission = _inspectSandboxSourceRevision?.(sb, sb.sourceRepo);
+            if (!persistedAdmission?.ok) {
+              _setProposalStatus?.(
+                created.id,
+                'rejected',
+                'Source revision changed during proposal capture.',
+                'source revision admission refused',
+              );
+              outcome = {
+                kind: 'sandbox-unavailable',
+                reason: persistedAdmission
+                  ? `sandbox source revision refused: ${persistedAdmission.reason}`
+                  : 'sandbox source revision inspection unavailable',
+                ...diffCounts,
+              };
+              emitLog(sink, `[M24] Proposal ${created.id} refused after source admission changed`);
+            } else {
+              outcome = {
+                kind: 'filed',
+                reason: isPartialCapture
+                  ? `builtin swarm partial proposal filed after ${run.status} producer`
+                  : 'builtin swarm proposal filed',
+                ...(isPartialCapture ? { isPartial: true } : {}),
+                proposalId: created.id,
+                ...diffCounts,
+              };
+              emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+              // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
+              // webhook notification. Fire-and-forget; metadata only; never blocks.
+              void (async () => {
+                try {
+                  const { loadConfig } = await import('../config.js');
+                  const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
+                  await notifyNewProposal(persisted, loadConfig());
+                } catch { /* notification is best-effort */ }
+              })();
               try {
-                const { loadConfig } = await import('../config.js');
-                const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
-                await notifyNewProposal(persisted, loadConfig());
-              } catch { /* notification is best-effort */ }
-            })();
-            try {
-              _audit?.({
-                action: 'inbox:proposal-created',
-                repo: sb.sourceRepo,
-                sandboxId: sb.id,
-                summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
-                result: 'ok',
-              });
-            } catch { /* audit best-effort */ }
+                _audit?.({
+                  action: 'inbox:proposal-created',
+                  repo: sb.sourceRepo,
+                  sandboxId: sb.id,
+                  summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
+                  result: 'ok',
+                });
+              } catch { /* audit best-effort */ }
+            }
           }
         }
       } catch (err) {

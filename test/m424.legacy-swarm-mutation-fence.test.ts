@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   removeSandbox: vi.fn(),
   removeSandboxWithBorrowedAuthority: vi.fn(),
   createProposal: vi.fn(),
+  loadProposal: vi.fn(),
+  setProposalStatus: vi.fn(),
   runGoal: vi.fn(),
   planSwarm: vi.fn(),
   assurePrivateStorage: vi.fn(() => ({ ok: true, reason: 'exact-private-dacl' })),
@@ -59,7 +61,12 @@ vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
 
 vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
-  return { ...actual, createProposal: mocks.createProposal };
+  return {
+    ...actual,
+    createProposal: mocks.createProposal,
+    loadProposal: mocks.loadProposal,
+    setStatus: mocks.setProposalStatus,
+  };
 });
 
 import { enroll, isEnrolled, killSwitchOn, setKill, unenroll } from '../src/core/sandbox/policy.js';
@@ -325,6 +332,55 @@ describe('M424 legacy swarm mutation lifecycle authority', { timeout: 15_000 }, 
     expect(mocks.createProposal).toHaveBeenCalledOnce();
     expect(mocks.removeSandboxWithBorrowedAuthority).toHaveBeenCalledOnce();
     expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
+  });
+
+  it('rejects a durably written swarm proposal when source admission changes during capture', async () => {
+    mocks.runGoal.mockImplementationOnce(async (goal: string) => completedRun(goal));
+    const project = join(home, 'repo');
+    expect(enroll(project)).toMatchObject({ ok: true, quiesced: true });
+    const created = {
+      id: 'm424-stale-capture',
+      status: 'pending',
+      repo: project,
+      runId: 'm424-stale-capture-run',
+      trajectoryId: 'run:m424-stale-capture-run',
+      workItemId: undefined,
+      workItemGenerationId: undefined,
+      isPartial: false,
+      diff: 'diff --git a/x.ts b/x.ts\n+held effect\n',
+      createdAt: new Date().toISOString(),
+    };
+    mocks.createProposal.mockReturnValueOnce(created);
+    mocks.loadProposal.mockReturnValueOnce(created);
+    mocks.inspectSandboxSourceRevision
+      .mockReturnValueOnce({ ok: true, reason: 'sandbox source revision matches admission baseline' })
+      .mockReturnValueOnce({ ok: false, reason: 'source-revision-stale' });
+
+    const result = await runSwarm(
+      { goal: plan.goal },
+      config(),
+      {
+        runId: 'm424-stale-capture-run',
+        project,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+      },
+      () => {},
+    );
+
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-revision-stale'),
+    });
+    expect(mocks.setProposalStatus).toHaveBeenCalledWith(
+      created.id,
+      'rejected',
+      'Source revision changed during proposal capture.',
+      'source revision admission refused',
+    );
+    expect(mocks.removeSandboxWithBorrowedAuthority).toHaveBeenCalledOnce();
   });
 
   it('rechecks enrollment across the creation-to-execution fence handoff', async () => {

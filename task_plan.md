@@ -2679,6 +2679,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Extend the same contract to direct orchestrator engineer capture without bypassing outward mutation authority.
 - [x] Keep legacy swarm lifecycle fixtures explicit about stable source admission; pass the complete serial CI portability 2/3 shard after Windows surfaced the missing synthetic admission proof.
 - [x] Refuse source checkouts with tracked or untracked worktree state that the sandbox base cannot represent, and reject source worktree state races across admission reads.
+- [x] Recheck source admission after durable swarm proposal persistence; reject stale rows before a filed outcome, success audit, or notification can escape.
 
 ## Closed Judge Decision Metadata (2026-07-16)
 - [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.
