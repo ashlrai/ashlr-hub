@@ -46,6 +46,7 @@ import {
   inspectSandboxSourceRevision,
   removeSandbox,
 } from '../src/core/sandbox/worktree.js';
+import { listProposals } from '../src/core/inbox/store.js';
 import {
   captureSandboxedProposal,
   runApiModelSandboxed,
@@ -258,6 +259,35 @@ describe('M403 source-revision admission', () => {
       kind: 'sandbox-unavailable',
       reason: expect.stringContaining('source-revision-stale'),
     });
+  });
+
+  it('rejects a successful CLI capture when the source advances before its durable proposal check', async () => {
+    const repo = initRepo(root, 'repo');
+    const sb = sandbox(repo);
+    mocks.spawnEngine.mockImplementationOnce(async () => {
+      writeFileSync(
+        join(sb.worktreePath, 'candidate.ts'),
+        Array.from({ length: 12 }, (_, index) => `export const candidate${index} = ${index};`).join('\n') + '\n',
+        'utf8',
+      );
+      advance(repo);
+      return { ok: true, output: 'completed' };
+    });
+
+    const result = await runEngineSandboxed('claude', 'source race after successful cli work', cfg, {
+      sourceRepo: repo,
+      existingWorktree: sb,
+      propose: true,
+      runId: 'run-m403-cli-stale-after-persist',
+    });
+
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'sandbox-unavailable',
+      reason: expect.stringContaining('source-revision-stale'),
+    });
+    expect(listProposals({ status: 'pending' })).toEqual([]);
+    expect(listProposals({ status: 'rejected' })).toHaveLength(1);
   });
 
   it('returns no draft or partial artifact when capture is stale', async () => {

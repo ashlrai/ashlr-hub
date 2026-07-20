@@ -2110,13 +2110,46 @@ export async function runEngineSandboxed(
               persisted.id === proposal.id &&
               persisted.repo === sb.sourceRepo &&
               persisted.runId === id &&
+              persisted.trajectoryId === `run:${id}` &&
+              persisted.workItemId === opts.workItemId &&
+              persisted.workItemGenerationId === opts.workItemGenerationId &&
               persisted.diffHash === diffHash &&
               persisted.provenanceSig === provenanceSig &&
-              persisted.diff === scrubbed;
+              persisted.diff === scrubbed &&
+              (persisted.isPartial === true) === false &&
+              typeof persisted.diff === 'string' &&
+              persisted.diff.trim().length > 0;
             if (!durablePending) {
+              if (
+                proposal.status === 'pending' &&
+                persisted?.status === 'pending' &&
+                persisted.id === proposal.id &&
+                persisted.runId === id
+              ) {
+                inbox.setStatus(
+                  proposal.id,
+                  'rejected',
+                  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+                  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+                );
+              }
               proposalOutcomeResult = proposalOutcome(
                 'proposal-capture-error',
                 'proposal was not durably persisted with matching capture metadata',
+                effDiff,
+              );
+            } else {
+            const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+            if (!persistedAdmission.ok) {
+              inbox.setStatus(
+                proposal.id,
+                'rejected',
+                'Source revision changed during proposal capture.',
+                'source revision admission refused',
+              );
+              proposalOutcomeResult = proposalOutcome(
+                'sandbox-unavailable',
+                `sandbox source revision refused: ${persistedAdmission.reason}`,
                 effDiff,
               );
             } else {
@@ -2198,6 +2231,7 @@ export async function runEngineSandboxed(
                 cacheWrite(cfg, _entry, opts.sourceRepo);
               }
             } catch { /* shadow write is best-effort */ }
+            }
             }
           }
           } // end if (_m275ShouldFile)
