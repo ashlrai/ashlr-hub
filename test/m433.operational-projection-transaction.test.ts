@@ -154,6 +154,35 @@ describe('M433 operational projection transaction journal', () => {
     }
   });
 
+  it('issues V2 only for signed staged metadata and preserves its versioned attestation across phases', () => {
+    const staged = {
+      proposal: { present: true, digest: AFTER.proposal, bytes: 17 },
+      projection: { present: true, digest: AFTER.projection, bytes: 19 },
+    };
+    const prepared = prepareOperationalProjectionTransactionJournalOnly({
+      proposalId: 'proposal-433-v2', before: BEFORE, after: AFTER, staged, storeLock: acquire(), now: NOW,
+    });
+    expect(prepared).toMatchObject({
+      state: 'healthy', transaction: { schemaVersion: 2, phase: 'prepared', staged },
+    });
+    if (prepared.state !== 'healthy') return;
+    const advanced = advanceOperationalProjectionTransactionJournalOnly(
+      prepared.transaction.transactionId, 'proposal-installed', lock!, NOW,
+    );
+    expect(advanced).toMatchObject({
+      state: 'healthy', transaction: { schemaVersion: 2, phase: 'proposal-installed', staged },
+    });
+
+    const target = operationalProjectionTransactionPath();
+    const v2 = JSON.parse(fs.readFileSync(target, 'utf8')) as Record<string, unknown>;
+    v2['schemaVersion'] = 1;
+    delete v2['staged'];
+    fs.writeFileSync(target, `${JSON.stringify(v2)}\n`, { mode: 0o600 });
+    expect(readOperationalProjectionTransaction()).toMatchObject({
+      state: 'degraded', reason: 'transaction-integrity-failed',
+    });
+  });
+
   it('refuses phase skips, rollback, foreign identity, and a second live transaction', () => {
     const prepared = prepare();
     expect(prepared.state).toBe('healthy');

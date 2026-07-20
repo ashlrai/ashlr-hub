@@ -26,7 +26,17 @@ function samePrepareIntent(
   current: OperationalProjectionTransactionReadResult,
   input: PrepareOperationalProjectionTransactionInput,
 ): boolean {
-  return current.state === 'healthy' && current.transaction.phase === 'prepared' &&
+  if (current.state !== 'healthy' || current.transaction.phase !== 'prepared') return false;
+  const stagedMatches = input.staged === undefined
+    ? current.transaction.schemaVersion === 1
+    : current.transaction.schemaVersion === 2 &&
+      current.transaction.staged.proposal.present === input.staged.proposal.present &&
+      current.transaction.staged.proposal.digest === input.staged.proposal.digest &&
+      current.transaction.staged.proposal.bytes === input.staged.proposal.bytes &&
+      current.transaction.staged.projection.present === input.staged.projection.present &&
+      current.transaction.staged.projection.digest === input.staged.projection.digest &&
+      current.transaction.staged.projection.bytes === input.staged.projection.bytes;
+  return stagedMatches &&
     current.transaction.proposalId === input.proposalId &&
     current.transaction.before.proposal === input.before.proposal &&
     current.transaction.before.projection === input.before.projection &&
