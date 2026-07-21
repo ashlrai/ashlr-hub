@@ -2613,6 +2613,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Exercise all remaining V2 phase/crash boundaries against real journal, replay, stage, and canonical artifacts: proposal install, projection install, committed attestation, and completed observation remain read-only inspector outputs.
 - [x] Prove the inspector refuses a malformed active journal without modifying its bytes or creating replay/stage recovery state.
 - [x] Prove the inspector refuses a symlinked active journal without touching the external target or creating replay/stage recovery state.
+- [x] Pass the complete protected CI matrix on immutable draft PR #75 head `3afd1a10`; keep recovery executor activation, merge, and deployment disabled.
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
 - [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
