@@ -8,6 +8,12 @@
 - [x] P1: preserve dispatch-reader health so missing history is unavailable and failed or incomplete history is degraded rather than an honest empty trace list (215 focused assertions).
 - [x] P1 follow-up: merge outcome/action reader health into trace publication; independent throws degrade and missing sources withhold traces as unavailable (217 focused assertions).
 
+## 2026-07-21 - Daemon Backlog Deployment Drift Audit
+- [x] Trace daemon tick persistence, backlog refresh publication, and read-only Fleet Status queue reads.
+- [x] Inspect the active launchd PID and distinguish its actual executable from the on-disk plist and current source.
+- [x] Prove the stale backlog timestamp matches the active July 13 release rather than a current-source publication failure.
+- [x] Preserve no-mutation posture: no daemon restart, deployment, queue write, dispatch, or merge change.
+
 ## Current Stack Integration Cycle
 - [x] Merge protected PR #30 with exact-head authority and preserve its merge tree.
 - [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.

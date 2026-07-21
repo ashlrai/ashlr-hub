@@ -11,6 +11,12 @@
 - P1 follow-up: trace availability now combines dispatch, outcome, and agent-action reader health. Any degraded input withholds all traces as `degraded`; otherwise any missing input withholds them as `unavailable`. This prevents failed outcome/action reads from masquerading as causal coverage gaps. M354 separately proves outcome and action throw paths plus missing-source paths; verification is typecheck plus 217 focused assertions.
 - Assessed the reported autonomy-evidence zero-on-read-failure state. No change needed: `buildFleetStatus()` initializes evidence-read failures as `authorityState:"degraded"` with incomplete source quality, and the existing dashboard labels degraded zero as observed rather than healthy.
 
+## 2026-07-21 - Daemon Backlog Deployment Drift Audit
+- Live `launchctl` and process inspection show PID `69823` executing `/Users/masonwyatt/.local/share/ashlr/releases/f178db34fa6e47eb44df9f3db855943db602ef76/bin/ashlr`, a July 13 release. The current checked source and `origin/master` are `fbbf5f1a` from July 21.
+- `~/.ashlr/backlog.json` has a July 13 mtime, matching the resident release period. The active LaunchAgent process therefore explains the stale persisted queue snapshot; it is not evidence of a current-source backlog publication failure.
+- The LaunchAgent plist on disk now names the local checkout, but `launchctl list` proves the already-running job still has the older release path. Rewriting a plist does not replace its resident process. No deployment, reload, restart, daemon, queue, or merge mutation was performed in this audit.
+- Source tracing confirms a separate intentional behavior: current daemon resource-control early returns can record a tick before `refreshBacklogForTick()`. That path is not implicated in this live incident and was left unchanged.
+
 ## Current Stack Integration Cycle
 - Protected PR #30 merged to `master` as `827faf6ee3c8f7311e6824466d3d6b478f46cd27` after 10/10 exact-head checks passed. The merge commit preserves the checked candidate tree.
 - Post-merge run `29547392728` passed macOS and every Windows partition. Ubuntu passed 11,203 tests and failed six assertions solely because five M402 canary fixtures and one M49 queued-work fixture had aged beyond their intended observation windows.
