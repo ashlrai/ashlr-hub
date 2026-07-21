@@ -593,6 +593,8 @@ function verifiedFailureProposalRepairParent(
       item.repairDepth === root.repairDepth;
   });
   if (!parent) return undefined;
+  const canonical = proposalRepairWorkItem(parent);
+  if (!canonical || !sameCanonicalVerifiedFailureRepair(item, canonical)) return undefined;
 
   // A non-partial child from this exact repair is durable evidence that this
   // parent has already consumed its one repair dispatch. The parent remains
@@ -605,6 +607,24 @@ function verifiedFailureProposalRepairParent(
     typeof proposal.diff === 'string' && proposal.diff.trim().length > 0,
   );
   return hasRepairChild ? undefined : parent;
+}
+
+/** Queue rows are transport only: execution-bearing text must match the parent-derived item. */
+function sameCanonicalVerifiedFailureRepair(item: WorkItem, canonical: WorkItem): boolean {
+  return item.id === canonical.id &&
+    item.repo === canonical.repo &&
+    item.source === canonical.source &&
+    item.title === canonical.title &&
+    item.detail === canonical.detail &&
+    item.value === canonical.value &&
+    item.effort === canonical.effort &&
+    item.score === canonical.score &&
+    item.ts === canonical.ts &&
+    item.repairRootId === canonical.repairRootId &&
+    item.repairRootAuthorityId === canonical.repairRootAuthorityId &&
+    item.repairDepth === canonical.repairDepth &&
+    item.tags.length === canonical.tags.length &&
+    item.tags.every((tag, index) => tag === canonical.tags[index]);
 }
 
 /**

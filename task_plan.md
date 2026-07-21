@@ -3037,4 +3037,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove one canonical repair executes while ordinary work and unrelated maintenance remain off; run focused tests and typecheck.
 - [x] Fence the final parent-authority check through producer start and refuse a second repair once a complete exact child exists.
 - [x] Cover parent-child deduplication in queue and daemon regression tests; rerun strategy and repair-queue suites.
+- [x] Bind queued execution-bearing fields to the canonical parent-derived repair item; reject forged title/detail payloads.
 - [ ] Require protected CI before promotion.
