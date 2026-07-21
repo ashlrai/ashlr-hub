@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
   "mode": "replace-detected",
+  "authorityFiles": [
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "vitest.config.ts",
+    "scripts/test-ci.mjs"
+  ],
   "commands": [
     {
       "id": "typecheck",

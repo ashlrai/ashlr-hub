@@ -684,4 +684,50 @@ describe('repo execution profile', () => {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  it('retains explicit regular verifier authority files in the canonical contract source', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'node scripts/verify.mjs' } });
+      mkdirSync(join(dir, 'scripts'));
+      writeFileSync(join(dir, 'scripts', 'verify.mjs'), 'process.exit(0);\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        authorityFiles: ['package.json', 'scripts/verify.mjs'],
+        commands: [{ id: 'test', kind: 'test', cmd: ['npm', 'run', 'test'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyContract).toMatchObject({ valid: true, authorityFileCount: 2 });
+      expect(profile.mergeVerifyContractSource.verifyContract?.authorityFiles)
+        .toEqual(['package.json', 'scripts/verify.mjs']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['missing.txt'],
+    ['../escape.txt'],
+    ['scripts\\verify.mjs'],
+  ])('rejects invalid verifier authority file %s', (authorityFile) => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        authorityFiles: [authorityFile],
+        commands: [{ id: 'test', kind: 'test', cmd: ['node', '--version'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyContract).toMatchObject({ valid: false, authorityFileCount: 0 });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('authorityFiles[0]');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
