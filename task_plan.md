@@ -1961,3 +1961,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+
+## Current Overnight Cycle - Read-Only Daemon Install Help
+- [x] Trace daemon command dispatch and confirm install help previously reached the service-install path.
+- [x] Return install usage before service-manager/config loading for `--help`, `-h`, and `help` invocations.
+- [x] Add focused mocked-service regressions proving help never calls install, service-status, or autostart.
+- [x] Pass focused tests, typecheck, quiet lint, and diff checks; commit the isolated CLI contract.

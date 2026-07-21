@@ -492,7 +492,24 @@ async function importServiceManager(): Promise<{
 // Subcommand: install
 // ---------------------------------------------------------------------------
 
+function printDaemonInstallUsage(): void {
+  console.log('Usage: ashlr daemon install [--no-autostart]');
+  console.log('');
+  console.log('Register the daemon as an OS service.');
+  console.log('');
+  console.log('Options:');
+  console.log('  --no-autostart  Register the service without starting it.');
+  console.log('  --help, -h      Show this help.');
+}
+
 async function cmdDaemonInstall(args: string[]): Promise<number> {
+  // Help must be decided before importing the service manager: importing and
+  // installing are distinct operations, and help is always read-only.
+  if (args.includes('--help') || args.includes('-h') || args.includes('help')) {
+    printDaemonInstallUsage();
+    return 0;
+  }
+
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 

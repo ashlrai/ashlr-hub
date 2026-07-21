@@ -1,5 +1,10 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Daemon Install Help Contract
+- Root cause: `ashlr daemon install --help` previously fell through to `cmdDaemonInstall`, where service-manager loading and launchd installation occurred before argument inspection.
+- Resolution: install-specific `--help`, `-h`, and `help` invocations now print usage and return before service-manager or config loading. Normal `ashlr daemon install [--no-autostart]` behavior is unchanged.
+- Regression proof: mocked service calls confirm all help forms return `0` without calling install, service-status, or autostart. Focused tests, typecheck, quiet lint, and diff checks pass.
+
 ## Current Dispatch Manifest Status
 - Context: the previous commit began recording metadata-only concurrent dispatch manifests before `runConcurrentDispatch()`. The follow-up gap was operator visibility: the ledger existed, but `FleetStatus` and CLI output could not yet answer "what concurrent plan did the daemon intend to run?"
 - Implementation: `FleetStatus.dispatchManifests` now reads the append-only manifest ledger fail-soft, bounded to recent events, and aggregates event count, latest timestamp, assigned/unassigned totals, backend assignment counts, and a bounded recent sample. `ashlr fleet status` renders the same manifest summary under Dispatch yield.
