@@ -93,6 +93,21 @@ describe('M373 directory durability', () => {
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
 
+  it.skipIf(process.platform !== 'win32')(
+    'proves native Windows directory durability or reports the exact unsupported capability',
+    () => {
+      try {
+        fsyncDirectory(directory);
+      } catch (error) {
+        const detail = error as NodeJS.ErrnoException;
+        throw new Error(
+          `native Windows fsyncDirectory failed: code=${detail.code ?? 'unknown'} ` +
+          `syscall=${detail.syscall ?? 'unknown'} path=${detail.path ?? directory}`,
+        );
+      }
+    },
+  );
+
   it.each([
     ['open', 'EACCES'],
     ['fstat', 'EPERM'],
