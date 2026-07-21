@@ -32,6 +32,10 @@ const DEFAULT_FS: DirectoryDurabilityFs = {
 };
 
 const WINDOWS_UNSUPPORTED_DIRECTORY_FD_CODES = new Set([
+  // Node may reject an otherwise validated directory path with EISDIR when
+  // the underlying Windows filesystem does not expose directory descriptors.
+  // This is equivalent to the other unsupported-directory-FD outcomes below.
+  'EISDIR',
   'EINVAL',
   'ENOSYS',
   'ENOTSUP',

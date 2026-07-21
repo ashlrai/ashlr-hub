@@ -58,7 +58,7 @@ describe('M373 directory durability', () => {
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
 
-  it.each(['EPERM', 'EINVAL'])(
+  it.each(['EPERM', 'EINVAL', 'EISDIR'])(
     'tolerates Windows directory-open %s after validating the named directory',
     (code) => {
       const fs = fakeFs({ openSync: vi.fn(() => { throw codedError(code); }) });
@@ -69,7 +69,7 @@ describe('M373 directory durability', () => {
     },
   );
 
-  it.each(['EPERM', 'EINVAL'])(
+  it.each(['EPERM', 'EINVAL', 'EISDIR'])(
     'tolerates Windows directory-fsync %s but still closes the descriptor',
     (code) => {
       const fs = fakeFs({ fsyncSync: vi.fn(() => { throw codedError(code); }) });
