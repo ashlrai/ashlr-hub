@@ -386,6 +386,61 @@ describe('M47 verifyProposal', () => {
     expect(res.ran).toHaveLength(1);
   });
 
+  it('stops before a later verifier when an earlier command rewrites ordinary candidate input', async () => {
+    initRepo(tmpRepo);
+    const secondCommandMarker = path.join(tmpHome, 'second-verifier-ran');
+    fs.mkdirSync(path.join(tmpRepo, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, 'src', 'runtime-input.txt'), 'candidate\n', 'utf8');
+    fs.writeFileSync(
+      path.join(tmpRepo, 'scripts', 'mutate-input.mjs'),
+      "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/runtime-input.txt', 'benign\\n');\n",
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, 'scripts', 'assert-benign.mjs'),
+      `import { readFileSync, writeFileSync } from 'node:fs';\n` +
+        `if (readFileSync('src/runtime-input.txt', 'utf8') !== 'benign\\n') process.exit(1);\n` +
+        `writeFileSync(${JSON.stringify(secondCommandMarker)}, 'ran');\n`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      authorityFiles: ['scripts/mutate-input.mjs', 'scripts/assert-benign.mjs'],
+      commands: [
+        {
+          id: 'mutate-input',
+          kind: 'test',
+          cmd: ['node', 'scripts/mutate-input.mjs'],
+          cwd: '.',
+          required: true,
+          profiles: ['merge'],
+        },
+        {
+          id: 'assert-benign',
+          kind: 'test',
+          cmd: ['node', 'scripts/assert-benign.mjs'],
+          cwd: '.',
+          required: true,
+          profiles: ['merge'],
+        },
+      ],
+    }), 'utf8');
+    git(tmpRepo, ['add', 'ashlr.verify.json', 'scripts', 'src/runtime-input.txt']);
+    git(tmpRepo, ['commit', '-m', 'add adversarial verifier chain']);
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/command-mutation.md', 'fenced') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/changed candidate state.*tracked candidate worktree/i);
+    expect(res.ran).toHaveLength(1);
+    expect(fs.existsSync(secondCommandMarker)).toBe(false);
+  });
+
   it('passing test script + a diff → ok', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 0');
@@ -438,6 +493,31 @@ describe('M47 verifyProposal', () => {
     const worktree = mockVerifyInBrowser.mock.calls[0]?.[0];
     expect(worktree).toContain(path.join('.ashlr', 'tmp', 'vwt-'));
     expect(worktree).not.toBe(tmpRepo);
+  });
+
+  it('browserVerify=true rejects tracked candidate mutation after browser verification', async () => {
+    initRepo(tmpRepo);
+    writePackageJson(tmpRepo, 'exit 0');
+    mockIsWebApp.mockReturnValue(true);
+    mockVerifyInBrowser.mockImplementation(async (worktree: string) => {
+      fs.writeFileSync(path.join(worktree, 'README.md'), '# rewritten during browser verify\n', 'utf8');
+      return {
+        ok: true,
+        renderOk: true,
+        consoleErrors: [],
+        screenshotPath: '/tmp/shot.png',
+        detail: 'rendered after mutation',
+      };
+    });
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/browser-mutation.md', 'doc') }),
+      cfgWith({ browserVerify: true }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/browser verification changed candidate state/i);
+    expect(res.browser).toEqual(expect.objectContaining({ ok: true }));
   });
 
   it('browserVerify=true fails closed on a non-skipped browser render failure', async () => {

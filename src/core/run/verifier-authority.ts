@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync } from 'node:fs';
+import { lstatSync, readlinkSync } from 'node:fs';
 import { isAbsolute, join, posix, win32 } from 'node:path';
 import type { VerifyCommand, VerifyCommandKind, VerifyCommandProfile } from './verify-commands.js';
 
@@ -64,7 +64,10 @@ export type VerifierAuthorityFailureCode =
   | 'authority-worktree-missing'
   | 'authority-worktree-not-regular'
   | 'authority-index-mismatch'
-  | 'authority-worktree-changed';
+  | 'authority-worktree-changed'
+  | 'candidate-index-changed'
+  | 'candidate-worktree-changed'
+  | 'candidate-untracked-path';
 
 export interface VerifierAuthorityFailure {
   ok: false;
@@ -102,6 +105,37 @@ export interface CompareVerifierAuthorityTreeOptions {
 export interface CompareVerifierAuthorityWorktreeOptions {
   repoRoot: string;
   snapshot: VerifierAuthoritySnapshotV1;
+}
+
+export interface CaptureVerifierCandidateStateOptions {
+  repoRoot: string;
+  candidateTreeOid: string;
+}
+
+export interface VerifierCandidateUntrackedEntry {
+  path: string;
+  kind: 'file' | 'symlink';
+  executable: boolean;
+  contentDigest: string;
+}
+
+export interface VerifierCandidateStateSnapshot {
+  candidateTreeOid: string;
+  relevantUntrackedEntries: VerifierCandidateUntrackedEntry[];
+}
+
+export interface VerifierCandidateStateCaptureSuccess {
+  ok: true;
+  snapshot: VerifierCandidateStateSnapshot;
+}
+
+export type VerifierCandidateStateCaptureResult =
+  | VerifierCandidateStateCaptureSuccess
+  | VerifierAuthorityFailure;
+
+export interface CompareVerifierCandidateStateOptions {
+  repoRoot: string;
+  snapshot: VerifierCandidateStateSnapshot;
 }
 
 interface GitTreeEntry {
@@ -465,4 +499,112 @@ export function compareVerifierAuthorityWorktree(
     }
   }
   return { ok: true, checkedEntryCount: options.snapshot.authorityEntries.length };
+}
+
+function relevantUntrackedEntries(
+  repoRoot: string,
+  objectFormat: GitObjectFormat,
+): VerifierCandidateUntrackedEntry[] | VerifierAuthorityFailure {
+  const output = git(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
+  if (!output) {
+    return failure('git-unavailable', 'untracked verifier worktree state could not be inspected');
+  }
+  const entries: VerifierCandidateUntrackedEntry[] = [];
+  for (const path of output.toString('utf8').split('\0').filter(Boolean)) {
+    let stat;
+    try {
+      stat = lstatSync(join(repoRoot, path));
+    } catch {
+      return failure('candidate-untracked-path', `untracked path '${boundedPath(path)}' changed during inspection`);
+    }
+    if (stat.isSymbolicLink()) {
+      let target: string;
+      try {
+        target = readlinkSync(join(repoRoot, path));
+      } catch {
+        return failure('candidate-untracked-path', `untracked symlink '${boundedPath(path)}' changed during inspection`);
+      }
+      entries.push({
+        path,
+        kind: 'symlink',
+        executable: false,
+        contentDigest: createHash('sha256').update('symlink\0').update(target).digest('hex'),
+      });
+      continue;
+    }
+    if (!stat.isFile()) {
+      return failure('candidate-untracked-path', `untracked path '${boundedPath(path)}' is not a regular file`);
+    }
+    const oid = gitText(repoRoot, ['hash-object', '--no-filters', '--', path]);
+    if (!oid || !isOid(oid, objectFormat)) {
+      return failure('git-unavailable', `untracked path '${boundedPath(path)}' could not be hashed`);
+    }
+    entries.push({
+      path,
+      kind: 'file',
+      executable: process.platform !== 'win32' && (stat.mode & 0o111) !== 0,
+      contentDigest: oid,
+    });
+  }
+  return entries;
+}
+
+/** Capture the exact candidate index, tracked worktree, and relevant untracked state. */
+export function captureVerifierCandidateState(
+  options: CaptureVerifierCandidateStateOptions,
+): VerifierCandidateStateCaptureResult {
+  const objectFormat = resolveObjectFormat(options.repoRoot);
+  if (!objectFormat) {
+    return failure('unsupported-object-format', 'repository Git object format is unavailable or unsupported');
+  }
+  const candidateTreeOid = resolveTree(options.repoRoot, options.candidateTreeOid, objectFormat);
+  if (!candidateTreeOid) {
+    return failure('invalid-candidate-tree', 'candidate revision does not resolve to a Git tree');
+  }
+
+  const indexTreeOid = gitText(options.repoRoot, ['write-tree']);
+  if (!indexTreeOid || !isOid(indexTreeOid, objectFormat)) {
+    return failure('git-unavailable', 'current verifier index tree could not be resolved');
+  }
+  if (indexTreeOid !== candidateTreeOid) {
+    return failure('candidate-index-changed', 'verifier changed the staged candidate index');
+  }
+
+  const trackedDrift = git(options.repoRoot, [
+    'diff-files',
+    '--raw',
+    '-z',
+    '--ignore-submodules=none',
+    '--',
+  ]);
+  if (!trackedDrift) {
+    return failure('git-unavailable', 'tracked verifier worktree state could not be inspected');
+  }
+  if (trackedDrift.length > 0) {
+    return failure('candidate-worktree-changed', 'verifier changed a tracked candidate worktree path');
+  }
+
+  const untracked = relevantUntrackedEntries(options.repoRoot, objectFormat);
+  if (isFailure(untracked)) return untracked;
+
+  return {
+    ok: true,
+    snapshot: { candidateTreeOid, relevantUntrackedEntries: untracked },
+  };
+}
+
+/** Compare live verifier state to a previously captured exact candidate state. */
+export function compareVerifierCandidateState(
+  options: CompareVerifierCandidateStateOptions,
+): VerifierAuthorityFailure | { ok: true } {
+  const current = captureVerifierCandidateState({
+    repoRoot: options.repoRoot,
+    candidateTreeOid: options.snapshot.candidateTreeOid,
+  });
+  if (!current.ok) return current;
+  if (JSON.stringify(current.snapshot.relevantUntrackedEntries)
+    !== JSON.stringify(options.snapshot.relevantUntrackedEntries)) {
+    return failure('candidate-untracked-path', 'verifier changed non-ignored untracked candidate state');
+  }
+  return { ok: true };
 }

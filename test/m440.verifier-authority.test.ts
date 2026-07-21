@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  captureVerifierCandidateState,
   captureVerifierAuthoritySnapshot,
   compareVerifierAuthorityCandidateTree,
   compareVerifierAuthorityWorktree,
+  compareVerifierCandidateState,
   type VerifierAuthoritySnapshotV1,
 } from '../src/core/run/verifier-authority.js';
 import type { VerifyCommand } from '../src/core/run/verify-commands.js';
@@ -52,6 +54,7 @@ function makeRepo(): string {
   mkdirSync(join(repo, 'scripts'), { recursive: true });
   mkdirSync(join(repo, 'src'), { recursive: true });
   writeFileSync(join(repo, 'package.json'), '{"name":"m386"}\n', 'utf8');
+  writeFileSync(join(repo, '.gitignore'), 'coverage/\n', 'utf8');
   writeFileSync(join(repo, 'scripts', 'verify.mjs'), 'process.exit(0);\n', 'utf8');
   writeFileSync(join(repo, 'src', 'index.ts'), 'export const value = 1;\n', 'utf8');
   writeContract(repo);
@@ -235,6 +238,43 @@ describe('verifier Git authority', () => {
       })).toMatchObject({ ok: true, checkedEntryCount: 3, candidateTreeOid: sourceTree });
       expect(compareVerifierAuthorityWorktree({ repoRoot: repo, snapshot }))
         .toEqual({ ok: true, checkedEntryCount: 3 });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('fences staged, tracked, and relevant untracked drift while allowing ignored verifier outputs', () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo, 'src', 'index.ts'), 'export const value = 2;\n', 'utf8');
+      git(repo, ['add', 'src/index.ts']);
+      const candidateTreeOid = git(repo, ['write-tree']);
+      const captured = captureVerifierCandidateState({ repoRoot: repo, candidateTreeOid });
+      expect(captured).toMatchObject({ ok: true });
+      if (!captured.ok) throw new Error(captured.reason);
+
+      writeFileSync(join(repo, 'src', 'index.ts'), 'export const value = 3;\n', 'utf8');
+      expect(compareVerifierCandidateState({ repoRoot: repo, snapshot: captured.snapshot }))
+        .toMatchObject({ ok: false, code: 'candidate-worktree-changed' });
+
+      git(repo, ['checkout-index', '--force', '--', 'src/index.ts']);
+      writeFileSync(join(repo, 'src', 'index.ts'), 'export const value = 4;\n', 'utf8');
+      git(repo, ['add', 'src/index.ts']);
+      expect(compareVerifierCandidateState({ repoRoot: repo, snapshot: captured.snapshot }))
+        .toMatchObject({ ok: false, code: 'candidate-index-changed' });
+
+      git(repo, ['read-tree', candidateTreeOid]);
+      git(repo, ['checkout-index', '--force', '--', 'src/index.ts']);
+      git(repo, ['update-index', '--refresh']);
+      writeFileSync(join(repo, 'verifier-output.txt'), 'unexpected\n', 'utf8');
+      expect(compareVerifierCandidateState({ repoRoot: repo, snapshot: captured.snapshot }))
+        .toMatchObject({ ok: false, code: 'candidate-untracked-path' });
+
+      rmSync(join(repo, 'verifier-output.txt'));
+      mkdirSync(join(repo, 'coverage'), { recursive: true });
+      writeFileSync(join(repo, 'coverage', 'report.json'), '{}\n', 'utf8');
+      expect(compareVerifierCandidateState({ repoRoot: repo, snapshot: captured.snapshot }))
+        .toEqual({ ok: true });
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
