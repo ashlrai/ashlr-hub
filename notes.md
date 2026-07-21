@@ -2924,3 +2924,10 @@
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Bounded daemon activity rollover (2026-07-21):
+  - The observational daemon activity writer previously stopped permanently when a daily journal reached 5,000 rows or two MiB. The daemon could continue ticking while Mission Control saw an increasingly stale final row.
+  - The legacy `YYYY-MM-DD.jsonl` partition remains segment zero. Saturated same-day journals now continue in ordered `YYYY-MM-DD.0001.jsonl` segments, preserving existing installations and the public `daemonActivityPath()` contract.
+  - Retention remains bounded at eight journal files. When rollover needs a ninth file, the writer identity-checks and durably removes the oldest retained files before exclusively creating the next segment. A pruning or creation failure returns false before publishing a new freshness claim.
+  - Readers validate all retained segments in logical day/index order, require complete newline-terminated metadata-only rows and monotonic timestamps, and derive phase start across segment boundaries. A partial or malformed retained segment degrades the source and withholds activity/freshness rather than falling back to an older healthy-looking row.
+  - This source remains explicitly observational with `authority:"none"`; it does not authorize dispatch, readiness, learning labels, verification, or merges. Focused verification passes 13 activity assertions plus typecheck and scoped lint; protected platform CI is still required before deployment.

@@ -2822,3 +2822,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Retain the five-second non-Windows deadline and add a bounded 30-second Windows allowance.
 - [x] Run focused authority/reservation coverage, typecheck, and diff integrity.
 - [ ] Require the refreshed protected matrix before promotion.
+
+## Bounded Daemon Activity Rollover (2026-07-21)
+- [x] Preserve the legacy daily JSONL file as segment zero and rotate saturated journals into ordered numbered segments.
+- [x] Prune retained history before publishing a new segment so storage remains bounded at eight files without making a failed rollover look fresh.
+- [x] Validate every retained segment and withhold activity, freshness, and ownership when any segment is partial, malformed, unsafe, oversized, or out of order.
+- [x] Preserve metadata-only rows, cross-segment phase timing, private-file checks, writer locking, file and directory durability, and legacy-reader fixtures.
+- [x] Cover 5,000-row saturation, interrupted rollover, malformed retained history, same-day retention, daily retention, and legacy single-file compatibility.
+- [x] Pass 13 focused assertions, typecheck, scoped lint, and diff integrity.
+- [ ] Require the complete protected platform matrix before promotion or daemon deployment.

@@ -33,6 +33,7 @@ const MAX_PARTITION_BYTES = 2 * 1024 * 1024;
 const MAX_ROWS = 5_000;
 const MAX_ROW_BYTES = 768;
 const MAX_PARTITIONS = 8;
+const MAX_SEGMENT_INDEX = 9_999;
 const FUTURE_TOLERANCE_MS = 5_000;
 export const DAEMON_ACTIVITY_STALE_MS = 90_000;
 
@@ -67,7 +68,14 @@ const ROW_KEYS = new Set([
 ]);
 const INSTANCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const START_REF_RE = /^[a-f0-9]{64}$/;
-const PARTITION_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
+const PARTITION_RE = /^(\d{4}-\d{2}-\d{2})(?:\.(\d{4}))?\.jsonl$/;
+
+interface ActivityPartition {
+  day: string;
+  index: number;
+  name: string;
+  path: string;
+}
 
 function storageRoot(): string {
   const configured = process.env['ASHLR_HOME'];
@@ -88,6 +96,12 @@ export function daemonActivityDirectory(): string {
 
 export function daemonActivityPath(day = new Date().toISOString().slice(0, 10)): string {
   return join(daemonActivityDirectory(), `${day}.jsonl`);
+}
+
+function daemonActivitySegmentPath(day: string, index: number): string {
+  return index === 0
+    ? daemonActivityPath(day)
+    : join(daemonActivityDirectory(), `${day}.${String(index).padStart(4, '0')}.jsonl`);
 }
 
 function privateOwner(uid: number): boolean {
@@ -240,26 +254,56 @@ function readPartition(path: string, expectedDirectory: Stats): DaemonActivityRo
   }
 }
 
-function prunePartitions(directory: string): boolean {
+function listPartitions(directory: string): ActivityPartition[] | null {
   try {
-    const partitions = readdirSync(directory).filter((name) => PARTITION_RE.test(name)).sort();
-    for (const name of partitions.slice(0, -MAX_PARTITIONS)) {
-      const path = join(directory, name);
+    const partitions: ActivityPartition[] = [];
+    for (const name of readdirSync(directory)) {
+      const match = PARTITION_RE.exec(name);
+      if (!match) continue;
+      const day = match[1]!;
+      const index = match[2] === undefined ? 0 : Number(match[2]);
+      if (!Number.isSafeInteger(index) || index < 0 || index > MAX_SEGMENT_INDEX ||
+        (match[2] !== undefined && index === 0)) return null;
+      partitions.push({ day, index, name, path: join(directory, name) });
+    }
+    partitions.sort((left, right) => left.day.localeCompare(right.day) || left.index - right.index);
+    for (let index = 1; index < partitions.length; index++) {
+      const prior = partitions[index - 1]!;
+      const current = partitions[index]!;
+      if (prior.day === current.day && prior.index === current.index) return null;
+    }
+    return partitions;
+  } catch {
+    return null;
+  }
+}
+
+function prunePartitions(
+  directory: string,
+  expectedDirectory: Stats,
+  partitions: ActivityPartition[],
+  keepCount: number,
+): boolean {
+  try {
+    const dropping = partitions.slice(0, Math.max(0, partitions.length - keepCount));
+    for (const partition of dropping) {
+      const directoryBefore = lstatSync(directory);
+      if (!privateDirectory(directoryBefore) || !sameNode(directoryBefore, expectedDirectory)) return false;
       let fd: number | undefined;
       try {
-        const named = lstatSync(path);
+        const named = lstatSync(partition.path);
         if (!privateFile(named)) return false;
-        fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        fd = openSync(partition.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
         const opened = fstatSync(fd);
-        const rebound = lstatSync(path);
+        const rebound = lstatSync(partition.path);
         if (!privateFile(opened) || !privateFile(rebound) || !sameNode(named, opened) ||
           !sameNode(opened, rebound)) return false;
-        unlinkSync(path);
+        unlinkSync(partition.path);
       } finally {
         if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
       }
     }
-    fsyncDirectory(directory);
+    if (dropping.length > 0) fsyncDirectory(directory);
     return true;
   } catch {
     return false;
@@ -281,13 +325,18 @@ export function readDaemonActivity(options: { nowMs?: number; staleMs?: number }
     const root = lstatSync(rootPath);
     const directory = lstatSync(directoryPath);
     if (!privateDirectory(root) || !privateDirectory(directory)) return degraded;
-    const partitions = readdirSync(directoryPath)
-      .filter((name) => PARTITION_RE.test(name))
-      .sort();
+    const partitions = listPartitions(directoryPath);
+    if (!partitions) return degraded;
     if (partitions.length === 0) return missing;
     if (partitions.length > MAX_PARTITIONS) return degraded;
-    const rows = readPartition(join(directoryPath, partitions.at(-1)!), directory);
-    if (!rows || rows.length === 0) return degraded;
+    const rows: DaemonActivityRowV1[] = [];
+    for (const partition of partitions) {
+      const segmentRows = readPartition(partition.path, directory);
+      if (!segmentRows || segmentRows.length === 0) return degraded;
+      const prior = rows.at(-1);
+      if (prior && segmentRows[0]!.observedAt < prior.observedAt) return degraded;
+      rows.push(...segmentRows);
+    }
     const activity = rows.at(-1)!;
     let phaseStartedAt = activity.observedAt;
     for (let index = rows.length - 2; index >= 0; index--) {
@@ -342,19 +391,49 @@ export function writeDaemonActivity(input: {
   let fd: number | undefined;
   try {
     const directories = ensurePrivateDirectories();
-    const path = daemonActivityPath(observedAt.slice(0, 10));
+    const day = observedAt.slice(0, 10);
     lock = acquireLocalStoreLock(join(daemonActivityDirectory(), '.activity.lock'), 2_000);
     if (!lock) return false;
     const directoryAfterLock = lstatSync(daemonActivityDirectory());
     if (!privateDirectory(directoryAfterLock) || !sameNode(directories.directory, directoryAfterLock)) return false;
+    const partitions = listPartitions(daemonActivityDirectory());
+    if (!partitions || partitions.length > MAX_PARTITIONS) return false;
+
     let prior: Stats | null = null;
-    if (existsSync(path)) {
-      prior = lstatSync(path);
-      if (!privateFile(prior) || prior.size + bytes.length > MAX_PARTITION_BYTES) return false;
-      const priorRows = readPartition(path, directories.directory);
-      if (!priorRows || priorRows.length >= MAX_ROWS) return false;
+    let path: string;
+    const latest = partitions.at(-1);
+    if (latest) {
+      const priorRows = readPartition(latest.path, directories.directory);
+      if (!priorRows || priorRows.length === 0) return false;
+      if (observedAt < priorRows.at(-1)!.observedAt || day < latest.day) return false;
+      prior = lstatSync(latest.path);
+      if (!privateFile(prior)) return false;
+      const canAppend = day === latest.day && priorRows.length < MAX_ROWS &&
+        prior.size + bytes.length <= MAX_PARTITION_BYTES;
+      if (canAppend) {
+        path = latest.path;
+      } else {
+        const nextIndex = day === latest.day ? latest.index + 1 : 0;
+        if (nextIndex > MAX_SEGMENT_INDEX) return false;
+        path = daemonActivitySegmentPath(day, nextIndex);
+        prior = null;
+      }
+    } else {
+      path = daemonActivitySegmentPath(day, 0);
+    }
+
+    if (prior) {
       fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_NOFOLLOW);
     } else {
+      if (!prunePartitions(
+        daemonActivityDirectory(),
+        directories.directory,
+        partitions,
+        MAX_PARTITIONS - 1,
+      )) return false;
+      const directoryBeforeCreate = lstatSync(daemonActivityDirectory());
+      if (!privateDirectory(directoryBeforeCreate) || !sameNode(directories.directory, directoryBeforeCreate) ||
+        existsSync(path)) return false;
       fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
     }
     const opened = fstatSync(fd);
@@ -368,7 +447,7 @@ export function writeDaemonActivity(input: {
     const rebound = lstatSync(path);
     if (!privateFile(rebound) || !sameNode(persisted, rebound) || rebound.size !== expectedSize) return false;
     fsyncDirectory(daemonActivityDirectory());
-    return prunePartitions(daemonActivityDirectory());
+    return true;
   } catch {
     return false;
   } finally {
