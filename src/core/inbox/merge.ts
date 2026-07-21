@@ -163,9 +163,12 @@ import {
   type VerifyCommand,
 } from '../run/verify-commands.js';
 import {
+  captureVerifierCandidateState,
   captureVerifierAuthoritySnapshot,
   compareVerifierAuthorityCandidateTree,
   compareVerifierAuthorityWorktree,
+  compareVerifierCandidateState,
+  type VerifierCandidateStateSnapshot,
   type VerifierAuthoritySnapshotV1,
 } from '../run/verifier-authority.js';
 import {
@@ -2299,6 +2302,26 @@ export async function verifyProposal(
       };
     }
 
+    const baseTreeOid = gitRun(tmpDir, ['rev-parse', '--verify', `${baseHead}^{tree}`]);
+    const capturedBaseState = captureVerifierCandidateState({
+      repoRoot: tmpDir,
+      candidateTreeOid: baseTreeOid,
+    });
+    if (!capturedBaseState.ok) {
+      return {
+        ok: false,
+        ran: [],
+        detail: `base verifier state unavailable: ${capturedBaseState.reason}`,
+        baseBranch: base,
+        baseHead,
+      };
+    }
+    let verifierState: VerifierCandidateStateSnapshot = capturedBaseState.snapshot;
+    const verifierStateDrift = (): string | null => {
+      const comparison = compareVerifierCandidateState({ repoRoot: tmpDir, snapshot: verifierState });
+      return comparison.ok ? null : comparison.reason;
+    };
+
     const capturedAuthority = captureVerifierAuthoritySnapshot({
       repoRoot: tmpDir,
       baseRevision: baseHead,
@@ -2342,6 +2365,16 @@ export async function verifyProposal(
       // tested change must not be blocked by lint debt it did not introduce. Baseline
       // lint and tolerate pre-existing failures (block only a clean→failing regression).
       if (vc.id === undefined && vc.required === undefined && (vc.kind === 'test' || vc.kind === 'lint')) {
+        const preBaselineStateDrift = verifierStateDrift();
+        if (preBaselineStateDrift) {
+          return {
+            ok: false,
+            ran: [],
+            detail: `base state changed before baseline command: ${preBaselineStateDrift}`,
+            baseBranch: base,
+            baseHead,
+          };
+        }
         const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg);
         const baselineAuthorityDrift = authorityDrift();
         if (baselineAuthorityDrift) {
@@ -2349,6 +2382,16 @@ export async function verifyProposal(
             ok: false,
             ran: [],
             detail: `baseline command changed verifier authority: ${baselineAuthorityDrift}`,
+            baseBranch: base,
+            baseHead,
+          };
+        }
+        const baselineStateDrift = verifierStateDrift();
+        if (baselineStateDrift) {
+          return {
+            ok: false,
+            ran: [],
+            detail: `baseline command changed candidate state: ${baselineStateDrift}`,
             baseBranch: base,
             baseHead,
           };
@@ -2380,6 +2423,20 @@ export async function verifyProposal(
     }
 
     candidateTreeOid = gitRun(tmpDir, ['write-tree']);
+    const capturedCandidateState = captureVerifierCandidateState({
+      repoRoot: tmpDir,
+      candidateTreeOid,
+    });
+    if (!capturedCandidateState.ok) {
+      return {
+        ok: false,
+        ran: [],
+        detail: `candidate verifier state unavailable: ${capturedCandidateState.reason}`,
+        baseBranch: base,
+        baseHead,
+      };
+    }
+    verifierState = capturedCandidateState.snapshot;
     let authorityEvidence: Pick<VerifyProposalResult,
       | 'verifierAuthoritySnapshotVersion'
       | 'verifierAuthorityObjectFormat'
@@ -2422,6 +2479,17 @@ export async function verifyProposal(
     }
 
     for (const vc of commands) {
+      const preCommandStateDrift = verifierStateDrift();
+      if (preCommandStateDrift) {
+        return {
+          ok: false,
+          ran,
+          detail: `candidate state changed before verify '${vc.kind}': ${preCommandStateDrift}`,
+          baseBranch: base,
+          baseHead,
+          ...authorityEvidence,
+        };
+      }
       ran.push(vc);
       const res = await runVerifyCommandAsync(vc, tmpDir, cfg);
       const commandAuthorityDrift = authorityDrift();
@@ -2430,6 +2498,17 @@ export async function verifyProposal(
           ok: false,
           ran,
           detail: `verify '${vc.kind}' changed verifier authority: ${commandAuthorityDrift}`,
+          baseBranch: base,
+          baseHead,
+          ...authorityEvidence,
+        };
+      }
+      const commandStateDrift = verifierStateDrift();
+      if (commandStateDrift) {
+        return {
+          ok: false,
+          ran,
+          detail: `verify '${vc.kind}' changed candidate state: ${commandStateDrift}`,
           baseBranch: base,
           baseHead,
           ...authorityEvidence,
@@ -2530,6 +2609,17 @@ export async function verifyProposal(
       }
     }
 
+    const preBrowserStateDrift = verifierStateDrift();
+    if (preBrowserStateDrift) {
+      return {
+        ok: false,
+        ran,
+        detail: `candidate state changed before browser verification: ${preBrowserStateDrift}`,
+        baseBranch: base,
+        baseHead,
+        ...authorityEvidence,
+      };
+    }
     const browser = await verifyProposalInBrowser(tmpDir, cfg);
     const browserAuthorityDrift = authorityDrift();
     if (browserAuthorityDrift) {
@@ -2537,6 +2627,18 @@ export async function verifyProposal(
         ok: false,
         ran,
         detail: `browser verification changed verifier authority: ${browserAuthorityDrift}`,
+        ...(browser ? { browser } : {}),
+        baseBranch: base,
+        baseHead,
+        ...authorityEvidence,
+      };
+    }
+    const browserStateDrift = verifierStateDrift();
+    if (browserStateDrift) {
+      return {
+        ok: false,
+        ran,
+        detail: `browser verification changed candidate state: ${browserStateDrift}`,
         ...(browser ? { browser } : {}),
         baseBranch: base,
         baseHead,
