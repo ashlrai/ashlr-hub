@@ -20,6 +20,7 @@ import { classifyProductionAttemptForLearningWithLabel } from '../learning/attem
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import { loadProposal } from '../inbox/store.js';
+import { listRunsDetailed, type RunsReadResult } from '../run/orchestrator.js';
 import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import type {
   EngineId,
@@ -29,6 +30,7 @@ import type {
   LearningSource,
   Proposal,
   RouteSnapshot,
+  RunState,
   RunEventSummary,
   SkillUseEvent,
   SkillUseMode,
@@ -46,7 +48,7 @@ const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
 export const MIN_SKILL_OBSERVED_TRAJECTORIES = 3;
 
-export type TrajectoryTimelineKind = 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'post-merge' | 'agent-action';
+export type TrajectoryTimelineKind = 'run' | 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'post-merge' | 'agent-action';
 export type TrajectoryTerminalOutcome =
   | 'merged'
   | 'rejected'
@@ -59,6 +61,8 @@ export type TrajectoryTerminalOutcome =
 export type TrajectoryRealizedOutcome = 'followed-up' | 'reverted' | 'regressed';
 
 export interface TrajectoryRecordCoverage {
+  /** Persisted run metadata joined without granting dispatch authority. */
+  run?: boolean;
   dispatch: boolean;
   proposal: boolean;
   evidence: boolean;
@@ -147,6 +151,7 @@ export interface TrajectoryRecord {
   learningEpoch?: string;
   decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
   agentActionSourceQuality?: AgentActionSourceQuality;
+  runSourceQuality?: Omit<RunsReadResult, 'runs'>;
   coverage: TrajectoryRecordCoverage;
   timeline: TrajectoryTimelineEvent[];
 }
@@ -232,6 +237,7 @@ export interface TrajectoryRecordReadDeps {
   readSkillUseEvents?: typeof readSkillUseEvents;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
   loadProposal?: (id: string) => Proposal | null;
+  listRunsDetailed?: typeof listRunsDetailed;
 }
 
 export interface TrajectoryRecordListOptions {
@@ -406,6 +412,7 @@ function fallbackTrajectoryKey(input: {
 
 function timelineRank(kind: TrajectoryTimelineKind): number {
   switch (kind) {
+    case 'run': return 5;
     case 'dispatch': return 10;
     case 'proposal': return 20;
     case 'evidence': return 30;
@@ -540,6 +547,7 @@ function makeRecord(id: string, key: string, ts: string): MutableTrajectoryRecor
     latestAt: ts,
     terminalOutcome: 'unknown',
     coverage: {
+      run: false,
       dispatch: false,
       proposal: false,
       evidence: false,
@@ -693,6 +701,16 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const outcomes = safeArray(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
   );
+  const runsRead = safeValue(() => (deps.listRunsDetailed ?? listRunsDetailed)({
+    limit: Math.max(limit * 3, 100),
+    maxCandidates: Math.max(limit * 6, 200),
+  }));
+  const runs = runsRead?.sourceState === 'healthy' && runsRead.complete
+    ? runsRead.runs.filter((run) => eventMs(run.updatedAt) >= sinceMs)
+    : [];
+  const runSourceQuality = runsRead
+    ? (({ runs: _runs, ...quality }) => quality)(runsRead)
+    : undefined;
   const actions = safeArray(() => deps.readAgentActions
     ? deps.readAgentActions({
         sinceMs,
@@ -718,6 +736,33 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
 
   const records = new Map<string, MutableTrajectoryRecord>();
   const aliasToRecord = new Map<string, string>();
+
+  const processRun = (run: RunState): void => {
+    const runId = cleanId(run.id, 160);
+    const trajectoryId = cleanId(run.trajectoryId, 240);
+    if (!runId) return;
+    const ts = run.updatedAt || run.createdAt;
+    const record = findOrCreateRecord(records, aliasToRecord, aliasesFromIds({ runId, trajectoryId }),
+      alias('run', runId) ?? `run:${runId}`, ts);
+    if (!record) return;
+    fillRecordMetadata(record, {
+      runId, trajectoryId, backend: run.engine, tier: run.engineTier, model: run.engineModel,
+      routeSnapshot: run.routeSnapshot, runEventSummary: run.runEventSummary,
+      evidenceOutcome: run.evidenceOutcome, learningSource: run.learningSource,
+      labelBasis: run.labelBasis, routerPolicyVersion: run.routerPolicyVersion, learningEpoch: run.learningEpoch,
+    });
+    record.coverage.run = true;
+    record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome,
+      run.status === 'failed' ? 'failed' : run.status === 'aborted' ? 'cancelled' : 'unknown');
+    noteTimeline(record, {
+      ts, kind: 'run', outcome: run.status, runId,
+      ...(trajectoryId && !isDerivedWorkTrajectory(trajectoryId) ? { trajectoryId } : {}),
+      backend: run.engine, tier: run.engineTier, model: run.engineModel,
+      routeSnapshot: run.routeSnapshot, runEventSummary: run.runEventSummary,
+      evidenceOutcome: run.evidenceOutcome, learningSource: run.learningSource,
+      labelBasis: run.labelBasis, routerPolicyVersion: run.routerPolicyVersion, learningEpoch: run.learningEpoch,
+    });
+  };
 
   const processDispatch = (event: DispatchProductionEvent): void => {
     const proposalId = cleanId(event.proposalId, 160);
@@ -1005,6 +1050,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   // The ledgers are independently newest-first. Replay one global causal
   // stream so cross-ledger bridges cannot change meaning with read order.
   const causalEvents = [
+    ...runs.map((run) => ({ ts: run.updatedAt || run.createdAt, rank: -1, apply: () => processRun(run) })),
     ...dispatches.map((event) => ({ ts: event.ts, rank: 0, apply: () => processDispatch(event) })),
     ...outcomes.map((outcome) => ({
       ts: outcome.proposal.createdAt,
@@ -1084,6 +1130,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       const resultRecord: TrajectoryRecord = {
         ...publicRecord,
         ...(agentActionSourceQuality ? { agentActionSourceQuality } : {}),
+        ...(runSourceQuality ? { runSourceQuality } : {}),
         timeline,
         terminalOutcome: record.terminalOutcome === 'unknown' && record.coverage.proposal
           ? 'pending'
@@ -1125,6 +1172,7 @@ export function summarizeTrajectoryLearning(
     regressed: 0,
   };
   const coverageCounts: Record<keyof TrajectoryRecordCoverage, number> = {
+    run: 0,
     dispatch: 0,
     proposal: 0,
     evidence: 0,
@@ -1133,6 +1181,7 @@ export function summarizeTrajectoryLearning(
     skillUse: 0,
   };
   const gapSamples: Record<keyof TrajectoryRecordCoverage, string[]> = {
+    run: [],
     dispatch: [],
     proposal: [],
     evidence: [],
@@ -1160,6 +1209,7 @@ export function summarizeTrajectoryLearning(
   }
 
   const coverage: Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric> = {
+    run: metric(coverageCounts.run, denominator),
     dispatch: metric(coverageCounts.dispatch, denominator),
     proposal: metric(coverageCounts.proposal, denominator),
     evidence: metric(coverageCounts.evidence, denominator),
@@ -1169,7 +1219,7 @@ export function summarizeTrajectoryLearning(
   };
   const dispatchDenominator = coverageCounts.dispatch;
   const gaps = (Object.keys(coverageCounts) as Array<keyof TrajectoryRecordCoverage>)
-    .filter((kind) => kind !== 'skillUse')
+    .filter((kind) => kind !== 'skillUse' && kind !== 'run')
     .map((kind) => ({
       kind,
       count: denominator - coverageCounts[kind],

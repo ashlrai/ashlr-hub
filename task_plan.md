@@ -2697,3 +2697,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+# Run-Ledger Trajectory Join (2026-07-21)
+- [x] Project bounded persisted run metadata into observation-only trajectory timelines.
+- [x] Preserve exact run/trajectory alias joins, terminal failure/cancellation facts, and degraded-source withholding.
+- [x] Keep raw goals, results, tasks, steps, prompts, diffs, and command output out of the projection.
+- [x] Pass typecheck and the complete trajectory-record suite.
+- [ ] Publish as a draft-only PR and require protected CI before promotion.

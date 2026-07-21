@@ -15,6 +15,8 @@ import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import type { Proposal, SkillUseEvent } from '../src/core/types.js';
+import type { RunState } from '../src/core/types.js';
+import type { RunsReadResult } from '../src/core/run/orchestrator.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 import {
   agentRunSemanticEvents,
@@ -108,6 +110,29 @@ function action(overrides: Partial<AgentActionEvent> = {}): AgentActionEvent {
     routerPolicyVersion: ROUTER_POLICY_VERSION,
     learningEpoch: '2026-07-09',
     ...overrides,
+  };
+}
+
+function runState(overrides: Partial<RunState> = {}): RunState {
+  return {
+    id: 'run-ledger-1', goal: 'RAW_RUN_GOAL_SECRET', result: 'RAW_RUN_RESULT_SECRET',
+    engine: 'sandboxed-engine', provider: 'local', engineModel: 'qwen3-coder', engineTier: 'local',
+    createdAt: TS0, updatedAt: TS2, budget: { maxTokens: 1, maxSteps: 1, allowCloud: false },
+    usage: { tokensIn: 0, tokensOut: 0, estCostUsd: 0 }, tasks: [], steps: [], status: 'done',
+    trajectoryId: 'traj-run-ledger',
+    routeSnapshot: { backend: 'local-coder', tier: 'local', assignedBy: 'run-ledger', reason: 'metadata-only' },
+    runEventSummary: { runId: 'run-ledger-1', status: 'done', actionCounts: { proposalCreated: 0 } },
+    evidenceOutcome: { target: 'proposal', trustBasis: 'verification', riskClass: 'low', verificationPassed: false },
+    learningSource: 'run-state', labelBasis: 'dispatch-outcome', routerPolicyVersion: ROUTER_POLICY_VERSION,
+    learningEpoch: '2026-07-09', ...overrides,
+  } as RunState;
+}
+
+function runsRead(runs: RunState[], overrides: Partial<RunsReadResult> = {}): RunsReadResult {
+  return {
+    runs, sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    entriesExamined: runs.length, filesDiscovered: runs.length, filesRead: runs.length,
+    bytesRead: 0, invalidFiles: 0, unreadableFiles: 0, oversizedFiles: 0, ...overrides,
   };
 }
 
@@ -317,6 +342,50 @@ describe('Trajectory records', () => {
     });
     expect(record?.timeline).toHaveLength(1);
     expect(record?.timeline[0]).toMatchObject({ kind: 'agent-action' });
+  });
+
+  it('projects a terminal persisted run after a crash without leaking run contents', () => {
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [], listOutcomeRecords: () => [], readAgentActions: () => [],
+        listRunsDetailed: () => runsRead([runState()]),
+      }),
+    });
+
+    expect(record).toMatchObject({
+      runId: 'run-ledger-1', trajectoryId: 'traj-run-ledger', terminalOutcome: 'unknown',
+      coverage: { run: true, dispatch: false, proposal: false, agentAction: false },
+      routeSnapshot: { backend: 'local-coder', tier: 'local' },
+      learningSource: 'run-state', labelBasis: 'dispatch-outcome', learningEpoch: '2026-07-09',
+    });
+    expect(record?.timeline).toHaveLength(1);
+    expect(record?.timeline[0]).toMatchObject({ kind: 'run', outcome: 'done' });
+    expect(JSON.stringify(record)).not.toContain('RAW_RUN_GOAL_SECRET');
+    expect(JSON.stringify(record)).not.toContain('RAW_RUN_RESULT_SECRET');
+  });
+
+  it('joins a later action to its exact persisted run identity and withholds degraded run rows', () => {
+    const run = runState();
+    const joined = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [], listOutcomeRecords: () => [],
+        readAgentActions: () => [action({ runId: run.id, trajectoryId: run.trajectoryId, proposalId: undefined })],
+        listRunsDetailed: () => runsRead([run]),
+      }),
+    });
+    expect(joined).toHaveLength(1);
+    expect(joined[0]?.timeline.map((event) => event.kind)).toEqual(['run', 'agent-action']);
+
+    const degraded = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [], listOutcomeRecords: () => [], readAgentActions: () => [],
+        listRunsDetailed: () => runsRead([run], { sourceState: 'degraded', complete: false }),
+      }),
+    });
+    expect(degraded).toEqual([]);
   });
 
   it('joins dispatch, proposal, evidence, decision, and agent action into one ordered trajectory', () => {

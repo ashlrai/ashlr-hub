@@ -2816,3 +2816,7 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+# Run-Ledger Trajectory Join (2026-07-21)
+- Durable `RunState` metadata could be lost from learning reconstruction when a process stopped before its later dispatch or action ledger write.
+- Trajectories now admit only allowlisted run metadata through the existing bounded detailed reader. The join remains observation-only and cannot count as dispatch authority or alter routing or merge policy.
+- Degraded run stores withhold rows instead of appearing as healthy zero; run coverage is informational and excluded from legacy gap alarms.
