@@ -2827,3 +2827,9 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- CI PR supersession (2026-07-21):
+  - Feature-branch updates previously triggered identical push and pull-request matrices, multiplying each PR head into duplicate Ubuntu, Windows, and macOS runs. This directly congested protected release validation.
+  - CI now runs branch pushes only on `master`, retains pull-request merge-ref validation and reusable workflow calls, and cancels superseded pull-request revisions through a PR-or-ref scoped concurrency key.
+  - Verification: M30 workflow guard passes 7 assertions, plus typecheck, quiet lint, and diff integrity. The workflow contains no deploy, publish, release, or authority-policy change.
+  - The first protected matrix exposed a Windows-only scheduler miss in an unrelated Pulse liveness fixture while all fence assertions passed. The test now preserves its one-second non-Windows budget and uses a bounded two-second Windows hosted-runner allowance; CI supersession behavior is unchanged.
