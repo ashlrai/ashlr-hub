@@ -18,6 +18,7 @@ import * as fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildToolPath } from '../run/tool-path.js';
 import { installLaunchdPlistTransaction, removeLaunchdPlistTransaction } from './launchd-plist-transaction.js';
+import { assertDaemonServiceSourceClean } from './release-source.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -357,6 +358,10 @@ function runCmd(args: string[]): { ok: boolean; stderr: string } {
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
+  // A service-file transaction is not sufficient if its executable path
+  // points back into mutable source. Fail before changing any platform's
+  // registration; a later release-staging slice can promote an artifact.
+  assertDaemonServiceSourceClean(opts.binPath ?? resolveBinPath());
 
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);

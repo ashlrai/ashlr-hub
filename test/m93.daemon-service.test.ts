@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 
 const installLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const removeLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
+const assertDaemonServiceSourceCleanMock = vi.hoisted(() => vi.fn());
 
 // ---------------------------------------------------------------------------
 // We import the module AFTER setting up vi.mock so spawnSync is interceptable
@@ -47,6 +48,10 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('../src/core/daemon/launchd-plist-transaction.js', () => ({
   installLaunchdPlistTransaction: installLaunchdPlistTransactionMock,
   removeLaunchdPlistTransaction: removeLaunchdPlistTransactionMock,
+}));
+
+vi.mock('../src/core/daemon/release-source.js', () => ({
+  assertDaemonServiceSourceClean: assertDaemonServiceSourceCleanMock,
 }));
 
 import * as cp from 'node:child_process';
@@ -368,6 +373,29 @@ describe('install() — mocked spawnSync', () => {
     expect(hasLoad).toBe(true);
   });
 
+  it('darwin: verifies the executable source before replacing the launchd plist', async () => {
+    await install(baseOpts('darwin'));
+
+    expect(assertDaemonServiceSourceCleanMock).toHaveBeenCalledWith(FAKE_BIN);
+    expect(assertDaemonServiceSourceCleanMock.mock.invocationCallOrder[0]).toBeLessThan(
+      installLaunchdPlistTransactionMock.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it.each(['darwin', 'linux', 'win32'] as const)(
+    '%s: leaves the existing service untouched when the source checkout is dirty',
+    async (platform) => {
+      assertDaemonServiceSourceCleanMock.mockImplementationOnce(() => {
+        throw new Error('Refusing to install daemon service from dirty Git checkout');
+      });
+
+      await expect(install(baseOpts(platform))).rejects.toThrow('dirty Git checkout');
+      expect(installLaunchdPlistTransactionMock).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+    },
+  );
+
   it('darwin: launchctl load receives the plist file path', async () => {
     await install(baseOpts('darwin'));
     const loadCall = spawnSyncMock.mock.calls.find(
@@ -396,6 +424,7 @@ describe('install() — mocked spawnSync', () => {
     const hasEnable = calls.some((c) => c[0] === 'systemctl' && c[1].includes('enable'));
     expect(hasReload).toBe(true);
     expect(hasEnable).toBe(true);
+    expect(assertDaemonServiceSourceCleanMock).toHaveBeenCalledWith(FAKE_BIN);
   });
 
   it('linux: does not throw when systemctl returns non-zero (best-effort)', async () => {
