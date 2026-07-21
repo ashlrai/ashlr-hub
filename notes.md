@@ -2827,3 +2827,7 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Causal coverage display truth (2026-07-20):
+  - Attempt Coverage previously rendered absent causal/verification metrics as `0 (0%)`, collapsing missing telemetry into a healthy-looking measured zero. The shared formatter now renders absent/non-object metrics as `unavailable` and preserves explicit `{count:0,rate:0}` metrics as `0 (0%)`.
+  - Focused dashboard SSE coverage passes 37 assertions, with typecheck, quiet lint, production build, and diff checks green. This is presentation truth only; it changes no learning, dispatch, proposal, verification, merge, or deployment authority.

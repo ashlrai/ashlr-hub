@@ -2896,7 +2896,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
 }
 
 function formatCoverageMetric(metric) {
-  if (!metric || typeof metric !== 'object') return '0 (0%)';
+  if (!metric || typeof metric !== 'object') return 'unavailable';
   return `${Number(metric.count ?? 0)} (${formatFleetPercent(metric.rate)})`;
 }
 
