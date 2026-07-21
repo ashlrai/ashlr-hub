@@ -2918,7 +2918,7 @@ describe('generated repair lifecycle store', () => {
       event.basis === 'repair-lifecycle-outcome' &&
       event.repairGenerationId === generationId &&
       event.repairTreatmentAttemptHash === attemptHash)).toHaveLength(1);
-  });
+  }, 30_000);
 
   it.skipIf(process.platform !== 'win32')(
     'accepts an exact-inspected v2 receipt tombstone after the live receipt is retained',

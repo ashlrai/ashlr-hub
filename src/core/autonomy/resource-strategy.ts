@@ -523,6 +523,7 @@ function recommendMode(
     outcomes.verifiedFailureRepairs.authorized > 0 &&
     !stalePendingOnly &&
     (cfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
+    cfg.fleet?.sharedQueue?.mode !== 'filesystem' &&
     ecosystem.posture !== 'fail'
   ) {
     reasons.push(`${outcomes.verifiedFailureRepairs.authorized} pending proposal(s) have authorized deterministic verification failures`);

@@ -3070,3 +3070,36 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep resource strategy and daemon selection on their independent complete-reader authority path.
 - [x] Verify Fleet Status/dashboard contracts, typecheck, browser-script syntax, and diff integrity.
 - [ ] Require protected CI on the immutable draft head before promotion.
+
+## Repair-Only Durable Attempt Authority (2026-07-21)
+- [x] Bind complete verified-failure repairs to a deterministic parent-derived generation identity.
+- [x] Require that identity during canonical queue authorization and lifecycle generation resolution.
+- [x] Route repair-only work through durable reservation, launch, settlement, and failed-attempt receipt paths.
+- [x] Preserve legacy partial/rejected repair behavior without an explicit generation identity.
+- [x] Verify complete queue authority plus focused repair-only/reservation daemon coverage.
+- [ ] Require protected CI on the immutable draft head before promotion.
+
+## Filesystem Repair-Only Fence (2026-07-21)
+- [x] Refuse repair-only strategy selection when filesystem shared-queue mode cannot dispatch generated repairs.
+- [x] Apply generated-repair dispatch filtering defensively to any repair-only daemon plan.
+- [x] Verify strategy and daemon repair/shared-queue coverage with diff integrity.
+- [ ] Require protected CI on the immutable draft head before promotion.
+
+## Repair Retry Route Recovery (2026-07-21)
+- [x] Let every trusted generated repair use same-tier alternate-backend recovery in the normal lane.
+- [x] Verify alternative-backend and repair-only daemon coverage with typecheck and diff integrity.
+- [ ] Require protected CI on the immutable draft head before promotion.
+# Windows M426 Timing Recovery (2026-07-21)
+- [x] Diagnose the protected Windows portability 2/3 failure as the real-Git worktree publication fixture exceeding Vitest's default 15-second budget.
+- [x] Give only the lock-aware fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [x] Pass the focused M426 fixture and publish the CI recovery commit.
+
+## Windows M113 Timing Recovery (2026-07-21)
+- [x] Isolate the protected Windows portability failure to the local coordinator cooldown fixture exceeding Vitest's default five-second budget.
+- [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [x] Pass the focused M113 fixture and publish the CI recovery commit.
+
+## Windows M360 Timing Recovery (2026-07-21)
+- [x] Isolate the protected Windows portability failure to the immutable repair-publication replay fixture exceeding Vitest's default five-second budget.
+- [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [ ] Verify the focused M360 fixture and require protected CI on the amended draft head.

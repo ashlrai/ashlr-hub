@@ -739,6 +739,7 @@ describe('queued autonomy work scanner', () => {
     const repair = proposalRepairWorkItem(created);
     expect(repair).not.toBeNull();
     if (!repair) throw new Error('expected proposal repair');
+    expect(repair.repairGenerationId).toMatch(/^[a-f0-9]{64}$/);
 
     expect(isVerifiedFailureProposalRepairAuthorized(repair)).toBe(true);
     expect(isVerifiedFailureProposalRepairAuthorized({ ...repair, id: `${repair.id}-tampered` })).toBe(false);
@@ -750,6 +751,10 @@ describe('queued autonomy work scanner', () => {
     };
     expect(isVerifiedFailureProposalRepairAuthorized(forged)).toBe(false);
     expect(beginVerifiedFailureProposalRepairDispatch(forged, () => true)).toEqual({ authorized: false });
+    expect(isVerifiedFailureProposalRepairAuthorized({
+      ...repair,
+      repairGenerationId: '0'.repeat(64),
+    })).toBe(false);
 
     createProposal({
       ...proposalInput,

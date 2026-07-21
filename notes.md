@@ -3327,3 +3327,29 @@
 - Fleet, Mission Control, the dashboard status panel, and CLI show this only as a repair observation. It does not enter ship readiness, mission briefs, strategy, queue selection, daemon dispatch, or any mutating API.
 - The authoritative repair-only path remains the independent complete reader plus daemon revalidation. Status snapshots are cached/display transport and cannot authorize work.
 - Verification: TypeScript typecheck, M49 Fleet Status plus M213 dashboard coverage (186 assertions), `node --check src/core/web/public/app.js`, and `git diff --check` pass locally. Protected CI remains the promotion gate.
+
+# Repair-Only Durable Attempt Authority (2026-07-21)
+- Complete pending verification-failure parents now mint a deterministic `proposal-repair-generation:v1` identity from the canonical repo, repair id, immutable proposal creation time, and depth-zero repair root. Partial and rejected-capture recovery retain their existing legacy generation behavior.
+- Repair-only dispatch now uses the durable generated-repair reservation, launch, settlement, and lifecycle path. A persisted launched reservation blocks redispatch after restart; queue-supplied generation metadata must equal the canonical parent-derived identity.
+- Failed repair outcomes can emit the same no-handoff generation lineage required for durable attempt receipts, so the reservation cannot become an unaccounted permanent in-flight state.
+- Verification: TypeScript typecheck; full M310 queue authority suite (59 assertions); focused M201 repair-only and reservation cases (5 assertions); and `git diff --check` pass locally. Protected CI remains the promotion gate.
+
+# Filesystem Repair-Only Fence (2026-07-21)
+- Filesystem shared-queue mode cannot safely dispatch generated repairs, so resource strategy now skips `repair-only` selection in that configuration. This prevents an authorized but non-executable parent from suppressing ordinary backlog work.
+- The daemon also applies generated-repair dispatch filtering to repair-only plans as defense in depth. A stale plan or pre-materialized repair cannot bypass filesystem dispatch controls; blocked durable reservations are removed before selection.
+- Verification: TypeScript typecheck and focused M306/M201 repair-only plus filesystem shared-queue coverage (5 assertions) pass locally, with `git diff --check` clean. Protected CI remains the promotion gate.
+
+# Repair Retry Route Recovery (2026-07-21)
+- Normal-lane trusted repairs now participate in the existing same-tier alternate-backend reroute before durable reservation. An authorized verified-failure repair no longer repeatedly selects a prior failed backend only to be refused later by retry policy.
+- Verification: TypeScript typecheck, focused M201 alternative-backend and repair-only coverage (3 assertions), and `git diff --check` pass locally. Protected CI remains the promotion gate.
+# Windows M426 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only 15-second timeout in M426's real-Git worktree publication fixture. The fixture already performs transient-lock-aware cleanup, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. This changes only CI tolerance for the known filesystem contention path.
+
+# Windows M113 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only five-second timeout in M113's local coordinator cooldown fixture. A duplicate protected matrix passed the same source revision, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. This changes only CI tolerance for a fixture that constructs local coordinator state under full-suite contention.
+
+# Windows M360 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only five-second timeout in M360's exact immutable repair-publication replay fixture. Its assertion sequence performs durable lifecycle writes and reads, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. The global timeout and lifecycle semantics remain unchanged.

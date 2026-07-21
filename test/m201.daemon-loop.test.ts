@@ -3630,9 +3630,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       scanned: 1, eligible: 1, queued: 0, failed: 0, proposalInboxAvailable: true,
       dispatchSourceState: 'healthy', dispatchSourceComplete: true,
     });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'durable repair-only fixture' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
 
     const result = await tick(
-      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], autonomyControlLoop: true, autoMerge: { enabled: true } },
+      } as AshlrConfig,
       { dryRun: false },
     );
 
@@ -3660,13 +3665,61 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       workItemId: repair.id,
     });
     const second = await tick(
-      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], autonomyControlLoop: true, autoMerge: { enabled: true } },
+      } as AshlrConfig,
       { dryRun: false },
     );
 
     expect(second.reason).toBe('repair-only');
     expect(second.itemsConsidered).toBe(0);
     expect(mockRunGoal.mock.calls.length + mockRunSwarm.mock.calls.length).toBe(1);
+  });
+
+  it('A1f-repair-only-durable: refuses a persisted launched repair attempt after restart', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Repair crash recovery',
+      summary: 'A durable launch marker must prevent a retry loop.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    const actual = await vi.importActual<typeof import('../src/core/fleet/proposal-repair-work.js')>(
+      '../src/core/fleet/proposal-repair-work.js',
+    );
+    const repair = actual.proposalRepairWorkItem(proposal);
+    expect(repair).not.toBeNull();
+    if (!repair) throw new Error('expected verified failure repair');
+    mockBuildBacklog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [repair] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('repair-only', 'verified failure requires repair'));
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 1, eligible: 1, queued: 0, failed: 0, proposalInboxAvailable: true,
+      dispatchSourceState: 'healthy', dispatchSourceComplete: true,
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'durable repair-only crash fixture' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    writeRepairReservationMarker(repair, {
+      reservationId: 'repair-only-crash',
+      backend: 'local-coder',
+      tier: 'mid',
+      repairAttemptOrdinal: 1,
+      phase: 'launched',
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], autonomyControlLoop: true, autoMerge: { enabled: true } },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result).toMatchObject({ directionMode: 'repair-only', itemsConsidered: 0 });
+    expect(result.dispatches ?? []).toHaveLength(0);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
   it('A1f1: real strategy conversion blocks verify-only maintenance without proposal authority', async () => {
