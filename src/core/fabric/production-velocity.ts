@@ -10,6 +10,15 @@
 import type { AshlrConfig } from '../types.js';
 import type { ResourceSnapshot } from './resource-monitor.js';
 import { slotsForBackendState } from './concurrent-dispatch.js';
+import {
+  productionVelocityRaw,
+  resolveProductionVelocityPendingPolicy,
+} from './production-velocity-pending.js';
+
+export {
+  pendingProposalIsStaleForProductionVelocity,
+  type PendingProposalBlockingOptions,
+} from './production-velocity-pending.js';
 
 export type ProductionVelocityProfileName = 'off' | 'resource-control';
 
@@ -59,20 +68,6 @@ function positiveIntOrNull(value: unknown): number | null {
     : null;
 }
 
-function productionVelocityRaw(cfg: AshlrConfig): boolean | Record<string, unknown> | null {
-  const foundry = asRecord(cfg.foundry);
-  const raw = foundry?.['productionVelocity'];
-  if (raw === true || raw === false) return raw;
-  return asRecord(raw);
-}
-
-function isProfileEnabled(raw: boolean | Record<string, unknown> | null): boolean {
-  if (raw === true) return true;
-  if (raw === false || raw === null) return false;
-  if (raw['enabled'] === false || raw['profile'] === 'off') return false;
-  return raw['enabled'] === true || raw['profile'] === 'resource-control';
-}
-
 export function resolveProductionVelocityProfile(cfg: AshlrConfig): EffectiveProductionVelocityProfile {
   const foundry = asRecord(cfg.foundry) ?? {};
   const fabric = asRecord(foundry['fabric']) ?? {};
@@ -81,7 +76,8 @@ export function resolveProductionVelocityProfile(cfg: AshlrConfig): EffectivePro
   const kimi = asRecord(foundry['kimi']) ?? {};
   const raw = productionVelocityRaw(cfg);
   const rawObj = asRecord(raw) ?? {};
-  const enabled = isProfileEnabled(raw);
+  const pendingPolicy = resolveProductionVelocityPendingPolicy(cfg);
+  const enabled = pendingPolicy.enabled;
 
   const maxSlotsPerBackend = positiveInt(
     rawObj['maxSlotsPerBackend'],
@@ -102,9 +98,7 @@ export function resolveProductionVelocityProfile(cfg: AshlrConfig): EffectivePro
     enabled,
     profile: enabled ? 'resource-control' : 'off',
     fillQueueToSlots: enabled && rawObj['fillQueueToSlots'] !== false,
-    stalePendingTtlHours: enabled
-      ? positiveInt(rawObj['stalePendingTtlHours'], 24)
-      : Number.POSITIVE_INFINITY,
+    stalePendingTtlHours: pendingPolicy.stalePendingTtlHours,
     maxSlotsPerBackend,
     caps: {
       localMaxConcurrent,

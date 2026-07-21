@@ -49,11 +49,13 @@ export interface InboxStore {
 
 /** DEFAULT local impl — pass-through adapter over core/inbox/store.ts. */
 export class LocalInboxStore implements InboxStore {
+  constructor(private readonly cfg?: Pick<AshlrConfig, 'user' | 'foundry'>) {}
+
   list(filter?: { status?: ProposalStatus }): Proposal[] {
     return listProposals(filter);
   }
   create(p: Omit<Proposal, 'id' | 'status' | 'createdAt'>): Proposal {
-    return createProposal(p);
+    return createProposal(p, this.cfg);
   }
   load(id: string): Proposal | null {
     return loadProposal(id);
@@ -87,5 +89,5 @@ export class CloudInboxStore implements InboxStore {
 
 /** Local by default; gated stub only when an endpoint is configured (refuses). */
 export function selectInboxStore(cfg: AshlrConfig): InboxStore {
-  return seamEndpoint(cfg, 'inbox') ? new CloudInboxStore() : new LocalInboxStore();
+  return seamEndpoint(cfg, 'inbox') ? new CloudInboxStore() : new LocalInboxStore(cfg);
 }
