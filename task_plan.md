@@ -2705,3 +2705,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## CI PR Supersession (2026-07-21)
+- [x] Confirm duplicate push and pull-request matrices on identical PR heads.
+- [x] Restrict full push validation to `master` while preserving PR merge-ref and reusable workflow validation.
+- [x] Add PR-revision concurrency cancellation and a workflow guard regression.
+- [x] Run focused CI guard, typecheck, quiet lint, and diff integrity.
+- [x] Preserve Pulse fence coverage while giving the Windows portability shard a bounded scheduler allowance.
+- [ ] Publish and require the protected CI matrix before release.

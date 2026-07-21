@@ -79,9 +79,17 @@ describe('M30 CI workflow', () => {
   it('is reusable as the canonical release verification authority', () => {
     expect(ciYml).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
     expect(ciYml.match(/^permissions:\n[\s\S]*?(?=^jobs:)/m)?.[0]).toBe(
-      'permissions:\n  contents: read\n\n',
+      'permissions:\n  contents: read\n\n' +
+      '# Feature-branch updates are validated through the PR merge ref, not an\n' +
+      '# equivalent push checkout. Superseded PR revisions can stop safely; default\n' +
+      '# branch pushes and reusable workflow callers retain independent full matrices.\n' +
+      'concurrency:\n' +
+      '  group: ci-${{ github.event.pull_request.number || github.ref }}\n' +
+      "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\n",
     );
     expect(ciYml.match(/^\s{2,}permissions:/gm) ?? []).toHaveLength(0);
+    expect(ciYml).toMatch(/^concurrency:\n {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$/m);
+    expect(ciYml).toMatch(/^ {2}push:\n {4}branches: \[master\]$/m);
   });
 
   it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {

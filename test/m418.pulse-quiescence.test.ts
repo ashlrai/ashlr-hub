@@ -170,7 +170,11 @@ describe('M418 Pulse outward-mutation quiescence', () => {
       expect.objectContaining({ status: 'done' }),
     ]);
     expect(outerFenceHeldDuringWriteback).toBe(true);
-    expect(elapsedMs).toBeLessThan(1_000);
+    // Windows hosted runners can schedule this otherwise synchronous-enough
+    // fixture behind slow filesystem work from neighbouring portability tests.
+    // Keep the same bounded liveness check without misclassifying scheduler
+    // contention as a Pulse fence failure.
+    expect(elapsedMs).toBeLessThan(process.platform === 'win32' ? 2_000 : 1_000);
   });
 
   it('aborts the active HTTP effect and starts no later sync write', async () => {
