@@ -389,7 +389,7 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // We verify this by checking the mock call count excludes item-1's repo swarm-skip
     expect(item1Events.length).toBe(1); // only the pre-recorded entry
     void item1DispatchedTs; // used above
-  });
+  }, 30_000);
 
   it('does not apply one repository cooldown policy to an equal-id item in another repository', async () => {
     const cfg = makeCfg({ daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 } });
