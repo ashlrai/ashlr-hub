@@ -138,6 +138,17 @@ export interface OutcomeRecord {
   racing?: RacingStats;
 }
 
+/** Bounded receipt for the ledgers used to construct outcome records. */
+export interface OutcomeRecordSourceQuality {
+  sourceState: 'healthy' | 'degraded';
+  complete: boolean;
+  stopReasons: string[];
+}
+
+export type OutcomeRecordList = OutcomeRecord[] & {
+  sourceQuality?: OutcomeRecordSourceQuality;
+};
+
 export interface OutcomeRecordReadDeps {
   listProposals?: () => Proposal[];
   readDecisions?: () => DecisionEntry[];
@@ -146,6 +157,14 @@ export interface OutcomeRecordReadDeps {
   listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   racingStats?: () => RacingStats;
   readPostMergeObservations?: typeof readPostMergeObservations;
+}
+
+function withOutcomeSourceQuality(
+  records: OutcomeRecord[],
+  sourceQuality: OutcomeRecordSourceQuality,
+): OutcomeRecordList {
+  Object.defineProperty(records, 'sourceQuality', { value: sourceQuality, enumerable: false });
+  return records as OutcomeRecordList;
 }
 
 export interface ReadyEvidenceOutcomeRecordDeps {
@@ -316,7 +335,7 @@ function workedSnapshot(event: WorkedEvent): OutcomeRecordWorkedEvent {
  */
 export function listOutcomeRecords(
   opts?: { limit?: number; deps?: OutcomeRecordReadDeps },
-): OutcomeRecord[] {
+): OutcomeRecordList {
   const deps = opts?.deps ?? {};
   const cap = boundedLimit(opts?.limit);
 
@@ -433,9 +452,25 @@ export function listOutcomeRecords(
       return b.proposal.id.localeCompare(a.proposal.id);
     });
 
-    return records.slice(0, cap);
+    const sourceFailures = [decisionSourceQuality, evidenceSourceQuality]
+      .filter((quality) => quality && (quality.sourceState !== 'healthy' || !quality.complete));
+    return withOutcomeSourceQuality(
+      records.slice(0, cap),
+      sourceFailures.length === 0
+        ? { sourceState: 'healthy', complete: true, stopReasons: [] }
+        : {
+            sourceState: 'degraded',
+            complete: false,
+            stopReasons: sourceFailures.flatMap((quality) => {
+              if (!quality) return [];
+              return 'stopReasons' in quality ? quality.stopReasons : ['incomplete-source'];
+            }),
+          },
+    );
   } catch {
-    return [];
+    return withOutcomeSourceQuality([], {
+      sourceState: 'degraded', complete: false, stopReasons: ['io-error'],
+    });
   }
 }
 

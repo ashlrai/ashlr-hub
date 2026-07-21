@@ -17,7 +17,12 @@ import {
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { GeneratedRepairRouteReason } from '../fleet/router.js';
 import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
-import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
+import type {
+  OutcomeRecord,
+  OutcomeRecordDecision,
+  OutcomeRecordEvidence,
+  OutcomeRecordSourceQuality,
+} from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import { loadProposal } from '../inbox/store.js';
 import { listRunsDetailed, type RunsReadResult } from '../run/orchestrator.js';
@@ -182,6 +187,9 @@ export function suppressDegradedSkillObservation(
   status: TrajectoryLearningStatus,
   eventState: 'none' | 'present',
 ): TrajectoryLearningStatus {
+  if (status.metricsState === 'unavailable' || !status.coverage || !status.recent) {
+    return { ...status, skillObservation: { eventState, sampleState: 'unavailable' } };
+  }
   const { skillUse: _skillUseCoverage, ...coverage } = status.coverage;
   return {
     ...status,
@@ -207,11 +215,14 @@ export type TrajectoryTerminalOutcomeCounts = Omit<
 export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
-  trajectories: number;
-  terminalOutcomes: TrajectoryTerminalOutcomeCounts;
-  realizedOutcomes: Record<TrajectoryRealizedOutcome, number>;
-  coverage: PublishedCoverageMetrics;
-  routeSpine: {
+  /** Exact route-to-outcome metrics are withheld when a mandatory ledger is incomplete. */
+  metricsState: 'available' | 'unavailable';
+  sourceQuality?: TrajectoryLearningSourceQuality;
+  trajectories?: number;
+  terminalOutcomes?: TrajectoryTerminalOutcomeCounts;
+  realizedOutcomes?: Record<TrajectoryRealizedOutcome, number>;
+  coverage?: PublishedCoverageMetrics;
+  routeSpine?: {
     dispatchToDecision: TrajectoryCoverageMetric;
     dispatchToEvidence: TrajectoryCoverageMetric;
     dispatchToMerge: TrajectoryCoverageMetric;
@@ -219,8 +230,8 @@ export interface TrajectoryLearningStatus {
   /** Bounded action-only preclaim observations, excluded from learning metrics. */
   routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
   skillObservation: TrajectorySkillObservationSummary;
-  gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
-  recent: Array<{
+  gaps?: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
+  recent?: Array<{
     ref: string;
     latestAt: string;
     terminalOutcome: TrajectoryTerminalOutcome;
@@ -229,6 +240,19 @@ export interface TrajectoryLearningStatus {
     source?: WorkSource;
     coverage: PublishedTrajectoryCoverage;
   }>;
+}
+
+export interface TrajectoryLearningSourceQuality {
+  state: 'healthy' | 'degraded' | 'incomplete';
+  dispatch: TrajectoryMandatorySourceQuality;
+  outcomes: OutcomeRecordSourceQuality;
+  agentActions: TrajectoryMandatorySourceQuality;
+}
+
+interface TrajectoryMandatorySourceQuality {
+  sourceState: 'healthy' | 'degraded' | 'missing';
+  complete: boolean;
+  stopReasons: readonly string[];
 }
 
 export interface TrajectoryRecordReadDeps {
@@ -260,6 +284,7 @@ interface SkillObservationCounts {
 }
 
 const skillObservationByRecords = new WeakMap<TrajectoryRecord[], SkillObservationCounts>();
+const sourceQualityByRecords = new WeakMap<TrajectoryRecord[], TrajectoryLearningSourceQuality>();
 const skillObservationByRecord = new WeakMap<TrajectoryRecord, SkillObservationCounts>();
 const skillObservationDiagnosticsByRecord = new WeakMap<
   TrajectoryRecord,
@@ -307,6 +332,20 @@ function safeValue<T>(read: () => T): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+function healthySourceQuality(): { sourceState: 'healthy'; complete: true; stopReasons: [] } {
+  return { sourceState: 'healthy', complete: true, stopReasons: [] };
+}
+
+function sourceQualityState(
+  dispatch: TrajectoryMandatorySourceQuality,
+  outcomes: OutcomeRecordSourceQuality,
+  agentActions: TrajectoryMandatorySourceQuality,
+): TrajectoryLearningSourceQuality['state'] {
+  const sources = [dispatch, outcomes, agentActions];
+  if (sources.some((source) => source.sourceState !== 'healthy')) return 'degraded';
+  return sources.every((source) => source.complete) ? 'healthy' : 'incomplete';
 }
 
 function eventMs(ts: string | undefined): number {
@@ -688,19 +727,32 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
     limit: Math.max(limit * 6, 200),
     maxFiles: 3,
   };
-  const dispatches = (deps.readDispatchProductionEvents
-    ? safeArray(() => deps.readDispatchProductionEvents!(dispatchReadOptions))
-    : safeArray(() => {
-        const read = readDispatchProductionEventsDetailed(dispatchReadOptions);
-        return read.sourceState === 'healthy' && read.complete ? read.events : [];
-      }))
+  const dispatchRead = deps.readDispatchProductionEvents
+    ? safeValue(() => deps.readDispatchProductionEvents!(dispatchReadOptions))
+    : safeValue(() => readDispatchProductionEventsDetailed(dispatchReadOptions));
+  const dispatchSourceQuality = deps.readDispatchProductionEvents
+    ? ((dispatchRead as (DispatchProductionEvent[] & {
+        sourceQuality?: TrajectoryLearningSourceQuality['dispatch'];
+      }) | undefined)?.sourceQuality ?? healthySourceQuality())
+    : (dispatchRead
+      ? (({ events: _events, ...quality }) => quality)(dispatchRead as ReturnType<typeof readDispatchProductionEventsDetailed>)
+      : { sourceState: 'degraded' as const, complete: false, stopReasons: ['io-error'] });
+  const dispatches = (Array.isArray(dispatchRead)
+    ? dispatchRead
+    : dispatchSourceQuality.sourceState === 'healthy' && dispatchSourceQuality.complete
+      ? (dispatchRead as ReturnType<typeof readDispatchProductionEventsDetailed> | undefined)?.events ?? []
+      : [])
     .filter((event) =>
       event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
     )
     .slice(0, Math.max(limit * 3, 100));
-  const outcomes = safeArray(() =>
+  const outcomesRead = safeValue(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
   );
+  const outcomes = Array.isArray(outcomesRead) ? outcomesRead : [];
+  const outcomeSourceQuality = outcomesRead
+    ? ((outcomesRead as typeof outcomes & { sourceQuality?: OutcomeRecordSourceQuality }).sourceQuality ?? healthySourceQuality())
+    : { sourceState: 'degraded' as const, complete: false, stopReasons: ['io-error'] };
   const runsRead = safeValue(() => (deps.listRunsDetailed ?? listRunsDetailed)({
     limit: Math.max(limit * 3, 100),
     maxCandidates: Math.max(limit * 6, 200),
@@ -711,7 +763,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const runSourceQuality = runsRead
     ? (({ runs: _runs, ...quality }) => quality)(runsRead)
     : undefined;
-  const actions = safeArray(() => deps.readAgentActions
+  const actionsRead = safeValue(() => deps.readAgentActions
     ? deps.readAgentActions({
         sinceMs,
         limit: Math.max(limit * 4, 200),
@@ -723,9 +775,13 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         maxFiles: 3,
         requireComplete: true,
       }));
+  const actions = Array.isArray(actionsRead) ? actionsRead : [];
   const agentActionSourceQuality = (actions as typeof actions & {
     sourceQuality?: AgentActionSourceQuality;
   }).sourceQuality;
+  const mandatoryAgentActionSourceQuality = agentActionSourceQuality ?? (actionsRead
+    ? healthySourceQuality()
+    : { sourceState: 'degraded' as const, complete: false, stopReasons: ['io-error'] });
   const skillUses = safeArray(() =>
     (deps.readSkillUseEvents ?? readSkillUseEvents)({
       sinceMs,
@@ -1147,6 +1203,12 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       return resultRecord;
     });
   skillObservationByRecords.set(result, skillObservation);
+  sourceQualityByRecords.set(result, {
+    state: sourceQualityState(dispatchSourceQuality, outcomeSourceQuality, mandatoryAgentActionSourceQuality),
+    dispatch: dispatchSourceQuality,
+    outcomes: outcomeSourceQuality,
+    agentActions: mandatoryAgentActionSourceQuality,
+  });
   return result;
 }
 
@@ -1154,6 +1216,16 @@ export function summarizeTrajectoryLearning(
   records: TrajectoryRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): TrajectoryLearningStatus {
+  const sourceQuality = sourceQualityByRecords.get(records);
+  if (sourceQuality && sourceQuality.state !== 'healthy') {
+    return {
+      version: 1,
+      windowHours,
+      metricsState: 'unavailable',
+      sourceQuality,
+      skillObservation: { eventState: 'none', sampleState: 'unavailable' },
+    };
+  }
   const productionRecords = records.filter((record) => record.coverage.dispatch);
   const denominator = productionRecords.length;
   const terminalOutcomes: Record<TrajectoryTerminalOutcome, number> = {
@@ -1273,6 +1345,8 @@ export function summarizeTrajectoryLearning(
   return {
     version: 1,
     windowHours,
+    metricsState: 'available',
+    ...(sourceQuality ? { sourceQuality } : {}),
     trajectories: denominator,
     terminalOutcomes,
     realizedOutcomes,

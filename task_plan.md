@@ -2703,3 +2703,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep raw goals, results, tasks, steps, prompts, diffs, and command output out of the projection.
 - [x] Pass typecheck and the complete trajectory-record suite.
 - [ ] Publish as a draft-only PR and require protected CI before promotion.
+
+## Causal Learning Source-Quality Fence (2026-07-21)
+- [x] Carry mandatory dispatch, outcome, and agent-action reader receipts through trajectory reconstruction.
+- [x] Withhold exact causal metrics when any mandatory source is degraded or incomplete.
+- [x] Render withheld metrics as unavailable in Fleet CLI rather than healthy zeroes.
+- [x] Verify trajectory, outcome, and Fleet Status coverage with typecheck and diff integrity.
+- [ ] Require protected CI on the updated draft head before promotion.

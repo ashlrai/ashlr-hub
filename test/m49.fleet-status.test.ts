@@ -7221,6 +7221,35 @@ describe('skill corpus readiness projection', () => {
     expect(out).not.toContain('(0%)');
   });
 
+  it('renders degraded trajectory learning as unavailable instead of healthy zero metrics', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-10T13:00:00.000Z',
+      daemon: { running: true, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      trajectoryLearning: {
+        version: 1,
+        windowHours: 24,
+        metricsState: 'unavailable',
+        sourceQuality: {
+          state: 'degraded',
+          dispatch: { sourceState: 'degraded', complete: false, stopReasons: ['io-error'] },
+          outcomes: { sourceState: 'healthy', complete: true, stopReasons: [] },
+          agentActions: { sourceState: 'healthy', complete: true, stopReasons: [] },
+        },
+        skillObservation: { eventState: 'none', sampleState: 'unavailable' },
+      },
+      killed: false,
+    });
+
+    expect(out).toContain('Trajectory learning:');
+    expect(out).toContain('unavailable: degraded source; exact metrics withheld');
+    expect(out).not.toContain('trajectories: 0');
+    expect(out).not.toContain('dispatch->decision 0');
+  });
+
   it('blocks learning categorically when the observation source is degraded', () => {
     const result = buildSkillCorpusReadiness({
       corpusState: 'ready',

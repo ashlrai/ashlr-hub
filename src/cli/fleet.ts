@@ -604,23 +604,25 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push('Trajectory learning:');
   if (!trajectoryLearning) {
     lines.push('  unavailable');
+  } else if (trajectoryLearning.metricsState === 'unavailable') {
+    lines.push(`  unavailable: ${trajectoryLearning.sourceQuality?.state ?? 'source quality unknown'} source; exact metrics withheld`);
   } else {
-    const outcomes = trajectoryLearning.terminalOutcomes;
+    const outcomes = trajectoryLearning.terminalOutcomes!;
     lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
     lines.push(
       `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
         `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`,
     );
     lines.push(
-      `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToDecision)}, ` +
-        `dispatch->evidence ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToEvidence)}, ` +
-        `dispatch->merge ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToMerge)}`,
+      `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine!.dispatchToDecision)}, ` +
+        `dispatch->evidence ${formatCoverageMetric(trajectoryLearning.routeSpine!.dispatchToEvidence)}, ` +
+        `dispatch->merge ${formatCoverageMetric(trajectoryLearning.routeSpine!.dispatchToMerge)}`,
     );
     lines.push(
-      `  coverage:     dispatch ${formatCoverageMetric(trajectoryLearning.coverage.dispatch)}, ` +
-        `proposal ${formatCoverageMetric(trajectoryLearning.coverage.proposal)}, ` +
-        `evidence ${formatCoverageMetric(trajectoryLearning.coverage.evidence)}, ` +
-        `decision ${formatCoverageMetric(trajectoryLearning.coverage.decision)}`,
+      `  coverage:     dispatch ${formatCoverageMetric(trajectoryLearning.coverage!.dispatch)}, ` +
+        `proposal ${formatCoverageMetric(trajectoryLearning.coverage!.proposal)}, ` +
+        `evidence ${formatCoverageMetric(trajectoryLearning.coverage!.evidence)}, ` +
+        `decision ${formatCoverageMetric(trajectoryLearning.coverage!.decision)}`,
     );
     const skillObservation = trajectoryLearning.skillObservation;
     if (skillObservation) {
@@ -640,9 +642,9 @@ export function formatFleetStatus(s: FleetStatus): string {
         lines.push('  skill observations: none');
       }
     }
-    const gap = trajectoryLearning.gaps[0];
+    const gap = trajectoryLearning.gaps?.[0];
     if (gap) lines.push(`  top gap:      ${gap.kind} missing on ${gap.count} trajector${gap.count === 1 ? 'y' : 'ies'}`);
-    const recent = trajectoryLearning.recent[0];
+    const recent = trajectoryLearning.recent?.[0];
     if (recent) {
       lines.push(`  recent:       ${recent.ref} ${recent.terminalOutcome} at ${recent.latestAt}`);
     }

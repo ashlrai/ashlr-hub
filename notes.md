@@ -2820,3 +2820,9 @@
 - Durable `RunState` metadata could be lost from learning reconstruction when a process stopped before its later dispatch or action ledger write.
 - Trajectories now admit only allowlisted run metadata through the existing bounded detailed reader. The join remains observation-only and cannot count as dispatch authority or alter routing or merge policy.
 - Degraded run stores withhold rows instead of appearing as healthy zero; run coverage is informational and excluded from legacy gap alarms.
+
+# Causal Learning Source-Quality Fence (2026-07-21)
+- Causal-learning summaries previously treated a failed or incomplete mandatory ledger read as an empty array, making data loss indistinguishable from a true zero-outcome population.
+- Trajectory reconstruction now carries bounded source receipts for dispatch, outcome, and agent-action ledgers. Any degraded or incomplete mandatory receipt makes the summary unavailable and withholds trajectories, outcomes, coverage, route-spine metrics, gaps, and recent records.
+- Fleet CLI labels the state unavailable and explains that exact metrics are withheld. This is observation-only: it cannot influence dispatch, routing, proposal capture, or merge authority.
+- Verification: M354 trajectory, M304 outcome, and M49 Fleet Status coverage (190 assertions), TypeScript typecheck, and diff integrity pass locally. Protected CI remains the promotion gate.

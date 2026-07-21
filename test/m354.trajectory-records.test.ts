@@ -1712,6 +1712,42 @@ describe('Trajectory records', () => {
     });
   });
 
+  it.each([
+    ['dispatch', 'degraded', false],
+    ['outcome', 'degraded', false],
+    ['agent-action', 'healthy', false],
+  ] as const)('withholds causal metrics for %s source quality failure', (source, sourceState, complete) => {
+    const dispatches = [dispatch()];
+    const outcomes = [outcomeRecord()];
+    const actions = [action()];
+    const receipt = { sourceState, complete, stopReasons: ['io-error'] };
+    if (source === 'dispatch') Object.defineProperty(dispatches, 'sourceQuality', { value: receipt });
+    if (source === 'outcome') Object.defineProperty(outcomes, 'sourceQuality', { value: receipt });
+    if (source === 'agent-action') Object.defineProperty(actions, 'sourceQuality', { value: receipt });
+
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => dispatches,
+        listOutcomeRecords: () => outcomes,
+        readAgentActions: () => actions,
+      }),
+    });
+    const summary = summarizeTrajectoryLearning(records, 24);
+
+    expect(summary).toMatchObject({
+      metricsState: 'unavailable',
+      sourceQuality: { state: sourceState === 'degraded' ? 'degraded' : 'incomplete' },
+      skillObservation: { sampleState: 'unavailable' },
+    });
+    expect(summary).not.toHaveProperty('trajectories');
+    expect(summary).not.toHaveProperty('terminalOutcomes');
+    expect(summary).not.toHaveProperty('coverage');
+    expect(summary).not.toHaveProperty('routeSpine');
+    expect(summary).not.toHaveProperty('gaps');
+    expect(summary).not.toHaveProperty('recent');
+  });
+
   it('retains the newest semantic occurrence when the timeline exceeds its cap', () => {
     const [semanticEvent] = defineAgentSemanticEvents({
       subjectRef: agentSemanticSubjectRef('proposal', SEMANTIC_PROPOSAL_ID),
