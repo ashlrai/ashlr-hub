@@ -33,7 +33,7 @@ import { readCodexRateLimits } from '../observability/codex-source.js';
 import { buildFleetDigest, type FleetRepoRow } from '../fleet/digest.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.js';
-import { listProposalsDetailed } from '../inbox/store.js';
+import { listProposalsDetailed, type ProposalSourceQuality } from '../inbox/store.js';
 import { realizedMergeOf } from '../inbox/realized-merge.js';
 import { serviceStatusCached, type ServiceStatusResult } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
@@ -621,8 +621,12 @@ export interface FleetActivitySnapshot {
   totalAutoMerged: number;
   totalPending: number;
   totalDeclined: number;
+  /** Completeness of the proposal-backed repository activity counts. */
+  proposalSourceQuality?: ProposalSourceQuality;
   /** Recent auto-merge audit events (newest-first, capped 20). */
   recentMerges: FleetMergeEvent[];
+  /** Completeness of the proposal evidence used to derive recent merges. */
+  recentMergesSourceQuality?: ProposalSourceQuality;
   /** Recent metadata-only agent action events (newest-first, capped 20). */
   recentActions: AgentWorkspaceRecentAction[];
   /** Completeness of the bounded recent-action feed. */
@@ -640,6 +644,20 @@ export interface FleetActivitySnapshot {
 // Throttle cache for fleetReadiness — 2s probes are expensive; cache for 10s.
 let _readinessCache: { result: EngineReadiness[]; at: number } | null = null;
 const READINESS_TTL_MS = 10_000;
+
+function degradedProposalSourceQuality(): ProposalSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+  };
+}
 
 function cachedFleetReadiness(cfg?: AshlrConfig): EngineReadiness[] {
   const now = Date.now();
@@ -680,13 +698,17 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
       totalAutoMerged: 0,
       totalPending: 0,
       totalDeclined: 0,
+      proposalSourceQuality: degradedProposalSourceQuality(),
     };
   });
 
   // Recent landed work from complete, store-authenticated proposal evidence.
   let recentMerges: FleetMergeEvent[] = [];
+  let recentMergesSourceQuality: ProposalSourceQuality = degradedProposalSourceQuality();
   try {
     const read = listProposalsDetailed();
+    const { proposals: _proposals, ...sourceQuality } = read;
+    recentMergesSourceQuality = sourceQuality;
     if (read.complete && read.sourceState !== 'degraded') {
       const now = Date.now();
       recentMerges = read.proposals.flatMap((proposal): FleetMergeEvent[] => {
@@ -790,7 +812,9 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     totalAutoMerged: digest.totalAutoMerged,
     totalPending: digest.totalPending,
     totalDeclined: digest.totalDeclined,
+    proposalSourceQuality: digest.proposalSourceQuality ?? degradedProposalSourceQuality(),
     recentMerges,
+    recentMergesSourceQuality,
     recentActions,
     ...(recentActionsSource ? { recentActionsSource } : {}),
     engineReadiness: engineReadinessResult,

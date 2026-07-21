@@ -96,7 +96,9 @@ describe('buildFleetActivity — shape on empty state', () => {
     expect(snap).toHaveProperty('totalAutoMerged');
     expect(snap).toHaveProperty('totalPending');
     expect(snap).toHaveProperty('totalDeclined');
+    expect(snap).toHaveProperty('proposalSourceQuality');
     expect(snap).toHaveProperty('recentMerges');
+    expect(snap).toHaveProperty('recentMergesSourceQuality');
     expect(snap).toHaveProperty('recentActions');
     expect(snap).toHaveProperty('engineReadiness');
     expect(snap).toHaveProperty('subscriptionUsage');
@@ -155,6 +157,36 @@ describe('dashboard source quality', () => {
       sourceState: 'degraded',
       complete: false,
     });
+  });
+});
+
+describe('buildFleetActivity — proposal source quality', () => {
+  it('withholds repository and merge evidence when the inbox is corrupt', async () => {
+    const inboxDir = join(tmpHome, '.ashlr', 'inbox');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'corrupt.json'), '{not-json', 'utf8');
+
+    const snap = await buildFleetActivity(baseConfig());
+
+    expect(snap.repos).toEqual([]);
+    expect(snap.recentMerges).toEqual([]);
+    expect(snap.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+    expect(snap.recentMergesSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+  });
+
+  it('keeps a complete empty inbox distinct from degraded evidence', async () => {
+    const snap = await buildFleetActivity(baseConfig());
+
+    expect(snap.repos).toEqual([]);
+    expect(snap.recentMerges).toEqual([]);
+    expect(snap.proposalSourceQuality).toMatchObject({ complete: true });
+    expect(snap.recentMergesSourceQuality).toMatchObject({ complete: true });
   });
 });
 

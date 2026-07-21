@@ -3287,3 +3287,8 @@
 - Local V2 receipt/event selection equality now uses the receipt contract's canonical selection digest, so omitted and explicit-null model metadata are semantically equal and object key order cannot create a false `degraded` projection.
 - Shared receipt-binding replay equality now includes `committedAt`. A timestamp-divergent replay is rejected at the shared-store mutation boundary instead of being accepted and only failing during later local readback.
 - Verification: M49 Fleet Status, local V2 binding, and shared work-queue suites pass 206 assertions; TypeScript typecheck and diff integrity pass. Lint remains successful with existing repository warnings only. Fresh protected CI is required on the new head.
+
+# Fleet Activity Proposal Source Truth (2026-07-21)
+- Fleet Activity now carries additive proposal-source metadata for both repository counts and its realized-merge feed. Any degraded or incomplete proposal read withholds both surfaces rather than presenting a zero count or an empty feed as fleet truth.
+- The UI renders an explicit non-live `Data withheld` badge and bounded explanation for incomplete proposal or merge evidence. A complete empty source preserves the existing ordinary empty state; legacy snapshots without quality retain compatibility without being promoted to a healthy claim.
+- Verification: Fleet Activity, dashboard SSE, and static surface suites pass 89 assertions; TypeScript typecheck, browser-script syntax, lint with the existing 101-warning baseline, and diff integrity pass. Protected CI and independent review remain required before promotion.

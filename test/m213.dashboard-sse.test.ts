@@ -527,6 +527,15 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).not.toContain("'none observed'");
   });
 
+  it('app.js withholds degraded Fleet Activity proposal and merge evidence', () => {
+    const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'), 'utf8');
+    expect(src).toContain('Proposal evidence is incomplete; activity counts are withheld.');
+    expect(src).toContain('Merge evidence is incomplete; recent merges are withheld.');
+    expect(src).toContain('proposalSourceQuality');
+    expect(src).toContain('recentMergesSourceQuality');
+    expect(src).toContain('Data withheld');
+  });
+
   it('CLI renders degraded autonomy evidence as partial authority, never an empty healthy store', async () => {
     const { formatFleetStatus } = await import('../src/cli/fleet.js');
     const rendered = formatFleetStatus({

@@ -4595,17 +4595,33 @@ function renderFleetActivity() {
     return;
   }
 
+  const sourceWithheld = (source) => source &&
+    (source.sourceState === 'degraded' || source.complete !== true);
+
   // ── 1. Repo activity table ──────────────────────────────────────────────
   const reposCard = el('div', { cls: 'fa-card card' });
+  const proposalSourceWithheld = sourceWithheld(d.proposalSourceQuality);
   reposCard.appendChild(el('div', { cls: 'card-header' },
-    el('span', { cls: 'card-title' }, 'Repo Activity (7d)'),
+    el('span', { cls: 'card-title' },
+      'Repo Activity (7d)',
+      proposalSourceWithheld
+        ? el('span', {
+            cls: 'badge badge-warn',
+            'aria-label': 'Proposal evidence incomplete; activity data withheld',
+          }, 'Data withheld')
+        : null,
+    ),
     el('span', { cls: 'card-subtitle' },
-      `${d.totalProposed} proposed · ${d.totalAutoMerged} merged · ${d.totalPending} pending · ${d.totalDeclined} declined`
+      proposalSourceWithheld
+        ? 'Proposal evidence unavailable'
+        : `${d.totalProposed} proposed · ${d.totalAutoMerged} merged · ${d.totalPending} pending · ${d.totalDeclined} declined`
     )
   ));
 
   const repos = Array.isArray(d.repos) ? d.repos : [];
-  if (repos.length === 0) {
+  if (proposalSourceWithheld) {
+    reposCard.appendChild(el('p', { cls: 'hint fa-card-body' }, 'Proposal evidence is incomplete; activity counts are withheld.'));
+  } else if (repos.length === 0) {
     reposCard.appendChild(el('p', { cls: 'hint fa-card-body' }, 'No repo activity in the last 7 days.'));
   } else {
     const wrap = el('div', { cls: 'table-wrap fa-card-body' });
@@ -4728,13 +4744,26 @@ function renderFleetActivity() {
 
   // ── 4. Recent auto-merge feed ──────────────────────────────────────────
   const mergesCard = el('div', { cls: 'fa-card card' });
+  const mergesSourceWithheld = sourceWithheld(d.recentMergesSourceQuality);
   mergesCard.appendChild(el('div', { cls: 'card-header' },
-    el('span', { cls: 'card-title' }, 'Auto-Merge Feed'),
-    el('span', { cls: 'card-subtitle' }, `${(d.recentMerges ?? []).length} recent events`)
+    el('span', { cls: 'card-title' },
+      'Auto-Merge Feed',
+      mergesSourceWithheld
+        ? el('span', {
+            cls: 'badge badge-warn',
+            'aria-label': 'Merge evidence incomplete; recent merge data withheld',
+          }, 'Data withheld')
+        : null,
+    ),
+    el('span', { cls: 'card-subtitle' }, mergesSourceWithheld
+      ? 'Merge evidence unavailable'
+      : `${(d.recentMerges ?? []).length} recent events`)
   ));
   const mergesBody = el('div', { cls: 'fa-feed fa-card-body' });
   const merges = Array.isArray(d.recentMerges) ? d.recentMerges : [];
-  if (merges.length === 0) {
+  if (mergesSourceWithheld) {
+    mergesBody.appendChild(el('p', { cls: 'hint' }, 'Merge evidence is incomplete; recent merges are withheld.'));
+  } else if (merges.length === 0) {
     mergesBody.appendChild(el('p', { cls: 'hint' }, 'No auto-merge events recorded.'));
   } else {
     for (const m of merges) {

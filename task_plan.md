@@ -3018,3 +3018,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Canonicalize local selection comparisons through the signed receipt contract and require `committedAt` for exact shared binding replays.
 - [x] Add null-versus-omitted model and timestamp-divergent replay regressions; run focused suites, typecheck, lint, and diff integrity.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Fleet Activity Proposal Source Truth (2026-07-21)
+- [x] Audit Fleet Activity's proposal-backed counts and merge feed for degraded-source false zeroes.
+- [x] Propagate additive source-quality metadata through the activity API and preserve complete-empty compatibility.
+- [x] Render accessible, non-live withheld states for incomplete proposal and merge evidence without changing authority or routing.
+- [x] Add API, dashboard, SSE, static syntax, typecheck, lint, and diff-integrity coverage.
+- [ ] Complete independent review, protected CI, and draft-only handoff without merging or deploying.
