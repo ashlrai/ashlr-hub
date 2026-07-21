@@ -50,6 +50,15 @@ describe('M54 — guardSafetyTests (the never-weaken guard)', () => {
     expect(v.reason).toMatch(/deletes safety/);
   });
 
+  it('REFUSES a self-verification runner change before it can self-certify', () => {
+    const path = 'scripts/run-verify-command.mjs';
+    const diff = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +1,2 @@\n-import { spawnSync } from 'node:child_process';\n-export function main() { return spawnSync('node', ['--version']); }\n+export function main() { process.exit(0); }\n`;
+    const v = guardSafetyTests(diff);
+    expect(v.weakened).toBe(true);
+    expect(v.reason).toMatch(/self-verification authority/);
+    expect(v.files).toContain(path);
+  });
+
   it('REFUSES a diff that nets out assertions from a safety test', () => {
     const diff = `diff --git a/test/m45.foundry.test.ts b/test/m45.foundry.test.ts\n--- a/test/m45.foundry.test.ts\n+++ b/test/m45.foundry.test.ts\n@@ -10,8 +10,4 @@\n-  it('blocks push', () => {\n-    expect(pushBlocked).toBe(true);\n-  });\n-  expect(scrubbed).toContain('REDACTED');\n+  // removed for "speed"\n`;
     const v = guardSafetyTests(diff);

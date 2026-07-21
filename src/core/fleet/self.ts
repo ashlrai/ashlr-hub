@@ -72,6 +72,21 @@ const SAFETY_FILE_PATTERNS: readonly RegExp[] = [
   /\.safety\./,
 ];
 
+/**
+ * Self-verification authority must not be rewritten by a self-target proposal.
+ * The runner executes verifier commands in the candidate worktree, so allowing
+ * this file through would let the proposal change the process that reports
+ * verification success. Broader verifier authority is bound by the merge
+ * snapshot; this is the immediate self-hosting fence.
+ */
+const SELF_VERIFICATION_AUTHORITY_FILES = new Set([
+  'scripts/run-verify-command.mjs',
+]);
+
+function isSelfVerificationAuthorityFile(path: string): boolean {
+  return SELF_VERIFICATION_AUTHORITY_FILES.has(path.replace(/^\.\//, ''));
+}
+
 /** Whether a repo-relative path names a safety/invariant test file. */
 export function isSafetyTestFile(path: string): boolean {
   const p = path.replace(/^\.\//, '');
@@ -171,6 +186,14 @@ export function guardSafetyTests(diff: string): SafetyGuardVerdict {
     return { weakened: true, reason: 'unparseable diff over self-target — refused', files: [] };
   }
   for (const f of parsed) {
+    if (f.path && isSelfVerificationAuthorityFile(f.path)) {
+      touched.push(f.path);
+      return {
+        weakened: true,
+        reason: `diff touches self-verification authority '${f.path}' — refused`,
+        files: touched,
+      };
+    }
     if (!f.path || !isSafetyTestFile(f.path)) continue;
     touched.push(f.path);
     if (f.deleted) {

@@ -2880,3 +2880,7 @@
   - Agent-action carriers and their nested `runEventSummary` are now required to agree whenever both supply a run id. A writer drops a conflicting nested summary while retaining the otherwise valid metadata-only carrier; a contradictory persisted row degrades the source and is withheld by complete reads.
   - This prevents a single row from joining `run:A` trajectory metadata to `run:B` outcome metadata. The invariant is observation-only and introduces no routing, verification, merge, or learning-credit authority.
   - Focused semantic-event coverage and adjacent agent-action, action-count, and context-rollup suites pass, together with typecheck and scoped lint.
+
+- Self-verification authority fence (2026-07-21):
+  - Base-derived verifier commands prevent a proposal from editing the command list, but the packaged runner still executes from the candidate worktree. Ashlr Hub now refuses a self-target proposal that touches `scripts/run-verify-command.mjs` before creating a verification worktree, preventing that runner from self-certifying a candidate change.
+  - This is deliberately a narrow interim fence. The next merge-grade lane binds repo-declared verifier authority inputs to a Git-tree snapshot and signed evidence; it must not claim to make bare PATH toolchains or same-host check-to-exec races immutable.
