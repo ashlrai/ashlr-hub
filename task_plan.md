@@ -3,6 +3,7 @@
 ## Deterministic Ubuntu CI Authority Shards (2026-07-21)
 - [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
 - [x] Partition the complete suite through Vitest's deterministic three-way file sharding.
+- [x] Bind CI topology coverage to the three shard labels, arguments, and one-time pack smoke.
 - [ ] Verify a representative hermetic shard invocation and require the protected matrix.
 
 ## Current Cycle - Verifier Contract Executable Portability

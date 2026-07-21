@@ -110,16 +110,19 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain("ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}");
   });
 
-  it('runs Ubuntu exhaustively with fixed Windows and macOS portability partitions', () => {
-    expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
+  it('runs Ubuntu exhaustively through deterministic shards with fixed Windows and macOS portability partitions', () => {
+    expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(3);
     expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(4);
     expect(ciYml.match(/os:\s*macos-latest/g)).toHaveLength(1);
+    for (const shard of ['1/3', '2/3', '3/3']) {
+      expect(ciYml).toContain(`label: ubuntu, authority ${shard}`);
+      expect(ciYml).toContain(`test_args: "--shard=${shard}"`);
+    }
     for (const partition of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
     expect(ciYml).toContain('label: windows, portability overflow');
-    expect(ciYml).toContain('test_args: ""');
-    expect(ciYml).not.toContain('--shard=');
+    expect(ciYml).toContain("if: matrix.label == 'ubuntu, authority 1/3'");
 
     const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
     const nativeMatrixEntries =
