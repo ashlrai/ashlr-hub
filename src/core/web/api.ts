@@ -340,6 +340,14 @@ async function prepareMutation(
     sendJson(res, 409, { error: 'operation is already in progress', operationId });
     return null;
   }
+  if (started.kind === 'unknown-outcome') {
+    sendJson(res, 409, {
+      error: 'operation outcome is unknown; recovery is required before retrying',
+      operationId,
+      recoveryState: 'unknown-outcome',
+    });
+    return null;
+  }
   if (started.kind === 'unavailable') {
     sendJson(res, 503, { error: 'operation receipt store unavailable' });
     return null;

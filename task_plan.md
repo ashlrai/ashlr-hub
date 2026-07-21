@@ -1969,4 +1969,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove receipt privacy, same-body replay, different-body conflict, and existing mutation route behavior with focused tests.
 - [x] Run typecheck, four focused web API suites, and diff integrity.
 - [x] Review receipt storage, replay behavior, and raw-data exclusion in the isolated worktree.
+- [x] Harden receipt persistence with atomic temp writes, file and directory syncs, and fail-closed durability errors.
+- [x] Treat pending receipts recovered from another process or a legacy writer as explicit unknown outcomes that require reconciliation, never as retry authority.
+- [x] Prove recovered-pending and injected durability-failure behavior in focused web control tests.
 - [ ] Publish a protected draft and require CI before promotion.

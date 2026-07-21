@@ -12,7 +12,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
+import * as fs from 'node:fs';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 const serviceMocks = vi.hoisted(() => ({
@@ -31,6 +33,12 @@ vi.mock('../src/core/daemon/service.js', () => ({
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { startServer } from '../src/core/web/server.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
+import {
+  beginOperationReceipt,
+  completeOperationReceipt,
+  operationRequestDigest,
+  setOperationReceiptDurabilityForTest,
+} from '../src/core/web/operation-receipts.js';
 import type { WebServerOptions } from '../src/core/types.js';
 
 let fx: H1Fixture;
@@ -174,6 +182,63 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(persisted).not.toContain('{}');
     expect(persisted).not.toContain('/tmp/ai.ashlr.daemon.plist');
     expect(persisted).not.toContain('/private/never-persist');
+  });
+
+  it('surfaces a pending receipt from an earlier process as unknown-outcome without rerunning it', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+    const id = operationId();
+    const body = '{}';
+    const receiptDir = join(fx.ashlrDir, 'web-operation-receipts');
+    fs.mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(join(receiptDir, `${id}.json`), `${JSON.stringify({
+      schemaVersion: 1,
+      operationId: id,
+      route: '/api/daemon/service/repair',
+      requestDigest: createHash('sha256').update(body, 'utf8').digest('hex'),
+      createdAt: new Date().toISOString(),
+      state: 'pending',
+    })}\n`, { mode: 0o600 });
+    const headers = { ...JSON_HEADERS, 'x-ashlr-token': h.token, 'x-ashlr-operation-id': id };
+
+    const first = await request('POST', `${h.url}/api/daemon/service/repair`, h.port, headers, body);
+    const retry = await request('POST', `${h.url}/api/daemon/service/repair`, h.port, headers, body);
+
+    expect(first.statusCode).toBe(409);
+    expect(JSON.parse(first.body)).toMatchObject({ recoveryState: 'unknown-outcome', operationId: id });
+    expect(retry.statusCode).toBe(409);
+    expect(JSON.parse(retry.body)).toMatchObject({ recoveryState: 'unknown-outcome', operationId: id });
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+    expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when receipt file durability fails before or after a side effect', () => {
+    const id = randomUUID();
+    const route = '/api/fleet/pause';
+    const digest = operationRequestDigest('{}');
+    const restoreStart = setOperationReceiptDurabilityForTest({
+      fsyncFile: () => { throw new Error('injected fsync failure'); },
+    });
+    try {
+      expect(beginOperationReceipt(id, route, digest)).toEqual({ kind: 'unavailable' });
+    } finally {
+      restoreStart();
+    }
+    expect(beginOperationReceipt(id, route, digest)).toMatchObject({ kind: 'in-progress' });
+
+    const completionId = randomUUID();
+    const started = beginOperationReceipt(completionId, route, digest);
+    expect(started.kind).toBe('started');
+    if (started.kind !== 'started') throw new Error('expected receipt to start');
+    const restoreCompletion = setOperationReceiptDurabilityForTest({
+      fsyncFile: () => { throw new Error('injected completion fsync failure'); },
+    });
+    try {
+      expect(completeOperationReceipt(started.receipt, 200)).toBe(false);
+    } finally {
+      restoreCompletion();
+    }
+    expect(beginOperationReceipt(completionId, route, digest)).toMatchObject({ kind: 'in-progress' });
   });
 
   it('rejects the same operation id when the JSON body changes', async () => {

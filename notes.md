@@ -1964,3 +1964,9 @@
 - Mission Control's shared POST helper and its two direct action calls now generate a fresh UUID per logical browser mutation, so its existing dispatch, inbox, daemon, fleet, and desktop-open controls remain compatible with the server gate.
 - Exact completed retries return their stored receipt status with `replayed:true` and do not execute another mutation. Route or byte-different-body reuse of an operation id returns 409; concurrent/pending reuse also returns 409 fail-closed. Receipt-store availability or finalization failures return 503 rather than silently treating the request as retry-safe.
 - Focused proof: `npm run typecheck` and `npx vitest run test/m14.api.test.ts test/m32.inbox-api.test.ts test/m100.web-open.test.ts test/m299.web-fleet-control.test.ts` passed (76 tests), plus `git diff --check`.
+
+## 2026-07-21 - Receipt crash-ambiguity hardening
+
+- Receipt writes now use exclusive temporary files, file `fsync`, atomic rename, and directory `fsync`; directory creation is synced as well. Any persistence or parsing failure is unavailable/fail-closed, never interpreted as a missing receipt.
+- Pending receipts include the current process owner. A pending record from another process, including legacy ownerless records, is reported as `unknown-outcome` with a recovery-required 409 response and can never re-execute its side effect automatically.
+- Focused proof: `npm run typecheck` and the four web API suites passed with 78 tests, plus `git diff --check`.
