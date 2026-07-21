@@ -92,6 +92,7 @@ import {
   hasExactDispatchProductionTreatmentOutcomeReceipt,
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
+  readDispatchProductionLatestObservationDetailed,
   readDispatchProductionAttemptReceiptAvailability,
   readDispatchProductionAttemptProtocolQuality,
   readDispatchProductionFailureAttemptReceipts,
@@ -3916,6 +3917,62 @@ describe('M342 dispatch production ledger', () => {
     expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
     expect(readDispatchProductionYield({ windowMs: 60 * 60 * 1000, limit: 20 })).toMatchObject({ events: 1 });
     expect(readDispatchProductionEvents({ limit: 20 })).toHaveLength(1);
+  });
+
+  it('reports a stale historical observation independently of the yield analytics window', () => {
+    const staleAt = '2020-01-01T12:34:56.000Z';
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2020-01-01.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'historical-observation', ts: staleAt }))}\n`,
+      'utf8',
+    );
+
+    expect(readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 }).summary).toBeUndefined();
+    expect(readDispatchProductionLatestObservationDetailed()).toEqual({
+      latestAt: staleAt,
+      sourceQuality: expect.objectContaining({
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        filesRead: 1,
+      }),
+    });
+  });
+
+  it('keeps an empty readable ledger healthy while withholding a nonexistent observation', () => {
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+
+    const read = readDispatchProductionLatestObservationDetailed();
+
+    expect(read).not.toHaveProperty('latestAt');
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesRead: 0,
+      invalidRows: 0,
+    });
+  });
+
+  it('withholds the latest observation when bounded history is degraded', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-07-08.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'valid-observation' }))}\nnot-json\n`,
+      'utf8',
+    );
+
+    const read = readDispatchProductionLatestObservationDetailed();
+
+    expect(read).not.toHaveProperty('latestAt');
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
   });
 
   it('summarizes proposal yield by backend, source, repo, and model', () => {

@@ -426,6 +426,16 @@ export interface DispatchProductionYieldReadResult {
   sourceQuality: DispatchProductionSourceQuality;
 }
 
+/**
+ * Latest metadata observation across the bounded durable history. This is
+ * intentionally separate from the rolling yield analytics window: callers
+ * use it to determine evidence freshness, never to make routing decisions.
+ */
+export interface DispatchProductionLatestObservationReadResult {
+  latestAt?: string;
+  sourceQuality: DispatchProductionSourceQuality;
+}
+
 export interface DispatchProductionReasonCount {
   reason: string;
   count: number;
@@ -7325,6 +7335,35 @@ export function readDispatchProductionYieldDetailed(opts?: {
     ...(summary ? { summary } : {}),
     sourceQuality,
   };
+}
+
+/**
+ * Read the newest durable dispatch-production observation without applying a
+ * rolling analytics cutoff. Any incomplete or degraded history withholds the
+ * timestamp so consumers cannot label partial evidence as fresh.
+ */
+export function readDispatchProductionLatestObservationDetailed(): DispatchProductionLatestObservationReadResult {
+  const read = readDispatchProductionEventsDetailed({
+    limit: HARD_READ_MAX_ROWS,
+    maxFiles: HARD_READ_MAX_FILES,
+    maxBytes: HARD_READ_MAX_BYTES,
+    maxRows: HARD_READ_MAX_ROWS,
+  });
+  const { events, ...sourceQuality } = read;
+  if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
+    return { sourceQuality };
+  }
+
+  let latestAt: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const event of events) {
+    const eventMs = Date.parse(event.ts);
+    if (eventMs > latestMs) {
+      latestMs = eventMs;
+      latestAt = event.ts;
+    }
+  }
+  return { ...(latestAt === undefined ? {} : { latestAt }), sourceQuality };
 }
 
 export function readDispatchProductionYield(opts?: {
