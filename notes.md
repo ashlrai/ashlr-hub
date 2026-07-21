@@ -3287,3 +3287,7 @@
 - Local V2 receipt/event selection equality now uses the receipt contract's canonical selection digest, so omitted and explicit-null model metadata are semantically equal and object key order cannot create a false `degraded` projection.
 - Shared receipt-binding replay equality now includes `committedAt`. A timestamp-divergent replay is rejected at the shared-store mutation boundary instead of being accepted and only failing during later local readback.
 - Verification: M49 Fleet Status, local V2 binding, and shared work-queue suites pass 206 assertions; TypeScript typecheck and diff integrity pass. Lint remains successful with existing repository warnings only. Fresh protected CI is required on the new head.
+
+# Ubuntu Onboard CI Timing Recovery (2026-07-21)
+- The hermetic non-interactive H7 onboarding test creates and commits a disposable Git repository. It alone exceeded Vitest's default five-second allowance under the 12,000-test Ubuntu protected run, while passing directly.
+- Only that test now has a bounded 15-second allowance. The global timeout, test assertions, fixture isolation, and no-network/no-daemon guarantee are unchanged, so unrelated hangs still fail at the default threshold.

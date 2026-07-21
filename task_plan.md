@@ -3018,3 +3018,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Canonicalize local selection comparisons through the signed receipt contract and require `committedAt` for exact shared binding replays.
 - [x] Add null-versus-omitted model and timestamp-divergent replay regressions; run focused suites, typecheck, lint, and diff integrity.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Ubuntu Onboard CI Timing Recovery (2026-07-21)
+- [x] Isolate the Ubuntu full-suite failure to the disposable-Git non-interactive H7 onboarding test.
+- [x] Preserve global timeout behavior while adding a bounded 15-second allowance only to that fixture-heavy test.
+- [ ] Verify the focused H7 suite locally and require a fresh protected CI matrix on the immutable draft head.
