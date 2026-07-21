@@ -2720,3 +2720,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove external-symlink contracts and direct runner inputs fail closed without spawning external code.
 - [x] Pass focused profile and verifier-runner coverage, typecheck, scoped lint, and diff checks.
 - [ ] Publish the guarded change as a protected draft PR and wait for the platform matrix.
+
+## Windows Receipt-Materialization CI Budget (2026-07-21)
+- [x] Isolate the repeated Windows portability timeout to the M342 failure-receipt integration case.
+- [x] Add a bounded test-local 30-second allowance without weakening receipt assertions or production behavior.
+- [x] Pass focused M342 coverage, typecheck, scoped lint, and diff integrity.
+- [ ] Require the complete protected CI matrix on PR #105 before promotion.

@@ -2843,3 +2843,8 @@
   - Lexical containment is insufficient for merge evidence: a repo-local directory symlink can resolve outside the checkout and make a repo-relative verifier execute arbitrary external state.
   - Contract parsing now requires an existing directory whose physical `realpath` remains under the repository. The sync and async verifier runners independently recheck the same physical boundary immediately before spawning, closing a parse-to-spawn symlink swap.
   - External or unavailable cwd values return `invalid-command`; they never fall back to the repository root, preserving the claimed verifier scope. Focused profile and execution tests, typecheck, scoped lint, and diff checks passed before protected CI.
+
+- Windows receipt-materialization CI budget (2026-07-21):
+  - Protected Windows portability shard 1/3 repeatedly timed out the M342 failure-receipt integration case at Vitest's default five-second test budget. The same timeout blocked unrelated daemon and verifier PRs because the test runs on their merge refs.
+  - The isolated test now has a bounded 30-second budget. Production receipt behavior and assertions are unchanged; this is an explicit hosted-Windows integration allowance, not a suppression of failures.
+  - Focused M342 coverage, typecheck, scoped lint, and diff integrity pass locally. Protected CI on PR #105 remains required before unblocking dependent promotions.

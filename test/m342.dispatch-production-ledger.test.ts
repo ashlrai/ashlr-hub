@@ -1059,7 +1059,7 @@ describe('M342 dispatch production ledger', () => {
         }],
       });
     }
-  });
+  }, 30_000);
 
   it('recovers a failure append crash without duplicating its authoritative raw event', () => {
     useWindowsSemanticPrivateStorageFixture();
