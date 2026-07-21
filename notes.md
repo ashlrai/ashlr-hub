@@ -2923,4 +2923,10 @@
 
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
-  - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+- Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Dirty daemon-service install guard (2026-07-21):
+  - Service registration previously embedded the invoking checkout's executable path, allowing a repair or reinstall to repoint launchd, systemd, or schtasks at mutable dirty source.
+  - The shared installation boundary now rejects dirty or unverifiable Git-backed Ashlr source after resolving symlinks, before any service-manager mutation. Packaged non-Git installs remain supported and an enclosing unrelated repository does not trigger a false refusal.
+  - Coverage includes staged, unstaged, untracked, submodule, symlink, detached-release, and service-mutation cases. This admission guard does not yet provide detached-SHA staging or atomic promotion.
+  - Verification: 69 focused, 55 adjacent setup/control, and 443 invariant assertions (5 skipped), plus typecheck, scoped lint, production build, and diff checks passed before protected CI.
