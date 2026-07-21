@@ -323,6 +323,7 @@ function appendDecisionLine(
   setOperation: (operation: NonNullable<DecisionWriteFailureForTest['operation']>) => void,
 ): boolean {
   let fd: number | undefined;
+  let pendingError: unknown;
   try {
     let pathBefore: ReturnType<typeof lstatSync> | undefined;
     try {
@@ -364,17 +365,21 @@ function appendDecisionLine(
     }
     setOperation('directory-fsync');
     fsyncDirectory(dirname(path));
-    return true;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch (error) {
+  } catch (error) {
+    pendingError = error;
+  }
+  if (fd !== undefined) {
+    try {
+      closeSync(fd);
+    } catch (error) {
+      if (pendingError === undefined) {
         setOperation('close');
-        throw error;
+        pendingError = error;
       }
     }
   }
+  if (pendingError !== undefined) throw pendingError;
+  return true;
 }
 
 function writeAll(fd: number, buffer: Buffer): void {
