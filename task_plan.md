@@ -2838,4 +2838,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Project measured versus unmetered maintenance data without fabricating spend.
 - [x] Harden receipt accounting against new-directory durability loss, cross-proposal aggregation, and phantom unmetered calls.
 - [x] Cover the Windows unsupported-directory-descriptor compatibility path without weakening POSIX durability failures.
+- [x] Add a native hosted-Windows directory durability probe that reports exact failing capability metadata.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.

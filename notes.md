@@ -2951,3 +2951,7 @@
   - Fresh Windows CI exposed ledger-derived metrics and reconciliation fanout disappearing after the new durable decision append path. The writer intentionally returns false on any persistence error, so the immediate symptom was missing decision rows rather than unsafe authority advancement.
   - After named-directory validation, `EISDIR` is now treated like the other Windows outcomes that mean Node cannot expose or sync a directory descriptor. POSIX and all unrelated Windows I/O failures remain fatal; injected open and fsync coverage exercises this exact boundary.
   - The diagnosis is intentionally provisional until a fresh protected Windows matrix confirms the host errno. The change does not relax file fsync, identity validation, or decision-ledger failure handling.
+
+- Native Windows directory durability probe (2026-07-21):
+  - Ledger writes continue to fail closed while the hosted-Windows failure is unresolved. A Windows-only real-filesystem M373 probe now calls `fsyncDirectory()` directly and includes the native error code, syscall, and path if it fails.
+  - This probe is diagnostic only. It does not broaden tolerated errors, alter file durability, or convert a failed decision append into authority.
