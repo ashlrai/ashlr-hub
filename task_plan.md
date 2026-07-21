@@ -2830,4 +2830,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add per-invocation measured/unmetered judge receipts and actual-responder attribution.
 - [x] Persist all authorized completed inline judge decisions and require durable decision writes before merge progression.
 - [x] Project measured versus unmetered maintenance data without fabricating spend.
+- [x] Harden receipt accounting against new-directory durability loss, cross-proposal aggregation, and phantom unmetered calls.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.

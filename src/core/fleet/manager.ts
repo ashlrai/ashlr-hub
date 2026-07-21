@@ -1452,11 +1452,14 @@ export async function runManager(
       const judgeClient = await resolveIndependentReviewer(proposal);
       let activeJudgeEngine = judgeClient?.model ?? 'unavailable';
       const judgeStats = judgeClient?.stats;
+      let judgeReceipts: JudgeUsageReceipt[] = [];
       judgeEngine = activeJudgeEngine;
 
       if (judgeClient) {
+        const receiptStart = judgeStats?.receipts.length ?? 0;
         verdict = await judgeProposal(proposal, cfg, judgeClient);
-        activeJudgeEngine = judgeStats?.model ?? judgeClient.model;
+        judgeReceipts = judgeStats?.receipts.slice(receiptStart) ?? [];
+        activeJudgeEngine = judgeReceipts.at(-1)?.model ?? judgeStats?.model ?? judgeClient.model;
         judgeEngine = activeJudgeEngine;
         judgeEnginesUsed.add(activeJudgeEngine);
       } else {
@@ -1509,6 +1512,11 @@ export async function runManager(
       }
 
       // Record in decisions ledger (always, shadow or not).
+      const measuredJudgeReceipts = judgeReceipts.filter((receipt) => receipt.metering === 'measured');
+      const judgeDurationMs = judgeReceipts.reduce((total, receipt) => total + receipt.durationMs, 0);
+      const judgeCostUsd = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.costUsd ?? 0), 0);
+      const judgeTokensIn = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.tokensIn ?? 0), 0);
+      const judgeTokensOut = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.tokensOut ?? 0), 0);
       recordDecision({
         ts: decisionTs,
         proposalId: proposal.id,
@@ -1523,11 +1531,11 @@ export async function runManager(
         // Fable primary that fell back to Opus reports Opus) plus per-call
         // cost/tokens/latency parsed from the CLI JSON. Judge spend was
         // previously invisible; with Fable 5 judging it must be measured.
-        model: judgeStats?.model ?? activeJudgeEngine,
-        ...(judgeStats?.durationMs !== undefined ? { durationMs: judgeStats.durationMs } : {}),
-        ...(judgeStats?.costUsd !== undefined ? { costUsd: judgeStats.costUsd } : {}),
-        ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
-        ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
+        model: activeJudgeEngine,
+        ...(judgeReceipts.length > 0 ? { durationMs: judgeDurationMs } : {}),
+        ...(measuredJudgeReceipts.length > 0
+          ? { costUsd: judgeCostUsd, tokensIn: judgeTokensIn, tokensOut: judgeTokensOut }
+          : {}),
         verdict: verdict.verdict,
         ...(!judgeClient ? { reason: 'manager-judge-unavailable' } : {}),
         detail: verdict.wouldMerge && reviewerIndependent ? 'would-merge' : '',

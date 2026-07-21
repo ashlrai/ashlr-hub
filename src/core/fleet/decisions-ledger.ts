@@ -239,6 +239,9 @@ export function recordDecision(entry: DecisionEntry): boolean {
     const dir = decisionsDir();
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+      // The leaf directory entry itself must survive a crash before a later
+      // decision write can claim durable authority.
+      fsyncDirectory(dirname(dir));
     }
 
     const line = JSON.stringify(record) + '\n';

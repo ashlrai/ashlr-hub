@@ -1119,9 +1119,9 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 	        (total, receipt) => total + (receipt.metering === 'measured' ? receipt.costUsd ?? 0 : 0),
 	        0,
 	      );
-	      out.judgeUnmeteredCalls += judgeResult.receipts.length > 0
-	        ? judgeResult.receipts.filter((receipt) => receipt.metering === 'unmetered').length
-	        : 1;
+	      out.judgeUnmeteredCalls += judgeResult.receipts.filter(
+	        (receipt) => receipt.metering === 'unmetered',
+	      ).length;
         if (!judgeResult.authorityLive || killSwitchOn() || !p.repo || !isEnrolled(p.repo)) {
           if (killSwitchOn()) break;
           continue;
