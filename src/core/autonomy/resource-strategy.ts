@@ -19,6 +19,7 @@ import {
   isLiveRemoteProtectionEvidence,
   READY_EVIDENCE_MAX_AGE_MS,
   READY_EVIDENCE_MAX_FUTURE_SKEW_MS,
+  verifierAuthorityBindingsMatch,
 } from './evidence-pack.js';
 import type { EcosystemDoctorCheck, EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import {
@@ -346,7 +347,8 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
     (record.proposal.riskClass === undefined || record.proposal.riskClass === risk) &&
     (currentTrustBasis !== 'evidence' || (
       evidence.remotePreferred === true &&
-      isLiveRemoteProtectionEvidence(gates.remoteProtection)
+      isLiveRemoteProtectionEvidence(gates.remoteProtection) &&
+      verifierAuthorityBindingsMatch(evidence.verification, verify)
     ))
   );
 }

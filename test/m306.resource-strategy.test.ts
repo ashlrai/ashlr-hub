@@ -148,6 +148,13 @@ function doctor(fail = 0, warn = 0, totalChecks = 1): EcosystemDoctorReport {
 function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
   const diffHash = 'a'.repeat(64);
   const verifiedAt = '2026-07-01T00:08:00.000Z';
+  const verifierAuthority = {
+    verifierAuthoritySnapshotVersion: 1 as const,
+    verifierAuthorityObjectFormat: 'sha1' as const,
+    baseTreeOid: 'd'.repeat(40),
+    candidateTreeOid: 'e'.repeat(40),
+    authoritySnapshotDigest: 'f'.repeat(64),
+  };
   return {
     version: 1,
     proposal: {
@@ -164,6 +171,7 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
         passed: true,
         baseBranch: 'main',
         baseHead: 'b'.repeat(40),
+        ...verifierAuthority,
         diffHash,
         verifiedAt,
         source: 'auto-merge',
@@ -195,6 +203,7 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
         commandKinds: ['test'],
         baseBranch: 'main',
         baseHead: 'b'.repeat(40),
+        ...verifierAuthority,
         diffHash,
         verifiedAt,
         source: 'auto-merge',
@@ -410,6 +419,60 @@ describe('buildResourceStrategyReport', () => {
 
     expect(report.outcomes.readyEvidence).toBe(0);
     expect(report.mode).not.toBe('auto-merge-ready');
+  });
+
+  it('requires an exact verifier authority snapshot for evidence-trust readiness', async () => {
+    const record = outcome();
+    const evidence = record.evidencePacks[0]!;
+    evidence.trustBasis = 'evidence';
+    evidence.remotePreferred = true;
+    evidence.gates.remoteProtection = {
+      ok: true,
+      live: true,
+      detail: 'exact protected remote fixture',
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead: 'b'.repeat(40),
+      observedAt: '2026-07-01T00:08:30.000Z',
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: '9'.repeat(64),
+    };
+    const config = cfg({
+      foundry: {
+        autoMerge: { enabled: true, trustBasis: 'evidence' },
+      } as NonNullable<AshlrConfig['foundry']>,
+    });
+
+    const ready = await buildResourceStrategyReport(config, {
+      now: new Date('2026-07-01T00:30:00.000Z'),
+      deps: deps({ listOutcomeRecords: () => [record] }),
+    });
+    expect(ready.outcomes.readyEvidence).toBe(1);
+
+    for (const mutate of [
+      (candidate: OutcomeRecord) => {
+        delete candidate.proposal.verifyResult!.authoritySnapshotDigest;
+      },
+      (candidate: OutcomeRecord) => {
+        candidate.proposal.verifyResult!.candidateTreeOid = '0'.repeat(40);
+      },
+      (candidate: OutcomeRecord) => {
+        candidate.proposal.verifyResult!.baseTreeOid = 'A'.repeat(40);
+      },
+    ]) {
+      const stale = structuredClone(record);
+      mutate(stale);
+      const report = await buildResourceStrategyReport(config, {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({ listOutcomeRecords: () => [stale] }),
+      });
+      expect(report.outcomes.readyEvidence).toBe(0);
+      expect(report.mode).not.toBe('auto-merge-ready');
+    }
   });
 
   it('does not treat branch-only or already-applied evidence as auto-merge-ready', async () => {
