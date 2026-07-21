@@ -169,6 +169,11 @@ export function inspectOperationalProjectionRecoveryV2(
     return refused('transaction-changed-during-inspection');
   }
   if (!ownsProposalStoreMutationLock(storeLock)) return refused('store-lock-not-owned');
+  const finalReplay = verifyOperationalProjectionReplay();
+  if (finalReplay.verdict !== 'consistent-with-local-ledger') {
+    return refused(`replay-changed-during-inspection:${finalReplay.verdict}`);
+  }
+  if (!ownsProposalStoreMutationLock(storeLock)) return refused('store-lock-not-owned');
   if (recovery === 'complete' && current.transaction.phase === 'committed') {
     return { state: 'complete-observation', transactionId: current.transaction.transactionId };
   }

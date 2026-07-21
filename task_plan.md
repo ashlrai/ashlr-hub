@@ -2614,6 +2614,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove the inspector refuses a malformed active journal without modifying its bytes or creating replay/stage recovery state.
 - [x] Prove the inspector refuses a symlinked active journal without touching the external target or creating replay/stage recovery state.
 - [x] Re-read and compare the exact signed active transaction after replay, stage, and canonical-artifact observation so a concurrent valid phase advance cannot return a mixed-snapshot recovery action.
+- [x] Recheck replay-ledger consistency at the final read-only recovery publication boundary so a concurrent deletion or degradation cannot emit a stale actionable observation.
 - [x] Pass the complete protected CI matrix on immutable draft PR #75 head `3afd1a10`; keep recovery executor activation, merge, and deployment disabled.
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
 - [x] Define a default-off, parse-only remote-CAS configuration contract that rejects credentials, non-HTTPS, local/private endpoints, and unbounded/malformed identifiers without any network or activation path.

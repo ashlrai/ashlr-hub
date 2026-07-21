@@ -39,7 +39,10 @@ import {
   advanceOperationalProjectionTransaction,
   prepareOperationalProjectionTransaction,
 } from '../src/core/inbox/operational-projection-transaction-coordinator.js';
-import { operationalProjectionReplayLedgerPath } from '../src/core/inbox/operational-projection-replay-ledger.js';
+import {
+  operationalProjectionReplayLedgerPath,
+  recordOperationalProjectionReplay,
+} from '../src/core/inbox/operational-projection-replay-ledger.js';
 import {
   operationalProjectionStagePath,
   writeOperationalProjectionStage,
@@ -223,6 +226,22 @@ describe('M436 operational projection recovery inspection', () => {
       prepared.transaction.staged.projection,
       (text) => validateOperationalProjectionStageText(text, key),
     )).toEqual({ ok: true });
+
+    const journalText = fs.readFileSync(operationalProjectionTransactionPath());
+    const proposalStageText = fs.readFileSync(operationalProjectionStagePath(prepared.transaction.transactionId, 'proposal'));
+    const projectionStageText = fs.readFileSync(operationalProjectionStagePath(prepared.transaction.transactionId, 'projection'));
+    afterReplayVerification = () => fs.rmSync(operationalProjectionReplayLedgerPath());
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'replay-changed-during-inspection:missing-local-ledger',
+    });
+    expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
+    expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
+    expect(fs.readFileSync(operationalProjectionTransactionPath())).toEqual(journalText);
+    expect(fs.readFileSync(operationalProjectionStagePath(prepared.transaction.transactionId, 'proposal'))).toEqual(proposalStageText);
+    expect(fs.readFileSync(operationalProjectionStagePath(prepared.transaction.transactionId, 'projection'))).toEqual(projectionStageText);
+    expect(fs.existsSync(operationalProjectionReplayLedgerPath())).toBe(false);
+    expect(recordOperationalProjectionReplay(prepared.transaction, lock!, new Date('2026-07-20T01:00:00.000Z')))
+      .toMatchObject({ state: 'healthy' });
 
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'recoverable-observation', transactionId: prepared.transaction.transactionId,
