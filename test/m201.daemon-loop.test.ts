@@ -3716,14 +3716,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       foundry: { allowedBackends: ['local-coder'], autonomyControlLoop: true, autoMerge: { enabled: true } },
     } as AshlrConfig, { dryRun: false });
 
-    expect(result).toMatchObject({ directionMode: 'repair-only', itemsConsidered: 1 });
-    expect(result.dispatches).toEqual([
-      expect.objectContaining({
-        itemId: repair.id,
-        dispatched: false,
-        skipReason: 'repair-attempt-reservation-unavailable',
-      }),
-    ]);
+    expect(result).toMatchObject({ directionMode: 'repair-only', itemsConsidered: 0 });
+    expect(result.dispatches ?? []).toHaveLength(0);
     expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });

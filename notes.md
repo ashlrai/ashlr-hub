@@ -3333,3 +3333,8 @@
 - Repair-only dispatch now uses the durable generated-repair reservation, launch, settlement, and lifecycle path. A persisted launched reservation blocks redispatch after restart; queue-supplied generation metadata must equal the canonical parent-derived identity.
 - Failed repair outcomes can emit the same no-handoff generation lineage required for durable attempt receipts, so the reservation cannot become an unaccounted permanent in-flight state.
 - Verification: TypeScript typecheck; full M310 queue authority suite (59 assertions); focused M201 repair-only and reservation cases (5 assertions); and `git diff --check` pass locally. Protected CI remains the promotion gate.
+
+# Filesystem Repair-Only Fence (2026-07-21)
+- Filesystem shared-queue mode cannot safely dispatch generated repairs, so resource strategy now skips `repair-only` selection in that configuration. This prevents an authorized but non-executable parent from suppressing ordinary backlog work.
+- The daemon also applies generated-repair dispatch filtering to repair-only plans as defense in depth. A stale plan or pre-materialized repair cannot bypass filesystem dispatch controls; blocked durable reservations are removed before selection.
+- Verification: TypeScript typecheck and focused M306/M201 repair-only plus filesystem shared-queue coverage (5 assertions) pass locally, with `git diff --check` clean. Protected CI remains the promotion gate.

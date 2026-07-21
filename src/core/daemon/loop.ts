@@ -4084,7 +4084,9 @@ export async function tick(
   }
   const repairOnlyDispatch = directionPlan?.dispatchScope === 'proposal-repair';
   if (repairOnlyDispatch) {
-    backlogItems = backlogItems.filter(isVerifiedFailureProposalRepairAuthorized);
+    backlogItems = filterGeneratedRepairDispatch(
+      backlogItems.filter(isVerifiedFailureProposalRepairAuthorized),
+    );
   }
   if (!repairOnlyDispatch) {
     backlogItems = filterGeneratedRepairDispatch(backlogItems);

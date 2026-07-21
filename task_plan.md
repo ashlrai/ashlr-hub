@@ -3078,3 +3078,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve legacy partial/rejected repair behavior without an explicit generation identity.
 - [x] Verify complete queue authority plus focused repair-only/reservation daemon coverage.
 - [ ] Require protected CI on the immutable draft head before promotion.
+
+## Filesystem Repair-Only Fence (2026-07-21)
+- [x] Refuse repair-only strategy selection when filesystem shared-queue mode cannot dispatch generated repairs.
+- [x] Apply generated-repair dispatch filtering defensively to any repair-only daemon plan.
+- [x] Verify strategy and daemon repair/shared-queue coverage with diff integrity.
+- [ ] Require protected CI on the immutable draft head before promotion.
