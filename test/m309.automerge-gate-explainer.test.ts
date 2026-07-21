@@ -6,15 +6,26 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import { explainAutoMergeGate } from '../src/core/inbox/merge.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { captureVerifierAuthoritySnapshot } from '../src/core/run/verifier-authority.js';
 
 const origHome = process.env.HOME;
 let tmpHome: string;
+let tmpRepo: string;
+
+const MERGE_COMMAND = {
+  id: 'merge-test',
+  kind: 'test' as const,
+  cmd: ['node', '-e', 'process.exit(0)'],
+  required: true,
+  profiles: ['merge' as const],
+};
 
 const docDiff = [
   'diff --git a/README.md b/README.md',
@@ -46,6 +57,46 @@ function cfg(autoMerge: Record<string, unknown> = {}): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
+function git(args: string[], env: NodeJS.ProcessEnv = process.env): string {
+  return execFileSync('git', ['-C', tmpRepo, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  }).trim();
+}
+
+function candidateTreeOid(diff: string): string {
+  const indexPath = path.join(tmpHome, 'candidate.index');
+  const patchPath = path.join(tmpHome, 'candidate.patch');
+  const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+  fs.writeFileSync(patchPath, diff, 'utf8');
+  git(['read-tree', 'HEAD'], env);
+  git(['apply', '--cached', patchPath], env);
+  return git(['write-tree'], env);
+}
+
+function evidenceVerification(diff: string): NonNullable<Proposal['verifyResult']> {
+  const snapshot = captureVerifierAuthoritySnapshot({
+    repoRoot: tmpRepo,
+    baseRevision: 'HEAD',
+    mergeCommands: [MERGE_COMMAND],
+  });
+  if (!snapshot.ok) throw new Error(`failed to capture M309 authority: ${snapshot.reason}`);
+  return {
+    passed: true,
+    detail: 'green',
+    ran: [MERGE_COMMAND],
+    baseBranch: 'main',
+    baseHead: snapshot.snapshot.baseCommitOid,
+    verifierAuthoritySnapshotVersion: 1,
+    verifierAuthorityObjectFormat: snapshot.snapshot.objectFormat,
+    baseTreeOid: snapshot.snapshot.baseTreeOid,
+    candidateTreeOid: candidateTreeOid(diff),
+    authoritySnapshotDigest: snapshot.snapshot.authoritySnapshotDigest,
+    diffHash: hashDiff(diff),
+  };
+}
+
 function proposal(over: Partial<Proposal> = {}): Proposal {
   const diff = over.diff ?? docDiff;
   const engineModel = over.engineModel ?? 'codex:gpt-5.5';
@@ -53,7 +104,7 @@ function proposal(over: Partial<Proposal> = {}): Proposal {
   const diffHash = hashDiff(diff);
   return {
     id: 'm309-prop',
-    repo: '/tmp/m309-repo',
+    repo: tmpRepo,
     origin: 'agent',
     kind: 'patch',
     title: 'explainer proposal',
@@ -71,11 +122,26 @@ function proposal(over: Partial<Proposal> = {}): Proposal {
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m309-home-'));
+  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m309-repo-'));
   process.env.HOME = tmpHome;
+  execFileSync('git', ['init', '--initial-branch=main', tmpRepo], { stdio: 'pipe' });
+  git(['config', 'user.email', 'm309@example.invalid']);
+  git(['config', 'user.name', 'M309']);
+  fs.writeFileSync(path.join(tmpRepo, 'README.md'), 'old\n', 'utf8');
+  fs.writeFileSync(path.join(tmpRepo, 'VERIFY_AUTHORITY.txt'), 'M309 inline verifier authority\n', 'utf8');
+  fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    mode: 'replace-detected',
+    authorityFiles: ['VERIFY_AUTHORITY.txt'],
+    commands: [MERGE_COMMAND],
+  })}\n`, 'utf8');
+  git(['add', 'README.md', 'VERIFY_AUTHORITY.txt', 'ashlr.verify.json']);
+  git(['commit', '-m', 'fixture base']);
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  fs.rmSync(tmpRepo, { recursive: true, force: true });
   process.env.HOME = origHome;
 });
 
@@ -130,14 +196,7 @@ describe('M309 explainAutoMergeGate', () => {
     const r = explainAutoMergeGate(
       proposal({
         diff,
-        verifyResult: {
-          passed: true,
-          detail: 'green',
-          ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-          baseBranch: 'main',
-          baseHead: '0123456789abcdef0123456789abcdef01234567',
-          diffHash: hashDiff(diff),
-        },
+        verifyResult: evidenceVerification(diff),
       }),
       cfg({
         trustBasis: 'evidence',
@@ -162,14 +221,7 @@ describe('M309 explainAutoMergeGate', () => {
     const r = explainAutoMergeGate(
       proposal({
         diff,
-        verifyResult: {
-          passed: true,
-          detail: 'green',
-          ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-          baseBranch: 'main',
-          baseHead: '0123456789abcdef0123456789abcdef01234567',
-          diffHash: hashDiff(diff),
-        },
+        verifyResult: evidenceVerification(diff),
       }),
       cfg({
         trustBasis: 'evidence',

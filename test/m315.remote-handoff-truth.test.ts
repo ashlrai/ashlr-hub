@@ -200,6 +200,7 @@ function initRepo(dir: string): void {
   fs.writeFileSync(path.join(dir, 'ashlr.verify.json'), JSON.stringify({
     schemaVersion: 1,
     mode: 'replace-detected',
+    authorityFiles: ['README.md'],
     commands: [{
       id: 'merge-test',
       kind: 'test',
@@ -1467,6 +1468,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
       schemaVersion: 1,
       mode: 'replace-detected',
+      authorityFiles: ['README.md'],
       commands: [{
         id: 'merge-test',
         kind: 'test',

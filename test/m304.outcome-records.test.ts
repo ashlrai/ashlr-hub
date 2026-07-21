@@ -30,6 +30,9 @@ import type { DecisionEntry, Proposal } from '../src/core/types.js';
 
 const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const TEST_DIFF_HASH = hashDiff(TEST_DIFF);
+const BASE_TREE_OID = 'c'.repeat(40);
+const CANDIDATE_TREE_OID = 'd'.repeat(40);
+const AUTHORITY_SNAPSHOT_DIGEST = 'e'.repeat(64);
 const SEMANTIC_PROPOSAL_ID = 'prop-m304abc1-000001-bbbbbbbbbbbbbbbbbbbbbbbb';
 const DEGRADED_PROPOSAL_ID = 'prop-m304abc1-000002-cccccccccccccccccccccccc';
 const originalHome = process.env.HOME;
@@ -138,6 +141,13 @@ function evidence(proposalId: string, generatedAt: string): SignedAutonomyEviden
   draft.proposal.createdAt = '2026-07-02T23:59:00.000Z';
   draft.trustBasis = 'evidence';
   draft.remotePreferred = true;
+  Object.assign(draft.verification, {
+    verifierAuthoritySnapshotVersion: 1 as const,
+    verifierAuthorityObjectFormat: 'sha1' as const,
+    baseTreeOid: BASE_TREE_OID,
+    candidateTreeOid: CANDIDATE_TREE_OID,
+    authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
+  });
   draft.gates.remoteProtection = {
     ok: true,
     detail: 'safe protected remote policy',
@@ -405,6 +415,11 @@ describe('m302 listOutcomeRecords', () => {
                 passed: true,
                 baseBranch: 'main',
                 baseHead: 'a'.repeat(40),
+                verifierAuthoritySnapshotVersion: 1,
+                verifierAuthorityObjectFormat: 'sha1',
+                baseTreeOid: BASE_TREE_OID,
+                candidateTreeOid: CANDIDATE_TREE_OID,
+                authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
                 diffHash: TEST_DIFF_HASH,
                 verifiedAt: '2026-07-03T03:00:00.000Z',
                 source: 'auto-merge',
@@ -449,6 +464,11 @@ describe('m302 listOutcomeRecords', () => {
         passed: true,
         baseBranch: 'main',
         baseHead: 'a'.repeat(40),
+        verifierAuthoritySnapshotVersion: 1,
+        verifierAuthorityObjectFormat: 'sha1',
+        baseTreeOid: BASE_TREE_OID,
+        candidateTreeOid: CANDIDATE_TREE_OID,
+        authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
         diffHash: TEST_DIFF_HASH,
         verifiedAt: '2026-07-03T03:00:00.000Z',
         source: 'auto-merge',
