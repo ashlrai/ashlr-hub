@@ -24,6 +24,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -473,7 +474,7 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
   }
 
   it('dedup returns the existing proposal id (not a new one) when diffHash matches pending', async () => {
-    // Seed inbox with an existing pending proposal with diffHash 'abc123'.
+    const diff = 'diff --git a/file.ts\n+// fix';
     const existing: Proposal = {
       id: 'existing-prop',
       repo: REPO,
@@ -481,8 +482,8 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
       kind: 'patch',
       title: 'Fix #38',
       summary: 'first attempt',
-      diff: 'diff --git a/file.ts\n+// fix',
-      diffHash: 'abc123',
+      diff,
+      diffHash: hashDiff(diff),
       status: 'pending',
       engineTier: 'frontier',
       createdAt: NOW_ISO,
@@ -498,8 +499,8 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
       kind: 'patch',
       title: 'Fix #38 again',
       summary: 'duplicate attempt',
-      diff: 'diff --git a/file.ts\n+// fix',
-      diffHash: 'abc123', // same hash
+      diff,
+      diffHash: hashDiff(diff),
     });
 
     // Dedup path: returns the existing proposal's id, status rejected (not persisted).

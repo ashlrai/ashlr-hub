@@ -255,8 +255,15 @@ describe('M23 createProposal — persistence + initial state', () => {
   it('normalizes causal identity on a diff-hash dedup return', () => {
     const diff = safeDiff();
     const diffHash = hashDiff(diff);
-    const first = createProposal(makeInput({ title: 'Canonical diff owner', diff, diffHash }));
+    const dedupAuthority = { origin: 'agent' as const, workItemId: 'issue:causal-dedup' };
+    const first = createProposal(makeInput({
+      ...dedupAuthority,
+      title: 'Canonical diff owner',
+      diff,
+      diffHash,
+    }));
     const duplicate = createProposal(makeInput({
+      ...dedupAuthority,
       title: 'Duplicate causal attempt',
       diff,
       diffHash,

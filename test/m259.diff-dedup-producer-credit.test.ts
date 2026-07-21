@@ -122,6 +122,7 @@ describe('M259 diff dedup producer credit', () => {
         branch: 'ashlr-sandbox-retry',
       },
       runId: 'run-retry',
+      workItemId: '/tmp/repo:issue:original',
     });
 
     expect(result.proposalId).toBeUndefined();
@@ -173,6 +174,7 @@ describe('M259 diff dedup producer credit', () => {
         branch: 'ashlr-sandbox-direct-retry',
       },
       runId: 'run-direct-retry',
+      workItemId: '/tmp/repo:issue:first-direct',
     });
 
     expect(result.proposalId).toBeUndefined();

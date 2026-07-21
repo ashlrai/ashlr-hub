@@ -87,11 +87,13 @@ import {
   verifyLocalRealizedMergeEvidence,
 } from './realized-merge.js';
 import {
+  hashDiff,
   signProducerProvenanceV2,
   signLocalRealizedMergeReceipt,
   verifyProvenance,
   verifyLocalMergeIntent,
 } from '../foundry/provenance.js';
+import { pendingProposalIsStaleForProductionVelocity } from '../fabric/production-velocity-pending.js';
 import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
 import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
 import {
@@ -938,6 +940,48 @@ function bindCreatedProposalRunSummary(
   };
 }
 
+type ProposalDedupCandidate = Pick<
+  Proposal,
+  | 'repo'
+  | 'origin'
+  | 'diff'
+  | 'diffHash'
+  | 'workItemId'
+  | 'workItemGenerationId'
+>;
+
+function canonicalProposalDiffHash(
+  proposal: Pick<Proposal, 'diff' | 'diffHash'>,
+): string | null {
+  if (
+    typeof proposal.diff !== 'string' ||
+    proposal.diff.trim().length === 0 ||
+    typeof proposal.diffHash !== 'string'
+  ) return null;
+  try {
+    const recomputed = hashDiff(canonicalizeProposalDiff(proposal.diff));
+    return proposal.diffHash === recomputed ? recomputed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAuthoritativeProposalDuplicate(
+  existing: Proposal,
+  input: ProposalDedupCandidate,
+  inputHash: string,
+  cfg: Pick<AshlrConfig, 'foundry'> | undefined,
+  now: string,
+): boolean {
+  if (typeof input.repo !== 'string' || existing.repo !== input.repo) return false;
+  if (
+    existing.workItemId !== input.workItemId ||
+    existing.workItemGenerationId !== input.workItemGenerationId
+  ) return false;
+  if (pendingProposalIsStaleForProductionVelocity(existing, cfg, { now })) return false;
+  return canonicalProposalDiffHash(existing) === inputHash;
+}
+
 /**
  * Create a new proposal, persist it, audit the creation, and return it.
  *
@@ -1043,7 +1087,13 @@ export function createProposal(
     try {
       // Dedup and installation share one namespace transaction so two
       // processes cannot both observe absence and file the same diff.
-      if (initialStatus === 'pending' && input.diffHash) {
+      // Manual control-plane input is never a dedup candidate and therefore
+      // never depends on the completeness of the autonomous dedup snapshot.
+      const inputHash = initialStatus === 'pending' && input.origin !== 'manual' &&
+        typeof input.repo === 'string'
+        ? canonicalProposalDiffHash(input)
+        : null;
+      if (inputHash !== null) {
         const pendingSnapshot = listProposalsDetailed({
           status: 'pending',
           requireComplete: true,
@@ -1055,7 +1105,7 @@ export function createProposal(
           throw new Error('Proposal dedup source is incomplete');
         }
         const duplicate = pendingSnapshot.proposals.find(
-          (existing) => existing.diffHash === input.diffHash,
+          (existing) => isAuthoritativeProposalDuplicate(existing, input, inputHash, cfg, createdAt),
         );
         if (duplicate) {
           const dedupRunEventSummary = bindCreatedProposalRunSummary(
