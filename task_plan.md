@@ -2798,3 +2798,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Defer TITRR pre-capture terminal actions and emit one capture-owned terminal action so `proposal-disabled` cannot conflict with final capture outcomes.
 - [x] Retain a created proposal id through persistence-read failures, attempt machine rejection, and require fail-closed reconciliation rather than re-filing.
 - [x] Make deferred TITRR attempts suppress every internal terminal action, including cancellation, retention, sandbox, and pre-execution exits; the epilogue owns the sole terminal action.
+
+## Windows Dispatch-Production Stress Fixture Budget (2026-07-21)
+- [x] Isolate the hosted-Windows timeout to M342's 2,048-artifact crash-recovery stress fixture.
+- [x] Retain the 60-second POSIX deadline and add a bounded 120-second Windows allowance.
+- [ ] Require a refreshed protected Windows matrix before promotion.

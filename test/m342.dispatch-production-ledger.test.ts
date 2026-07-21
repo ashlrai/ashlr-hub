@@ -2555,7 +2555,9 @@ describe('M342 dispatch production ledger', () => {
     expect(readdirSync(receiptDir).filter((name) =>
       name.includes(generationId) && name.endsWith('.failure.json'))).toHaveLength(0);
     expect(existsSync(join(receiptDir, failureAttemptReceiptName(trigger)))).toBe(true);
-  }, 60_000);
+  // Hosted Windows runners can exceed the POSIX deadline while performing the
+  // same 2,048-artifact filesystem recovery exercise.
+  }, process.platform === 'win32' ? 120_000 : 60_000);
 
   it.each(['failure-receipt', 'failure-intent'] as const)(
     'recovers an interrupted retention manifest for an exact %s artifact',
