@@ -893,6 +893,32 @@ describe('verification runner packaging', () => {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  it('revalidates escaped executable paths at the asynchronous spawn boundary', async () => {
+    const outside = makeFixture();
+    try {
+      const target = join(outside, 'verify.js');
+      writeFileSync(target, 'process.exit(0)', 'utf8');
+      mkdirSync(join(workdir, 'scripts'), { recursive: true });
+      try {
+        symlinkSync(target, join(workdir, 'scripts', 'verify.js'), 'file');
+      } catch {
+        return;
+      }
+
+      const result = await runVerifySubprocessAsync(['scripts/verify.js'], {
+        cwd: workdir,
+        env: process.env,
+        timeoutMs: 1_000,
+        verifyBoundary: { repoRoot: workdir, executable: 'scripts/verify.js' },
+      });
+
+      expect(result.exitCode).toBe(-1);
+      expect(result.error).toContain('without escaping through a symlink');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -960,7 +986,7 @@ describe('verifyTaskStructured', () => {
 
     try {
       writeVerifyContract(dir, [
-        process.execPath,
+        'node',
         '-e',
         `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'started')`,
       ]);
@@ -1006,7 +1032,7 @@ describe('verifyTaskStructured', () => {
         'setInterval(() => {}, 1000)',
       ].join(';');
 
-      writeVerifyContract(dir, [process.execPath, '-e', script]);
+      writeVerifyContract(dir, ['node', '-e', script]);
       const pending = verifyTaskStructured(
         makeTask('build a thing', 'some result'),
         mockClientText('yes'),

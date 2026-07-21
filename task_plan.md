@@ -2731,6 +2731,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Reject host-independent Windows absolute and drive-relative executable forms.
 - [x] Add portable contract-parser regression coverage and rerun typecheck.
 - [x] Revalidate physical cwd and executable containment inside the synchronous watchdog wrapper.
+- [x] Revalidate original cwd and executable containment inside asynchronous spawn ownership.
+- [x] Migrate supported contract fixtures from absolute host runtimes to portable argv executables.
 - [ ] Require the refreshed complete protected matrix on PR #106 before merge.
 - [ ] Design immutable verification-snapshot authority separately; do not claim final check-to-exec race elimination from path validation alone.
 

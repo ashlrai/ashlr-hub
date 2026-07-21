@@ -110,6 +110,8 @@ export interface VerifySubprocessOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+  /** Final argv containment check performed in this function immediately before spawn. */
+  verifyBoundary?: { repoRoot: string; executable: string };
   /** Windows package-manager shims only; ignored on POSIX. */
   windowsShell?: boolean;
   signal?: AbortSignal;
@@ -560,6 +562,18 @@ export async function runVerifySubprocessAsync(
       cancelled: true,
     });
   }
+  if (opts.verifyBoundary) {
+    const boundaryCwd = commandRootFor(
+      { kind: 'test', cmd: [opts.verifyBoundary.executable], cwd: opts.cwd },
+      opts.verifyBoundary.repoRoot,
+    );
+    const executableError = boundaryCwd
+      ? verifyExecutablePathError(opts.verifyBoundary.repoRoot, boundaryCwd, opts.verifyBoundary.executable)
+      : 'command cwd is outside the workspace or unavailable';
+    if (executableError) {
+      return emptyResult({ error: `[verify-runner] ${executableError}` });
+    }
+  }
 
   const platform = opts._platform ?? process.platform;
   if (opts.signal && platform === 'win32') {
@@ -980,6 +994,7 @@ export async function runVerifyCommandAsync(
         : isolated.env,
       timeoutMs: useWindowsWrapper ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout,
       windowsShell: useWindowsWrapper ? false : baseOptions.shell === true,
+      verifyBoundary: { repoRoot: workspaceRoot, executable: bin },
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });
     isolated.cleanup();

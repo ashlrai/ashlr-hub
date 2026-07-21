@@ -189,7 +189,7 @@ function initRepo(dir: string): void {
     commands: [{
       id: 'merge-test',
       kind: 'test',
-      cmd: [process.execPath, '-e', 'process.exit(0)'],
+      cmd: ['node', '-e', 'process.exit(0)'],
       required: true,
       profiles: ['merge'],
     }],
