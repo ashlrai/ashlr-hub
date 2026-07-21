@@ -122,7 +122,7 @@ vi.mock('../src/core/fleet/manager.js', async (importOriginal) => {
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => []),
-  recordDecision: vi.fn(),
+  recordDecision: vi.fn(() => true),
 }));
 
 vi.mock('../src/core/fleet/judge-trace.js', () => ({

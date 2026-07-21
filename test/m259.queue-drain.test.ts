@@ -79,7 +79,7 @@ vi.mock('../src/core/fleet/manager.js', () => ({
   resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
-const mockRecordDecision = vi.fn();
+const mockRecordDecision = vi.fn(() => true);
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => []),
   recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
@@ -236,6 +236,7 @@ beforeEach(() => {
   mockSetStatus.mockReset();
   mockUpdateProposalField.mockReset();
   mockRecordDecision.mockReset();
+  mockRecordDecision.mockReturnValue(true);
   mockSetStatus.mockReturnValue(true);
   mockUpdateProposalField.mockReturnValue(true);
 
