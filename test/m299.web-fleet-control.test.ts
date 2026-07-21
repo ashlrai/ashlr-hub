@@ -12,6 +12,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const serviceMocks = vi.hoisted(() => ({
   ensureRunning: vi.fn(),
@@ -33,11 +35,18 @@ import type { WebServerOptions } from '../src/core/types.js';
 
 let fx: H1Fixture;
 let openHandles: Array<{ close(): Promise<void> }> = [];
+let operationSequence = 0;
+
+function operationId(): string {
+  operationSequence += 1;
+  return `00000000-0000-4000-8000-${String(operationSequence).padStart(12, '0')}`;
+}
 
 beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
   openHandles = [];
+  operationSequence = 0;
   serviceMocks.ensureRunning.mockReset();
   serviceMocks.install.mockReset();
   serviceMocks.serviceStatus.mockReset();
@@ -83,7 +92,13 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'POST' && headers['x-ashlr-operation-id'] === undefined
+            ? { 'x-ashlr-operation-id': operationId() }
+            : {}),
+          ...headers,
+        },
       },
       (res) => {
         let data = '';
@@ -100,6 +115,81 @@ function request(
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 describe('POST /api/fleet/pause|resume', () => {
+  it('requires a bounded operation id after the token and JSON gate', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+
+    const missing = await request(
+      'POST', `${h.url}/api/fleet/pause`, h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': h.token, 'x-ashlr-operation-id': '' }, '{}',
+    );
+    expect(missing.statusCode).toBe(400);
+    expect(JSON.parse(missing.body)).toMatchObject({ error: expect.stringContaining('operation-id') });
+    expect(killSwitchOn()).toBe(false);
+  });
+
+  it('replays one service repair receipt without a second service mutation', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+    const id = operationId();
+    const headers = { ...JSON_HEADERS, 'x-ashlr-token': h.token, 'x-ashlr-operation-id': id };
+
+    const first = await request('POST', `${h.url}/api/daemon/service/repair`, h.port, headers, '{}');
+    const replay = await request('POST', `${h.url}/api/daemon/service/repair`, h.port, headers, '{}');
+
+    expect(first.statusCode).toBe(200);
+    expect(replay.statusCode).toBe(200);
+    expect(JSON.parse(first.body)).toMatchObject({ replayed: false, receipt: { operationId: id } });
+    expect(JSON.parse(replay.body)).toEqual(expect.objectContaining({
+      ok: true,
+      replayed: true,
+      receipt: { operationId: id, route: '/api/daemon/service/repair', statusCode: 200 },
+    }));
+    expect(serviceMocks.install).toHaveBeenCalledTimes(1);
+    expect(serviceMocks.ensureRunning).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an operation-id replay with a different request and stores metadata only', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+    const id = operationId();
+    const headers = { ...JSON_HEADERS, 'x-ashlr-token': h.token, 'x-ashlr-operation-id': id };
+    const secretGoal = 'do not persist this private goal';
+
+    const first = await request(
+      'POST', `${h.url}/api/daemon/service/repair`, h.port, headers,
+      JSON.stringify({ goal: secretGoal, environment: 'private', path: '/private/never-persist' }),
+    );
+    const conflict = await request('POST', `${h.url}/api/run`, h.port, headers, JSON.stringify({ goal: secretGoal }));
+
+    expect(first.statusCode).toBe(200);
+    expect(conflict.statusCode).toBe(409);
+    const receipts = join(fx.ashlrDir, 'web-operation-receipts');
+    expect(existsSync(receipts)).toBe(true);
+    const persisted = readdirSync(receipts).map((file) => readFileSync(join(receipts, file), 'utf8')).join('\n');
+    expect(persisted).toContain(id);
+    expect(persisted).toContain('/api/daemon/service/repair');
+    expect(persisted).not.toContain(secretGoal);
+    expect(persisted).not.toContain(h.token);
+    expect(persisted).not.toContain('{}');
+    expect(persisted).not.toContain('/tmp/ai.ashlr.daemon.plist');
+    expect(persisted).not.toContain('/private/never-persist');
+  });
+
+  it('rejects the same operation id when the JSON body changes', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+    const id = operationId();
+    const headers = { ...JSON_HEADERS, 'x-ashlr-token': h.token, 'x-ashlr-operation-id': id };
+
+    const first = await request('POST', `${h.url}/api/fleet/pause`, h.port, headers, '{"reason":"maintenance"}');
+    const conflict = await request('POST', `${h.url}/api/fleet/pause`, h.port, headers, '{"reason":"different"}');
+
+    expect(first.statusCode).toBe(200);
+    expect(conflict.statusCode).toBe(409);
+    expect(killSwitchOn()).toBe(true);
+  });
+
   it('returns 404 when dispatch controls are disabled', async () => {
     const h = await startServer(makeCfg(), makeOpts({ allowDispatch: false }));
     openHandles.push(h);

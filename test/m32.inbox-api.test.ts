@@ -23,11 +23,18 @@ import type { WebServerOptions } from '../src/core/types.js';
 
 let fx: H1Fixture;
 let openHandles: Array<{ close(): Promise<void> }> = [];
+let operationSequence = 0;
+
+function operationId(): string {
+  operationSequence += 1;
+  return `00000000-0000-4000-8000-${String(operationSequence).padStart(12, '0')}`;
+}
 
 beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
   openHandles = [];
+  operationSequence = 0;
 });
 
 afterEach(async () => {
@@ -57,7 +64,13 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'POST' && headers['x-ashlr-operation-id'] === undefined
+            ? { 'x-ashlr-operation-id': operationId() }
+            : {}),
+          ...headers,
+        },
       },
       (res) => {
         let data = '';

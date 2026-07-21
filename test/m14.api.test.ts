@@ -246,6 +246,7 @@ function post(url: string, port: number, headers: Record<string, string> = {}, b
     Host: `127.0.0.1:${port}`,
     'Content-Type': 'application/json',
     'Content-Length': String(Buffer.byteLength(body)),
+    'x-ashlr-operation-id': '00000000-0000-4000-8000-000000000014',
     ...headers,
   }, body);
 }

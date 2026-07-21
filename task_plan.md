@@ -1961,3 +1961,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+## Current Overnight Cycle - Web Mutation Operation Receipts
+- [x] Map every existing POST mutation route and its existing token/JSON gate.
+- [x] Add a durable, metadata-only, exclusive-create receipt store under the isolated `~/.ashlr` home.
+- [x] Require a UUID operation id after the existing gate and before body execution for run, inbox, daemon repair, fleet control, and desktop-open routes.
+- [x] Replay completed exact requests without re-executing; reject route/body mismatches and in-flight duplicates.
+- [x] Prove receipt privacy, same-body replay, different-body conflict, and existing mutation route behavior with focused tests.
+- [x] Run typecheck, four focused web API suites, and diff integrity.
+- [x] Review receipt storage, replay behavior, and raw-data exclusion in the isolated worktree.
+- [ ] Publish a protected draft and require CI before promotion.

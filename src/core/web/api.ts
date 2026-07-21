@@ -85,6 +85,12 @@ import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import {
+  beginOperationReceipt,
+  completeOperationReceipt,
+  operationRequestDigest,
+  parseOperationId,
+} from './operation-receipts.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -297,6 +303,72 @@ function passesMutationGate(req: IncomingMessage, res: ServerResponse, token: st
   return true;
 }
 
+type MutationReply = (statusCode: number, body: Record<string, unknown>) => void;
+
+/**
+ * Validate, claim, and parse a web mutation before its side effect runs.
+ * The receipt claim is durable and exclusive, so duplicated requests cannot
+ * execute a local control action twice even across a server restart.
+ */
+async function prepareMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+  route: string,
+): Promise<{ body: unknown; reply: MutationReply } | null> {
+  if (!passesMutationGate(req, res, token)) return null;
+  const operationId = parseOperationId(headerValue(req, 'x-ashlr-operation-id'));
+  if (!operationId) {
+    sendJson(res, 400, { error: 'x-ashlr-operation-id must be a UUID' });
+    return null;
+  }
+  let raw: string;
+  let body: unknown;
+  try {
+    raw = await readBody(req);
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON body' });
+    return null;
+  }
+  const started = beginOperationReceipt(operationId, route, operationRequestDigest(raw));
+  if (started.kind === 'conflict') {
+    sendJson(res, 409, { error: 'operation id already belongs to a different request' });
+    return null;
+  }
+  if (started.kind === 'in-progress') {
+    sendJson(res, 409, { error: 'operation is already in progress', operationId });
+    return null;
+  }
+  if (started.kind === 'unavailable') {
+    sendJson(res, 503, { error: 'operation receipt store unavailable' });
+    return null;
+  }
+  if (started.kind === 'replay') {
+    sendJson(res, started.receipt.statusCode ?? 500, {
+      ok: (started.receipt.statusCode ?? 500) < 400,
+      replayed: true,
+      receipt: { operationId, route, statusCode: started.receipt.statusCode },
+    });
+    return null;
+  }
+  const receipt = started.receipt;
+  return {
+    body,
+    reply: (statusCode, response) => {
+      if (!completeOperationReceipt(receipt, statusCode)) {
+        sendJson(res, 503, { error: 'operation receipt finalization failed', operationId });
+        return;
+      }
+      sendJson(res, statusCode, {
+        ...response,
+        replayed: false,
+        receipt: { operationId, route, statusCode },
+      });
+    },
+  };
+}
+
 /**
  * Extract the path from the request URL, without query string.
  * Never throws; falls back to '/'.
@@ -499,36 +571,19 @@ function handleSseEvents(
  *    local-first ceilings (never higher than the CLI defaults).
  */
 async function handleDispatch(
-  req: IncomingMessage,
-  res: ServerResponse,
   cfg: AshlrConfig,
-  ctx: { token: string },
+  body: unknown,
+  reply: MutationReply,
 ): Promise<void> {
-  // Token (constant-time) + JSON Content-Type gate — blocks simple-request
-  // form-POST CSRF before body parsing (the token is the real control).
-  if (!passesMutationGate(req, res, ctx.token)) {
-    return;
-  }
-
-  // Parse body.
-  let body: unknown;
-  try {
-    const raw = await readBody(req);
-    body = JSON.parse(raw);
-  } catch {
-    sendJson(res, 400, { error: 'invalid JSON body' });
-    return;
-  }
-
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    sendJson(res, 400, { error: 'body must be a JSON object' });
+    reply(400, { error: 'body must be a JSON object' });
     return;
   }
 
   const obj = body as Record<string, unknown>;
   const goal = typeof obj['goal'] === 'string' ? obj['goal'].trim() : '';
   if (!goal) {
-    sendJson(res, 400, { error: '"goal" (string) is required' });
+    reply(400, { error: '"goal" (string) is required' });
     return;
   }
 
@@ -561,7 +616,7 @@ async function handleDispatch(
       json: true,
     });
 
-    sendJson(res, 200, {
+    reply(200, {
       id: runState.id,
       status: runState.status,
       goal: runState.goal,
@@ -570,7 +625,7 @@ async function handleDispatch(
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    send500(res, `run failed: ${msg}`);
+    reply(500, { error: `run failed: ${msg}` });
   }
 }
 
@@ -793,27 +848,26 @@ export async function handleApi(
         return true;
       }
 
-      // Same token + Content-Type gate as handleDispatch.
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const mutation = await prepareMutation(req, res, ctx.token, path);
+      if (!mutation) return true;
+      const { reply } = mutation;
 
       const proposal = loadProposal(id);
       if (!proposal) {
-        sendJson(res, 404, { error: `proposal not found: ${id}` });
+        reply(404, { error: `proposal not found: ${id}` });
         return true;
       }
       if (proposal.status !== 'pending') {
-        sendJson(res, 409, { error: `proposal is ${proposal.status}, not pending` });
+        reply(409, { error: `proposal is ${proposal.status}, not pending` });
         return true;
       }
 
       if (action === 'reject') {
         if (!setStatus(id, 'rejected')) {
-          sendJson(res, 503, { error: 'proposal rejection unavailable; queued recovery could not be revoked' });
+          reply(503, { error: 'proposal rejection unavailable; queued recovery could not be revoked' });
           return true;
         }
-        sendJson(res, 200, { ok: true, id, status: 'rejected' });
+        reply(200, { ok: true, id, status: 'rejected' });
         return true;
       }
 
@@ -822,7 +876,7 @@ export async function handleApi(
       setStatus(id, 'approved');
       const { applyProposal } = await import('../inbox/apply.js');
       const result = await applyProposal(id, { confirmed: true });
-      sendJson(res, result.ok ? 200 : 500, result);
+      reply(result.ok ? 200 : 500, result as unknown as Record<string, unknown>);
       return true;
     }
 
@@ -855,19 +909,18 @@ export async function handleApi(
         sendJson(res, 404, { error: 'not found' });
         return true;
       }
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const mutation = await prepareMutation(req, res, ctx.token, path);
+      if (!mutation) return true;
 
       try {
         const opts = daemonServiceInstallOptions(cfg, { autostart: true });
         await installDaemonService(opts);
         const service = await ensureDaemonServiceRunning(opts);
-        sendJson(res, 200, { ok: true, action: 'repair', service });
+        mutation.reply(200, { ok: true, action: 'repair', service });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const service = serviceStatus(daemonServiceInstallOptions(cfg, { autostart: true }));
-        sendJson(res, 500, { ok: false, action: 'repair', error: msg, service });
+        mutation.reply(500, { ok: false, action: 'repair', error: msg, service });
       }
       return true;
     }
@@ -881,9 +934,8 @@ export async function handleApi(
         sendJson(res, 404, { error: 'not found' });
         return true;
       }
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const mutation = await prepareMutation(req, res, ctx.token, path);
+      if (!mutation) return true;
 
       const paused = path.endsWith('/pause');
       setKill(paused);
@@ -896,7 +948,7 @@ export async function handleApi(
         }
       }
       const fleet = await buildFleetStatus(cfg);
-      sendJson(res, 200, {
+      mutation.reply(200, {
         ok: true,
         action: paused ? 'pause' : 'resume',
         ...(service ? { service } : {}),
@@ -990,7 +1042,8 @@ export async function handleApi(
         sendJson(res, 404, { error: 'not found' });
         return true;
       }
-      await handleDispatch(req, res, cfg, ctx);
+      const mutation = await prepareMutation(req, res, ctx.token, path);
+      if (mutation) await handleDispatch(cfg, mutation.body, mutation.reply);
       return true;
     }
 
@@ -1054,21 +1107,12 @@ export async function handleApi(
         return true;
       }
 
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
-
-      let body: unknown;
-      try {
-        const raw = await readBody(req);
-        body = JSON.parse(raw);
-      } catch {
-        sendJson(res, 400, { error: 'invalid JSON body' });
-        return true;
-      }
+      const mutation = await prepareMutation(req, res, ctx.token, path);
+      if (!mutation) return true;
+      const { body, reply } = mutation;
 
       if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-        sendJson(res, 400, { error: 'body must be a JSON object' });
+        reply(400, { error: 'body must be a JSON object' });
         return true;
       }
 
@@ -1078,12 +1122,12 @@ export async function handleApi(
       const action = typeof obj['action'] === 'string' ? obj['action'] : 'editor';
 
       if (!rawRepo) {
-        sendJson(res, 400, { error: '"repo" (string) is required' });
+        reply(400, { error: '"repo" (string) is required' });
         return true;
       }
 
       if (action !== 'editor' && action !== 'finder') {
-        sendJson(res, 400, { error: '"action" must be "editor" or "finder"' });
+        reply(400, { error: '"action" must be "editor" or "finder"' });
         return true;
       }
 
@@ -1092,7 +1136,7 @@ export async function handleApi(
       const enrolled = listEnrolled();
       const repoCanon = canonForCompare(resolvedRepo);
       if (!enrolled.some((e) => canonForCompare(e) === repoCanon)) {
-        sendJson(res, 403, { error: 'path not in an enrolled repo' });
+        reply(403, { error: 'path not in an enrolled repo' });
         return true;
       }
 
@@ -1106,7 +1150,7 @@ export async function handleApi(
         const fileCanon = canonForCompare(resolvedFile);
         const repoWithSep = repoCanon.endsWith(pathSep) ? repoCanon : repoCanon + pathSep;
         if (fileCanon !== repoCanon && !fileCanon.startsWith(repoWithSep)) {
-          sendJson(res, 403, { error: 'file path escapes the repo root' });
+          reply(403, { error: 'file path escapes the repo root' });
           return true;
         }
         targetPath = resolvedFile;
@@ -1118,10 +1162,10 @@ export async function handleApi(
         } else {
           openInEditor(targetPath, cfg);
         }
-        sendJson(res, 200, { ok: true, action, path: targetPath });
+        reply(200, { ok: true, action, path: targetPath });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        send500(res, `open failed: ${msg}`);
+        reply(500, { error: `open failed: ${msg}` });
       }
       return true;
     }

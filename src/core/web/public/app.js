@@ -171,6 +171,17 @@ async function apiFetch(path) {
   return res.json();
 }
 
+function operationId() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === 'function') return webCrypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  webCrypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // Token-authenticated POST. Returns parsed JSON or throws with message.
 async function apiPost(path, token) {
   const res = await fetch(API_BASE + path, {
@@ -178,6 +189,7 @@ async function apiPost(path, token) {
     headers: {
       'Content-Type': 'application/json',
       'x-ashlr-token': token,
+      'x-ashlr-operation-id': operationId(),
     },
     body: '{}',
   });
@@ -269,7 +281,11 @@ async function apiOpenRepo(repo, action) {
   try {
     const res = await fetch(API_BASE + '/api/open', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-ashlr-token': token,
+        'x-ashlr-operation-id': operationId(),
+      },
       body: JSON.stringify({ repo, action }),
     });
     if (!res.ok) {
@@ -879,7 +895,11 @@ function buildDispatchPanel() {
       if (!isNaN(maxTok) && maxTok > 0) body.maxTokens = maxTok;
       const res = await fetch('/api/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-ashlr-token': token,
+          'x-ashlr-operation-id': operationId(),
+        },
         body: JSON.stringify(body),
       });
       const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
