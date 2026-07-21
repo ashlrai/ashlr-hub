@@ -3098,3 +3098,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the protected Windows portability failure to the local coordinator cooldown fixture exceeding Vitest's default five-second budget.
 - [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
 - [x] Pass the focused M113 fixture and publish the CI recovery commit.
+
+# Repair-Only Failure Evidence Binding (2026-07-21)
+- [x] Audit repair-only admission for stale or handwritten `passed:false` records.
+- [x] Require current base-head/diff binding and a required executed command before a verification failure mints repair-only work.
+- [x] Validate required command evidence with the canonical argv-only manifest validator; malformed rows fail closed without poisoning the queue scan.
+- [x] Apply the same predicate to repair creation, queue selection, and final parent revalidation.
+- [x] Cover unbound and stale failures while retaining exact bound-failure and durable restart coverage.
+- [ ] Publish as a draft stacked PR and require the protected CI matrix before any promotion.

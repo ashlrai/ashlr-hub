@@ -4,6 +4,9 @@ import { basename, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { DecisionEntry, Proposal, RepairDepth, RepairTreatment, WorkItem } from '../types.js';
 import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
+import { hasCurrentVerificationBinding } from '../inbox/merge.js';
+import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
+import type { VerifyCommand } from '../run/verify-commands.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItemDetailed } from './self-heal.js';
 import { loadQueuedAutonomyItemsDetailed } from '../portfolio/queued-autonomy.js';
@@ -489,7 +492,19 @@ function proposalNeedsRepair(
   if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now, decisionProof)) return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.repo) return false;
-  return proposal.isPartial === true || proposal.verifyResult?.passed === false;
+  return proposal.isPartial === true || hasCurrentDeterministicFailureEvidence(proposal);
+}
+
+/** A repair-only retry needs current merge-grade failure evidence, not a mutable flag. */
+function hasCurrentDeterministicFailureEvidence(proposal: Proposal): boolean {
+  const ran = proposal.verifyResult?.ran;
+  return proposal.status === 'pending' &&
+    proposal.isPartial !== true &&
+    proposal.verifyResult?.passed === false &&
+    hasCurrentVerificationBinding(proposal) &&
+    Array.isArray(ran) &&
+    ran.some((command) => command.required !== false &&
+      buildRequiredVerificationManifest(proposal.repo!, [command as VerifyCommand]) !== null);
 }
 
 function repairReason(proposal: Proposal): string {
@@ -549,8 +564,7 @@ export function proposalRepairWorkItem(
   if (!repo) return null;
   const root = proposalRepairRootIdentity(proposal, repo);
   if (!root) return null;
-  const verifiedFailureRepair = proposal.status === 'pending' &&
-    proposal.isPartial !== true && proposal.verifyResult?.passed === false;
+  const verifiedFailureRepair = hasCurrentDeterministicFailureEvidence(proposal);
   const repairGenerationId = verifiedFailureRepair
     ? proposalRepairGenerationId(proposal, repo, root)
     : undefined;
@@ -641,7 +655,7 @@ function verifiedFailureProposalRepairParent(
   proposals: readonly Proposal[],
 ): Proposal | undefined {
   const parent = proposals.find((proposal) => {
-    if (proposal.status !== 'pending' || proposal.isPartial === true || proposal.verifyResult?.passed !== false) {
+    if (!hasCurrentDeterministicFailureEvidence(proposal)) {
       return false;
     }
     if (typeof proposal.repo !== 'string' || !proposal.repo) return false;
@@ -1389,7 +1403,7 @@ export function queueProposalRepairWorkForPendingProposals(
       .slice(0, REJECTED_CAPTURE_MAX_SCANNED);
     pending = verifiedFailureProposalOnly
       ? availableProposals.filter((proposal) =>
-          proposal.status === 'pending' && proposal.isPartial !== true && proposal.verifyResult?.passed === false)
+          hasCurrentDeterministicFailureEvidence(proposal))
       : [
           ...availableProposals.filter((proposal) => proposal.status === 'pending'),
           ...rejectedCapture,

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   linkSync,
@@ -63,6 +64,7 @@ import {
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from '../src/core/inbox/persistence-mismatch.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import { defaultBranch } from '../src/core/git.js';
 import {
   PRIVATE_STORAGE_TEST_CONTROL,
   _setPrivateStorageTestControlForTest,
@@ -143,6 +145,18 @@ function partialProposal(repo: string, overrides: Partial<Proposal> = {}): Propo
       source: 'capture-gate',
     },
     ...overrides,
+  };
+}
+
+function deterministicFailure(repo: string, diff: string): Proposal['verifyResult'] {
+  return {
+    passed: false,
+    detail: 'typecheck failed',
+    ran: [{ id: 'typecheck', kind: 'typecheck', cmd: ['npm', 'run', 'typecheck'], required: true }],
+    baseBranch: defaultBranch(repo),
+    baseHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
+    diffHash: hashDiff(diff),
+    source: 'auto-merge-preflight',
   };
 }
 
@@ -711,7 +725,7 @@ describe('queued autonomy work scanner', () => {
     const failed = partialProposal(repo.dir, {
       id: 'prop-verified-failure',
       isPartial: false,
-      verifyResult: { passed: false, detail: 'typecheck failed' },
+      verifyResult: deterministicFailure(repo.dir, partialProposal(repo.dir).diff!),
     });
     const partial = partialProposal(repo.dir, {
       id: 'prop-partial-capture',
@@ -732,7 +746,7 @@ describe('queued autonomy work scanner', () => {
     repo.enroll();
     const input = partialProposal(repo.dir, {
       isPartial: false,
-      verifyResult: { passed: false, detail: 'typecheck failed' },
+      verifyResult: deterministicFailure(repo.dir, partialProposal(repo.dir).diff!),
     });
     const { id: _id, status: _status, createdAt: _createdAt, ...proposalInput } = input;
     const created = createProposal(proposalInput);
@@ -755,6 +769,46 @@ describe('queued autonomy work scanner', () => {
       ...repair,
       repairGenerationId: '0'.repeat(64),
     })).toBe(false);
+
+    const unbound = createProposal({
+      ...proposalInput,
+      id: 'prop-unbound-failure',
+      verifyResult: { passed: false, detail: 'handwritten failure' },
+    });
+    expect(proposalRepairWorkItem(unbound)).toBeNull();
+    const stale = createProposal({
+      ...proposalInput,
+      id: 'prop-stale-failure',
+      verifyResult: { ...deterministicFailure(repo.dir, input.diff!), diffHash: '0'.repeat(64) },
+    });
+    expect(proposalRepairWorkItem(stale)).toBeNull();
+    const missingKind = createProposal({
+      ...proposalInput,
+      id: 'prop-missing-command-kind',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: [{ cmd: ['npm', 'run', 'typecheck'], required: true }] as unknown as Proposal['verifyResult']['ran'],
+      },
+    });
+    const emptyArgv = createProposal({
+      ...proposalInput,
+      id: 'prop-empty-command-argv',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: [{ kind: 'typecheck', cmd: [], required: true }],
+      },
+    });
+    const malformedRan = createProposal({
+      ...proposalInput,
+      id: 'prop-malformed-ran',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: {} as unknown as Proposal['verifyResult']['ran'],
+      },
+    });
+    expect(proposalRepairWorkItem(missingKind)).toBeNull();
+    expect(proposalRepairWorkItem(emptyArgv)).toBeNull();
+    expect(proposalRepairWorkItem(malformedRan)).toBeNull();
 
     createProposal({
       ...proposalInput,
@@ -781,7 +835,7 @@ describe('queued autonomy work scanner', () => {
     const input = partialProposal(repo.dir, {
       id: 'prop-repair-parent',
       isPartial: false,
-      verifyResult: { passed: false, detail: 'typecheck failed' },
+      verifyResult: deterministicFailure(repo.dir, partialProposal(repo.dir).diff!),
     });
     const { id: _id, status: _status, createdAt: _createdAt, ...proposalInput } = input;
     const parent = createProposal(proposalInput);

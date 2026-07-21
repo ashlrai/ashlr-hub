@@ -64,7 +64,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import type {
@@ -72,6 +72,7 @@ import type {
   DaemonTick,
   EngineId,
   EngineTier,
+  Proposal,
   RepairTreatment,
   WorkItem,
 } from '../src/core/types.js';
@@ -403,6 +404,8 @@ import {
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome, recordOutcomeWithKey } from '../src/core/fleet/worked-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
+import { defaultBranch } from '../src/core/git.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { generatedRepairLifecycleAttemptHash } from '../src/core/fleet/generated-repair-identity.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -649,6 +652,18 @@ function seedTicks(ticks: DaemonTick[], automaticDrainOrdinaryTurnDue?: boolean)
 }
 
 /** Build N synthetic WorkItems for a given repo. */
+function deterministicFailure(repo: string, diff: string): Proposal['verifyResult'] {
+  return {
+    passed: false,
+    detail: 'typecheck failed',
+    ran: [{ id: 'typecheck', kind: 'typecheck', cmd: ['npm', 'run', 'typecheck'], required: true }],
+    baseBranch: defaultBranch(repo),
+    baseHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
+    diffHash: hashDiff(diff),
+    source: 'auto-merge-preflight',
+  };
+}
+
 function makeItems(repoDir: string, count: number) {
   const now = new Date().toISOString();
   return Array.from({ length: count }, (_, i) => ({
@@ -3606,15 +3621,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1f-repair-only: dispatches only an exact verified-failure repair', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    const diff = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
     const proposal = createProposal({
       repo: repo.dir,
       origin: 'agent',
       kind: 'patch',
       title: 'Fix verified failure',
       summary: 'Repair the failed check.',
-      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      diff,
       workItemId: 'repo:goal:verified-parent',
-      verifyResult: { passed: false, detail: 'typecheck failed' },
+      verifyResult: deterministicFailure(repo.dir, diff),
     });
     const actual = await vi.importActual<typeof import('../src/core/fleet/proposal-repair-work.js')>(
       '../src/core/fleet/proposal-repair-work.js',
@@ -3680,14 +3696,15 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1f-repair-only-durable: refuses a persisted launched repair attempt after restart', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    const diff = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
     const proposal = createProposal({
       repo: repo.dir,
       origin: 'agent',
       kind: 'patch',
       title: 'Repair crash recovery',
       summary: 'A durable launch marker must prevent a retry loop.',
-      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
-      verifyResult: { passed: false, detail: 'typecheck failed' },
+      diff,
+      verifyResult: deterministicFailure(repo.dir, diff),
     });
     const actual = await vi.importActual<typeof import('../src/core/fleet/proposal-repair-work.js')>(
       '../src/core/fleet/proposal-repair-work.js',
