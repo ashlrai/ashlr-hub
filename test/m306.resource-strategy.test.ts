@@ -530,6 +530,23 @@ describe('buildResourceStrategyReport', () => {
     });
   });
 
+  it('does not recommend repair-only when filesystem shared-queue mode fences generated repair dispatch', async () => {
+    const report = await buildResourceStrategyReport(cfg({
+      fleet: { sharedQueue: { mode: 'filesystem', path: '/tmp/ashlr-shared' } },
+    }), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2, frontierPending: 1 }) }),
+        listVerifiedFailureProposalRepairWorkItems: () => ({
+          sourceState: 'healthy', complete: true, items: [{ id: 'repair-filesystem-fenced' }],
+        } as VerifiedFailureProposalRepairRead),
+      }),
+    });
+
+    expect(report.outcomes.verifiedFailureRepairs.authorized).toBe(1);
+    expect(report.mode).not.toBe('repair-only');
+    expect(resourceStrategyToDaemonPlan(report).dispatchScope).not.toBe('proposal-repair');
+  });
+
   it('uses complete repair authority when a verification failure is outside the bounded outcome window', async () => {
     const report = await buildResourceStrategyReport(cfg(), {
       maxOutcomes: 1,
