@@ -23,6 +23,7 @@ import {
   captureGateRepairWorkItem,
   generatedRepairRootKey,
   isRejectedCaptureRecoveryAuthorized,
+  isVerifiedFailureProposalRepairAuthorized,
   noDiffResliceWorkItem,
   proposalRepairWorkItem,
   queueProposalRepairWorkForPendingProposals,
@@ -700,6 +701,24 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
     expect(found[0]!.detail).toContain('[REDACTED]');
     expect(found[0]!.ts).toBe(proposal.createdAt);
+  });
+
+  it('authorizes only the exact complete failed-verification proposal repair', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const input = partialProposal(repo.dir, {
+      isPartial: false,
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    const { id: _id, status: _status, createdAt: _createdAt, ...proposalInput } = input;
+    const created = createProposal(proposalInput);
+    const repair = proposalRepairWorkItem(created);
+    expect(repair).not.toBeNull();
+    if (!repair) throw new Error('expected proposal repair');
+
+    expect(isVerifiedFailureProposalRepairAuthorized(repair)).toBe(true);
+    expect(isVerifiedFailureProposalRepairAuthorized({ ...repair, id: `${repair.id}-tampered` })).toBe(false);
+    expect(isVerifiedFailureProposalRepairAuthorized({ ...repair, tags: [...repair.tags, 'partial'] })).toBe(false);
   });
 
   it('recovers a recent rejected capture artifact without reopening or copying it', async () => {

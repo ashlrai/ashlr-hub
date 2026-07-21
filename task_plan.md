@@ -3023,3 +3023,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the Ubuntu full-suite failure to the disposable-Git non-interactive H7 onboarding test.
 - [x] Preserve global timeout behavior while adding a bounded 15-second allowance only to that fixture-heavy test.
 - [ ] Verify the focused H7 suite locally and require a fresh protected CI matrix on the immutable draft head.
+
+## Verified Failure Repair Authority (2026-07-21)
+- [x] Trace the verify-only deadlock and identify queue metadata as insufficient authority for a repair-only escape lane.
+- [x] Add a complete-inbox, exact-lineage validator for pending non-partial proposals with explicit deterministic verification failure.
+- [x] Cover authorized and tampered/partial rejection paths; run the repair-queue suite, typecheck, and diff integrity.
+- [ ] Use this validator only behind structural repair-only selection and maintenance fences; require protected CI before promotion.

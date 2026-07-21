@@ -3291,3 +3291,8 @@
 # Ubuntu Onboard CI Timing Recovery (2026-07-21)
 - The hermetic non-interactive H7 onboarding test creates and commits a disposable Git repository. It alone exceeded Vitest's default five-second allowance under the 12,000-test Ubuntu protected run, while passing directly.
 - Only that test now has a bounded 15-second allowance. The global timeout, test assertions, fixture isolation, and no-network/no-daemon guarantee are unchanged, so unrelated hangs still fail at the default threshold.
+
+# Verified Failure Repair Authority (2026-07-21)
+- `isVerifiedFailureProposalRepairAuthorized` proves a queued depth-zero proposal repair against a complete, healthy inbox snapshot: its pending parent must be non-partial, have an explicit failed deterministic verification, retain the exact canonical repair id and root lineage, and remain enrolled.
+- Queue tags and prose cannot grant this authority. Partial capture, rejected capture, capture-repair, diagnostic/no-diff repair, missing repo, degraded inbox, and tampered lineage all fail closed.
+- This is a prerequisite for the future `repair-only` dispatch mode, not an activation of that mode or any merge, judge, or general dispatch authority.

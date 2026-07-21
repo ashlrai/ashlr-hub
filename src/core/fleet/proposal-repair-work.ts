@@ -13,6 +13,7 @@ import {
   isActionableSelfHealItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from './self-heal-trust.js';
 import {
   readDispatchProductionEventsDetailed,
@@ -553,6 +554,35 @@ export function proposalRepairWorkItem(
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
     ...root,
   };
+}
+
+/**
+ * Prove that a queued repair is the exact depth-zero projection of a complete
+ * pending proposal whose deterministic verification explicitly failed. Queue
+ * metadata is not authority: partial/capture and diagnostic repair variants
+ * intentionally fail this check.
+ */
+export function isVerifiedFailureProposalRepairAuthorized(item: WorkItem): boolean {
+  if (!isTrustedProposalRepairItem(item) || item.tags.includes('partial')) return false;
+  try {
+    const read = listProposalsDetailed({ requireComplete: true });
+    if (!read.complete || read.sourceState === 'degraded') return false;
+    return read.proposals.some((proposal) => {
+      if (proposal.status !== 'pending' || proposal.isPartial === true || proposal.verifyResult?.passed !== false) {
+        return false;
+      }
+      if (typeof proposal.repo !== 'string' || !proposal.repo) return false;
+      const repo = canonicalEnrolledExistingRepo(proposal.repo);
+      if (!repo || repo !== item.repo || proposalRepairId(repo, proposal.id) !== item.id) return false;
+      const root = proposalRepairRootIdentity(proposal, repo);
+      return root !== null &&
+        item.repairRootId === root.repairRootId &&
+        item.repairRootAuthorityId === root.repairRootAuthorityId &&
+        item.repairDepth === root.repairDepth;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
