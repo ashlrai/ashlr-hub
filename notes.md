@@ -3349,3 +3349,7 @@
 # Windows M113 Timing Recovery (2026-07-21)
 - Protected CI isolated a Windows-only five-second timeout in M113's local coordinator cooldown fixture. A duplicate protected matrix passed the same source revision, and no assertion or production failure was reported.
 - The exact test now has a 30-second budget. This changes only CI tolerance for a fixture that constructs local coordinator state under full-suite contention.
+
+# Windows M360 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only five-second timeout in M360's exact immutable repair-publication replay fixture. Its assertion sequence performs durable lifecycle writes and reads, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. The global timeout and lifecycle semantics remain unchanged.

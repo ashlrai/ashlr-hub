@@ -3098,3 +3098,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the protected Windows portability failure to the local coordinator cooldown fixture exceeding Vitest's default five-second budget.
 - [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
 - [x] Pass the focused M113 fixture and publish the CI recovery commit.
+
+## Windows M360 Timing Recovery (2026-07-21)
+- [x] Isolate the protected Windows portability failure to the immutable repair-publication replay fixture exceeding Vitest's default five-second budget.
+- [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [ ] Verify the focused M360 fixture and require protected CI on the amended draft head.
