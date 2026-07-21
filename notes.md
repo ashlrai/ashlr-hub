@@ -2816,3 +2816,8 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Operational proposal projection readiness (2026-07-21):
+  - Fleet Status now reports the sealed active-proposal projection as a separate `shadow-only` source. It distinguishes clean cold start, healthy sealed membership, and explicit degradation such as `legacy-unmigrated` without changing proposal counts, auto-merge authority, routing, or persistence.
+  - This makes the archive-growth migration gate observable before activation. The projection remains non-authoritative until every proposal writer participates in a crash-recoverable transaction and a monotonic external authority is available.
+  - Fleet Status regression coverage proves pristine storage is cold-start and an existing legacy inbox is never displayed as healthy projected state. Focused status tests, typecheck, scoped lint, and diff checks passed before protected CI.

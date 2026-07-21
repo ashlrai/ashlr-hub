@@ -360,6 +360,15 @@ export interface FleetProposalAuthoritySource {
   detail: string;
 }
 
+/** Advisory sealed-projection state; never grants active proposal authority. */
+export interface FleetOperationalProposalProjectionStatus {
+  authority: 'shadow-only';
+  state: 'cold-start' | 'healthy' | 'degraded';
+  activeMembers: number;
+  generation: number | null;
+  reason: string | null;
+}
+
 function proposalAuthoritySource(
   quality: FleetProposalSourceQuality,
 ): FleetProposalAuthoritySource {
@@ -1353,6 +1362,7 @@ export interface FleetStatus {
     applied: number;
     sourceQuality?: FleetProposalSourceQuality;
     authority?: FleetProposalAuthoritySource;
+    operationalProjection?: FleetOperationalProposalProjectionStatus;
   };
   merges: {
     recent: number;
@@ -2212,6 +2222,34 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     invalidFiles: 0,
     unreadableFiles: 0,
   };
+  let operationalProjection: FleetOperationalProposalProjectionStatus = {
+    authority: 'shadow-only',
+    state: 'degraded',
+    activeMembers: 0,
+    generation: null,
+    reason: 'projection-read-unavailable',
+  };
+  try {
+    const { readOperationalProposals } = await import('../inbox/operational-projection.js');
+    const read = readOperationalProposals();
+    operationalProjection = read.state === 'degraded'
+      ? {
+        authority: 'shadow-only',
+        state: 'degraded',
+        activeMembers: 0,
+        generation: null,
+        reason: read.reason,
+      }
+      : {
+        authority: 'shadow-only',
+        state: read.state,
+        activeMembers: read.proposals.length,
+        generation: read.projection?.generation ?? null,
+        reason: null,
+      };
+  } catch {
+    // Preserve an explicit degraded advisory source without affecting legacy authority.
+  }
   try {
     const { listProposalsDetailed } = await import('../inbox/store.js');
     const read = listProposalsDetailed();
@@ -2555,6 +2593,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       applied,
       sourceQuality: proposalSourceQuality,
       authority: proposalAuthority,
+      operationalProjection,
     },
     merges: {
       recent: mergesRecent,
