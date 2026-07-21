@@ -954,7 +954,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.merges.sourceQuality?.stopReasons).toContain('invalid-file');
   });
 
-  it('reports complete verified-failure repair eligibility separately from proposal inventory', async () => {
+  it('does not advertise repair-only eligibility for unbound verification failures', async () => {
     const repo = join(tmpHome, 'repo-repair-only-status');
     writeBacklogSnapshot(tmpHome, repo, []);
     createProposal({
@@ -983,16 +983,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       authority: 'observation-only',
       sourceState: 'healthy',
       complete: true,
-      eligibleItems: 1,
+      eligibleItems: 0,
       sourceQuality: {
-        badge: 'healthy-source',
-        label: 'healthy source',
-        empty: false,
+        badge: 'healthy-zero',
+        label: 'healthy zero',
+        empty: true,
         sourcePresent: true,
-        detail: '1 observed eligible repair',
+        detail: 'no observed eligible repairs',
       },
     });
-    expect(formatFleetStatus(status)).toContain('repair-only:       1 observed eligible (healthy-source; observation only)');
+    expect(formatFleetStatus(status)).toContain('repair-only:       0 observed eligible (healthy-zero; observation only)');
   });
 
   it('keeps unavailable proposal authority ahead of degraded queue diagnostics', async () => {
@@ -4882,7 +4882,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.missionBrief).toMatchObject({
       directive: 'Drain failed proposal blockers',
-      operatingMode: 'repair-only',
+      operatingMode: 'verify-only',
       blocker: { id: 'verification-failed' },
       action: { id: 'repair-verification-failures' },
     });
