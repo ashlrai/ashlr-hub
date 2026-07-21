@@ -3345,3 +3345,7 @@
 # Windows M426 Timing Recovery (2026-07-21)
 - Protected CI isolated a Windows-only 15-second timeout in M426's real-Git worktree publication fixture. The fixture already performs transient-lock-aware cleanup, and no assertion or production failure was reported.
 - The exact test now has a 30-second budget. This changes only CI tolerance for the known filesystem contention path.
+
+# Windows M113 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only five-second timeout in M113's local coordinator cooldown fixture. A duplicate protected matrix passed the same source revision, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. This changes only CI tolerance for a fixture that constructs local coordinator state under full-suite contention.

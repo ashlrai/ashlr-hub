@@ -3093,3 +3093,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Diagnose the protected Windows portability 2/3 failure as the real-Git worktree publication fixture exceeding Vitest's default 15-second budget.
 - [x] Give only the lock-aware fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
 - [x] Pass the focused M426 fixture and publish the CI recovery commit.
+
+## Windows M113 Timing Recovery (2026-07-21)
+- [x] Isolate the protected Windows portability failure to the local coordinator cooldown fixture exceeding Vitest's default five-second budget.
+- [x] Give only that fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [x] Pass the focused M113 fixture and publish the CI recovery commit.
