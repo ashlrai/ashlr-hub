@@ -47,6 +47,7 @@ import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
+import { recordPostMergeObservation } from '../src/core/fleet/post-merge-observations.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
   generatedRepairCooldownKey,
@@ -3405,6 +3406,35 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(status.judgeTraceSource).toMatchObject({ sourceState: 'healthy', complete: true });
       expect(evidence).toMatchObject({
         status: 'degraded', freshness: 'stale', eligibility: 'withheld', evidenceRole: 'learning',
+        sourceQuality: { badge: 'stale-source' },
+      });
+    });
+  });
+
+  it('marks stale post-merge evidence as observational rather than freshly generated', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    const staleAt = new Date(now.getTime() - 31 * 60 * 1000).toISOString();
+    await withFakeNow(now, async () => {
+      recordPostMergeObservation({
+        observedAt: staleAt,
+        outcome: 'regressed',
+        basis: 'bisect-first-bad',
+        confidence: 'heuristic',
+        repo: join(tmpHome, 'post-merge-stale-repo'),
+        proposalId: 'post-merge-stale-proposal',
+        mergeCommit: 'a'.repeat(40),
+        observedHead: 'b'.repeat(40),
+      });
+      const status = await buildFleetStatus(baseConfig());
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'post-merge',
+      );
+
+      expect(status.postMergeSource).toMatchObject({
+        sourceState: 'healthy', complete: true, latestAt: staleAt,
+      });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'observational', evidenceRole: 'forensics',
         sourceQuality: { badge: 'stale-source' },
       });
     });

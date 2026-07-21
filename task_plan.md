@@ -2722,3 +2722,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Withhold `latestAt` whenever either bounded source is degraded or incomplete; missing readable sources remain an explicit no-observation state.
 - [x] Return aggregate source-quality metadata only, without raw observations, witnesses, repository paths, verification digests, or merge authority.
 - [x] Cover newest-valid-time selection, empty readable sources, and degradation of each source; pass focused Vitest, typecheck, lint, and diff checks.
+- [x] Reuse the existing FleetStatus source reads to project post-merge freshness without a second ledger read.

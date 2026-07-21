@@ -133,6 +133,7 @@ import {
   readPostMergeStability,
   type PostMergeStabilityCohortSummary,
 } from './post-merge-stability.js';
+import { summarizePostMergeForensicLatestObservation } from './post-merge-forensic-evidence.js';
 import {
   readFleetCutoffCheckpointStatus,
   type FleetCutoffCheckpointStatus,
@@ -1401,7 +1402,7 @@ export interface FleetStatus {
   /** Bounded candidate-economics evidence and its newest validated observation. */
   bestOfNSource?: FleetEvidenceSourceStatus;
   /** Observation-only post-merge evidence. Never grants routing or merge authority. */
-  postMergeSource?: FleetReadinessEvidenceQuality;
+  postMergeSource?: FleetEvidenceSourceStatus;
   postMergeCohort?: {
     policyEligible: false;
     denominatorComplete: false;
@@ -2697,6 +2698,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   try {
     const adverse = readPostMergeObservations({ requireComplete: true });
     const stability = readPostMergeStability({ requireComplete: true });
+    const forensicFreshness = summarizePostMergeForensicLatestObservation(adverse, stability);
     const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
       !adverse.complete || !stability.complete;
     const missing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
@@ -2725,6 +2727,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       rowsScanned: adverse.physicalRows + stability.physicalRows,
       invalidRows: adverse.invalidRows + stability.invalidRows,
       unreadableFiles: 0,
+      ...(forensicFreshness.latestAt ? { latestAt: forensicFreshness.latestAt } : {}),
     };
     status.postMergeCohort = {
       policyEligible: false,
@@ -4999,6 +5002,7 @@ function learningEvidenceReadinessSources(
     evidenceReadinessSource({
       id: 'post-merge', label: 'Post-Merge Cohort', role: 'forensics',
       quality: status.postMergeSource, generatedAt,
+      observedAt: status.postMergeSource?.latestAt,
     }),
   ];
 }

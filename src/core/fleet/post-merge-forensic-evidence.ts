@@ -66,9 +66,10 @@ function stabilityQuality(
  * timestamp. A partial source is never allowed to make forensic evidence look
  * fresh, even when the other source is complete.
  */
-export function readPostMergeForensicLatestObservation(): PostMergeForensicEvidenceLatestObservation {
-  const observationRead = readPostMergeObservations();
-  const stabilityRead = readPostMergeStabilityDetailed();
+export function summarizePostMergeForensicLatestObservation(
+  observationRead: PostMergeObservationReadResult,
+  stabilityRead: PostMergeStabilityReadResult,
+): PostMergeForensicEvidenceLatestObservation {
   const observations = observationQuality(observationRead);
   const stability = stabilityQuality(stabilityRead);
 
@@ -89,4 +90,11 @@ export function readPostMergeForensicLatestObservation(): PostMergeForensicEvide
     }
   }
   return { ...(latestAt === undefined ? {} : { latestAt }), observations, stability };
+}
+
+export function readPostMergeForensicLatestObservation(): PostMergeForensicEvidenceLatestObservation {
+  return summarizePostMergeForensicLatestObservation(
+    readPostMergeObservations(),
+    readPostMergeStabilityDetailed(),
+  );
 }
