@@ -2828,4 +2828,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refuse dirty or unverifiable Git-backed executable sources before any OS service mutation while preserving packaged installs.
 - [x] Cover Git dirt, submodules, symlinks, detached clean releases, and cross-platform service invocation.
 - [x] Pass focused, adjacent, invariant, typecheck, lint, build, and diff verification.
-- [ ] Publish as a protected draft PR and require fresh platform CI; detached-SHA staging remains a subsequent release-management slice.
+- [x] Reconstruct and repush the draft PR on production `909bf7a4` with detached-checkout and dirty-submodule proofs.
+- [ ] Require the fresh eight-job protected matrix; detached-SHA staging remains a subsequent release-management slice.

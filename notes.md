@@ -2929,4 +2929,4 @@
   - Service registration previously embedded the invoking checkout's executable path, allowing a repair or reinstall to repoint launchd, systemd, or schtasks at mutable dirty source.
   - The shared installation boundary now rejects dirty or unverifiable Git-backed Ashlr source after resolving symlinks, before any service-manager mutation. Packaged non-Git installs remain supported and an enclosing unrelated repository does not trigger a false refusal.
   - Coverage includes staged, unstaged, untracked, submodule, symlink, detached-release, and service-mutation cases. This admission guard does not yet provide detached-SHA staging or atomic promotion.
-  - Verification: 69 focused, 55 adjacent setup/control, and 443 invariant assertions (5 skipped), plus typecheck, scoped lint, production build, and diff checks passed before protected CI.
+  - The branch was reconstructed on production `909bf7a4` and now directly proves both clean detached-checkout admission and dirty tracked-submodule refusal. Verification passes 71 focused assertions, typecheck, scoped lint, and diff integrity before protected CI.
