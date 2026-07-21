@@ -576,6 +576,8 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.captureSandboxedProposal).toHaveBeenCalledTimes(4);
     expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] === true)).toHaveLength(3);
     expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
+    expect(h.captureSandboxedProposal?.mock.calls.find((call) => call[3]?.['draftOnly'] !== true)?.[3])
+      .toMatchObject({ expectedDiffHash: 'hash-1' });
     expect(h.judgeProposal.mock.calls.map((call) => call[3])).toEqual([
       { recordTrace: false },
       { recordTrace: false },
@@ -627,6 +629,7 @@ describe('M333 — file-once proposal capture', () => {
     });
 
     expect(runTestsForProposal).toHaveBeenCalledTimes(3);
+    expect(h.judgeProposal).toHaveBeenCalledTimes(2);
     expect(runTestsForProposal.mock.calls.map((call) => call[2])).toEqual(['quick', 'quick', 'quick']);
     expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([true, false, true]);
     expect(result.winner).toMatchObject({ index: 2, proposalId: 'proposal-sb-2' });
@@ -660,6 +663,48 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.captureSandboxedProposal).toHaveBeenCalledTimes(2);
     expect(h.captureSandboxedProposal?.mock.calls.every((call) => call[3]?.['draftOnly'] === true)).toBe(true);
     expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('refuses final filing when the verified draft hash no longer matches', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      draftMode: true,
+    });
+    const capture = h.captureSandboxedProposal!;
+    const original = capture.getMockImplementation()!;
+    capture.mockImplementation(async (...args: Parameters<typeof original>) => {
+      const captureOpts = args[3] as Record<string, unknown>;
+      if (captureOpts['draftOnly'] !== true) {
+        return {
+          state: {
+            id: String(captureOpts['runId'] ?? 'run-drift'),
+            status: 'failed' as const,
+            result: 'proposal capture refused: verified draft diff hash changed before final capture',
+          },
+          proposalOutcome: {
+            kind: 'proposal-capture-error' as const,
+            reason: 'proposal capture refused: verified draft diff hash changed before final capture',
+          },
+        };
+      }
+      return original(...args);
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      error: 'proposal-capture-error: proposal capture refused: verified draft diff hash changed before final capture',
+    });
+    expect(result.candidates[0]).not.toHaveProperty('proposalId');
+    expect(h.filedProposals?.size).toBe(0);
+    expect(capture.mock.calls.find((call) => call[3]?.['draftOnly'] !== true)?.[3])
+      .toMatchObject({ expectedDiffHash: 'hash-0' });
   });
 
   it('prefers verified-green evidence over a higher critic score with unavailable verification', async () => {
@@ -981,7 +1026,7 @@ describe('M333 — file-once proposal capture', () => {
     expect(record.candidates).toEqual([expect.objectContaining({ won: true })]);
   });
 
-  it('propagates mid-cancel through legacy judging and tests while retaining settled evidence', async () => {
+  it('stops before advisory judging when cancellation arrives during deterministic verification', async () => {
     const controller = new AbortController();
     let testsStarted!: () => void;
     const started = new Promise<void>((resolve) => { testsStarted = resolve; });
@@ -1007,23 +1052,22 @@ describe('M333 — file-once proposal capture', () => {
       signal: controller.signal,
     });
     await started;
-    const judgeOptions = h.judgeProposal.mock.calls[0]?.[3] as { signal?: AbortSignal };
-    expect(judgeOptions.signal).toBe(controller.signal);
     controller.abort();
     const result = await pending;
 
     expect(result.winner).toBeUndefined();
     expect(result.candidates[0]).toMatchObject({
       proposalId: 'proposal-cli-0',
-      verdict: { verdict: 'ship' },
       testsPassed: true,
       costUsd: 0.4,
     });
-    expect(result.critique).toMatchObject({ judged: 1, totalCostUsd: 0.4, winnerIndex: -1 });
+    expect(result.candidates[0]?.verdict).toBeUndefined();
+    expect(h.judgeProposal).not.toHaveBeenCalled();
+    expect(result.critique).toMatchObject({ judged: 0, totalCostUsd: 0.4, winnerIndex: -1 });
     expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
       winnerIndex: -1,
       totalCostUsd: 0.4,
-      candidates: [expect.objectContaining({ score: 19, testsPassed: true, costUsd: 0.4 })],
+      candidates: [expect.objectContaining({ score: 0, testsPassed: true, costUsd: 0.4 })],
     }));
   });
 });

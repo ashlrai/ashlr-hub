@@ -3018,3 +3018,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Canonicalize local selection comparisons through the signed receipt contract and require `committedAt` for exact shared binding replays.
 - [x] Add null-versus-omitted model and timestamp-divergent replay regressions; run focused suites, typecheck, lint, and diff integrity.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Verified Draft Capture Binding (2026-07-21)
+- [x] Audit file-once Best-of-N draft verification and identify the final-capture diff drift boundary.
+- [x] Verify drafts before advisory critics and exclude deterministic failures from critic/taste spend and winner selection.
+- [x] Bind final winner capture to the verified canonical draft hash and refuse drift before proposal persistence.
+- [x] Add capture, selection, cancellation, and loser-metadata regressions; run focused/adjacent suites, typecheck, and diff integrity.
+- [ ] Complete independent review, protected CI, and draft-PR handoff without merging or deploying.

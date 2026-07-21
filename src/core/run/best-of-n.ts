@@ -869,20 +869,6 @@ async function runBestOfNInternal(
         let testsPassed: boolean | undefined;
         const proposal = proposalForCandidate(item, c, loadProposal);
 
-        // Score via judge
-        if (judgeProposal) {
-          try {
-            verdict = await judgeProposal(proposal, cfg, judgeClient, {
-              recordTrace: false,
-              ...(opts?.signal ? { signal: opts.signal } : {}),
-            });
-            score = scoreVerdict(verdict);
-          } catch {
-            // Judge failure — candidate stays with score 0
-          }
-        }
-        if (opts?.signal?.aborted) return { ...c, verdict, score };
-
         // Deterministic quick verification. Infrastructure errors remain neutral.
         if (c.proposalDraft || c.proposalId) {
           try {
@@ -906,9 +892,25 @@ async function runBestOfNInternal(
         }
         if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed };
 
+        // A deterministic verification failure is ineligible, so never spend
+        // advisory critic capacity on it. Infrastructure/skipped verification
+        // remains neutral and preserves the existing fallback behavior.
+        if (testsPassed !== false && judgeProposal) {
+          try {
+            verdict = await judgeProposal(proposal, cfg, judgeClient, {
+              recordTrace: false,
+              ...(opts?.signal ? { signal: opts.signal } : {}),
+            });
+            score = scoreVerdict(verdict);
+          } catch {
+            // Judge failure — candidate stays with score 0
+          }
+        }
+        if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed };
+
         // M183: taste scoring (flag-gated; only when tasteCritic enabled)
         let taste: TasteScore | undefined;
-        if (scoreTaste) {
+        if (testsPassed !== false && scoreTaste) {
           try {
             taste = await scoreTaste(
               proposal,
@@ -988,6 +990,7 @@ async function runBestOfNInternal(
         ...(c.delegationScope ? { delegationScope: c.delegationScope } : {}),
         ...(opts?.signal ? { signal: opts.signal } : {}),
         sourceLabel: 'Best-of-N winner',
+        ...(c.proposalDraft?.diffHash ? { expectedDiffHash: c.proposalDraft.diffHash } : {}),
         isPartial: c.proposalDraft?.isPartial === true || c.state?.status !== 'done',
         usage: c.state?.usage,
         durationMs: c.latencyMs,

@@ -567,6 +567,29 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     });
     expect(result.state.proposalId).toBeUndefined();
 
+    const beforeDriftCapture = capturedProposalArgs.length;
+    const driftResult = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: {
+        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+      },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-test',
+      },
+      runId: 'run-m117-drift',
+      expectedDiffHash: 'not-the-verified-draft-hash',
+    });
+    expect(driftResult.proposalId).toBeUndefined();
+    expect(driftResult.proposalOutcome).toMatchObject({
+      kind: 'proposal-capture-error',
+      reason: 'proposal capture refused: verified draft diff hash changed before final capture',
+    });
+    expect(capturedProposalArgs).toHaveLength(beforeDriftCapture);
+
     returnMismatchedPending = true;
     setStatus.mockClear();
     const mismatchResult = await captureSandboxedProposal('local-coder', 'increment x', {

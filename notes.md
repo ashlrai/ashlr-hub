@@ -3287,3 +3287,8 @@
 - Local V2 receipt/event selection equality now uses the receipt contract's canonical selection digest, so omitted and explicit-null model metadata are semantically equal and object key order cannot create a false `degraded` projection.
 - Shared receipt-binding replay equality now includes `committedAt`. A timestamp-divergent replay is rejected at the shared-store mutation boundary instead of being accepted and only failing during later local readback.
 - Verification: M49 Fleet Status, local V2 binding, and shared work-queue suites pass 206 assertions; TypeScript typecheck and diff integrity pass. Lint remains successful with existing repository warnings only. Fresh protected CI is required on the new head.
+
+# Verified Draft Capture Binding (2026-07-21)
+- Best-of-N now runs deterministic quick verification before either advisory correctness or taste selection. Explicit verification failures cannot consume critic capacity, cannot win, and do not create proposal, merge, evidence, or learning authority; skipped or unavailable verification remains neutral.
+- Winner-only filing now binds final sandbox capture to the canonical `diffHash` of the verified in-memory draft. A changed sandbox diff is refused before inbox creation with a metadata-only capture error, so loser privacy and file-once semantics remain intact.
+- Verification: focused API-model capture plus Best-of-N, taste, and multi-model suites pass 80 assertions (one intentional skip); TypeScript typecheck and diff integrity pass. Independent review and protected CI remain required before promotion.

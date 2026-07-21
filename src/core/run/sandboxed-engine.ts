@@ -170,6 +170,11 @@ export interface CaptureSandboxedProposalOptions {
   existingWorktree: Sandbox;
   /** Capture a Proposal-shaped draft without persisting or recording a decision. */
   draftOnly?: boolean;
+  /**
+   * Optional canonical hash from a previously verified draft. When supplied,
+   * a changed sandbox diff is refused before any proposal is persisted.
+   */
+  expectedDiffHash?: string;
   /** Model id for the backend (else cfg.foundry.models[engine]). */
   model?: string;
   /** Budget/usage hints recorded on the synthetic capture state. */
@@ -1111,6 +1116,17 @@ export async function captureSandboxedProposal(
 
     const scrubbed = canonicalizeProposalDiff(diff.patch);
     const diffHash = hashDiff(scrubbed);
+    if (opts.expectedDiffHash !== undefined && opts.expectedDiffHash !== diffHash) {
+      const outcome = proposalOutcome(
+        'proposal-capture-error',
+        'proposal capture refused: verified draft diff hash changed before final capture',
+        diff,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const provenanceSig = signProvenance(engineModel, tier, diffHash);
     const label = opts.sourceLabel ?? 'Sandboxed';
     const filedOutcomeForMetadata = proposalOutcome(
