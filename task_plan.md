@@ -1961,3 +1961,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+
+## Strict CLI Proposal Capture (2026-07-21)
+- [x] Align successful CLI capture durability checks with the shared proposal finalizer.
+- [x] Reject malformed pending artifacts immediately instead of returning a filed proposal id.
+- [x] Verify the CLI Foundry suite, TypeScript typecheck, and diff integrity.
+- [ ] Require protected CI before promotion.

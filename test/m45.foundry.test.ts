@@ -21,7 +21,7 @@
  * cleanup path is exercised without any network/auth/model dependency.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -471,6 +471,74 @@ describe('M45 runEngineSandboxed — absent/failing engine is contained', () => 
         expect(loadProposal(result.proposalId!)?.workItemGenerationId).toBe(generation);
         expect(listSandboxes()).toEqual([]);
       } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+        if (prevPath === undefined) delete process.env.PATH;
+        else process.env.PATH = prevPath;
+      }
+    });
+  });
+
+  it('rejects a malformed pending CLI capture instead of returning a proposal id', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      const prevPath = process.env.PATH;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      const stubBin = mkTmp('ashlr-m45-mismatched-capture-bin-');
+      writeFileSync(
+        join(stubBin, 'codex'),
+        '#!/bin/sh\n' +
+          'cwd=""\n' +
+          'while [ "$#" -gt 0 ]; do\n' +
+          '  if [ "$1" = "--cd" ]; then shift; cwd="$1"; fi\n' +
+          '  shift\n' +
+          'done\n' +
+          'printf "export const malformed = true;\\n" > "$cwd/malformed.ts"\n' +
+          'printf "done"\n',
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${stubBin}:${prevPath ?? ''}`;
+
+      const setStatus = vi.fn();
+      let created: Record<string, unknown> | undefined;
+      vi.resetModules();
+      vi.doMock('../src/core/seams/inbox.js', () => ({
+        selectInboxStore: () => ({
+          create: (input: Record<string, unknown>) => {
+            created = {
+              ...input,
+              id: 'optimistic-cli-proposal',
+              status: 'pending',
+              createdAt: new Date().toISOString(),
+            };
+            return created;
+          },
+          load: () => created ? { ...created, diff: '' } : null,
+          setStatus,
+        }),
+      }));
+
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const { runEngineSandboxed: runStrictCapture } = await import(
+          '../src/core/run/sandboxed-engine.js?strict-cli-capture'
+        );
+        const result = await runStrictCapture('codex', 'add malformed capture file', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+        });
+
+        expect(result.proposalId).toBeUndefined();
+        expect(result.proposalOutcome).toMatchObject({ kind: 'proposal-capture-error' });
+        expect(setStatus).toHaveBeenCalledWith(
+          'optimistic-cli-proposal',
+          'rejected',
+          'proposal persistence verification failed',
+          'machine: proposal persistence verification mismatch',
+        );
+      } finally {
+        vi.resetModules();
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
         if (prevPath === undefined) delete process.env.PATH;
