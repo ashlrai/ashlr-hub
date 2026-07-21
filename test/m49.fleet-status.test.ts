@@ -1738,8 +1738,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     writeRunningDaemon(tmpHome);
     writeBacklogSnapshot(tmpHome, repo, items);
-    recordOutcome('repo:goal:cooling-one', 'empty', new Date().toISOString());
-    recordOutcome('repo:goal:cooling-two', 'judged-review', new Date().toISOString());
+    recordOutcome(generatedRepairCooldownKey(items[0]!), 'empty', new Date().toISOString());
+    recordOutcome(generatedRepairCooldownKey(items[1]!), 'judged-review', new Date().toISOString());
 
     const s = await buildFleetStatus(cfg);
 
@@ -1779,6 +1779,34 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         id: 'cooldown-gated-backlog',
       },
     });
+  });
+
+  it('does not let one repository cool an equal-id item in another repository', async () => {
+    const firstRepo = join(tmpHome, 'first-repo');
+    const secondRepo = join(tmpHome, 'second-repo');
+    const first = makeBacklogItem(firstRepo, 'shared:item', 'First repository item', 8);
+    const second = makeBacklogItem(secondRepo, 'shared:item', 'Second repository item', 7);
+    mkdirSync(join(tmpHome, '.ashlr'), { recursive: true });
+    mkdirSync(firstRepo, { recursive: true });
+    mkdirSync(secondRepo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'enrollment.json'),
+      JSON.stringify({ repos: [firstRepo, secondRepo] }),
+      'utf8',
+    );
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'backlog.json'),
+      JSON.stringify({ generatedAt: new Date().toISOString(), repos: [firstRepo, secondRepo], items: [first, second] }),
+      'utf8',
+    );
+    recordOutcome(generatedRepairCooldownKey(first), 'empty', new Date().toISOString());
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.queue.cooldownItems).toBe(1);
+    expect(status.queue.eligibleBacklogItems).toBe(1);
+    expect(status.queue.next?.[0]).toMatchObject({ id: second.id, repo: secondRepo });
   });
 
   it('projects ordinary work while retaining route-blocked generated work as visible inventory', async () => {
@@ -2318,7 +2346,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const fresh = makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 2);
     writeRunningDaemon(tmpHome);
     writeBacklogSnapshot(tmpHome, repo, [cooled, fresh]);
-    recordOutcome(cooled.id, 'empty', new Date().toISOString());
+    recordOutcome(generatedRepairCooldownKey(cooled), 'empty', new Date().toISOString());
 
     const s = await buildFleetStatus(baseConfig());
 

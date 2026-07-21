@@ -106,6 +106,7 @@ import {
   loadWorkedLedger,
   recordOutcome as localRecord,
 } from '../src/core/fleet/worked-ledger.js';
+import { generatedRepairCooldownKey } from '../src/core/fleet/generated-repair-lifecycle.js';
 import {
   LocalWorkQueueCoordinator,
   SharedWorkQueueCoordinator,
@@ -337,7 +338,7 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // All recorded items should be from our backlog
     const recordedIds = new Set(ledger.events.map(e => e.itemId));
     for (const id of recordedIds) {
-      expect(['item-1', 'item-2', 'item-3']).toContain(id);
+      expect(backlogItems.map(generatedRepairCooldownKey)).toContain(id);
     }
   });
 
@@ -346,12 +347,11 @@ describe('tick() with no sharedQueue (Local path)', () => {
     mockLoadConfig.mockReturnValue(cfg);
 
     // Pre-record item-1 as 'empty' so it's in cooldown
-    localRecord('item-1', 'empty');
-
     backlogItems = [
       makeItem('item-1', tmpRepo, { score: 5 }),
       makeItem('item-2', tmpRepo, { score: 3 }),
     ];
+    localRecord(generatedRepairCooldownKey(backlogItems[0]!), 'empty');
     mockBuildBacklog.mockImplementation(async () => ({
       generatedAt: new Date().toISOString(),
       repos: [tmpRepo],
@@ -364,12 +364,12 @@ describe('tick() with no sharedQueue (Local path)', () => {
     // item-1 should not get a new ledger entry written by the tick
     // (the pre-existing 'empty' entry is there, but no new one from this tick)
     const ledger = loadWorkedLedger();
-    const item1Events = ledger.events.filter(e => e.itemId === 'item-1');
+    const item1Events = ledger.events.filter(e => e.itemId === generatedRepairCooldownKey(backlogItems[0]!));
     // Only the manually pre-recorded one; tick should not have dispatched it
     // (swarm was not called for item-1)
     const item1DispatchedTs = item1Events[item1Events.length - 1]?.ts;
     // item-2 should have been dispatched instead
-    const item2Events = ledger.events.filter(e => e.itemId === 'item-2');
+    const item2Events = ledger.events.filter(e => e.itemId === generatedRepairCooldownKey(backlogItems[1]!));
     expect(item2Events.length).toBeGreaterThan(0);
     // item-1's last event should be the pre-recorded one (not a new tick-recorded one)
     // We verify this by checking the mock call count excludes item-1's repo swarm-skip

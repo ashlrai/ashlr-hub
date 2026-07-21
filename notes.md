@@ -2827,3 +2827,9 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Repository-scoped cooldown identities (2026-07-20):
+  - Cooldown identity now binds normalized repository path, work-item id, and optional repair generation with NUL-delimited fields. Dispatch selection, the generated-repair snapshot, and Fleet Status share this representation.
+  - This prevents an outcome for `id` in one enrolled repository from suppressing an equal-id item in another. Lifecycle and Fleet Status tests cover both the direct identity boundary and the two-repository status projection.
+  - Legacy raw cooldown rows are intentionally not read as compatibility aliases: they lack repository provenance, so honoring them would recreate the collision. This can make an old cooldown expire early after upgrade, but it cannot falsely block unrelated repository work.
+  - Windows CI exposed stale local-coordinator fixtures that seeded and asserted raw ledger ids. They now use the canonical identity helper, proving ordinary local selection observes the same repository scope as the production daemon.
