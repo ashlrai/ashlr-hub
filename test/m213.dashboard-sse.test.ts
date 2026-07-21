@@ -1046,6 +1046,30 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
   });
 
+  it('app.js withholds Fleet Activity proposal metrics without complete source evidence', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function fleetActivitySourceHealthy(source)');
+    const end = src.indexOf('\nfunction renderFleetActivity()', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const helpers = new Function(
+      `${src.slice(start, end)}\nreturn { fleetActivitySourceHealthy, fleetActivitySourceText, fleetActivityObservedMetric };`,
+    )() as Record<string, (...args: any[]) => string | boolean>;
+    const healthy = { sourceState: 'healthy', complete: true };
+    const degraded = { sourceState: 'degraded', complete: false, stopReasons: ['io-error'] };
+
+    expect(helpers.fleetActivitySourceHealthy!(healthy)).toBe(true);
+    expect(helpers.fleetActivityObservedMetric!(healthy, 0)).toBe('0');
+    expect(helpers.fleetActivitySourceHealthy!(degraded)).toBe(false);
+    expect(helpers.fleetActivityObservedMetric!(degraded, 0)).toBe('unavailable');
+    expect(helpers.fleetActivityObservedMetric!(undefined, 0)).toBe('unavailable');
+    expect(helpers.fleetActivitySourceText!(degraded)).toBe('degraded (io-error)');
+    expect(src).toContain('Proposal evidence is unavailable; repository activity is withheld.');
+    expect(src).toContain('Merge evidence is unavailable; recent merges are withheld.');
+  });
+
   it('renders cutoff checkpoints outside readiness and labels evidence source quality honestly', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

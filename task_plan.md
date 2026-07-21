@@ -2005,6 +2005,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
 
+## Fleet Activity Source Truth (2026-07-21)
+- [x] Trace proposal and merge evidence from the inbox reader through `FleetDigest`, `/api/fleet-activity`, and Fleet Activity cards.
+- [x] Preserve distinct quality metadata for proposal-backed totals/repository rows and the independently read recent-merge feed.
+- [x] Withhold repository totals, rows, pending/merged stat-card values, merge event count, and merge feed rows unless their respective evidence source is healthy and complete.
+- [x] Treat missing or legacy quality metadata as unavailable rather than a healthy zero while retaining independent cooldown, engine, subscription, tick, and agent-action views.
+- [x] Pass digest, Fleet Activity, and executable dashboard-helper coverage, typecheck, and diff check.
+- [x] Publish protected draft PR #93 and require the full CI matrix before promotion.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.
