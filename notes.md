@@ -3321,3 +3321,9 @@
 - The reader returns source state and completeness alongside its canonical items. Partial, non-failing, un-enrolled, and already-repaired parents are excluded; missing, degraded, incomplete, or unreadable sources fail closed with no authority count.
 - Fleet Status repair-only coverage supplies its deterministic failure from the enrolled repository under test. Queue metadata or an un-enrolled `/tmp` proposal cannot satisfy the contract.
 - Verification: resource strategy and repair-reader coverage, full M49 Fleet Status coverage (147 assertions), TypeScript typecheck, and diff integrity pass locally. Protected CI remains the promotion gate.
+
+# Repair-Only Observation Quality (2026-07-21)
+- `FleetStatus.proposals.repairOnly` now exposes a bounded `sourceQuality` badge alongside its observation-only count. Healthy nonzero, healthy zero, missing, and degraded/incomplete states remain distinct; unavailable data stays `null` and is displayed as withheld rather than zero.
+- Fleet, Mission Control, the dashboard status panel, and CLI show this only as a repair observation. It does not enter ship readiness, mission briefs, strategy, queue selection, daemon dispatch, or any mutating API.
+- The authoritative repair-only path remains the independent complete reader plus daemon revalidation. Status snapshots are cached/display transport and cannot authorize work.
+- Verification: TypeScript typecheck, M49 Fleet Status plus M213 dashboard coverage (186 assertions), `node --check src/core/web/public/app.js`, and `git diff --check` pass locally. Protected CI remains the promotion gate.

@@ -333,8 +333,8 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`  applied:           ${s.proposals.applied}`);
   if (s.proposals.repairOnly) {
     const repair = s.proposals.repairOnly;
-    const count = repair.eligibleItems === null ? 'unavailable' : `${repair.eligibleItems} eligible`;
-    lines.push(`  repair-only:       ${count} (${repair.sourceState}${repair.complete ? '' : ', incomplete'})`);
+    const count = repair.eligibleItems === null ? 'data withheld' : `${repair.eligibleItems} observed eligible`;
+    lines.push(`  repair-only:       ${count} (${repair.sourceQuality.badge}; observation only)`);
   }
   lines.push('');
 
@@ -1610,6 +1610,9 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
         ? `work ${fs.queue.activeWork.itemCount} ${fs.queue.activeWork.malformed ? 'malformed' : 'active'}`
         : null,
       `pending ${fs.proposals.pending}`,
+      fs.proposals.repairOnly
+        ? `repair observation ${repairOnlyWatchText(fs.proposals.repairOnly)}`
+        : null,
       fs.autonomy ? `evidence ${fs.autonomy.evidencePacks}` : null,
       fs.workspace
         ? `workspace ${workspaceSourceHealthy(fs.workspace)
@@ -1663,6 +1666,11 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
 
   console.log('');
   return 0;
+}
+
+function repairOnlyWatchText(repair: NonNullable<FleetStatus['proposals']['repairOnly']>): string {
+  if (repair.eligibleItems === null) return `${repair.sourceQuality.badge}: data withheld`;
+  return `${repair.sourceQuality.badge}: ${repair.eligibleItems} observed`;
 }
 
 // ---------------------------------------------------------------------------

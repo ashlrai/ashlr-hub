@@ -931,6 +931,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourceState: 'degraded',
       complete: false,
       eligibleItems: null,
+      sourceQuality: { badge: 'degraded-source', sourcePresent: true },
     });
     expect(status.autoMergeReadiness).toBeUndefined();
     expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'auto-merge'))
@@ -983,8 +984,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourceState: 'healthy',
       complete: true,
       eligibleItems: 1,
+      sourceQuality: {
+        badge: 'healthy-source',
+        label: 'healthy source',
+        empty: false,
+        sourcePresent: true,
+        detail: '1 observed eligible repair',
+      },
     });
-    expect(formatFleetStatus(status)).toContain('repair-only:       1 eligible (healthy)');
+    expect(formatFleetStatus(status)).toContain('repair-only:       1 observed eligible (healthy-source; observation only)');
   });
 
   it('keeps unavailable proposal authority ahead of degraded queue diagnostics', async () => {
