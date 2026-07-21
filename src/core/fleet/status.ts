@@ -106,8 +106,8 @@ import {
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
-import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
-import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
+import { readDecisionsDetailed } from './decisions-ledger.js';
+import { readJudgeTracesDetailed } from './judge-trace.js';
 import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
 import {
   readBestOfNRecordsDetailed,
@@ -1393,9 +1393,9 @@ export interface FleetStatus {
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
-  decisionsSource?: DecisionSourceQuality;
+  decisionsSource?: FleetEvidenceSourceStatus;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
-  judgeTraceSource?: JudgeTraceSourceQuality;
+  judgeTraceSource?: FleetEvidenceSourceStatus;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
   /** Storage/read completeness for forensic concurrent dispatch intent. */
@@ -1431,6 +1431,11 @@ export interface FleetStatus {
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
+}
+
+/** Bounded evidence quality plus its newest validated source observation. */
+interface FleetEvidenceSourceStatus extends FleetReadinessEvidenceQuality {
+  latestAt?: string;
 }
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
@@ -2588,6 +2593,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       rowsScanned: decisionsRead.rowsScanned,
       invalidRows: decisionsRead.invalidRows,
       unreadableFiles: decisionsRead.unreadableFiles,
+      ...(decisionsRead.decisions[0]?.ts ? { latestAt: decisionsRead.decisions[0].ts } : {}),
     };
   } catch {
     status.decisionsSource = {
@@ -2614,6 +2620,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       rowsScanned: traceRead.rowsScanned,
       invalidRows: traceRead.invalidRows,
       unreadableFiles: traceRead.unreadableFiles,
+      ...(traceRead.traces.length > 0 ? {
+        latestAt: traceRead.traces
+          .map((trace) => trace.outcomeAt ?? trace.ts)
+          .filter((ts) => Number.isFinite(Date.parse(ts)))
+          .sort((left, right) => Date.parse(right) - Date.parse(left))[0],
+      } : {}),
     };
   } catch {
     status.judgeTraceSource = {
@@ -4856,6 +4868,8 @@ function evidenceReadinessSource(input: {
   role: FleetReadinessEvidenceRole;
   quality: FleetReadinessEvidenceQuality | undefined;
   generatedAt: string;
+  /** Use the evidence's own latest observation when its recency matters. */
+  observedAt?: string | null;
   applicable?: boolean;
   applicability?: Exclude<FleetReadinessEvidenceApplicability, 'disabled'>;
 }): FleetReadinessSourceHealth {
@@ -4881,7 +4895,7 @@ function evidenceReadinessSource(input: {
   const observational = input.role === 'forensics';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
-  const eligibility: FleetReadinessEvidenceEligibility = observational
+  const baseEligibility: FleetReadinessEvidenceEligibility = observational
     ? 'observational'
     : degraded
       ? 'withheld'
@@ -4893,14 +4907,14 @@ function evidenceReadinessSource(input: {
   const detail = quality
     ? missing
       ? `${input.role} evidence has no ledger yet; consumers remain in cold-start mode`
-      : `${input.role} evidence ${eligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
+      : `${input.role} evidence is structurally ${baseEligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
         `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${stop}`
     : `${input.role} evidence diagnostics are unavailable; consumers fail closed`;
   const source = readinessSource(
     input.id,
     input.label,
     status,
-    input.generatedAt,
+    input.observedAt ?? input.generatedAt,
     READINESS_STATUS_STALE_MS,
     detail,
     {
@@ -4909,6 +4923,14 @@ function evidenceReadinessSource(input: {
       sourceDegraded: degraded,
     },
   );
+  const staleOrUnknown = source.freshness === 'stale' || source.freshness === 'unknown';
+  const eligibility: FleetReadinessEvidenceEligibility = observational
+    ? 'observational'
+    : baseEligibility === 'withheld' || staleOrUnknown
+      ? 'withheld'
+      : baseEligibility === 'cold-start'
+        ? 'cold-start'
+        : 'eligible';
   return {
     ...source,
     category: 'evidence',
@@ -4948,15 +4970,16 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
-      quality: status.decisionsSource, generatedAt, applicability: 'required',
+      quality: status.decisionsSource, generatedAt, observedAt: status.decisionsSource?.latestAt, applicability: 'required',
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',
-      quality: status.judgeTraceSource, generatedAt,
+      quality: status.judgeTraceSource, generatedAt, observedAt: status.judgeTraceSource?.latestAt,
     }),
     evidenceReadinessSource({
       id: 'agent-actions', label: 'Agent Actions', role: 'learning',
       quality: status.workspace?.sourceQuality, generatedAt,
+      observedAt: status.workspace?.latestAt,
     }),
     evidenceReadinessSource({
       id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',

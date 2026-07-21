@@ -2827,3 +2827,10 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Agent-action freshness truth (2026-07-21):
+  - Mission Control's evidence matrix previously used FleetStatus generation time for agent actions, so a healthy readable but stale action ledger appeared fresh and learning-eligible.
+  - Evidence sources can now carry an explicit latest observation timestamp. Agent Actions uses its bounded workspace `latestAt`; stale or invalid timestamps degrade the source and withhold learning eligibility, while a readable empty ledger remains a fresh healthy-zero cold-start surface.
+  - Focused FleetStatus verification passes 144 assertions, plus typecheck and quiet lint. This remains an observability/eligibility correction only; it changes no routing, merge, writer, or projection authority.
+  - The same evidence matrix had an equivalent required-authority gap for decisions. Decision source wrappers now retain their latest validated row timestamp, so stale decision evidence is structurally readable but degraded and withheld rather than fresh merge-authority input.
+  - Judge outcomes now retain the latest validated verdict/outcome timestamp as well, so stale optional learning evidence is withheld under the same rule. Focused FleetStatus coverage is now 146 assertions.

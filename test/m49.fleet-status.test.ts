@@ -46,6 +46,7 @@ import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
+import { recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
   generatedRepairCooldownKey,
@@ -3219,6 +3220,134 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('Context efficiency:');
     expect(formatted).toContain('posture:   watch');
     expect(formatted).toContain('memory:    2 entries');
+  });
+
+  it('withholds stale agent-action evidence without treating an empty readable ledger as stale', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    const repo = join(tmpHome, 'repo-agent-action-freshness');
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(tmpHome, '.ashlr'), { recursive: true });
+    writeFileSync(join(tmpHome, '.ashlr', 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+
+    await withFakeNow(now, async () => {
+      recordAgentAction({
+        schemaVersion: 1,
+        ts: new Date(now.getTime() - 31 * 60 * 1000).toISOString(),
+        machineId: 'm49',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: 'stale action fixture',
+        repo,
+        itemId: 'stale-action',
+        source: 'goal',
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        reason: 'fixture',
+        spentUsd: 0,
+      });
+
+      const staleStatus = await buildFleetStatus(baseConfig());
+      const staleEvidence = staleStatus.autonomousShipReadiness?.evidenceMatrix?.sources
+        .find((source) => source.id === 'agent-actions');
+
+      expect(staleStatus.workspace?.sourceQuality).toMatchObject({ sourceState: 'healthy', complete: true });
+      expect(staleEvidence).toMatchObject({
+        status: 'degraded',
+        freshness: 'stale',
+        eligibility: 'withheld',
+        sourceQuality: { badge: 'stale-source' },
+      });
+      expect(staleStatus.autonomousShipReadiness?.evidenceMatrix?.state).toBe('degraded');
+    });
+
+    const freshNow = new Date('2026-07-20T13:00:00.000Z');
+    await withFakeNow(freshNow, async () => {
+      recordAgentAction({
+        schemaVersion: 1,
+        ts: freshNow.toISOString(),
+        machineId: 'm49',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: 'fresh action fixture',
+        repo,
+        itemId: 'fresh-action',
+        source: 'goal',
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        reason: 'fixture',
+        spentUsd: 0,
+      });
+
+      const freshStatus = await buildFleetStatus(baseConfig());
+      expect(freshStatus.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'agent-actions',
+      )).toMatchObject({ status: 'healthy', freshness: 'fresh', eligibility: 'eligible' });
+    });
+
+    const emptyHome = tmpHome;
+    const actionDir = join(emptyHome, '.ashlr', 'agent-actions');
+    rmSync(actionDir, { recursive: true, force: true });
+    mkdirSync(actionDir, { recursive: true });
+    writeFileSync(join(actionDir, '2026-07-21.jsonl'), '', 'utf8');
+    await withFakeNow(new Date('2026-07-21T12:00:00.000Z'), async () => {
+      const emptyStatus = await buildFleetStatus(baseConfig());
+      expect(emptyStatus.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'agent-actions',
+      )).toMatchObject({ status: 'healthy', freshness: 'fresh', eligibility: 'eligible', sourceQuality: { badge: 'healthy-zero' } });
+    });
+  });
+
+  it('withholds stale decision authority while retaining its structural source health', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    await withFakeNow(now, async () => {
+      recordDecision({
+        ts: new Date(now.getTime() - 31 * 60 * 1000).toISOString(),
+        proposalId: 'stale-decision-authority',
+        action: 'judged',
+        verdict: 'ship',
+        reason: 'fixture',
+      });
+      const status = await buildFleetStatus(baseConfig());
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'decisions',
+      );
+
+      expect(status.decisionsSource).toMatchObject({ sourceState: 'healthy', complete: true });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'withheld', applicability: 'required',
+        sourceQuality: { badge: 'stale-source' },
+      });
+      expect(status.autonomousShipReadiness?.evidenceMatrix?.state).toBe('degraded');
+    });
+  });
+
+  it('withholds stale judge outcomes while retaining their structural source health', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    await withFakeNow(now, async () => {
+      recordJudgeTrace({
+        proposalId: 'stale-judge-outcome',
+        judgeEngine: 'claude',
+        verdict: 'ship',
+        scores: { value: 5, correctness: 5, scope: 5, alignment: 5 },
+        ts: new Date(now.getTime() - 31 * 60 * 1000).toISOString(),
+      });
+      const status = await buildFleetStatus(baseConfig());
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'judge-traces',
+      );
+
+      expect(status.judgeTraceSource).toMatchObject({ sourceState: 'healthy', complete: true });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'withheld', evidenceRole: 'learning',
+        sourceQuality: { badge: 'stale-source' },
+      });
+    });
   });
 
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
