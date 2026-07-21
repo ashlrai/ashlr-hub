@@ -356,6 +356,32 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('rejects contract cwd symlinks that resolve outside the repo', () => {
+    const dir = makeFixture();
+    const outside = makeFixture();
+    try {
+      try {
+        symlinkSync(outside, join(dir, 'outside-link'), 'dir');
+      } catch {
+        return;
+      }
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'escape-link', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'outside-link' }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([]);
+      expect(profile.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('without escaping through a symlink');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('detects shell-only Bats repos without package manifests', () => {
     const dir = makeFixture();
     try {

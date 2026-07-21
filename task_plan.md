@@ -2712,4 +2712,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add PR-revision concurrency cancellation and a workflow guard regression.
 - [x] Run focused CI guard, typecheck, quiet lint, and diff integrity.
 - [x] Preserve Pulse fence coverage while giving the Windows portability shard a bounded scheduler allowance.
-- [ ] Publish and require the protected CI matrix before release.
+- [x] Publish and require the protected CI matrix before release.
+
+## Current Overnight Cycle - Verifier Contract Physical Containment (2026-07-21)
+- [x] Trace contract cwd values through parser, worktree verifier, and both subprocess runners.
+- [x] Require existing physical cwd containment at parse time and immediately before sync or async execution.
+- [x] Prove external-symlink contracts and direct runner inputs fail closed without spawning external code.
+- [x] Pass focused profile and verifier-runner coverage, typecheck, scoped lint, and diff checks.
+- [ ] Publish the guarded change as a protected draft PR and wait for the platform matrix.

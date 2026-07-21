@@ -21,7 +21,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -259,19 +259,27 @@ function verifyRunnerPath(): string | null {
   return existsSync(p) ? p : null;
 }
 
-function commandRootFor(vc: VerifyCommand, workspaceRoot: string): string {
+function commandRootFor(vc: VerifyCommand, workspaceRoot: string): string | null {
   const root = resolve(workspaceRoot);
-  if (!vc.cwd) return root;
-  const cwd = resolve(root, vc.cwd);
+  const cwd = vc.cwd ? resolve(root, vc.cwd) : root;
   const rel = relative(root, cwd);
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return cwd;
-  return root;
+  if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) return null;
+  try {
+    if (!statSync(cwd).isDirectory()) return null;
+    const physicalRoot = realpathSync(root);
+    const physicalCwd = realpathSync(cwd);
+    const physicalRel = relative(physicalRoot, physicalCwd);
+    return physicalRel === '' || (!physicalRel.startsWith('..') && !isAbsolute(physicalRel)) ? cwd : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatVerifyCommand(vc: VerifyCommand, workspaceRoot: string): string {
   const command = vc.cmd.join(' ');
   const root = resolve(workspaceRoot);
   const cwd = commandRootFor(vc, root);
+  if (!cwd) return command;
   // M341b: posix-normalize — 'cd apps/web' works in sh AND cmd.exe, while a
   // native '\' sep leaks platform-specific strings into ledgers/logs.
   const rel = relative(root, cwd).replace(/\\/g, '/');
@@ -397,6 +405,17 @@ export function runVerifyCommand(
       timedOut: false,
       failureCategory: 'invalid-command',
     };
+  }
+  if (!commandRoot) {
+    const output = renderToolText(`${command}\n[verify-runner] command cwd is outside the workspace or unavailable`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid cwd`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
   }
 
   try {
@@ -874,6 +893,17 @@ export async function runVerifyCommandAsync(
       timedOut: false,
       failureCategory: 'invalid-command',
     };
+  }
+  if (!commandRoot) {
+    const output = renderToolText(`${command}\n[verify-runner] command cwd is outside the workspace or unavailable`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid cwd`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
   }
 
   if (opts?.signal?.aborted) {
