@@ -731,6 +731,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       gate: 'unavailable',
       detail: expect.stringContaining('missing source is absent'),
     });
+    expect(s.proposals.operationalProjection).toEqual({
+      authority: 'shadow-only',
+      state: 'cold-start',
+      activeMembers: 0,
+      generation: null,
+      reason: null,
+    });
     expect(s.merges.recent).toBe(0);
     expect(s.merges).toMatchObject({
       reportedByTicks: 0,
@@ -909,6 +916,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         invalidFiles: 1,
       },
       authority: { gate: 'unavailable' },
+      operationalProjection: {
+        authority: 'shadow-only',
+        state: 'degraded',
+        activeMembers: 0,
+        generation: null,
+        reason: 'legacy-unmigrated',
+      },
     });
     expect(status.proposals.sourceQuality?.stopReasons).toContain('invalid-file');
     expect(status.autoMergeReadiness).toBeUndefined();

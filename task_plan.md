@@ -2697,3 +2697,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Current Overnight Cycle - Operational Projection Readiness (2026-07-21)
+- [x] Audit the bounded active-proposal projection, transaction primitives, live writer paths, and archive-growth authority cliff.
+- [x] Surface sealed projection readiness as shadow-only Fleet Status data without changing legacy readers or active authority.
+- [x] Prove cold-start and legacy-unmigrated states cannot render as healthy projection evidence.
+- [x] Pass focused Fleet Status coverage, typecheck, scoped lint, and diff checks.
+- [ ] Publish the observation-only readiness slice as a protected draft PR and await the platform matrix.
