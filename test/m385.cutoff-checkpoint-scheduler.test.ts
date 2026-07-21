@@ -501,6 +501,23 @@ describe('M385 daemon lifecycle wiring', () => {
     expect(events.slice(0, 2)).toEqual(['cancel-observer', 'cancel-cutoff']);
   });
 
+  it('schedules cutoff capture from a durable verify-only freshness snapshot', () => {
+    const handle = {
+      disposition: 'scheduled' as const,
+      reason: 'due',
+      cancel: () => {},
+      completion: Promise.resolve({ outcome: 'completed' as const, code: 0, signal: null }),
+    };
+    const schedule = vi.fn(() => handle);
+
+    expect(scheduleCutoffCheckpointAfterTick(
+      tick({ reason: 'verify-only' }),
+      { dryRun: false, once: false },
+      schedule,
+    )).toBe(handle);
+    expect(schedule).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps hidden commands packaged and scheduler imports outside authority modules', () => {
     const cli = readFileSync(join(process.cwd(), 'src/cli/index.ts'), 'utf8');
     const scheduler = readFileSync(join(process.cwd(), 'src/core/daemon/cutoff-checkpoint-scheduler.ts'), 'utf8');

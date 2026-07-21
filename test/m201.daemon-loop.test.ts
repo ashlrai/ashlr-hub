@@ -3456,7 +3456,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockReconcileRemoteHandoffs).toHaveBeenCalledTimes(1);
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
@@ -3477,7 +3477,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.directionMode).toBe('verify-only');
     expect(result.directionReason).toContain('complete healthy proposal source');
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -3500,10 +3500,56 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(state.ticks.at(-1)?.remoteHandoff).toEqual({ checked: 2, merged: 1, closed: 1, open: 0, unknown: 0 });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockReconcileRemoteHandoffs).toHaveBeenCalledTimes(1);
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f3: verify-only refreshes stale backlog once, reuses its identity, and never dispatches or spends', async () => {
+    const { repo, items } = enrollWithItems(1);
+    const snapshotId = 'a'.repeat(32);
+    const freshAt = new Date().toISOString();
+    const staleAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const freshBacklog = { generatedAt: freshAt, snapshotId, repos: [repo.dir], items };
+    mockLoadBacklog
+      .mockReturnValueOnce({ ...freshBacklog, generatedAt: staleAt })
+      .mockReturnValueOnce({ ...freshBacklog, generatedAt: staleAt })
+      .mockReturnValue(freshBacklog);
+    mockBuildBacklog.mockResolvedValue(freshBacklog);
+    mockBuildResourceStrategyReport.mockResolvedValue(
+      strategyReport('verify-only', 'actionable proposal needs verification'),
+    );
+    mockRunAutoMergePass.mockResolvedValue({ attempted: 0, merged: 0 });
+
+    const config = {
+      ...cfgBuiltin(),
+      foundry: { autonomyControlLoop: true, autoMerge: { enabled: false } },
+    } as AshlrConfig;
+    const first = await tick(config, { dryRun: false });
+    const second = await tick(config, { dryRun: false });
+
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    expect(first).toMatchObject({
+      reason: 'verify-only',
+      backlogSnapshotAt: freshAt,
+      backlogSnapshotId: snapshotId,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+    });
+    expect(second).toMatchObject({
+      reason: 'verify-only',
+      backlogSnapshotAt: freshAt,
+      backlogSnapshotId: snapshotId,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+    });
+    expect(loadDaemonState().todaySpentUsd).toBe(0);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunConcurrentDispatch).not.toHaveBeenCalled();
   });
 
   it('A1f4: executable direction uses persisted enrolled backlog count before scanner refresh', async () => {
