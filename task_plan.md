@@ -2705,3 +2705,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Post-Merge Forensic Evidence Freshness (2026-07-21)
+- [x] Add a read-only bounded helper that combines only validated adverse `observedAt` and released stability-witness `stableAt` values.
+- [x] Withhold `latestAt` whenever either bounded source is degraded or incomplete; missing readable sources remain an explicit no-observation state.
+- [x] Return aggregate source-quality metadata only, without raw observations, witnesses, repository paths, verification digests, or merge authority.
+- [x] Cover newest-valid-time selection, empty readable sources, and degradation of each source; pass focused Vitest, typecheck, lint, and diff checks.

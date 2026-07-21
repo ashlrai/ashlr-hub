@@ -2827,3 +2827,8 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Post-merge forensic evidence freshness (2026-07-21):
+  - Added a bounded read-only composition over signed post-merge observation and released stability-witness ledgers. It returns only aggregate source quality plus a timestamp drawn from validated `observedAt` and `stableAt` fields; manifest completion timestamps are intentionally not treated as observations.
+  - A degraded or incomplete source withholds `latestAt`, preventing partial forensic history from appearing fresh. The helper is not wired to FleetStatus and does not touch routing, merge, deploy, policy, or authority behavior.
+  - Focused regressions prove newest valid timestamp selection, metadata-only output, empty-source behavior, and withholding for degraded adverse and stability sources. Focused Vitest, typecheck, lint, and diff checks pass.
