@@ -83,6 +83,18 @@ const MAX_READ_ROW_BYTES = 128 * 1024;
 const MAX_DIRECTORY_ENTRIES = 2_048;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
+interface DecisionWriteFailureForTest {
+  code?: string;
+  syscall?: string;
+}
+
+let latestDecisionWriteFailureForTest: DecisionWriteFailureForTest | undefined;
+
+/** Test-only metadata for diagnosing a never-throw persistence failure. */
+export function _getLatestDecisionWriteFailureForTest(): DecisionWriteFailureForTest | undefined {
+  return latestDecisionWriteFailureForTest;
+}
+
 export interface ReadDecisionsOptions {
   sinceMs?: number;
   proposalId?: string;
@@ -231,6 +243,7 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  */
 export function recordDecision(entry: DecisionEntry): boolean {
   try {
+    latestDecisionWriteFailureForTest = undefined;
     const record = sanitizeDecisionEntry(entry, true);
     // Reserved positive authority must come from the future proof-bound release
     // writer, never this generic operational ledger API. Check the immutable
@@ -259,8 +272,18 @@ export function recordDecision(entry: DecisionEntry): boolean {
     if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
     return appendDecisionLine(filePath, line);
-  } catch {
+  } catch (error) {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
+    latestDecisionWriteFailureForTest = {
+      ...(typeof error === 'object' && error !== null &&
+        typeof (error as NodeJS.ErrnoException).code === 'string'
+        ? { code: (error as NodeJS.ErrnoException).code }
+        : {}),
+      ...(typeof error === 'object' && error !== null &&
+        typeof (error as NodeJS.ErrnoException).syscall === 'string'
+        ? { syscall: (error as NodeJS.ErrnoException).syscall }
+        : {}),
+    };
     return false;
   }
 }
