@@ -141,7 +141,8 @@ export interface ResourceStrategyReadDeps {
   getResourceSnapshot?: (cfg: AshlrConfig) => Promise<ResourceSnapshot>;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
   listReadyEvidenceOutcomeRecords?: (opts?: { limit?: number; now?: Date }) => OutcomeRecord[];
-  listPendingProposals?: () => Proposal[];
+  /** Null means the proposal source could not be read completely. */
+  listPendingProposals?: () => Proposal[] | null;
   runEcosystemDoctor?: (opts?: { root?: string; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
   diagnoseGuardHealth?: () => GuardHealthDiagnosis;
 }

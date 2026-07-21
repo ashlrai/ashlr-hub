@@ -1572,7 +1572,10 @@ async function buildDaemonStrategyPlan(
               deps: { loadWorkedLedger: () => ({ events: [] }) },
             })
           : () => [],
-      listPendingProposals: () => listProposals({ status: 'pending' }),
+      listPendingProposals: () => {
+        const read = listProposalsDetailed({ status: 'pending', requireComplete: true });
+        return read.complete && read.sourceState !== 'degraded' ? read.proposals : null;
+      },
     },
   });
   return resourceStrategyToDaemonPlan(report);
