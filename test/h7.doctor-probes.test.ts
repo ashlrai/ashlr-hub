@@ -340,6 +340,50 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(manyProbe?.fix).toMatch(/gc/i);
   }, DOCTOR_PROBE_TIMEOUT_MS);
 
+  it('reports remote CAS configuration without probing, activating, or exposing endpoint credentials', async () => {
+    expect.hasAssertions();
+    fx = makeFixture();
+    stubModelUp(false);
+    const before = hashDir(fx.ashlrDir);
+
+    expect(probe(await runDoctor(cfg()), 'remote-cas-authority')).toEqual({
+      id: 'remote-cas-authority',
+      label: 'Remote CAS authority',
+      status: 'pass',
+      detail: 'disabled (default; recovery executor remains disabled)',
+    });
+
+    const observational = cfg();
+    observational.fleet = {
+      remoteCasAuthority: {
+        mode: 'probe',
+        provider: 'ashlr-authority',
+        endpoint: 'https://authority.ashlr.ai/',
+        audience: 'ashlr-operational-projection',
+        authorityId: 'authority-prod-1',
+      },
+    };
+    expect(probe(await runDoctor(observational), 'remote-cas-authority')).toMatchObject({
+      status: 'warn',
+      detail: 'configured for observation only; recovery executor remains disabled',
+    });
+
+    const invalid = cfg();
+    invalid.fleet = {
+      remoteCasAuthority: {
+        mode: 'probe',
+        provider: 'ashlr-authority',
+        endpoint: 'https://user:secret@authority.ashlr.ai/',
+        audience: 'ashlr-operational-projection',
+        authorityId: 'authority-prod-1',
+      },
+    };
+    const invalidProbe = probe(await runDoctor(invalid), 'remote-cas-authority');
+    expect(invalidProbe).toMatchObject({ status: 'warn', detail: expect.stringMatching(/^configuration invalid \(endpoint-invalid\)/) });
+    expect(invalidProbe?.detail).not.toContain('secret');
+    expect(hashDir(fx.ashlrDir)).toBe(before);
+  }, DOCTOR_PROBE_TIMEOUT_MS);
+
   it(
     'NO-GUARD-WEAKENED: runDoctor mutates no enrollment / KILL / daemon / sandbox state ' +
       '(byte-identical before vs after), leaving no writeable-sentinel behind',
