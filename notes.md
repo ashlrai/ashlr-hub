@@ -2862,3 +2862,8 @@
 - Windows CI default test budget (2026-07-21):
   - Fresh protected runs showed unrelated Windows fixtures repeatedly crossing Vitest's five-second default while passing in isolation: dispatch receipt recovery and rollback's live-owner safety check were the latest examples. These are all run beneath the existing serial hermetic runner and 15-minute hard watchdog.
   - The CI workflow now injects a bounded 30-second default only for Windows. POSIX retains five seconds, explicit test-local deadlines still take precedence, and the global idle/hard watchdogs continue to fail genuinely stalled suites.
+
+- Verifier executable portability hardening (2026-07-21):
+  - Contract executables now reject absolute, escaping, and outward-symlink paths at parse time and immediately before sync or async spawn. Bare PATH commands remain an explicit bootstrap compatibility boundary.
+  - Independent review found that Windows drive-qualified paths were host-dependent: `C:/...` and `C:...` could be treated as ordinary relative/bare commands on POSIX evaluators. The guard now rejects both forms through platform-independent `win32` parsing, with portable regression coverage.
+  - A local M43 hermetic subprocess-start fixture failed to create its ready marker inside its explicit 10-second budget; this known environment-sensitive test remains a protected-CI requirement and is not waived by the focused 25-test profile pass and successful typecheck.
