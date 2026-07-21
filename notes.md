@@ -2946,3 +2946,8 @@
   - Inline manager-gate calls retain only metadata-only receipts in the decision ledger: actual final responder, aggregate duration, and measured-only cost/token totals. They deliberately do not write daemon daily spend because direct commands execute outside the daemon's durable spend transaction.
   - Decision-ledger first-use setup now fsyncs every created ancestor boundary through the first pre-existing parent before authority writes can report success. Windows retains its explicit best-effort directory-fsync limitation.
   - Gate 7 coverage separately proves failed `judged` and failed `merge-authorized` durable writes both leave the proposal approved and the default branch untouched.
+
+- Windows directory durability compatibility (2026-07-21):
+  - Fresh Windows CI exposed ledger-derived metrics and reconciliation fanout disappearing after the new durable decision append path. The writer intentionally returns false on any persistence error, so the immediate symptom was missing decision rows rather than unsafe authority advancement.
+  - After named-directory validation, `EISDIR` is now treated like the other Windows outcomes that mean Node cannot expose or sync a directory descriptor. POSIX and all unrelated Windows I/O failures remain fatal; injected open and fsync coverage exercises this exact boundary.
+  - The diagnosis is intentionally provisional until a fresh protected Windows matrix confirms the host errno. The change does not relax file fsync, identity validation, or decision-ledger failure handling.

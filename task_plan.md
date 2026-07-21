@@ -2837,4 +2837,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Persist all authorized completed inline judge decisions and require durable decision writes before merge progression.
 - [x] Project measured versus unmetered maintenance data without fabricating spend.
 - [x] Harden receipt accounting against new-directory durability loss, cross-proposal aggregation, and phantom unmetered calls.
+- [x] Cover the Windows unsupported-directory-descriptor compatibility path without weakening POSIX durability failures.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.
