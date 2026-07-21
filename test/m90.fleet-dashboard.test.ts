@@ -96,7 +96,9 @@ describe('buildFleetActivity — shape on empty state', () => {
     expect(snap).toHaveProperty('totalAutoMerged');
     expect(snap).toHaveProperty('totalPending');
     expect(snap).toHaveProperty('totalDeclined');
+    expect(snap).toHaveProperty('proposalSourceQuality');
     expect(snap).toHaveProperty('recentMerges');
+    expect(snap).toHaveProperty('recentMergesSourceQuality');
     expect(snap).toHaveProperty('recentActions');
     expect(snap).toHaveProperty('engineReadiness');
     expect(snap).toHaveProperty('subscriptionUsage');
@@ -118,6 +120,14 @@ describe('buildFleetActivity — shape on empty state', () => {
     expect(snap.recentTicks).toBeInstanceOf(Array);
     expect(snap.engineReadiness).toBeInstanceOf(Array);
     expect(snap.subscriptionUsage).toBeInstanceOf(Array);
+    expect(snap.proposalSourceQuality).toMatchObject({
+      sourceState: 'missing',
+      complete: true,
+    });
+    expect(snap.recentMergesSourceQuality).toMatchObject({
+      sourceState: 'missing',
+      complete: true,
+    });
   });
 
   it('numeric totals are 0 on empty state', async () => {
@@ -152,6 +162,26 @@ describe('dashboard source quality', () => {
       complete: false,
     });
     expect(snap.intelligence?.decisionSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+  });
+
+  it('keeps Fleet Activity proposal and merge sources distinguishable from zero', async () => {
+    const inboxDir = join(tmpHome, '.ashlr', 'inbox');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'corrupt.json'), '{not-json', 'utf8');
+
+    const activity = await buildFleetActivity(baseConfig());
+
+    expect(activity.totalPending).toBe(0);
+    expect(activity.totalAutoMerged).toBe(0);
+    expect(activity.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+    expect(activity.recentMerges).toEqual([]);
+    expect(activity.recentMergesSourceQuality).toMatchObject({
       sourceState: 'degraded',
       complete: false,
     });
@@ -216,6 +246,15 @@ describe('buildFleetActivity — per-repo counts from proposals', () => {
     }
 
     const snap = await buildFleetActivity(baseConfig());
+
+    expect(snap.proposalSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+    });
+    expect(snap.recentMergesSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+    });
 
     // Find repo rows
     const alpha = snap.repos.find((r) => r.repo === '/repo/alpha');
