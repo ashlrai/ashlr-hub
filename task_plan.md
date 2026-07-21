@@ -2006,6 +2006,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add bounded-window, degraded-source, direct-reader, and completed-child regressions.
 - [ ] Run focused verification, commit, push, and open a stacked draft without changing merge authority.
 
+## Current Overnight Cycle - Repair-Only Fleet Status Truth
+- [x] Expose complete verified-failure repair availability as a read-only proposal status signal.
+- [x] Preserve degraded or incomplete source state as `eligibleItems:null`, never a healthy-looking zero.
+- [x] Render the observation in CLI fleet status without changing scheduling, dispatch, or merge authority.
+- [x] Align the existing repair-only Fleet Status fixture with canonical enrolled-repository provenance.
+- [x] Pass typecheck, full Fleet Status coverage, and diff integrity.
+- [x] Commit, push, and open a stacked draft; require protected CI on both draft heads before promotion.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.

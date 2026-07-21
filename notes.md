@@ -2055,6 +2055,11 @@
   - Draft PR #78 established a repair-only execution lane and passed its six-check protected matrix. The follow-on must not select that lane from the bounded outcome ledger because older failures and evidence-sparse proposals can fall outside the reporting window.
   - `listVerifiedFailureProposalRepairWorkItems` now reads the complete proposal inbox and emits only exact, complete pending proposals with deterministic failed verification, canonical enrolled repositories, and no complete repair child. Source state and completeness accompany the result; missing, degraded, incomplete, or unreadable authority returns no dispatchable repairs.
   - Resource strategy reports source quality separately from advisory outcome counts. Repair-only requires a positive complete-reader count, while degraded authority with an outcome failure remains verify-only. This adds no merge or execution authority beyond the repair-only lane's existing final parent fence.
+
+- Current repair-only Fleet Status truth pass:
+  - FleetStatus now exposes `proposals.repairOnly` as an `observation-only` complete-reader snapshot. It carries source state, completeness, and an eligible count only when the source is healthy and complete; unavailable authority is explicitly `null` rather than zero.
+  - The CLI renders this signal in the existing Proposals section so the operating team can see whether the repair-only lane has exact available work without inferring it from advisory outcomes or queue rows.
+  - The repair-only status fixture now uses an enrolled repository for the deterministic failed parent. This proves the user-facing mode and the complete-reader contract share canonical repository provenance.
   - Focused verification passes 309 assertions across daemon selection, FleetStatus, generated-repair lifecycle/routing, and repo-map localization. Typecheck, production build, zero-warning touched-file lint, dependency audit with zero vulnerabilities, and diff checks pass. The definitive 485-file suite passes 10,203 assertions with 8 intentional skips. Final independent re-review returned `SHIP`.
 
 - Current frontier-repair quality and causal release-evidence pass:
