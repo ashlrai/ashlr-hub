@@ -2924,3 +2924,8 @@
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Verify-only freshness maintenance (2026-07-21):
+  - Resource direction now derives pending pressure from complete proposal shapes. Partial captures, capture/gate-blocked records, empty diffs, repository-less records, and non-mergeable proposal kinds remain counted as repair/quarantine observations but do not globally suppress unrelated backlog dispatch.
+  - Verify-only ticks now refresh a missing, invalid, enrollment-mismatched, future-dated, or hour-old backlog without entering dispatch. Between refreshes they reuse the exact persisted `generatedAt` and `snapshotId`, allowing post-tick resolution-observer and cutoff scheduling to proceed from durable snapshot identity.
+  - The maintenance path does not reject proposals, change configuration, select work, invoke an execution backend, or debit daemon spend. Focused daemon, strategy, observer, and cutoff coverage passes 277 assertions with typecheck, scoped lint, and diff integrity.
