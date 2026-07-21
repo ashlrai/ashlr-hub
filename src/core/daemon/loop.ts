@@ -1576,6 +1576,12 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
   const judgeEstimatedSpendUsd = typeof result.judgeEstimatedSpendUsd === 'number'
     ? Math.max(0, result.judgeEstimatedSpendUsd)
     : 0;
+  const judgeMeasuredSpendUsd = typeof result.judgeMeasuredSpendUsd === 'number'
+    ? Math.max(0, result.judgeMeasuredSpendUsd)
+    : 0;
+  const judgeUnmeteredCalls = typeof result.judgeUnmeteredCalls === 'number'
+    ? Math.max(0, Math.floor(result.judgeUnmeteredCalls))
+    : 0;
   const merged = typeof result.merged === 'number' ? result.merged : 0;
   const handoffs = typeof result.handoffs === 'number' ? result.handoffs : 0;
   const autoArchived = typeof result.autoArchived === 'number' ? result.autoArchived : 0;
@@ -1602,6 +1608,8 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
     ...(verifyBeforeJudgeRan > 0 ? { verifyBeforeJudgeRan } : {}),
     ...(verifyBeforeJudgeCapped > 0 ? { verifyBeforeJudgeCapped } : {}),
     ...(judgeEstimatedSpendUsd > 0 ? { judgeEstimatedSpendUsd } : {}),
+    ...(judgeMeasuredSpendUsd > 0 ? { judgeMeasuredSpendUsd } : {}),
+    ...(judgeUnmeteredCalls > 0 ? { judgeUnmeteredCalls } : {}),
     merged,
     ...(handoffs > 0 ? { handoffs } : {}),
     ...(autoArchived > 0 ? { autoArchived } : {}),
