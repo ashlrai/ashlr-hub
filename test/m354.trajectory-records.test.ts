@@ -9,6 +9,7 @@ import {
   summarizeTrajectoryLearning,
   suppressDegradedSkillObservation,
   type TrajectoryLearningStatus,
+  type TrajectoryRecord,
   type TrajectoryRecordReadDeps,
 } from '../src/core/autonomy/trajectory-records.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
@@ -493,6 +494,166 @@ describe('Trajectory records', () => {
     expect(json).not.toContain(DIFF_SECRET);
     expect(json).not.toContain(STDOUT_SECRET);
     expect(json).not.toContain('npm test');
+  });
+
+  it('projects capped, chronological, opaque trajectory traces with source quality', () => {
+    const hostile = 'RAW_TRACE_SECRET_SHOULD_NOT_LEAK';
+    const records: TrajectoryRecord[] = Array.from({ length: 6 }, (_, index) => ({
+      version: 1,
+      id: `trajectory:private-${index}-${hostile}`,
+      key: `private-key-${index}`,
+      startedAt: `2026-07-09T12:0${index}:00.000Z`,
+      latestAt: `2026-07-09T13:0${index}:00.000Z`,
+      terminalOutcome: index === 0 ? 'failed' : 'pending',
+      repo: `/private/${hostile}`,
+      itemId: `item-${hostile}`,
+      proposalId: `proposal-${hostile}`,
+      runId: `run-${hostile}`,
+      trajectoryId: `trajectory-${hostile}`,
+      coverage: { dispatch: true, proposal: true, evidence: true, decision: true, agentAction: true, skillUse: false },
+      ...(index === 5 ? {
+        decisionSourceQuality: {
+          sourceState: 'degraded' as const,
+          sourcePresent: true,
+          complete: false,
+          stopReasons: ['io-error' as const],
+          filesRead: 0,
+          bytesRead: 0,
+          rowsScanned: 0,
+          invalidRows: 0,
+          unreadableFiles: 1,
+        },
+      } : {}),
+      timeline: Array.from({ length: 9 }, (__unused, eventIndex) => ({
+        ts: `2026-07-09T12:${String(eventIndex).padStart(2, '0')}:00.000Z`,
+        kind: eventIndex % 2 === 0 ? 'evidence' as const : 'agent-action' as const,
+        outcome: eventIndex === 0 ? 'proposal-created' : hostile,
+        action: eventIndex === 1 ? 'merged' : `private-action-${hostile}`,
+        repo: `/private/${hostile}`,
+        itemId: `item-${hostile}`,
+        proposalId: `proposal-${hostile}`,
+        runId: `run-${hostile}`,
+        trajectoryId: `trajectory-${hostile}`,
+        model: `private-model-${hostile}`,
+        reason: hostile,
+        routeSnapshot: {
+          backend: 'codex', tier: 'frontier', model: `private-model-${hostile}`,
+          routerPolicyVersion: 'fleet-router-v1', reason: hostile,
+        },
+        learningSource: `private-source-${hostile}`,
+        labelBasis: `private-label-${hostile}`,
+        routerPolicyVersion: 'fleet-router-v1',
+        learningEpoch: '2026-07-09',
+        evidence: {
+          target: hostile,
+          trustBasis: 'verification',
+          riskClass: hostile,
+          verificationPassed: eventIndex % 2 === 0,
+          commandKinds: ['test', `private-command-${hostile}`],
+        },
+      })),
+    }));
+
+    const summary = summarizeTrajectoryLearning(records, 24);
+    expect(summary.traces).toMatchObject({ state: 'available' });
+    expect(summary.traces.records).toHaveLength(5);
+    expect(summary.traces.records[0]).toMatchObject({
+      ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
+      sourceState: 'degraded',
+    });
+    expect(summary.traces.records.some((trace) => trace.sourceState === 'degraded')).toBe(true);
+    const trace = summary.traces.records.at(-1)!;
+    expect(trace.events).toHaveLength(8);
+    expect(trace.events.map((event) => event.ts)).toEqual([
+      '2026-07-09T12:00:00.000Z', '2026-07-09T12:01:00.000Z', '2026-07-09T12:02:00.000Z',
+      '2026-07-09T12:03:00.000Z', '2026-07-09T12:04:00.000Z', '2026-07-09T12:05:00.000Z',
+      '2026-07-09T12:06:00.000Z', '2026-07-09T12:07:00.000Z',
+    ]);
+    expect(trace.events[0]).toMatchObject({
+      kind: 'evidence', outcome: 'passed', route: { backend: 'codex', tier: 'frontier', modelFamily: 'other', policyVersion: 'fleet-router-v1', learningEpoch: '2026-07-09' },
+      evidence: { state: 'passed', trust: 'deterministic', commandKinds: ['test'] },
+      labelBasis: 'unknown', learningSource: 'unknown',
+    });
+    const serialized = JSON.stringify(summary.traces);
+    for (const forbidden of [hostile, '/private/', 'proposal-', 'run-', 'trajectory-']) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it('withholds trajectory traces when the dispatch source is failed, incomplete, or missing', () => {
+    const failed = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => { throw new Error('dispatch reader unavailable'); },
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+      }),
+    });
+    expect(summarizeTrajectoryLearning(failed).traces).toEqual({ state: 'degraded', records: [] });
+
+    const incomplete = [dispatch()];
+    Object.defineProperty(incomplete, 'sourceQuality', {
+      value: { sourceState: 'degraded', complete: false }, enumerable: false,
+    });
+    const partial = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({ readDispatchProductionEvents: () => incomplete }),
+    });
+    expect(summarizeTrajectoryLearning(partial).traces).toEqual({ state: 'degraded', records: [] });
+
+    const missing = [] as DispatchProductionEvent[];
+    Object.defineProperty(missing, 'sourceQuality', {
+      value: { sourceState: 'missing', complete: false }, enumerable: false,
+    });
+    const unavailable = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => missing,
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+      }),
+    });
+    expect(summarizeTrajectoryLearning(unavailable).traces).toEqual({ state: 'unavailable', records: [] });
+  });
+
+  it('withholds trajectory traces when outcome or action sources fail independently', () => {
+    const outcomeFailure = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        listOutcomeRecords: () => { throw new Error('outcome reader unavailable'); },
+      }),
+    });
+    expect(summarizeTrajectoryLearning(outcomeFailure).traces).toEqual({ state: 'degraded', records: [] });
+
+    const actionFailure = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readAgentActions: () => { throw new Error('action reader unavailable'); },
+      }),
+    });
+    expect(summarizeTrajectoryLearning(actionFailure).traces).toEqual({ state: 'degraded', records: [] });
+  });
+
+  it('withholds trajectory traces when outcome or action sources are missing', () => {
+    const missingOutcomes = [] as OutcomeRecord[];
+    Object.defineProperty(missingOutcomes, 'sourceQuality', {
+      value: { sourceState: 'missing', complete: false }, enumerable: false,
+    });
+    const outcomeMissing = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({ listOutcomeRecords: () => missingOutcomes }),
+    });
+    expect(summarizeTrajectoryLearning(outcomeMissing).traces).toEqual({ state: 'unavailable', records: [] });
+
+    const missingActions = [] as AgentActionEvent[];
+    Object.defineProperty(missingActions, 'sourceQuality', {
+      value: { sourceState: 'missing', complete: false }, enumerable: false,
+    });
+    const actionMissing = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({ readAgentActions: () => missingActions }),
+    });
+    expect(summarizeTrajectoryLearning(actionMissing).traces).toEqual({ state: 'unavailable', records: [] });
   });
 
   it('keeps no-proposal attempts visible without treating derived work ids as strong trajectories', () => {

@@ -646,6 +646,37 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (recent) {
       lines.push(`  recent:       ${recent.ref} ${recent.terminalOutcome} at ${recent.latestAt}`);
     }
+    const traces = trajectoryLearning.traces;
+    if (!traces || traces.state === 'unavailable') {
+      lines.push('  Recent trajectory traces: unavailable');
+    } else if (traces.state === 'degraded') {
+      lines.push('  Recent trajectory traces: degraded (partial dispatch history withheld)');
+    } else if (traces.records.length === 0) {
+      lines.push('  Recent trajectory traces: none');
+    } else {
+      lines.push('  Recent trajectory traces:');
+      for (const trace of traces.records.slice(0, 5)) {
+        lines.push(
+          `    ${trace.ref} ${trace.terminalOutcome} ${trace.sourceState} ` +
+            `coverage d=${trace.coverage.dispatch ? 'y' : 'n'} p=${trace.coverage.proposal ? 'y' : 'n'} ` +
+            `e=${trace.coverage.evidence ? 'y' : 'n'} c=${trace.coverage.decision ? 'y' : 'n'} a=${trace.coverage.agentAction ? 'y' : 'n'}`,
+        );
+        for (const event of trace.events.slice(0, 8)) {
+          const route = event.route
+            ? [event.route.tier, event.route.backend, event.route.modelFamily].filter(Boolean).join('/')
+            : '';
+          const evidence = event.evidence ? ` evidence=${event.evidence.state}/${event.evidence.trust}` : '';
+          const policy = event.route?.policyVersion ? ` policy=${event.route.policyVersion}` : '';
+          const epoch = event.route?.learningEpoch ? ` epoch=${event.route.learningEpoch}` : '';
+          const label = event.labelBasis ? ` label=${event.labelBasis}` : '';
+          const source = event.learningSource ? ` source=${event.learningSource}` : '';
+          lines.push(
+            `      ${event.ts} ${event.kind}/${event.outcome}` +
+              `${event.action ? `/${event.action}` : ''}${route ? ` route=${route}` : ''}${evidence}${policy}${epoch}${label}${source}`,
+          );
+        }
+      }
+    }
   }
   lines.push('');
 

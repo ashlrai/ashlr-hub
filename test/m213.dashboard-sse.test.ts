@@ -672,7 +672,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).not.toContain('d.todaySpendUsd');
   });
 
-  it('app.js surfaces aggregate-only trajectory learning in Mission Control and Fleet Dashboard', () => {
+  it('app.js surfaces bounded metadata-only trajectory traces in Mission Control and Fleet Dashboard', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
       'utf8',
@@ -694,9 +694,14 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['No-proposal', terminal['no-proposal'] ?? 0]");
     expect(src).toContain("['Failed', terminal.failed ?? 0]");
     expect(src).toContain("['Top gap', formatTrajectoryLearningGap(trajectoryLearning)]");
+    expect(src).toContain('function renderTrajectoryTraceList(trajectoryLearning)');
+    expect(src).toContain('trajectoryLearning?.traces');
+    expect(src).toContain("/^trajectory:[a-f0-9]{12}$/");
+    expect(src).toContain('body.appendChild(renderTrajectoryTraceList(trajectoryLearning))');
 
     const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
     const rowsStart = src.indexOf('\nfunction trajectoryLearningRows', formatStart);
+    const traceStart = src.indexOf('\nfunction trajectoryTraceValue', rowsStart);
     const rendererEnd = src.indexOf('\nfunction formatCountMap', rowsStart);
     expect(formatStart).toBeGreaterThanOrEqual(0);
     expect(rowsStart).toBeGreaterThan(formatStart);
@@ -717,9 +722,14 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(renderedGap).not.toContain('secret');
     expect(renderedGap).not.toContain('trajectory:');
 
-    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const trajectoryUiSource = src.slice(formatStart, traceStart);
     for (const identityField of ['sampleRefs', '.recent', '.ref', 'repo', 'itemId', 'proposalId', 'runId', 'trajectoryId']) {
       expect(trajectoryUiSource).not.toContain(identityField);
+    }
+
+    const traceSource = src.slice(traceStart, rendererEnd);
+    for (const forbidden of ['repo', 'itemId', 'proposalId', 'runId', 'trajectoryId', 'prompt', 'diff', 'stdout', 'stderr', 'commandKinds']) {
+      expect(traceSource).not.toContain(forbidden);
     }
 
     const rows = new Function(
@@ -733,6 +743,66 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
     expect(values['Observed selections']).toBe('withheld');
     expect(values['Observation join gaps']).toBe('withheld');
+  });
+
+  it('executes the trajectory trace renderer for valid, legacy, degraded, and hostile snapshots', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const traceStart = src.indexOf('function trajectoryTraceValue(value, allowed, fallback = \'unknown\')');
+    const traceEnd = src.indexOf('\nfunction renderTrajectoryLearningCard', traceStart);
+    expect(traceStart).toBeGreaterThanOrEqual(0);
+    expect(traceEnd).toBeGreaterThan(traceStart);
+    const el = (tag: string, attrs: Record<string, unknown>, ...children: unknown[]) => ({
+      tag, attrs, children,
+      appendChild(child: unknown) { this.children.push(child); },
+    });
+    const renderer = new Function(
+      'el',
+      `${src.slice(traceStart, traceEnd)}\nreturn renderTrajectoryTraceList;`,
+    )(el) as (trajectoryLearning: Record<string, unknown>) => ReturnType<typeof el>;
+    const text = (node: unknown): string => typeof node === 'string'
+      ? node
+      : node && typeof node === 'object' && 'children' in node
+        ? (node as { children: unknown[] }).children.map(text).join(' ')
+        : '';
+
+    const valid = text(renderer({ traces: {
+      state: 'available',
+      records: [{
+        ref: 'trajectory:0123456789ab', terminalOutcome: 'failed', sourceState: 'degraded',
+        coverage: { dispatch: true, proposal: false, evidence: true, decision: true, agentAction: true },
+        events: [{
+          ts: '2026-07-21T12:00:00.000Z', kind: 'evidence', outcome: 'failed', action: 'verified',
+          route: { tier: 'frontier', backend: 'codex', modelFamily: 'codex', policyVersion: 'fleet-router-v1', learningEpoch: '2026-07-21' },
+          evidence: { state: 'failed', trust: 'deterministic' }, labelBasis: 'evidence-policy', learningSource: 'autonomy-evidence',
+        }],
+      }],
+    } }));
+    expect(valid).toContain('trajectory:0123456789ab');
+    expect(valid).toContain('evidence/failed/verified');
+    expect(valid).toContain('route=frontier/codex/codex');
+    expect(valid).toContain('policy=fleet-router-v1');
+    expect(valid).toContain('source=autonomy-evidence');
+
+    expect(text(renderer({}))).toContain('Trajectory traces unavailable');
+    expect(text(renderer({ traces: { state: 'degraded', records: [] } }))).toContain('partial dispatch history withheld');
+
+    const hostile = 'RAW_TRACE_RENDER_SECRET';
+    const hostileText = text(renderer({ traces: {
+      state: 'available', records: [{
+        ref: `trajectory:${hostile}`, terminalOutcome: hostile, sourceState: hostile,
+        coverage: { dispatch: hostile },
+        events: [{
+          ts: hostile, kind: hostile, outcome: hostile, action: hostile,
+          route: { tier: hostile, backend: hostile, modelFamily: hostile, policyVersion: hostile, learningEpoch: hostile },
+          evidence: { state: hostile, trust: hostile }, labelBasis: hostile, learningSource: hostile,
+        }],
+      }],
+    } }));
+    expect(hostileText).toContain('trajectory:unavailable');
+    expect(hostileText).not.toContain(hostile);
   });
 
   it('app.js renders categorical skill corpus readiness without exposing sub-k details', () => {

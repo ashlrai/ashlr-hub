@@ -3444,6 +3444,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.trajectoryLearning?.recent[0]?.coverage).not.toHaveProperty('skillUse');
+    expect(s.trajectoryLearning?.traces).toMatchObject({
+      state: 'available',
+      records: [expect.objectContaining({
+        ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
+        sourceState: expect.stringMatching(/^(complete|incomplete|degraded)$/),
+      })],
+    });
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(proposal.id);
@@ -3456,6 +3463,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
     expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
     expect(formatted).toContain('Trajectory learning:');
+    expect(formatted).toContain('Recent trajectory traces:');
     expect(formatted).toContain('trajectories: 1 in 24h');
     expect(formatted).toContain(
       'outcomes:     merged 0, pending 1, no-proposal 0, cancelled 0, failed 0',
@@ -3464,6 +3472,43 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('coverage:     dispatch 1 (100%), proposal 1 (100%), evidence 1 (100%), decision 1 (100%)');
     expect(formatted).toContain('skill observations:');
     expect(formatted).not.toContain('skill shadow:');
+  });
+
+  it('prints degraded trajectory traces as withheld dispatch history, never an empty trace list', () => {
+    const formatted = formatFleetStatus({
+      generatedAt: '2026-07-21T12:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      trajectoryLearning: {
+        version: 1,
+        windowHours: 24,
+        trajectories: 0,
+        terminalOutcomes: { merged: 0, rejected: 0, handoff: 0, pending: 0, 'no-proposal': 0, failed: 0, unknown: 0 },
+        realizedOutcomes: { 'followed-up': 0, reverted: 0, regressed: 0 },
+        coverage: {
+          dispatch: { count: 0, rate: 0 },
+          proposal: { count: 0, rate: 0 },
+          evidence: { count: 0, rate: 0 },
+          decision: { count: 0, rate: 0 },
+          agentAction: { count: 0, rate: 0 },
+        },
+        routeSpine: {
+          dispatchToDecision: { count: 0, rate: 0 },
+          dispatchToEvidence: { count: 0, rate: 0 },
+          dispatchToMerge: { count: 0, rate: 0 },
+        },
+        skillObservation: { eventState: 'none', sampleState: 'none' },
+        traces: { state: 'degraded', records: [] },
+        gaps: [],
+        recent: [],
+      },
+      killed: false,
+    } as any);
+    expect(formatted).toContain('Recent trajectory traces: degraded (partial dispatch history withheld)');
+    expect(formatted).not.toContain('Recent trajectory traces: none');
   });
 
   it('promotes weak causal attempt coverage into next actions', async () => {
