@@ -8,7 +8,7 @@
  */
 
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
 export type RepoPackageManager =
@@ -243,6 +243,9 @@ function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label
  * dependencies are installed and can use standard tools such as npm or node.
  */
 export function verifyExecutablePathError(repoRoot: string, cwd: string, executable: string): string | null {
+  if (win32.isAbsolute(executable) || /^[a-zA-Z]:/.test(executable)) {
+    return 'must be repo-relative, not a Windows drive path';
+  }
   if (executable.includes('\\')) return 'must not use Windows backslash path separators';
   if (!executable.includes('/')) return null;
   if (isAbsolute(executable)) return 'must be repo-relative, not an absolute path';

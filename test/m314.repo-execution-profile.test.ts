@@ -453,6 +453,27 @@ describe('repo execution profile', () => {
     }
   });
 
+  it.each(['C:/tools/verify.exe', 'C:tools/verify.exe'])(
+    'rejects Windows drive-qualified executable %s on every host',
+    (executable) => {
+      const dir = makeFixture();
+      try {
+        writeVerifyContract(dir, {
+          schemaVersion: 1,
+          mode: 'replace-detected',
+          commands: [{ id: 'windows-drive-path', kind: 'test', cmd: [executable], profiles: ['merge'] }],
+        });
+
+        const profile = detectRepoExecutionProfile(dir);
+
+        expect(profile.verifyCommands).toEqual([]);
+        expect(profile.verifyContract?.errors.join('\n')).toContain('must be repo-relative, not a Windows drive path');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('accepts bare PATH executables and legitimate repo-relative paths', () => {
     const dir = makeFixture();
     try {
