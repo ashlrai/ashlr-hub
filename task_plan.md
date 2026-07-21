@@ -3047,3 +3047,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover parent-child deduplication in queue and daemon regression tests; rerun strategy and repair-queue suites.
 - [x] Bind queued execution-bearing fields to the canonical parent-derived repair item; reject forged title/detail payloads.
 - [ ] Require protected CI before promotion.
+
+## Complete Repair Failure Authority (2026-07-21)
+- [x] Read repair-only candidates from the complete healthy proposal inbox rather than a bounded outcome window.
+- [x] Withhold the authority count when the reader is missing, degraded, or incomplete.
+- [x] Exclude partial, non-failing, and already-repaired parents from the candidate set.
+- [x] Align Fleet Status repair-only coverage with canonical enrolled-repository provenance.
+- [x] Verify typecheck, strategy/repair authority coverage, full Fleet Status coverage, and diff integrity locally.
+- [ ] Require protected CI on the amended draft head before promotion.
