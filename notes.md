@@ -5,6 +5,11 @@
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
   - M30 now asserts the three Ubuntu labels, exact shard arguments, and one-time pack-smoke selector, so a future workflow edit cannot silently collapse exhaustive authority back into one cap-bound job.
 
+## Measured Judge Spend Windows Durability Repair (2026-07-21)
+- Native Windows first-use decision writes failed before append because recursive `mkdirSync` can return a namespaced `\\?\\C:\\...` first-created path. Comparing its parent to the ordinary `C:\\...` target path made the durability walk miss its boundary and reach the drive root.
+- Decision directory creation now captures the nearest existing named ancestor and exact `(dev, ino)` identity before recursive creation. The post-create walk uses only target-derived paths, checks the captured identity at its boundary, and records whether failure occurred during ancestor inspection, creation, or directory fsync.
+- Typecheck, scoped zero-error lint, M119, and M373 pass locally: 60 assertions passed with two intentional platform skips. Protected native Windows remains required before the branch can authorize production.
+
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
 - Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.

@@ -24,6 +24,7 @@ import {
   opendirSync,
   readSync,
   writeSync,
+  type BigIntStats,
 } from 'node:fs';
 import { fsyncDirectory } from '../util/durability.js';
 import type { DecisionEntry } from '../types.js';
@@ -52,17 +53,45 @@ export function decisionsDir(): string {
   return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'decisions');
 }
 
-/** Persist each newly-created authority directory and its first existing parent. */
-export function _fsyncCreatedDecisionDirectoryChainForTest(
+interface DecisionDirectoryCreationBoundary {
+  path: string;
+  identity: { dev: bigint; ino: bigint };
+}
+
+function captureDecisionDirectoryCreationBoundary(
   dir: string,
-  firstCreated: string,
-  syncDirectory: (path: string) => void = fsyncDirectory,
-): void {
-  const firstExistingParent = dirname(firstCreated);
+  inspect: (path: string) => BigIntStats = (path) => lstatSync(path, { bigint: true }),
+): DecisionDirectoryCreationBoundary {
   let current = dir;
   while (true) {
-    syncDirectory(current);
-    if (current === firstExistingParent) return;
+    try {
+      const existing = inspect(current);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        throw new Error(`decisions ledger ancestor is not a named directory: ${current}`);
+      }
+      return { path: current, identity: { dev: existing.dev, ino: existing.ino } };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) throw new Error('decisions ledger has no existing filesystem root');
+    current = parent;
+  }
+}
+
+/** Persist each newly-created authority directory and its identity-bound existing parent. */
+export function _fsyncCreatedDecisionDirectoryChainForTest(
+  dir: string,
+  boundary: DecisionDirectoryCreationBoundary,
+  syncDirectory: (
+    path: string,
+    expectedIdentity?: DecisionDirectoryCreationBoundary['identity'],
+  ) => void = (path, expectedIdentity) => fsyncDirectory(path, { expectedIdentity }),
+): void {
+  let current = dir;
+  while (true) {
+    syncDirectory(current, current === boundary.path ? boundary.identity : undefined);
+    if (current === boundary.path) return;
     const parent = dirname(current);
     if (parent === current) throw new Error('decisions ledger creation escaped filesystem root');
     current = parent;
@@ -111,6 +140,8 @@ interface DecisionWriteFailureForTest {
     | 'file-fsync'
     | 'inspect-path-after'
     | 'directory-fsync'
+    | 'inspect-directory-ancestor'
+    | 'create-directories'
     | 'close';
   code?: string;
   syscall?: string;
@@ -282,14 +313,16 @@ export function recordDecision(entry: DecisionEntry): boolean {
     const dir = decisionsDir();
     stage = 'ensure-directory';
     if (!existsSync(dir)) {
-      const firstCreated = mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (firstCreated) {
-        stage = 'create-directory-durability';
-        // Persist the leaf entry and every newly-created ancestor entry through
-        // the first pre-existing parent. Without this, a first-use nested
-        // ASHLR_HOME can lose the whole ledger tree after reporting success.
-        _fsyncCreatedDecisionDirectoryChainForTest(dir, firstCreated);
-      }
+      operation = 'inspect-directory-ancestor';
+      const boundary = captureDecisionDirectoryCreationBoundary(dir);
+      operation = 'create-directories';
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      stage = 'create-directory-durability';
+      operation = 'directory-fsync';
+      // Persist the leaf entry and every newly-created ancestor entry through
+      // the identity-bound pre-existing parent. The boundary is captured before
+      // mkdir because Windows returns namespaced paths from recursive mkdir.
+      _fsyncCreatedDecisionDirectoryChainForTest(dir, boundary);
     }
 
     const line = JSON.stringify(record) + '\n';
