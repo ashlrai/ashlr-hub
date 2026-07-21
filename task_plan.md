@@ -3023,3 +3023,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the Ubuntu full-suite failure to the disposable-Git non-interactive H7 onboarding test.
 - [x] Preserve global timeout behavior while adding a bounded 15-second allowance only to that fixture-heavy test.
 - [ ] Verify the focused H7 suite locally and require a fresh protected CI matrix on the immutable draft head.
+
+## Remote CAS Recovery Preflight (2026-07-21)
+- [x] Audit the dormant projection recovery stack and retain its non-authoritative posture.
+- [x] Build a pure V2 transaction/inspection/action/epoch request preflight with no transport, signing, persistence, or execution.
+- [x] Add deterministic and adversarial contract coverage; run focused authority suites, typecheck, and lint.
+- [ ] Implement a separately deployed authenticated CAS authority and signed grant verifier before any recovery executor or live writer integration.

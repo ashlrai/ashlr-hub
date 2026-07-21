@@ -3291,3 +3291,9 @@
 # Ubuntu Onboard CI Timing Recovery (2026-07-21)
 - The hermetic non-interactive H7 onboarding test creates and commits a disposable Git repository. It alone exceeded Vitest's default five-second allowance under the 12,000-test Ubuntu protected run, while passing directly.
 - Only that test now has a bounded 15-second allowance. The global timeout, test assertions, fixture isolation, and no-network/no-daemon guarantee are unchanged, so unrelated hangs still fail at the default threshold.
+
+# Remote CAS Recovery Preflight (2026-07-21)
+- Added a pure preflight builder for the dormant operational-projection recovery stack. It binds an inspected V2 transaction, phase-compatible hypothetical action, probe authority identity, repository identity, and mandatory canonical expected epoch into the existing metadata-only request contract.
+- The builder neither reads or writes files, acquires locks, signs, sends requests, retries, advances journals, nor changes proposal/projection/reader authority. `ready` means only that a future authority request has a deterministic validated payload.
+- It refuses inspection/transaction/action drift, non-probe authority, invalid epochs, malformed IDs/timestamps, and staged-artifact binding mismatches. The next required rung remains an authenticated remote authority plus signed response/epoch verifier; no executor can be activated from this preflight.
+- Verification: M438-M440 remote authority/contract/preflight suites pass 30 assertions, plus TypeScript typecheck and quiet lint.
