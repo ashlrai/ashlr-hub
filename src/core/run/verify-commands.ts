@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
-import { detectRepoExecutionProfile } from './repo-profile.js';
+import { detectRepoExecutionProfile, verifyExecutablePathError } from './repo-profile.js';
 import { buildToolPath } from './tool-path.js';
 
 // ---------------------------------------------------------------------------
@@ -110,6 +110,8 @@ export interface VerifySubprocessOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+  /** Final argv containment check performed in this function immediately before spawn. */
+  verifyBoundary?: { repoRoot: string; executable: string };
   /** Windows package-manager shims only; ignored on POSIX. */
   windowsShell?: boolean;
   signal?: AbortSignal;
@@ -417,41 +419,52 @@ export function runVerifyCommand(
     });
     return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
   }
+  const executableError = verifyExecutablePathError(workspaceRoot, commandRoot, bin);
+  if (executableError) {
+    const output = renderToolText(`${command}\n[verify-runner] command executable ${executableError}`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid executable`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+  }
 
   try {
     const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
       extraBinRoots: [workspaceRoot],
     });
     const runner = verifyRunnerPath();
+    if (!runner) {
+      throw new Error('verification process-tree runner is unavailable');
+    }
     const isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
     const res = (() => {
       try {
-        return runner
-          ? spawnSync(
-              process.execPath,
-              [
-                runner,
-                String(timeout),
-                commandRoot,
-                Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
-              ],
-              {
-                cwd: commandRoot,
-                timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
-                stdio: 'pipe',
-                encoding: 'utf8',
-                shell: false,
-                windowsHide: true,
-                env: {
-                  ...isolated.env,
-                  ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
-                },
-              },
-            )
-          : spawnSync(bin, vc.cmd.slice(1), {
-              ...baseOptions,
-              env: isolated.env,
-            });
+        return spawnSync(
+          process.execPath,
+          [
+            runner,
+            String(timeout),
+            workspaceRoot,
+            commandRoot,
+            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+          ],
+          {
+            cwd: commandRoot,
+            timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
+            stdio: 'pipe',
+            encoding: 'utf8',
+            shell: false,
+            windowsHide: true,
+            env: {
+              ...isolated.env,
+              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+            },
+          },
+        );
       } finally {
         isolated.cleanup();
       }
@@ -548,6 +561,18 @@ export async function runVerifySubprocessAsync(
       stderr: '[verify-runner] cancelled before subprocess start',
       cancelled: true,
     });
+  }
+  if (opts.verifyBoundary) {
+    const boundaryCwd = commandRootFor(
+      { kind: 'test', cmd: [opts.verifyBoundary.executable], cwd: opts.cwd },
+      opts.verifyBoundary.repoRoot,
+    );
+    const executableError = boundaryCwd
+      ? verifyExecutablePathError(opts.verifyBoundary.repoRoot, boundaryCwd, opts.verifyBoundary.executable)
+      : 'command cwd is outside the workspace or unavailable';
+    if (executableError) {
+      return emptyResult({ error: `[verify-runner] ${executableError}` });
+    }
   }
 
   const platform = opts._platform ?? process.platform;
@@ -905,6 +930,18 @@ export async function runVerifyCommandAsync(
     });
     return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
   }
+  const executableError = verifyExecutablePathError(workspaceRoot, commandRoot, bin);
+  if (executableError) {
+    const output = renderToolText(`${command}\n[verify-runner] command executable ${executableError}`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid executable`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+  }
 
   if (opts?.signal?.aborted) {
     const output = renderToolText(`${command}\n[verify-runner] cancelled before subprocess start`);
@@ -942,6 +979,7 @@ export async function runVerifyCommandAsync(
           process.execPath,
           runner!,
           String(timeout),
+          workspaceRoot,
           commandRoot,
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]
@@ -956,6 +994,7 @@ export async function runVerifyCommandAsync(
         : isolated.env,
       timeoutMs: useWindowsWrapper ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout,
       windowsShell: useWindowsWrapper ? false : baseOptions.shell === true,
+      verifyBoundary: { repoRoot: workspaceRoot, executable: bin },
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });
     isolated.cleanup();

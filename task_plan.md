@@ -1,5 +1,10 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Cycle - Verifier Contract Executable Portability
+- [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
+- [x] Reject path-bearing executable symlink escapes and Windows-only separators while preserving bare PATH tools and missing dependency shims.
+- [x] Run focused parser/runner coverage, typecheck, scoped lint, and diff validation; commit the isolated hardening patch.
+
 ## 2026-07-21 - Bounded trajectory trace projection
 - [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.
 - [x] Add a capped read-only projection under `trajectoryLearning` (five opaque traces, eight chronological allowlisted events).
@@ -2720,6 +2725,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove external-symlink contracts and direct runner inputs fail closed without spawning external code.
 - [x] Pass focused profile and verifier-runner coverage, typecheck, scoped lint, and diff checks.
 - [ ] Publish the guarded change as a protected draft PR and wait for the platform matrix.
+
+## Verifier Executable Portability Follow-Up (2026-07-21)
+- [x] Audit executable path handling independently from cwd containment.
+- [x] Reject host-independent Windows absolute and drive-relative executable forms.
+- [x] Add portable contract-parser regression coverage and rerun typecheck.
+- [x] Revalidate physical cwd and executable containment inside the synchronous watchdog wrapper.
+- [x] Revalidate original cwd and executable containment inside asynchronous spawn ownership.
+- [x] Migrate supported contract fixtures from absolute host runtimes to portable argv executables.
+- [ ] Require the refreshed complete protected matrix on PR #106 before merge.
+- [ ] Design immutable verification-snapshot authority separately; do not claim final check-to-exec race elimination from path validation alone.
 
 ## Windows Receipt-Materialization CI Budget (2026-07-21)
 - [x] Isolate the repeated Windows portability timeout to the M342 failure-receipt integration case.

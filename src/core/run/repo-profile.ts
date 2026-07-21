@@ -8,7 +8,7 @@
  */
 
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
 export type RepoPackageManager =
@@ -237,6 +237,42 @@ function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label
   return resolved;
 }
 
+/**
+ * Reject path-bearing verifier executables that would escape the repository.
+ * Bare names intentionally remain PATH-resolved so contracts work before
+ * dependencies are installed and can use standard tools such as npm or node.
+ */
+export function verifyExecutablePathError(repoRoot: string, cwd: string, executable: string): string | null {
+  if (win32.isAbsolute(executable) || /^[a-zA-Z]:/.test(executable)) {
+    return 'must be repo-relative, not a Windows drive path';
+  }
+  if (executable.includes('\\')) return 'must not use Windows backslash path separators';
+  if (!executable.includes('/')) return null;
+  if (isAbsolute(executable)) return 'must be repo-relative, not an absolute path';
+
+  const root = resolve(repoRoot);
+  const resolved = resolve(cwd, executable);
+  const lexicalRel = relative(root, resolved);
+  if (lexicalRel === '' || lexicalRel.startsWith('..') || isAbsolute(lexicalRel)) {
+    return 'must resolve inside the repo';
+  }
+
+  // Dependency shims are often absent before install. Their eventual target is
+  // checked again immediately before spawn by the verification runner.
+  if (!existsSync(resolved)) return null;
+  try {
+    const physicalRoot = realpathSync(root);
+    const physicalExecutable = realpathSync(resolved);
+    const physicalRel = relative(physicalRoot, physicalExecutable);
+    if (physicalRel === '' || physicalRel.startsWith('..') || isAbsolute(physicalRel)) {
+      return 'must resolve inside the repo without escaping through a symlink';
+    }
+  } catch {
+    return 'must resolve inside the repo';
+  }
+  return null;
+}
+
 function parseContractProfiles(raw: unknown, errors: string[], label: string): VerifyCommandProfile[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
@@ -376,6 +412,12 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
 
       const cwd = safeContractCwd(repoRoot, command['cwd'], errors, label);
       if (!cwd) continue;
+
+      const executableError = verifyExecutablePathError(repoRoot, cwd, cmd[0]);
+      if (executableError) {
+        errors.push(`${label}.cmd[0] ${executableError}`);
+        continue;
+      }
 
       const timeoutRaw = command['timeoutMs'];
       let timeoutMs: number | undefined;

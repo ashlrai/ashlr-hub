@@ -1,5 +1,10 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Verifier Contract Executable Portability Hardening
+- Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
+- Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.
+- Bare PATH executables and absent dependency-installed relative shims remain valid. The runner performs the same physical-path check immediately before spawn, so a dependency shim created after parsing still cannot escape the workspace through a symlink.
+
 ## 2026-07-21 - Bounded trajectory trace projection
 - Added an in-memory `trajectoryLearning.traces` projection; it adds no ledger, API endpoint, mutation route, or lookup-by-identity capability.
 - Each trace is keyed by the existing opaque `trajectory:<sha256-prefix>` reference and exposes at most eight chronological events. The projection emits only allowlisted kind/outcome/action, known engine/tier categories, normalized model family, safe policy/epoch values, bounded evidence classification, and closed label/source categories.
@@ -2857,3 +2862,11 @@
 - Windows CI default test budget (2026-07-21):
   - Fresh protected runs showed unrelated Windows fixtures repeatedly crossing Vitest's five-second default while passing in isolation: dispatch receipt recovery and rollback's live-owner safety check were the latest examples. These are all run beneath the existing serial hermetic runner and 15-minute hard watchdog.
   - The CI workflow now injects a bounded 30-second default only for Windows. POSIX retains five seconds, explicit test-local deadlines still take precedence, and the global idle/hard watchdogs continue to fail genuinely stalled suites.
+
+- Verifier executable portability hardening (2026-07-21):
+  - Contract executables now reject absolute, escaping, and outward-symlink paths at parse time and immediately before sync or async spawn. Bare PATH commands remain an explicit bootstrap compatibility boundary.
+  - Independent review found that Windows drive-qualified paths were host-dependent: `C:/...` and `C:...` could be treated as ordinary relative/bare commands on POSIX evaluators. The guard now rejects both forms through platform-independent `win32` parsing, with portable regression coverage.
+  - A local M43 hermetic subprocess-start fixture failed to create its ready marker inside its explicit 10-second budget; this known environment-sensitive test remains a protected-CI requirement and is not waived by the focused 25-test profile pass and successful typecheck.
+  - The synchronous watchdog wrapper now receives the repository root and independently revalidates the physical cwd and path-bearing executable immediately before its own spawn. This closes the parent-to-wrapper validation gap. A mutable checkout can still race a check immediately before `spawn`; merge-grade snapshot immutability remains a separate required boundary rather than an implied guarantee.
+  - Synchronous verification now fails closed when that packaged watchdog is unavailable, rather than falling back to an unchecked direct spawn.
+  - Async verification now repeats cwd and executable containment in the shared subprocess primitive immediately before spawn. Contract fixtures use the portable bare `node` executable; absolute host runtime paths remain intentionally invalid as nonportable merge evidence.

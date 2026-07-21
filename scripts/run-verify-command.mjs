@@ -9,13 +9,15 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, win32 } from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
 
-const [, , timeoutRaw, cwd, argvB64] = process.argv;
+const [, , timeoutRaw, repoRoot, cwd, argvB64] = process.argv;
 const timeoutMs = Number(timeoutRaw);
 
-if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !cwd || !argvB64) {
-  console.error('usage: run-verify-command.mjs <timeoutMs> <cwd> <base64-json-argv>');
+if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !repoRoot || !cwd || !argvB64) {
+  console.error('usage: run-verify-command.mjs <timeoutMs> <repoRoot> <cwd> <base64-json-argv>');
   process.exit(2);
 }
 
@@ -33,6 +35,43 @@ if (!Array.isArray(argv) || argv.length === 0 || typeof argv[0] !== 'string') {
 }
 
 const [bin, ...args] = argv;
+const inside = (root, candidate) => {
+  const rel = relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+};
+
+function executableError() {
+  if (win32.isAbsolute(bin) || /^[a-zA-Z]:/.test(bin)) return 'must be repo-relative, not a Windows drive path';
+  if (bin.includes('\\')) return 'must not use Windows backslash path separators';
+  if (!bin.includes('/')) return null;
+  if (isAbsolute(bin)) return 'must be repo-relative, not an absolute path';
+
+  const lexical = resolve(cwd, bin);
+  if (!inside(resolve(repoRoot), lexical)) return 'must resolve inside the repo';
+  if (!existsSync(lexical)) return null;
+  try {
+    const physicalRoot = realpathSync(repoRoot);
+    return inside(physicalRoot, realpathSync(lexical))
+      ? null
+      : 'must resolve inside the repo without escaping through a symlink';
+  } catch {
+    return 'must resolve inside the repo';
+  }
+}
+
+try {
+  const physicalRoot = realpathSync(repoRoot);
+  const physicalCwd = realpathSync(cwd);
+  if (!statSync(physicalCwd).isDirectory() || !inside(physicalRoot, physicalCwd)) {
+    throw new Error('command cwd is outside the workspace or unavailable');
+  }
+  const error = executableError();
+  if (error) throw new Error(`command executable ${error}`);
+} catch (error) {
+  console.error(`[verify-runner] ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
+}
+
 const child = spawn(bin, args, {
   cwd,
   stdio: ['ignore', 'pipe', 'pipe'],
