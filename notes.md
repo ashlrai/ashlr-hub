@@ -2834,6 +2834,11 @@
   - Verification: M30 workflow guard passes 7 assertions, plus typecheck, quiet lint, and diff integrity. The workflow contains no deploy, publish, release, or authority-policy change.
   - The first protected matrix exposed a Windows-only scheduler miss in an unrelated Pulse liveness fixture while all fence assertions passed. The test now preserves its one-second non-Windows budget and uses a bounded two-second Windows hosted-runner allowance; CI supersession behavior is unchanged.
 
+- Proposal dedup authority (2026-07-21):
+  - Capture dedup previously treated a pending diff hash as global authority, allowing an old record to suppress valid work in another repository, work generation, or stale redispatch.
+  - Dedup now requires canonical repository, exact optional work identity, fresh pending authority, and a recomputed canonical diff hash. Manual proposals bypass synthetic dedup rejection and existing cross-process locking remains authoritative.
+  - Coverage includes cross-repo, work-generation, stale, forged-hash, manual, and concurrent duplicate cases. Verification: 176 focused assertions, typecheck, changed-file lint, and diff checks; independent review found no authority or privacy issue.
+
 - Verifier-contract physical cwd containment (2026-07-21):
   - Lexical containment is insufficient for merge evidence: a repo-local directory symlink can resolve outside the checkout and make a repo-relative verifier execute arbitrary external state.
   - Contract parsing now requires an existing directory whose physical `realpath` remains under the repository. The sync and async verifier runners independently recheck the same physical boundary immediately before spawning, closing a parse-to-spawn symlink swap.
