@@ -20,17 +20,24 @@ concurrency:
 jobs:
   ci:
     # Node 22 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.
-    # Ubuntu is the exhaustive authority. Windows runs a named portability
-    # contract over fleet durability, verification, merge authority, handoff,
-    # telemetry, and watchdog surfaces. POSIX-only semantics remain on Ubuntu.
+    # Ubuntu is the exhaustive authority, partitioned by Vitest's deterministic
+    # file sharding so the full suite has margin below the hermetic hard cap.
+    # Windows runs named portability contracts over fleet durability,
+    # verification, merge authority, handoff, telemetry, and watchdog surfaces.
     name: CI (Node 22, ${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            label: ubuntu
-            test_args: ""
+            label: ubuntu, authority 1/3
+            test_args: "--shard=1/3"
+          - os: ubuntu-latest
+            label: ubuntu, authority 2/3
+            test_args: "--shard=2/3"
+          - os: ubuntu-latest
+            label: ubuntu, authority 3/3
+            test_args: "--shard=3/3"
           - os: windows-latest
             label: windows, portability 1/3
             test_args: >-
@@ -146,10 +153,10 @@ jobs:
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.
-      # M83: ubuntu-only — the tarball-exports check is OS-independent, and the
-      # bash heredoc (mktemp/$PWD/.bin shims) is not worth porting to Windows.
+      # M83: run once on the first Ubuntu authority shard. The tarball-exports
+      # check is OS-independent, and the bash heredoc is not worth porting to Windows.
       - name: Pack smoke (exports map)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.label == 'ubuntu, authority 1/3'
         shell: bash
         run: |
           npm pack

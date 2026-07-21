@@ -1,5 +1,10 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+- Deterministic Ubuntu CI authority shards (2026-07-21):
+  - The exhaustive Ubuntu suite was active but could reach the hermetic 15-minute hard cap, leaving no scheduler margin. CI now runs Vitest's deterministic file shards 1/3, 2/3, and 3/3 in separate fresh hermetic homes.
+  - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
+  - M30 now asserts the three Ubuntu labels, exact shard arguments, and one-time pack-smoke selector, so a future workflow edit cannot silently collapse exhaustive authority back into one cap-bound job.
+
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
 - Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.
