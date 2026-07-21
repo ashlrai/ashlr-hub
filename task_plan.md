@@ -2619,6 +2619,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
 - [x] Define a default-off, parse-only remote-CAS configuration contract that rejects credentials, non-HTTPS, local/private endpoints, and unbounded/malformed identifiers without any network or activation path.
 - [x] Surface that contract through a read-only doctor diagnostic while keeping Fleet Status, readiness, and the recovery executor disabled.
+- [x] Define and test the metadata-only, canonical request shape a future remote CAS authority must bind to one exact V2 transaction, action, repository, and expected decimal epoch without sending or signing anything.
 - [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
