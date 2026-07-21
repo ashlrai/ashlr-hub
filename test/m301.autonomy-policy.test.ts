@@ -89,6 +89,11 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
       commandKinds: ['test', 'typecheck'],
       baseBranch: 'main',
       baseHead: 'a'.repeat(40),
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+      baseTreeOid: 'c'.repeat(40),
+      candidateTreeOid: 'd'.repeat(40),
+      authoritySnapshotDigest: 'e'.repeat(64),
       diffHash: TEST_DIFF_HASH,
       verifiedAt: '2026-07-01T00:01:00.000Z',
       source: 'auto-merge',
@@ -197,6 +202,23 @@ describe('M301 evaluateAutonomyPolicy', () => {
 
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toMatch(/protected remote PR handoff|local merge fallback/i);
+  });
+
+  it('keeps snapshotless legacy evidence observational but never authoritative', () => {
+    const pack = goodPack({
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      remoteProtection: liveRemoteProtection(),
+    });
+    delete pack.verification.verifierAuthoritySnapshotVersion;
+    delete pack.verification.verifierAuthorityObjectFormat;
+    delete pack.verification.baseTreeOid;
+    delete pack.verification.candidateTreeOid;
+    delete pack.verification.authoritySnapshotDigest;
+
+    const verdict = evaluateAutonomyPolicy(pack, cfg());
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/verifier authority snapshot/i);
   });
 
   it('refuses evidence-mode main merge without remote protection or command evidence', () => {

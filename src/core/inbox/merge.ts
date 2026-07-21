@@ -163,6 +163,12 @@ import {
   type VerifyCommand,
 } from '../run/verify-commands.js';
 import {
+  captureVerifierAuthoritySnapshot,
+  compareVerifierAuthorityCandidateTree,
+  compareVerifierAuthorityWorktree,
+  type VerifierAuthoritySnapshotV1,
+} from '../run/verifier-authority.js';
+import {
   isWebApp,
   verifyInBrowser,
   type BrowserVerifyResult,
@@ -173,6 +179,7 @@ import {
   persistAutonomyEvidencePack,
   readAutonomyEvidencePack,
   sealAutonomyEvidencePackV3,
+  verifierAuthorityBindingsMatch,
   verifyAutonomyEvidencePackV3,
   type AutonomyGateEvidence,
   type AutonomyRemoteProtectionEvidence,
@@ -1886,6 +1893,9 @@ export function evaluateEvidenceGate(
   if (!hasVerifiedDiffBinding(proposal)) {
     return refuse('evidence gate: verification diff binding is missing or stale — reverify required');
   }
+  if (!hasVerifierAuthorityBinding(proposal.verifyResult) || !liveVerifierAuthorityMatches(proposal)) {
+    return refuse('evidence gate: Git-tree verifier authority snapshot is missing or stale — reverify required');
+  }
 
   const diff = proposal.diff ?? '';
   const changedFiles = changedFilesFromDiff(diff);
@@ -1939,6 +1949,11 @@ export interface VerifyProposalResult {
   baseBranch?: string;
   /** Exact commit checked out before applying the proposal diff in verification. */
   baseHead?: string;
+  verifierAuthoritySnapshotVersion?: 1;
+  verifierAuthorityObjectFormat?: 'sha1' | 'sha256';
+  baseTreeOid?: string;
+  candidateTreeOid?: string;
+  authoritySnapshotDigest?: string;
 }
 
 export function verifyResultFromProposalResult(
@@ -1955,6 +1970,15 @@ export function verifyResultFromProposalResult(
     ...(result.browser ? { browser: result.browser } : {}),
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
+    ...(result.verifierAuthoritySnapshotVersion !== undefined
+      ? { verifierAuthoritySnapshotVersion: result.verifierAuthoritySnapshotVersion }
+      : {}),
+    ...(result.verifierAuthorityObjectFormat
+      ? { verifierAuthorityObjectFormat: result.verifierAuthorityObjectFormat }
+      : {}),
+    ...(result.baseTreeOid ? { baseTreeOid: result.baseTreeOid } : {}),
+    ...(result.candidateTreeOid ? { candidateTreeOid: result.candidateTreeOid } : {}),
+    ...(result.authoritySnapshotDigest ? { authoritySnapshotDigest: result.authoritySnapshotDigest } : {}),
     ...(diffHash ? { diffHash } : {}),
     verifiedAt,
     source,
@@ -1975,6 +1999,32 @@ function hasVerifiedBaseBinding(
 
 function currentProposalDiffHash(proposal: Proposal): string {
   return hashDiff(proposal.diff ?? '');
+}
+
+function hasVerifierAuthorityBinding(result: ProposalVerifyResult | VerifyProposalResult | undefined): boolean {
+  if (!result) return false;
+  const oidPattern = result.verifierAuthorityObjectFormat === 'sha1'
+    ? /^[0-9a-f]{40}$/
+    : result.verifierAuthorityObjectFormat === 'sha256'
+      ? /^[0-9a-f]{64}$/
+      : null;
+  return result.verifierAuthoritySnapshotVersion === 1 && oidPattern !== null &&
+    typeof result.baseTreeOid === 'string' && oidPattern.test(result.baseTreeOid) &&
+    typeof result.candidateTreeOid === 'string' && oidPattern.test(result.candidateTreeOid) &&
+    typeof result.authoritySnapshotDigest === 'string' && /^[0-9a-f]{64}$/.test(result.authoritySnapshotDigest);
+}
+
+function liveVerifierAuthorityMatches(proposal: Proposal): boolean {
+  const result = proposal.verifyResult;
+  if (!proposal.repo || !hasVerifierAuthorityBinding(result) || !result?.baseHead || !result.ran) return false;
+  const captured = captureVerifierAuthoritySnapshot({
+    repoRoot: proposal.repo,
+    baseRevision: result.baseHead,
+    mergeCommands: result.ran,
+  });
+  return captured.ok && captured.snapshot.objectFormat === result.verifierAuthorityObjectFormat &&
+    captured.snapshot.baseTreeOid === result.baseTreeOid &&
+    captured.snapshot.authoritySnapshotDigest === result.authoritySnapshotDigest;
 }
 
 function hasVerificationDiffBinding(
@@ -1998,7 +2048,8 @@ export function hasCurrentVerificationBinding(
 
   const base = defaultBranch(proposal.repo);
   return proposal.verifyResult.baseBranch === base &&
-    resolveDefaultBranchHead(proposal.repo, base) === proposal.verifyResult.baseHead;
+    resolveDefaultBranchHead(proposal.repo, base) === proposal.verifyResult.baseHead &&
+    liveVerifierAuthorityMatches(proposal);
 }
 
 function hasVerifiedDiffBinding(
@@ -2039,6 +2090,10 @@ function signedEvidenceMatchesMutationProposal(
     isDeepStrictEqual(pack.verification.commandKinds, commandKinds) &&
     pack.verification.baseBranch === verification.baseBranch &&
     pack.verification.baseHead === verification.baseHead &&
+    (verifierAuthorityBindingsMatch(pack.verification, verification) ||
+      (pack.trustBasis !== 'evidence' &&
+        pack.verification.authoritySnapshotDigest === undefined &&
+        verification.authoritySnapshotDigest === undefined)) &&
     pack.verification.diffHash === verification.diffHash &&
     pack.verification.verifiedAt === verification.verifiedAt &&
     pack.verification.source === verification.source &&
@@ -2096,6 +2151,15 @@ function verifyResultFromStored(result: ProposalVerifyResult): VerifyProposalRes
     ...(result.browser ? { browser: result.browser } : {}),
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
+    ...(result.verifierAuthoritySnapshotVersion !== undefined
+      ? { verifierAuthoritySnapshotVersion: result.verifierAuthoritySnapshotVersion }
+      : {}),
+    ...(result.verifierAuthorityObjectFormat
+      ? { verifierAuthorityObjectFormat: result.verifierAuthorityObjectFormat }
+      : {}),
+    ...(result.baseTreeOid ? { baseTreeOid: result.baseTreeOid } : {}),
+    ...(result.candidateTreeOid ? { candidateTreeOid: result.candidateTreeOid } : {}),
+    ...(result.authoritySnapshotDigest ? { authoritySnapshotDigest: result.authoritySnapshotDigest } : {}),
   };
 }
 
@@ -2203,6 +2267,8 @@ export async function verifyProposal(
 
   let patchFile: string | null = null;
   const ran: VerifyCommand[] = [];
+  let authoritySnapshot: VerifierAuthoritySnapshotV1 | undefined;
+  let candidateTreeOid: string | undefined;
   try {
     // ── H1a: detect verify commands from the BASE tree BEFORE applying the ─────
     // diff, so the diff CANNOT rewrite which commands run (e.g. a diff that sets
@@ -2233,6 +2299,38 @@ export async function verifyProposal(
       };
     }
 
+    const capturedAuthority = captureVerifierAuthoritySnapshot({
+      repoRoot: tmpDir,
+      baseRevision: baseHead,
+      mergeCommands: commands,
+    });
+    if (capturedAuthority.ok) {
+      authoritySnapshot = capturedAuthority.snapshot;
+    } else if (configuredTrustBasis(cfg) === 'evidence') {
+      return {
+        ok: false,
+        ran: [],
+        detail: `verifier authority snapshot unavailable: ${capturedAuthority.reason}`,
+        baseBranch: base,
+        baseHead,
+      };
+    }
+    const authorityDrift = (): string | null => {
+      if (!authoritySnapshot) return null;
+      const comparison = compareVerifierAuthorityWorktree({ repoRoot: tmpDir, snapshot: authoritySnapshot });
+      return comparison.ok ? null : comparison.reason;
+    };
+    const baseAuthorityDrift = authorityDrift();
+    if (baseAuthorityDrift) {
+      return {
+        ok: false,
+        ran: [],
+        detail: `base verifier authority changed before execution: ${baseAuthorityDrift}`,
+        baseBranch: base,
+        baseHead,
+      };
+    }
+
     // M281: For test commands, record the BASELINE result BEFORE applying
     // the patch (worktree is still on the clean default-branch HEAD at this point).
     // Typecheck is NOT delta-aware — it must be clean in the patched tree.
@@ -2245,6 +2343,16 @@ export async function verifyProposal(
       // lint and tolerate pre-existing failures (block only a clean→failing regression).
       if (vc.id === undefined && vc.required === undefined && (vc.kind === 'test' || vc.kind === 'lint')) {
         const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg);
+        const baselineAuthorityDrift = authorityDrift();
+        if (baselineAuthorityDrift) {
+          return {
+            ok: false,
+            ran: [],
+            detail: `baseline command changed verifier authority: ${baselineAuthorityDrift}`,
+            baseBranch: base,
+            baseHead,
+          };
+        }
         if (!baseRes.timedOut) {
           const key = verifyCommandIdentity(vc);
           baselineResults.set(key, {
@@ -2271,9 +2379,62 @@ export async function verifyProposal(
       };
     }
 
+    candidateTreeOid = gitRun(tmpDir, ['write-tree']);
+    let authorityEvidence: Pick<VerifyProposalResult,
+      | 'verifierAuthoritySnapshotVersion'
+      | 'verifierAuthorityObjectFormat'
+      | 'baseTreeOid'
+      | 'candidateTreeOid'
+      | 'authoritySnapshotDigest'> = {};
+    if (authoritySnapshot) {
+      const candidateAuthority = compareVerifierAuthorityCandidateTree({
+        repoRoot: tmpDir,
+        candidateRevision: candidateTreeOid,
+        snapshot: authoritySnapshot,
+      });
+      if (!candidateAuthority.ok) {
+        return {
+          ok: false,
+          ran: [],
+          detail: `candidate changed verifier authority: ${candidateAuthority.reason}`,
+          baseBranch: base,
+          baseHead,
+        };
+      }
+      authorityEvidence = {
+        verifierAuthoritySnapshotVersion: 1,
+        verifierAuthorityObjectFormat: authoritySnapshot.objectFormat,
+        baseTreeOid: authoritySnapshot.baseTreeOid,
+        candidateTreeOid,
+        authoritySnapshotDigest: authoritySnapshot.authoritySnapshotDigest,
+      };
+      const candidateAuthorityDrift = authorityDrift();
+      if (candidateAuthorityDrift) {
+        return {
+          ok: false,
+          ran: [],
+          detail: `candidate verifier authority differs before execution: ${candidateAuthorityDrift}`,
+          baseBranch: base,
+          baseHead,
+          ...authorityEvidence,
+        };
+      }
+    }
+
     for (const vc of commands) {
       ran.push(vc);
       const res = await runVerifyCommandAsync(vc, tmpDir, cfg);
+      const commandAuthorityDrift = authorityDrift();
+      if (commandAuthorityDrift) {
+        return {
+          ok: false,
+          ran,
+          detail: `verify '${vc.kind}' changed verifier authority: ${commandAuthorityDrift}`,
+          baseBranch: base,
+          baseHead,
+          ...authorityEvidence,
+        };
+      }
 
       if (!res.ok) {
         if (vc.required === false) continue;
@@ -2284,6 +2445,7 @@ export async function verifyProposal(
             detail: `required verify '${vc.kind}' failed (exit ${res.exitCode}): ${res.command}`,
             baseBranch: base,
             baseHead,
+            ...authorityEvidence,
           };
         }
         // M281: for test commands, only block if NEW failures were introduced.
@@ -2309,6 +2471,7 @@ export async function verifyProposal(
                 detail: `verify 'test' failed — ${newFailures.size} new failure(s) introduced: ${listed}`,
                 baseBranch: base,
                 baseHead,
+                ...authorityEvidence,
               };
             } else {
               // No parseable IDs — fall back to ok-flag delta
@@ -2320,6 +2483,7 @@ export async function verifyProposal(
                   detail: `verify 'test' failed — regression detected (suite was passing before change)`,
                   baseBranch: base,
                   baseHead,
+                  ...authorityEvidence,
                 };
               }
               return {
@@ -2328,6 +2492,7 @@ export async function verifyProposal(
                 detail: `verify 'test' failed and non-regression could not be proven from opaque baseline output`,
                 baseBranch: base,
                 baseHead,
+                ...authorityEvidence,
               };
             }
           }
@@ -2346,6 +2511,7 @@ export async function verifyProposal(
                 detail: `verify 'lint' failed — change introduced lint errors (lint was clean before)`,
                 baseBranch: base,
                 baseHead,
+                ...authorityEvidence,
               };
             }
             // Lint already failing on base (pre-existing debt) — tolerate and continue.
@@ -2359,11 +2525,24 @@ export async function verifyProposal(
           detail: `verify '${vc.kind}' failed (exit ${res.exitCode}): ${res.command}`,
           baseBranch: base,
           baseHead,
+          ...authorityEvidence,
         };
       }
     }
 
     const browser = await verifyProposalInBrowser(tmpDir, cfg);
+    const browserAuthorityDrift = authorityDrift();
+    if (browserAuthorityDrift) {
+      return {
+        ok: false,
+        ran,
+        detail: `browser verification changed verifier authority: ${browserAuthorityDrift}`,
+        ...(browser ? { browser } : {}),
+        baseBranch: base,
+        baseHead,
+        ...authorityEvidence,
+      };
+    }
     if (browser && !browser.ok) {
       return {
         ok: false,
@@ -2372,6 +2551,7 @@ export async function verifyProposal(
         browser,
         baseBranch: base,
         baseHead,
+        ...authorityEvidence,
       };
     }
 
@@ -2382,6 +2562,7 @@ export async function verifyProposal(
       ...(browser ? { browser } : {}),
       baseBranch: base,
       baseHead,
+      ...authorityEvidence,
     };
   } catch (err) {
     return {
@@ -2949,6 +3130,11 @@ export async function autoMergeProposal(
           currentVerify.diffHash !== expectedVerify.diffHash ||
           currentVerify.baseBranch !== expectedVerify.baseBranch ||
           currentVerify.baseHead !== expectedVerify.baseHead ||
+          currentVerify.verifierAuthoritySnapshotVersion !== expectedVerify.verifierAuthoritySnapshotVersion ||
+          currentVerify.verifierAuthorityObjectFormat !== expectedVerify.verifierAuthorityObjectFormat ||
+          currentVerify.baseTreeOid !== expectedVerify.baseTreeOid ||
+          currentVerify.candidateTreeOid !== expectedVerify.candidateTreeOid ||
+          currentVerify.authoritySnapshotDigest !== expectedVerify.authoritySnapshotDigest ||
           currentVerify.verifiedAt !== expectedVerify.verifiedAt ||
           currentVerify.source !== expectedVerify.source
         ) return 'proposal verification binding changed during merge evaluation';
@@ -3642,6 +3828,15 @@ export async function autoMergeProposal(
         commandKinds: verify.ran.map((cmd) => cmd.kind),
         ...(verify.baseBranch ? { baseBranch: verify.baseBranch } : {}),
         ...(verify.baseHead ? { baseHead: verify.baseHead } : {}),
+        ...(verify.verifierAuthoritySnapshotVersion !== undefined
+          ? { verifierAuthoritySnapshotVersion: verify.verifierAuthoritySnapshotVersion }
+          : {}),
+        ...(verify.verifierAuthorityObjectFormat
+          ? { verifierAuthorityObjectFormat: verify.verifierAuthorityObjectFormat }
+          : {}),
+        ...(verify.baseTreeOid ? { baseTreeOid: verify.baseTreeOid } : {}),
+        ...(verify.candidateTreeOid ? { candidateTreeOid: verify.candidateTreeOid } : {}),
+        ...(verify.authoritySnapshotDigest ? { authoritySnapshotDigest: verify.authoritySnapshotDigest } : {}),
         ...(proposal.verifyResult?.diffHash ? { diffHash: proposal.verifyResult.diffHash } : {}),
         ...(proposal.verifyResult?.verifiedAt ? { verifiedAt: proposal.verifyResult.verifiedAt } : {}),
         ...(proposal.verifyResult?.source ? { source: proposal.verifyResult.source } : {}),
@@ -3822,6 +4017,14 @@ export async function autoMergeProposal(
       });
       return refuse(reason, repo);
     };
+    const verifiedCandidateTree = persistedEvidence.verification.candidateTreeOid;
+    const stagedTree = verifiedCandidateTree
+      ? gitTry(repo, ['rev-parse', '--verify', `${stagedHead}^{tree}`])
+      : null;
+    if ((trustBasis === 'evidence' && !verifiedCandidateTree) ||
+      (verifiedCandidateTree && (!stagedTree || stagedTree !== verifiedCandidateTree))) {
+      return refuseStaged('staged merge tree does not match the candidate tree that passed verification');
+    }
 
     let merged = false;
     let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)

@@ -208,7 +208,10 @@ function activeV3EvidenceMatches(proposal: Proposal): boolean {
       ) &&
       pack.verification.baseBranch === verification.baseBranch &&
       pack.verification.baseHead === verification.baseHead &&
-      verifierAuthorityBindingsMatch(pack.verification, verification) &&
+      (verifierAuthorityBindingsMatch(pack.verification, verification) ||
+        (pack.trustBasis !== 'evidence' &&
+          pack.verification.authoritySnapshotDigest === undefined &&
+          verification.authoritySnapshotDigest === undefined)) &&
       pack.verification.diffHash === verification.diffHash &&
       pack.verification.verifiedAt === verification.verifiedAt &&
       pack.verification.source === verification.source &&

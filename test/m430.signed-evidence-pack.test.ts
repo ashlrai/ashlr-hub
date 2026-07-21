@@ -535,7 +535,9 @@ describe('M430 v3 tamper and schema rejection', () => {
 
     observational.trustBasis = 'evidence';
     observational.evidenceOutcome!.trustBasis = 'evidence';
-    expect(sealAutonomyEvidencePackV3(observational)).toBeNull();
+    const legacySigned = sealAutonomyEvidencePackV3(observational);
+    expect(legacySigned).not.toBeNull();
+    expect(legacySigned && verifyAutonomyEvidencePackV3(legacySigned).ok).toBe(true);
   });
 
   it('derives the signed builder diff hash and refuses stored hash disagreement', () => {

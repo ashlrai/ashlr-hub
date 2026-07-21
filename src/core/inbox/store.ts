@@ -282,6 +282,32 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
       }
     }
 
+    const authorityOidPattern = verify.verifierAuthorityObjectFormat === 'sha1'
+      ? /^[0-9a-f]{40}$/
+      : verify.verifierAuthorityObjectFormat === 'sha256'
+        ? /^[0-9a-f]{64}$/
+        : null;
+    const authoritySnapshotValid =
+      verify.verifierAuthoritySnapshotVersion === 1 &&
+      authorityOidPattern !== null &&
+      typeof verify.baseTreeOid === 'string' && authorityOidPattern.test(verify.baseTreeOid) &&
+      typeof verify.candidateTreeOid === 'string' && authorityOidPattern.test(verify.candidateTreeOid) &&
+      typeof verify.authoritySnapshotDigest === 'string' && /^[0-9a-f]{64}$/.test(verify.authoritySnapshotDigest);
+    if (!authoritySnapshotValid && (
+      verify.verifierAuthoritySnapshotVersion !== undefined ||
+      verify.verifierAuthorityObjectFormat !== undefined ||
+      verify.baseTreeOid !== undefined ||
+      verify.candidateTreeOid !== undefined ||
+      verify.authoritySnapshotDigest !== undefined
+    )) {
+      const sanitized = ensureVerify();
+      delete sanitized.verifierAuthoritySnapshotVersion;
+      delete sanitized.verifierAuthorityObjectFormat;
+      delete sanitized.baseTreeOid;
+      delete sanitized.candidateTreeOid;
+      delete sanitized.authoritySnapshotDigest;
+    }
+
     if (updatedVerify !== verify) {
       next.verifyResult = updatedVerify;
       changed = true;

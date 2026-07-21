@@ -821,7 +821,6 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
         (record['target'] === 'preview' && p['tier'] === 'T5' && p['action'] === 'deploy-preview');
       if (!allowedTuple || verification['passed'] !== true ||
         Object.values(gates).some((gate) => (gate as JsonRecord)['ok'] !== true)) return false;
-      if (record['trustBasis'] === 'evidence' && verifierAuthorityState !== 'complete') return false;
     }
   }
 
@@ -875,7 +874,7 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
         !requiredGates.every((key) => (gates[key] as JsonRecord)['ok'] === true)) return false;
       if (record['trustBasis'] === 'evidence') {
         const remote = jsonRecord(gates['remoteProtection']);
-        if (verifierAuthorityState !== 'complete' || record['remotePreferred'] !== true || !remote ||
+        if (record['remotePreferred'] !== true || !remote ||
           remote['branch'] !== verification['baseBranch'] ||
           remote['baseHead'] !== verification['baseHead'] ||
           verification['source'] === 'manual' ||

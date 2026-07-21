@@ -80,6 +80,26 @@ function hasVerificationFreshnessMetadata(pack: AutonomyEvidencePack): boolean {
   );
 }
 
+function hasVerifierAuthoritySnapshot(pack: AutonomyEvidencePack): boolean {
+  const verification = pack.verification;
+  const oidLength = verification.verifierAuthorityObjectFormat === 'sha1'
+    ? 40
+    : verification.verifierAuthorityObjectFormat === 'sha256'
+      ? 64
+      : 0;
+  const oidPattern = oidLength === 40 ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
+  return (
+    verification.verifierAuthoritySnapshotVersion === 1 &&
+    oidLength > 0 &&
+    typeof verification.baseTreeOid === 'string' &&
+    oidPattern.test(verification.baseTreeOid) &&
+    typeof verification.candidateTreeOid === 'string' &&
+    oidPattern.test(verification.candidateTreeOid) &&
+    typeof verification.authoritySnapshotDigest === 'string' &&
+    /^[0-9a-f]{64}$/.test(verification.authoritySnapshotDigest)
+  );
+}
+
 export function evaluateAutonomyPolicy(
   pack: AutonomyEvidencePack,
   cfg: AshlrConfig,
@@ -119,8 +139,10 @@ export function evaluateAutonomyPolicy(
   if (RISK_ORDER[pack.riskClass] > RISK_ORDER[maxRisk(cfg)]) {
     return refuse(`risk '${pack.riskClass}' exceeds configured maxRisk '${maxRisk(cfg)}'`);
   }
-
   if (pack.target === 'branch') {
+    if (pack.trustBasis === 'evidence' && !hasVerifierAuthoritySnapshot(pack)) {
+      return refuse('evidence authority requires a complete Git-tree verifier authority snapshot');
+    }
     return pack.remotePreferred
       ? allow('T3', 'open-ready-pr', 'branch-target evidence passed; open a ready PR for host review')
       : allow('T2', 'apply-local-branch', 'branch-target evidence passed; stage a local review branch');
@@ -149,6 +171,9 @@ export function evaluateAutonomyPolicy(
       }
       if (!hasVerificationFreshnessMetadata(pack)) {
         return refuse('evidence main merge requires verification freshness metadata');
+      }
+      if (!hasVerifierAuthoritySnapshot(pack)) {
+        return refuse('evidence authority requires a complete Git-tree verifier authority snapshot');
       }
     }
     return allow(
