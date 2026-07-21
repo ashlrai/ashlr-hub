@@ -95,8 +95,9 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
   readDecisionsDetailed: (...args: unknown[]) => mockReadDecisionsDetailed(...args),
   recordDecision: (...args: unknown[]) => {
-    mockRecordDecision(...args);
-    recordedDecisions.push(args[0] as Record<string, unknown>);
+    const persisted = mockRecordDecision(...args);
+    if (persisted) recordedDecisions.push(args[0] as Record<string, unknown>);
+    return persisted;
   },
 }));
 
@@ -263,7 +264,7 @@ beforeEach(() => {
     model: 'claude-opus-4-8',
     complete: async (_s: string, _u: string) => '{"verdict":"review","value":3,"correctness":3,"scope":3,"alignment":3,"rationale":"mock"}',
   });
-  mockRecordDecision.mockReturnValue(undefined);
+  mockRecordDecision.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -305,6 +306,60 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     expect(r.merged).toBe(true);
     expect(git(tmpRepo, ['rev-parse', 'main'])).not.toBe(mainBefore);
     expect(loadProposal(p.id)!.status).toBe('applied');
+  });
+
+  it('[1a] inline ship fails closed when durable judge decision persistence fails', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(docsDiff('docs/decision-write-failure.md'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+    mockRecordDecision.mockReturnValueOnce(false);
+
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(result.reason).toMatch(/durable judge decision persistence failed/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('[1b] inline judge persists actual responder and measured receipt totals', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(docsDiff('docs/inline-receipts.md'));
+    const receipts: Array<Record<string, unknown>> = [];
+    mockResolveFrontierJudgeClient.mockReturnValueOnce({
+      model: 'claude-opus-4-5',
+      complete: async () => '{}',
+      stats: { receipts },
+    });
+    mockJudgeProposal.mockImplementationOnce(async () => {
+      receipts.push(
+        { model: 'claude-opus-4-5', durationMs: 10, metering: 'unmetered' },
+        { model: 'claude-opus-4-5', durationMs: 20, metering: 'measured', costUsd: 0.03, tokensIn: 120, tokensOut: 40 },
+      );
+      return shipVerdict(p.id);
+    });
+
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(true);
+    expect(recordedDecisions.find((entry) => entry['action'] === 'judged')).toMatchObject({
+      engine: 'claude-opus-4-5',
+      model: 'claude-opus-4-5',
+      durationMs: 30,
+      costUsd: 0.03,
+      tokensIn: 120,
+      tokensOut: 40,
+    });
   });
 
   it('[2] ship verdict resolved from ledger cache — judge NOT called inline → merges', async () => {

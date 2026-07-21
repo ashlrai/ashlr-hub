@@ -238,10 +238,21 @@ export function recordDecision(entry: DecisionEntry): boolean {
     if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return false;
     const dir = decisionsDir();
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      // The leaf directory entry itself must survive a crash before a later
-      // decision write can claim durable authority.
-      fsyncDirectory(dirname(dir));
+      const firstCreated = mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (firstCreated) {
+        // Persist the leaf entry and every newly-created ancestor entry through
+        // the first pre-existing parent. Without this, a first-use nested
+        // ASHLR_HOME can lose the whole ledger tree after reporting success.
+        const firstExistingParent = dirname(firstCreated);
+        let current = dirname(dir);
+        while (true) {
+          fsyncDirectory(current);
+          if (current === firstExistingParent) break;
+          const parent = dirname(current);
+          if (parent === current) throw new Error('decisions ledger creation escaped filesystem root');
+          current = parent;
+        }
+      }
     }
 
     const line = JSON.stringify(record) + '\n';
