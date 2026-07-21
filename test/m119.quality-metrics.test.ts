@@ -542,6 +542,26 @@ describe('m119 decisions-ledger', () => {
     expect(entries[0]!.reason).toBe('looks good');
   });
 
+  it.skipIf(process.platform !== 'win32')(
+    'reports the exact metadata-only durability failure when a native Windows write is rejected',
+    async () => {
+      const { recordDecision, _getLatestDecisionWriteFailureForTest } =
+        await import('../src/core/fleet/decisions-ledger.js');
+      const written = recordDecision({
+        ts: new Date().toISOString(),
+        proposalId: 'prop-windows-durability-diagnostic',
+        action: 'proposed',
+      });
+      if (!written) {
+        const failure = _getLatestDecisionWriteFailureForTest();
+        throw new Error(
+          `native Windows decision write failed: code=${failure?.code ?? 'unknown'} ` +
+          `syscall=${failure?.syscall ?? 'unknown'}`,
+        );
+      }
+    },
+  );
+
   it('omits invalid caller accounting and degrades hostile raw accounting rows', async () => {
     const { decisionsDir, recordDecision, readDecisions, readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
     const ts = new Date().toISOString();

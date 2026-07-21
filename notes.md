@@ -2955,3 +2955,7 @@
 - Native Windows directory durability probe (2026-07-21):
   - Ledger writes continue to fail closed while the hosted-Windows failure is unresolved. A Windows-only real-filesystem M373 probe now calls `fsyncDirectory()` directly and includes the native error code, syscall, and path if it fails.
   - This probe is diagnostic only. It does not broaden tolerated errors, alter file durability, or convert a failed decision append into authority.
+
+- Native Windows decision-write probe (2026-07-21):
+  - A metadata-only test hook now records only the code and syscall of a swallowed decision-ledger write failure. A Windows-only M119 probe fails with those fields when a native durable write returns false.
+  - The production API remains never-throw and fail-closed. No error messages, paths, ledger contents, prompts, or credentials are persisted or exposed; this is a bounded diagnostic to identify the precise compatibility boundary before changing it.
