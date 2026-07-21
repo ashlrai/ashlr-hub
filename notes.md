@@ -2886,7 +2886,6 @@
   - Sampling now preserves the first and last events plus latest lifecycle-stage representatives within the existing eight-event cap, and reports `eventState: complete|sampled` so downstream consumers do not mistake a bounded trace for a full record.
   - The trace remains metadata-only and observation-only: no raw identities, prompts, diffs, reasoning, outputs, paths, or authority changes were introduced.
   - Verification: 39 focused and 180 Fleet/dashboard integration assertions, typecheck, build, and zero-error lint. An initial full run had setup/load-only failures; after building and isolation the affected files passed 143 assertions with 4 intentional skips.
-
 - Agent-action run-summary identity integrity (2026-07-21):
   - Agent-action carriers and their nested `runEventSummary` are now required to agree whenever both supply a run id. A writer drops a conflicting nested summary while retaining the otherwise valid metadata-only carrier; a contradictory persisted row degrades the source and is withheld by complete reads.
   - This prevents a single row from joining `run:A` trajectory metadata to `run:B` outcome metadata. The invariant is observation-only and introduces no routing, verification, merge, or learning-credit authority.
@@ -2924,3 +2923,8 @@
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Decision ledger accounting durability (2026-07-21):
+  - `recordDecision` now returns a durable append result while preserving its never-throw caller contract. The append fsyncs the exact private file and parent directory before reporting success, allowing merge-capable callers to refuse authority when decision persistence fails.
+  - Accounting telemetry is strict: cost must be finite and non-negative; token and duration fields must be non-negative safe integers. Invalid caller values are omitted, while hostile raw ledger rows degrade complete source reads rather than reducing recorded spend.
+  - Focused M119 ledger coverage passes 41 assertions with typecheck and diff integrity. Receipt aggregation, actual-responder attribution, and daemon charge propagation remain separate pending slices.
