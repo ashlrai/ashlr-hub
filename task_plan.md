@@ -218,7 +218,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Recover missing roots, fsynced orphan rows, torn tails, and partial genesis writes without releasing unauthenticated data.
 - [x] Keep checkpoint evidence observation-only and statically unwired from population, routing, readiness, merge, daemon, and policy authority.
 - [x] Cover maximum valid captures, replay, tamper, wrong keys, unstable providers, permissions, and crash recovery with focused tests.
-- [ ] Add authenticated rotation/retention and an external monotonic anchor before treating the bounded ledger as rollback-resistant historical authority.
+- [x] Add authenticated one-generation rotation/retention; an external monotonic anchor remains required before treating the ledger as rollback-resistant historical authority.
 - [x] Project checkpoint freshness into a separate observation-only FleetStatus surface after role-based forensic exclusion is implemented.
 - [x] Commit, push, observe CI, reload production, and record unchanged cutoff/population/merge authority.
 
