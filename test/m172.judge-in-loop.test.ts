@@ -117,7 +117,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 }));
 
 const mockReadDecisions = vi.fn(() => []);
-const mockRecordDecision = vi.fn();
+const mockRecordDecision = vi.fn(() => true);
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
   recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
@@ -280,10 +280,14 @@ describe('M172 judge-then-merge — basic flow', () => {
 
     expect(mockJudgeProposal).toHaveBeenCalledOnce();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockRecordDecision).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: 'j1b',
       action: 'judged',
       verdict: 'ship',
     }));
+    const persistedVerdict = mockRecordDecision.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(persistedVerdict['judgeAttestation']).toBeUndefined();
+    expect(persistedVerdict['judgeAttestationIntent']).toBeUndefined();
     expect(r.judged).toBe(1);
     expect(r.attempted).toBe(0);
   });

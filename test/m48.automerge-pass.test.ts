@@ -115,7 +115,7 @@ vi.mock('../src/core/fleet/manager.js', () => ({
 }));
 
 const mockReadDecisions = vi.fn(() => []);
-const mockRecordDecision = vi.fn();
+const mockRecordDecision = vi.fn(() => true);
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
   recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
@@ -245,6 +245,7 @@ beforeEach(() => {
   pendingProposals = [];
 
   mockReadDecisions.mockReturnValue([]);
+  mockRecordDecision.mockReturnValue(true);
   mockListProposalsDetailed.mockImplementation(() => proposalRead(pendingProposals));
   mockReplayRealizedMergeFanout.mockReturnValue(true);
   mockSetStatus.mockReturnValue(true);
@@ -1198,6 +1199,58 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
     expect(typeof judgedCall?.[0]?.judgeAttestation).toBe('string');
     expect(judgedCall?.[0]?.judgeAttestation).toHaveLength(64);
     expect(mockReadDecisions).toHaveBeenCalledWith(expect.objectContaining({ requireComplete: true }));
+  });
+
+  it('records the actual responder and aggregates only measured judge receipts', async () => {
+    pendingProposals = [makeProposal('receipt-attribution', {
+      engineTier: 'frontier',
+      engineModel: 'claude:claude-sonnet-4-5',
+    })];
+    const client = {
+      model: 'claude-fable-5',
+      complete: async () => '',
+      stats: { receipts: [] as Array<{
+        model: string;
+        durationMs: number;
+        metering: 'measured' | 'unmetered';
+        costUsd?: number;
+        tokensIn?: number;
+        tokensOut?: number;
+      }> },
+    };
+    mockResolveFrontierJudgeClient.mockReturnValue(client);
+    mockJudgeProposal.mockImplementation(async (_proposal: unknown, _cfg: unknown, activeClient: typeof client) => {
+      activeClient.stats.receipts.push(
+        { model: 'claude-fable-5', durationMs: 10, metering: 'unmetered' },
+        { model: 'gpt-5.5', durationMs: 20, metering: 'measured', costUsd: 0.03, tokensIn: 120, tokensOut: 40 },
+      );
+      activeClient.stats.model = 'gpt-5.5';
+      return {
+        proposalId: 'receipt-attribution',
+        verdict: 'review',
+        value: 3,
+        correctness: 3,
+        scope: 2,
+        alignment: 3,
+        rationale: 'metadata-only test',
+        wouldMerge: false,
+      };
+    });
+
+    const out = await runAutoMergePass(managerGateCfg());
+
+    expect(out).toMatchObject({ judged: 1, judgeMeasuredSpendUsd: 0.03, judgeUnmeteredCalls: 1 });
+    expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: 'receipt-attribution',
+      engine: 'gpt-5.5',
+      model: 'gpt-5.5',
+      verdict: 'review',
+      durationMs: 30,
+      costUsd: 0.03,
+      tokensIn: 120,
+      tokensOut: 40,
+    }));
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 
   it('stops judge and merge progression when the decisions source is degraded', async () => {

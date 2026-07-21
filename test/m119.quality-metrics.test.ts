@@ -501,6 +501,47 @@ describe('m119 computeQualityMetrics', () => {
 // ---------------------------------------------------------------------------
 
 describe('m119 decisions-ledger', () => {
+  it('persists the newly-created decision leaf through its first existing parent', async () => {
+    const { _fsyncCreatedDecisionDirectoryChainForTest } =
+      await import('../src/core/fleet/decisions-ledger.js');
+    const root = path.join(tmpHome, 'nested-home');
+    const created = path.join(root, '.ashlr');
+    const dir = path.join(created, 'decisions');
+    fs.mkdirSync(root);
+    const existing = fs.lstatSync(root, { bigint: true });
+    const synced: string[] = [];
+
+    _fsyncCreatedDecisionDirectoryChainForTest(
+      dir,
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+      (candidate) => synced.push(candidate),
+    );
+
+    expect(synced).toEqual([dir, created, root]);
+  });
+
+  it('passes the captured existing-parent identity only at the durability boundary', async () => {
+    const { _fsyncCreatedDecisionDirectoryChainForTest } =
+      await import('../src/core/fleet/decisions-ledger.js');
+    const root = path.join(tmpHome, 'identity-home');
+    const dir = path.join(root, '.ashlr', 'decisions');
+    fs.mkdirSync(root);
+    const existing = fs.lstatSync(root, { bigint: true });
+    const synced: Array<{ path: string; identity?: { dev: bigint; ino: bigint } }> = [];
+
+    _fsyncCreatedDecisionDirectoryChainForTest(
+      dir,
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+      (candidate, identity) => synced.push({ path: candidate, identity }),
+    );
+
+    expect(synced).toEqual([
+      { path: dir, identity: undefined },
+      { path: path.dirname(dir), identity: undefined },
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+    ]);
+  });
+
   it('keeps identity checks while tolerating Windows-emulated POSIX modes', async () => {
     const {
       isSafeDecisionAuthorityDirectory,
@@ -524,7 +565,7 @@ describe('m119 decisions-ledger', () => {
   it('recordDecision + readDecisions round-trips a basic entry', async () => {
     const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
 
-    recordDecision({
+    expect(recordDecision({
       ts: new Date().toISOString(),
       proposalId: 'prop-test-001',
       action: 'merged',
@@ -532,7 +573,7 @@ describe('m119 decisions-ledger', () => {
       model: 'codex:gpt-5.5',
       verdict: 'approved',
       reason: 'looks good',
-    });
+    })).toBe(true);
 
     const entries = readDecisions();
     expect(entries.length).toBe(1);
@@ -540,6 +581,68 @@ describe('m119 decisions-ledger', () => {
     expect(entries[0]!.action).toBe('merged');
     expect(entries[0]!.engine).toBe('codex');
     expect(entries[0]!.reason).toBe('looks good');
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'reports the exact metadata-only durability failure when a native Windows write is rejected',
+    async () => {
+      const { recordDecision, _getLatestDecisionWriteFailureForTest } =
+        await import('../src/core/fleet/decisions-ledger.js');
+      const written = recordDecision({
+        ts: new Date().toISOString(),
+        proposalId: 'prop-windows-durability-diagnostic',
+        action: 'proposed',
+      });
+      if (!written) {
+        const failure = _getLatestDecisionWriteFailureForTest();
+        throw new Error(
+          `native Windows decision write failed: stage=${failure?.stage ?? 'unknown'} ` +
+          `operation=${failure?.operation ?? 'unknown'} ` +
+          `code=${failure?.code ?? 'unknown'} ` +
+          `syscall=${failure?.syscall ?? 'unknown'}`,
+        );
+      }
+    },
+  );
+
+  it('omits invalid caller accounting and degrades hostile raw accounting rows', async () => {
+    const { decisionsDir, recordDecision, readDecisions, readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = new Date().toISOString();
+    expect(recordDecision({
+      ts,
+      proposalId: 'prop-invalid-accounting-write',
+      action: 'judged',
+      verdict: 'review',
+      costUsd: -1,
+      tokensIn: 1.5,
+      tokensOut: -2,
+      durationMs: -10,
+    })).toBe(true);
+    expect(readDecisions({ proposalId: 'prop-invalid-accounting-write' })[0]).toEqual(expect.not.objectContaining({
+      costUsd: expect.anything(),
+      tokensIn: expect.anything(),
+      tokensOut: expect.anything(),
+      durationMs: expect.anything(),
+    }));
+
+    fs.mkdirSync(decisionsDir(), { recursive: true });
+    fs.writeFileSync(path.join(decisionsDir(), `${ts.slice(0, 10)}.jsonl`), `${JSON.stringify({
+      ts,
+      proposalId: 'prop-hostile-accounting',
+      action: 'judged',
+      verdict: 'review',
+      judgeDecisionMetadataVersion: 2,
+      judgeReasonCode: 'judge-review',
+      judgeRationaleState: 'not-persisted',
+      costUsd: -1,
+    })}\n`, { flag: 'a' });
+
+    expect(readDecisionsDetailed({ proposalId: 'prop-hostile-accounting' })).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      decisions: [],
+    });
   });
 
   it('generic decision writes reject exact and padded reserved release labels', async () => {

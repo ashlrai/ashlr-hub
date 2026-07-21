@@ -11,11 +11,12 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fsyncSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -23,7 +24,9 @@ import {
   opendirSync,
   readSync,
   writeSync,
+  type BigIntStats,
 } from 'node:fs';
+import { fsyncDirectory } from '../util/durability.js';
 import type { DecisionEntry } from '../types.js';
 import { normalizeDecisionLearningFields } from '../learning/causal.js';
 import {
@@ -48,6 +51,51 @@ import {
 /** Absolute path to the decisions directory: ~/.ashlr/decisions. */
 export function decisionsDir(): string {
   return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'decisions');
+}
+
+interface DecisionDirectoryCreationBoundary {
+  path: string;
+  identity: { dev: bigint; ino: bigint };
+}
+
+function captureDecisionDirectoryCreationBoundary(
+  dir: string,
+  inspect: (path: string) => BigIntStats = (path) => lstatSync(path, { bigint: true }),
+): DecisionDirectoryCreationBoundary {
+  let current = dir;
+  while (true) {
+    try {
+      const existing = inspect(current);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        throw new Error(`decisions ledger ancestor is not a named directory: ${current}`);
+      }
+      return { path: current, identity: { dev: existing.dev, ino: existing.ino } };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) throw new Error('decisions ledger has no existing filesystem root');
+    current = parent;
+  }
+}
+
+/** Persist each newly-created authority directory and its identity-bound existing parent. */
+export function _fsyncCreatedDecisionDirectoryChainForTest(
+  dir: string,
+  boundary: DecisionDirectoryCreationBoundary,
+  syncDirectory: (
+    path: string,
+    expectedIdentity?: DecisionDirectoryCreationBoundary['identity'],
+  ) => void = (path, expectedIdentity) => fsyncDirectory(path, { expectedIdentity }),
+): void {
+  let current = dir;
+  while (true) {
+    syncDirectory(current, current === boundary.path ? boundary.identity : undefined);
+    if (current === boundary.path) return;
+    const parent = dirname(current);
+    if (parent === current) throw new Error('decisions ledger creation escaped filesystem root');
+    current = parent;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +128,31 @@ const HARD_READ_MAX_ROWS = 1_000_000;
 const MAX_READ_ROW_BYTES = 128 * 1024;
 const MAX_DIRECTORY_ENTRIES = 2_048;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+
+interface DecisionWriteFailureForTest {
+  stage: 'sanitize' | 'ensure-directory' | 'create-directory-durability' | 'append';
+  operation?:
+    | 'inspect-path'
+    | 'open'
+    | 'inspect-opened'
+    | 'read-tail'
+    | 'write'
+    | 'file-fsync'
+    | 'inspect-path-after'
+    | 'directory-fsync'
+    | 'inspect-directory-ancestor'
+    | 'create-directories'
+    | 'close';
+  code?: string;
+  syscall?: string;
+}
+
+let latestDecisionWriteFailureForTest: DecisionWriteFailureForTest | undefined;
+
+/** Test-only metadata for diagnosing a never-throw persistence failure. */
+export function _getLatestDecisionWriteFailureForTest(): DecisionWriteFailureForTest | undefined {
+  return latestDecisionWriteFailureForTest;
+}
 
 export interface ReadDecisionsOptions {
   sinceMs?: number;
@@ -115,8 +188,21 @@ function isDecisionAction(value: unknown): value is DecisionEntry['action'] {
   return typeof value === 'string' && DECISION_ACTIONS.has(value as DecisionEntry['action']);
 }
 
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nonNegativeSafeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function hasValidAccountingTelemetry(value: Record<string, unknown>): boolean {
+  return (
+    (value['costUsd'] === undefined || nonNegativeFiniteNumber(value['costUsd']) !== undefined) &&
+    (value['tokensIn'] === undefined || nonNegativeSafeInteger(value['tokensIn']) !== undefined) &&
+    (value['tokensOut'] === undefined || nonNegativeSafeInteger(value['tokensOut']) !== undefined) &&
+    (value['durationMs'] === undefined || nonNegativeSafeInteger(value['durationMs']) !== undefined)
+  );
 }
 
 function optionalBoolean(value: unknown): boolean | undefined {
@@ -195,10 +281,10 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
       ? { judgeAttestationIssuedAt: optionalScrubbedText(entry.judgeAttestationIssuedAt) }
       : {}),
     ...(entry.judgeAttestationIntent === 'would-merge' ? { judgeAttestationIntent: 'would-merge' } : {}),
-    ...(finiteNumber(entry.costUsd) !== undefined ? { costUsd: finiteNumber(entry.costUsd) } : {}),
-    ...(finiteNumber(entry.tokensIn) !== undefined ? { tokensIn: finiteNumber(entry.tokensIn) } : {}),
-    ...(finiteNumber(entry.tokensOut) !== undefined ? { tokensOut: finiteNumber(entry.tokensOut) } : {}),
-    ...(finiteNumber(entry.durationMs) !== undefined ? { durationMs: finiteNumber(entry.durationMs) } : {}),
+    ...(nonNegativeFiniteNumber(entry.costUsd) !== undefined ? { costUsd: nonNegativeFiniteNumber(entry.costUsd) } : {}),
+    ...(nonNegativeSafeInteger(entry.tokensIn) !== undefined ? { tokensIn: nonNegativeSafeInteger(entry.tokensIn) } : {}),
+    ...(nonNegativeSafeInteger(entry.tokensOut) !== undefined ? { tokensOut: nonNegativeSafeInteger(entry.tokensOut) } : {}),
+    ...(nonNegativeSafeInteger(entry.durationMs) !== undefined ? { durationMs: nonNegativeSafeInteger(entry.durationMs) } : {}),
     ...(optionalBoolean(entry.cacheHit) !== undefined ? { cacheHit: optionalBoolean(entry.cacheHit) } : {}),
   };
   return normalizeDecisionLearningFields(clean);
@@ -214,32 +300,67 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  *
  * Append-only. Never throws.
  */
-export function recordDecision(entry: DecisionEntry): void {
+export function recordDecision(entry: DecisionEntry): boolean {
+  let stage: DecisionWriteFailureForTest['stage'] = 'sanitize';
+  let operation: DecisionWriteFailureForTest['operation'];
   try {
+    latestDecisionWriteFailureForTest = undefined;
     const record = sanitizeDecisionEntry(entry, true);
     // Reserved positive authority must come from the future proof-bound release
     // writer, never this generic operational ledger API. Check the immutable
     // sanitized snapshot so stateful getters cannot change values after guard.
-    if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return;
+    if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return false;
     const dir = decisionsDir();
+    stage = 'ensure-directory';
     if (!existsSync(dir)) {
+      operation = 'inspect-directory-ancestor';
+      const boundary = captureDecisionDirectoryCreationBoundary(dir);
+      operation = 'create-directories';
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+      stage = 'create-directory-durability';
+      operation = 'directory-fsync';
+      // Persist the leaf entry and every newly-created ancestor entry through
+      // the identity-bound pre-existing parent. The boundary is captured before
+      // mkdir because Windows returns namespaced paths from recursive mkdir.
+      _fsyncCreatedDecisionDirectoryChainForTest(dir, boundary);
     }
 
     const line = JSON.stringify(record) + '\n';
-    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
+    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
-    appendDecisionLine(filePath, line);
-  } catch {
+    stage = 'append';
+    return appendDecisionLine(filePath, line, (nextOperation) => {
+      operation = nextOperation;
+    });
+  } catch (error) {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
+    latestDecisionWriteFailureForTest = {
+      stage,
+      ...(operation ? { operation } : {}),
+      ...(typeof error === 'object' && error !== null &&
+        typeof (error as NodeJS.ErrnoException).code === 'string'
+        ? { code: (error as NodeJS.ErrnoException).code }
+        : {}),
+      ...(typeof error === 'object' && error !== null &&
+        typeof (error as NodeJS.ErrnoException).syscall === 'string'
+        ? { syscall: (error as NodeJS.ErrnoException).syscall }
+        : {}),
+    };
+    return false;
   }
 }
 
-function appendDecisionLine(path: string, line: string): void {
+function appendDecisionLine(
+  path: string,
+  line: string,
+  setOperation: (operation: NonNullable<DecisionWriteFailureForTest['operation']>) => void,
+): boolean {
   let fd: number | undefined;
+  let pendingError: unknown;
   try {
     let pathBefore: ReturnType<typeof lstatSync> | undefined;
     try {
+      setOperation('inspect-path');
       pathBefore = lstatSync(path);
       if (!isSafeDecisionAuthorityFile(pathBefore)) {
         throw new Error('decisions ledger path is unsafe');
@@ -247,30 +368,51 @@ function appendDecisionLine(path: string, line: string): void {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    setOperation('open');
     fd = openSync(
       path,
       fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
         (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
       0o600,
     );
+    setOperation('inspect-opened');
     const opened = fstatSync(fd);
     if (!isSafeDecisionAuthorityFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
       throw new Error('decisions ledger is not a safe regular file');
     }
     if (opened.size > 0) {
+      setOperation('read-tail');
       const tail = Buffer.alloc(1);
       const read = readSync(fd, tail, 0, 1, opened.size - 1);
       if (read !== 1) throw new Error('decisions ledger tail is unreadable');
       if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
     }
+    setOperation('write');
     writeAll(fd, Buffer.from(line, 'utf8'));
+    setOperation('file-fsync');
+    fsyncSync(fd);
+    setOperation('inspect-path-after');
     const pathAfter = lstatSync(path);
     if (!isSafeDecisionAuthorityFile(pathAfter) || !sameFile(opened, pathAfter)) {
       throw new Error('decisions ledger path changed during append');
     }
-  } finally {
-    if (fd !== undefined) closeSync(fd);
+    setOperation('directory-fsync');
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    pendingError = error;
   }
+  if (fd !== undefined) {
+    try {
+      closeSync(fd);
+    } catch (error) {
+      if (pendingError === undefined) {
+        setOperation('close');
+        pendingError = error;
+      }
+    }
+  }
+  if (pendingError !== undefined) throw pendingError;
+  return true;
 }
 
 function writeAll(fd: number, buffer: Buffer): void {
@@ -533,6 +675,10 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
               typeof obj['action'] === 'string'
             ) {
               if (!isDecisionAction(obj['action'])) {
+                result.invalidRows++;
+                continue;
+              }
+              if (!hasValidAccountingTelemetry(obj)) {
                 result.invalidRows++;
                 continue;
               }

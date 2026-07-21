@@ -58,7 +58,7 @@ describe('M373 directory durability', () => {
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
 
-  it.each(['EPERM', 'EINVAL'])(
+  it.each(['EPERM', 'EINVAL', 'EISDIR'])(
     'tolerates Windows directory-open %s after validating the named directory',
     (code) => {
       const fs = fakeFs({ openSync: vi.fn(() => { throw codedError(code); }) });
@@ -69,7 +69,7 @@ describe('M373 directory durability', () => {
     },
   );
 
-  it.each(['EPERM', 'EINVAL'])(
+  it.each(['EPERM', 'EINVAL', 'EISDIR'])(
     'tolerates Windows directory-fsync %s but still closes the descriptor',
     (code) => {
       const fs = fakeFs({ fsyncSync: vi.fn(() => { throw codedError(code); }) });
@@ -92,6 +92,21 @@ describe('M373 directory durability', () => {
     expect(() => fsyncDirectory(directory, { platform: 'win32', fs })).toThrow('EIO');
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
+
+  it.skipIf(process.platform !== 'win32')(
+    'proves native Windows directory durability or reports the exact unsupported capability',
+    () => {
+      try {
+        fsyncDirectory(directory);
+      } catch (error) {
+        const detail = error as NodeJS.ErrnoException;
+        throw new Error(
+          `native Windows fsyncDirectory failed: code=${detail.code ?? 'unknown'} ` +
+          `syscall=${detail.syscall ?? 'unknown'} path=${detail.path ?? directory}`,
+        );
+      }
+    },
+  );
 
   it.each([
     ['open', 'EACCES'],

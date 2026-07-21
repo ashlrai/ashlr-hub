@@ -871,12 +871,65 @@ function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
  * back to Opus reports Opus, so the ledger never lies about the answering
  * model. All fields best-effort; absent on local/ollama judge paths.
  */
+export interface JudgeUsageReceipt {
+  model: string;
+  durationMs: number;
+  metering: 'measured' | 'unmetered';
+  costUsd?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
 export interface JudgeCallStats {
+  /** Append-only metadata receipts for every attempted CLI invocation. */
+  receipts: JudgeUsageReceipt[];
+  /** Latest receipt compatibility projection. */
   model?: string;
   durationMs?: number;
   costUsd?: number;
   tokensIn?: number;
   tokensOut?: number;
+}
+
+function resetLatestJudgeStats(stats: JudgeCallStats | undefined): void {
+  if (!stats) return;
+  delete stats.model;
+  delete stats.durationMs;
+  delete stats.costUsd;
+  delete stats.tokensIn;
+  delete stats.tokensOut;
+}
+
+function recordJudgeReceipt(stats: JudgeCallStats | undefined, receipt: JudgeUsageReceipt): void {
+  if (!stats) return;
+  stats.receipts.push(receipt);
+  stats.model = receipt.model;
+  stats.durationMs = receipt.durationMs;
+  if (receipt.metering === 'measured') {
+    stats.costUsd = receipt.costUsd;
+    stats.tokensIn = receipt.tokensIn;
+    stats.tokensOut = receipt.tokensOut;
+  }
+}
+
+function measuredJudgeReceipt(
+  model: string,
+  durationMs: number,
+  parsed: Record<string, unknown>,
+): JudgeUsageReceipt {
+  const usage = parsed['usage'];
+  const usageRecord = usage !== null && typeof usage === 'object' ? usage as Record<string, unknown> : null;
+  const cost = parsed['cost_usd'] ?? parsed['total_cost_usd'];
+  const tokensIn = usageRecord?.['input_tokens'];
+  const tokensOut = usageRecord?.['output_tokens'];
+  if (
+    typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 &&
+    typeof tokensIn === 'number' && Number.isSafeInteger(tokensIn) && tokensIn >= 0 &&
+    typeof tokensOut === 'number' && Number.isSafeInteger(tokensOut) && tokensOut >= 0
+  ) {
+    return { model, durationMs, metering: 'measured', costUsd: cost, tokensIn, tokensOut };
+  }
+  return { model, durationMs, metering: 'unmetered' };
 }
 
 /**
@@ -916,18 +969,14 @@ function buildClaudeCliCompleteSingle(
   stats?: JudgeCallStats,
 ): JudgeComplete {
   return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+    const t0 = Date.now();
+    let spawned = false;
+    let receiptRecorded = false;
     try {
       // M337 (review fix): reset the shared holder EVERY call — a failed or
       // usage-less call must record NOTHING, never the previous proposal's
       // model/cost/tokens (the ledger must not lie about the answering model).
-      if (stats) {
-        delete stats.model;
-        delete stats.durationMs;
-        delete stats.costUsd;
-        delete stats.tokensIn;
-        delete stats.tokensOut;
-      }
-      const t0 = Date.now();
+      resetLatestJudgeStats(stats);
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
       if (!cmd) return '';
@@ -935,6 +984,7 @@ function buildClaudeCliCompleteSingle(
         timeoutMs: 300_000,
         ...(signal ? { signal } : {}),
       }); // 5 min for frontier
+      spawned = true;
       if (!result.ok || !result.output) return '';
       // claude --output-format json → { result: "<text>", total_cost_usd, usage, ... }
       try {
@@ -942,29 +992,21 @@ function buildClaudeCliCompleteSingle(
         const text = parsed['result'];
         // M322: capture per-call telemetry (best-effort — fields only set when
         // the CLI JSON carries them). Judge spend was previously invisible.
-        if (stats) {
-          stats.model = model;
-          stats.durationMs = Date.now() - t0;
-          const cost = parsed['total_cost_usd'];
-          if (typeof cost === 'number') stats.costUsd = cost;
-          const usage = parsed['usage'];
-          if (usage !== null && typeof usage === 'object') {
-            const u = usage as Record<string, unknown>;
-            if (typeof u['input_tokens'] === 'number') stats.tokensIn = u['input_tokens'];
-            if (typeof u['output_tokens'] === 'number') stats.tokensOut = u['output_tokens'];
-          }
-        }
+        recordJudgeReceipt(stats, measuredJudgeReceipt(model, Date.now() - t0, parsed));
+        receiptRecorded = true;
         return typeof text === 'string' ? text : result.output;
       } catch {
         // Not JSON-wrapped (older claude versions) — return raw output.
-        if (stats) {
-          stats.model = model;
-          stats.durationMs = Date.now() - t0;
-        }
+        recordJudgeReceipt(stats, { model, durationMs: Date.now() - t0, metering: 'unmetered' });
+        receiptRecorded = true;
         return result.output;
       }
     } catch {
       return '';
+    } finally {
+      if (spawned && !receiptRecorded) {
+        recordJudgeReceipt(stats, { model, durationMs: Date.now() - t0, metering: 'unmetered' });
+      }
     }
   };
 }
@@ -985,17 +1027,13 @@ function buildCodexCliComplete(
   stats?: JudgeCallStats,
 ): JudgeComplete {
   return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+    const t0 = Date.now();
+    let spawned = false;
+    let receiptRecorded = false;
     try {
       // M337 (review fix): reset the shared holder EVERY call (see the claude
       // single-shot builder above).
-      if (stats) {
-        delete stats.model;
-        delete stats.durationMs;
-        delete stats.costUsd;
-        delete stats.tokensIn;
-        delete stats.tokensOut;
-      }
-      const t0 = Date.now();
+      resetLatestJudgeStats(stats);
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });
       if (!cmd) return '';
@@ -1003,15 +1041,18 @@ function buildCodexCliComplete(
         timeoutMs: 300_000,
         ...(signal ? { signal } : {}),
       }); // 5 min for frontier
+      spawned = true;
       if (!result.ok || !result.output) return '';
       // codex output is plain text — model + latency only (no parseable usage).
-      if (stats) {
-        stats.model = model;
-        stats.durationMs = Date.now() - t0;
-      }
+      recordJudgeReceipt(stats, { model, durationMs: Date.now() - t0, metering: 'unmetered' });
+      receiptRecorded = true;
       return result.output;
     } catch {
       return '';
+    } finally {
+      if (spawned && !receiptRecorded) {
+        recordJudgeReceipt(stats, { model, durationMs: Date.now() - t0, metering: 'unmetered' });
+      }
     }
   };
 }
@@ -1042,7 +1083,7 @@ function resolveJudgeClient(
 } {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
-  const stats: JudgeCallStats = {};
+  const stats: JudgeCallStats = { receipts: [] };
 
   // M274: The judge is an OVERSIGHT role, not a proposal-execution backend.
   // cfg.foundry.allowedBackends restricts which engines may EXECUTE proposals
@@ -1411,11 +1452,14 @@ export async function runManager(
       const judgeClient = await resolveIndependentReviewer(proposal);
       let activeJudgeEngine = judgeClient?.model ?? 'unavailable';
       const judgeStats = judgeClient?.stats;
+      let judgeReceipts: JudgeUsageReceipt[] = [];
       judgeEngine = activeJudgeEngine;
 
       if (judgeClient) {
+        const receiptStart = judgeStats?.receipts.length ?? 0;
         verdict = await judgeProposal(proposal, cfg, judgeClient);
-        activeJudgeEngine = judgeStats?.model ?? judgeClient.model;
+        judgeReceipts = judgeStats?.receipts.slice(receiptStart) ?? [];
+        activeJudgeEngine = judgeReceipts.at(-1)?.model ?? judgeStats?.model ?? judgeClient.model;
         judgeEngine = activeJudgeEngine;
         judgeEnginesUsed.add(activeJudgeEngine);
       } else {
@@ -1468,6 +1512,11 @@ export async function runManager(
       }
 
       // Record in decisions ledger (always, shadow or not).
+      const measuredJudgeReceipts = judgeReceipts.filter((receipt) => receipt.metering === 'measured');
+      const judgeDurationMs = judgeReceipts.reduce((total, receipt) => total + receipt.durationMs, 0);
+      const judgeCostUsd = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.costUsd ?? 0), 0);
+      const judgeTokensIn = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.tokensIn ?? 0), 0);
+      const judgeTokensOut = measuredJudgeReceipts.reduce((total, receipt) => total + (receipt.tokensOut ?? 0), 0);
       recordDecision({
         ts: decisionTs,
         proposalId: proposal.id,
@@ -1482,11 +1531,11 @@ export async function runManager(
         // Fable primary that fell back to Opus reports Opus) plus per-call
         // cost/tokens/latency parsed from the CLI JSON. Judge spend was
         // previously invisible; with Fable 5 judging it must be measured.
-        model: judgeStats?.model ?? activeJudgeEngine,
-        ...(judgeStats?.durationMs !== undefined ? { durationMs: judgeStats.durationMs } : {}),
-        ...(judgeStats?.costUsd !== undefined ? { costUsd: judgeStats.costUsd } : {}),
-        ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
-        ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
+        model: activeJudgeEngine,
+        ...(judgeReceipts.length > 0 ? { durationMs: judgeDurationMs } : {}),
+        ...(measuredJudgeReceipts.length > 0
+          ? { costUsd: judgeCostUsd, tokensIn: judgeTokensIn, tokensOut: judgeTokensOut }
+          : {}),
         verdict: verdict.verdict,
         ...(!judgeClient ? { reason: 'manager-judge-unavailable' } : {}),
         detail: verdict.wouldMerge && reviewerIndependent ? 'would-merge' : '',

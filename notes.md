@@ -5,6 +5,11 @@
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
   - M30 now asserts the three Ubuntu labels, exact shard arguments, and one-time pack-smoke selector, so a future workflow edit cannot silently collapse exhaustive authority back into one cap-bound job.
 
+## Measured Judge Spend Windows Durability Repair (2026-07-21)
+- Native Windows first-use decision writes failed before append because recursive `mkdirSync` can return a namespaced `\\?\\C:\\...` first-created path. Comparing its parent to the ordinary `C:\\...` target path made the durability walk miss its boundary and reach the drive root.
+- Decision directory creation now captures the nearest existing named ancestor and exact `(dev, ino)` identity before recursive creation. The post-create walk uses only target-derived paths, checks the captured identity at its boundary, and records whether failure occurred during ancestor inspection, creation, or directory fsync.
+- Typecheck, scoped zero-error lint, M119, and M373 pass locally: 60 assertions passed with two intentional platform skips. Protected native Windows remains required before the branch can authorize production.
+
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
 - Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.
@@ -2886,7 +2891,6 @@
   - Sampling now preserves the first and last events plus latest lifecycle-stage representatives within the existing eight-event cap, and reports `eventState: complete|sampled` so downstream consumers do not mistake a bounded trace for a full record.
   - The trace remains metadata-only and observation-only: no raw identities, prompts, diffs, reasoning, outputs, paths, or authority changes were introduced.
   - Verification: 39 focused and 180 Fleet/dashboard integration assertions, typecheck, build, and zero-error lint. An initial full run had setup/load-only failures; after building and isolation the affected files passed 143 assertions with 4 intentional skips.
-
 - Agent-action run-summary identity integrity (2026-07-21):
   - Agent-action carriers and their nested `runEventSummary` are now required to agree whenever both supply a run id. A writer drops a conflicting nested summary while retaining the otherwise valid metadata-only carrier; a contradictory persisted row degrades the source and is withheld by complete reads.
   - This prevents a single row from joining `run:A` trajectory metadata to `run:B` outcome metadata. The invariant is observation-only and introduces no routing, verification, merge, or learning-credit authority.
@@ -2924,3 +2928,52 @@
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Decision ledger accounting durability (2026-07-21):
+  - `recordDecision` now returns a durable append result while preserving its never-throw caller contract. The append fsyncs the exact private file and parent directory before reporting success, allowing merge-capable callers to refuse authority when decision persistence fails.
+  - Accounting telemetry is strict: cost must be finite and non-negative; token and duration fields must be non-negative safe integers. Invalid caller values are omitted, while hostile raw ledger rows degrade complete source reads rather than reducing recorded spend.
+  - Focused M119 ledger coverage passes 41 assertions with typecheck and diff integrity. Receipt aggregation, actual-responder attribution, and daemon charge propagation remain separate pending slices.
+
+- Inline judge receipt truth (2026-07-21):
+  - Claude and Codex CLI judge clients now retain append-only, metadata-only receipts per actual invocation. A complete measured receipt requires a non-negative reported cost plus non-negative safe-integer input/output tokens; all other executed calls are explicitly unmetered. The parser accepts Claude's `cost_usd` and legacy `total_cost_usd` forms.
+  - Inline auto-merge derives attestation identity from the actual final responder, records every authorized completed judge verdict (not only mergeable ships), and refuses merge progression when the durable decision append fails. Only independently reviewed `ship` verdicts with merge intent receive an attestation.
+  - Auto-merge results and daemon tick metadata now distinguish display-only estimates, provider-reported measured spend, and unmetered calls. This does not yet charge `todaySpentUsd`; once-only charge propagation across maintenance early returns remains pending.
+  - Focused M48, M119, M120, and M130 coverage passes 128 assertions plus typecheck. The broader M201 daemon suite was still running in the local hermetic environment and is left to protected CI rather than treated as evidence.
+  - Follow-up review closed three integrity gaps: new ledger-directory creation now fsyncs its parent before a durable write can report success; manager-path decisions aggregate only the current proposal's receipts; and absence of any receipt is not falsely labelled as an unmetered provider call. Daemon projection rejects non-finite totals and non-integer call counts.
+
+- Measured maintenance spend commit (2026-07-21):
+  - Maintenance-only auto-merge now arms a dedicated durable spend guard before contacting a judge. Measured provider cost is reloaded into daemon state and atomically persisted before the guard clears; a thrown pass, invalid amount, persistence failure, or guard-clear failure leaves the guard armed and blocks the next tick.
+  - Post-dispatch auto-merge reuses the already-armed dispatch spend guard and adds measured cost to the same final state transaction. Tick telemetry reports maintenance plus dispatch spend without double-debiting `todaySpentUsd`.
+  - Focused daemon coverage proves verify-only charge persistence, post-dispatch accumulation, and a failed maintenance pass blocking retry. Direct `autoMergeProposal` manager-gate calls still need the same durable decision/receipt treatment before judge-cost accounting can be called complete.
+
+- Direct manager-gate authority and receipt metadata (2026-07-21):
+  - Gate 7 now refuses before mutation when either its inline `judged` record or its `merge-authorized` record cannot durably append. Cached and freshly judged ships therefore cannot turn a transient ledger failure into merge authority.
+  - Inline manager-gate calls retain only metadata-only receipts in the decision ledger: actual final responder, aggregate duration, and measured-only cost/token totals. They deliberately do not write daemon daily spend because direct commands execute outside the daemon's durable spend transaction.
+  - Decision-ledger first-use setup now fsyncs every created ancestor boundary through the first pre-existing parent before authority writes can report success. Windows retains its explicit best-effort directory-fsync limitation.
+  - Gate 7 coverage separately proves failed `judged` and failed `merge-authorized` durable writes both leave the proposal approved and the default branch untouched.
+
+- Windows directory durability compatibility (2026-07-21):
+  - Fresh Windows CI exposed ledger-derived metrics and reconciliation fanout disappearing after the new durable decision append path. The writer intentionally returns false on any persistence error, so the immediate symptom was missing decision rows rather than unsafe authority advancement.
+  - After named-directory validation, `EISDIR` is now treated like the other Windows outcomes that mean Node cannot expose or sync a directory descriptor. POSIX and all unrelated Windows I/O failures remain fatal; injected open and fsync coverage exercises this exact boundary.
+  - The diagnosis is intentionally provisional until a fresh protected Windows matrix confirms the host errno. The change does not relax file fsync, identity validation, or decision-ledger failure handling.
+
+- Native Windows directory durability probe (2026-07-21):
+  - Ledger writes continue to fail closed while the hosted-Windows failure is unresolved. A Windows-only real-filesystem M373 probe now calls `fsyncDirectory()` directly and includes the native error code, syscall, and path if it fails.
+  - This probe is diagnostic only. It does not broaden tolerated errors, alter file durability, or convert a failed decision append into authority.
+
+- Native Windows decision-write probe (2026-07-21):
+  - A metadata-only test hook now records only the code and syscall of a swallowed decision-ledger write failure. A Windows-only M119 probe fails with those fields when a native durable write returns false.
+  - The production API remains never-throw and fail-closed. No error messages, paths, ledger contents, prompts, or credentials are persisted or exposed; this is a bounded diagnostic to identify the precise compatibility boundary before changing it.
+  - The probe now also reports one allowlisted operation stage (`sanitize`, directory setup/durability, or append). The prior Windows result had no native errno, so this stage is required to distinguish an internal durability invariant from a filesystem capability mismatch without exposing error text.
+  - Append failures now include one allowlisted operation (`open`, write/tail work, file fsync, post-write identity, directory fsync, or close). Successful cleanup cannot overwrite the operation that actually failed. No paths, error messages, or record data are exposed.
+
+- Decision-directory first-use durability (2026-07-21):
+  - The first-use directory traversal had started at the new leaf's parent, so it did not persist the newly-created `decisions/` leaf before reporting a durable write. The traversal now starts at that leaf and continues through the first existing parent.
+  - Focused coverage records the exact leaf-to-parent order. This correctness repair retains fail-closed directory sync semantics and does not relax the pending Windows compatibility boundary.
+
+- Native Windows decision-directory boundary repair (2026-07-21):
+  - Hosted Windows proved that recursive directory creation can report a namespaced `\\?\C:\...` first-created path while the requested target remains in ordinary `C:\...` form. Comparing those spellings caused the durability walk to miss its boundary and continue toward the drive root, so decision persistence failed closed before merge authority could advance.
+  - Directory setup now captures the nearest pre-existing ancestor and its exact device/inode identity before mutation, then walks target-derived paths back to that identity-bound boundary. Diagnostics remain metadata-only and distinguish ancestor inspection, directory creation, and directory fsync.
+  - The exact source head passed the protected native Windows 2/3 shard that previously failed. Local verification after aligning decision-write mocks passed typecheck plus all 16 changed suites: 571 tests passed with 2 intentional skips.
+  - Existing manager/daemon test doubles now return durable-write success by default; explicit persistence-failure cases still return false. Non-mergeable judge outcomes are asserted as metadata-only decisions without attestation or merge authority.
+  - Windows directory-descriptor fsync remains an explicit best-effort platform boundary; this repair proves correct containment and fail-closed authority behavior, not a stronger native filesystem flush guarantee than Node exposes.

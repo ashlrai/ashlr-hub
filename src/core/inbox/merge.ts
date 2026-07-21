@@ -148,6 +148,8 @@ import {
   judgeProposal,
   resolveFrontierJudgeClient,
   wrapClient,
+  type FrontierJudgeClient,
+  type JudgeUsageReceipt,
   type MinimalProviderClient,
 } from '../fleet/manager.js';
 import {
@@ -3347,10 +3349,7 @@ export async function autoMergeProposal(
         // Resolve the judge client (same pattern as runManager; fail closed if unavailable).
         // M153: capture the actual judge engine string so it can be recorded in
         // the decisions ledger and later read by evaluateVerificationGate criterion 1.
-        let judgeClient: {
-          complete: (system: string, user: string) => Promise<string>;
-          model?: string;
-        } | null = null;
+        let judgeClient: FrontierJudgeClient | null = null;
         let inlineJudgeEngine = 'gate7-inline'; // updated to real model string below
         try {
           const resolved = resolveFrontierJudgeClient(cfg, {
@@ -3411,7 +3410,10 @@ export async function autoMergeProposal(
         }
 
         try {
+          const receiptStart = judgeClient.stats?.receipts.length ?? 0;
           const verdict = await judgeProposal(proposal, cfg, judgeClient);
+          const judgeReceipts: JudgeUsageReceipt[] = judgeClient.stats?.receipts.slice(receiptStart) ?? [];
+          inlineJudgeEngine = judgeReceipts.at(-1)?.model ?? judgeClient.stats?.model ?? judgeClient.model;
           // M157: sign an attestation when the inline judge is frontier and ships.
           // This mirrors the runManager path so evaluateVerificationGate criterion 1
           // can verify the HMAC regardless of which path produced the ledger entry.
@@ -3435,7 +3437,12 @@ export async function autoMergeProposal(
           }
           // M153: record inlineJudgeEngine (the real model string) so that
           // evaluateVerificationGate criterion 1 can verify the judge was frontier.
-          recordDecision({
+          const measuredReceipts = judgeReceipts.filter((receipt) => receipt.metering === 'measured');
+          const durationMs = judgeReceipts.reduce((total, receipt) => total + receipt.durationMs, 0);
+          const costUsd = measuredReceipts.reduce((total, receipt) => total + (receipt.costUsd ?? 0), 0);
+          const tokensIn = measuredReceipts.reduce((total, receipt) => total + (receipt.tokensIn ?? 0), 0);
+          const tokensOut = measuredReceipts.reduce((total, receipt) => total + (receipt.tokensOut ?? 0), 0);
+          const decisionPersisted = recordDecision({
             ts,
             proposalId: id,
             ...causalMetadataFromProposal(proposal, {
@@ -3448,12 +3455,20 @@ export async function autoMergeProposal(
             model: inlineJudgeEngine,
             verdict: verdict.verdict,
             detail: verdict.wouldMerge && inlineReviewerIndependence.independent ? 'would-merge' : '',
+            ...(judgeReceipts.length > 0 ? { durationMs } : {}),
+            ...(measuredReceipts.length > 0 ? { costUsd, tokensIn, tokensOut } : {}),
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
             ...(inlineAttestation !== undefined
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
               : {}),
           });
+          if (!decisionPersisted) {
+            return refuse(
+              'manager quality gate: durable judge decision persistence failed — fail closed',
+              repo,
+            );
+          }
           if (verdict.verdict === 'ship' && verdict.wouldMerge === true &&
             !inlineReviewerIndependence.independent) {
             return refuse(`manager quality gate: ${inlineReviewerIndependence.reason}`, repo);
@@ -3549,12 +3564,8 @@ export async function autoMergeProposal(
       // Gate 7 passed, but no mutation or host merge has happened yet. Keep
       // this authorization distinct from the authoritative `merged` outcome
       // emitted only when the proposal later transitions to `applied`.
-      managerGateEvidence = {
-        ok: true,
-        detail: `manager verdict '${managerVerdict.verdict}' with wouldMerge=true`,
-      };
       const ts = new Date().toISOString();
-      recordDecision({
+      const authorizationPersisted = recordDecision({
         ts,
         proposalId: id,
         ...causalMetadataFromProposal(proposal, {
@@ -3565,6 +3576,16 @@ export async function autoMergeProposal(
         action: 'merge-authorized',
         reason: `gate 7 passed: verdict=${managerVerdict.verdict}, reasonCode=${managerVerdict.reasonCode}`,
       });
+      if (!authorizationPersisted) {
+        return refuse(
+          'manager quality gate: durable merge authorization persistence failed — fail closed',
+          repo,
+        );
+      }
+      managerGateEvidence = {
+        ok: true,
+        detail: `manager verdict '${managerVerdict.verdict}' with wouldMerge=true`,
+      };
     }
 
     // ── Gate 8: first-class autonomy policy verdict + durable evidence pack ──

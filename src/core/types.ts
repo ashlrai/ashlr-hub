@@ -4361,8 +4361,12 @@ export interface DaemonTick {
 	    judgeCapped?: number;
 	    verifyBeforeJudgePerPass?: number;
 	    verifyBeforeJudgeRan?: number;
-	    verifyBeforeJudgeCapped?: number;
+    verifyBeforeJudgeCapped?: number;
     judgeEstimatedSpendUsd?: number;
+    /** Provider-reported judge spend only; never a pricing estimate. */
+    judgeMeasuredSpendUsd?: number;
+    /** Completed judge calls without a complete provider usage receipt. */
+    judgeUnmeteredCalls?: number;
     merged: number;
     handoffs?: number;
     autoArchived?: number;

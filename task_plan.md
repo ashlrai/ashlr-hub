@@ -10,6 +10,15 @@
 - [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
 - [x] Reject path-bearing executable symlink escapes and Windows-only separators while preserving bare PATH tools and missing dependency shims.
 - [x] Run focused parser/runner coverage, typecheck, scoped lint, and diff validation; commit the isolated hardening patch.
+## 2026-07-21 - Measured maintenance spend commit
+- [x] Preserve per-invocation provider receipts through automerge and daemon tick metadata.
+- [x] Charge measured maintenance judge spend exactly once on maintenance-only early-return paths behind a durable pre-call guard.
+- [x] Fold post-dispatch maintenance spend into the existing tick guard and final state commit without double charging.
+- [x] Cover verify-only, normal dispatch, and failed-maintenance retry-blocking paths with focused daemon tests.
+- [x] Close direct `autoMergeProposal` manager-gate decision durability and receipt-metadata gaps before calling judge-cost accounting complete.
+- [x] Diagnose native Windows first-use persistence as a namespaced recursive-`mkdir` boundary mismatch.
+- [x] Replace the returned-path boundary with a pre-captured existing ancestor identity and pass focused typecheck, lint, and 60 assertions.
+- [ ] Rebase onto sharded production and require the exact native Windows matrix before promotion.
 
 ## 2026-07-21 - Bounded trajectory trace projection
 - [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.
@@ -2787,7 +2796,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose complete versus sampled state without adding authority or raw payloads.
 - [x] Run focused, integration, isolated regression, typecheck, build, lint, and diff verification.
 - [ ] Publish as a protected draft PR and require fresh platform CI.
-
 ## Current Overnight Cycle - Trajectory Metadata Integrity (2026-07-21)
 - [x] Audit causal metadata and agent-action trajectory reconstruction boundaries without overlapping active verifier, daemon, trajectory-record, or proposal-authority PRs.
 - [x] Enforce exact carrier and nested run-summary identity agreement at writer and persisted-reader boundaries.
@@ -2822,3 +2830,24 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Retain the five-second non-Windows deadline and add a bounded 30-second Windows allowance.
 - [x] Run focused authority/reservation coverage, typecheck, and diff integrity.
 - [ ] Require the refreshed protected matrix before promotion.
+
+## Measured Judge Spend Foundation (2026-07-21)
+- [x] Audit judge fallback/retry accounting, inline decision provenance, and daemon maintenance return paths.
+- [x] Make decision-ledger persistence observable to authority callers and durable before success is returned.
+- [x] Reject malformed accounting telemetry at both write sanitization and complete source reads.
+- [x] Pass focused ledger coverage, typecheck, and diff integrity.
+- [x] Add per-invocation measured/unmetered judge receipts and actual-responder attribution.
+- [x] Persist all authorized completed inline judge decisions and require durable decision writes before merge progression.
+- [x] Project measured versus unmetered maintenance data without fabricating spend.
+- [x] Harden receipt accounting against new-directory durability loss, cross-proposal aggregation, and phantom unmetered calls.
+- [x] Cover the Windows unsupported-directory-descriptor compatibility path without weakening POSIX durability failures.
+- [x] Add a native hosted-Windows directory durability probe that reports exact failing capability metadata.
+- [x] Add a metadata-only native Windows decision-write probe for swallowed durable-write failures.
+- [x] Add an allowlisted diagnostic stage when a swallowed write has no native errno.
+- [x] Add an allowlisted append operation without letting successful cleanup hide the failing operation.
+- [x] Persist the newly-created decisions leaf itself before reporting a first-use durable write.
+- [x] Bind recursive directory creation to a pre-existing ancestor identity so Windows namespace spelling cannot overrun the durability boundary.
+- [x] Confirm the previously failing native Windows 2/3 shard passes the repaired exact source head.
+- [x] Align decision-write test doubles with the production durable-append contract and pass all 16 changed suites (571 passed, 2 skipped).
+- [ ] Require a fresh complete protected matrix on the final reconstructed head before promotion.
+- [ ] Charge only measured receipts once through every daemon maintenance return path.
