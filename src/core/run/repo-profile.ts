@@ -52,6 +52,8 @@ export interface RepoVerifyContractSummary {
   profileCounts: Partial<Record<VerifyCommandProfile, number>>;
   mergeProfileCommandCount: number;
   requiredMergeProfileCommandCount: number;
+  /** Explicit verifier-control inputs declared for future merge authority snapshots. */
+  authorityFileCount: number;
   mergeGradeExplicit: boolean;
   mergeGradeReason: string;
   errors: string[];
@@ -133,6 +135,7 @@ export interface MergeVerifyContractScannerSource {
   verifyContract: null | {
     summary: RepoVerifyContractSummary;
     commands: CanonicalVerifyCommand[];
+    authorityFiles: string[];
   };
 }
 
@@ -332,6 +335,7 @@ function parseContractProfiles(raw: unknown, errors: string[], label: string): V
 interface ParsedVerifyContract {
   mode: RepoVerifyContractMode;
   commands: VerifyCommand[];
+  authorityFiles: string[];
   summary: RepoVerifyContractSummary;
 }
 
@@ -342,6 +346,7 @@ function summarizeVerifyContract(
     schemaVersion?: 1;
     mode?: RepoVerifyContractMode;
     commands: VerifyCommand[];
+    authorityFiles: string[];
     errors: string[];
   },
 ): RepoVerifyContractSummary {
@@ -378,10 +383,52 @@ function summarizeVerifyContract(
     profileCounts,
     mergeProfileCommandCount,
     requiredMergeProfileCommandCount,
+    authorityFileCount: opts.authorityFiles.length,
     mergeGradeExplicit,
     mergeGradeReason,
     errors: opts.errors,
   };
+}
+
+/** Validate one exact repo-relative control input for verifier authority. */
+function parseAuthorityFile(repoRoot: string, raw: unknown, errors: string[], label: string): string | null {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    errors.push(`${label} must be a non-empty repo-relative path`);
+    return null;
+  }
+  if (raw.includes('\\') || win32.isAbsolute(raw) || /^[a-zA-Z]:/.test(raw) || isAbsolute(raw)) {
+    errors.push(`${label} must be a normalized POSIX repo-relative path`);
+    return null;
+  }
+  const normalized = raw.replace(/^\.\//, '');
+  if (!normalized || normalized === '.' || normalized.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+    errors.push(`${label} must not contain empty, dot, or parent path segments`);
+    return null;
+  }
+  const resolved = resolve(repoRoot, normalized);
+  const rel = safeRelative(repoRoot, resolved);
+  if (rel === null || rel !== normalized) {
+    errors.push(`${label} must stay inside the repo`);
+    return null;
+  }
+  try {
+    const stat = lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      errors.push(`${label} must name a regular non-symlink file`);
+      return null;
+    }
+    const physicalRoot = realpathSync(repoRoot);
+    const physicalFile = realpathSync(resolved);
+    const physicalRel = relative(physicalRoot, physicalFile);
+    if (physicalRel.startsWith('..') || isAbsolute(physicalRel)) {
+      errors.push(`${label} must resolve inside the repo without escaping through a symlink`);
+      return null;
+    }
+  } catch {
+    errors.push(`${label} must name an existing regular file`);
+    return null;
+  }
+  return normalized;
 }
 
 function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
@@ -397,10 +444,12 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
     return {
       mode: 'augment-detected',
       commands: [],
+      authorityFiles: [],
       summary: summarizeVerifyContract({
         present: true,
         valid: false,
         commands: [],
+        authorityFiles: [],
         errors: [`invalid JSON: ${msg}`],
       }),
     };
@@ -493,6 +542,26 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
     }
   }
 
+  const authorityFiles: string[] = [];
+  const authorityRaw = obj['authorityFiles'];
+  if (authorityRaw !== undefined) {
+    if (!Array.isArray(authorityRaw)) {
+      errors.push('authorityFiles must be an array when provided');
+    } else {
+      const seen = new Set<string>();
+      for (const [index, rawFile] of authorityRaw.entries()) {
+        const path = parseAuthorityFile(repoRoot, rawFile, errors, `authorityFiles[${index}]`);
+        if (!path) continue;
+        if (seen.has(path)) {
+          errors.push(`authorityFiles[${index}] duplicates '${path}'`);
+          continue;
+        }
+        seen.add(path);
+        authorityFiles.push(path);
+      }
+    }
+  }
+
   const valid = errors.length === 0;
   const contractMode = VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode)
     ? mode as RepoVerifyContractMode
@@ -500,12 +569,14 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
   return {
     mode: contractMode,
     commands: valid ? commands : [],
+    authorityFiles: valid ? authorityFiles : [],
     summary: summarizeVerifyContract({
       present: true,
       valid,
       ...(obj['schemaVersion'] === 1 ? { schemaVersion: 1 as const } : {}),
       ...(VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode) ? { mode: contractMode } : {}),
       commands: valid ? commands : [],
+      authorityFiles: valid ? authorityFiles : [],
       errors,
     }),
   };
@@ -964,6 +1035,7 @@ export function detectRepoExecutionProfile(
         ? {
             summary: contract.summary,
             commands: canonicalizeVerifyCommands(root, contract.commands),
+            authorityFiles: [...contract.authorityFiles],
           }
         : null,
     },

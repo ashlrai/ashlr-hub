@@ -2915,3 +2915,12 @@
 - Windows dispatch-production stress fixture budget (2026-07-21):
   - M342's 2,048-artifact crash-recovery test exceeded its 60-second deadline only on a hosted Windows CI partition. Its POSIX deadline remains 60 seconds; Windows has a bounded 120-second allowance for the same filesystem exercise.
   - The workload, crash injection, artifact integrity, retention, and recovery assertions are unchanged. This is fixture scheduling budget only, not production behavior.
+
+- Verifier authority declarations (2026-07-21):
+  - `ashlr.verify.json` now accepts exact `authorityFiles` for merge-verifier control inputs. Entries are normalized POSIX paths to existing regular, non-symlink files inside the repo; missing, escaping, backslash, duplicate, directory, and symlink entries invalidate the contract.
+  - Ashlr Hub declares the package scripts/manifests and test runner wrapper used by its merge profile. The declaration is metadata only at this stage: it does not bind a Git-tree snapshot, make dependencies read-only, or authorize judge-free merge reuse.
+  - The Hub declaration also covers ESLint's config and Vitest's setup file, both of which are loaded by merge-profile commands. Focused parser fixtures cover canonical duplicates, malformed declarations, absolute paths, directories, and symlinks alongside the existing missing/escape cases.
+
+- Windows sandbox-reservation fixture budget (2026-07-21):
+  - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
+  - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
