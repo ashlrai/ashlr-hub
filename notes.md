@@ -2970,3 +2970,10 @@
 - Decision-directory first-use durability (2026-07-21):
   - The first-use directory traversal had started at the new leaf's parent, so it did not persist the newly-created `decisions/` leaf before reporting a durable write. The traversal now starts at that leaf and continues through the first existing parent.
   - Focused coverage records the exact leaf-to-parent order. This correctness repair retains fail-closed directory sync semantics and does not relax the pending Windows compatibility boundary.
+
+- Native Windows decision-directory boundary repair (2026-07-21):
+  - Hosted Windows proved that recursive directory creation can report a namespaced `\\?\C:\...` first-created path while the requested target remains in ordinary `C:\...` form. Comparing those spellings caused the durability walk to miss its boundary and continue toward the drive root, so decision persistence failed closed before merge authority could advance.
+  - Directory setup now captures the nearest pre-existing ancestor and its exact device/inode identity before mutation, then walks target-derived paths back to that identity-bound boundary. Diagnostics remain metadata-only and distinguish ancestor inspection, directory creation, and directory fsync.
+  - The exact source head passed the protected native Windows 2/3 shard that previously failed. Local verification after aligning decision-write mocks passed typecheck plus all 16 changed suites: 571 tests passed with 2 intentional skips.
+  - Existing manager/daemon test doubles now return durable-write success by default; explicit persistence-failure cases still return false. Non-mergeable judge outcomes are asserted as metadata-only decisions without attestation or merge authority.
+  - Windows directory-descriptor fsync remains an explicit best-effort platform boundary; this repair proves correct containment and fail-closed authority behavior, not a stronger native filesystem flush guarantee than Node exposes.

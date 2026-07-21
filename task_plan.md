@@ -2846,4 +2846,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add an allowlisted diagnostic stage when a swallowed write has no native errno.
 - [x] Add an allowlisted append operation without letting successful cleanup hide the failing operation.
 - [x] Persist the newly-created decisions leaf itself before reporting a first-use durable write.
+- [x] Bind recursive directory creation to a pre-existing ancestor identity so Windows namespace spelling cannot overrun the durability boundary.
+- [x] Confirm the previously failing native Windows 2/3 shard passes the repaired exact source head.
+- [x] Align decision-write test doubles with the production durable-append contract and pass all 16 changed suites (571 passed, 2 skipped).
+- [ ] Require a fresh complete protected matrix on the final reconstructed head before promotion.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.
