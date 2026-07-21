@@ -2730,7 +2730,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit executable path handling independently from cwd containment.
 - [x] Reject host-independent Windows absolute and drive-relative executable forms.
 - [x] Add portable contract-parser regression coverage and rerun typecheck.
+- [x] Revalidate physical cwd and executable containment inside the synchronous watchdog wrapper.
 - [ ] Require the refreshed complete protected matrix on PR #106 before merge.
+- [ ] Design immutable verification-snapshot authority separately; do not claim final check-to-exec race elimination from path validation alone.
 
 ## Windows Receipt-Materialization CI Budget (2026-07-21)
 - [x] Isolate the repeated Windows portability timeout to the M342 failure-receipt integration case.

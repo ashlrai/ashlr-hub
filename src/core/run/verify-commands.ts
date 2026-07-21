@@ -444,6 +444,7 @@ export function runVerifyCommand(
               [
                 runner,
                 String(timeout),
+                workspaceRoot,
                 commandRoot,
                 Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
               ],
@@ -966,6 +967,7 @@ export async function runVerifyCommandAsync(
           process.execPath,
           runner!,
           String(timeout),
+          workspaceRoot,
           commandRoot,
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]

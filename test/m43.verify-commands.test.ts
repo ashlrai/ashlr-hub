@@ -11,6 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -864,6 +865,33 @@ describe('verification runner packaging', () => {
       files?: string[];
     };
     expect(pkg.files).toContain('scripts/run-verify-command.mjs');
+  });
+
+  it('revalidates escaped executable paths inside the synchronous watchdog wrapper', () => {
+    const outside = makeFixture();
+    try {
+      const target = join(outside, 'verify.js');
+      writeFileSync(target, 'process.exit(0)', 'utf8');
+      mkdirSync(join(workdir, 'scripts'), { recursive: true });
+      try {
+        symlinkSync(target, join(workdir, 'scripts', 'verify.js'), 'file');
+      } catch {
+        return;
+      }
+      const runner = join(process.cwd(), 'scripts', 'run-verify-command.mjs');
+      const result = spawnSync(process.execPath, [
+        runner,
+        '1000',
+        workdir,
+        workdir,
+        Buffer.from(JSON.stringify(['scripts/verify.js']), 'utf8').toString('base64'),
+      ], { encoding: 'utf8' });
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('without escaping through a symlink');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 
