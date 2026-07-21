@@ -2705,3 +2705,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Current Cycle - CI Reliability
+- [x] Diagnose the historical verifier-portability CI failure as a child-process startup timing issue.
+- [x] Preserve abort-settlement coverage with a bounded hosted-runner startup budget.
+- [ ] Publish after PR #99's CI supersession guard is merged, so this repair receives one protected matrix.

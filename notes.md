@@ -2827,3 +2827,7 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Verifier abort CI resilience (2026-07-21):
+  - A protected Ubuntu run exposed a timing-sensitive startup assumption in the verifier abort-settlement test: it retained the child-process settlement assertion but allowed only two seconds for a process to receive CPU under a saturated full suite.
+  - The test now uses a bounded ten-second startup window. It does not alter verifier execution, cancellation behavior, post-startup assertions, or production authority.

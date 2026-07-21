@@ -937,7 +937,10 @@ describe('verifyTaskStructured', () => {
       );
 
       try {
-        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 2_000 });
+        // Hosted CI can be CPU-constrained after the hermetic suite has started
+        // hundreds of subprocesses. Keep the settlement assertion, but do not
+        // mistake delayed child-process scheduling for an abort regression.
+        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 10_000 });
         verifierPid = Number(readFileSync(pidPath, 'utf8'));
         await new Promise((resolveDone) => setTimeout(resolveDone, 100));
         controller.abort();
