@@ -6,7 +6,7 @@
  * writes ledgers, or changes policy.
  */
 
-import type { AshlrConfig, AutoMergeTrustBasis, EngineId } from '../types.js';
+import type { AshlrConfig, AutoMergeTrustBasis, EngineId, Proposal } from '../types.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { FleetStatus } from '../fleet/status.js';
 import type {
@@ -120,6 +120,8 @@ export interface ResourceStrategyReport {
   outcomes: {
     records: number;
     pendingRecords: number;
+    actionablePending: number;
+    quarantinedPending: number;
     stalePending: number;
     readyEvidence: number;
     verificationFailures: number;
@@ -139,6 +141,8 @@ export interface ResourceStrategyReadDeps {
   getResourceSnapshot?: (cfg: AshlrConfig) => Promise<ResourceSnapshot>;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
   listReadyEvidenceOutcomeRecords?: (opts?: { limit?: number; now?: Date }) => OutcomeRecord[];
+  /** Null means the proposal source could not be read completely. */
+  listPendingProposals?: () => Proposal[] | null;
   runEcosystemDoctor?: (opts?: { root?: string; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
   diagnoseGuardHealth?: () => GuardHealthDiagnosis;
 }
@@ -398,11 +402,46 @@ function summarizeOutcomes(
   return {
     records: records.length,
     pendingRecords,
+    actionablePending: 0,
+    quarantinedPending: 0,
     stalePending,
     readyEvidence,
     verificationFailures,
     recent,
   };
+}
+
+interface PendingProposalPressure {
+  actionable: number;
+  quarantined: number;
+  actionableIds: Set<string> | null;
+}
+
+function isActionablePendingProposal(proposal: Proposal): boolean {
+  if (proposal.status !== 'pending') return false;
+  if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
+  if (!proposal.repo || !proposal.diff?.trim() || proposal.isPartial === true) return false;
+  if (proposal.runEventSummary?.proposalCreated === false) return false;
+  if ((proposal.runEventSummary?.actionCounts?.proposalBlocked ?? 0) > 0) return false;
+  return true;
+}
+
+function pendingProposalPressure(
+  proposals: readonly Proposal[] | null,
+  observedPending: number,
+): PendingProposalPressure {
+  if (proposals === null) return { actionable: observedPending, quarantined: 0, actionableIds: null };
+  let actionable = 0;
+  let quarantined = 0;
+  const actionableIds = new Set<string>();
+  for (const proposal of proposals) {
+    if (proposal.status !== 'pending') continue;
+    if (isActionablePendingProposal(proposal)) {
+      actionable++;
+      actionableIds.add(proposal.id);
+    } else quarantined++;
+  }
+  return { actionable, quarantined, actionableIds };
 }
 
 function ecosystemPosture(report: EcosystemDoctorReport): EcosystemPosture {
@@ -471,6 +510,7 @@ function recommendMode(
   budgets: ResourceStrategyBudgetSummary,
   productionVelocity: EffectiveProductionVelocityProfile,
   proposalSource: ResourceStrategyReport['fleet']['proposalSource'],
+  pendingPressure: PendingProposalPressure,
 ): { mode: AutonomousDirectionMode; confidence: ReportConfidence; reasons: string[]; recommendedActions: string[] } {
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -513,18 +553,18 @@ function recommendMode(
     proposalSource.gate === 'ready' &&
     productionVelocity.enabled &&
     fleet.queue.backlogItems > 0 &&
-    fleet.proposals.pending > 0 &&
-    outcomes.stalePending >= fleet.proposals.pending &&
+    pendingPressure.actionable > 0 &&
+    outcomes.stalePending >= pendingPressure.actionable &&
     outcomes.verificationFailures === 0 &&
     ecosystem.posture !== 'fail';
 
   if (
-    (proposalSource.gate === 'ready' && fleet.proposals.pending > 0 && !stalePendingOnly) ||
+    (proposalSource.gate === 'ready' && pendingPressure.actionable > 0 && !stalePendingOnly) ||
     outcomes.verificationFailures > 0 ||
     ecosystem.posture === 'fail'
   ) {
-    if (proposalSource.gate === 'ready' && fleet.proposals.pending > 0) {
-      reasons.push(`${fleet.proposals.pending} pending proposal(s) need verification or review`);
+    if (proposalSource.gate === 'ready' && pendingPressure.actionable > 0) {
+      reasons.push(`${pendingPressure.actionable} actionable pending proposal(s) need verification or review`);
     }
     if (outcomes.verificationFailures > 0) reasons.push(`${outcomes.verificationFailures} recent outcome record(s) failed verification`);
     if (ecosystem.posture === 'fail') reasons.push('ecosystem doctor reports failing checks');
@@ -536,6 +576,10 @@ function recommendMode(
     if (stalePendingOnly) {
       reasons.push(`${outcomes.stalePending} stale pending proposal(s) are past the production velocity TTL and will not starve new dispatch`);
       actions.push('archive, reject, or refresh stale pending proposals while keeping proposal production moving');
+    }
+    if (proposalSource.gate === 'ready' && pendingPressure.quarantined > 0) {
+      reasons.push(`${pendingPressure.quarantined} non-actionable pending proposal(s) remain visible for repair or quarantine`);
+      actions.push('repair or quarantine incomplete proposal observations without blocking unrelated dispatch');
     }
     reasons.push(`${fleet.queue.backlogItems} backlog item(s) are available and no hard stop is active`);
     actions.push('build backlog proposals within configured caps');
@@ -574,6 +618,16 @@ async function defaultReadyEvidenceOutcomeRecordsAsync(
 ): Promise<OutcomeRecord[]> {
   const { listReadyEvidenceOutcomeRecords } = await import('./outcome-records.js');
   return listReadyEvidenceOutcomeRecords({ limit, now });
+}
+
+async function defaultPendingProposalsAsync(): Promise<Proposal[] | null> {
+  try {
+    const { listProposalsDetailed } = await import('../inbox/store.js');
+    const read = listProposalsDetailed({ status: 'pending', requireComplete: true });
+    return read.complete && read.sourceState !== 'degraded' ? read.proposals : null;
+  } catch {
+    return null;
+  }
 }
 
 async function defaultEcosystemDoctor(options: { root?: string; deep?: boolean; now?: Date }): Promise<EcosystemDoctorReport> {
@@ -616,6 +670,11 @@ export async function buildResourceStrategyReport(
   const readyRecords = deps.listReadyEvidenceOutcomeRecords
     ? deps.listReadyEvidenceOutcomeRecords({ limit: maxOutcomes, now })
     : await defaultReadyEvidenceOutcomeRecordsAsync(maxOutcomes, now);
+  const pendingProposals = deps.listPendingProposals
+    ? deps.listPendingProposals()
+    : opts.deps
+      ? null
+      : await defaultPendingProposalsAsync();
   const doctor = deps.runEcosystemDoctor
     ? await deps.runEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now })
     : await defaultEcosystemDoctor({ root: opts.ecosystemRoot, deep: false, now }).catch(() =>
@@ -638,6 +697,16 @@ export async function buildResourceStrategyReport(
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);
   const proposalSource = proposalSourceAuthority(fleet);
+  const pendingPressure = pendingProposalPressure(pendingProposals, fleet.proposals.pending);
+  outcomeSummary.actionablePending = pendingPressure.actionable;
+  outcomeSummary.quarantinedPending = pendingPressure.quarantined;
+  if (pendingPressure.actionableIds !== null) {
+    const actionableIds = pendingPressure.actionableIds;
+    outcomeSummary.stalePending = outcomeSummary.recent.filter((record) =>
+      actionableIds.has(record.proposalId) && record.stalePending).length;
+    outcomeSummary.verificationFailures = outcomeSummary.recent.filter((record) =>
+      actionableIds.has(record.proposalId) && record.verificationPassed === false).length;
+  }
   const recommendation = recommendMode(
     cfg,
     guard,
@@ -648,6 +717,7 @@ export async function buildResourceStrategyReport(
     budgetSummary,
     productionVelocity,
     proposalSource,
+    pendingPressure,
   );
 
   return {
