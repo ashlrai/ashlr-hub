@@ -172,6 +172,54 @@ export interface TrajectoryRouteDiagnosticSummary {
   reasonCounts: Record<GeneratedRepairRouteReason, number>;
 }
 
+type TraceModelFamily = 'codex' | 'claude' | 'kimi' | 'local' | 'other';
+type TraceCommandKind = 'typecheck' | 'lint' | 'test' | 'build' | 'security';
+type TraceAction = 'created' | 'verified' | 'merged' | 'rejected' | 'handoff' | 'escalated';
+type TraceLabelBasis = 'proposal-status' | 'dispatch-outcome' | 'judge-verdict' | 'merge-gate' | 'autonomy-policy' | 'evidence-policy' | 'manual-decision' | 'unknown';
+type TraceLearningSource = 'proposal' | 'decision-ledger' | 'daemon-dispatch' | 'agent-action' | 'autonomy-evidence' | 'outcome-record' | 'worked-ledger' | 'unknown';
+
+/** A deliberately narrow, metadata-only event surface for operator traces. */
+export interface TrajectoryTraceEvent {
+  ts: string;
+  kind: TrajectoryTimelineKind;
+  outcome: TrajectoryTerminalOutcome | 'passed' | 'failed' | 'unknown';
+  action?: TraceAction;
+  route?: {
+    backend?: EngineId;
+    tier?: EngineTier;
+    modelFamily?: TraceModelFamily;
+    policyVersion?: string;
+    learningEpoch?: string;
+  };
+  evidence?: {
+    state: 'passed' | 'failed' | 'unknown';
+    trust: 'signed' | 'deterministic' | 'heuristic' | 'unknown';
+    commandKinds: TraceCommandKind[];
+  };
+  labelBasis?: TraceLabelBasis;
+  learningSource?: TraceLearningSource;
+}
+
+export interface TrajectoryTrace {
+  ref: string;
+  latestAt: string;
+  terminalOutcome: TrajectoryTerminalOutcome;
+  realizedOutcome?: TrajectoryRealizedOutcome;
+  coverage: PublishedTrajectoryCoverage;
+  sourceState: 'complete' | 'incomplete' | 'degraded';
+  events: TrajectoryTraceEvent[];
+}
+
+export interface TrajectoryTraceSummary {
+  state: 'available' | 'unavailable' | 'degraded';
+  records: TrajectoryTrace[];
+}
+
+type TrajectoryTraceReadQuality = {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+};
+
 /** Remove all exact skill metrics when the observation ledger is degraded. */
 export function suppressDegradedSkillObservation(
   status: TrajectoryLearningStatus,
@@ -214,6 +262,8 @@ export interface TrajectoryLearningStatus {
   /** Bounded action-only preclaim observations, excluded from learning metrics. */
   routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
   skillObservation: TrajectorySkillObservationSummary;
+  /** Capped, opaque, metadata-only route-to-outcome traces for operators. */
+  traces: TrajectoryTraceSummary;
   gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
   recent: Array<{
     ref: string;
@@ -254,6 +304,7 @@ interface SkillObservationCounts {
 }
 
 const skillObservationByRecords = new WeakMap<TrajectoryRecord[], SkillObservationCounts>();
+const dispatchTraceReadStateByRecords = new WeakMap<TrajectoryRecord[], TrajectoryTraceSummary['state']>();
 const skillObservationByRecord = new WeakMap<TrajectoryRecord, SkillObservationCounts>();
 const skillObservationDiagnosticsByRecord = new WeakMap<
   TrajectoryRecord,
@@ -453,6 +504,175 @@ function metric(count: number, denominator: number): TrajectoryCoverageMetric {
 
 function trajectoryRef(record: TrajectoryRecord): string {
   return `trajectory:${createHash('sha256').update(record.id).digest('hex').slice(0, 12)}`;
+}
+
+const TRACE_ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+]);
+const TRACE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
+const TRACE_COMMAND_KINDS = new Set<TraceCommandKind>([
+  'typecheck', 'lint', 'test', 'build', 'security',
+]);
+const TRACE_ACTIONS = new Set<TraceAction>([
+  'created', 'verified', 'merged', 'rejected', 'handoff', 'escalated',
+]);
+const TRACE_LABEL_BASES = new Set<TraceLabelBasis>([
+  'proposal-status', 'dispatch-outcome', 'judge-verdict', 'merge-gate', 'autonomy-policy', 'evidence-policy', 'manual-decision', 'unknown',
+]);
+const TRACE_LEARNING_SOURCES = new Set<TraceLearningSource>([
+  'proposal', 'decision-ledger', 'daemon-dispatch', 'agent-action', 'autonomy-evidence', 'outcome-record', 'worked-ledger', 'unknown',
+]);
+const TRACE_TERMINAL_OUTCOMES = new Set<TrajectoryTerminalOutcome>([
+  'merged', 'rejected', 'handoff', 'pending', 'no-proposal', 'cancelled', 'failed', 'unknown',
+]);
+const TRACE_POLICY_VERSIONS = new Set(['fleet-router-v1']);
+
+function traceTimestamp(value: unknown): string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : 'unknown';
+}
+
+function traceEngine(value: unknown): EngineId | undefined {
+  return typeof value === 'string' && TRACE_ENGINE_IDS.has(value as EngineId) ? value as EngineId : undefined;
+}
+
+function traceTier(value: unknown): EngineTier | undefined {
+  return typeof value === 'string' && TRACE_TIERS.has(value as EngineTier) ? value as EngineTier : undefined;
+}
+
+function traceModelFamily(value: unknown): TraceModelFamily | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  if (/(^|[/:._-])codex([/:._-]|$)|\bgpt[- ]?\d|\bopenai\b/.test(normalized)) return 'codex';
+  if (/(^|[/:._-])claude([/:._-]|$)|\banthropic\b/.test(normalized)) return 'claude';
+  if (/(^|[/:._-])kimi([/:._-]|$)|\bmoonshot\b/.test(normalized)) return 'kimi';
+  if (/(^|[/:._-])(local|ollama|qwen|llama|deepseek|nim|builtin|ashlrcode|aw|hermes|opencode|grok)([/:._-]|$)/.test(normalized)) return 'local';
+  return 'other';
+}
+
+function tracePolicyVersion(value: unknown): string | undefined {
+  return typeof value === 'string' && TRACE_POLICY_VERSIONS.has(value) ? value : undefined;
+}
+
+function traceLearningEpoch(value: unknown): string | undefined {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
+function traceOutcome(event: TrajectoryTimelineEvent): TrajectoryTraceEvent['outcome'] {
+  if (typeof event.outcome === 'string' && TRACE_TERMINAL_OUTCOMES.has(event.outcome as TrajectoryTerminalOutcome)) {
+    return event.outcome as TrajectoryTerminalOutcome;
+  }
+  if (event.outcome === 'passed' || event.outcome === 'failed') return event.outcome;
+  if (event.evidence?.verificationPassed === true || event.evidenceOutcome?.verificationPassed === true) return 'passed';
+  if (event.evidence?.verificationPassed === false || event.evidenceOutcome?.verificationPassed === false) return 'failed';
+  return 'unknown';
+}
+
+function traceEvidence(event: TrajectoryTimelineEvent): TrajectoryTraceEvent['evidence'] | undefined {
+  const commandKinds = [
+    ...(event.evidence?.commandKinds ?? []),
+    ...(event.postMergeEvidence?.commandKinds ?? []),
+  ].filter((kind): kind is TraceCommandKind =>
+    typeof kind === 'string' && TRACE_COMMAND_KINDS.has(kind as TraceCommandKind),
+  );
+  const verification = event.evidence?.verificationPassed ?? event.evidenceOutcome?.verificationPassed;
+  const trustBasis = event.evidence?.trustBasis ?? event.evidenceOutcome?.trustBasis;
+  const trust = trustBasis === 'evidence'
+    ? 'signed'
+    : trustBasis === 'verification'
+      ? 'deterministic'
+      : trustBasis === 'tier'
+        ? 'heuristic'
+        : 'unknown';
+  if (verification === undefined && commandKinds.length === 0 && trust === 'unknown') return undefined;
+  return {
+    state: verification === true ? 'passed' : verification === false ? 'failed' : 'unknown',
+    trust,
+    commandKinds: [...new Set(commandKinds)],
+  };
+}
+
+function traceSourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
+  const qualities = [record.decisionSourceQuality, record.agentActionSourceQuality];
+  if (qualities.some((quality) => quality?.sourceState === 'degraded')) return 'degraded';
+  if (qualities.some((quality) => quality && (quality.sourceState === 'missing' || !quality.complete))) return 'incomplete';
+  return record.coverage.dispatch && record.coverage.proposal && record.coverage.evidence && record.coverage.decision && record.coverage.agentAction
+    ? 'complete'
+    : 'incomplete';
+}
+
+function projectTrajectoryEvent(event: TrajectoryTimelineEvent): TrajectoryTraceEvent {
+  const backend = traceEngine(event.backend ?? event.routeSnapshot?.backend);
+  const tier = traceTier(event.tier ?? event.routeSnapshot?.tier);
+  const modelFamily = traceModelFamily(event.model ?? event.routeSnapshot?.model);
+  const policyVersion = tracePolicyVersion(event.routerPolicyVersion ?? event.routeSnapshot?.routerPolicyVersion);
+  const learningEpoch = traceLearningEpoch(event.learningEpoch);
+  const route = {
+    ...(backend ? { backend } : {}),
+    ...(tier ? { tier } : {}),
+    ...(modelFamily ? { modelFamily } : {}),
+    ...(policyVersion ? { policyVersion } : {}),
+    ...(learningEpoch ? { learningEpoch } : {}),
+  };
+  const evidence = traceEvidence(event);
+  const action = typeof event.action === 'string' && TRACE_ACTIONS.has(event.action as TraceAction)
+    ? event.action as TraceAction
+    : undefined;
+  const labelBasis = typeof event.labelBasis === 'string' && TRACE_LABEL_BASES.has(event.labelBasis as TraceLabelBasis)
+    ? event.labelBasis as TraceLabelBasis
+    : event.labelBasis ? 'unknown' : undefined;
+  const learningSource = typeof event.learningSource === 'string' && TRACE_LEARNING_SOURCES.has(event.learningSource as TraceLearningSource)
+    ? event.learningSource as TraceLearningSource
+    : event.learningSource ? 'unknown' : undefined;
+  return {
+    ts: traceTimestamp(event.ts),
+    kind: event.kind,
+    outcome: traceOutcome(event),
+    ...(action ? { action } : {}),
+    ...(Object.keys(route).length > 0 ? { route } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(labelBasis ? { labelBasis } : {}),
+    ...(learningSource ? { learningSource } : {}),
+  };
+}
+
+function projectTrajectoryTraces(records: TrajectoryRecord[]): TrajectoryTraceSummary {
+  const state = dispatchTraceReadStateByRecords.get(records) ?? 'available';
+  // A partial dispatch ledger cannot establish a reliable route-to-outcome
+  // population. Preserve the health truth, but do not publish partial traces.
+  if (state !== 'available') return { state, records: [] };
+  const projected = records
+    .filter((record) => record.coverage.dispatch)
+    .sort((left, right) => eventMs(right.latestAt) - eventMs(left.latestAt) || trajectoryRef(left).localeCompare(trajectoryRef(right)))
+    .slice(0, 5)
+    .map((record): TrajectoryTrace => ({
+      ref: trajectoryRef(record),
+      latestAt: traceTimestamp(record.latestAt),
+      terminalOutcome: record.terminalOutcome,
+      ...(record.realizedOutcome ? { realizedOutcome: record.realizedOutcome } : {}),
+      coverage: (({ skillUse: _skillUse, ...coverage }) => coverage)(record.coverage),
+      sourceState: traceSourceState(record),
+      events: [...record.timeline]
+        .sort((left, right) => eventMs(left.ts) - eventMs(right.ts) || timelineRank(left.kind) - timelineRank(right.kind))
+        .slice(0, 8)
+        .map(projectTrajectoryEvent),
+    }));
+  return { state: 'available', records: projected };
+}
+
+function traceReadState(quality: TrajectoryTraceReadQuality | undefined): TrajectoryTraceSummary['state'] {
+  if (!quality) return 'available';
+  if (quality.sourceState === 'missing') return 'unavailable';
+  return quality.sourceState === 'healthy' && quality.complete ? 'available' : 'degraded';
+}
+
+function failedTraceRead(): TrajectoryTraceReadQuality {
+  return { sourceState: 'degraded', complete: false };
+}
+
+function combinedTraceReadState(...qualities: Array<TrajectoryTraceReadQuality | undefined>): TrajectoryTraceSummary['state'] {
+  const states = qualities.map(traceReadState);
+  if (states.includes('degraded')) return 'degraded';
+  return states.includes('unavailable') ? 'unavailable' : 'available';
 }
 
 function generatedRepairRouteReason(value: unknown): GeneratedRepairRouteReason {
@@ -680,31 +900,65 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
     limit: Math.max(limit * 6, 200),
     maxFiles: 3,
   };
-  const dispatches = (deps.readDispatchProductionEvents
-    ? safeArray(() => deps.readDispatchProductionEvents!(dispatchReadOptions))
-    : safeArray(() => {
-        const read = readDispatchProductionEventsDetailed(dispatchReadOptions);
-        return read.sourceState === 'healthy' && read.complete ? read.events : [];
-      }))
+  let dispatchReadQuality: TrajectoryTraceReadQuality | undefined;
+  let dispatchEvents: DispatchProductionEvent[];
+  if (deps.readDispatchProductionEvents) {
+    try {
+      const read = deps.readDispatchProductionEvents(dispatchReadOptions);
+      dispatchEvents = Array.isArray(read) ? read : [];
+      dispatchReadQuality = (read as DispatchProductionEvent[] & {
+        sourceQuality?: TrajectoryTraceReadQuality;
+      }).sourceQuality;
+    } catch {
+      dispatchEvents = [];
+      dispatchReadQuality = failedTraceRead();
+    }
+  } else {
+    try {
+      const read = readDispatchProductionEventsDetailed(dispatchReadOptions);
+      dispatchReadQuality = read;
+      dispatchEvents = read.sourceState === 'healthy' && read.complete ? read.events : [];
+    } catch {
+      dispatchEvents = [];
+      dispatchReadQuality = failedTraceRead();
+    }
+  }
+  const dispatches = dispatchEvents
     .filter((event) =>
       event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
     )
     .slice(0, Math.max(limit * 3, 100));
-  const outcomes = safeArray(() =>
-    (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
-  );
-  const actions = safeArray(() => deps.readAgentActions
-    ? deps.readAgentActions({
+  let outcomeReadQuality: TrajectoryTraceReadQuality | undefined;
+  let outcomes: OutcomeRecord[];
+  try {
+    const read = (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) });
+    outcomes = Array.isArray(read) ? read : [];
+    outcomeReadQuality = (read as OutcomeRecord[] & { sourceQuality?: TrajectoryTraceReadQuality }).sourceQuality;
+  } catch {
+    outcomes = [];
+    outcomeReadQuality = failedTraceRead();
+  }
+  let actionReadQuality: TrajectoryTraceReadQuality | undefined;
+  let actions: ReturnType<typeof readAgentActions>;
+  try {
+    const read = deps.readAgentActions
+      ? deps.readAgentActions({
         sinceMs,
         limit: Math.max(limit * 4, 200),
         maxFiles: 3,
       })
-    : readAgentActions({
+      : readAgentActions({
         sinceMs,
         limit: Math.max(limit * 4, 200),
         maxFiles: 3,
         requireComplete: true,
-      }));
+      });
+    actions = Array.isArray(read) ? read : [];
+    actionReadQuality = (read as typeof actions & { sourceQuality?: TrajectoryTraceReadQuality }).sourceQuality;
+  } catch {
+    actions = [];
+    actionReadQuality = failedTraceRead();
+  }
   const agentActionSourceQuality = (actions as typeof actions & {
     sourceQuality?: AgentActionSourceQuality;
   }).sourceQuality;
@@ -1100,6 +1354,10 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       return resultRecord;
     });
   skillObservationByRecords.set(result, skillObservation);
+  dispatchTraceReadStateByRecords.set(
+    result,
+    combinedTraceReadState(dispatchReadQuality, outcomeReadQuality, actionReadQuality),
+  );
   return result;
 }
 
@@ -1252,6 +1510,7 @@ export function summarizeTrajectoryLearning(
           sampleState,
         }
       : { eventState, sampleState },
+    traces: projectTrajectoryTraces(records),
     gaps,
     recent: productionRecords.slice(0, 8).map((record) => ({
       ref: trajectoryRef(record),

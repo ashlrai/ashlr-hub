@@ -1,5 +1,16 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## 2026-07-21 - Bounded trajectory trace projection
+- Added an in-memory `trajectoryLearning.traces` projection; it adds no ledger, API endpoint, mutation route, or lookup-by-identity capability.
+- Each trace is keyed by the existing opaque `trajectory:<sha256-prefix>` reference and exposes at most eight chronological events. The projection emits only allowlisted kind/outcome/action, known engine/tier categories, normalized model family, safe policy/epoch values, bounded evidence classification, and closed label/source categories.
+- Projection never forwards record identities, repository/item paths, prompt/diff/output/reason/hash/command details, route snapshots, run summaries, or full evidence payloads. Explicit source quality remains `complete`, `incomplete`, or `degraded`.
+- Fleet CLI, Mission Control, and Fleet Dashboard consume the existing Fleet Status field and render unavailable/legacy snapshots explicitly.
+- Verified with `npm run typecheck -- --pretty false`, `npm run test:ci -- test/m354.trajectory-records.test.ts test/m49.fleet-status.test.ts test/m213.dashboard-sse.test.ts` (212 passed), and `git diff --check`.
+- P1 follow-up: the projection now carries the dispatch reader's categorical health. A missing ledger is `unavailable`; thrown, malformed, or incomplete reads are `degraded` and withhold all trace records rather than publishing a misleading empty population. CLI and dashboard state this explicitly.
+- M354 now covers failed, incomplete, and missing dispatch reads. M213 executes the renderer with valid, legacy, degraded, and hostile snapshots; hostile categories and identities collapse to safe fallback text. M49 proves CLI degradation text. Follow-up verification: typecheck plus 215 focused assertions.
+- P1 follow-up: trace availability now combines dispatch, outcome, and agent-action reader health. Any degraded input withholds all traces as `degraded`; otherwise any missing input withholds them as `unavailable`. This prevents failed outcome/action reads from masquerading as causal coverage gaps. M354 separately proves outcome and action throw paths plus missing-source paths; verification is typecheck plus 217 focused assertions.
+- Assessed the reported autonomy-evidence zero-on-read-failure state. No change needed: `buildFleetStatus()` initializes evidence-read failures as `authorityState:"degraded"` with incomplete source quality, and the existing dashboard labels degraded zero as observed rather than healthy.
+
 ## Current Stack Integration Cycle
 - Protected PR #30 merged to `master` as `827faf6ee3c8f7311e6824466d3d6b478f46cd27` after 10/10 exact-head checks passed. The merge commit preserves the checked candidate tree.
 - Post-merge run `29547392728` passed macOS and every Windows partition. Ubuntu passed 11,203 tests and failed six assertions solely because five M402 canary fixtures and one M49 queued-work fixture had aged beyond their intended observation windows.

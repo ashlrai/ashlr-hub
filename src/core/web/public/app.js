@@ -3052,6 +3052,78 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
   ];
 }
 
+function trajectoryTraceValue(value, allowed, fallback = 'unknown') {
+  return typeof value === 'string' && allowed.includes(value) ? value : fallback;
+}
+
+function renderTrajectoryTraceList(trajectoryLearning) {
+  const traces = trajectoryLearning?.traces;
+  if (!traces || traces.state === 'unavailable') {
+    return el('p', { cls: 'hint' }, 'Trajectory traces unavailable');
+  }
+  if (traces.state === 'degraded') {
+    return el('p', { cls: 'hint' }, 'Trajectory traces degraded; partial dispatch history withheld');
+  }
+  if (traces.state !== 'available') {
+    return el('p', { cls: 'hint' }, 'Trajectory traces unavailable');
+  }
+  const records = Array.isArray(traces.records) ? traces.records.slice(0, 5) : [];
+  if (records.length === 0) return el('p', { cls: 'hint' }, 'No recent trajectory traces');
+  const sourceStates = ['complete', 'incomplete', 'degraded'];
+  const outcomes = ['merged', 'rejected', 'handoff', 'pending', 'no-proposal', 'cancelled', 'failed', 'unknown'];
+  const kinds = ['dispatch', 'proposal', 'evidence', 'decision', 'post-merge', 'agent-action'];
+  const eventOutcomes = [...outcomes, 'passed'];
+  const actions = ['created', 'verified', 'merged', 'rejected', 'handoff', 'escalated'];
+  const tiers = ['local', 'mid', 'frontier'];
+  const engines = ['builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok'];
+  const models = ['codex', 'claude', 'kimi', 'local', 'other'];
+  const evidenceStates = ['passed', 'failed', 'unknown'];
+  const evidenceTrust = ['signed', 'deterministic', 'heuristic', 'unknown'];
+  const labelBases = ['proposal-status', 'dispatch-outcome', 'judge-verdict', 'merge-gate', 'autonomy-policy', 'evidence-policy', 'manual-decision', 'unknown'];
+  const learningSources = ['proposal', 'decision-ledger', 'daemon-dispatch', 'agent-action', 'autonomy-evidence', 'outcome-record', 'worked-ledger', 'unknown'];
+  const list = el('div', { cls: 'trajectory-trace-list' });
+  for (const trace of records) {
+    const ref = typeof trace?.ref === 'string' && /^trajectory:[a-f0-9]{12}$/.test(trace.ref)
+      ? trace.ref
+      : 'trajectory:unavailable';
+    const outcome = trajectoryTraceValue(trace?.terminalOutcome, outcomes);
+    const sourceState = trajectoryTraceValue(trace?.sourceState, sourceStates);
+    const coverage = trace?.coverage ?? {};
+    const coverageText = `d=${coverage.dispatch === true ? 'y' : 'n'} p=${coverage.proposal === true ? 'y' : 'n'} e=${coverage.evidence === true ? 'y' : 'n'} c=${coverage.decision === true ? 'y' : 'n'} a=${coverage.agentAction === true ? 'y' : 'n'}`;
+    const item = el('div', { cls: 'trajectory-trace' },
+      el('div', { cls: 'trajectory-trace-head' }, `${ref} · ${outcome} · ${sourceState} · ${coverageText}`),
+    );
+    const events = Array.isArray(trace?.events) ? trace.events.slice(0, 8) : [];
+    for (const event of events) {
+      const kind = trajectoryTraceValue(event?.kind, kinds);
+      const eventOutcome = trajectoryTraceValue(event?.outcome, eventOutcomes);
+      const action = event?.action ? `/${trajectoryTraceValue(event.action, actions)}` : '';
+      const route = event?.route ?? {};
+      const routeParts = [
+        trajectoryTraceValue(route.tier, tiers, ''),
+        trajectoryTraceValue(route.backend, engines, ''),
+        trajectoryTraceValue(route.modelFamily, models, ''),
+      ].filter(Boolean);
+      const evidence = event?.evidence;
+      const evidenceText = evidence
+        ? ` evidence=${trajectoryTraceValue(evidence.state, evidenceStates)}/${trajectoryTraceValue(evidence.trust, evidenceTrust)}`
+        : '';
+      const policy = route.policyVersion === 'fleet-router-v1' ? ` policy=${route.policyVersion}` : '';
+      const epoch = typeof route.learningEpoch === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(route.learningEpoch)
+        ? ` epoch=${route.learningEpoch}`
+        : '';
+      const label = event?.labelBasis ? ` label=${trajectoryTraceValue(event.labelBasis, labelBases)}` : '';
+      const source = event?.learningSource ? ` source=${trajectoryTraceValue(event.learningSource, learningSources)}` : '';
+      item.appendChild(el('div', { cls: 'trajectory-trace-event' },
+        `${typeof event?.ts === 'string' && Number.isFinite(Date.parse(event.ts)) ? event.ts : 'unknown'} ${kind}/${eventOutcome}${action}` +
+          `${routeParts.length > 0 ? ` route=${routeParts.join('/')}` : ''}${evidenceText}${policy}${epoch}${label}${source}`,
+      ));
+    }
+    list.appendChild(item);
+  }
+  return list;
+}
+
 function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card') {
   if (!trajectoryLearning && !skillCorpusReadiness) return null;
   const trajectories = trajectoryLearning?.trajectories ?? 0;
@@ -3065,7 +3137,9 @@ function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness =
       ? `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`
       : 'observe-only readiness')
   ));
-  card.appendChild(el('div', { cls: 'card-body' }, infoGrid(rows)));
+  const body = el('div', { cls: 'card-body' }, infoGrid(rows));
+  if (trajectoryLearning) body.appendChild(renderTrajectoryTraceList(trajectoryLearning));
+  card.appendChild(body);
   return card;
 }
 
@@ -5535,6 +5609,7 @@ function fdRenderProductionPanel(snap) {
   if (trajectoryLearning) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Trajectory learning'));
     body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)));
+    body.appendChild(renderTrajectoryTraceList(trajectoryLearning));
   } else if (skillCorpusReadiness) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Skill learning'));
     body.appendChild(infoGrid(skillCorpusReadinessRows(skillCorpusReadiness)));

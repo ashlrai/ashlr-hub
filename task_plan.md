@@ -1,5 +1,13 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## 2026-07-21 - Bounded trajectory trace projection
+- [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.
+- [x] Add a capped read-only projection under `trajectoryLearning` (five opaque traces, eight chronological allowlisted events).
+- [x] Render the projection in Fleet CLI and both Mission Control and Fleet Dashboard, including legacy/unavailable handling.
+- [x] Run focused privacy, status, and dashboard suites plus typecheck and diff checks (212 focused assertions).
+- [x] P1: preserve dispatch-reader health so missing history is unavailable and failed or incomplete history is degraded rather than an honest empty trace list (215 focused assertions).
+- [x] P1 follow-up: merge outcome/action reader health into trace publication; independent throws degrade and missing sources withhold traces as unavailable (217 focused assertions).
+
 ## Current Stack Integration Cycle
 - [x] Merge protected PR #30 with exact-head authority and preserve its merge tree.
 - [x] Diagnose post-merge Ubuntu failures as expired test fixtures, with macOS and all Windows lanes green.
