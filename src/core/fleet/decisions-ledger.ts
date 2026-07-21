@@ -52,6 +52,23 @@ export function decisionsDir(): string {
   return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'decisions');
 }
 
+/** Persist each newly-created authority directory and its first existing parent. */
+export function _fsyncCreatedDecisionDirectoryChainForTest(
+  dir: string,
+  firstCreated: string,
+  syncDirectory: (path: string) => void = fsyncDirectory,
+): void {
+  const firstExistingParent = dirname(firstCreated);
+  let current = dir;
+  while (true) {
+    syncDirectory(current);
+    if (current === firstExistingParent) return;
+    const parent = dirname(current);
+    if (parent === current) throw new Error('decisions ledger creation escaped filesystem root');
+    current = parent;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Secret scrubbing (mirror audit.ts's stripSecrets)
 // ---------------------------------------------------------------------------
@@ -260,15 +277,7 @@ export function recordDecision(entry: DecisionEntry): boolean {
         // Persist the leaf entry and every newly-created ancestor entry through
         // the first pre-existing parent. Without this, a first-use nested
         // ASHLR_HOME can lose the whole ledger tree after reporting success.
-        const firstExistingParent = dirname(firstCreated);
-        let current = dirname(dir);
-        while (true) {
-          fsyncDirectory(current);
-          if (current === firstExistingParent) break;
-          const parent = dirname(current);
-          if (parent === current) throw new Error('decisions ledger creation escaped filesystem root');
-          current = parent;
-        }
+        _fsyncCreatedDecisionDirectoryChainForTest(dir, firstCreated);
       }
     }
 

@@ -501,6 +501,19 @@ describe('m119 computeQualityMetrics', () => {
 // ---------------------------------------------------------------------------
 
 describe('m119 decisions-ledger', () => {
+  it('persists the newly-created decision leaf through its first existing parent', async () => {
+    const { _fsyncCreatedDecisionDirectoryChainForTest } =
+      await import('../src/core/fleet/decisions-ledger.js');
+    const root = path.join(tmpHome, 'nested-home');
+    const created = path.join(root, '.ashlr');
+    const dir = path.join(created, 'decisions');
+    const synced: string[] = [];
+
+    _fsyncCreatedDecisionDirectoryChainForTest(dir, created, (candidate) => synced.push(candidate));
+
+    expect(synced).toEqual([dir, created, root]);
+  });
+
   it('keeps identity checks while tolerating Windows-emulated POSIX modes', async () => {
     const {
       isSafeDecisionAuthorityDirectory,
