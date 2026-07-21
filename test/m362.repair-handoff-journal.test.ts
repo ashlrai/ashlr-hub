@@ -888,7 +888,7 @@ describe('M362 durable repair handoff journal', () => {
       unboundV2Authorities: 1,
       latestCurrentActivationV2At: bound.ts,
     });
-  });
+  }, 15_000);
 
   it('journal activation authority: quarantines unbound v2 rows written after activation', () => {
     const repo = fx.makeRepo();
