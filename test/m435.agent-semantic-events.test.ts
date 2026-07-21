@@ -214,6 +214,43 @@ describe('M435 metadata-only agent semantic events', () => {
     expect(persisted?.semanticEventsState).toBe('rejected');
   });
 
+  it('keeps nested run summaries bound to their carrier run identity', () => {
+    const runId = 'run-m435-summary-owner';
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:03.500Z',
+      actor: 'agent',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'sandboxed-engine:run',
+      summary: 'closed metadata carrier',
+      runId,
+      runEventSummary: {
+        runId: 'run-m435-summary-other',
+        outcome: 'no-proposal',
+        proposalCreated: false,
+      },
+    });
+
+    const [persisted] = readAgentActions();
+    expect(persisted).toMatchObject({ runId, trajectoryId: `run:${runId}` });
+    expect(persisted?.runEventSummary).toBeUndefined();
+
+    fs.writeFileSync(path.join(agentActionsDir(), '2026-07-16.jsonl'), `${JSON.stringify({
+      schemaVersion: 1,
+      ts: '2026-07-16T20:00:03.600Z',
+      actor: 'agent', kind: 'dispatch', outcome: 'no-proposal',
+      action: 'sandboxed-engine:run', summary: 'tampered metadata carrier',
+      runId,
+      runEventSummary: { runId: 'run-m435-summary-other', outcome: 'no-proposal' },
+    })}\n`, { flag: 'a', mode: 0o600 });
+
+    expect(readAgentActionsDetailed({ requireComplete: true })).toMatchObject({
+      sourceState: 'degraded', complete: false, invalidRows: 1,
+    });
+    expect(readAgentActions({ requireComplete: true })).toEqual([]);
+  });
+
   it('projects replay-idempotent run signals and collapses contradictions to unknown', () => {
     const runId = 'run-m435-workspace-signal';
     const completed = agentRunSemanticEvents({
