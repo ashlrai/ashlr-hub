@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   bestOfNDir,
+  readBestOfNLatestObservationDetailed,
   readBestOfNRecords,
   readBestOfNRecordsDetailed,
   recordBestOfN,
@@ -242,6 +243,58 @@ describe('M370 bounded best-of-N ledger', () => {
     });
     expect(readBestOfNRecordsDetailed({ maxRows: 1 })).toMatchObject({
       sourceState: 'degraded', complete: false, rowsScanned: 1, stopReasons: ['row-limit'],
+    });
+  });
+
+  it('reports a stale historical observation independently of rolling analytics cutoffs', () => {
+    const staleAt = '2020-01-01T12:34:56.000Z';
+    recordBestOfN(record({ ts: staleAt, attemptId: 'historical-observation' }));
+
+    expect(readBestOfNRecordsDetailed({ sinceMs: Date.now() - 60_000 })).toMatchObject({
+      records: [], sourceState: 'healthy', complete: true,
+    });
+    expect(readBestOfNLatestObservationDetailed()).toEqual({
+      latestAt: staleAt,
+      sourceQuality: expect.objectContaining({
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        filesRead: 1,
+      }),
+    });
+  });
+
+  it('keeps an empty readable ledger healthy while withholding a nonexistent observation', () => {
+    mkdirSync(bestOfNDir(), { recursive: true, mode: 0o700 });
+
+    const read = readBestOfNLatestObservationDetailed();
+
+    expect(read).not.toHaveProperty('latestAt');
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesRead: 0,
+      invalidRows: 0,
+    });
+  });
+
+  it('withholds the latest observation when bounded history is degraded', () => {
+    const dir = bestOfNDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(dir, '2026-07-11.jsonl'),
+      `${JSON.stringify({ ...record(), schemaVersion: 1 })}\nnot-json\n`,
+      { mode: 0o600 },
+    );
+
+    const read = readBestOfNLatestObservationDetailed();
+
+    expect(read).not.toHaveProperty('latestAt');
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
     });
   });
 
