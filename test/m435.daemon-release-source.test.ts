@@ -91,6 +91,48 @@ describe('daemon release source inspection', () => {
     expect(inspectDaemonSourceCheckout(linkedBin)).toEqual({ state: 'dirty', root: checkout.root });
   });
 
+  it('accepts a clean detached release checkout', () => {
+    const checkout = initCheckout();
+    execFileSync('git', ['-C', checkout.root, 'checkout', '--detach', '-q', 'HEAD']);
+
+    expect(inspectDaemonSourceCheckout(checkout.binPath)).toEqual({
+      state: 'clean',
+      root: checkout.root,
+    });
+  });
+
+  it('rejects dirt inside a tracked submodule', () => {
+    const checkout = initCheckout();
+    const submodule = tempDir();
+    fs.writeFileSync(path.join(submodule, 'tracked.txt'), 'clean\n', 'utf8');
+    execFileSync('git', ['init', '-q', submodule]);
+    execFileSync('git', ['-C', submodule, 'add', 'tracked.txt']);
+    execFileSync('git', [
+      '-C', submodule,
+      '-c', 'user.name=Ashlr Test',
+      '-c', 'user.email=ashlr-test@example.invalid',
+      'commit', '-qm', 'submodule fixture',
+    ]);
+    execFileSync('git', [
+      '-C', checkout.root,
+      '-c', 'protocol.file.allow=always',
+      'submodule', 'add', '-q', submodule, 'vendor/fixture',
+    ]);
+    execFileSync('git', ['-C', checkout.root, 'add', '.gitmodules', 'vendor/fixture']);
+    execFileSync('git', [
+      '-C', checkout.root,
+      '-c', 'user.name=Ashlr Test',
+      '-c', 'user.email=ashlr-test@example.invalid',
+      'commit', '-qm', 'add submodule',
+    ]);
+    fs.appendFileSync(path.join(checkout.root, 'vendor', 'fixture', 'tracked.txt'), 'dirty\n');
+
+    expect(inspectDaemonSourceCheckout(checkout.binPath)).toEqual({
+      state: 'dirty',
+      root: checkout.root,
+    });
+  });
+
   it('fails closed when an owned Git checkout cannot be inspected', () => {
     const root = tempDir();
     const binPath = path.join(root, 'bin', 'ashlr');
