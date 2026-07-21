@@ -6593,7 +6593,17 @@ export async function tick(
           const production = outcome.value.dispatch?.production;
           const duplicateDiff = production?.outcome === 'proposal-disabled' &&
             production.reason?.startsWith('duplicate diff skipped;') === true;
-          if (production?.runEventSummary?.status === 'aborted') continue;
+          if (production?.runEventSummary?.status === 'aborted') {
+            // A durable partial artifact remains review-only and keeps its
+            // backlog dedupe role, but its completed producer must not strand
+            // the exact shared-queue claim until lease expiry.
+            if (production.outcome === 'gate-blocked' && production.proposalId) {
+              if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+                workedOutcomeFailedItemIds.add(outcome.value.item.id);
+              }
+            }
+            continue;
+          }
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
               workedOutcomeFailedItemIds.add(outcome.value.item.id);

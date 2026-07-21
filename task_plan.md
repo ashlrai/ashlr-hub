@@ -2705,3 +2705,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Partial Artifact Claim Settlement (2026-07-20)
+- [x] Settle an exact completed shared-queue claim when an aborted producer files a durable review-only partial artifact.
+- [x] Preserve partial-artifact dedupe, deny cooldown/learning/merge authority, and avoid redispatching the paid original work.
+- [x] Add a filesystem shared-queue regression and pass focused daemon, typecheck, lint, build, and diff checks.
+- [ ] Design separately authenticated shared-mode proposal-repair recovery; do not infer it from this claim-settlement slice.
