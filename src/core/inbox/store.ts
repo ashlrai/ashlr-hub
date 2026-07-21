@@ -532,8 +532,8 @@ function persistProposal(
 // Structural validation
 // ---------------------------------------------------------------------------
 
-/** Light type-guard so we never return garbage from the store. */
-function isValidProposal(parsed: unknown): parsed is Proposal {
+/** Structural proposal contract shared by canonical storage and recovery staging. */
+export function isValidProposal(parsed: unknown): parsed is Proposal {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return false;
   }

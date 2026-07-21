@@ -9,10 +9,14 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import type {
+  OperationalProjectionTransaction,
+  OperationalProjectionTransactionDigestsV1,
   OperationalProjectionTransactionPhase,
-  OperationalProjectionTransactionV1,
 } from './operational-projection-transaction.js';
-import { readOperationalProjectionTransaction } from './operational-projection-transaction.js';
+import {
+  readOperationalProjectionTransaction,
+  validOperationalProjectionStagedArtifactsV2,
+} from './operational-projection-transaction.js';
 import {
   ownsProposalStoreMutationLock,
   type ProposalStoreMutationLock,
@@ -345,9 +349,18 @@ export function readOperationalProjectionReplayLedger(): OperationalProjectionRe
 }
 
 function matchesActiveTransaction(
-  candidate: OperationalProjectionTransactionV1,
-  active: OperationalProjectionTransactionV1,
+  candidate: OperationalProjectionTransaction,
+  active: OperationalProjectionTransaction,
 ): boolean {
+  const sameStaged = candidate.schemaVersion === 1
+    ? active.schemaVersion === 1
+    : active.schemaVersion === 2 &&
+      candidate.staged.proposal.present === active.staged.proposal.present &&
+      candidate.staged.proposal.digest === active.staged.proposal.digest &&
+      candidate.staged.proposal.bytes === active.staged.proposal.bytes &&
+      candidate.staged.projection.present === active.staged.projection.present &&
+      candidate.staged.projection.digest === active.staged.projection.digest &&
+      candidate.staged.projection.bytes === active.staged.projection.bytes;
   return candidate.schemaVersion === active.schemaVersion &&
     candidate.transactionId === active.transactionId &&
     candidate.signingKeyId === active.signingKeyId &&
@@ -356,11 +369,11 @@ function matchesActiveTransaction(
     candidate.before.projection === active.before.projection &&
     candidate.after.proposal === active.after.proposal &&
     candidate.after.projection === active.after.projection &&
-    candidate.createdAt === active.createdAt && candidate.updatedAt === active.updatedAt &&
+    candidate.createdAt === active.createdAt && candidate.updatedAt === active.updatedAt && sameStaged &&
     equalDigest(candidate.attestation, active.attestation);
 }
 
-function validTransactionShape(value: unknown): value is OperationalProjectionTransactionV1 {
+function validTransactionShape(value: unknown): value is OperationalProjectionTransaction {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const transaction = value as Record<string, unknown>;
   const digestPair = (candidate: unknown): boolean => {
@@ -370,17 +383,22 @@ function validTransactionShape(value: unknown): value is OperationalProjectionTr
       [pair['proposal'], pair['projection']].every((digest) =>
         digest === null || (typeof digest === 'string' && DIGEST_RE.test(digest)));
   };
-  return transaction['schemaVersion'] === 1 &&
+  const common = (transaction['schemaVersion'] === 1 || transaction['schemaVersion'] === 2) &&
     typeof transaction['transactionId'] === 'string' && DIGEST_RE.test(transaction['transactionId']) &&
     typeof transaction['signingKeyId'] === 'string' && DIGEST_RE.test(transaction['signingKeyId']) &&
     typeof transaction['proposalId'] === 'string' && validPhase(transaction['phase']) &&
     digestPair(transaction['before']) && digestPair(transaction['after']) &&
     canonicalTimestamp(transaction['createdAt']) && canonicalTimestamp(transaction['updatedAt']) &&
     typeof transaction['attestation'] === 'string' && DIGEST_RE.test(transaction['attestation']);
+  return common && (transaction['schemaVersion'] === 1 ||
+    validOperationalProjectionStagedArtifactsV2(
+      transaction['staged'],
+      transaction['after'] as OperationalProjectionTransactionDigestsV1,
+    ));
 }
 
 export function recordOperationalProjectionReplay(
-  transaction: OperationalProjectionTransactionV1,
+  transaction: OperationalProjectionTransaction,
   storeLock: ProposalStoreMutationLock,
   now = new Date(),
 ): OperationalProjectionReplayLedgerReadResult {

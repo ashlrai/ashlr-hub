@@ -180,6 +180,28 @@ describe('M434 operational projection host-local replay ledger', () => {
     });
   });
 
+  it('does not treat changed V2 staged metadata as the same prepared intent', () => {
+    const before = { proposal: '1'.repeat(64), projection: '2'.repeat(64) };
+    const after = { proposal: '3'.repeat(64), projection: '4'.repeat(64) };
+    const first = prepareOperationalProjectionTransaction({
+      proposalId: 'proposal-434-v2', before, after,
+      staged: {
+        proposal: { present: true, digest: after.proposal, bytes: 1 },
+        projection: { present: true, digest: after.projection, bytes: 1 },
+      },
+      storeLock: acquire(), now: NOW,
+    });
+    expect(first).toMatchObject({ state: 'healthy', transaction: { schemaVersion: 2 } });
+    expect(prepareOperationalProjectionTransaction({
+      proposalId: 'proposal-434-v2', before, after,
+      staged: {
+        proposal: { present: true, digest: after.proposal, bytes: 2 },
+        projection: { present: true, digest: after.projection, bytes: 1 },
+      },
+      storeLock: lock!, now: NOW,
+    })).toMatchObject({ state: 'degraded', reason: 'transaction-already-active' });
+  });
+
   it('repairs a committed predecessor before preparing its successor', () => {
     const first = prepareOperationalProjectionTransaction({
       proposalId: 'proposal-434-first',

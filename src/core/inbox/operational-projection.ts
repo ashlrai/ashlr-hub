@@ -20,6 +20,7 @@ import {
 } from './operational-membership.js';
 import {
   inboxDir,
+  isValidProposal,
   listProposalsDetailed,
   loadProposal,
 } from './store.js';
@@ -124,6 +125,25 @@ export interface MigrateOperationalProposalProjectionOptions {
   storeLock: ProposalStoreMutationLock;
   nowMs?: number;
 }
+
+export interface OperationalProjectionArtifactDigest {
+  digest: string | null;
+  bytes: number;
+}
+
+/** A canonical staged artifact identity, using the same domains as live observation. */
+export interface OperationalProjectionStageTextValidation {
+  digest: string;
+  bytes: number;
+}
+
+export type OperationalProjectionArtifactObservation =
+  | {
+    state: 'healthy';
+    proposal: OperationalProjectionArtifactDigest;
+    projection: OperationalProjectionArtifactDigest;
+  }
+  | { state: 'degraded'; reason: OperationalProposalProjectionDegradedReason | 'proposal-id-invalid'; proposal: null; projection: null };
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -391,6 +411,16 @@ function safePrivatePath(path: string, kind: 'file' | 'directory', exactMode: nu
   }
 }
 
+/** A missing deterministic proposal path is a valid transaction endpoint, never a safe file. */
+function pathIsMissing(path: string): boolean {
+  try {
+    lstatSync(path, { bigint: true });
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
 function legacyState(): OperationalProposalsReadResult {
   const legacy = listProposalsDetailed({ maxFiles: 1, requireComplete: false });
   if (legacy.filesDiscovered > 0) {
@@ -466,6 +496,47 @@ function readProjectionFile():
 function proposalIdentityMatches(proposal: Proposal, member: OperationalProposalProjectionMemberV1): boolean {
   return proposal.id === member.proposalId && proposal.status === member.status &&
     proposal.createdAt === member.createdAt;
+}
+
+/**
+ * Validate canonical proposal text for a specific proposal identity without
+ * reading or writing the proposal store.
+ */
+export function validateOperationalProposalStageText(
+  text: string,
+  proposalId: string,
+): OperationalProjectionStageTextValidation | null {
+  if (!validProposalId(proposalId)) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!isPlainRecord(parsed) || !isValidProposal(parsed) || parsed.id !== proposalId) return null;
+    const canonical = canonicalJson(parsed);
+    if (text !== canonical) return null;
+    const bytes = Buffer.byteLength(canonical, 'utf8');
+    if (bytes <= 0 || bytes > MAX_PROPOSAL_BYTES) return null;
+    return { digest: sha256(PROPOSAL_DIGEST_DOMAIN, parsed), bytes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate canonical sealed projection text without consulting projection
+ * storage. The provenance key is required to bind the manifest seal.
+ */
+export function validateOperationalProjectionStageText(
+  text: string,
+  provenanceKey: Buffer,
+): OperationalProjectionStageTextValidation | null {
+  if (!Buffer.isBuffer(provenanceKey) || provenanceKey.length !== 32) return null;
+  const projection = parseManifest(text);
+  if (!projection || !verifyManifest(projection, projectionSigningKey(provenanceKey))) return null;
+  const canonical = `${canonicalJson(projection)}\n`;
+  if (text !== canonical) return null;
+  const bytes = Buffer.byteLength(canonical, 'utf8');
+  return bytes > 0 && bytes <= MAX_MANIFEST_BYTES
+    ? { digest: projection.projectionDigest, bytes }
+    : null;
 }
 
 function readOperationalProposalsAt(
@@ -586,6 +657,75 @@ function projectionMember(proposal: Proposal, nowMs: number):
 
 function degraded(reason: OperationalProposalProjectionDegradedReason): OperationalProposalsReadResult {
   return { state: 'degraded', reason, proposals: [], projection: null };
+}
+
+/**
+ * Observe the two artifacts used by a future projection transaction while the
+ * caller owns the global proposal-store writer fence. This performs no writes
+ * and intentionally does not grant runtime projection authority.
+ */
+export function observeOperationalProjectionArtifacts(
+  proposalId: string,
+  storeLock: ProposalStoreMutationLock,
+): OperationalProjectionArtifactObservation {
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  if (!validProposalId(proposalId)) {
+    return { state: 'degraded', reason: 'proposal-id-invalid', proposal: null, projection: null };
+  }
+  const proposalPath = join(inboxDir(), `${proposalId}.json`);
+  if (!safePrivatePath(dirname(inboxDir()), 'directory', 0o700) ||
+    !safePrivatePath(inboxDir(), 'directory', 0o700)) {
+    return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+  }
+  let proposal: OperationalProjectionArtifactDigest;
+  if (pathIsMissing(proposalPath)) {
+    proposal = { digest: null, bytes: 0 };
+  } else {
+    if (!safePrivatePath(proposalPath, 'file', 0o600)) {
+      return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+    }
+    const proposalRead = readStableRegularFile(proposalPath, {
+      anchorPath: homedir(),
+      maxFileBytes: MAX_PROPOSAL_BYTES,
+      remainingBytes: MAX_PROPOSAL_BYTES,
+    });
+    if (!proposalRead.ok) {
+      return { state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null };
+    }
+    try {
+      const parsed: unknown = JSON.parse(proposalRead.text);
+      if (!isPlainRecord(parsed) || parsed.id !== proposalId) throw new TypeError('proposal identity mismatch');
+      const canonical = canonicalJson(parsed);
+      const bytes = Buffer.byteLength(canonical, 'utf8');
+      if (bytes <= 0 || bytes > MAX_PROPOSAL_BYTES) throw new TypeError('proposal too large');
+      proposal = { digest: sha256(PROPOSAL_DIGEST_DOMAIN, parsed), bytes };
+    } catch {
+      return { state: 'degraded', reason: 'proposal-member-mismatch', proposal: null, projection: null };
+    }
+  }
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  const projectionRead = readProjectionFile();
+  if (projectionRead.state === 'degraded') {
+    return { state: 'degraded', reason: projectionRead.reason, proposal: null, projection: null };
+  }
+  const projection = projectionRead.state === 'ok'
+    ? {
+      digest: projectionRead.projection.projectionDigest,
+      bytes: Buffer.byteLength(`${canonicalJson(projectionRead.projection)}\n`, 'utf8'),
+    }
+    : { digest: null, bytes: 0 };
+  if (!ownsProposalStoreMutationLock(storeLock)) {
+    return { state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null };
+  }
+  return {
+    state: 'healthy',
+    proposal,
+    projection,
+  };
 }
 
 /**

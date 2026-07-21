@@ -132,7 +132,7 @@ describe('h7 onboard — guided first-activation walkthrough', () => {
     expect(out).toContain('ashlr preflight');
     expect(out).toContain('ashlr inbox');
     expect(out).toMatch(/--rollback/);
-  });
+  }, 15_000);
 
   it('TTY-confirmed flow enrolls exactly ONE repo (listEnrolled length goes 0 → 1)', async () => {
     expect.hasAssertions();

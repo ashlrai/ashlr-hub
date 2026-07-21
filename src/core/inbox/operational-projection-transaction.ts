@@ -15,13 +15,17 @@ import {
   type ProposalStoreMutationLock,
 } from './proposal-mutation-lock.js';
 
-const SCHEMA_VERSION = 1 as const;
+const V1_SCHEMA_VERSION = 1 as const;
+const V2_SCHEMA_VERSION = 2 as const;
 const MAX_TRANSACTION_BYTES = 64 * 1024;
+const MAX_STAGED_PROPOSAL_BYTES = 4 * 1024 * 1024;
+const MAX_STAGED_PROJECTION_BYTES = 4 * 1024 * 1024;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const PROPOSAL_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const KEY_DOMAIN = 'ashlr.operational-projection-transaction.key.v1';
 const KEY_ID_DOMAIN = 'ashlr.operational-projection-transaction.key-id.v1';
-const ATTESTATION_DOMAIN = 'ashlr.operational-projection-transaction.record.v1';
+const V1_ATTESTATION_DOMAIN = 'ashlr.operational-projection-transaction.record.v1';
+const V2_ATTESTATION_DOMAIN = 'ashlr.operational-projection-transaction.record.v2';
 
 export type OperationalProjectionTransactionPhase =
   | 'prepared'
@@ -32,6 +36,18 @@ export type OperationalProjectionTransactionPhase =
 export interface OperationalProjectionTransactionDigestsV1 {
   proposal: string | null;
   projection: string | null;
+}
+
+/** Metadata-only description of a deterministic private staged artifact. */
+export interface OperationalProjectionTransactionStagedArtifactV2 {
+  present: boolean;
+  digest: string | null;
+  bytes: number;
+}
+
+export interface OperationalProjectionTransactionStagedArtifactsV2 {
+  proposal: OperationalProjectionTransactionStagedArtifactV2;
+  projection: OperationalProjectionTransactionStagedArtifactV2;
 }
 
 export interface OperationalProjectionTransactionV1 {
@@ -47,9 +63,19 @@ export interface OperationalProjectionTransactionV1 {
   attestation: string;
 }
 
+/** V2 binds deterministic staged-artifact metadata without retaining bytes or paths. */
+export interface OperationalProjectionTransactionV2 extends Omit<OperationalProjectionTransactionV1, 'schemaVersion'> {
+  schemaVersion: 2;
+  staged: OperationalProjectionTransactionStagedArtifactsV2;
+}
+
+export type OperationalProjectionTransaction =
+  | OperationalProjectionTransactionV1
+  | OperationalProjectionTransactionV2;
+
 export type OperationalProjectionTransactionReadResult =
   | { state: 'missing'; transaction: null }
-  | { state: 'healthy'; transaction: OperationalProjectionTransactionV1 }
+  | { state: 'healthy'; transaction: OperationalProjectionTransaction }
   | { state: 'degraded'; reason: string; transaction: null };
 
 export type OperationalProjectionRecoveryState =
@@ -63,6 +89,8 @@ export interface PrepareOperationalProjectionTransactionInput {
   proposalId: string;
   before: OperationalProjectionTransactionDigestsV1;
   after: OperationalProjectionTransactionDigestsV1;
+  /** Omit for byte-for-byte V1 issuance; present metadata emits an authenticated V2 record. */
+  staged?: OperationalProjectionTransactionStagedArtifactsV2;
   storeLock: ProposalStoreMutationLock;
   now?: Date;
 }
@@ -91,6 +119,34 @@ function validDigestPair(value: unknown): value is OperationalProjectionTransact
     validDigest(record['proposal']) && validDigest(record['projection']);
 }
 
+/**
+ * Validates only bounded metadata. Artifact paths and bytes are intentionally
+ * absent: a later recovery executor derives paths from a transaction id and
+ * revalidates stable-read bytes under the global writer lock.
+ */
+export function validOperationalProjectionStagedArtifactsV2(
+  value: unknown,
+  after: OperationalProjectionTransactionDigestsV1,
+): value is OperationalProjectionTransactionStagedArtifactsV2 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const staged = value as Record<string, unknown>;
+  if (Object.keys(staged).sort().join(',') !== 'projection,proposal') return false;
+  const validArtifact = (artifact: unknown, digest: string | null, maxBytes: number): boolean => {
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return false;
+    const record = artifact as Record<string, unknown>;
+    const present = record['present'];
+    const artifactDigest = record['digest'];
+    const bytes = record['bytes'];
+    if (Object.keys(record).sort().join(',') !== 'bytes,digest,present' ||
+      typeof present !== 'boolean' || typeof bytes !== 'number' || !Number.isSafeInteger(bytes)) return false;
+    if (present === false) return artifactDigest === null && bytes === 0 && digest === null;
+    return typeof artifactDigest === 'string' && DIGEST_RE.test(artifactDigest) &&
+      artifactDigest === digest && bytes > 0 && bytes <= maxBytes;
+  };
+  return validArtifact(staged['proposal'], after.proposal, MAX_STAGED_PROPOSAL_BYTES) &&
+    validArtifact(staged['projection'], after.projection, MAX_STAGED_PROJECTION_BYTES);
+}
+
 function validProposalId(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 240 &&
     PROPOSAL_ID_RE.test(value) && value !== '.' && value !== '..';
@@ -100,7 +156,11 @@ function validPhase(value: unknown): value is OperationalProjectionTransactionPh
   return typeof value === 'string' && Object.hasOwn(PHASE_ORDER, value);
 }
 
-function canonicalRecord(value: Omit<OperationalProjectionTransactionV1, 'attestation'>): string {
+type UnsignedOperationalProjectionTransaction =
+  | Omit<OperationalProjectionTransactionV1, 'attestation'>
+  | Omit<OperationalProjectionTransactionV2, 'attestation'>;
+
+function canonicalRecordV1(value: Omit<OperationalProjectionTransactionV1, 'attestation'>): string {
   return JSON.stringify({
     after: { projection: value.after.projection, proposal: value.after.proposal },
     before: { projection: value.before.projection, proposal: value.before.proposal },
@@ -109,6 +169,32 @@ function canonicalRecord(value: Omit<OperationalProjectionTransactionV1, 'attest
     proposalId: value.proposalId,
     schemaVersion: value.schemaVersion,
     signingKeyId: value.signingKeyId,
+    transactionId: value.transactionId,
+    updatedAt: value.updatedAt,
+  });
+}
+
+function canonicalRecordV2(value: Omit<OperationalProjectionTransactionV2, 'attestation'>): string {
+  return JSON.stringify({
+    after: { projection: value.after.projection, proposal: value.after.proposal },
+    before: { projection: value.before.projection, proposal: value.before.proposal },
+    createdAt: value.createdAt,
+    phase: value.phase,
+    proposalId: value.proposalId,
+    schemaVersion: value.schemaVersion,
+    signingKeyId: value.signingKeyId,
+    staged: {
+      projection: {
+        bytes: value.staged.projection.bytes,
+        digest: value.staged.projection.digest,
+        present: value.staged.projection.present,
+      },
+      proposal: {
+        bytes: value.staged.proposal.bytes,
+        digest: value.staged.proposal.digest,
+        present: value.staged.proposal.present,
+      },
+    },
     transactionId: value.transactionId,
     updatedAt: value.updatedAt,
   });
@@ -123,12 +209,16 @@ function signingKey(provenanceKey: Buffer): Buffer {
 
 function attest(
   key: Buffer,
-  value: Omit<OperationalProjectionTransactionV1, 'attestation'>,
+  value: UnsignedOperationalProjectionTransaction,
 ): string {
+  const domain = value.schemaVersion === V1_SCHEMA_VERSION
+    ? V1_ATTESTATION_DOMAIN : V2_ATTESTATION_DOMAIN;
+  const canonical = value.schemaVersion === V1_SCHEMA_VERSION
+    ? canonicalRecordV1(value) : canonicalRecordV2(value);
   return createHmac('sha256', key)
-    .update(ATTESTATION_DOMAIN, 'utf8')
+    .update(domain, 'utf8')
     .update('\n', 'utf8')
-    .update(canonicalRecord(value), 'utf8')
+    .update(canonical, 'utf8')
     .digest('hex');
 }
 
@@ -137,22 +227,27 @@ function equalDigest(left: string, right: string): boolean {
     timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
 }
 
-function parseRecord(text: string): OperationalProjectionTransactionV1 | null {
+function parseRecord(text: string): OperationalProjectionTransaction | null {
   try {
     const parsed: unknown = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     const value = parsed as Record<string, unknown>;
-    if (Object.keys(value).sort().join(',') !==
-      'after,attestation,before,createdAt,phase,proposalId,schemaVersion,signingKeyId,transactionId,updatedAt') return null;
-    if (value['schemaVersion'] !== SCHEMA_VERSION ||
+    const schemaVersion = value['schemaVersion'];
+    const exactV1Keys = 'after,attestation,before,createdAt,phase,proposalId,schemaVersion,signingKeyId,transactionId,updatedAt';
+    const exactV2Keys = 'after,attestation,before,createdAt,phase,proposalId,schemaVersion,signingKeyId,staged,transactionId,updatedAt';
+    if ((schemaVersion === V1_SCHEMA_VERSION && Object.keys(value).sort().join(',') !== exactV1Keys) ||
+      (schemaVersion === V2_SCHEMA_VERSION && Object.keys(value).sort().join(',') !== exactV2Keys) ||
+      (schemaVersion !== V1_SCHEMA_VERSION && schemaVersion !== V2_SCHEMA_VERSION) ||
       typeof value['transactionId'] !== 'string' || !DIGEST_RE.test(value['transactionId']) ||
       typeof value['signingKeyId'] !== 'string' || !DIGEST_RE.test(value['signingKeyId']) ||
       !validProposalId(value['proposalId']) || !validPhase(value['phase']) ||
       !validDigestPair(value['before']) || !validDigestPair(value['after']) ||
       !canonicalTimestamp(value['createdAt']) || !canonicalTimestamp(value['updatedAt']) ||
       Date.parse(value['updatedAt']) < Date.parse(value['createdAt']) ||
-      typeof value['attestation'] !== 'string' || !DIGEST_RE.test(value['attestation'])) return null;
-    return value as unknown as OperationalProjectionTransactionV1;
+      typeof value['attestation'] !== 'string' || !DIGEST_RE.test(value['attestation']) ||
+      (schemaVersion === V2_SCHEMA_VERSION &&
+        !validOperationalProjectionStagedArtifactsV2(value['staged'], value['after']))) return null;
+    return value as unknown as OperationalProjectionTransaction;
   } catch {
     return null;
   }
@@ -238,7 +333,7 @@ export function readOperationalProjectionTransaction(): OperationalProjectionTra
 }
 
 function writeRecord(
-  transaction: OperationalProjectionTransactionV1,
+  transaction: OperationalProjectionTransaction,
   storeLock: ProposalStoreMutationLock,
 ): boolean {
   if (!ownsProposalStoreMutationLock(storeLock) || !safeDirectory()) return false;
@@ -256,6 +351,7 @@ function writeRecord(
     if (!ownsProposalStoreMutationLock(storeLock)) return false;
     const reread = readOperationalProjectionTransaction();
     return ownsProposalStoreMutationLock(storeLock) && reread.state === 'healthy' &&
+      reread.transaction.schemaVersion === transaction.schemaVersion &&
       reread.transaction.transactionId === transaction.transactionId &&
       reread.transaction.phase === transaction.phase &&
       equalDigest(reread.transaction.attestation, transaction.attestation);
@@ -269,6 +365,7 @@ export function prepareOperationalProjectionTransactionJournalOnly(
 ): OperationalProjectionTransactionReadResult {
   if (!ownsProposalStoreMutationLock(input.storeLock) || !validProposalId(input.proposalId) ||
     !validDigestPair(input.before) || !validDigestPair(input.after) ||
+    (input.staged !== undefined && !validOperationalProjectionStagedArtifactsV2(input.staged, input.after)) ||
     input.before.proposal === input.after.proposal ||
     input.before.projection === input.after.projection) {
     return { state: 'degraded', reason: 'transaction-input-invalid', transaction: null };
@@ -296,8 +393,7 @@ export function prepareOperationalProjectionTransactionJournalOnly(
     .update('\n', 'utf8')
     .update(randomBytes(16))
     .digest('hex');
-  const unsigned = {
-    schemaVersion: SCHEMA_VERSION,
+  const common = {
     transactionId,
     signingKeyId: signing.id,
     proposalId: input.proposalId,
@@ -307,7 +403,13 @@ export function prepareOperationalProjectionTransactionJournalOnly(
     createdAt: timestamp,
     updatedAt: timestamp,
   };
-  const transaction = { ...unsigned, attestation: attest(signing.key, unsigned) };
+  const unsigned: UnsignedOperationalProjectionTransaction = input.staged === undefined
+    ? { schemaVersion: V1_SCHEMA_VERSION, ...common }
+    : { schemaVersion: V2_SCHEMA_VERSION, ...common, staged: input.staged };
+  const transaction: OperationalProjectionTransaction = {
+    ...unsigned,
+    attestation: attest(signing.key, unsigned),
+  } as OperationalProjectionTransaction;
   return writeRecord(transaction, input.storeLock)
     ? { state: 'healthy', transaction }
     : { state: 'degraded', reason: 'transaction-write-failed', transaction: null };
@@ -342,14 +444,17 @@ export function advanceOperationalProjectionTransactionJournalOnly(
   }
   const { attestation: _attestation, ...prior } = current.transaction;
   const unsigned = { ...prior, phase, updatedAt: now.toISOString() };
-  const transaction = { ...unsigned, attestation: attest(signing.key, unsigned) };
+  const transaction: OperationalProjectionTransaction = {
+    ...unsigned,
+    attestation: attest(signing.key, unsigned),
+  } as OperationalProjectionTransaction;
   return writeRecord(transaction, storeLock)
     ? { state: 'healthy', transaction }
     : { state: 'degraded', reason: 'transaction-write-failed', transaction: null };
 }
 
 export function classifyOperationalProjectionRecovery(
-  transaction: Pick<OperationalProjectionTransactionV1, 'before' | 'after'>,
+  transaction: Pick<OperationalProjectionTransaction, 'before' | 'after'>,
   actual: OperationalProjectionTransactionDigestsV1,
 ): OperationalProjectionRecoveryState {
   if (!validDigestPair(transaction.before) || !validDigestPair(transaction.after) ||

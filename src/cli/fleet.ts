@@ -779,6 +779,17 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Operational projection recovery is intentionally outside ship readiness.
+  const projectionRecovery = s.operationalProjectionRecovery;
+  lines.push('Operational projection recovery:');
+  if (!projectionRecovery) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  executor:  ${projectionRecovery.executor} (${projectionRecovery.blocker.replaceAll('-', ' ')})`);
+    lines.push(`  authority: ${projectionRecovery.authority}`);
+  }
+  lines.push('');
+
   // Authenticated observation checkpoints are deliberately outside readiness.
   const cutoff = s.cutoffCheckpoints;
   lines.push('Cutoff checkpoints (observation only):');

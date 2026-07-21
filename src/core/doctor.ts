@@ -13,6 +13,7 @@ import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegi
 import { loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
+import { parseRemoteCasAuthorityConfig } from './inbox/remote-cas-authority.js';
 // H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
 // `ashlr preflight` uses, from the shared readiness module (single source of
 // truth; no drift). See docs/contracts/CONTRACT-H7.md (BUILD ITEM 2). These
@@ -1059,6 +1060,38 @@ function checkSandboxHealth(): DoctorCheck {
   }
 }
 
+/**
+ * Reports the configuration boundary only. A reachable endpoint, valid or
+ * otherwise, cannot establish remote-CAS semantics or activate recovery.
+ */
+function checkRemoteCasAuthority(cfg: AshlrConfig): DoctorCheck {
+  const parsed = parseRemoteCasAuthorityConfig(cfg.fleet?.remoteCasAuthority);
+  if (parsed.state === 'off') {
+    return check(
+      'remote-cas-authority',
+      'Remote CAS authority',
+      'pass',
+      'disabled (default; recovery executor remains disabled)',
+    );
+  }
+  if (parsed.state === 'probe') {
+    return check(
+      'remote-cas-authority',
+      'Remote CAS authority',
+      'warn',
+      'configured for observation only; recovery executor remains disabled',
+      'A configured endpoint is not authority; require authenticated CAS, durable epochs, and signed responses before activation.',
+    );
+  }
+  return check(
+    'remote-cas-authority',
+    'Remote CAS authority',
+    'warn',
+    `configuration invalid (${parsed.reason}); recovery executor remains disabled`,
+    'Correct the remote CAS configuration; it remains observational until an authenticated authority is deployed.',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
@@ -1124,6 +1157,7 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   checks.push(checkKillSwitch());
   checks.push(checkAshlrWriteableProbe());
   checks.push(checkSandboxHealth());
+  checks.push(checkRemoteCasAuthority(cfg));
 
   // --- M33: plugin layer (read-only; discovery never executes plugin code) ---
   checks.push(await checkPlugins(cfg));

@@ -711,6 +711,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue).toBeDefined();
     expect(s.proposals).toBeDefined();
     expect(s.merges).toBeDefined();
+    expect(s.operationalProjectionRecovery).toEqual({
+      executor: 'disabled',
+      authority: 'unavailable',
+      blocker: 'remote-cas-authority-required',
+      detail: 'Recovery executor is disabled pending authenticated remote compare-and-set authority with durable monotonic epochs.',
+    });
 
     // Fallbacks on a pristine HOME
     expect(s.killed).toBe(false);
@@ -778,6 +784,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(cutoffPayload).not.toContain(`"${forbidden}"`);
     }
     expect(formatFleetStatus(s)).toContain('Cutoff checkpoints (observation only):');
+    expect(formatFleetStatus(s)).toContain('Operational projection recovery:');
+    expect(formatFleetStatus(s)).toContain('executor:  disabled (remote cas authority required)');
     expect(formatFleetStatus(s)).toContain('cutoff=false, denominator=false, policy=false');
     expect(s.autonomyEffectiveness).toMatchObject({
       phase: 'control-blocked',

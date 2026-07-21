@@ -2598,6 +2598,32 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Integrate all six proposal persistence paths only after replay protection and recovery installation are proven.
 - [x] Publish draft stacked PR #44 on #43 with valid-record replay called out as a merge blocker.
 
+## Operational Projection Recovery Foundation (2026-07-20)
+- [x] Audit dormant projection authority and preserve the no-hot-consumer boundary.
+- [x] Add a read-only, lock-required observation seam for canonical proposal and projection artifacts.
+- [x] Add the authenticated V1|V2 journal union: V2 binds bounded staged metadata, preserves version-specific HMAC domains, and participates in replay and prepared-intent comparison.
+- [x] Add deterministic private staged-artifact storage with injected semantic validation and deletion-as-absence semantics.
+- [x] Export canonical proposal and sealed-projection text validators so staged bytes bind to existing operational identities rather than raw hashes.
+- [x] Add a read-only V2 recovery inspector that requires authenticated journal/replay/stage/artifact evidence and reports only hypothetical next actions.
+- [x] Prove the recovery inspector refuses a symlinked staged artifact without touching canonical proposal or projection state.
+- [x] Make recovery intents phase-bound and deletion-explicit so a future executor cannot infer an effect from journal phase alone.
+- [x] Observe canonical proposal absence as a valid create/delete endpoint while continuing to reject unsafe existing proposal paths.
+- [x] Prove read-only recovery planning recognizes both absent-to-present creation and present-to-absent deletion, then observes their first proposal-only effect without installing a projection or advancing a phase.
+- [x] Reject symlinked private staging directories before write or deletion-as-absence evaluation, and prove a released real store-lock handle cannot inspect or create recovery state after a successor acquires the fence.
+- [x] Exercise all remaining V2 phase/crash boundaries against real journal, replay, stage, and canonical artifacts: proposal install, projection install, committed attestation, and completed observation remain read-only inspector outputs.
+- [x] Prove the inspector refuses a malformed active journal without modifying its bytes or creating replay/stage recovery state.
+- [x] Prove the inspector refuses a symlinked active journal without touching the external target or creating replay/stage recovery state.
+- [x] Re-read and compare the exact signed active transaction after replay, stage, and canonical-artifact observation so a concurrent valid phase advance cannot return a mixed-snapshot recovery action.
+- [x] Recheck replay-ledger consistency at the final read-only recovery publication boundary so a concurrent deletion or degradation cannot emit a stale actionable observation.
+- [x] Pass the complete protected CI matrix on immutable draft PR #75 head `3afd1a10`; keep recovery executor activation, merge, and deployment disabled.
+- [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
+- [x] Define a default-off, parse-only remote-CAS configuration contract that rejects credentials, non-HTTPS, local/private endpoints, and unbounded/malformed identifiers without any network or activation path.
+- [x] Surface that contract through a read-only doctor diagnostic while keeping Fleet Status, readiness, and the recovery executor disabled.
+- [x] Define and test the metadata-only, canonical request shape a future remote CAS authority must bind to one exact V2 transaction, action, repository, and expected decimal epoch without sending or signing anything.
+- [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
+- [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
+- [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
+
 ## Operational Projection Local Replay Ledger (2026-07-16)
 - [x] Add a separately keyed, atomically published bounded phase ledger and authenticated logical root under the global proposal-store mutation lock.
 - [x] Bind every floor advance to the exact authenticated active transaction record and reject fabricated, stale, skipped-phase, cross-lineage, and clock-regressing inputs.
@@ -2992,3 +3018,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Canonicalize local selection comparisons through the signed receipt contract and require `committedAt` for exact shared binding replays.
 - [x] Add null-versus-omitted model and timestamp-divergent replay regressions; run focused suites, typecheck, lint, and diff integrity.
 - [ ] Require the protected CI matrix on the immutable draft head before promotion.
+
+## Ubuntu Onboard CI Timing Recovery (2026-07-21)
+- [x] Isolate the Ubuntu full-suite failure to the disposable-Git non-interactive H7 onboarding test.
+- [x] Preserve global timeout behavior while adding a bounded 15-second allowance only to that fixture-heavy test.
+- [ ] Verify the focused H7 suite locally and require a fresh protected CI matrix on the immutable draft head.
+
+## Remote CAS Recovery Preflight (2026-07-21)
+- [x] Audit the dormant projection recovery stack and retain its non-authoritative posture.
+- [x] Build a pure V2 transaction/inspection/action/epoch request preflight with no transport, signing, persistence, or execution.
+- [x] Add deterministic and adversarial contract coverage; run focused authority suites, typecheck, and lint.
+- [ ] Implement a separately deployed authenticated CAS authority and signed grant verifier before any recovery executor or live writer integration.

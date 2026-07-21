@@ -6,9 +6,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadOrCreateKey, provenanceKeyPath } from '../src/core/foundry/provenance.js';
 import {
   migrateOperationalProposalProjection,
+  observeOperationalProjectionArtifacts,
   operationalProposalProjectionDir,
   operationalProposalProjectionPath,
   readOperationalProposals,
+  validateOperationalProjectionStageText,
+  validateOperationalProposalStageText,
 } from '../src/core/inbox/operational-projection.js';
 import {
   acquireProposalStoreMutationLock,
@@ -99,6 +102,93 @@ afterEach(() => {
 });
 
 describe('M432 operational proposal projection', () => {
+  it('validates canonical staged proposal and sealed projection text with operational identities', () => {
+    const value = proposal('stage-validation');
+    writeProposal(value);
+    const key = loadOrCreateKey();
+    const migrated = migrate([value]);
+    expect(migrated.state).toBe('healthy');
+    const observed = observeOperationalProjectionArtifacts(value.id, heldLock!);
+    expect(observed.state).toBe('healthy');
+    if (observed.state !== 'healthy') return;
+
+    const proposalText = JSON.stringify(Object.fromEntries(Object.entries(value).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0)));
+    expect(validateOperationalProposalStageText(proposalText, value.id)).toEqual(observed.proposal);
+    expect(validateOperationalProposalStageText(`${proposalText}\n`, value.id)).toBeNull();
+    expect(validateOperationalProposalStageText(proposalText, 'other-proposal')).toBeNull();
+    expect(validateOperationalProposalStageText('{broken', value.id)).toBeNull();
+
+    const projectionText = fs.readFileSync(operationalProposalProjectionPath(), 'utf8');
+    expect(validateOperationalProjectionStageText(projectionText, key)).toEqual(observed.projection);
+    expect(validateOperationalProjectionStageText(projectionText.trimEnd(), key)).toBeNull();
+    expect(validateOperationalProjectionStageText(projectionText, Buffer.alloc(32, 9))).toBeNull();
+    const tampered = JSON.parse(projectionText) as Record<string, unknown>;
+    tampered['projectionDigest'] = '0'.repeat(64);
+    expect(validateOperationalProjectionStageText(`${JSON.stringify(tampered)}\n`, key)).toBeNull();
+  });
+
+  it('observes canonical proposal and projection artifacts only while the store lock is held', () => {
+    const value = proposal('observe-active');
+    writeProposal(value);
+    const migrated = migrate([value]);
+    expect(migrated.state).toBe('healthy');
+    const projectionBytes = fs.readFileSync(operationalProposalProjectionPath());
+    const proposalBytes = fs.readFileSync(path.join(inboxDir(), `${value.id}.json`));
+
+    const observed = observeOperationalProjectionArtifacts(value.id, heldLock!);
+    expect(observed).toMatchObject({
+      state: 'healthy',
+      proposal: { digest: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number) },
+      projection: { digest: migrated.projection?.projectionDigest, bytes: expect.any(Number) },
+    });
+    if (observed.state !== 'healthy') throw new Error('expected healthy observation');
+    expect(observed.proposal.bytes).toBeGreaterThan(0);
+    expect(observed.projection.bytes).toBe(projectionBytes.length);
+    expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(projectionBytes);
+    expect(fs.readFileSync(path.join(inboxDir(), `${value.id}.json`))).toEqual(proposalBytes);
+
+    releaseProposalStoreMutationLock(heldLock);
+    heldLock = null;
+    expect(observeOperationalProjectionArtifacts(value.id, null)).toEqual({
+      state: 'degraded', reason: 'store-lock-not-owned', proposal: null, projection: null,
+    });
+  });
+
+  it('observes an absent proposal as a valid create/delete endpoint without accepting unsafe files', () => {
+    fs.mkdirSync(inboxDir(), { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') fs.chmodSync(inboxDir(), 0o700);
+    const lock = acquireLock();
+    expect(observeOperationalProjectionArtifacts('absent-proposal', lock)).toEqual({
+      state: 'healthy',
+      proposal: { digest: null, bytes: 0 },
+      projection: { digest: null, bytes: 0 },
+    });
+
+    const value = proposal('absent-proposal');
+    writeProposal(value);
+    loadOrCreateKey();
+    expect(migrateOperationalProposalProjection({ proposals: [value], storeLock: lock, nowMs: NOW_MS }).state)
+      .toBe('healthy');
+    fs.rmSync(path.join(inboxDir(), `${value.id}.json`));
+    const observed = observeOperationalProjectionArtifacts(value.id, lock);
+    expect(observed).toMatchObject({
+      state: 'healthy',
+      proposal: { digest: null, bytes: 0 },
+      projection: { digest: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number) },
+    });
+
+    if (process.platform !== 'win32') {
+      const target = path.join(inboxDir(), `${value.id}.json`);
+      const outside = path.join(home, 'outside-proposal.json');
+      fs.writeFileSync(outside, JSON.stringify(value), { mode: 0o600 });
+      fs.symlinkSync(outside, target);
+      expect(observeOperationalProjectionArtifacts(value.id, lock)).toEqual({
+        state: 'degraded', reason: 'proposal-source-unavailable', proposal: null, projection: null,
+      });
+    }
+  });
+
   it('reports a truly empty store as a read-only cold start', () => {
     expect(readOperationalProposals()).toEqual({
       state: 'cold-start',
