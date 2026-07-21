@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -19,7 +20,58 @@ function writeVerifyContract(dir: string, contract: unknown): void {
   writeFileSync(join(dir, 'ashlr.verify.json'), JSON.stringify(contract), 'utf8');
 }
 
+function initGit(dir: string): void {
+  execFileSync('git', ['init', '--quiet', dir], { stdio: 'pipe' });
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 'profile-test@ashlr.test'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 'Profile Test'], { stdio: 'pipe' });
+}
+
+const mergeContract = {
+  schemaVersion: 1,
+  mode: 'replace-detected',
+  commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+};
+
 describe('repo execution profile', () => {
+  it('reports verifier-contract Git provenance without changing local command discovery', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, mergeContract);
+      expect(detectRepoExecutionProfile(dir)).toMatchObject({
+        verifyContractSource: 'unavailable',
+        verifyContract: { mergeGradeExplicit: true },
+      });
+
+      initGit(dir);
+      expect(detectRepoExecutionProfile(dir).verifyContractSource).toBe('untracked');
+
+      execFileSync('git', ['-C', dir, 'add', 'ashlr.verify.json'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', dir, 'commit', '--quiet', '-m', 'add verifier'], { stdio: 'pipe' });
+      expect(detectRepoExecutionProfile(dir).verifyContractSource).toBe('tracked-clean');
+
+      writeVerifyContract(dir, { ...mergeContract, commands: [...mergeContract.commands, {
+        id: 'quick', kind: 'test', cmd: ['npm', 'run', 'quick'], required: true, profiles: ['quick'],
+      }] });
+      expect(detectRepoExecutionProfile(dir).verifyContractSource).toBe('modified');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('distinguishes ignored verifier contracts from untracked contracts', () => {
+    const dir = makeFixture();
+    try {
+      initGit(dir);
+      writeFileSync(join(dir, '.gitignore'), 'ashlr.verify.json\n', 'utf8');
+      execFileSync('git', ['-C', dir, 'add', '.gitignore'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', dir, 'commit', '--quiet', '-m', 'ignore verifier'], { stdio: 'pipe' });
+      writeVerifyContract(dir, mergeContract);
+
+      expect(detectRepoExecutionProfile(dir).verifyContractSource).toBe('ignored');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('surfaces malformed package metadata to source-bound scanners', () => {
     const dir = makeFixture();
     try {

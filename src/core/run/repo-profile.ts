@@ -9,6 +9,7 @@
 
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
 export type RepoPackageManager =
@@ -33,6 +34,13 @@ export type RepoProjectKind =
   | 'bats'
   | 'verify-contract';
 export type RepoVerifyContractMode = 'replace-detected' | 'augment-detected';
+export type RepoVerifyContractSource =
+  | 'tracked-clean'
+  | 'untracked'
+  | 'ignored'
+  | 'modified'
+  | 'missing'
+  | 'unavailable';
 
 export interface RepoVerifyContractSummary {
   present: boolean;
@@ -68,9 +76,40 @@ export interface RepoExecutionProfile {
   detectedVerifyCommandCount: number;
   contractVerifyCommandCount: number;
   verifyContract?: RepoVerifyContractSummary;
+  /** Git provenance of the root contract; only tracked-clean is fleet portable. */
+  verifyContractSource: RepoVerifyContractSource;
   noVerifyReason: string | null;
   /** Canonical metadata consumed by the merge-verify-contract scanner digest. */
   mergeVerifyContractSource: MergeVerifyContractScannerSource;
+}
+
+function verifyContractSource(repoRoot: string): RepoVerifyContractSource {
+  if (!existsSync(join(repoRoot, VERIFY_CONTRACT_FILE))) return 'missing';
+  const git = (args: string[]): string => execFileSync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 2_000,
+  });
+  try {
+    git(['ls-files', '--error-unmatch', '--', VERIFY_CONTRACT_FILE]);
+  } catch (error) {
+    const code = (error as { status?: unknown }).status;
+    if (code !== 1) return 'unavailable';
+    try {
+      git(['check-ignore', '--quiet', '--', VERIFY_CONTRACT_FILE]);
+      return 'ignored';
+    } catch (ignoreError) {
+      return (ignoreError as { status?: unknown }).status === 1 ? 'untracked' : 'unavailable';
+    }
+  }
+  try {
+    return git(['status', '--porcelain=v1', '--', VERIFY_CONTRACT_FILE]).trim().length === 0
+      ? 'tracked-clean'
+      : 'modified';
+  } catch {
+    return 'unavailable';
+  }
 }
 
 export interface CanonicalVerifyCommand {
@@ -871,6 +910,7 @@ export function detectRepoExecutionProfile(
     : projects.flatMap((project) => project.verifyCommands);
   const detectedProjectKinds = [...new Set(projects.map((project) => project.kind))].sort();
   const contract = parseVerifyContract(root);
+  const contractSource = verifyContractSource(root);
   let verifyCommands = detectedCommands;
   let effectiveDetectedVerifyCommandCount = detectedCommands.length;
   let effectiveContractVerifyCommandCount = 0;
@@ -913,6 +953,7 @@ export function detectRepoExecutionProfile(
     detectedVerifyCommandCount: detectedCommands.length,
     contractVerifyCommandCount: contract?.summary.valid ? contract.commands.length : 0,
     ...(contract ? { verifyContract: contract.summary } : {}),
+    verifyContractSource: contractSource,
     noVerifyReason: describeNoVerifyCommandReason(projects, verifyCommands, contract?.summary),
     mergeVerifyContractSource: {
       inputState,

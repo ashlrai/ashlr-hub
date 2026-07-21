@@ -5966,7 +5966,8 @@ async function buildAutoMergeReadinessStatus(
     verifierContracts.pendingNeedingVerification++;
     const profile = profileForRepo(proposal.repo);
     const withoutVerifyCommands = !profile || profile.verifyCommands.length === 0;
-    const withoutExplicitMergeContract = profile?.verifyContract?.mergeGradeExplicit !== true;
+    const withoutExplicitMergeContract = profile?.verifyContract?.mergeGradeExplicit !== true ||
+      profile.verifyContractSource !== 'tracked-clean';
     if (!withoutVerifyCommands && !withoutExplicitMergeContract) return;
     if (withoutVerifyCommands) verifierContracts.withoutVerifyCommands++;
     if (withoutExplicitMergeContract) verifierContracts.withoutExplicitMergeContract++;
@@ -5980,7 +5981,9 @@ async function buildAutoMergeReadinessStatus(
         withoutExplicitMergeContract,
         reason:
           profile?.noVerifyReason ??
-          profile?.verifyContract?.mergeGradeReason ??
+          (profile?.verifyContract?.mergeGradeExplicit && profile.verifyContractSource !== 'tracked-clean'
+            ? `ashlr.verify.json is ${profile.verifyContractSource}; merge contract must be tracked-clean`
+            : profile?.verifyContract?.mergeGradeReason) ??
           'missing explicit merge-profile verification contract',
       });
     }
@@ -6378,13 +6381,17 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
       }
       if (profile.verifyContract?.present) reposWithVerifyContracts++;
       if (profile.verifyContract?.valid) reposWithValidVerifyContracts++;
-      if (profile.verifyContract?.mergeGradeExplicit) reposWithExplicitMergeContracts++;
+      if (profile.verifyContract?.mergeGradeExplicit && profile.verifyContractSource === 'tracked-clean') {
+        reposWithExplicitMergeContracts++;
+      }
       else {
         missingExplicitMergeContracts.push({
           repo,
           name: basename(repo),
           projectKinds,
-          reason: profile.verifyContract?.mergeGradeReason ?? 'missing ashlr.verify.json merge-profile contract',
+          reason: profile.verifyContract?.mergeGradeExplicit
+            ? `ashlr.verify.json is ${profile.verifyContractSource}; merge contract must be tracked-clean`
+            : profile.verifyContract?.mergeGradeReason ?? 'missing ashlr.verify.json merge-profile contract',
         });
       }
       for (const project of profile.projects) {

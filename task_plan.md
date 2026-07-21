@@ -2022,6 +2022,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
 
+## Verification Contract Provenance (2026-07-21)
+- [x] Audit Fleet Status merge-contract coverage against Git provenance rather than only the working-tree JSON parser.
+- [x] Classify root `ashlr.verify.json` as tracked-clean, untracked, ignored, modified, missing, or unavailable without altering local command detection.
+- [x] Require tracked-clean contracts before reporting a repository as explicit merge-grade or clearing a verification-contract blocker.
+- [x] Preserve valid local contract counts for diagnostics while naming nonportable sources in Fleet Status remediation.
+- [x] Cover non-Git, untracked, ignored, modified, and tracked-clean profile states plus Fleet Status untracked-contract reporting.
+- [x] Pass focused profile and Fleet Status verification, typecheck, and diff check.
+- [x] Publish protected draft PR #94 and require the full CI matrix before promotion.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.
@@ -2789,3 +2798,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Defer TITRR pre-capture terminal actions and emit one capture-owned terminal action so `proposal-disabled` cannot conflict with final capture outcomes.
 - [x] Retain a created proposal id through persistence-read failures, attempt machine rejection, and require fail-closed reconciliation rather than re-filing.
 - [x] Make deferred TITRR attempts suppress every internal terminal action, including cancellation, retention, sandbox, and pre-execution exits; the epilogue owns the sole terminal action.
+
+## Windows Dispatch-Production Stress Fixture Budget (2026-07-21)
+- [x] Isolate the hosted-Windows timeout to M342's 2,048-artifact crash-recovery stress fixture.
+- [x] Retain the 60-second POSIX deadline and add a bounded 120-second Windows allowance.
+- [ ] Require a refreshed protected Windows matrix before promotion.
