@@ -120,6 +120,16 @@ export interface BestOfNRecordsReadResult extends BestOfNSourceQuality {
   records: BestOfNRecord[];
 }
 
+/**
+ * Latest metadata observation across bounded durable Best-of-N history. This
+ * is intentionally separate from any analytics cutoff: consumers use it for
+ * evidence freshness, never for scoring or routing.
+ */
+export interface BestOfNLatestObservationReadResult {
+  latestAt?: string;
+  sourceQuality: BestOfNSourceQuality;
+}
+
 function storageRoot(): string {
   const configured = process.env.ASHLR_HOME;
   return typeof configured === 'string' && configured.trim() !== '' && isAbsolute(configured)
@@ -678,6 +688,35 @@ export function readBestOfNRecordsDetailed(
   } finally {
     releaseLocalStoreLock(lock);
   }
+}
+
+/**
+ * Read the newest durable Best-of-N observation without applying a rolling
+ * analytics cutoff. Any incomplete or degraded bounded history withholds the
+ * timestamp so callers cannot label partial evidence as fresh.
+ */
+export function readBestOfNLatestObservationDetailed(): BestOfNLatestObservationReadResult {
+  const read = readBestOfNRecordsDetailed({
+    limit: HARD_EVENT_LIMIT,
+    maxFiles: HARD_MAX_FILES,
+    maxBytes: HARD_MAX_BYTES,
+    maxRows: HARD_MAX_ROWS,
+  });
+  const { records, ...sourceQuality } = read;
+  if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
+    return { sourceQuality };
+  }
+
+  let latestAt: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const record of records) {
+    const recordMs = Date.parse(record.ts);
+    if (recordMs > latestMs) {
+      latestMs = recordMs;
+      latestAt = record.ts;
+    }
+  }
+  return { ...(latestAt === undefined ? {} : { latestAt }), sourceQuality };
 }
 
 /** Compatibility array reader with non-enumerable source quality. Never throws. */
