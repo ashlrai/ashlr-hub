@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isSafetyTestFile,
   guardSafetyTests,
+  guardTestIntegrity,
   selfEvalParity,
   selfEvalParityAsync,
   isSelfTargetProposal,
@@ -110,6 +111,26 @@ describe('M54 — guardSafetyTests (the never-weaken guard)', () => {
 
   it('treats an empty diff as not weakening', () => {
     expect(guardSafetyTests('').weakened).toBe(false);
+  });
+});
+
+describe('M54 — guardTestIntegrity (evidence-mode regression protection)', () => {
+  it('refuses deleting, weakening, or disabling ordinary test coverage', () => {
+    const deleted = `diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts\ndeleted file mode 100644\n--- a/test/m307.verify-before-judge.test.ts\n+++ /dev/null\n`;
+    const removed = `diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts\n--- a/test/m307.verify-before-judge.test.ts\n+++ b/test/m307.verify-before-judge.test.ts\n@@ -1 +0,0 @@\n-expect(realGate).toBe(true);\n`;
+    const skipped = `diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts\n--- a/test/m307.verify-before-judge.test.ts\n+++ b/test/m307.verify-before-judge.test.ts\n@@ -1 +1 @@\n-it('runs verification', () => {\n+it.skip('runs verification', () => {\n`;
+
+    expect(guardTestIntegrity(deleted).weakened).toBe(true);
+    expect(guardTestIntegrity(removed).reason).toMatch(/removes 1 assertion/);
+    expect(guardTestIntegrity(skipped).reason).toMatch(/skipped\/focused/);
+  });
+
+  it('allows additive ordinary test coverage and ignores source-only diffs', () => {
+    const additive = `diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts\n--- a/test/m307.verify-before-judge.test.ts\n+++ b/test/m307.verify-before-judge.test.ts\n@@ -1 +1,2 @@\n+it('covers a fresh case', () => { expect(true).toBe(true); });\n`;
+    const sourceOnly = `diff --git a/src/core/example.ts b/src/core/example.ts\n--- a/src/core/example.ts\n+++ b/src/core/example.ts\n@@ -1 +1 @@\n-export const oldValue = false;\n+export const newValue = true;\n`;
+
+    expect(guardTestIntegrity(additive).weakened).toBe(false);
+    expect(guardTestIntegrity(sourceOnly).weakened).toBe(false);
   });
 });
 

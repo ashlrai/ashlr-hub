@@ -136,7 +136,7 @@ import {
   type CreatePrResult,
 } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
-import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
+import { isSelfTargetProposal, guardSafetyTests, guardTestIntegrity, selfEvalParityAsync } from '../fleet/self.js';
 import { observeAutoMergeCanaryShadowAsync } from '../fleet/automerge-canary-observer.js';
 import {
   hashDiff,
@@ -1333,6 +1333,10 @@ export function evaluateEvidenceAutoMergePreflight(
   const guard = guardSafetyTests(proposal.diff ?? '');
   if (guard.weakened) {
     return refuse(`test-weakening change refused: ${guard.reason}`);
+  }
+  const testIntegrity = guardTestIntegrity(proposal.diff ?? '');
+  if (testIntegrity.weakened) {
+    return refuse(`test-weakening change refused: ${testIntegrity.reason}`);
   }
 
   const provenance = verifyProvenance(proposal);

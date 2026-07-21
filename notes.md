@@ -2816,3 +2816,7 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+# Evidence-Mode Test Integrity (2026-07-21)
+- Evidence mode already refused build, CI, manifest, self-target, unsigned, stale, no-command, and unprotected-remote changes, but `guardSafetyTests` covered only a narrow invariant-file allowlist.
+- `guardTestIntegrity` is a pure evidence-only fence: it fails closed on deleting a recognized test file, removing an assertion, or introducing skip/only syntax. Additive coverage and non-test source changes remain eligible.
+- This deliberately does not make all test-file edits forbidden and does not alter verification- or judge-based merge behavior.

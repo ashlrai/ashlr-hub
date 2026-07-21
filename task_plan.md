@@ -2697,3 +2697,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+# Evidence-Mode Test Integrity (2026-07-21)
+- [x] Audit judge-free merge preflight for ordinary regression-test weakening paths.
+- [x] Reject deleted test files, removed assertions, and new skip/only declarations in evidence mode.
+- [x] Preserve additive tests and source-only diffs; verification and human-reviewed paths are unchanged.
+- [x] Add focused guard and evidence-preflight regression coverage; typecheck and focused suites pass.
+- [ ] Publish as a draft-only PR and require the protected CI matrix before any promotion.

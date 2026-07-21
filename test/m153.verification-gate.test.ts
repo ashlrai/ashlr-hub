@@ -831,6 +831,19 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     expect(
       evaluateEvidenceAutoMergePreflight(skipped, evidenceCfg(), { remoteAvailable: true }).reason,
     ).toMatch(/skipped\/focused/);
+
+    const ordinaryRemovalDiff = [
+      'diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts',
+      '--- a/test/m307.verify-before-judge.test.ts',
+      '+++ b/test/m307.verify-before-judge.test.ts',
+      '@@ -1 +0,0 @@',
+      '-expect(verifyResult.passed).toBe(true);',
+      '',
+    ].join('\n');
+    const ordinaryRemoval = evidenceProposal('e8-ordinary-removal', ordinaryRemovalDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(ordinaryRemoval, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/test-weakening|removes 1 assertion/);
   });
 
   it('[E8b] weakened verification scripts are refused by evidence preflight', () => {

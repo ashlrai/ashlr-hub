@@ -78,6 +78,17 @@ export function isSafetyTestFile(path: string): boolean {
   return SAFETY_FILE_PATTERNS.some((re) => re.test(p));
 }
 
+/**
+ * Recognize conventional test files without treating unrelated source as test
+ * infrastructure. Evidence-mode automation may add coverage, but it must not
+ * delete or disable existing coverage without a judge or human review.
+ */
+export function isTestFile(path: string): boolean {
+  const p = path.replace(/^\.\//, '');
+  return /(?:^|\/)(?:test|tests|__tests__)\//.test(p) ||
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(p);
+}
+
 /** Lines that represent a test assertion or block — the protected substance. */
 const ASSERTION_RE =
   /^\s*(?:(?:await|return|void)\s+)?(?:it|test|describe|expect|assert)\b|^\s*(?:\)|\.)\s*\.(?:not|resolves|rejects|to[A-Z]\w*)\b|^\s*(?:toBe|toEqual|toThrow|toMatch)\b/;
@@ -196,6 +207,45 @@ export function guardSafetyTests(diff: string): SafetyGuardVerdict {
     }
   }
   return { weakened: false, reason: 'no safety test weakened', files: touched };
+}
+
+/**
+ * Evidence-mode-only integrity guard for ordinary regression tests. This is
+ * intentionally narrower than the self-target safety guard: additive test
+ * changes remain eligible, while deletion, assertion removal, and focused or
+ * skipped test declarations require judge or human review.
+ */
+export function guardTestIntegrity(diff: string): SafetyGuardVerdict {
+  const touched: string[] = [];
+  if (!diff || !diff.trim()) return { weakened: false, reason: 'empty diff', files: [] };
+  let parsed: FileDiff[];
+  try {
+    parsed = parseDiff(diff);
+  } catch {
+    return { weakened: true, reason: 'unparseable diff touching test integrity — refused', files: [] };
+  }
+  for (const f of parsed) {
+    if (!f.path || !isTestFile(f.path)) continue;
+    touched.push(f.path);
+    if (f.deleted) {
+      return { weakened: true, reason: `diff deletes test file '${f.path}' — refused`, files: touched };
+    }
+    if (f.addedSkippedOrOnlyTests.length > 0) {
+      return {
+        weakened: true,
+        reason: `diff adds skipped/focused test declaration in '${f.path}' — refused`,
+        files: touched,
+      };
+    }
+    if (f.removedAssertions > 0) {
+      return {
+        weakened: true,
+        reason: `diff removes ${f.removedAssertions} assertion(s) from test '${f.path}' — refused`,
+        files: touched,
+      };
+    }
+  }
+  return { weakened: false, reason: 'no test integrity weakened', files: touched };
 }
 
 // ---------------------------------------------------------------------------
