@@ -2778,3 +2778,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Enforce exact carrier and nested run-summary identity agreement at writer and persisted-reader boundaries.
 - [x] Add privacy-preserving focused coverage for writer sanitization and fail-closed persisted contradiction handling.
 - [x] Run focused and adjacent telemetry suites, typecheck, scoped lint, and diff integrity.
+
+## Fail-Closed API Capture (2026-07-21)
+- [x] Trace API-model failed/partial capture plus CLI and API TITRR capture paths from `origin/master`.
+- [x] Add one guarded capture adapter that turns thrown capture dependencies into metadata-only `proposal-capture-error` outcomes.
+- [x] Preserve bounded diff/action counters, causal run identity, durable failed-run persistence, sandbox cleanup, and no-retry/no-proposal behavior.
+- [x] Replace TITRR rejection expectations and cover a failed API-model producer with a partial diff capture exception.
+- [x] Fence the direct self-capturing API-model failed-task path and prove its failed agent-action telemetry is structured and metadata-only.
+- [x] Run focused TITRR tests, typecheck, and diff checks without touching the root workspace or GitHub.
+- [x] Defer TITRR pre-capture terminal actions and emit one capture-owned terminal action so `proposal-disabled` cannot conflict with final capture outcomes.
+- [x] Retain a created proposal id through persistence-read failures, attempt machine rejection, and require fail-closed reconciliation rather than re-filing.
+- [x] Make deferred TITRR attempts suppress every internal terminal action, including cancellation, retention, sandbox, and pre-execution exits; the epilogue owns the sole terminal action.

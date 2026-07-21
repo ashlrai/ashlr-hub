@@ -148,7 +148,11 @@ import {
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
 import { hasUnresolvedToolEffects } from '../util/effect-journal.js';
-import type { SandboxedEngineResult, SandboxRetentionEvidence } from './sandboxed-engine.js';
+import type {
+  CaptureSandboxedProposalOptions,
+  SandboxedEngineResult,
+  SandboxRetentionEvidence,
+} from './sandboxed-engine.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
 // NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
@@ -828,9 +832,10 @@ function hasAuthoritativeErrorExit(state: RunState): boolean {
 
 function withCapturedProposalMetadata(producerState: RunState, capturedState: RunState): RunState {
   const captureAborted = capturedState.status === 'aborted' && !hasAuthoritativeErrorExit(producerState);
+  const captureFailed = capturedState.proposalOutcome?.kind === 'proposal-capture-error';
   const merged = {
     ...producerState,
-    ...(captureAborted
+    ...(captureAborted || captureFailed
       ? {
           status: capturedState.status,
           result: capturedState.result,
@@ -860,6 +865,84 @@ function withCapturedProposalMetadata(producerState: RunState, capturedState: Ru
     (producerState as RunStateWithSandboxRetention).sandboxRetention ??
       (capturedState as RunStateWithSandboxRetention).sandboxRetention,
   );
+}
+
+type SandboxedProposalCapture = (
+  engine: EngineId,
+  goal: string,
+  cfg: AshlrConfig,
+  opts: CaptureSandboxedProposalOptions,
+) => Promise<SandboxedEngineResult>;
+
+function boundedCaptureCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value))
+    : undefined;
+}
+
+/**
+ * The sandbox capture implementation is itself fail-closed, but callers must
+ * preserve that boundary if an import seam or future dependency throws before
+ * it can return a structured result. Never persist exception text here: errors
+ * may contain provider, filesystem, or command details.
+ */
+async function captureSandboxedProposalFailClosed(
+  capture: SandboxedProposalCapture,
+  engine: EngineId,
+  goal: string,
+  cfg: AshlrConfig,
+  opts: CaptureSandboxedProposalOptions,
+  producerState: RunState,
+): Promise<SandboxedEngineResult> {
+  try {
+    return await capture(engine, goal, cfg, opts);
+  } catch {
+    const priorCounts = actionCountsForProposalCapture(producerState) ?? {};
+    const actionCounts: RunActionCounts = {
+      ...priorCounts,
+      proposalCaptureAttempts: Math.min(
+        Number.MAX_SAFE_INTEGER,
+        (boundedCaptureCount(priorCounts.proposalCaptureAttempts) ?? 0) + 1,
+      ),
+      proposalBlocked: 1,
+      proposalCreated: 0,
+    };
+    const priorSummary = producerState.runEventSummary;
+    const files = boundedCaptureCount(
+      priorSummary?.diffFiles ?? priorCounts.diffFiles ?? producerState.proposalOutcome?.files,
+    );
+    const diffLines = boundedCaptureCount(
+      priorSummary?.diffLines ?? priorCounts.diffLines ??
+        ((producerState.proposalOutcome?.insertions ?? 0) + (producerState.proposalOutcome?.deletions ?? 0)),
+    );
+    const outcome: RunProposalOutcome = {
+      kind: 'proposal-capture-error',
+      reason: 'proposal capture failed before durable proposal filing',
+      ...(files !== undefined ? { files } : {}),
+      ...(diffLines !== undefined ? { insertions: diffLines, deletions: 0 } : {}),
+    };
+    const now = new Date().toISOString();
+    return {
+      state: {
+        ...producerState,
+        status: 'failed',
+        result: outcome.reason,
+        updatedAt: now,
+        proposalOutcome: outcome,
+        runEventSummary: {
+          ...(priorSummary ?? { runId: producerState.id }),
+          runId: producerState.id,
+          status: 'failed',
+          outcome: 'proposal-capture-error',
+          proposalCreated: false,
+          ...(files !== undefined ? { diffFiles: files } : {}),
+          ...(diffLines !== undefined ? { diffLines } : {}),
+          actionCounts,
+        },
+      },
+      proposalOutcome: outcome,
+    };
+  }
 }
 
 function failedCaptureOutcome(
@@ -1822,18 +1905,18 @@ export async function titrrTestRun(
   if (signal?.aborted) return cancelledResult;
 
   // Only run the test command — typecheck/lint are out of scope for TITRR.
-  const allCmds = detectVerifyCommands(worktreePath);
-  const testCmd = allCmds.find((c) => c.kind === 'test');
-  if (!testCmd) return null; // no test command → skip gracefully
-
-  const verifyOptions = {
-    timeoutMs: TITRR_TEST_TIMEOUT_MS,
-    ...(signal ? { signal } : {}),
-  };
-  // The verifier owns subprocess cancellation and resolves only after process
-  // settlement. Await it directly so callers cannot remove the worktree while
-  // the cancelled verifier still has an active cwd or open file handles.
-  const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, verifyOptions);
+  let result: Awaited<ReturnType<typeof runVerifyCommandAsync>>;
+  try {
+    const allCmds = detectVerifyCommands(worktreePath);
+    const testCmd = allCmds.find((c) => c.kind === 'test');
+    if (!testCmd) return null; // no test command → skip gracefully
+    result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, {
+      timeoutMs: TITRR_TEST_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    return { ok: false, output: 'TITRR verification unavailable.' };
+  }
   if (signal?.aborted) return cancelledResult;
 
   const trimmed = result.output.length > TITRR_OUTPUT_CAP
@@ -2087,7 +2170,7 @@ async function runGoalInternal(
           );
           emit(sink, { kind: 'log', text: `api-model engine "${engine}" — in-process sandboxed run` });
 
-          const { captureSandboxedProposal, runApiModelSandboxed } = await import('./sandboxed-engine.js');
+          const { captureSandboxedProposal, recordSandboxedRunAgentAction, runApiModelSandboxed } = await import('./sandboxed-engine.js');
           const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
 
           const wtMod = await import('../sandbox/worktree.js');
@@ -2112,6 +2195,20 @@ async function runGoalInternal(
             let titrrUsage = newUsage();
             let titrrActionCounts: RunActionCounts = {};
             let titrrDurationMs = 0;
+            const captureApiProposal = async (
+              producerState: RunState,
+              captureOpts: CaptureSandboxedProposalOptions,
+            ) => {
+              const captured = await captureSandboxedProposalFailClosed(
+              captureSandboxedProposal,
+              engineId,
+              goal,
+              cfg,
+              captureOpts,
+              producerState,
+            );
+              return captured;
+            };
 
             try {
               while (titrrAttempt < titrrMax) {
@@ -2131,6 +2228,7 @@ async function runGoalInternal(
                   ...(effectGeneration ? { effectGeneration } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                   ...(opts.runId ? { runId: opts.runId } : {}),
+                  deferTerminalAction: true,
                 });
                 titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
                 titrrActionCounts = addTitrrActionCounts(
@@ -2157,7 +2255,7 @@ async function runGoalInternal(
                 if (apiR.state.status === 'aborted') break;
 
                 if (apiR.state.status !== 'done') {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                  const propR = await captureApiProposal(apiR.state, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
@@ -2204,7 +2302,7 @@ async function runGoalInternal(
                     titrrBudget,
                   );
                   if (isLastAttempt || retryBudgetExceeded) {
-                    const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    const propR = await captureApiProposal(apiR.state, {
                       sourceRepo: cwd,
                       model: modelEnv,
                       budget: opts.budget,
@@ -2255,7 +2353,7 @@ async function runGoalInternal(
                   break;
                 }
                 if (!titrrResult || titrrResult.ok) {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                  const propR = await captureApiProposal(lastApiR.state, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
@@ -2289,7 +2387,7 @@ async function runGoalInternal(
                 }
 
                 if (isLastAttempt) {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                  const propR = await captureApiProposal(lastApiR.state, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
@@ -2324,7 +2422,7 @@ async function runGoalInternal(
                 }
                 if (overBudget(titrrUsage, titrrBudget)) {
                   const forceGateBlockReason = `tests: still failing - budget exceeded after attempt ${titrrAttempt}`;
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                  const propR = await captureApiProposal(lastApiR.state, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
@@ -2372,6 +2470,7 @@ async function runGoalInternal(
               if (cancelled()) {
                 lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
               }
+              recordSandboxedRunAgentAction({ engine: engineId, engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: lastApiR.state.engineTier ?? 'mid', runId: lastApiR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: lastApiR.proposalId, outcome: lastApiR.proposalOutcome, status: lastApiR.state.status, usage: lastApiR.state.usage, durationMs: runDurationMs(lastApiR.state), actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {}, contextSummary: lastApiR.state.runEventSummary?.contextSummary });
               emit(sink, {
                 kind: 'log',
                 text: lastApiR.proposalId
@@ -2408,7 +2507,7 @@ async function runGoalInternal(
         // annotated with the TITRR outcome. Degrades gracefully when no test command
         // is detected (no-test-command repo → behavior identical to pre-M78).
         if (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId)) {
-          const { captureSandboxedProposal, runEngineSandboxed } = await import('./sandboxed-engine.js');
+          const { captureSandboxedProposal, recordSandboxedRunAgentAction, runEngineSandboxed } = await import('./sandboxed-engine.js');
           const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
 
           // Create one shared sandbox worktree for all TITRR attempts so the engine
@@ -2465,7 +2564,7 @@ async function runGoalInternal(
             const sandbox = titrrSandbox;
             const producer = lastR;
             if (!sandbox || !producer) return;
-            const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+            const propR = await captureSandboxedProposalFailClosed(captureSandboxedProposal, engineId, goal, cfg, {
               sourceRepo: cwd,
               model: modelEnv,
               budget: opts.budget,
@@ -2484,7 +2583,7 @@ async function runGoalInternal(
               producerStatus: producer.state.status,
               actionCounts: actionCountsForProposalCapture(producer.state),
               contextSummary: producer.state.runEventSummary?.contextSummary,
-            });
+            }, producer.state);
             const capturedState = propR.proposalOutcome
               ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
               : propR.state;
@@ -2517,6 +2616,7 @@ async function runGoalInternal(
                 delegationScope,
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
+                deferTerminalAction: true,
               });
               const retention = sandboxRetentionFrom(rawR);
               titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage));
@@ -2671,6 +2771,7 @@ async function runGoalInternal(
               ? `[TITRR: ${titrrAnnotation}]\n${finalR.state.result}`
               : `[TITRR: ${titrrAnnotation}]`;
           }
+          recordSandboxedRunAgentAction({ engine: engineId, engineModel: finalR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: finalR.state.engineTier ?? 'mid', runId: finalR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: finalR.proposalId, outcome: finalR.proposalOutcome, status: finalR.state.status, usage: finalR.state.usage, durationMs: runDurationMs(finalR.state), actionCounts: actionCountsForProposalCapture(finalR.state) ?? {}, contextSummary: finalR.state.runEventSummary?.contextSummary });
 
           emit(sink, {
             kind: finalR.state.status === 'done' ? 'task-done' : 'log',

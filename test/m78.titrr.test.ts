@@ -146,6 +146,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
   // Mock factories — rebuilt per test via vi.doMock.
   let engineMockFn: ReturnType<typeof vi.fn>;
   let captureMockFn: ReturnType<typeof vi.fn>;
+  let terminalActionMockFn: ReturnType<typeof vi.fn>;
   let detectVCMockFn: ReturnType<typeof vi.fn>;
   let runVCMockFn: ReturnType<typeof vi.fn>;
   let createSandboxMockFn: ReturnType<typeof vi.fn>;
@@ -171,6 +172,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
         },
       };
     });
+    terminalActionMockFn = vi.fn();
     detectVCMockFn = vi.fn();
     runVCMockFn = vi.fn();
     createSandboxMockFn = vi.fn(() => ({
@@ -184,6 +186,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
       captureSandboxedProposal: captureMockFn,
+      recordSandboxedRunAgentAction: terminalActionMockFn,
       // M300 routes api-model engines through runApiModelSandboxed; alias it to
       // the same mock so the module's exports are complete regardless of path.
       runApiModelSandboxed: engineMockFn,
@@ -437,7 +440,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(state.result).toMatch(/TITRR.*tests: pass \(attempt 1\)/);
     expect(engineMockFn).toHaveBeenCalled();
     const attemptOpts = engineMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
-    expect(attemptOpts).toMatchObject({ propose: false });
+    expect(attemptOpts).toMatchObject({ propose: false, deferTerminalAction: true });
     expect(attemptOpts['delegationScope']).toMatchObject({
       origin: 'daemon',
       sourceRepo: '/mock/repo',
@@ -561,7 +564,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     });
 
     const attemptOpts = engineMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
-    expect(attemptOpts).toMatchObject({ propose: false });
+    expect(attemptOpts).toMatchObject({ propose: false, deferTerminalAction: true });
     const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
     expect(captureOpts).toMatchObject({
       runId: apiProducerState.id,
@@ -856,7 +859,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
   it.each([
     ['claude', 'claude'],
     ['local-coder', 'local-coder'],
-  ] as const)('%s capture failure still removes the shared sandbox', async (engine, stateEngine) => {
+  ] as const)('%s capture failure becomes a persisted fail-closed outcome and removes the shared sandbox', async (engine, stateEngine) => {
     const producer = {
       ...makeRunState({ status: 'done', result: 'producer completed' }),
       engine: stateEngine,
@@ -866,16 +869,93 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     detectVCMockFn.mockReturnValue([]);
 
     const runGoal = await loadRunGoal();
-    await expect(runGoal('fix a bug', sandboxCfg(), {
+    const state = await runGoal('fix a bug', sandboxCfg(), {
       engine,
       sandboxEngine: true,
       budget: { maxTokens: 1_000_000, maxSteps: 100 },
       tools: false,
-    })).rejects.toThrow('capture exploded');
+    });
 
     expect(captureMockFn).toHaveBeenCalledTimes(1);
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
     expect(captureMockFn.mock.invocationCallOrder[0]).toBeLessThan(removeSandboxMockFn.mock.invocationCallOrder[0]!);
+    expect(state).toMatchObject({
+      status: 'failed',
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        reason: 'proposal capture failed before durable proposal filing',
+      },
+      runEventSummary: {
+        outcome: 'proposal-capture-error',
+        proposalCreated: false,
+        actionCounts: { proposalCaptureAttempts: 1, proposalBlocked: 1, proposalCreated: 0 },
+      },
+    });
+    expect(state.proposalOutcome?.proposalId).toBeUndefined();
+    expect(state.result).not.toContain('capture exploded');
+    expect(terminalActionMockFn).toHaveBeenCalledTimes(1);
+    expect(terminalActionMockFn).toHaveBeenLastCalledWith(expect.objectContaining({
+      outcome: expect.objectContaining({ kind: 'proposal-capture-error' }),
+      status: 'failed',
+    }));
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'proposal-capture-error' },
+      runEventSummary: { outcome: 'proposal-capture-error', proposalCreated: false },
+    });
+  });
+
+  it('failed API-model producer with a partial diff capture exception files nothing and does not retry', async () => {
+    const failedState = {
+      ...makeKnownDiffState(2),
+      status: 'failed' as const,
+      result: 'api model stopped after editing',
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    engineMockFn.mockResolvedValue({ state: failedState });
+    captureMockFn.mockRejectedValueOnce(new Error('capture exploded with raw diff details'));
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      workItemId: 'repair-api-capture-error',
+      workItemGenerationId: 'e'.repeat(64),
+      workSource: 'self',
+      titrrMaxAttempts: 3,
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(state).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'proposal-capture-error', files: 2 },
+      runEventSummary: {
+        outcome: 'proposal-capture-error',
+        proposalCreated: false,
+        diffFiles: 2,
+        actionCounts: { proposalCaptureAttempts: 1, proposalBlocked: 1, proposalCreated: 0 },
+      },
+    });
+    expect(state.proposalOutcome?.proposalId).toBeUndefined();
+    expect(JSON.stringify(state)).not.toContain('raw diff details');
+    expect(terminalActionMockFn).toHaveBeenCalledTimes(1);
+    expect(terminalActionMockFn).toHaveBeenLastCalledWith(expect.objectContaining({
+      outcome: expect.objectContaining({ kind: 'proposal-capture-error' }),
+      status: 'failed',
+    }));
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'proposal-capture-error', files: 2 },
+      trajectoryId: `run:${state.id}`,
+    });
   });
 
   // ---- Test 2: fail then pass → engine re-invoked ----
