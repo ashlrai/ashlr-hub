@@ -140,6 +140,16 @@ export interface DispatchManifestEventsReadResult extends DispatchManifestSource
   events: DispatchManifestEvent[];
 }
 
+/**
+ * Latest metadata observation across the bounded durable history. This is
+ * intentionally separate from any display aggregation: callers use it to
+ * determine evidence freshness, never to make routing decisions.
+ */
+export interface DispatchManifestLatestObservationReadResult {
+  latestAt?: string;
+  sourceQuality: DispatchManifestSourceQuality;
+}
+
 export function dispatchManifestDir(): string {
   const configuredHome = process.env.ASHLR_HOME;
   const root = typeof configuredHome === 'string' && configuredHome.trim() !== '' && isAbsolute(configuredHome)
@@ -711,4 +721,32 @@ export function readDispatchManifestEvents(opts: ReadDispatchManifestEventsOptio
     enumerable: false,
   });
   return events;
+}
+
+/**
+ * Read the newest durable manifest observation without applying a display or
+ * analytics cutoff. Incomplete or degraded history withholds the timestamp so
+ * consumers cannot label partial evidence as fresh.
+ */
+export function readDispatchManifestLatestObservationDetailed(): DispatchManifestLatestObservationReadResult {
+  const read = readDispatchManifestEventsDetailed({
+    maxFiles: HARD_READ_MAX_FILES,
+    maxBytes: HARD_READ_MAX_BYTES,
+    maxRows: HARD_READ_MAX_ROWS,
+  });
+  const { events, ...sourceQuality } = read;
+  if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
+    return { sourceQuality };
+  }
+
+  let latestAt: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const event of events) {
+    const eventMs = Date.parse(event.ts);
+    if (eventMs > latestMs) {
+      latestMs = eventMs;
+      latestAt = event.ts;
+    }
+  }
+  return { ...(latestAt === undefined ? {} : { latestAt }), sourceQuality };
 }

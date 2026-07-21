@@ -14,6 +14,7 @@ import {
   dispatchManifestDir,
   readDispatchManifestEvents,
   readDispatchManifestEventsDetailed,
+  readDispatchManifestLatestObservationDetailed,
   recordDispatchManifest,
   sanitizeDispatchManifestEvent,
   type DispatchManifestEvent,
@@ -332,6 +333,34 @@ describe('dispatch manifest ledger', () => {
     expect(events).toHaveLength(100);
     expect(events.sourceQuality).toMatchObject({
       sourceState: 'degraded', complete: false, stopReasons: ['event-limit'],
+    });
+  });
+
+  it('reads the latest observation from complete history without applying a display window', () => {
+    const older = makeEvent('2020-01-01T09:00:00.000Z', 'old-history');
+    const newer = makeEvent('2020-01-01T10:00:00.000Z', 'newer-history');
+    writeRows(path.join(dispatchManifestDir(), '2020-01-01.jsonl'), [older, newer]);
+
+    expect(readDispatchManifestLatestObservationDetailed()).toMatchObject({
+      latestAt: '2020-01-01T10:00:00.000Z',
+      sourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true },
+    });
+  });
+
+  it('reports an empty readable manifest ledger as healthy without a latest observation', () => {
+    fs.mkdirSync(dispatchManifestDir(), { recursive: true, mode: 0o700 });
+
+    expect(readDispatchManifestLatestObservationDetailed()).toEqual({
+      sourceQuality: expect.objectContaining({ sourceState: 'healthy', sourcePresent: true, complete: true }),
+    });
+  });
+
+  it('withholds the latest observation when bounded manifest history is degraded', () => {
+    const event = makeEvent('2026-07-11T10:00:00.000Z', 'partial-history');
+    writeRows(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), [event, '{"torn":true']);
+
+    expect(readDispatchManifestLatestObservationDetailed()).toEqual({
+      sourceQuality: expect.objectContaining({ sourceState: 'degraded', sourcePresent: true, complete: false, invalidRows: 1 }),
     });
   });
 
