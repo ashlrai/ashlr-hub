@@ -2677,6 +2677,21 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Publish protected stacked draft PR #50 on PR #49.
 - [ ] Replace remaining durable free-form decision rationale with closed reason codes in a separate compatibility-scoped slice.
 
+## Source-Revision Admission (2026-07-20)
+- [x] Establish a cross-platform, read-only sandbox/source/base admission proof on the current mainline.
+- [x] Refuse proposal capture before diff read or inbox creation when the source admission is not stable.
+- [x] Update sandbox module fixtures and pass direct API-dispatch/cancellation regression tests.
+- [x] Recheck source admission before CLI retry attempts and prove source advancement stops further model spend using real Git worktrees.
+- [x] Recheck source admission before API provider invocation and after proposal persistence; reject a proposal that becomes stale during its write.
+- [x] Extend the same contract to swarm capture without bypassing outward mutation authority.
+- [x] Extend the same contract to direct orchestrator engineer capture without bypassing outward mutation authority.
+- [x] Keep legacy swarm lifecycle fixtures explicit about stable source admission; pass the complete serial CI portability 2/3 shard after Windows surfaced the missing synthetic admission proof.
+- [x] Refuse source checkouts with tracked or untracked worktree state that the sandbox base cannot represent, and reject source worktree state races across admission reads.
+- [x] Recheck source admission after durable swarm proposal persistence; reject stale rows before a filed outcome, success audit, or notification can escape.
+- [x] Refuse dirty, raced, stale, or unavailable source admission before strict swarm planning or task execution can spend model capacity.
+- [x] Bring successful CLI proposal filing onto the same durable-reload and post-write source-admission contract as shared/API capture, rejecting unsafe rows instead of blocking queue progress.
+- [x] Preserve durable proposal ownership across post-create cancellation so queue settlement observes the real producer terminal state instead of an orphaning aborted result.
+
 ## Closed Judge Decision Metadata (2026-07-16)
 - [x] Map every durable Manager rationale path through decisions, Gate 7 audit/status, proposal rejection, and recursive anti-playbooks.
 - [x] Version new judged decision rows as metadata-only v2 with finite verdict and reason-code registries.

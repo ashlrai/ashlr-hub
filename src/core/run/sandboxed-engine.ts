@@ -1042,6 +1042,17 @@ export async function captureSandboxedProposal(
   try {
     const wt = await import('../sandbox/worktree.js');
     if (opts.signal?.aborted) return cancelledCapture();
+    const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!sourceAdmission.ok) {
+      const outcome = proposalOutcome(
+        'sandbox-unavailable',
+        `sandbox source revision refused: ${sourceAdmission.reason}`,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const diff: SandboxDiff = wt.sandboxDiff(sb);
     setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
@@ -1225,6 +1236,24 @@ export async function captureSandboxedProposal(
       );
       return {
         state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
+    const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+    if (!persistedAdmission.ok) {
+      inbox.setStatus(
+        proposal.id,
+        'rejected',
+        'Source revision changed during proposal capture.',
+        'source revision admission refused',
+      );
+      const outcome = proposalOutcome(
+        'sandbox-unavailable',
+        `sandbox source revision refused: ${persistedAdmission.reason}`,
+        diff,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
         proposalOutcome: outcome,
       };
     }
@@ -1468,6 +1497,23 @@ export async function runEngineSandboxed(
     };
   }
 
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', `sandbox source revision refused: ${sourceAdmission.reason}`);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
+    };
+  }
+
   // Hold authority through the complete agent lifecycle. Creation has its own
   // short fence; this second acquisition closes the gap before agent writes and
   // makes kill/unenroll wait for execution, proposal capture, and cleanup.
@@ -1644,6 +1690,15 @@ export async function runEngineSandboxed(
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (opts.signal?.aborted) {
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
+        break;
+      }
+      const attemptAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+      if (!attemptAdmission.ok) {
+        res = {
+          ok: false,
+          output: '',
+          error: `sandbox source revision refused: ${attemptAdmission.reason}`,
+        };
         break;
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
@@ -1827,7 +1882,7 @@ export async function runEngineSandboxed(
             producerStatus: 'failed',
             actionCounts,
           });
-          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          if (captured.state.status === 'aborted') {
             return cancelledAfterSpawn(captured);
           }
           proposalId = captured.proposalId;
@@ -2055,13 +2110,46 @@ export async function runEngineSandboxed(
               persisted.id === proposal.id &&
               persisted.repo === sb.sourceRepo &&
               persisted.runId === id &&
+              persisted.trajectoryId === `run:${id}` &&
+              persisted.workItemId === opts.workItemId &&
+              persisted.workItemGenerationId === opts.workItemGenerationId &&
               persisted.diffHash === diffHash &&
               persisted.provenanceSig === provenanceSig &&
-              persisted.diff === scrubbed;
+              persisted.diff === scrubbed &&
+              (persisted.isPartial === true) === false &&
+              typeof persisted.diff === 'string' &&
+              persisted.diff.trim().length > 0;
             if (!durablePending) {
+              if (
+                proposal.status === 'pending' &&
+                persisted?.status === 'pending' &&
+                persisted.id === proposal.id &&
+                persisted.runId === id
+              ) {
+                inbox.setStatus(
+                  proposal.id,
+                  'rejected',
+                  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+                  PROPOSAL_PERSISTENCE_MISMATCH_REASON,
+                );
+              }
               proposalOutcomeResult = proposalOutcome(
                 'proposal-capture-error',
                 'proposal was not durably persisted with matching capture metadata',
+                effDiff,
+              );
+            } else {
+            const persistedAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+            if (!persistedAdmission.ok) {
+              inbox.setStatus(
+                proposal.id,
+                'rejected',
+                'Source revision changed during proposal capture.',
+                'source revision admission refused',
+              );
+              proposalOutcomeResult = proposalOutcome(
+                'sandbox-unavailable',
+                `sandbox source revision refused: ${persistedAdmission.reason}`,
                 effDiff,
               );
             } else {
@@ -2101,17 +2189,6 @@ export async function runEngineSandboxed(
             } catch {
               // telemetry is best-effort — never fails the run
             }
-            if (opts.signal?.aborted) {
-              return cancelledAfterSpawn({
-                state: withProposalOutcome(
-                  mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
-                  proposalOutcomeResult,
-                  actionCounts,
-                ),
-                proposalId,
-                proposalOutcome: proposalOutcomeResult,
-              });
-            }
             // M249: RunCache shadow write — record the (key → outcome) entry for
             // measurement. Fire-and-forget, never throws, never changes run behavior.
             // Flag-off (default cacheShadow === false) → cacheWrite is a no-op.
@@ -2143,6 +2220,7 @@ export async function runEngineSandboxed(
                 cacheWrite(cfg, _entry, opts.sourceRepo);
               }
             } catch { /* shadow write is best-effort */ }
+            }
             }
           }
           } // end if (_m275ShouldFile)
@@ -2414,6 +2492,23 @@ export async function runApiModelSandboxed(
     };
   }
 
+  const sourceAdmission = wt.inspectSandboxSourceRevision(sb, opts.sourceRepo);
+  if (!sourceAdmission.ok) {
+    if (createdHere) {
+      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
+    }
+    const outcome = proposalOutcome('sandbox-unavailable', `sandbox source revision refused: ${sourceAdmission.reason}`);
+    recordSandboxedRunAgentAction({
+      engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId, workSource: opts.workSource,
+      outcome, status: 'failed', actionCounts,
+    });
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      proposalOutcome: outcome,
+    };
+  }
+
   const executionFence = acquireOutwardMutationFence();
   let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
   let executionAuthorityFailure: string | undefined;
@@ -2617,7 +2712,7 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+        if (captured.state.status === 'aborted') {
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;
@@ -2685,7 +2780,7 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+        if (captured.state.status === 'aborted') {
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;

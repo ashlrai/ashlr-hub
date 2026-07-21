@@ -25,6 +25,11 @@ vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/core/sandbox/worktree.js')>();
   return {
     ...real,
+    inspectSandboxSourceRevision: () => ({
+      ok: true as const,
+      baseHead: 'fixture',
+      currentHead: 'fixture',
+    }),
     sandboxDiff: () => ({
       files: 1,
       patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,

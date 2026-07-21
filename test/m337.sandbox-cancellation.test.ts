@@ -14,18 +14,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { InboxStore } from '../src/core/seams/inbox.js';
 import type { Proposal } from '../src/core/types.js';
+import {
+  PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+} from '../src/core/inbox/persistence-mismatch.js';
 
 interface CancellationHarness {
   actions: Array<Record<string, unknown>>;
   createCalls: unknown[];
   lifecycle: string[];
+  statusChanges: Array<{ id: string; status: string; result?: string }>;
 }
 
 function durableInboxStore(
   proposalId: string,
   createCalls: unknown[],
   lifecycle: string[],
+  statusChanges: Array<{ id: string; status: string; result?: string }>,
   afterCreate?: () => void,
+  loadTransform?: (proposal: Proposal) => Proposal,
 ): InboxStore {
   const proposals = new Map<string, Proposal>();
 
@@ -48,11 +54,12 @@ function durableInboxStore(
     },
     load: (id) => {
       const proposal = proposals.get(id);
-      return proposal ? structuredClone(proposal) : null;
+      return proposal ? structuredClone(loadTransform?.(proposal) ?? proposal) : null;
     },
     setStatus: (id, status, result) => {
       const proposal = proposals.get(id);
       if (!proposal) return;
+      statusChanges.push({ id, status, ...(result === undefined ? {} : { result }) });
       proposals.set(id, {
         ...proposal,
         status,
@@ -67,14 +74,16 @@ function durableInboxStore(
 function installHarness(opts: {
   repo: string;
   controller: AbortController;
-  abortAt: 'gate' | 'create';
+  abortAt?: 'gate' | 'create';
   proposalId: string;
   producerStatus?: 'done' | 'failed';
   terminationReason?: 'error-exit';
+  loadTransform?: (proposal: Proposal) => Proposal;
 }): CancellationHarness {
   const actions: Array<Record<string, unknown>> = [];
   const createCalls: unknown[] = [];
   const lifecycle: string[] = [];
+  const statusChanges: Array<{ id: string; status: string; result?: string }> = [];
 
   vi.doMock('../src/core/sandbox/worktree.js', () => ({
     createSandbox: (sourceRepo: string) => ({
@@ -86,6 +95,7 @@ function installHarness(opts: {
     borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
     removeSandboxWithBorrowedAuthority: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
     removeSandbox: (sandbox: { id: string }) => lifecycle.push(`removed:${sandbox.id}`),
+    inspectSandboxSourceRevision: () => ({ ok: true, baseHead: 'fixture', currentHead: 'fixture' }),
     sandboxDiff: () => ({
       files: 1,
       patch: [
@@ -166,7 +176,9 @@ function installHarness(opts: {
       opts.proposalId,
       createCalls,
       lifecycle,
+      statusChanges,
       opts.abortAt === 'create' ? () => opts.controller.abort() : undefined,
+      opts.loadTransform,
     ),
   }));
 
@@ -194,7 +206,7 @@ function installHarness(opts: {
     recordDecision: vi.fn(),
   }));
 
-  return { actions, createCalls, lifecycle };
+  return { actions, createCalls, lifecycle, statusChanges };
 }
 
 afterEach(() => {
@@ -246,7 +258,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('returns a durably created proposal as filed while the api-model run aborts', async () => {
+  it('keeps a durably created API-model proposal settled after cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-cancel-after-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -276,8 +288,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'done',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId },
       });
@@ -285,10 +296,10 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result.proposalOutcome).toMatchObject({ kind: 'filed', proposalId });
       expect(harness.createCalls).toHaveLength(1);
       expect(harness.actions.at(-1)).toMatchObject({
-        outcome: 'blocked',
+        outcome: 'ok',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'done',
           outcome: 'proposal-created',
           proposalId,
           tokensIn: 13,
@@ -300,7 +311,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('keeps successful cli proposal ownership while reporting post-create cancellation', async () => {
+  it('keeps a successful CLI proposal settled after post-create cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-successful-cli-cancel-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -334,8 +345,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'done',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId },
       });
@@ -343,10 +353,10 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result.proposalOutcome).toMatchObject({ kind: 'filed', proposalId });
       expect(harness.createCalls).toHaveLength(1);
       expect(harness.actions.at(-1)).toMatchObject({
-        outcome: 'blocked',
+        outcome: 'ok',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'done',
           outcome: 'proposal-created',
           proposalId,
           tokensIn: 13,
@@ -355,9 +365,56 @@ describe('sandbox proposal cancellation commit point', () => {
       });
       expect(harness.lifecycle).toEqual([
         `durable:${proposalId}`,
-        'action:aborted',
+        'action:done',
         'removed:sb-cancellation',
       ]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a same-run CLI proposal whose durable reload has mismatched capture metadata', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-successful-cli-mismatch-'));
+    mkdirSync(join(repo, '.git'));
+    writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
+    const controller = new AbortController();
+    const proposalId = 'successful-cli-mismatched-persist';
+    const harness = installHarness({
+      repo,
+      controller,
+      proposalId,
+      producerStatus: 'done',
+      loadTransform: (proposal) => ({ ...proposal, diffHash: 'wrong-diff-hash' }),
+    });
+
+    try {
+      const { runEngineSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?successful-cli-mismatch=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+      const result = await runEngineSandboxed('claude', 'reject mismatched durable cli capture', {
+        models: { providerChain: [] },
+        foundry: {
+          completenessGate: false,
+          dispatchRetries: 0,
+          fleetMcp: false,
+          models: { claude: 'claude-sonnet-4-5' },
+        },
+      } as never, {
+        sourceRepo: repo,
+        propose: true,
+      });
+
+      expect(result.proposalId).toBeUndefined();
+      expect(result.proposalOutcome).toMatchObject({
+        kind: 'proposal-capture-error',
+        reason: 'proposal was not durably persisted with matching capture metadata',
+      });
+      expect(harness.statusChanges).toContainEqual({
+        id: proposalId,
+        status: 'rejected',
+        result: PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
+      });
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -469,7 +526,7 @@ describe('sandbox proposal cancellation commit point', () => {
     }
   });
 
-  it('keeps failed-producer proposal ownership while reporting capture cancellation', async () => {
+  it('keeps failed-producer proposal ownership after capture cancellation', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-failed-producer-cancel-'));
     mkdirSync(join(repo, '.git'));
     writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
@@ -502,8 +559,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
 
       expect(result.state).toMatchObject({
-        status: 'aborted',
-        terminationReason: 'cancelled',
+        status: 'failed',
         usage: { tokensIn: 13, tokensOut: 6 },
         proposalOutcome: { kind: 'filed', proposalId, isPartial: true },
       });
@@ -514,7 +570,7 @@ describe('sandbox proposal cancellation commit point', () => {
         outcome: 'blocked',
         proposalId,
         runEventSummary: {
-          status: 'aborted',
+          status: 'failed',
           proposalId,
           tokensIn: 13,
           tokensOut: 6,

@@ -148,6 +148,10 @@ async function loadM17(): Promise<void> {
 
 type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
+type InspectSandboxSourceRevisionFn = (
+  sb: Sandbox,
+  expectedSourceRepo?: string,
+) => import('../sandbox/worktree.js').SandboxSourceRevisionAdmission;
 type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult | void;
 type BorrowedSandboxCleanupAuthority =
   import('../sandbox/worktree.js').BorrowedSandboxCleanupAuthority;
@@ -174,6 +178,7 @@ type SetProposalStatusFn = (
 
 let _createSandbox:  CreateSandboxFn  | null = null;
 let _sandboxDiff:    SandboxDiffFn    | null = null;
+let _inspectSandboxSourceRevision: InspectSandboxSourceRevisionFn | null = null;
 let _removeSandbox:  RemoveSandboxFn  | null = null;
 let _borrowSandboxCleanupAuthority: BorrowSandboxCleanupAuthorityFn | null = null;
 let _removeSandboxWithBorrowedAuthority: RemoveSandboxWithBorrowedAuthorityFn | null = null;
@@ -194,12 +199,14 @@ async function loadM21(): Promise<void> {
     const wt = await import(/* @vite-ignore */ wtSpec) as {
       createSandbox: CreateSandboxFn;
       sandboxDiff: SandboxDiffFn;
+      inspectSandboxSourceRevision?: InspectSandboxSourceRevisionFn;
       removeSandbox: RemoveSandboxFn;
       borrowSandboxCleanupAuthority?: BorrowSandboxCleanupAuthorityFn;
       removeSandboxWithBorrowedAuthority?: RemoveSandboxWithBorrowedAuthorityFn;
     };
     _createSandbox = wt.createSandbox;
     _sandboxDiff   = wt.sandboxDiff;
+    _inspectSandboxSourceRevision = wt.inspectSandboxSourceRevision ?? null;
     _removeSandbox = wt.removeSandbox;
     _borrowSandboxCleanupAuthority = wt.borrowSandboxCleanupAuthority ?? null;
     _removeSandboxWithBorrowedAuthority = wt.removeSandboxWithBorrowedAuthority ?? null;
@@ -1105,7 +1112,13 @@ function captureSandboxAndCleanup(
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
   let captureFailureReason = 'sandbox diff capture unavailable';
-  if (_sandboxDiff !== null) {
+  const sourceAdmission = _inspectSandboxSourceRevision?.(sb, sb.sourceRepo);
+  if (!sourceAdmission?.ok) {
+    captureFailureReason = sourceAdmission
+      ? `sandbox source revision refused: ${sourceAdmission.reason}`
+      : 'sandbox source revision inspection unavailable';
+    emitLog(sink, `[M21] ${captureFailureReason}`);
+  } else if (_sandboxDiff !== null) {
     try {
       diff = _sandboxDiff(sb);
     } catch (err) {
@@ -1297,34 +1310,52 @@ function captureSandboxAndCleanup(
             };
             emitLog(sink, `[M24] Proposal ${created.id} failed durable persistence verification`);
           } else {
-            outcome = {
-              kind: 'filed',
-              reason: isPartialCapture
-                ? `builtin swarm partial proposal filed after ${run.status} producer`
-                : 'builtin swarm proposal filed',
-              ...(isPartialCapture ? { isPartial: true } : {}),
-              proposalId: created.id,
-              ...diffCounts,
-            };
-            emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
-            // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
-            // webhook notification. Fire-and-forget; metadata only; never blocks.
-            void (async () => {
+            const persistedAdmission = _inspectSandboxSourceRevision?.(sb, sb.sourceRepo);
+            if (!persistedAdmission?.ok) {
+              _setProposalStatus?.(
+                created.id,
+                'rejected',
+                'Source revision changed during proposal capture.',
+                'source revision admission refused',
+              );
+              outcome = {
+                kind: 'sandbox-unavailable',
+                reason: persistedAdmission
+                  ? `sandbox source revision refused: ${persistedAdmission.reason}`
+                  : 'sandbox source revision inspection unavailable',
+                ...diffCounts,
+              };
+              emitLog(sink, `[M24] Proposal ${created.id} refused after source admission changed`);
+            } else {
+              outcome = {
+                kind: 'filed',
+                reason: isPartialCapture
+                  ? `builtin swarm partial proposal filed after ${run.status} producer`
+                  : 'builtin swarm proposal filed',
+                ...(isPartialCapture ? { isPartial: true } : {}),
+                proposalId: created.id,
+                ...diffCounts,
+              };
+              emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+              // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
+              // webhook notification. Fire-and-forget; metadata only; never blocks.
+              void (async () => {
+                try {
+                  const { loadConfig } = await import('../config.js');
+                  const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
+                  await notifyNewProposal(persisted, loadConfig());
+                } catch { /* notification is best-effort */ }
+              })();
               try {
-                const { loadConfig } = await import('../config.js');
-                const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
-                await notifyNewProposal(persisted, loadConfig());
-              } catch { /* notification is best-effort */ }
-            })();
-            try {
-              _audit?.({
-                action: 'inbox:proposal-created',
-                repo: sb.sourceRepo,
-                sandboxId: sb.id,
-                summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
-                result: 'ok',
-              });
-            } catch { /* audit best-effort */ }
+                _audit?.({
+                  action: 'inbox:proposal-created',
+                  repo: sb.sourceRepo,
+                  sandboxId: sb.id,
+                  summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
+                  result: 'ok',
+                });
+              } catch { /* audit best-effort */ }
+            }
           }
         }
       } catch (err) {
@@ -1901,6 +1932,21 @@ async function runSwarmInternal(
         );
       }
       enforceKillState = true;
+
+      // Do not plan or execute against a source worktree that is already dirty
+      // or has moved since the sandbox was created. Capture rechecks this too,
+      // but this preflight prevents spending swarm capacity on a base that can
+      // never produce admissible proposal evidence.
+      const sourceAdmission = activeSandbox === null
+        ? null
+        : _inspectSandboxSourceRevision?.(activeSandbox, project ?? undefined);
+      if (!sourceAdmission?.ok) {
+        const reason = sourceAdmission
+          ? `sandbox source revision refused: ${sourceAdmission.reason}`
+          : 'sandbox source revision inspection unavailable';
+        finalizeSandbox(false);
+        return abortNoSandbox(reason);
+      }
     }
 
   // -------------------------------------------------------------------------
