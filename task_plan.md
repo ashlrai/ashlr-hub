@@ -1970,3 +1970,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+
+## Time-Stable Autonomy Fixtures (2026-07-21)
+- [x] Identify the shared master CI failures as stale fixture timestamps crossing real recovery and learning windows.
+- [x] Replace fixed dates with bounded relative clocks in rejected-capture, secret-safety, and stale self-heal coverage.
+- [x] Verify the exact failing cluster and TypeScript typecheck without changing production behavior.
+- [ ] Publish a protected draft and require CI before promotion.

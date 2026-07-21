@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -722,7 +722,7 @@ describe('queued autonomy work scanner', () => {
       decisionReason: 'auto-drained: permanent readiness blocker persisted for 2 pass(es): known verification failure',
     });
     (proposal as unknown as Record<string, unknown>)['stuckPassCount'] = 2;
-    queueProposalRepairWorkForPendingProposals([proposal], new Date('2026-07-12T12:00:00.000Z'));
+    queueProposalRepairWorkForPendingProposals([proposal], materializedAt);
     expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
 
     const expiredAt = new Date(Date.parse(createdAt) + 48 * 60 * 60 * 1000 + 1);
