@@ -63,7 +63,10 @@ function initRepo(): void {
   git(repo, ['config', 'user.email', 'test@ashlr.test']);
   git(repo, ['config', 'user.name', 'Ashlr Test']);
   writeFileSync(join(repo, 'README.md'), '# m407 fixture\n', 'utf8');
-  git(repo, ['add', 'README.md']);
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: '@ashlr/hub' }), 'utf8');
+  mkdirSync(join(repo, 'scripts'), { recursive: true });
+  writeFileSync(join(repo, 'scripts', 'run-verify-command.mjs'), 'process.exit(1);\n', 'utf8');
+  git(repo, ['add', 'README.md', 'package.json', 'scripts/run-verify-command.mjs']);
   git(repo, ['commit', '-m', 'init']);
 
   const origin = join(home, 'origin.git');
@@ -83,6 +86,19 @@ function addFileDiff(): string {
     '+++ b/docs/m407.md',
     '@@ -0,0 +1 @@',
     '+verification mutation fence',
+    '',
+  ].join('\n');
+}
+
+function verifierEntrypointDiff(): string {
+  return [
+    'diff --git a/scripts/run-verify-command.mjs b/scripts/run-verify-command.mjs',
+    'index 1111111..2222222 100644',
+    '--- a/scripts/run-verify-command.mjs',
+    '+++ b/scripts/run-verify-command.mjs',
+    '@@ -1 +1 @@',
+    '-process.exit(1);',
+    '+process.exit(0);',
     '',
   ].join('\n');
 }
@@ -170,6 +186,46 @@ afterEach(() => {
 });
 
 describe('M407 auto-merge verification mutation fence', () => {
+  it('refuses a self-target proposal that changes the verifier entrypoint before execution', async () => {
+    const diff = verifierEntrypointDiff();
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 verifier entrypoint mutation',
+      summary: 'A self-target proposal must not certify a changed verifier runner.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    });
+    setStatus(proposal.id, 'approved');
+    const mainBefore = git(repo, ['rev-parse', 'main']);
+    verifyMocks.runVerifyCommandAsync.mockResolvedValue({
+      ok: true,
+      command: 'mock-verifier',
+      exitCode: 0,
+      output: '',
+      timedOut: false,
+    });
+
+    await expect(autoMergeProposal(proposal.id, verificationConfig())).resolves.toMatchObject({
+      ok: false,
+      merged: false,
+    });
+
+    expect(verifyMocks.runVerifyCommandAsync).not.toHaveBeenCalled();
+    expect(git(repo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(proposal.id)?.status).toBe('approved');
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
+      passed: false,
+      ran: [],
+      detail: expect.stringMatching(/self-verification authority/),
+    });
+  });
+
   it('holds the outward fence until verification drains and refuses the merge after kill', async () => {
     const diff = addFileDiff();
     const diffHash = hashDiff(diff);

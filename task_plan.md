@@ -128,6 +128,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Rebase on merged Vitest 4 master; run definitive full verification and final adversarial review.
 - [ ] Commit, push, open protected PR, observe all required checks, and keep production auto-merge disabled pending post-merge canary evidence.
 
+## Current Overnight Cycle - Verifier Authority Snapshot
+- [x] Audit the mutable verifier-authority boundary and preserve the base-derived command list finding.
+- [x] Fence Ashlr Hub's packaged verifier runner from self-target verification before the broader snapshot contract lands.
+- [ ] Bind merge evidence to immutable, repo-declared verifier authority inputs and reject authority-mutating diffs.
+- [ ] Propagate snapshot freshness through signed evidence, remote handoff, readiness, and cached-verification reuse.
+
+## Windows Sandbox-Recovery Fixture Budget (2026-07-21)
+- [x] Isolate the hosted-Windows timeout to M412's real-worktree recovery case.
+- [x] Preserve the 15-second POSIX deadline and add a bounded 30-second Windows allowance.
+- [x] Run focused fence/recovery coverage, typecheck, and diff checks.
+- [ ] Require the refreshed protected matrix before promotion.
+
 ## Current Overnight Cycle - Fleetwide Merge Contracts
 - [x] Rehydrate the deployed Hub, daemon, guard, queue, and verifier-coverage state.
 - [x] Audit the five remaining repositories without explicit merge contracts in parallel.
