@@ -3070,6 +3070,66 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('withholds stale Best-of-N evidence rather than refreshing it through the analytics window', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    const staleAt = new Date(now.getTime() - 31 * 60 * 1000).toISOString();
+    await withFakeNow(now, async () => {
+      recordBestOfN({
+        ts: staleAt,
+        source: 'todo',
+        repo: '/repo/stale-best-of-n',
+        n: 1,
+        winnerIndex: 0,
+        winnerProposalId: 'proposal-stale-best-of-n',
+        totalCostUsd: 0,
+        candidates: [{
+          index: 0, engine: 'codex', model: 'gpt-5.5', score: 1,
+          proposalId: 'proposal-stale-best-of-n', won: true,
+        }],
+      });
+      const status = await buildFleetStatus(withFoundry({ bestOfN: 2 }));
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'best-of-n',
+      );
+
+      expect(status.bestOfNSource).toMatchObject({ sourceState: 'healthy', complete: true, latestAt: staleAt });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'withheld', evidenceRole: 'learning',
+        sourceQuality: { badge: 'stale-source' },
+      });
+    });
+  });
+
+  it('marks stale dispatch intent as observational rather than fresh evidence', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    const staleAt = new Date(now.getTime() - 31 * 60 * 1000).toISOString();
+    await withFakeNow(now, async () => {
+      recordDispatchManifest({
+        schemaVersion: 1,
+        manifestId: 'dm-stale-observation',
+        ts: staleAt,
+        mode: 'concurrent',
+        dryRun: false,
+        claimedItemIds: ['item-stale'],
+        assignments: [{ itemId: 'item-stale', source: 'todo', repo: '/repo/stale-manifest', title: 'Stale', backend: 'codex' }],
+        unassigned: [],
+        slots: { codex: 1 },
+        backendCounts: { codex: 1 },
+        counts: { claimed: 1, assigned: 1, unassigned: 0 },
+      });
+      const status = await buildFleetStatus(withFoundry({ fabric: { concurrentDispatch: true } }));
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'dispatch-manifests',
+      );
+
+      expect(status.dispatchManifestSource).toMatchObject({ sourceState: 'healthy', complete: true, latestAt: staleAt });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'observational', evidenceRole: 'forensics',
+        sourceQuality: { badge: 'stale-source' },
+      });
+    });
+  });
+
   it('withholds concurrent manifest aggregates when their source is partial', async () => {
     const event = {
       schemaVersion: 1 as const,

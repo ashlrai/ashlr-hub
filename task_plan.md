@@ -2714,4 +2714,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Extend required decision authority to retain its latest validated observation and withhold stale evidence.
 - [x] Extend judge outcomes to retain their latest validated observation and withhold stale learning evidence.
 - [x] Bind dispatch-production evidence freshness to a bounded full-history observation, independent of rolling yield analytics.
+- [x] Bind Best-of-N and concurrent dispatch-intent freshness to bounded full-history observations with stale-source regressions.
 - [ ] Publish and require the protected CI matrix before release.

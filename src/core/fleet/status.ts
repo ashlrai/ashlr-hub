@@ -108,10 +108,8 @@ import {
 } from './dispatch-production-ledger.js';
 import { readDecisionsDetailed } from './decisions-ledger.js';
 import { readJudgeTracesDetailed } from './judge-trace.js';
-import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
 import {
-  readBestOfNRecordsDetailed,
-  type BestOfNSourceQuality,
+  readBestOfNLatestObservationDetailed,
 } from './best-of-n-ledger.js';
 import {
   readAgentWorkspaceDetailed,
@@ -1398,10 +1396,10 @@ export interface FleetStatus {
   judgeTraceSource?: FleetEvidenceSourceStatus;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
-  /** Storage/read completeness for forensic concurrent dispatch intent. */
-  dispatchManifestSource?: DispatchManifestSourceQuality;
-  /** Bounded candidate-economics evidence used only when complete. */
-  bestOfNSource?: BestOfNSourceQuality;
+  /** Storage/read completeness and newest validated observation for forensic concurrent dispatch intent. */
+  dispatchManifestSource?: FleetEvidenceSourceStatus;
+  /** Bounded candidate-economics evidence and its newest validated observation. */
+  bestOfNSource?: FleetEvidenceSourceStatus;
   /** Observation-only post-merge evidence. Never grants routing or merge authority. */
   postMergeSource?: FleetReadinessEvidenceQuality;
   postMergeCohort?: {
@@ -2683,23 +2681,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
   if (status.evidencePolicy?.bestOfNEnabled === true) {
     try {
-      const bestOfN = readBestOfNRecordsDetailed({
-        sinceMs: Date.parse(generatedAt) - 30 * 24 * 60 * 60 * 1000,
-        limit: 100_000,
-        maxFiles: 31,
-        maxBytes: 32 * 1024 * 1024,
-        maxRows: 100_000,
-      });
+      const bestOfN = readBestOfNLatestObservationDetailed();
       status.bestOfNSource = {
-        sourceState: bestOfN.sourceState,
-        sourcePresent: bestOfN.sourcePresent,
-        complete: bestOfN.complete,
-        stopReasons: bestOfN.stopReasons,
-        filesRead: bestOfN.filesRead,
-        bytesRead: bestOfN.bytesRead,
-        rowsScanned: bestOfN.rowsScanned,
-        invalidRows: bestOfN.invalidRows,
-        unreadableFiles: bestOfN.unreadableFiles,
+        ...bestOfN.sourceQuality,
+        ...(bestOfN.latestAt ? { latestAt: bestOfN.latestAt } : {}),
       };
     } catch {
       status.bestOfNSource = {
@@ -2870,21 +2855,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
 async function buildDispatchManifestStatus(): Promise<{
   summary?: FleetDispatchManifestStatus;
-  sourceQuality: DispatchManifestSourceQuality;
+  sourceQuality: FleetEvidenceSourceStatus;
 }> {
-  const { readDispatchManifestEventsDetailed } = await import('./dispatch-manifest.js');
+  const {
+    readDispatchManifestEventsDetailed,
+    readDispatchManifestLatestObservationDetailed,
+  } = await import('./dispatch-manifest.js');
+  const latestObservation = readDispatchManifestLatestObservationDetailed();
   const read = readDispatchManifestEventsDetailed({ limit: 1000 });
   const events = read.events;
-  const sourceQuality: DispatchManifestSourceQuality = {
-    sourceState: read.sourceState,
-    sourcePresent: read.sourcePresent,
-    complete: read.complete,
-    stopReasons: read.stopReasons,
-    filesRead: read.filesRead,
-    bytesRead: read.bytesRead,
-    rowsScanned: read.rowsScanned,
-    invalidRows: read.invalidRows,
-    unreadableFiles: read.unreadableFiles,
+  const sourceQuality: FleetEvidenceSourceStatus = {
+    ...latestObservation.sourceQuality,
+    ...(latestObservation.latestAt ? { latestAt: latestObservation.latestAt } : {}),
   };
   if (events.length === 0 || sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
     return { sourceQuality };
@@ -5005,11 +4987,13 @@ function learningEvidenceReadinessSources(
     evidenceReadinessSource({
       id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',
       quality: status.dispatchManifestSource, generatedAt,
+      observedAt: status.dispatchManifestSource?.latestAt,
       applicable: status.evidencePolicy?.concurrentDispatchEnabled !== false,
     }),
     evidenceReadinessSource({
       id: 'best-of-n', label: 'Candidate Races', role: 'learning',
       quality: status.bestOfNSource, generatedAt,
+      observedAt: status.bestOfNSource?.latestAt,
       applicable: status.evidencePolicy?.bestOfNEnabled !== false,
     }),
     evidenceReadinessSource({
