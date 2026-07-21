@@ -2723,3 +2723,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Return aggregate source-quality metadata only, without raw observations, witnesses, repository paths, verification digests, or merge authority.
 - [x] Cover newest-valid-time selection, empty readable sources, and degradation of each source; pass focused Vitest, typecheck, lint, and diff checks.
 - [x] Reuse the existing FleetStatus source reads to project post-merge freshness without a second ledger read.
+
+## Production Daemon Drift (2026-07-21)
+- [x] Confirm stale queue inventory coincided with a live daemon running an older immutable release.
+- [x] Restore the service after an accidental worktree-targeted reinstall and verify a live immutable-release PID and clear guard.
+- [ ] Define a clean immutable-release upgrade procedure before the next production service update.

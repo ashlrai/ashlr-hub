@@ -2840,3 +2840,8 @@
   - Added a bounded read-only composition over signed post-merge observation and released stability-witness ledgers. It returns only aggregate source quality plus a timestamp drawn from validated `observedAt` and `stableAt` fields; manifest completion timestamps are intentionally not treated as observations.
   - A degraded or incomplete source withholds `latestAt`, preventing partial forensic history from appearing fresh. FleetStatus reuses its already-read post-merge sources to project that timestamp, so stale forensic evidence is observational and degraded rather than fresh; routing, merge, deploy, policy, and authority remain unchanged.
   - Focused regressions prove newest valid timestamp selection, metadata-only output, empty-source behavior, degraded adverse and stability sources, and stale FleetStatus projection. Focused Vitest, typecheck, lint, and diff checks pass.
+
+- Production daemon deployment drift (2026-07-21):
+  - Live launchd inspection found a current daemon heartbeat backed by an immutable July 14 release while the development workspace and remote baseline were newer. The matching July 14 backlog snapshot was therefore release drift, not an unproven queue-publication failure.
+  - A CLI help probe unexpectedly exercised the idempotent daemon-install path and briefly pointed launchd at the dirty development worktree. The service was immediately restored to its prior immutable release, then verified running with a fresh PID, fresh tick, and clear guard health.
+  - Future upgrades must stage and verify a clean immutable release artifact before reinstalling launchd; do not point the persistent service at a dirty worktree.
