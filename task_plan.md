@@ -16,6 +16,9 @@
 - [x] Fold post-dispatch maintenance spend into the existing tick guard and final state commit without double charging.
 - [x] Cover verify-only, normal dispatch, and failed-maintenance retry-blocking paths with focused daemon tests.
 - [x] Close direct `autoMergeProposal` manager-gate decision durability and receipt-metadata gaps before calling judge-cost accounting complete.
+- [x] Diagnose native Windows first-use persistence as a namespaced recursive-`mkdir` boundary mismatch.
+- [x] Replace the returned-path boundary with a pre-captured existing ancestor identity and pass focused typecheck, lint, and 60 assertions.
+- [ ] Rebase onto sharded production and require the exact native Windows matrix before promotion.
 
 ## 2026-07-21 - Bounded trajectory trace projection
 - [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.

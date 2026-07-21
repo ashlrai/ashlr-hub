@@ -507,11 +507,39 @@ describe('m119 decisions-ledger', () => {
     const root = path.join(tmpHome, 'nested-home');
     const created = path.join(root, '.ashlr');
     const dir = path.join(created, 'decisions');
+    fs.mkdirSync(root);
+    const existing = fs.lstatSync(root, { bigint: true });
     const synced: string[] = [];
 
-    _fsyncCreatedDecisionDirectoryChainForTest(dir, created, (candidate) => synced.push(candidate));
+    _fsyncCreatedDecisionDirectoryChainForTest(
+      dir,
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+      (candidate) => synced.push(candidate),
+    );
 
     expect(synced).toEqual([dir, created, root]);
+  });
+
+  it('passes the captured existing-parent identity only at the durability boundary', async () => {
+    const { _fsyncCreatedDecisionDirectoryChainForTest } =
+      await import('../src/core/fleet/decisions-ledger.js');
+    const root = path.join(tmpHome, 'identity-home');
+    const dir = path.join(root, '.ashlr', 'decisions');
+    fs.mkdirSync(root);
+    const existing = fs.lstatSync(root, { bigint: true });
+    const synced: Array<{ path: string; identity?: { dev: bigint; ino: bigint } }> = [];
+
+    _fsyncCreatedDecisionDirectoryChainForTest(
+      dir,
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+      (candidate, identity) => synced.push({ path: candidate, identity }),
+    );
+
+    expect(synced).toEqual([
+      { path: dir, identity: undefined },
+      { path: path.dirname(dir), identity: undefined },
+      { path: root, identity: { dev: existing.dev, ino: existing.ino } },
+    ]);
   });
 
   it('keeps identity checks while tolerating Windows-emulated POSIX modes', async () => {
