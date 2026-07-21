@@ -2820,3 +2820,4 @@
 - Evidence mode already refused build, CI, manifest, self-target, unsigned, stale, no-command, and unprotected-remote changes, but `guardSafetyTests` covered only a narrow invariant-file allowlist.
 - `guardTestIntegrity` is a pure evidence-only fence: it fails closed on deleting a recognized test file, removing an assertion, or introducing skip/only syntax. Additive coverage and non-test source changes remain eligible.
 - This deliberately does not make all test-file edits forbidden and does not alter verification- or judge-based merge behavior.
+- The evidence-preflight fixture now adversarially covers ordinary test deletion, assertion removal, new skip/only declarations, and the additive-test control at the public merge-decision boundary.

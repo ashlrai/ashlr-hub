@@ -2702,4 +2702,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Reject deleted test files, removed assertions, and new skip/only declarations in evidence mode.
 - [x] Preserve additive tests and source-only diffs; verification and human-reviewed paths are unchanged.
 - [x] Add focused guard and evidence-preflight regression coverage; typecheck and focused suites pass.
+- [x] Reconfirm ordinary test deletion, assertion removal, new skip/only, and additive coverage through the evidence-preflight contract.
 - [ ] Publish as a draft-only PR and require the protected CI matrix before any promotion.

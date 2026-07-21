@@ -844,6 +844,64 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     expect(
       evaluateEvidenceAutoMergePreflight(ordinaryRemoval, evidenceCfg(), { remoteAvailable: true }).reason,
     ).toMatch(/test-weakening|removes 1 assertion/);
+
+    const ordinaryDeletionDiff = [
+      'diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts',
+      'deleted file mode 100644',
+      '--- a/test/m307.verify-before-judge.test.ts',
+      '+++ /dev/null',
+      '@@ -1,3 +0,0 @@',
+      "-it('keeps verification bound', () => {",
+      '-  expect(verifyResult.passed).toBe(true);',
+      '-});',
+      '',
+    ].join('\n');
+    const ordinaryDeletion = evidenceProposal('e8-ordinary-deletion', ordinaryDeletionDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(ordinaryDeletion, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/test-weakening|deletes test file/);
+
+    const ordinarySkipDiff = [
+      'diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts',
+      '--- a/test/m307.verify-before-judge.test.ts',
+      '+++ b/test/m307.verify-before-judge.test.ts',
+      '@@ -1 +1 @@',
+      "-it('keeps verification bound', () => {",
+      "+it.skip('keeps verification bound', () => {",
+      '',
+    ].join('\n');
+    const ordinarySkip = evidenceProposal('e8-ordinary-skip', ordinarySkipDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(ordinarySkip, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/test-weakening|skipped\/focused/);
+
+    const ordinaryOnlyDiff = [
+      'diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts',
+      '--- a/test/m307.verify-before-judge.test.ts',
+      '+++ b/test/m307.verify-before-judge.test.ts',
+      '@@ -1 +1 @@',
+      "+describe.only('verification edge cases', () => { expect(true).toBe(true); });",
+      '',
+    ].join('\n');
+    const ordinaryOnly = evidenceProposal('e8-ordinary-only', ordinaryOnlyDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(ordinaryOnly, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/test-weakening|skipped\/focused/);
+
+    const additiveOrdinaryTestDiff = [
+      'diff --git a/test/m307.verify-before-judge.test.ts b/test/m307.verify-before-judge.test.ts',
+      '--- a/test/m307.verify-before-judge.test.ts',
+      '+++ b/test/m307.verify-before-judge.test.ts',
+      '@@ -1 +1,4 @@',
+      "+it('covers a new verification edge case', () => {",
+      '+  expect(verifyResult.passed).toBe(true);',
+      '+});',
+      '',
+    ].join('\n');
+    const additiveOrdinaryTest = evidenceProposal('e8-ordinary-additive', additiveOrdinaryTestDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(additiveOrdinaryTest, evidenceCfg(), { remoteAvailable: true }),
+    ).toMatchObject({ authorized: true });
   });
 
   it('[E8b] weakened verification scripts are refused by evidence preflight', () => {
