@@ -4,7 +4,7 @@
 - [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
 - [x] Partition the complete suite through Vitest's deterministic three-way file sharding.
 - [x] Bind CI topology coverage to the three shard labels, arguments, and one-time pack smoke.
-- [ ] Verify a representative hermetic shard invocation and require the protected matrix.
+- [x] Verify all eight exact-head jobs and bind branch protection to the three Ubuntu authority shards.
 
 ## Verifier Git-Authority Binding (2026-07-21)
 - [x] Capture a strict base Git-tree authority snapshot from the tracked root contract and declared regular blobs.
@@ -18,7 +18,9 @@
 ## Protected Production Promotion (2026-07-21)
 - [x] Merge protected PR #94 after all six exact-head checks passed.
 - [x] Rebase and repush #110, #111, and #108 onto production `0a7f3d79`.
-- [ ] Promote deterministic Ubuntu CI sharding after its refreshed protected matrix passes.
+- [x] Promote deterministic Ubuntu CI sharding as production commit `1239b022c36e0c30b22ae063dd269d6a71bab4d9`.
+- [x] Rebase verifier authority declarations onto sharded production and start a fresh protected matrix.
+- [ ] Merge verifier authority declarations, then rebase and retarget the Git-authority binding for its own exact-head matrix.
 
 ## Current Cycle - Verifier Contract Executable Portability
 - [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.

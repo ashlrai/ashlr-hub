@@ -15,6 +15,8 @@
 ## Protected Production Promotion (2026-07-21)
 - PR #94 passed all six protected Ubuntu, macOS, and Windows checks and merged to production as `0a7f3d79b319f482f4a546723ad2481e12b53e0e`.
 - Active declaration, deterministic CI-sharding, and measured-judge-spend branches were rebased onto that exact production head and repushed for fresh protected matrices.
+- PR #111 then passed all eight exact-head checks and merged deterministic Ubuntu authority sharding to production as `1239b022c36e0c30b22ae063dd269d6a71bab4d9`. Strict branch protection now requires all three Ubuntu authority shards plus the existing macOS and three Windows portability checks from the GitHub Actions App.
+- PR #110 was rebased onto that production head, locally passed typecheck and 59 focused assertions, and was repushed for a fresh eight-job exact-head matrix. The Git-authority binding remains stacked behind it until those declarations merge.
 
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
