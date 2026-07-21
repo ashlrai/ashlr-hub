@@ -16,6 +16,10 @@ import type {
 } from '../fabric/resource-monitor.js';
 import type { OutcomeRecord } from './outcome-records.js';
 import {
+  listVerifiedFailureProposalRepairWorkItems,
+  type VerifiedFailureProposalRepairRead,
+} from '../fleet/proposal-repair-work.js';
+import {
   isLiveRemoteProtectionEvidence,
   READY_EVIDENCE_MAX_AGE_MS,
   READY_EVIDENCE_MAX_FUTURE_SKEW_MS,
@@ -124,6 +128,11 @@ export interface ResourceStrategyReport {
     stalePending: number;
     readyEvidence: number;
     verificationFailures: number;
+    verifiedFailureRepairs: {
+      sourceState: 'missing' | 'healthy' | 'degraded';
+      complete: boolean;
+      authorized: number | null;
+    };
     recent: ResourceStrategyOutcome[];
   };
   ecosystem: {
@@ -140,6 +149,7 @@ export interface ResourceStrategyReadDeps {
   getResourceSnapshot?: (cfg: AshlrConfig) => Promise<ResourceSnapshot>;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
   listReadyEvidenceOutcomeRecords?: (opts?: { limit?: number; now?: Date }) => OutcomeRecord[];
+  listVerifiedFailureProposalRepairWorkItems?: (now?: Date) => VerifiedFailureProposalRepairRead;
   runEcosystemDoctor?: (opts?: { root?: string; repos?: readonly string[]; deep?: boolean; now?: Date }) => Promise<EcosystemDoctorReport>;
   diagnoseGuardHealth?: () => GuardHealthDiagnosis;
 }
@@ -362,6 +372,7 @@ function summarizeOutcomes(
   now: Date,
   stalePendingTtlHours: number,
   readyRecords: readonly OutcomeRecord[],
+  verifiedFailureRepairs: VerifiedFailureProposalRepairRead,
 ): ResourceStrategyReport['outcomes'] {
   let pendingRecords = 0;
   let stalePending = 0;
@@ -405,6 +416,13 @@ function summarizeOutcomes(
     stalePending,
     readyEvidence,
     verificationFailures,
+    verifiedFailureRepairs: {
+      sourceState: verifiedFailureRepairs.sourceState,
+      complete: verifiedFailureRepairs.complete,
+      authorized: verifiedFailureRepairs.sourceState === 'healthy' && verifiedFailureRepairs.complete
+        ? verifiedFailureRepairs.items.length
+        : null,
+    },
     recent,
   };
 }
@@ -501,12 +519,13 @@ function recommendMode(
   if (
     proposalSource.gate === 'ready' &&
     fleet.proposals.pending > 0 &&
-    outcomes.verificationFailures > 0 &&
+    outcomes.verifiedFailureRepairs.authorized !== null &&
+    outcomes.verifiedFailureRepairs.authorized > 0 &&
     !stalePendingOnly &&
     (cfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
     ecosystem.posture !== 'fail'
   ) {
-    reasons.push(`${outcomes.verificationFailures} pending proposal(s) have deterministic verification failures`);
+    reasons.push(`${outcomes.verifiedFailureRepairs.authorized} pending proposal(s) have authorized deterministic verification failures`);
     actions.push('dispatch only exact verified-failure proposal repairs');
     actions.push('do not run merge, handoff, judge, or ordinary backlog work in this lane');
     return { mode: 'repair-only', confidence: 'high', reasons, recommendedActions: actions };
@@ -641,6 +660,7 @@ export async function buildResourceStrategyReport(
   const readyRecords = deps.listReadyEvidenceOutcomeRecords
     ? deps.listReadyEvidenceOutcomeRecords({ limit: maxOutcomes, now })
     : await defaultReadyEvidenceOutcomeRecordsAsync(maxOutcomes, now);
+  const verifiedFailureRepairs = (deps.listVerifiedFailureProposalRepairWorkItems ?? listVerifiedFailureProposalRepairWorkItems)(now);
   const doctor = deps.runEcosystemDoctor
     ? await deps.runEcosystemDoctor({ root: opts.ecosystemRoot, repos: opts.ecosystemRepos, deep: false, now })
     : await defaultEcosystemDoctor({ root: opts.ecosystemRoot, repos: opts.ecosystemRepos, deep: false, now }).catch(() =>
@@ -659,6 +679,7 @@ export async function buildResourceStrategyReport(
     now,
     productionVelocity.stalePendingTtlHours,
     readyRecords,
+    verifiedFailureRepairs,
   );
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);

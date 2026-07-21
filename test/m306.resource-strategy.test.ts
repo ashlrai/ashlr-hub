@@ -12,6 +12,7 @@ import type { ResourceSnapshot } from '../src/core/fabric/resource-monitor.js';
 import type { FleetStatus } from '../src/core/fleet/status.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { ResourceStrategyReadDeps } from '../src/core/autonomy/resource-strategy.js';
+import type { VerifiedFailureProposalRepairRead } from '../src/core/fleet/proposal-repair-work.js';
 import {
   buildResourceStrategyReport,
   resourceStrategyToDaemonPlan,
@@ -224,6 +225,7 @@ function deps(overrides: Partial<ResourceStrategyReadDeps> = {}): ResourceStrate
     getResourceSnapshot: async () => resources([backend('claude', 'open'), backend('builtin', 'open')]),
     listOutcomeRecords,
     listReadyEvidenceOutcomeRecords,
+    listVerifiedFailureProposalRepairWorkItems: () => ({ sourceState: 'healthy', complete: true, items: [] }),
     runEcosystemDoctor: async () => doctor(),
     diagnoseGuardHealth: () => guard(false),
     ...overrides,
@@ -508,11 +510,17 @@ describe('buildResourceStrategyReport', () => {
       deps: deps({
         buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2, frontierPending: 1 }) }),
         listOutcomeRecords: () => [failed],
+        listVerifiedFailureProposalRepairWorkItems: () => ({
+          sourceState: 'healthy', complete: true, items: [{ id: 'repair-prop-failed' }],
+        } as VerifiedFailureProposalRepairRead),
       }),
     });
 
     expect(report.mode).toBe('repair-only');
     expect(report.outcomes.verificationFailures).toBe(1);
+    expect(report.outcomes.verifiedFailureRepairs).toMatchObject({
+      sourceState: 'healthy', complete: true, authorized: 1,
+    });
     expect(report.reasons.join(' ')).toContain('deterministic verification failures');
     expect(resourceStrategyToDaemonPlan(report)).toMatchObject({
       mode: 'repair-only',
@@ -520,6 +528,44 @@ describe('buildResourceStrategyReport', () => {
       dispatchScope: 'proposal-repair',
       runAutoMergeMaintenance: false,
     });
+  });
+
+  it('uses complete repair authority when a verification failure is outside the bounded outcome window', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      maxOutcomes: 1,
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2, frontierPending: 1 }) }),
+        listOutcomeRecords: () => [outcome()],
+        listVerifiedFailureProposalRepairWorkItems: () => ({
+          sourceState: 'healthy', complete: true, items: [{ id: 'repair-old-failure' }],
+        } as VerifiedFailureProposalRepairRead),
+      }),
+    });
+
+    expect(report.outcomes.verificationFailures).toBe(0);
+    expect(report.outcomes.verifiedFailureRepairs.authorized).toBe(1);
+    expect(report.mode).toBe('repair-only');
+  });
+
+  it('does not authorize repair-only from a degraded complete-repair source', async () => {
+    const failed = outcome({
+      proposal: { ...outcome().proposal, verifyResult: { passed: false } },
+      evidencePacks: [],
+    });
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 1, frontierPending: 1 }) }),
+        listOutcomeRecords: () => [failed],
+        listVerifiedFailureProposalRepairWorkItems: () => ({
+          sourceState: 'degraded', complete: false, items: [],
+        }),
+      }),
+    });
+
+    expect(report.outcomes.verifiedFailureRepairs).toMatchObject({
+      sourceState: 'degraded', complete: false, authorized: null,
+    });
+    expect(report.mode).toBe('verify-only');
   });
 
   it('does not let stale pending proposals force verify-only under production velocity', async () => {

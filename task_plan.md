@@ -1998,6 +1998,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
 
+## Current Overnight Cycle - Complete Repair Failure Authority
+- [x] Preserve green draft PR #78 as the repair-only dispatch foundation.
+- [x] Replace bounded outcome-window activation with a complete, healthy proposal-inbox reader.
+- [x] Exclude partial, non-failing, and already-repaired parents from the authoritative repair-only set.
+- [x] Expose source quality and withhold the authorized count when inbox authority is degraded or incomplete.
+- [x] Add bounded-window, degraded-source, direct-reader, and completed-child regressions.
+- [ ] Run focused verification, commit, push, and open a stacked draft without changing merge authority.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.

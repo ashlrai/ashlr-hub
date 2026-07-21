@@ -25,6 +25,7 @@ import {
   generatedRepairRootKey,
   isRejectedCaptureRecoveryAuthorized,
   isVerifiedFailureProposalRepairAuthorized,
+  listVerifiedFailureProposalRepairWorkItems,
   noDiffResliceWorkItem,
   proposalRepairWorkItem,
   queueProposalRepairWorkForPendingProposals,
@@ -749,6 +750,24 @@ describe('queued autonomy work scanner', () => {
     };
     expect(isVerifiedFailureProposalRepairAuthorized(forged)).toBe(false);
     expect(beginVerifiedFailureProposalRepairDispatch(forged, () => true)).toEqual({ authorized: false });
+
+    createProposal({
+      ...proposalInput,
+      id: 'prop-partial-not-repair-only',
+      isPartial: true,
+      verifyResult: { passed: false, detail: 'capture gate failed' },
+    });
+    createProposal({
+      ...proposalInput,
+      id: 'prop-passed-not-repair-only',
+      verifyResult: { passed: true, detail: 'typecheck passed' },
+    });
+
+    expect(listVerifiedFailureProposalRepairWorkItems()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      items: [{ id: repair.id }],
+    });
   });
 
   it('does not authorize a parent again after its exact repair files a complete child proposal', async () => {
@@ -777,6 +796,7 @@ describe('queued autonomy work scanner', () => {
     });
 
     expect(isVerifiedFailureProposalRepairAuthorized(repair)).toBe(false);
+    expect(listVerifiedFailureProposalRepairWorkItems().items).toEqual([]);
   });
 
   it('recovers a recent rejected capture artifact without reopening or copying it', async () => {
