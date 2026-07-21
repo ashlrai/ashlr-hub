@@ -44,6 +44,7 @@ import {
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
+const MAX_TRACE_EVENTS = 8;
 export const MIN_SKILL_OBSERVED_TRAJECTORIES = 3;
 
 export type TrajectoryTimelineKind = 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'post-merge' | 'agent-action';
@@ -207,6 +208,8 @@ export interface TrajectoryTrace {
   realizedOutcome?: TrajectoryRealizedOutcome;
   coverage: PublishedTrajectoryCoverage;
   sourceState: 'complete' | 'incomplete' | 'degraded';
+  /** Whether the bounded public event list contains every timeline event. */
+  eventState: 'complete' | 'sampled';
   events: TrajectoryTraceEvent[];
 }
 
@@ -635,6 +638,34 @@ function projectTrajectoryEvent(event: TrajectoryTimelineEvent): TrajectoryTrace
   };
 }
 
+function projectTrajectoryEvents(
+  timeline: readonly TrajectoryTimelineEvent[],
+): Pick<TrajectoryTrace, 'eventState' | 'events'> {
+  const ordered = [...timeline]
+    .sort((left, right) => eventMs(left.ts) - eventMs(right.ts) || timelineRank(left.kind) - timelineRank(right.kind));
+  if (ordered.length <= MAX_TRACE_EVENTS) {
+    return { eventState: 'complete', events: ordered.map(projectTrajectoryEvent) };
+  }
+
+  // Preserve both causal boundaries and the newest observation of each
+  // lifecycle stage. Fill any remaining capacity from the newest events, then
+  // restore chronological display order. The public surface stays bounded.
+  const retained = new Set<number>([0, ordered.length - 1]);
+  const latestByKind = new Map<TrajectoryTimelineKind, number>();
+  for (let index = 0; index < ordered.length; index++) {
+    latestByKind.set(ordered[index]!.kind, index);
+  }
+  for (const index of latestByKind.values()) retained.add(index);
+  for (let index = ordered.length - 1; retained.size < MAX_TRACE_EVENTS && index >= 0; index--) {
+    retained.add(index);
+  }
+  const events = [...retained]
+    .sort((left, right) => left - right)
+    .slice(0, MAX_TRACE_EVENTS)
+    .map((index) => projectTrajectoryEvent(ordered[index]!));
+  return { eventState: 'sampled', events };
+}
+
 function projectTrajectoryTraces(records: TrajectoryRecord[]): TrajectoryTraceSummary {
   const state = dispatchTraceReadStateByRecords.get(records) ?? 'available';
   // A partial dispatch ledger cannot establish a reliable route-to-outcome
@@ -644,18 +675,18 @@ function projectTrajectoryTraces(records: TrajectoryRecord[]): TrajectoryTraceSu
     .filter((record) => record.coverage.dispatch)
     .sort((left, right) => eventMs(right.latestAt) - eventMs(left.latestAt) || trajectoryRef(left).localeCompare(trajectoryRef(right)))
     .slice(0, 5)
-    .map((record): TrajectoryTrace => ({
-      ref: trajectoryRef(record),
-      latestAt: traceTimestamp(record.latestAt),
-      terminalOutcome: record.terminalOutcome,
-      ...(record.realizedOutcome ? { realizedOutcome: record.realizedOutcome } : {}),
-      coverage: (({ skillUse: _skillUse, ...coverage }) => coverage)(record.coverage),
-      sourceState: traceSourceState(record),
-      events: [...record.timeline]
-        .sort((left, right) => eventMs(left.ts) - eventMs(right.ts) || timelineRank(left.kind) - timelineRank(right.kind))
-        .slice(0, 8)
-        .map(projectTrajectoryEvent),
-    }));
+    .map((record): TrajectoryTrace => {
+      const projectedEvents = projectTrajectoryEvents(record.timeline);
+      return {
+        ref: trajectoryRef(record),
+        latestAt: traceTimestamp(record.latestAt),
+        terminalOutcome: record.terminalOutcome,
+        ...(record.realizedOutcome ? { realizedOutcome: record.realizedOutcome } : {}),
+        coverage: (({ skillUse: _skillUse, ...coverage }) => coverage)(record.coverage),
+        sourceState: traceSourceState(record),
+        ...projectedEvents,
+      };
+    });
   return { state: 'available', records: projected };
 }
 

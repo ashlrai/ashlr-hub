@@ -560,24 +560,67 @@ describe('Trajectory records', () => {
     expect(summary.traces.records[0]).toMatchObject({
       ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
       sourceState: 'degraded',
+      eventState: 'sampled',
     });
     expect(summary.traces.records.some((trace) => trace.sourceState === 'degraded')).toBe(true);
     const trace = summary.traces.records.at(-1)!;
     expect(trace.events).toHaveLength(8);
     expect(trace.events.map((event) => event.ts)).toEqual([
-      '2026-07-09T12:00:00.000Z', '2026-07-09T12:01:00.000Z', '2026-07-09T12:02:00.000Z',
+      '2026-07-09T12:00:00.000Z', '2026-07-09T12:02:00.000Z',
       '2026-07-09T12:03:00.000Z', '2026-07-09T12:04:00.000Z', '2026-07-09T12:05:00.000Z',
-      '2026-07-09T12:06:00.000Z', '2026-07-09T12:07:00.000Z',
+      '2026-07-09T12:06:00.000Z', '2026-07-09T12:07:00.000Z', '2026-07-09T12:08:00.000Z',
     ]);
     expect(trace.events[0]).toMatchObject({
       kind: 'evidence', outcome: 'passed', route: { backend: 'codex', tier: 'frontier', modelFamily: 'other', policyVersion: 'fleet-router-v1', learningEpoch: '2026-07-09' },
       evidence: { state: 'passed', trust: 'deterministic', commandKinds: ['test'] },
       labelBasis: 'unknown', learningSource: 'unknown',
     });
+    expect(trace.events.at(-1)).toMatchObject({
+      ts: '2026-07-09T12:08:00.000Z',
+      kind: 'evidence',
+      outcome: 'passed',
+    });
     const serialized = JSON.stringify(summary.traces);
     for (const forbidden of [hostile, '/private/', 'proposal-', 'run-', 'trajectory-']) {
       expect(serialized).not.toContain(forbidden);
     }
+  });
+
+  it('keeps lifecycle coverage and latest stage observations in sampled traces', () => {
+    const [base] = listTrajectoryRecords({ windowHours: 1000, deps: deps() });
+    const kinds = [
+      'dispatch', 'proposal', 'evidence', 'decision', 'post-merge',
+      'agent-action', 'proposal', 'evidence', 'decision', 'agent-action',
+    ] as const;
+    const record: TrajectoryRecord = {
+      ...base!,
+      latestAt: '2026-07-09T12:09:00.000Z',
+      timeline: kinds.map((kind, index) => ({
+        ts: `2026-07-09T12:${String(index).padStart(2, '0')}:00.000Z`,
+        kind,
+        outcome: index === kinds.length - 1 ? 'failed' : 'unknown',
+      })),
+    };
+
+    const trace = summarizeTrajectoryLearning([record]).traces.records[0]!;
+    expect(trace.eventState).toBe('sampled');
+    expect(trace.events).toHaveLength(8);
+    expect(new Set(trace.events.map((event) => event.kind))).toEqual(new Set(kinds));
+    expect(trace.events.map((event) => event.ts)).toEqual([
+      '2026-07-09T12:00:00.000Z', '2026-07-09T12:03:00.000Z',
+      '2026-07-09T12:04:00.000Z', '2026-07-09T12:05:00.000Z',
+      '2026-07-09T12:06:00.000Z', '2026-07-09T12:07:00.000Z',
+      '2026-07-09T12:08:00.000Z', '2026-07-09T12:09:00.000Z',
+    ]);
+    expect(trace.events.at(-1)).toMatchObject({ kind: 'agent-action', outcome: 'failed' });
+  });
+
+  it('marks uncapped traces as complete', () => {
+    const records = listTrajectoryRecords({ windowHours: 1000, deps: deps() });
+
+    const trace = summarizeTrajectoryLearning(records).traces.records[0]!;
+    expect(trace.eventState).toBe('complete');
+    expect(trace.events).toHaveLength(5);
   });
 
   it('withholds trajectory traces when the dispatch source is failed, incomplete, or missing', () => {
