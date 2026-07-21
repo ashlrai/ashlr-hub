@@ -2884,3 +2884,7 @@
 - Self-verification authority fence (2026-07-21):
   - Base-derived verifier commands prevent a proposal from editing the command list, but the packaged runner still executes from the candidate worktree. Ashlr Hub now refuses a self-target proposal that touches `scripts/run-verify-command.mjs` before creating a verification worktree, preventing that runner from self-certifying a candidate change.
   - This is deliberately a narrow interim fence. The next merge-grade lane binds repo-declared verifier authority inputs to a Git-tree snapshot and signed evidence; it must not claim to make bare PATH toolchains or same-host check-to-exec races immutable.
+
+- Windows sandbox-recovery fixture budget (2026-07-21):
+  - The pre-effect recovery fixture creates and removes a real Git worktree. Its 15-second hermetic deadline is retained on POSIX and expanded only to a bounded 30 seconds on hosted Windows, where the same operation exceeded the prior allowance.
+  - Assertions and production sandbox behavior are unchanged; a fresh protected matrix remains required.
