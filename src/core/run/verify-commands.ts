@@ -435,36 +435,34 @@ export function runVerifyCommand(
       extraBinRoots: [workspaceRoot],
     });
     const runner = verifyRunnerPath();
+    if (!runner) {
+      throw new Error('verification process-tree runner is unavailable');
+    }
     const isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
     const res = (() => {
       try {
-        return runner
-          ? spawnSync(
-              process.execPath,
-              [
-                runner,
-                String(timeout),
-                workspaceRoot,
-                commandRoot,
-                Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
-              ],
-              {
-                cwd: commandRoot,
-                timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
-                stdio: 'pipe',
-                encoding: 'utf8',
-                shell: false,
-                windowsHide: true,
-                env: {
-                  ...isolated.env,
-                  ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
-                },
-              },
-            )
-          : spawnSync(bin, vc.cmd.slice(1), {
-              ...baseOptions,
-              env: isolated.env,
-            });
+        return spawnSync(
+          process.execPath,
+          [
+            runner,
+            String(timeout),
+            workspaceRoot,
+            commandRoot,
+            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+          ],
+          {
+            cwd: commandRoot,
+            timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
+            stdio: 'pipe',
+            encoding: 'utf8',
+            shell: false,
+            windowsHide: true,
+            env: {
+              ...isolated.env,
+              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+            },
+          },
+        );
       } finally {
         isolated.cleanup();
       }
