@@ -102,6 +102,16 @@ const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
 interface DecisionWriteFailureForTest {
   stage: 'sanitize' | 'ensure-directory' | 'create-directory-durability' | 'append';
+  operation?:
+    | 'inspect-path'
+    | 'open'
+    | 'inspect-opened'
+    | 'read-tail'
+    | 'write'
+    | 'file-fsync'
+    | 'inspect-path-after'
+    | 'directory-fsync'
+    | 'close';
   code?: string;
   syscall?: string;
 }
@@ -261,6 +271,7 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  */
 export function recordDecision(entry: DecisionEntry): boolean {
   let stage: DecisionWriteFailureForTest['stage'] = 'sanitize';
+  let operation: DecisionWriteFailureForTest['operation'];
   try {
     latestDecisionWriteFailureForTest = undefined;
     const record = sanitizeDecisionEntry(entry, true);
@@ -285,11 +296,14 @@ export function recordDecision(entry: DecisionEntry): boolean {
     if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
     stage = 'append';
-    return appendDecisionLine(filePath, line);
+    return appendDecisionLine(filePath, line, (nextOperation) => {
+      operation = nextOperation;
+    });
   } catch (error) {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
     latestDecisionWriteFailureForTest = {
       stage,
+      ...(operation ? { operation } : {}),
       ...(typeof error === 'object' && error !== null &&
         typeof (error as NodeJS.ErrnoException).code === 'string'
         ? { code: (error as NodeJS.ErrnoException).code }
@@ -303,11 +317,16 @@ export function recordDecision(entry: DecisionEntry): boolean {
   }
 }
 
-function appendDecisionLine(path: string, line: string): boolean {
+function appendDecisionLine(
+  path: string,
+  line: string,
+  setOperation: (operation: NonNullable<DecisionWriteFailureForTest['operation']>) => void,
+): boolean {
   let fd: number | undefined;
   try {
     let pathBefore: ReturnType<typeof lstatSync> | undefined;
     try {
+      setOperation('inspect-path');
       pathBefore = lstatSync(path);
       if (!isSafeDecisionAuthorityFile(pathBefore)) {
         throw new Error('decisions ledger path is unsafe');
@@ -315,32 +334,46 @@ function appendDecisionLine(path: string, line: string): boolean {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    setOperation('open');
     fd = openSync(
       path,
       fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
         (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
       0o600,
     );
+    setOperation('inspect-opened');
     const opened = fstatSync(fd);
     if (!isSafeDecisionAuthorityFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
       throw new Error('decisions ledger is not a safe regular file');
     }
     if (opened.size > 0) {
+      setOperation('read-tail');
       const tail = Buffer.alloc(1);
       const read = readSync(fd, tail, 0, 1, opened.size - 1);
       if (read !== 1) throw new Error('decisions ledger tail is unreadable');
       if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
     }
+    setOperation('write');
     writeAll(fd, Buffer.from(line, 'utf8'));
+    setOperation('file-fsync');
     fsyncSync(fd);
+    setOperation('inspect-path-after');
     const pathAfter = lstatSync(path);
     if (!isSafeDecisionAuthorityFile(pathAfter) || !sameFile(opened, pathAfter)) {
       throw new Error('decisions ledger path changed during append');
     }
+    setOperation('directory-fsync');
     fsyncDirectory(dirname(path));
     return true;
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch (error) {
+        setOperation('close');
+        throw error;
+      }
+    }
   }
 }
 

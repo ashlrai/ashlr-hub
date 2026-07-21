@@ -2841,5 +2841,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a native hosted-Windows directory durability probe that reports exact failing capability metadata.
 - [x] Add a metadata-only native Windows decision-write probe for swallowed durable-write failures.
 - [x] Add an allowlisted diagnostic stage when a swallowed write has no native errno.
+- [x] Add an allowlisted append operation without letting successful cleanup hide the failing operation.
 - [x] Persist the newly-created decisions leaf itself before reporting a first-use durable write.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.
