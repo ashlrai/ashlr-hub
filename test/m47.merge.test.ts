@@ -309,6 +309,138 @@ describe('M47 verifyProposal', () => {
     git(dir, ['commit', '-m', 'add package.json']);
   }
 
+  function writeAuthorityContract(dir: string, script: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'authority-check.mjs'), script, 'utf8');
+    fs.writeFileSync(path.join(dir, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      authorityFiles: ['scripts/authority-check.mjs'],
+      commands: [{
+        id: 'authority-check',
+        kind: 'test',
+        cmd: ['node', 'scripts/authority-check.mjs'],
+        cwd: '.',
+        required: true,
+        profiles: ['merge'],
+      }],
+    }), 'utf8');
+    git(dir, ['add', 'ashlr.verify.json', 'scripts/authority-check.mjs']);
+    git(dir, ['commit', '-m', 'add authority contract']);
+  }
+
+  it('records exact base and candidate tree authority for an ordinary source diff', async () => {
+    initRepo(tmpRepo);
+    writeAuthorityContract(tmpRepo, 'process.exit(0);\n');
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/authority.md', 'bound') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(res).toMatchObject({
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+    });
+    expect(res.baseTreeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.candidateTreeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.candidateTreeOid).not.toBe(res.baseTreeOid);
+    expect(res.authoritySnapshotDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('refuses a candidate authority-file change before the verifier executes', async () => {
+    initRepo(tmpRepo);
+    const marker = path.join(tmpHome, 'authority-command-ran');
+    writeAuthorityContract(tmpRepo, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'ran');\n`);
+    fs.appendFileSync(path.join(tmpRepo, 'scripts', 'authority-check.mjs'), '// candidate change\n', 'utf8');
+    git(tmpRepo, ['add', 'scripts/authority-check.mjs']);
+    const diff = git(tmpRepo, ['diff', '--cached']);
+    git(tmpRepo, ['reset', 'HEAD', 'scripts/authority-check.mjs']);
+    git(tmpRepo, ['checkout', '--', 'scripts/authority-check.mjs']);
+
+    const res = await verifyProposal(
+      makeProposal({ diff }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/candidate changed verifier authority/i);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('refuses when a passing command mutates its own authority file', async () => {
+    initRepo(tmpRepo);
+    writeAuthorityContract(
+      tmpRepo,
+      "import { writeFileSync } from 'node:fs';\nwriteFileSync(new URL(import.meta.url), 'process.exit(0);\\n');\n",
+    );
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/runtime-drift.md', 'drift') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/changed verifier authority/i);
+    expect(res.ran).toHaveLength(1);
+  });
+
+  it('stops before a later verifier when an earlier command rewrites ordinary candidate input', async () => {
+    initRepo(tmpRepo);
+    const secondCommandMarker = path.join(tmpHome, 'second-verifier-ran');
+    fs.mkdirSync(path.join(tmpRepo, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, 'src', 'runtime-input.txt'), 'candidate\n', 'utf8');
+    fs.writeFileSync(
+      path.join(tmpRepo, 'scripts', 'mutate-input.mjs'),
+      "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/runtime-input.txt', 'benign\\n');\n",
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, 'scripts', 'assert-benign.mjs'),
+      `import { readFileSync, writeFileSync } from 'node:fs';\n` +
+        `if (readFileSync('src/runtime-input.txt', 'utf8') !== 'benign\\n') process.exit(1);\n` +
+        `writeFileSync(${JSON.stringify(secondCommandMarker)}, 'ran');\n`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      authorityFiles: ['scripts/mutate-input.mjs', 'scripts/assert-benign.mjs'],
+      commands: [
+        {
+          id: 'mutate-input',
+          kind: 'test',
+          cmd: ['node', 'scripts/mutate-input.mjs'],
+          cwd: '.',
+          required: true,
+          profiles: ['merge'],
+        },
+        {
+          id: 'assert-benign',
+          kind: 'test',
+          cmd: ['node', 'scripts/assert-benign.mjs'],
+          cwd: '.',
+          required: true,
+          profiles: ['merge'],
+        },
+      ],
+    }), 'utf8');
+    git(tmpRepo, ['add', 'ashlr.verify.json', 'scripts', 'src/runtime-input.txt']);
+    git(tmpRepo, ['commit', '-m', 'add adversarial verifier chain']);
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/command-mutation.md', 'fenced') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/changed candidate state.*tracked candidate worktree/i);
+    expect(res.ran).toHaveLength(1);
+    expect(fs.existsSync(secondCommandMarker)).toBe(false);
+  });
+
   it('passing test script + a diff → ok', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 0');
@@ -361,6 +493,31 @@ describe('M47 verifyProposal', () => {
     const worktree = mockVerifyInBrowser.mock.calls[0]?.[0];
     expect(worktree).toContain(path.join('.ashlr', 'tmp', 'vwt-'));
     expect(worktree).not.toBe(tmpRepo);
+  });
+
+  it('browserVerify=true rejects tracked candidate mutation after browser verification', async () => {
+    initRepo(tmpRepo);
+    writePackageJson(tmpRepo, 'exit 0');
+    mockIsWebApp.mockReturnValue(true);
+    mockVerifyInBrowser.mockImplementation(async (worktree: string) => {
+      fs.writeFileSync(path.join(worktree, 'README.md'), '# rewritten during browser verify\n', 'utf8');
+      return {
+        ok: true,
+        renderOk: true,
+        consoleErrors: [],
+        screenshotPath: '/tmp/shot.png',
+        detail: 'rendered after mutation',
+      };
+    });
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/browser-mutation.md', 'doc') }),
+      cfgWith({ browserVerify: true }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/browser verification changed candidate state/i);
+    expect(res.browser).toEqual(expect.objectContaining({ ok: true }));
   });
 
   it('browserVerify=true fails closed on a non-skipped browser render failure', async () => {

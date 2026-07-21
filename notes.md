@@ -5,6 +5,19 @@
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
   - M30 now asserts the three Ubuntu labels, exact shard arguments, and one-time pack-smoke selector, so a future workflow edit cannot silently collapse exhaustive authority back into one cap-bound job.
 
+## Verifier Git-Authority Binding (2026-07-21)
+- Verification can now capture a repository-owned authority snapshot from an immutable base commit. The snapshot binds Git object format, base commit/tree, the tracked root `ashlr.verify.json` blob, sorted declared authority blob/mode tuples, and canonical effective merge commands into a metadata-only SHA-256 digest.
+- Judge-free evidence requires a valid `replace-detected` contract, non-empty tracked authority files, and a required merge command. Candidate authority drift is refused before commands run; index/worktree drift is checked after every command and browser verification; the staged merge tree must equal the candidate tree that passed verification.
+- Snapshot version, object format, base/candidate tree OIDs, and digest flow through durable proposal verification, signed/sealed v3 evidence, resource readiness, and remote handoff matching. Snapshotless legacy evidence remains readable but cannot authorize evidence-trust mutation or skill distillation, and snapshotless cached results reverify.
+- Focused verification passes 260 tests with one intentional platform skip across merge, persistence, policy, readiness, mutation-fence, handoff, evidence, skill-learning, and Git-authority suites. Typecheck and scoped zero-error lint pass.
+- Residual boundary: Git authority does not prove immutable `PATH`, dependency directories, or toolchain/runtime images. Read-only dependency/toolchain identity remains required before claiming complete verifier immutability.
+
+## Protected Production Promotion (2026-07-21)
+- PR #94 passed all six protected Ubuntu, macOS, and Windows checks and merged to production as `0a7f3d79b319f482f4a546723ad2481e12b53e0e`.
+- Active declaration, deterministic CI-sharding, and measured-judge-spend branches were rebased onto that exact production head and repushed for fresh protected matrices.
+- PR #111 then passed all eight exact-head checks and merged deterministic Ubuntu authority sharding to production as `1239b022c36e0c30b22ae063dd269d6a71bab4d9`. Strict branch protection now requires all three Ubuntu authority shards plus the existing macOS and three Windows portability checks from the GitHub Actions App.
+- PR #110 was rebased onto that production head, locally passed typecheck and 59 focused assertions, and was repushed for a fresh eight-job exact-head matrix. The Git-authority binding remains stacked behind it until those declarations merge.
+
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
 - Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.
@@ -2920,6 +2933,14 @@
   - `ashlr.verify.json` now accepts exact `authorityFiles` for merge-verifier control inputs. Entries are normalized POSIX paths to existing regular, non-symlink files inside the repo; missing, escaping, backslash, duplicate, directory, and symlink entries invalidate the contract.
   - Ashlr Hub declares the package scripts/manifests and test runner wrapper used by its merge profile. The declaration is metadata only at this stage: it does not bind a Git-tree snapshot, make dependencies read-only, or authorize judge-free merge reuse.
   - The Hub declaration also covers ESLint's config and Vitest's setup file, both of which are loaded by merge-profile commands. Focused parser fixtures cover canonical duplicates, malformed declarations, absolute paths, directories, and symlinks alongside the existing missing/escape cases.
+
+- Verifier authority snapshot and evidence closure (2026-07-21):
+  - Merge verification now captures base-derived authority inputs from Git objects, binds their digest and source revision through proposal verification, signed evidence, gate explanations, and remote handoff, and refuses stale, incomplete, mismatched, or unsupported object-format snapshots.
+  - Direct tracked argv files are explicit authority inputs. Nested command cwd values are canonicalized portably, and every authority path rejects symlink or junction ancestry both when the contract is parsed and when the live state is compared.
+  - Candidate execution is fenced command-by-command: the exact index tree, tracked worktree content, and hashed non-ignored untracked state must remain identical before and after each verifier/browser command. A mutation blocks subsequent commands and cannot produce reusable merge evidence.
+  - Evidence-mode source review now rejects deletion, rename-out, skip/focus, assertion removal, and assertion trivialization across ordinary JavaScript, TypeScript, Python, Ruby, Go, Rust, Java, .NET, PHP, Swift, Kotlin, and shell test layouts while continuing to allow additive tests.
+  - Synthetic merge fixtures now supply complete authority snapshots instead of bypassing the new prerequisite. Consolidated verification passed typecheck and 17 affected suites: 449 tests passed with 1 intentional skip.
+  - The proof boundary remains explicit: ignored outputs, bare PATH toolchains, package-manager resolution, plugins/imports, and transitive dependencies are not fully identified or hermetic. This is evidence-bound judge-free authority, not a claim that the host toolchain is immutable.
 
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
