@@ -2875,3 +2875,8 @@
   - Sampling now preserves the first and last events plus latest lifecycle-stage representatives within the existing eight-event cap, and reports `eventState: complete|sampled` so downstream consumers do not mistake a bounded trace for a full record.
   - The trace remains metadata-only and observation-only: no raw identities, prompts, diffs, reasoning, outputs, paths, or authority changes were introduced.
   - Verification: 39 focused and 180 Fleet/dashboard integration assertions, typecheck, build, and zero-error lint. An initial full run had setup/load-only failures; after building and isolation the affected files passed 143 assertions with 4 intentional skips.
+
+- Agent-action run-summary identity integrity (2026-07-21):
+  - Agent-action carriers and their nested `runEventSummary` are now required to agree whenever both supply a run id. A writer drops a conflicting nested summary while retaining the otherwise valid metadata-only carrier; a contradictory persisted row degrades the source and is withheld by complete reads.
+  - This prevents a single row from joining `run:A` trajectory metadata to `run:B` outcome metadata. The invariant is observation-only and introduces no routing, verification, merge, or learning-credit authority.
+  - Focused semantic-event coverage and adjacent agent-action, action-count, and context-rollup suites pass, together with typecheck and scoped lint.

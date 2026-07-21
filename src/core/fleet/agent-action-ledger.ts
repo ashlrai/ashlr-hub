@@ -395,6 +395,13 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const itemId = boundedOptionalText(event.itemId, 240);
   const proposalId = boundedOptionalText(event.proposalId, 160);
   const runId = boundedOptionalText(event.runId, 160);
+  const suppliedRunSummary = normalizeRunEventSummary(event.runEventSummary);
+  // A nested run summary is useful only when it describes this carrier's run.
+  // Keeping a conflicting summary would create an untraceable cross-run join.
+  const runEventSummary = suppliedRunSummary &&
+    (runId === undefined || suppliedRunSummary.runId === undefined || suppliedRunSummary.runId === runId)
+    ? suppliedRunSummary
+    : undefined;
   const model = boundedOptionalText(event.model, 160);
   const semanticSubjectRef = agentSemanticBoundSubjectRef(event.semanticEvents, {
     proposalId,
@@ -472,7 +479,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     runId,
     trajectoryId: event.trajectoryId,
     routeSnapshot: event.routeSnapshot,
-    runEventSummary: event.runEventSummary,
+    runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
     learningSource: event.learningSource ?? 'agent-action',
     labelBasis: event.labelBasis ?? (event.kind === 'dispatch' ? 'dispatch-outcome' : 'unknown'),
@@ -527,6 +534,8 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
 function isAgentActionEvent(value: unknown): value is AgentActionEvent {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const obj = value as Record<string, unknown>;
+  const runId = boundedOptionalText(obj['runId'], 160);
+  const runEventSummary = normalizeRunEventSummary(obj['runEventSummary'] as never);
   return (
     obj['schemaVersion'] === 1 &&
     typeof obj['ts'] === 'string' &&
@@ -537,6 +546,7 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     typeof obj['summary'] === 'string' && obj['summary'].trim() !== '' &&
     validOptionalCausalRecord(obj['routeSnapshot'], ROUTE_SNAPSHOT_KEYS, normalizeRouteSnapshot, ['routerPolicyVersion']) &&
     validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
+    (runId === undefined || runEventSummary?.runId === undefined || runEventSummary.runId === runId) &&
     validOptionalCausalRecord(obj['evidenceOutcome'], EVIDENCE_OUTCOME_KEYS, normalizeEvidenceOutcome) &&
     (obj['semanticEvents'] === undefined || (
       agentSemanticBoundSubjectRef(obj['semanticEvents'], {

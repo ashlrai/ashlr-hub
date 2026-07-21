@@ -2760,3 +2760,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose complete versus sampled state without adding authority or raw payloads.
 - [x] Run focused, integration, isolated regression, typecheck, build, lint, and diff verification.
 - [ ] Publish as a protected draft PR and require fresh platform CI.
+
+## Current Overnight Cycle - Trajectory Metadata Integrity (2026-07-21)
+- [x] Audit causal metadata and agent-action trajectory reconstruction boundaries without overlapping active verifier, daemon, trajectory-record, or proposal-authority PRs.
+- [x] Enforce exact carrier and nested run-summary identity agreement at writer and persisted-reader boundaries.
+- [x] Add privacy-preserving focused coverage for writer sanitization and fail-closed persisted contradiction handling.
+- [x] Run focused and adjacent telemetry suites, typecheck, scoped lint, and diff integrity.
