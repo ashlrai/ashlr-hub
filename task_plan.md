@@ -2022,6 +2022,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
 
+## Verification Contract Provenance (2026-07-21)
+- [x] Audit Fleet Status merge-contract coverage against Git provenance rather than only the working-tree JSON parser.
+- [x] Classify root `ashlr.verify.json` as tracked-clean, untracked, ignored, modified, missing, or unavailable without altering local command detection.
+- [x] Require tracked-clean contracts before reporting a repository as explicit merge-grade or clearing a verification-contract blocker.
+- [x] Preserve valid local contract counts for diagnostics while naming nonportable sources in Fleet Status remediation.
+- [x] Cover non-Git, untracked, ignored, modified, and tracked-clean profile states plus Fleet Status untracked-contract reporting.
+- [x] Pass focused profile and Fleet Status verification, typecheck, and diff check.
+- [x] Publish protected draft PR #94 and require the full CI matrix before promotion.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.

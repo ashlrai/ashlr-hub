@@ -1693,6 +1693,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       }),
       'utf8',
     );
+    execFileSync('git', ['init', '--initial-branch=main', contractRepo], { stdio: 'pipe' });
+    git(contractRepo, ['config', 'user.email', 'status-test@ashlr.test']);
+    git(contractRepo, ['config', 'user.name', 'Status Test']);
+    git(contractRepo, ['add', 'ashlr.verify.json']);
+    git(contractRepo, ['commit', '-m', 'add verifier contract']);
     writeFileSync(
       join(ashlrDir, 'enrollment.json'),
       JSON.stringify({ repos: [inferredRepo, contractRepo] }),
@@ -1721,6 +1726,43 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           reason: 'missing ashlr.verify.json merge-profile contract',
         },
       ],
+    });
+  });
+
+  it('does not count an untracked merge contract as fleet-portable verification', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'untracked-contract-repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    execFileSync('git', ['init', '--initial-branch=main', repo], { stdio: 'pipe' });
+    git(repo, ['config', 'user.email', 'status-test@ashlr.test']);
+    git(repo, ['config', 'user.name', 'Status Test']);
+    writeFileSync(join(repo, 'README.md'), '# verifier\n', 'utf8');
+    git(repo, ['add', 'README.md']);
+    git(repo, ['commit', '-m', 'base']);
+    writeFileSync(join(repo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{ id: 'merge-test', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+    }), 'utf8');
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({ generatedAt: '2026-07-03T00:00:00.000Z', repos: [repo], items: [] }),
+      'utf8',
+    );
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.queue.repos?.executionProfiles).toMatchObject({
+      reposWithVerifyContracts: 1,
+      reposWithValidVerifyContracts: 1,
+      reposWithExplicitMergeContracts: 0,
+      reposMissingExplicitMergeContracts: 1,
+      missingExplicitMergeContracts: [expect.objectContaining({
+        repo,
+        reason: 'ashlr.verify.json is untracked; merge contract must be tracked-clean',
+      })],
     });
   });
 

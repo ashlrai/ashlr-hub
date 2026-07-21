@@ -2023,6 +2023,12 @@
   - Adversarial review additionally closed four parity gaps: per-item lifecycle/cooldown exceptions cannot trigger the outer all-eligible fallback; untrusted repair-shaped rows fail closed too; `proposalRepair:false` and filesystem shared-queue mode match daemon-wide repair gates; and mixed queues prioritize claimable ordinary work before route restoration. Dirty worktrees now bypass repo-map cache load and save, so mutable files cannot remain stale at one HEAD.
   - Focused verification passes 309 assertions across daemon selection, FleetStatus, generated-repair lifecycle/routing, and repo-map localization. Typecheck, production build, zero-warning touched-file lint, dependency audit with zero vulnerabilities, and diff checks pass. The definitive 485-file suite passes 10,203 assertions with 8 intentional skips. Final independent re-review returned `SHIP`.
 
+- Verification-contract provenance hardening (2026-07-21):
+  - Fleet Status previously counted a syntactically valid working-tree `ashlr.verify.json` as merge-grade even when it was untracked, ignored, modified, or inaccessible through Git. That can overstate verifier coverage because a PR branch or another fleet machine cannot reproduce the contract.
+  - Repo profiles now expose a read-only Git provenance state. Fleet-wide explicit merge-grade coverage and verification-contract gap checks require `tracked-clean`; the existing parser and local verification commands remain available for diagnostics and ordinary execution.
+  - Verification passes 162 focused profile and Fleet Status tests, typecheck, and diff check. This does not alter verifier execution, automerge activation, routing, or daemon work; it only makes readiness claims portable and evidence-bound.
+  - Published commit `25dce2bd` as protected draft PR #94. The full protected CI matrix remains the promotion gate.
+
 - Current frontier-repair quality and causal release-evidence pass:
   - Fresh trusted ordinary proposal repairs now prefer an available frontier backend on their initial attempt. Feasibility inspection uses the same classification, malformed lookalikes remain normal bulk work, mid-tier remains the fallback when no frontier exists, and authoritative retries still require a different backend on the exact tier that produced the first empty result.
   - Release commit `e75cc6e feat: Promote trusted repairs to frontier` passed 299 focused scheduler/status/lifecycle assertions locally and GitHub Actions run `29217865980` on exhaustive Ubuntu validation plus all three Windows portability shards.
