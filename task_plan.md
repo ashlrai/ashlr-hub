@@ -2815,3 +2815,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add exact, validated contract authority-file declarations and declare Hub verifier inputs.
 - [ ] Bind a base Git-tree authority snapshot through verification reuse and signed merge evidence.
 - [ ] Make authority/dependency inputs read-only for candidate execution before treating the snapshot as judge-free authority.
+
+## Windows Sandbox-Reservation Fixture Budget (2026-07-21)
+- [x] Isolate the hosted-Windows timeout to M426's real-worktree owner-publication case.
+- [x] Retain the five-second non-Windows deadline and add a bounded 30-second Windows allowance.
+- [x] Run focused authority/reservation coverage, typecheck, and diff integrity.
+- [ ] Require the refreshed protected matrix before promotion.
