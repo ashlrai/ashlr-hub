@@ -634,6 +634,18 @@ describe('buildResourceStrategyReport', () => {
     expect(report.outcomes).toMatchObject({ actionablePending: 1, quarantinedPending: 0 });
   });
 
+  it('preserves observed pending pressure when the detailed proposal source is unavailable', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2 }) }),
+        listPendingProposals: () => null,
+      }),
+    });
+
+    expect(report.mode).toBe('verify-only');
+    expect(report.outcomes).toMatchObject({ actionablePending: 2, quarantinedPending: 0 });
+  });
+
   it('ignores verification failures after proposals are no longer pending', async () => {
     const rejected = outcome({
       proposal: {
