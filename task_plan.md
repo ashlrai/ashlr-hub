@@ -1998,6 +1998,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
 
+## Current Overnight Cycle - Complete Repair Failure Authority
+- [x] Preserve green draft PR #78 as the repair-only dispatch foundation.
+- [x] Replace bounded outcome-window activation with a complete, healthy proposal-inbox reader.
+- [x] Exclude partial, non-failing, and already-repaired parents from the authoritative repair-only set.
+- [x] Expose source quality and withhold the authorized count when inbox authority is degraded or incomplete.
+- [x] Add bounded-window, degraded-source, direct-reader, and completed-child regressions.
+- [ ] Run focused verification, commit, push, and open a stacked draft without changing merge authority.
+
 ## Current Overnight Cycle - Frontier Repair Quality And Causal Release Evidence
 - [x] Preserve live work while macOS Desktop access is unavailable by using a clean temporary mirror of `origin/master`.
 - [x] Promote fresh trusted ordinary proposal repairs to frontier routing while preserving durable same-tier retry authority and malformed-item fallback.
@@ -3039,3 +3047,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover parent-child deduplication in queue and daemon regression tests; rerun strategy and repair-queue suites.
 - [x] Bind queued execution-bearing fields to the canonical parent-derived repair item; reject forged title/detail payloads.
 - [ ] Require protected CI before promotion.
+
+## Complete Repair Failure Authority (2026-07-21)
+- [x] Read repair-only candidates from the complete healthy proposal inbox rather than a bounded outcome window.
+- [x] Withhold the authority count when the reader is missing, degraded, or incomplete.
+- [x] Exclude partial, non-failing, and already-repaired parents from the candidate set.
+- [x] Align Fleet Status repair-only coverage with canonical enrolled-repository provenance.
+- [x] Verify typecheck, strategy/repair authority coverage, full Fleet Status coverage, and diff integrity locally.
+- [ ] Require protected CI on the amended draft head before promotion.

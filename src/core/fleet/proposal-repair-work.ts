@@ -575,6 +575,35 @@ export function isVerifiedFailureProposalRepairAuthorized(item: WorkItem): boole
   }
 }
 
+/**
+ * Read the complete inbox projection that is eligible for repair-only dispatch.
+ * This is intentionally separate from bounded outcome ledgers: an old failure
+ * or a proposal without an evidence pack must not disappear from repair policy.
+ */
+export interface VerifiedFailureProposalRepairRead {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+  items: WorkItem[];
+}
+
+export function listVerifiedFailureProposalRepairWorkItems(
+  now = new Date(),
+): VerifiedFailureProposalRepairRead {
+  try {
+    const read = listProposalsDetailed({ requireComplete: true });
+    if (!read.complete || read.sourceState !== 'healthy') {
+      return { sourceState: read.sourceState, complete: read.complete, items: [] };
+    }
+    const items = read.proposals
+      .map((proposal) => proposalRepairWorkItem(proposal, now))
+      .filter((item): item is WorkItem => item !== null)
+      .filter((item) => verifiedFailureProposalRepairParent(item, read.proposals) !== undefined);
+    return { sourceState: read.sourceState, complete: read.complete, items };
+  } catch {
+    return { sourceState: 'degraded', complete: false, items: [] };
+  }
+}
+
 function verifiedFailureProposalRepairParent(
   item: WorkItem,
   proposals: readonly Proposal[],

@@ -568,6 +568,7 @@ function writeBacklogSnapshot(
 function createSignedProposal(
   cfg: AshlrConfig,
   opts: {
+    repo?: string;
     title: string;
     diff: string;
     verifyResult?: Proposal['verifyResult'];
@@ -580,7 +581,7 @@ function createSignedProposal(
   const diffHash = hashDiff(opts.diff);
   return createProposal(
     {
-      repo: '/tmp/repo',
+      repo: opts.repo ?? '/tmp/repo',
       origin: 'agent',
       kind: 'patch',
       title: opts.title,
@@ -4776,6 +4777,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     createSignedProposal(cfg, {
+      repo,
       title: 'Failed verify docs change',
       diff: docsDiff('failed verify with reslices'),
       verifyResult: { passed: false, failed: ['npm test'], source: 'auto-merge-preflight' },
