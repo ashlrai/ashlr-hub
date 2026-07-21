@@ -2,6 +2,7 @@ import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
 import {
   classifyOperationalProjectionRecovery,
   readOperationalProjectionTransaction,
+  type OperationalProjectionTransaction,
   type OperationalProjectionRecoveryState,
   type OperationalProjectionTransactionPhase,
 } from './operational-projection-transaction.js';
@@ -56,6 +57,36 @@ function applyAction(
   return present
     ? `would-write-${artifact}`
     : `would-delete-${artifact}`;
+}
+
+/**
+ * The replay verifier reads the active record independently. Keep the
+ * inspection bound to the exact signed record used for its stage and artifact
+ * observations, rather than returning an action from a mixed snapshot.
+ */
+function sameTransaction(
+  left: OperationalProjectionTransaction,
+  right: OperationalProjectionTransaction,
+): boolean {
+  if (left.schemaVersion !== right.schemaVersion ||
+    left.transactionId !== right.transactionId ||
+    left.signingKeyId !== right.signingKeyId ||
+    left.proposalId !== right.proposalId ||
+    left.phase !== right.phase ||
+    left.createdAt !== right.createdAt ||
+    left.updatedAt !== right.updatedAt ||
+    left.attestation !== right.attestation ||
+    left.before.proposal !== right.before.proposal ||
+    left.before.projection !== right.before.projection ||
+    left.after.proposal !== right.after.proposal ||
+    left.after.projection !== right.after.projection) return false;
+  if (left.schemaVersion !== 2 || right.schemaVersion !== 2) return true;
+  return left.staged.proposal.present === right.staged.proposal.present &&
+    left.staged.proposal.digest === right.staged.proposal.digest &&
+    left.staged.proposal.bytes === right.staged.proposal.bytes &&
+    left.staged.projection.present === right.staged.projection.present &&
+    left.staged.projection.digest === right.staged.projection.digest &&
+    left.staged.projection.bytes === right.staged.projection.bytes;
 }
 
 /**
@@ -133,6 +164,11 @@ export function inspectOperationalProjectionRecoveryV2(
     projection: actual.projection.digest,
   });
   if (recovery === 'unknown' || recovery === 'projection-only') return refused(`artifact-state-${recovery}`);
+  const final = readOperationalProjectionTransaction();
+  if (final.state !== 'healthy' || !sameTransaction(current.transaction, final.transaction)) {
+    return refused('transaction-changed-during-inspection');
+  }
+  if (!ownsProposalStoreMutationLock(storeLock)) return refused('store-lock-not-owned');
   if (recovery === 'complete' && current.transaction.phase === 'committed') {
     return { state: 'complete-observation', transactionId: current.transaction.transactionId };
   }

@@ -1,7 +1,25 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+let afterReplayVerification: (() => void) | null = null;
+
+vi.mock('../src/core/inbox/operational-projection-replay-ledger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/operational-projection-replay-ledger.js')>();
+  return {
+    ...actual,
+    verifyOperationalProjectionReplay: (...args: Parameters<typeof actual.verifyOperationalProjectionReplay>) => {
+      const result = actual.verifyOperationalProjectionReplay(...args);
+      if (afterReplayVerification) {
+        const callback = afterReplayVerification;
+        afterReplayVerification = null;
+        callback();
+      }
+      return result;
+    },
+  };
+});
 
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import {
@@ -59,6 +77,7 @@ function writeProposal(value: Proposal): void {
 }
 
 beforeEach(() => {
+  afterReplayVerification = null;
   lock = null;
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m436-'));
   process.env.HOME = home;
@@ -77,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  afterReplayVerification = null;
   releaseProposalStoreMutationLock(lock);
   fs.rmSync(home, { recursive: true, force: true });
   restore('HOME', originalHome);
@@ -207,6 +227,20 @@ describe('M436 operational projection recovery inspection', () => {
     expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
       state: 'recoverable-observation', transactionId: prepared.transaction.transactionId,
       phase: 'prepared', actual: 'no-effect', next: 'would-write-proposal',
+    });
+    expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
+    expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
+
+    afterReplayVerification = () => {
+      expect(advanceOperationalProjectionTransaction(
+        prepared.transaction.transactionId,
+        'proposal-installed',
+        lock!,
+        new Date('2026-07-20T01:01:00.000Z'),
+      )).toMatchObject({ state: 'healthy', transaction: { phase: 'proposal-installed' } });
+    };
+    expect(inspectOperationalProjectionRecoveryV2(lock!)).toEqual({
+      state: 'refused', reason: 'transaction-changed-during-inspection',
     });
     expect(fs.readFileSync(path.join(inboxDir(), `${beforeProposal.id}.json`))).toEqual(beforeProposalText);
     expect(fs.readFileSync(operationalProposalProjectionPath())).toEqual(beforeProjectionText);
