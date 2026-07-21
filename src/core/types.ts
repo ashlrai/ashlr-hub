@@ -4377,7 +4377,7 @@ export interface DaemonTick {
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
   backends?: Record<string, number>;
   /** M308: resource-aware direction mode applied to this tick when opt-in. */
-  directionMode?: 'pause' | 'local-only' | 'verify-only' | 'backlog-build' | 'auto-merge-ready';
+  directionMode?: 'pause' | 'local-only' | 'verify-only' | 'repair-only' | 'backlog-build' | 'auto-merge-ready';
   /** M308: one-line reason behind the applied autonomy direction. */
   directionReason?: string;
   /** M308/M48: maintenance work performed by the auto-merge pass this tick. */

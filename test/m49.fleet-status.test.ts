@@ -4832,7 +4832,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.missionBrief).toMatchObject({
       directive: 'Drain failed proposal blockers',
-      operatingMode: 'verify-only',
+      operatingMode: 'repair-only',
       blocker: { id: 'verification-failed' },
       action: { id: 'repair-verification-failures' },
     });

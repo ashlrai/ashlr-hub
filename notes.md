@@ -3291,3 +3291,17 @@
 # Ubuntu Onboard CI Timing Recovery (2026-07-21)
 - The hermetic non-interactive H7 onboarding test creates and commits a disposable Git repository. It alone exceeded Vitest's default five-second allowance under the 12,000-test Ubuntu protected run, while passing directly.
 - Only that test now has a bounded 15-second allowance. The global timeout, test assertions, fixture isolation, and no-network/no-daemon guarantee are unchanged, so unrelated hangs still fail at the default threshold.
+
+# Verified Failure Repair Authority (2026-07-21)
+- `isVerifiedFailureProposalRepairAuthorized` proves a queued depth-zero proposal repair against a complete, healthy inbox snapshot: its pending parent must be non-partial, have an explicit failed deterministic verification, retain the exact canonical repair id and root lineage, and remain enrolled.
+- Queue tags and prose cannot grant this authority. Partial capture, rejected capture, capture-repair, diagnostic/no-diff repair, missing repo, degraded inbox, and tampered lineage all fail closed.
+- This is a prerequisite for the future `repair-only` dispatch mode, not an activation of that mode or any merge, judge, or general dispatch authority.
+
+# Repair-Only Dispatch Lane (2026-07-21)
+- The autonomy strategy now selects `repair-only` only for complete pending proposals with deterministic verification failures, ahead of local-capacity and merge-ready modes but behind hard stops and the stale-pending velocity escape.
+- The lane scopes maintenance and selection to exact verified-failure proposal repairs. It disables capture/no-diff repair generation, global repair pruning, auto-merge, remote-handoff reconciliation, self-heal, invention, and ancillary maintenance.
+- The canonical failed parent is exempt only from duplicate suppression and diagnostic/capture retry-tier machinery after it passes the complete-inbox exact-lineage authority check. Other generated repair families retain their existing lifecycle and tier guards.
+- A complete non-partial patch/PR child whose `workItemId` is the exact repair id settles that parent for this lane. The original remains pending for operator review, but cannot consume another repair dispatch after cooldown.
+- Producer start revalidates the exact parent under the shared proposal-mutation fence. A concurrent status transition, degraded inbox, tampered lineage, or existing child refuses dispatch rather than falling into the generic repair protocol.
+- Focused proof: the repair-only daemon test confirms one canonical execution followed by zero work on the next tick after a complete child exists; queue authority coverage rejects the same parent after that child is filed. Fleet Status now correctly reports `repair-only` rather than legacy `verify-only` for the same deterministic blocker. Typecheck, Fleet Status (147 assertions), the resource-strategy/repair-queue suite (85 assertions), and diff integrity pass locally. Protected CI remains the promotion gate.
+- Queue rows are transport only. Before repair-only dispatch, the validator regenerates the exact repair item from the authoritative parent and requires every execution-bearing field (including title, detail, tags, score, timestamp, and root lineage) to match. A queue participant cannot retain a valid ID/root while substituting a new engineering objective into the agent prompt.

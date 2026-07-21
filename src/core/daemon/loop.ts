@@ -131,10 +131,12 @@ import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import {
+  beginVerifiedFailureProposalRepairDispatch,
   beginRejectedCaptureRecoveryDispatch,
   generatedRepairRootKey,
   generatedRepairProposalDispatchAuthority,
   isRejectedCaptureRecoveryAuthorized,
+  isVerifiedFailureProposalRepairAuthorized,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
   type ProposalRepairWorkResult,
@@ -1563,7 +1565,7 @@ async function buildDaemonStrategyPlan(
       diagnoseGuardHealth: () => guardHealth,
       listOutcomeRecords: cfg.foundry?.autoMerge?.enabled === true
         ? (opts) => listReadyEvidenceOutcomeRecords({ limit: Math.min(opts?.limit ?? 6, 6) })
-        : productionVelocity.enabled
+        : productionVelocity.enabled || (cfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false
           ? (opts) => listOutcomeRecords({
               limit: Math.min(opts?.limit ?? 6, 6),
               deps: { loadWorkedLedger: () => ({ events: [] }) },
@@ -3598,7 +3600,12 @@ export async function tick(
       proposalRepairMaintenanceResult = queueProposalRepairWorkForPendingProposals(
         undefined,
         new Date(now),
-        { terminalLifecycleEnabled: liveCfg.fleet?.sharedQueue?.mode !== 'filesystem' },
+        {
+          terminalLifecycleEnabled: liveCfg.fleet?.sharedQueue?.mode !== 'filesystem',
+          ...(directionPlan?.dispatchScope === 'proposal-repair'
+            ? { verifiedFailureProposalOnly: true }
+            : {}),
+        },
       );
       const activationRaw = (liveCfg.foundry as Record<string, unknown> | undefined)?.['repairHandoffV2Activation'];
       if (validRepairHandoffV2Activation(activationRaw)) {
@@ -3831,6 +3838,9 @@ export async function tick(
       const resolution = resolveDiagnosticResliceParents(backlog.items);
       diagnosticResliceParentsResolved = resolution.resolved;
       diagnosticResliceParentsMissing = resolution.missing;
+      if (directionPlan?.dispatchScope === 'proposal-repair') {
+        return resolution.dispatchable.filter(isVerifiedFailureProposalRepairAuthorized);
+      }
       return filterGeneratedRepairDispatch(resolution.dispatchable);
     } catch (err) {
       // buildBacklog never throws by contract; extra guard
@@ -3972,6 +3982,7 @@ export async function tick(
       directionPlan = {
         mode: 'pause',
         allowDispatch: false,
+        dispatchScope: 'none',
         forceLocalOnly: false,
         runAutoMergeMaintenance: false,
         reason: `resource strategy failed: ${msg.slice(0, 160)}`,
@@ -3983,7 +3994,7 @@ export async function tick(
     if (!stillOwnsTick()) {
       return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
     }
-    if (directionPlan.mode !== 'pause') {
+    if (directionPlan.mode !== 'pause' && directionPlan.mode !== 'repair-only') {
       runRemoteHandoffReconciliation();
       remoteHandoff = remoteHandoffTickSummary(remoteHandoffReconcileResult);
     }
@@ -4070,12 +4081,40 @@ export async function tick(
       ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
     });
   }
-  backlogItems = filterGeneratedRepairDispatch(backlogItems);
+  const repairOnlyDispatch = directionPlan?.dispatchScope === 'proposal-repair';
+  if (repairOnlyDispatch) {
+    backlogItems = backlogItems.filter(isVerifiedFailureProposalRepairAuthorized);
+  }
+  if (!repairOnlyDispatch) {
+    backlogItems = filterGeneratedRepairDispatch(backlogItems);
+  } else {
+    backlogItems = backlogItems.filter(isVerifiedFailureProposalRepairAuthorized);
+  }
   if (!stillOwnsTick()) {
     return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
   if (backlogItems.length === 0) {
+    if (repairOnlyDispatch) {
+      saveTickState(state);
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: `tick repair-only: no exact verified-failure proposal repair is dispatchable`,
+        result: 'ok',
+      });
+      return recordTick({
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'repair-only',
+        directionMode,
+        ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+        ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
+      });
+    }
     const autoMergePassResult = await runAutoMergeMaintenancePass();
     preDispatchAutoMergePassResult = autoMergePassResult;
     preDispatchAutoMergePassRan = true;
@@ -4313,6 +4352,13 @@ export async function tick(
     if (proposalRead.complete && proposalRead.sourceState !== 'degraded' &&
       (pendingActivity === undefined || pendingActivity.complete)) {
       pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, blockingPendingProposals);
+      if (repairOnlyDispatch) {
+        for (const item of backlogItems) {
+          if (isVerifiedFailureProposalRepairAuthorized(item)) {
+            pendingItemKeys.delete(workItemCoverageKey(item));
+          }
+        }
+      }
     }
     for (const item of backlogItems) {
       if (!isTrustedDiagnosticResliceItem(item)) continue;
@@ -4414,7 +4460,7 @@ export async function tick(
     !isSelectionBlocked(item) && hasFeasibleClaimRoute(item);
 
   const explicitDrainMode = opts.drain;
-  const canAutoDrain = explicitDrainMode === undefined && canAutoDrainRepairs(opts, directionPlan);
+  const canAutoDrain = !repairOnlyDispatch && explicitDrainMode === undefined && canAutoDrainRepairs(opts, directionPlan);
   // Capture failures are the production-yield recovery lane. Prefer them to
   // diagnostic reslices, but retain the existing single-lane cap and ordinary
   // work fairness below so recovery cannot consume all available capacity.
@@ -4893,6 +4939,7 @@ export async function tick(
   };
   const generatedRepairReservations = new Map<string, GeneratedRepairExecutionReservation>();
   const settledGeneratedRepairReservationItemIds = new Set<string>();
+  const repairOnlyLaunchedItemKeys = new Set<string>();
   const releaseGeneratedRepairReservations = (): void => {
     for (const reservation of generatedRepairReservations.values()) {
       for (const lock of [...reservation.locks].reverse()) releaseLocalStoreLock(lock);
@@ -4905,6 +4952,7 @@ export async function tick(
     backend: EngineId,
     tier: EngineTier | null,
   ): boolean => {
+    if (repairOnlyDispatch) return isVerifiedFailureProposalRepairAuthorized(item);
     if (!isTrustedGeneratedRepairItem(item)) return true;
     const itemKey = workItemCoverageKey(item);
     if (generatedRepairReservations.has(itemKey)) return false;
@@ -4927,13 +4975,23 @@ export async function tick(
   };
   const settleGeneratedRepairExecution = (item: WorkItem): boolean => {
     const itemKey = workItemCoverageKey(item);
+    if (repairOnlyDispatch) return repairOnlyLaunchedItemKeys.delete(itemKey);
     const reservation = generatedRepairReservations.get(itemKey);
     if (!reservation) return false;
     if (!clearGeneratedRepairExecutionReservation(reservation)) return false;
     settledGeneratedRepairReservationItemIds.add(itemKey);
     return true;
   };
+  const beginRepairDispatch = <T>(item: WorkItem, begin: () => T): { authorized: true; value: T } | { authorized: false } =>
+    repairOnlyDispatch
+      ? beginVerifiedFailureProposalRepairDispatch(item, begin)
+      : beginRejectedCaptureRecoveryDispatch(item, begin);
   const markGeneratedRepairExecutionLaunched = (item: WorkItem): boolean => {
+    if (repairOnlyDispatch) {
+      if (!isVerifiedFailureProposalRepairAuthorized(item)) return false;
+      repairOnlyLaunchedItemKeys.add(workItemCoverageKey(item));
+      return true;
+    }
     if (!isTrustedGeneratedRepairItem(item)) return true;
     const reservation = generatedRepairReservations.get(workItemCoverageKey(item));
     if (!reservation || reservation.record.phase !== 'prepared') return false;
@@ -4955,7 +5013,7 @@ export async function tick(
   // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
   // guard so queued work discovery and regression watches do not extend an
   // in-flight accounting guard for selected dispatches.
-  if (!producerMaintenanceBeforeSelection && shouldRunProducerMaintenance(state)) {
+  if (!repairOnlyDispatch && !producerMaintenanceBeforeSelection && shouldRunProducerMaintenance(state)) {
     await runSelfHealMaintenance();
     await runInventMaintenance();
     await runAncillaryMaintenance();
@@ -5525,7 +5583,10 @@ export async function tick(
         backendTier = engineTierOf(backend, routingCfg);
         selectedModel = null;
       }
-      if (isTrustedGeneratedRepairItem(item)) {
+      if (repairOnlyDispatch && !isVerifiedFailureProposalRepairAuthorized(item)) {
+        return authorityUnavailableOutcome(item, attemptId);
+      }
+      if (!repairOnlyDispatch && isTrustedGeneratedRepairItem(item) && !isVerifiedFailureProposalRepairAuthorized(item)) {
         let retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
         if (retryPolicy.available && retryPolicy.requireAlternative &&
           retryPolicy.excludedBackend !== null && backend === retryPolicy.excludedBackend) {
@@ -5656,7 +5717,7 @@ export async function tick(
 
       if (backend === 'builtin') {
         if (stopRequested()) return stopRequestedOutcome(item, attemptId);
-        const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+        const launch = beginRepairDispatch(item, () => {
           if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before swarm launch');
           beginQueueExecution();
           recordDispatchStartAgentAction(item, {
@@ -5859,7 +5920,7 @@ export async function tick(
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
-          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+          const launch = beginRepairDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n launch');
             beginQueueExecution();
             recordUse(backend!);
@@ -5954,7 +6015,7 @@ export async function tick(
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
         } else {
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
-          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+          const launch = beginRepairDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
             beginQueueExecution();
             recordUse(backend!);
@@ -6902,7 +6963,7 @@ export async function tick(
         }
         continue;
       }
-      if (!generatedRepairLifecycleSucceededItemKeys.has(itemKey)) {
+      if (!repairOnlyDispatch && !generatedRepairLifecycleSucceededItemKeys.has(itemKey)) {
         console.warn('[ashlr] daemon:tick generated repair lifecycle persistence incomplete');
         workedOutcomeFailedItemKeys.add(itemKey);
         continue;

@@ -3261,6 +3261,7 @@ function formatDirectionMode(mode) {
     pause: 'Pause',
     'local-only': 'Local Only',
     'verify-only': 'Verify Only',
+    'repair-only': 'Repair Only',
     'backlog-build': 'Backlog Build',
     'auto-merge-ready': 'Auto-Merge Ready',
     unknown: 'Unknown',
@@ -3272,6 +3273,7 @@ function directionAccent(mode) {
   const colors = {
     pause: '#f87171',
     'verify-only': '#fbbf24',
+    'repair-only': '#fb923c',
     'auto-merge-ready': '#4ade80',
     'local-only': '#38bdf8',
     'backlog-build': '#a78bfa',
