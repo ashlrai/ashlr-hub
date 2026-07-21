@@ -2705,3 +2705,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Base-Bound Draft Verification (2026-07-20)
+- [x] Snapshot Best-of-N draft verification commands from the clean sandbox base before candidate diff application.
+- [x] Prove a candidate-added replace-detected no-op contract cannot mask a failing base test command.

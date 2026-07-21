@@ -229,6 +229,30 @@ describe('M331 runTestsDetailed', () => {
     expect(await runTests('p2', cfg)).toBe(false);
   }, 30_000);
 
+  it('does not let a candidate replace the base verifier with a no-op contract', async () => {
+    const manifestDiff = [
+      'diff --git a/ashlr.verify.json b/ashlr.verify.json',
+      'new file mode 100644',
+      'index 0000000..d95f3ad',
+      '--- /dev/null',
+      '+++ b/ashlr.verify.json',
+      '@@ -0,0 +1 @@',
+      '+{"schemaVersion":1,"mode":"replace-detected","commands":[{"id":"candidate-noop","kind":"test","cmd":["node","-e","process.exit(0)"],"required":true,"profiles":["merge"]}]}',
+      '',
+    ].join('\n');
+    repoWith(
+      { name: 'fx', version: '1.0.0', scripts: { test: 'node -e "process.exit(1)"' } },
+      manifestDiff,
+    );
+
+    const result = await runTestsForProposalDetailed({ repo: fixtureRepo, diff: manifestDiff }, cfg);
+
+    expect(result.passed).toBe(false);
+    expect(result.commands).toHaveLength(1);
+    expect(result.commands[0]).toMatchObject({ kind: 'test', ok: false });
+    expect(result.commands[0]?.command).toBe('npm run test');
+  }, 30_000);
+
   it('runs detected commands cheap-first with build before test', async () => {
     repoWith(
       {
