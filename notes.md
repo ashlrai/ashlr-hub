@@ -2833,3 +2833,8 @@
   - CI now runs branch pushes only on `master`, retains pull-request merge-ref validation and reusable workflow calls, and cancels superseded pull-request revisions through a PR-or-ref scoped concurrency key.
   - Verification: M30 workflow guard passes 7 assertions, plus typecheck, quiet lint, and diff integrity. The workflow contains no deploy, publish, release, or authority-policy change.
   - The first protected matrix exposed a Windows-only scheduler miss in an unrelated Pulse liveness fixture while all fence assertions passed. The test now preserves its one-second non-Windows budget and uses a bounded two-second Windows hosted-runner allowance; CI supersession behavior is unchanged.
+
+- Verifier-contract physical cwd containment (2026-07-21):
+  - Lexical containment is insufficient for merge evidence: a repo-local directory symlink can resolve outside the checkout and make a repo-relative verifier execute arbitrary external state.
+  - Contract parsing now requires an existing directory whose physical `realpath` remains under the repository. The sync and async verifier runners independently recheck the same physical boundary immediately before spawning, closing a parse-to-spawn symlink swap.
+  - External or unavailable cwd values return `invalid-command`; they never fall back to the repository root, preserving the claimed verifier scope. Focused profile and execution tests, typecheck, scoped lint, and diff checks passed before protected CI.

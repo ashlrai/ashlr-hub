@@ -7,7 +7,7 @@
  * routing can all ask one question here instead of re-learning package roots.
  */
 
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
@@ -206,15 +206,32 @@ function safeRelative(root: string, child: string): string | null {
 }
 
 function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label: string): string | null {
-  if (cwd === undefined) return resolve(repoRoot);
+  const root = resolve(repoRoot);
+  if (cwd === undefined) return root;
   if (typeof cwd !== 'string' || cwd.trim().length === 0) {
     errors.push(`${label}.cwd must be a non-empty string when provided`);
     return null;
   }
-  const resolved = resolve(repoRoot, cwd);
-  const rel = relative(resolve(repoRoot), resolved);
+  const resolved = resolve(root, cwd);
+  const rel = relative(root, resolved);
   if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) {
     errors.push(`${label}.cwd must stay inside the repo`);
+    return null;
+  }
+  try {
+    if (!statSync(resolved).isDirectory()) {
+      errors.push(`${label}.cwd must resolve to a directory inside the repo`);
+      return null;
+    }
+    const physicalRoot = realpathSync(root);
+    const physicalCwd = realpathSync(resolved);
+    const physicalRel = relative(physicalRoot, physicalCwd);
+    if (physicalRel !== '' && (physicalRel.startsWith('..') || isAbsolute(physicalRel))) {
+      errors.push(`${label}.cwd must resolve inside the repo without escaping through a symlink`);
+      return null;
+    }
+  } catch {
+    errors.push(`${label}.cwd must resolve to a directory inside the repo`);
     return null;
   }
   return resolved;

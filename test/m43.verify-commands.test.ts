@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
@@ -444,6 +444,32 @@ describe('runVerifyCommand', () => {
     expect(res.ok).toBe(true);
     expect(res.output.trim()).toBe('apps/web');
     expect(res.command).toContain('cd apps/web');
+  });
+
+  it('fails closed before spawning when command cwd escapes through a symlink', async () => {
+    const outside = makeFixture();
+    const marker = join(outside, 'should-not-exist');
+    try {
+      try {
+        symlinkSync(outside, join(workdir, 'outside-link'), 'dir');
+      } catch {
+        return;
+      }
+      const vc: VerifyCommand = {
+        kind: 'test',
+        cmd: ['node', '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+        cwd: 'outside-link',
+      };
+
+      const sync = runVerifyCommand(vc, workdir, cfg);
+      const async = await runVerifyCommandAsync(vc, workdir, cfg);
+
+      expect(sync).toMatchObject({ ok: false, failureCategory: 'invalid-command' });
+      expect(async).toMatchObject({ ok: false, failureCategory: 'invalid-command' });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('never throws on a missing binary — returns ok:false', () => {

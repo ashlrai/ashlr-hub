@@ -356,6 +356,75 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('rejects contract cwd symlinks that resolve outside the repo', () => {
+    const dir = makeFixture();
+    const outside = makeFixture();
+    try {
+      try {
+        symlinkSync(outside, join(dir, 'outside-link'), 'dir');
+      } catch {
+        return;
+      }
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'escape-link', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'outside-link' }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([]);
+      expect(profile.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('without escaping through a symlink');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts contract cwd symlinks whose physical target remains inside the repo', () => {
+    const dir = makeFixture();
+    try {
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      try {
+        symlinkSync(join(dir, 'scripts'), join(dir, 'scripts-link'), 'dir');
+      } catch {
+        return;
+      }
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'internal-link', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'scripts-link', profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyContract).toMatchObject({ valid: true, mergeGradeExplicit: true });
+      expect(profile.verifyCommands[0]?.cwd).toBe(join(dir, 'scripts-link'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing contract cwd directories', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'missing-cwd', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'does-not-exist' }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([]);
+      expect(profile.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('must resolve to a directory inside the repo');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('detects shell-only Bats repos without package manifests', () => {
     const dir = makeFixture();
     try {
