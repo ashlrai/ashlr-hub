@@ -3350,6 +3350,44 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('withholds stale dispatch outcomes even when the rolling yield window is empty', async () => {
+    const now = new Date('2026-07-20T12:00:00.000Z');
+    const staleAt = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+    await withFakeNow(now, async () => {
+      recordDispatchProduction({
+        schemaVersion: 1,
+        ts: staleAt,
+        machineId: 'm49',
+        itemId: 'stale-dispatch-outcome',
+        source: 'goal',
+        repo: '/repo/stale-dispatch',
+        title: 'Stale dispatch fixture',
+        backend: 'local-coder',
+        tier: 'mid',
+        assignedBy: 'daemon',
+        routeReason: 'fixture',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        spentUsd: 0,
+        basis: 'run-proposal-outcome',
+      });
+      const status = await buildFleetStatus(baseConfig());
+      const evidence = status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+        (source) => source.id === 'dispatch-production',
+      );
+
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'healthy', complete: true,
+        latestAt: staleAt,
+      });
+      expect(evidence).toMatchObject({
+        status: 'degraded', freshness: 'stale', eligibility: 'withheld', evidenceRole: 'analytics',
+        sourceQuality: { badge: 'stale-source' },
+      });
+    });
+  });
+
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
     const now = new Date().toISOString();
     const repo = join(tmpHome, 'repo-attempts');

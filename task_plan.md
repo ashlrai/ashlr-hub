@@ -2713,4 +2713,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add stale, fresh, and empty-ledger regressions; run focused FleetStatus verification, typecheck, and lint.
 - [x] Extend required decision authority to retain its latest validated observation and withhold stale evidence.
 - [x] Extend judge outcomes to retain their latest validated observation and withhold stale learning evidence.
+- [x] Bind dispatch-production evidence freshness to a bounded full-history observation, independent of rolling yield analytics.
 - [ ] Publish and require the protected CI matrix before release.

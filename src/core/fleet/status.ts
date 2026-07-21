@@ -101,8 +101,8 @@ import {
   workItemCoverageKey,
 } from './proposal-matching.js';
 import {
+  readDispatchProductionLatestObservationDetailed,
   readDispatchProductionYieldDetailed,
-  type DispatchProductionSourceQuality,
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
@@ -1390,8 +1390,8 @@ export interface FleetStatus {
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
   dispatchProduction?: DispatchProductionYieldSummary;
-  /** Storage/read completeness for dispatch-production analytics. */
-  dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Storage/read completeness and newest validated observation for dispatch-production analytics. */
+  dispatchProductionSource?: FleetEvidenceSourceStatus;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: FleetEvidenceSourceStatus;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -2641,12 +2641,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     };
   }
   try {
+    const dispatchObservation = readDispatchProductionLatestObservationDetailed();
+    status.dispatchProductionSource = {
+      ...dispatchObservation.sourceQuality,
+      ...(dispatchObservation.latestAt ? { latestAt: dispatchObservation.latestAt } : {}),
+    };
     const dispatchRead = readDispatchProductionYieldDetailed({
       windowMs: RECENT_WINDOW_MS,
       limit: 1200,
       limitPerDimension: 8,
     });
-    status.dispatchProductionSource = dispatchRead.sourceQuality;
     const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
@@ -2656,7 +2660,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
-    // and available even when the append-only ledger is absent or corrupt.
+    // and available even when the append-only ledger is absent or corrupt. A
+    // failed freshness read must still be visible as degraded evidence.
+    status.dispatchProductionSource = {
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['io-error'],
+      filesRead: 0,
+      bytesRead: 0,
+      rowsScanned: 0,
+      invalidRows: 0,
+      unreadableFiles: 1,
+    };
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();
@@ -4984,6 +5000,7 @@ function learningEvidenceReadinessSources(
     evidenceReadinessSource({
       id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',
       quality: status.dispatchProductionSource, generatedAt,
+      observedAt: status.dispatchProductionSource?.latestAt,
     }),
     evidenceReadinessSource({
       id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',
