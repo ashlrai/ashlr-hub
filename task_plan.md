@@ -2728,3 +2728,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Confirm stale queue inventory coincided with a live daemon running an older immutable release.
 - [x] Restore the service after an accidental worktree-targeted reinstall and verify a live immutable-release PID and clear guard.
 - [ ] Define a clean immutable-release upgrade procedure before the next production service update.
+- [x] Audit the required staging, promotion, rollback, status, and web-repair boundaries for an immutable release upgrade.
