@@ -2848,3 +2848,12 @@
   - Protected Windows portability shard 1/3 repeatedly timed out the M342 failure-receipt integration case at Vitest's default five-second test budget. The same timeout blocked unrelated daemon and verifier PRs because the test runs on their merge refs.
   - The isolated test now has a bounded 30-second budget. Production receipt behavior and assertions are unchanged; this is an explicit hosted-Windows integration allowance, not a suppression of failures.
   - Focused M342 coverage, typecheck, scoped lint, and diff integrity pass locally. Protected CI on PR #105 remains required before unblocking dependent promotions.
+
+- Hermetic fixture platform budgets (2026-07-21):
+  - Full protected runs exposed two isolated load-sensitive fixtures after the M342 correction: M43 waits for a spawned verifier ready marker, while M362 performs durable pre-activation journal I/O. Their five- and two-second defaults were too small under hosted runner load.
+  - M43 now has a 10-second ready-marker wait within a 15-second case budget; M362 has a 15-second case-local budget. Assertions, subprocess lifecycle checks, and production behavior are unchanged.
+  - These budgets are intentionally local to the fixtures and do not alter the global test runner or suppress any failure. Fresh protected CI remains required.
+
+- Windows CI default test budget (2026-07-21):
+  - Fresh protected runs showed unrelated Windows fixtures repeatedly crossing Vitest's five-second default while passing in isolation: dispatch receipt recovery and rollback's live-owner safety check were the latest examples. These are all run beneath the existing serial hermetic runner and 15-minute hard watchdog.
+  - The CI workflow now injects a bounded 30-second default only for Windows. POSIX retains five seconds, explicit test-local deadlines still take precedence, and the global idle/hard watchdogs continue to fail genuinely stalled suites.

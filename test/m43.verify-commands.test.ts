@@ -963,7 +963,9 @@ describe('verifyTaskStructured', () => {
       );
 
       try {
-        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 2_000 });
+        // Hosted runners can delay the child Node process under the serial
+        // hermetic suite; this only waits for the fixture's ready marker.
+        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 10_000 });
         verifierPid = Number(readFileSync(pidPath, 'utf8'));
         await new Promise((resolveDone) => setTimeout(resolveDone, 100));
         controller.abort();
@@ -981,7 +983,7 @@ describe('verifyTaskStructured', () => {
         }
         rmSync(dir, { recursive: true, force: true });
       }
-    },
+    }, 15_000,
   );
 
   it('returns a command-failure verdict when a detected test command exits non-zero', async () => {

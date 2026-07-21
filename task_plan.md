@@ -2726,3 +2726,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a bounded test-local 30-second allowance without weakening receipt assertions or production behavior.
 - [x] Pass focused M342 coverage, typecheck, scoped lint, and diff integrity.
 - [ ] Require the complete protected CI matrix on PR #105 before promotion.
+
+## Hermetic Fixture Platform Budgets (2026-07-21)
+- [x] Isolate M43 verifier-ready and M362 pre-activation journal cases as load-sensitive fixtures.
+- [x] Add bounded fixture-local budgets while retaining all behavioral assertions.
+- [ ] Run focused coverage, typecheck, scoped lint, and diff integrity.
+- [ ] Require the complete protected CI matrix before promotion.
+
+## Windows CI Default Test Budget (2026-07-21)
+- [x] Identify repeated unrelated failures at Vitest's default five-second threshold under serial hosted Windows runs.
+- [x] Inject a bounded 30-second Windows-only default while preserving explicit deadlines and watchdog caps.
+- [ ] Run CI configuration coverage and require a complete protected matrix.

@@ -3,6 +3,11 @@ import { defineConfig } from 'vitest/config';
 
 const spyOnCompatKey = '__ASHLR_VITEST_3_SPY_ON_COMPAT__';
 const testGlobal = globalThis as typeof globalThis & { [spyOnCompatKey]?: boolean };
+const configuredTestTimeoutMs = Number(process.env['ASHLR_VITEST_TEST_TIMEOUT_MS']);
+const testTimeoutMs = Number.isFinite(configuredTestTimeoutMs) &&
+  configuredTestTimeoutMs >= 1_000 && configuredTestTimeoutMs <= 60_000
+  ? Math.floor(configuredTestTimeoutMs)
+  : 5_000;
 
 // Preserve the Vitest 3 mock isolation semantics expected by the existing suite.
 if (process.env['VITEST_WORKER_ID'] && !testGlobal[spyOnCompatKey]) {
@@ -53,6 +58,10 @@ export default defineConfig({
     // fixed cap keeps meaningful parallelism without the oversubscription.
     pool: 'forks',
     maxWorkers: 4,
+    // Windows hosted runners execute the same hermetic durability fixtures
+    // several times slower than local/POSIX hosts. CI injects a bounded
+    // platform-specific default; explicit fixture deadlines still win.
+    testTimeout: testTimeoutMs,
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

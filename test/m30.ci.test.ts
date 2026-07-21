@@ -107,6 +107,7 @@ describe('M30 CI workflow', () => {
     // The canonical test runner isolates HOME and adds a watchdog timeout.
     expect(ciYml).toContain('npm run test:ci');
     expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
+    expect(ciYml).toContain("ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}");
   });
 
   it('runs Ubuntu exhaustively with fixed Windows and macOS portability partitions', () => {

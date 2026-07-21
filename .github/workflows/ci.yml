@@ -94,6 +94,8 @@ jobs:
               test/m395.effect-terminal-retention.test.ts
               test/m367.daemon-observer-scheduler.test.ts
     runs-on: ${{ matrix.os }}
+    env:
+      ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}
 
     steps:
       - name: Checkout
