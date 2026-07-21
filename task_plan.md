@@ -2752,3 +2752,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Identify repeated unrelated failures at Vitest's default five-second threshold under serial hosted Windows runs.
 - [x] Inject a bounded 30-second Windows-only default while preserving explicit deadlines and watchdog caps.
 - [ ] Run CI configuration coverage and require a complete protected matrix.
+- [ ] Publish and require the protected CI matrix before release.
+
+## Bounded Trajectory Trace Retention (2026-07-21)
+- [x] Audit trace sampling for reconstructability gaps while preserving the metadata-only boundary.
+- [x] Retain terminal and latest lifecycle-stage evidence within the existing eight-event cap.
+- [x] Expose complete versus sampled state without adding authority or raw payloads.
+- [x] Run focused, integration, isolated regression, typecheck, build, lint, and diff verification.
+- [ ] Publish as a protected draft PR and require fresh platform CI.
