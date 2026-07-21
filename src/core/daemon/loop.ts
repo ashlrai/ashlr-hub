@@ -5581,7 +5581,7 @@ export async function tick(
       if (repairOnlyDispatch && !isVerifiedFailureProposalRepairAuthorized(item)) {
         return authorityUnavailableOutcome(item, attemptId);
       }
-      if (!repairOnlyDispatch && isTrustedGeneratedRepairItem(item) && !isVerifiedFailureProposalRepairAuthorized(item)) {
+      if (!repairOnlyDispatch && isTrustedGeneratedRepairItem(item)) {
         let retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
         if (retryPolicy.available && retryPolicy.requireAlternative &&
           retryPolicy.excludedBackend !== null && backend === retryPolicy.excludedBackend) {

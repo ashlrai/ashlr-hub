@@ -3084,3 +3084,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Apply generated-repair dispatch filtering defensively to any repair-only daemon plan.
 - [x] Verify strategy and daemon repair/shared-queue coverage with diff integrity.
 - [ ] Require protected CI on the immutable draft head before promotion.
+
+## Repair Retry Route Recovery (2026-07-21)
+- [x] Let every trusted generated repair use same-tier alternate-backend recovery in the normal lane.
+- [x] Verify alternative-backend and repair-only daemon coverage with typecheck and diff integrity.
+- [ ] Require protected CI on the immutable draft head before promotion.

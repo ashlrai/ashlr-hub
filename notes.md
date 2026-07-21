@@ -3338,3 +3338,7 @@
 - Filesystem shared-queue mode cannot safely dispatch generated repairs, so resource strategy now skips `repair-only` selection in that configuration. This prevents an authorized but non-executable parent from suppressing ordinary backlog work.
 - The daemon also applies generated-repair dispatch filtering to repair-only plans as defense in depth. A stale plan or pre-materialized repair cannot bypass filesystem dispatch controls; blocked durable reservations are removed before selection.
 - Verification: TypeScript typecheck and focused M306/M201 repair-only plus filesystem shared-queue coverage (5 assertions) pass locally, with `git diff --check` clean. Protected CI remains the promotion gate.
+
+# Repair Retry Route Recovery (2026-07-21)
+- Normal-lane trusted repairs now participate in the existing same-tier alternate-backend reroute before durable reservation. An authorized verified-failure repair no longer repeatedly selects a prior failed backend only to be refused later by retry policy.
+- Verification: TypeScript typecheck, focused M201 alternative-backend and repair-only coverage (3 assertions), and `git diff --check` pass locally. Protected CI remains the promotion gate.
