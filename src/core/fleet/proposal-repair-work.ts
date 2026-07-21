@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs';
 import type { DecisionEntry, Proposal, RepairDepth, RepairTreatment, WorkItem } from '../types.js';
 import { listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
 import { hasCurrentVerificationBinding } from '../inbox/merge.js';
+import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
+import type { VerifyCommand } from '../run/verify-commands.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItemDetailed } from './self-heal.js';
 import { loadQueuedAutonomyItemsDetailed } from '../portfolio/queued-autonomy.js';
@@ -495,11 +497,14 @@ function proposalNeedsRepair(
 
 /** A repair-only retry needs current merge-grade failure evidence, not a mutable flag. */
 function hasCurrentDeterministicFailureEvidence(proposal: Proposal): boolean {
+  const ran = proposal.verifyResult?.ran;
   return proposal.status === 'pending' &&
     proposal.isPartial !== true &&
     proposal.verifyResult?.passed === false &&
     hasCurrentVerificationBinding(proposal) &&
-    proposal.verifyResult.ran?.some((command) => command.required !== false) === true;
+    Array.isArray(ran) &&
+    ran.some((command) => command.required !== false &&
+      buildRequiredVerificationManifest(proposal.repo!, [command as VerifyCommand]) !== null);
 }
 
 function repairReason(proposal: Proposal): string {

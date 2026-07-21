@@ -3353,4 +3353,5 @@
 # Repair-Only Failure Evidence Binding (2026-07-21)
 - A pending non-partial `verifyResult.passed:false` was previously enough to reserve repair-only capacity, even if the record was handwritten, stale, or had no executed verification command.
 - Repair-only admission now reuses `hasCurrentVerificationBinding` and requires at least one required argv record. This binds the failure to the live default-branch head and exact proposal diff before any retry is generated or dispatched.
+- The admission boundary validates that command with the same argv-only manifest contract used by merge verification. Missing kinds, empty argv, and malformed `ran` shapes are rejected without aborting the scan.
 - Legacy/manual failures remain observational; ordinary backlog is unaffected. A base advance intentionally requires a fresh verification before another repair-only retry.

@@ -782,6 +782,33 @@ describe('queued autonomy work scanner', () => {
       verifyResult: { ...deterministicFailure(repo.dir, input.diff!), diffHash: '0'.repeat(64) },
     });
     expect(proposalRepairWorkItem(stale)).toBeNull();
+    const missingKind = createProposal({
+      ...proposalInput,
+      id: 'prop-missing-command-kind',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: [{ cmd: ['npm', 'run', 'typecheck'], required: true }] as unknown as Proposal['verifyResult']['ran'],
+      },
+    });
+    const emptyArgv = createProposal({
+      ...proposalInput,
+      id: 'prop-empty-command-argv',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: [{ kind: 'typecheck', cmd: [], required: true }],
+      },
+    });
+    const malformedRan = createProposal({
+      ...proposalInput,
+      id: 'prop-malformed-ran',
+      verifyResult: {
+        ...deterministicFailure(repo.dir, input.diff!),
+        ran: {} as unknown as Proposal['verifyResult']['ran'],
+      },
+    });
+    expect(proposalRepairWorkItem(missingKind)).toBeNull();
+    expect(proposalRepairWorkItem(emptyArgv)).toBeNull();
+    expect(proposalRepairWorkItem(malformedRan)).toBeNull();
 
     createProposal({
       ...proposalInput,
