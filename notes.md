@@ -2945,3 +2945,4 @@
   - Gate 7 now refuses before mutation when either its inline `judged` record or its `merge-authorized` record cannot durably append. Cached and freshly judged ships therefore cannot turn a transient ledger failure into merge authority.
   - Inline manager-gate calls retain only metadata-only receipts in the decision ledger: actual final responder, aggregate duration, and measured-only cost/token totals. They deliberately do not write daemon daily spend because direct commands execute outside the daemon's durable spend transaction.
   - Decision-ledger first-use setup now fsyncs every created ancestor boundary through the first pre-existing parent before authority writes can report success. Windows retains its explicit best-effort directory-fsync limitation.
+  - Gate 7 coverage separately proves failed `judged` and failed `merge-authorized` durable writes both leave the proposal approved and the default branch untouched.

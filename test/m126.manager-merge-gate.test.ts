@@ -328,6 +328,26 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
+  it('[1a1] inline ship fails closed when durable merge authorization persistence fails', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(docsDiff('docs/authorization-write-failure.md'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict(p.id));
+    mockRecordDecision.mockReturnValueOnce(true).mockReturnValueOnce(false);
+
+    const result = await autoMergeProposal(p.id, baseCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(result.reason).toMatch(/durable merge authorization persistence failed/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
   it('[1b] inline judge persists actual responder and measured receipt totals', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
