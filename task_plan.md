@@ -2705,3 +2705,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Agent-Action Freshness Truth (2026-07-21)
+- [x] Audit evidence-matrix timestamps against the workspace action ledger.
+- [x] Bind agent-action evidence freshness to its latest bounded observation rather than status generation time.
+- [x] Withhold stale/unknown action evidence while preserving readable empty-ledger healthy-zero behavior.
+- [x] Add stale, fresh, and empty-ledger regressions; run focused FleetStatus verification, typecheck, and lint.
+- [x] Extend required decision authority to retain its latest validated observation and withhold stale evidence.
+- [x] Extend judge outcomes to retain their latest validated observation and withhold stale learning evidence.
+- [ ] Publish and require the protected CI matrix before release.
