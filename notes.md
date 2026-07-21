@@ -2848,3 +2848,8 @@
   - Protected Windows portability shard 1/3 repeatedly timed out the M342 failure-receipt integration case at Vitest's default five-second test budget. The same timeout blocked unrelated daemon and verifier PRs because the test runs on their merge refs.
   - The isolated test now has a bounded 30-second budget. Production receipt behavior and assertions are unchanged; this is an explicit hosted-Windows integration allowance, not a suppression of failures.
   - Focused M342 coverage, typecheck, scoped lint, and diff integrity pass locally. Protected CI on PR #105 remains required before unblocking dependent promotions.
+
+- Fleet readiness source completeness (2026-07-21):
+  - A Fleet OS readiness verdict with any blocked operational source must not report high confidence, even when every other source is fresh. That combination is internally contradictory and can cause operators to over-trust a blocked ship state.
+  - Readiness confidence now treats `blocked` identically to `unknown` and `unavailable`: it yields `low` confidence. This is a presentation/evidence integrity correction only; it does not alter readiness blockers, routing, merge authority, or deployment behavior.
+  - Focused Phantom Fleet-status coverage, typecheck, changed-file lint, and diff integrity pass locally. Protected CI on PR #103 remains required before promotion.
