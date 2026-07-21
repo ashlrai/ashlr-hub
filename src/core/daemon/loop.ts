@@ -1576,10 +1576,10 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
   const judgeEstimatedSpendUsd = typeof result.judgeEstimatedSpendUsd === 'number'
     ? Math.max(0, result.judgeEstimatedSpendUsd)
     : 0;
-  const judgeMeasuredSpendUsd = typeof result.judgeMeasuredSpendUsd === 'number'
+  const judgeMeasuredSpendUsd = typeof result.judgeMeasuredSpendUsd === 'number' && Number.isFinite(result.judgeMeasuredSpendUsd)
     ? Math.max(0, result.judgeMeasuredSpendUsd)
     : 0;
-  const judgeUnmeteredCalls = typeof result.judgeUnmeteredCalls === 'number'
+  const judgeUnmeteredCalls = typeof result.judgeUnmeteredCalls === 'number' && Number.isSafeInteger(result.judgeUnmeteredCalls)
     ? Math.max(0, Math.floor(result.judgeUnmeteredCalls))
     : 0;
   const merged = typeof result.merged === 'number' ? result.merged : 0;
