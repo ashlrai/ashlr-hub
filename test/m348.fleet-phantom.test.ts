@@ -383,6 +383,7 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(JSON.stringify(action)).not.toContain('/Users/masonwyatt/private/repo');
       expect(status.autonomousShipReadiness).toMatchObject({
         verdict: 'blocked',
+        confidence: 'low',
         topBlocker: {
           id: 'phantom-audit-risk',
           label: 'Phantom audit needs review',

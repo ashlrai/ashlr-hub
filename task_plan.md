@@ -2726,3 +2726,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a bounded test-local 30-second allowance without weakening receipt assertions or production behavior.
 - [x] Pass focused M342 coverage, typecheck, scoped lint, and diff integrity.
 - [ ] Require the complete protected CI matrix on PR #105 before promotion.
+
+## Fleet Readiness Source Completeness (2026-07-21)
+- [x] Classify readiness summaries containing a blocked operational source as low confidence.
+- [x] Cover the blocked Phantom-audit projection so a blocked verdict cannot claim high confidence.
+- [x] Pass focused Fleet-status coverage, typecheck, scoped lint, and diff integrity.
+- [ ] Require the complete protected CI matrix on PR #103 before promotion.

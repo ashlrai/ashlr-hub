@@ -5543,7 +5543,10 @@ function chooseReadinessBlocker(
 }
 
 function readinessConfidence(summary: Record<FleetReadinessSourceStatus, number>): FleetAutonomousShipReadinessConfidence {
-  if (summary.unavailable > 0 || summary.unknown > 0) return 'low';
+  // A blocked operational input is an explicit stop signal, so the Fleet OS
+  // must never present the aggregate as high-confidence even when every other
+  // source is fresh and healthy.
+  if (summary.blocked > 0 || summary.unavailable > 0 || summary.unknown > 0) return 'low';
   if (summary.degraded > 0) return 'medium';
   return 'high';
 }
