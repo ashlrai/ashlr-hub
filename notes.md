@@ -3327,3 +3327,9 @@
 - Fleet, Mission Control, the dashboard status panel, and CLI show this only as a repair observation. It does not enter ship readiness, mission briefs, strategy, queue selection, daemon dispatch, or any mutating API.
 - The authoritative repair-only path remains the independent complete reader plus daemon revalidation. Status snapshots are cached/display transport and cannot authorize work.
 - Verification: TypeScript typecheck, M49 Fleet Status plus M213 dashboard coverage (186 assertions), `node --check src/core/web/public/app.js`, and `git diff --check` pass locally. Protected CI remains the promotion gate.
+
+# Repair-Only Durable Attempt Authority (2026-07-21)
+- Complete pending verification-failure parents now mint a deterministic `proposal-repair-generation:v1` identity from the canonical repo, repair id, immutable proposal creation time, and depth-zero repair root. Partial and rejected-capture recovery retain their existing legacy generation behavior.
+- Repair-only dispatch now uses the durable generated-repair reservation, launch, settlement, and lifecycle path. A persisted launched reservation blocks redispatch after restart; queue-supplied generation metadata must equal the canonical parent-derived identity.
+- Failed repair outcomes can emit the same no-handoff generation lineage required for durable attempt receipts, so the reservation cannot become an unaccounted permanent in-flight state.
+- Verification: TypeScript typecheck; full M310 queue authority suite (59 assertions); focused M201 repair-only and reservation cases (5 assertions); and `git diff --check` pass locally. Protected CI remains the promotion gate.

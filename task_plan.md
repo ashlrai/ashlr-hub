@@ -3070,3 +3070,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep resource strategy and daemon selection on their independent complete-reader authority path.
 - [x] Verify Fleet Status/dashboard contracts, typecheck, browser-script syntax, and diff integrity.
 - [ ] Require protected CI on the immutable draft head before promotion.
+
+## Repair-Only Durable Attempt Authority (2026-07-21)
+- [x] Bind complete verified-failure repairs to a deterministic parent-derived generation identity.
+- [x] Require that identity during canonical queue authorization and lifecycle generation resolution.
+- [x] Route repair-only work through durable reservation, launch, settlement, and failed-attempt receipt paths.
+- [x] Preserve legacy partial/rejected repair behavior without an explicit generation identity.
+- [x] Verify complete queue authority plus focused repair-only/reservation daemon coverage.
+- [ ] Require protected CI on the immutable draft head before promotion.

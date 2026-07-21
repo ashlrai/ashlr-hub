@@ -23,6 +23,7 @@ import {
   isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
+  isTrustedProposalRepairItem,
 } from './self-heal-trust.js';
 import type { EngineId, EngineTier, Proposal, RepairTreatment, WorkItem } from '../types.js';
 import { listProposalsDetailed, loadProposal } from '../inbox/store.js';
@@ -498,11 +499,37 @@ function exactParentRowAliasGenerations(
   return right !== null;
 }
 
+function proposalRepairGenerationIdFromItem(item: WorkItem): string | null {
+  if (!isTrustedProposalRepairItem(item) || item.repairHandoffId !== undefined ||
+    item.repairDepth !== 0 || !SHA256_RE.test(item.repairRootId ?? '') ||
+    typeof item.repairRootAuthorityId !== 'string' || !item.repairRootAuthorityId) return null;
+  const ts = Date.parse(item.ts);
+  let repo: string;
+  try {
+    repo = resolve(item.repo);
+  } catch {
+    return null;
+  }
+  if (!Number.isFinite(ts)) return null;
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:proposal-repair-generation:v1',
+    repo,
+    item.id,
+    new Date(ts).toISOString(),
+    item.repairRootId,
+    item.repairRootAuthorityId,
+  ])).digest('hex');
+}
+
 function generatedRepairGenerationIdFromAuthority(
   item: WorkItem,
   authority: HandoffAuthoritySnapshot,
 ): string | null {
   if (!isTrustedGeneratedRepairItem(item)) return null;
+  if (isTrustedProposalRepairItem(item) && item.repairGenerationId !== undefined) {
+    const expected = proposalRepairGenerationIdFromItem(item);
+    return expected !== null && item.repairGenerationId === expected ? expected : null;
+  }
   if (item.repairHandoffId !== undefined || item.repairGenerationId !== undefined) {
     if (
       typeof item.repairHandoffId !== 'string' ||

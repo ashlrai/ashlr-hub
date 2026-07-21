@@ -110,6 +110,31 @@ export function proposalRepairRootIdentity(proposal: Proposal, repo: string): Ge
   return repairRootId ? { repairRootId, repairRootAuthorityId, repairDepth: 0 } : null;
 }
 
+/** Immutable generation identity for a depth-zero repair of one failed proposal. */
+export function proposalRepairGenerationId(
+  proposal: Pick<Proposal, 'id' | 'createdAt'>,
+  repo: string,
+  root: GeneratedRepairRootIdentity,
+): string | null {
+  const createdAtMs = Date.parse(proposal.createdAt);
+  let canonicalRepo: string;
+  try {
+    canonicalRepo = resolve(repo);
+  } catch {
+    return null;
+  }
+  if (!proposal.id || !Number.isFinite(createdAtMs) || root.repairDepth !== 0 ||
+    !SHA256_RE.test(root.repairRootId) || !root.repairRootAuthorityId) return null;
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:proposal-repair-generation:v1',
+    canonicalRepo,
+    proposalRepairId(canonicalRepo, proposal.id),
+    new Date(createdAtMs).toISOString(),
+    root.repairRootId,
+    root.repairRootAuthorityId,
+  ])).digest('hex');
+}
+
 function dispatchRepairRootIdentity(
   event: DispatchProductionEvent,
   repo: string,
@@ -524,6 +549,12 @@ export function proposalRepairWorkItem(
   if (!repo) return null;
   const root = proposalRepairRootIdentity(proposal, repo);
   if (!root) return null;
+  const verifiedFailureRepair = proposal.status === 'pending' &&
+    proposal.isPartial !== true && proposal.verifyResult?.passed === false;
+  const repairGenerationId = verifiedFailureRepair
+    ? proposalRepairGenerationId(proposal, repo, root)
+    : undefined;
+  if (verifiedFailureRepair && !repairGenerationId) return null;
 
   const title = bounded(proposal.title, MAX_TITLE) || proposal.id;
   const reason = repairReason(proposal);
@@ -554,6 +585,7 @@ export function proposalRepairWorkItem(
       ...(proposal.status === 'rejected' ? ['rejected-capture-recovery'] : []),
     ],
     ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
+    ...(repairGenerationId ? { repairGenerationId } : {}),
     ...root,
   };
 }
@@ -651,6 +683,7 @@ function sameCanonicalVerifiedFailureRepair(item: WorkItem, canonical: WorkItem)
     item.ts === canonical.ts &&
     item.repairRootId === canonical.repairRootId &&
     item.repairRootAuthorityId === canonical.repairRootAuthorityId &&
+    item.repairGenerationId === canonical.repairGenerationId &&
     item.repairDepth === canonical.repairDepth &&
     item.tags.length === canonical.tags.length &&
     item.tags.every((tag, index) => tag === canonical.tags[index]);

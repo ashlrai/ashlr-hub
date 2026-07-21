@@ -2372,10 +2372,11 @@ function dispatchProductionEventFromOutcome(
   const failureReservation = reservation;
   const diagnosticFailureLineage = generatedRepairDispatchLineage(value.item, trace.backend);
   const genericFailureLineage = isTrustedGeneratedRepairItem(value.item) &&
-    typeof value.item.repairHandoffId === 'string' &&
     typeof value.item.repairGenerationId === 'string'
     ? {
-        repairHandoffId: value.item.repairHandoffId,
+        ...(typeof value.item.repairHandoffId === 'string'
+          ? { repairHandoffId: value.item.repairHandoffId }
+          : {}),
         repairGenerationId: value.item.repairGenerationId,
       }
     : null;
@@ -4939,7 +4940,6 @@ export async function tick(
   };
   const generatedRepairReservations = new Map<string, GeneratedRepairExecutionReservation>();
   const settledGeneratedRepairReservationItemIds = new Set<string>();
-  const repairOnlyLaunchedItemKeys = new Set<string>();
   const releaseGeneratedRepairReservations = (): void => {
     for (const reservation of generatedRepairReservations.values()) {
       for (const lock of [...reservation.locks].reverse()) releaseLocalStoreLock(lock);
@@ -4952,7 +4952,6 @@ export async function tick(
     backend: EngineId,
     tier: EngineTier | null,
   ): boolean => {
-    if (repairOnlyDispatch) return isVerifiedFailureProposalRepairAuthorized(item);
     if (!isTrustedGeneratedRepairItem(item)) return true;
     const itemKey = workItemCoverageKey(item);
     if (generatedRepairReservations.has(itemKey)) return false;
@@ -4975,7 +4974,6 @@ export async function tick(
   };
   const settleGeneratedRepairExecution = (item: WorkItem): boolean => {
     const itemKey = workItemCoverageKey(item);
-    if (repairOnlyDispatch) return repairOnlyLaunchedItemKeys.delete(itemKey);
     const reservation = generatedRepairReservations.get(itemKey);
     if (!reservation) return false;
     if (!clearGeneratedRepairExecutionReservation(reservation)) return false;
@@ -4987,11 +4985,6 @@ export async function tick(
       ? beginVerifiedFailureProposalRepairDispatch(item, begin)
       : beginRejectedCaptureRecoveryDispatch(item, begin);
   const markGeneratedRepairExecutionLaunched = (item: WorkItem): boolean => {
-    if (repairOnlyDispatch) {
-      if (!isVerifiedFailureProposalRepairAuthorized(item)) return false;
-      repairOnlyLaunchedItemKeys.add(workItemCoverageKey(item));
-      return true;
-    }
     if (!isTrustedGeneratedRepairItem(item)) return true;
     const reservation = generatedRepairReservations.get(workItemCoverageKey(item));
     if (!reservation || reservation.record.phase !== 'prepared') return false;
@@ -6963,7 +6956,7 @@ export async function tick(
         }
         continue;
       }
-      if (!repairOnlyDispatch && !generatedRepairLifecycleSucceededItemKeys.has(itemKey)) {
+      if (!generatedRepairLifecycleSucceededItemKeys.has(itemKey)) {
         console.warn('[ashlr] daemon:tick generated repair lifecycle persistence incomplete');
         workedOutcomeFailedItemKeys.add(itemKey);
         continue;
