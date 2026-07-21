@@ -1422,6 +1422,19 @@ export interface AshlrConfig {
    * consensus stores and cannot provide execution authority.
    */
   fleet?: {
+    /**
+     * Deployment-neutral remote authority configuration. `probe` is only a
+     * future observation mode; it cannot enable recovery execution.
+     */
+    remoteCasAuthority?:
+      | { mode: 'off' }
+      | {
+          mode: 'probe';
+          provider: string;
+          endpoint: string;
+          audience: string;
+          authorityId: string;
+        };
     sharedQueue?: {
       /**
        * 'off'        — single-machine mode (default, no shared file).

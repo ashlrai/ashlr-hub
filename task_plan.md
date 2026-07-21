@@ -2616,6 +2616,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Re-read and compare the exact signed active transaction after replay, stage, and canonical-artifact observation so a concurrent valid phase advance cannot return a mixed-snapshot recovery action.
 - [x] Pass the complete protected CI matrix on immutable draft PR #75 head `3afd1a10`; keep recovery executor activation, merge, and deployment disabled.
 - [x] Surface the dormant recovery executor and its remote-CAS activation blocker in read-only Fleet Status without changing shipping readiness.
+- [x] Define a default-off, parse-only remote-CAS configuration contract that rejects credentials, non-HTTPS, local/private endpoints, and unbounded/malformed identifiers without any network or activation path.
 - [ ] Define and prove a remote authenticated compare-and-set authority with durable monotonic epochs before enabling staged-artifact installation under the global writer lock.
 - [ ] Add deterministic staged-artifact validation and installation under the global writer lock only after remote CAS authorization exists.
 - [ ] Prove all crash boundaries, tamper refusal, contention, idempotent restart, and read-only behavior before any writer integration.
