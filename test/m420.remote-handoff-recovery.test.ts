@@ -41,7 +41,8 @@ vi.mock('../src/core/foundry/provenance.js', () => ({
   verifyLocalMergeIntent: () => true,
 }));
 
-vi.mock('../src/core/autonomy/evidence-pack.js', () => ({
+vi.mock('../src/core/autonomy/evidence-pack.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/autonomy/evidence-pack.js')>()),
   readAutonomyEvidencePack: (...args: unknown[]) => readEvidenceMock(...args),
   verifyAutonomyEvidencePackV3: () => ({ ok: true, reason: 'valid signed evidence pack v3' }),
 }));
@@ -111,6 +112,9 @@ const BRANCH = 'ashlr/merge/prop-m420';
 const DIFF_HASH = 'c'.repeat(64);
 const EVIDENCE_SEAL = 'd'.repeat(64);
 const VERIFIED_AT = '2026-07-14T00:00:20.000Z';
+const BASE_TREE_OID = '4'.repeat(40);
+const CANDIDATE_TREE_OID = '5'.repeat(40);
+const AUTHORITY_SNAPSHOT_DIGEST = '6'.repeat(64);
 const RECOVERY_MARKER = '[ashlr-remote-handoff-retry:1]';
 const ORIGIN_A = {
   nameWithOwner: 'ashlrai/fixture',
@@ -159,6 +163,11 @@ function makeProposal(): Proposal {
       ran: [{ kind: 'test', required: true, passed: true, detail: 'passed' }],
       baseBranch: 'main',
       baseHead: 'b'.repeat(40),
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+      baseTreeOid: BASE_TREE_OID,
+      candidateTreeOid: CANDIDATE_TREE_OID,
+      authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
       diffHash: DIFF_HASH,
       verifiedAt: VERIFIED_AT,
       source: 'fresh',
@@ -219,6 +228,11 @@ beforeEach(() => {
       commandKinds: ['test'],
       baseBranch: 'main',
       baseHead: 'b'.repeat(40),
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+      baseTreeOid: BASE_TREE_OID,
+      candidateTreeOid: CANDIDATE_TREE_OID,
+      authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
       diffHash: DIFF_HASH,
       verifiedAt: VERIFIED_AT,
       source: 'fresh',
@@ -303,6 +317,31 @@ describe('M420 URL-less remote handoff recovery', () => {
         intentAttestation: 'f'.repeat(64),
       },
     };
+    execFileSyncMock.mockImplementation((file: string) => (
+      file === 'gh' ? '[]' : `${HEAD}\trefs/heads/${BRANCH}\n`
+    ));
+
+    expect(reconcileRemoteHandoffs()).toMatchObject({ checked: 1, unknown: 1 });
+    expect(proposal.status).toBe('awaiting-host-merge');
+    expect(setStatusMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['snapshotless proposal verification', () => {
+      delete proposal.verifyResult!.authoritySnapshotDigest;
+      delete proposal.verifyResult!.candidateTreeOid;
+      delete proposal.verifyResult!.baseTreeOid;
+      delete proposal.verifyResult!.verifierAuthorityObjectFormat;
+      delete proposal.verifyResult!.verifierAuthoritySnapshotVersion;
+    }],
+    ['stale authority digest', () => {
+      proposal.verifyResult!.authoritySnapshotDigest = '7'.repeat(64);
+    }],
+    ['malformed candidate tree identity', () => {
+      proposal.verifyResult!.candidateTreeOid = 'A'.repeat(40);
+    }],
+  ])('refuses %s from minting recovery authority', (_label, mutate) => {
+    mutate();
     execFileSyncMock.mockImplementation((file: string) => (
       file === 'gh' ? '[]' : `${HEAD}\trefs/heads/${BRANCH}\n`
     ));
