@@ -1,5 +1,10 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Deterministic Ubuntu CI Authority Shards (2026-07-21)
+- [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
+- [x] Partition the complete suite through Vitest's deterministic three-way file sharding.
+- [ ] Verify a representative hermetic shard invocation and require the protected matrix.
+
 ## Current Cycle - Verifier Contract Executable Portability
 - [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
 - [x] Reject path-bearing executable symlink escapes and Windows-only separators while preserving bare PATH tools and missing dependency shims.
