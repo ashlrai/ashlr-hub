@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -42,6 +44,19 @@ describe('daemon activity — observational private state', () => {
   function createActivityStorage(): void {
     mkdirSync(process.env['ASHLR_HOME']!, { mode: 0o700 });
     mkdirSync(daemonActivityDirectory(), { mode: 0o700 });
+  }
+
+  function stagingPath(
+    day: string,
+    index: number,
+    content: string,
+    suffix = '123e4567-e89b-42d3-a456-426614174001',
+  ): string {
+    const digest = createHash('sha256').update(content).digest('hex');
+    return join(
+      daemonActivityDirectory(),
+      `.activity-stage-${day}-${String(index).padStart(4, '0')}-${suffix}-${digest}.tmp`,
+    );
   }
 
   beforeEach(() => {
@@ -266,7 +281,7 @@ describe('daemon activity — observational private state', () => {
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:32.000Z') })).toMatchObject({
       sourceState: 'healthy',
       freshness: 'fresh',
-      phaseStartedAt: '2026-07-13T05:00:01.000Z',
+      phaseStartedAt: null,
       activity: { observedAt: '2026-07-13T05:00:31.000Z', phase: 'tick' },
     });
   });
@@ -341,5 +356,157 @@ describe('daemon activity — observational private state', () => {
       freshness: 'fresh',
       activity: { observedAt: '2026-07-13T05:00:08.000Z', phase: 'idle' },
     });
+  });
+
+  it('cleans an incomplete unpublished stage and retries rollover transactionally', () => {
+    createActivityStorage();
+    const legacyPath = daemonActivityPath('2026-07-13');
+    const saturated = `${Array.from({ length: 5_000 }, () =>
+      JSON.stringify(activityRow('2026-07-13T05:00:01.000Z'))).join('\n')}\n`;
+    writeFileSync(legacyPath, saturated, { mode: 0o600 });
+    const interruptedContent = '{"schemaVersion":1';
+    const interruptedStage = stagingPath('2026-07-13', 1, interruptedContent);
+    writeFileSync(interruptedStage, interruptedContent, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:31.000Z'),
+    })).toBe(true);
+
+    expect(existsSync(interruptedStage)).toBe(false);
+    expect(readFileSync(legacyPath, 'utf8').trim().split('\n')).toHaveLength(5_000);
+    expect(readFileSync(join(daemonActivityDirectory(), '2026-07-13.0001.jsonl'), 'utf8'))
+      .toContain('"observedAt":"2026-07-13T05:00:31.000Z"');
+    expect(readdirSync(daemonActivityDirectory()).some((name) => name.startsWith('.activity-'))).toBe(false);
+  });
+
+  it('finishes a valid published transaction before pruning and preserves the new row', () => {
+    createActivityStorage();
+    for (let index = 0; index < 8; index++) {
+      const name = index === 0
+        ? '2026-07-13.jsonl'
+        : `2026-07-13.${String(index).padStart(4, '0')}.jsonl`;
+      writeFileSync(
+        join(daemonActivityDirectory(), name),
+        `${JSON.stringify(activityRow(`2026-07-13T05:00:0${index}.000Z`, 'idle'))}\n`,
+        { mode: 0o600 },
+      );
+    }
+    const stagedRow = `${JSON.stringify(activityRow('2026-07-13T05:00:08.000Z', 'idle'))}\n`;
+    const stage = stagingPath('2026-07-13', 8, stagedRow);
+    const target = join(daemonActivityDirectory(), '2026-07-13.0008.jsonl');
+    writeFileSync(stage, stagedRow, { mode: 0o600 });
+    linkSync(stage, target);
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:09.000Z'),
+    })).toBe(true);
+
+    const partitions = readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl')).sort();
+    expect(partitions).toHaveLength(8);
+    expect(partitions).not.toContain('2026-07-13.jsonl');
+    expect(existsSync(stage)).toBe(false);
+    expect(lstatSync(target).nlink).toBe(1);
+    expect(readFileSync(target, 'utf8').trim().split('\n')).toHaveLength(2);
+  });
+
+  it('never accepts or removes a partial published segment', () => {
+    createActivityStorage();
+    writeFileSync(
+      daemonActivityPath('2026-07-13'),
+      `${JSON.stringify(activityRow('2026-07-13T05:00:01.000Z'))}\n`,
+      { mode: 0o600 },
+    );
+    const partialRow = '{"schemaVersion":1';
+    const stage = stagingPath('2026-07-13', 1, partialRow);
+    const target = join(daemonActivityDirectory(), '2026-07-13.0001.jsonl');
+    writeFileSync(stage, partialRow, { mode: 0o600 });
+    linkSync(stage, target);
+
+    expect(readDaemonActivity().sourceState).toBe('degraded');
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:31.000Z'),
+    })).toBe(false);
+    expect(existsSync(stage)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+    expect(lstatSync(target).nlink).toBe(2);
+  });
+
+  it('finishes cleanup after a crash leaves a verified deletion tombstone', () => {
+    createActivityStorage();
+    const tombstone = join(
+      daemonActivityDirectory(),
+      '.activity-delete-123e4567-e89b-42d3-a456-426614174002.tmp',
+    );
+    writeFileSync(tombstone, `${JSON.stringify(activityRow('2026-07-13T05:00:00.000Z'))}\n`, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+    })).toBe(true);
+    expect(existsSync(tombstone)).toBe(false);
+    expect(readdirSync(daemonActivityDirectory()).some((name) => name.startsWith('.activity-delete-'))).toBe(false);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'healthy',
+      activity: { observedAt: '2026-07-13T05:00:01.000Z' },
+    });
+  });
+
+  it('rejects internal segment gaps while allowing a pruned leading suffix', () => {
+    createActivityStorage();
+    writeFileSync(
+      daemonActivityPath('2026-07-13'),
+      `${JSON.stringify(activityRow('2026-07-13T05:00:01.000Z'))}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(daemonActivityDirectory(), '2026-07-13.0002.jsonl'),
+      `${JSON.stringify(activityRow('2026-07-13T05:00:02.000Z'))}\n`,
+      { mode: 0o600 },
+    );
+    expect(readDaemonActivity().sourceState).toBe('degraded');
+
+    rmSync(daemonActivityPath('2026-07-13'));
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:03.000Z') })).toMatchObject({
+      sourceState: 'healthy',
+      activity: { observedAt: '2026-07-13T05:00:02.000Z' },
+    });
+  });
+
+  it('bounds reverse JSON parsing and degrades corruption inside the relevant tail', () => {
+    createActivityStorage();
+    const validRows = Array.from({ length: 599 }, (_, index) => JSON.stringify(activityRow(
+      `2026-07-13T05:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+      'idle',
+    )));
+    writeFileSync(
+      daemonActivityPath('2026-07-13'),
+      `${['{"truncated":true}', ...validRows].join('\n')}\n`,
+      { mode: 0o600 },
+    );
+
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:10:00.000Z') })).toMatchObject({
+      sourceState: 'healthy',
+      phaseStartedAt: null,
+      activity: { observedAt: '2026-07-13T05:09:58.000Z' },
+    });
+
+    validRows[validRows.length - 10] = '{"truncated":true}';
+    writeFileSync(
+      daemonActivityPath('2026-07-13'),
+      `${['{"truncated":true}', ...validRows].join('\n')}\n`,
+      { mode: 0o600 },
+    );
+    expect(readDaemonActivity().sourceState).toBe('degraded');
   });
 });
