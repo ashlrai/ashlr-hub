@@ -2716,3 +2716,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bind dispatch-production evidence freshness to a bounded full-history observation, independent of rolling yield analytics.
 - [x] Bind Best-of-N and concurrent dispatch-intent freshness to bounded full-history observations with stale-source regressions.
 - [ ] Publish and require the protected CI matrix before release.
+
+## Post-Merge Forensic Evidence Freshness (2026-07-21)
+- [x] Add a read-only bounded helper that combines only validated adverse `observedAt` and released stability-witness `stableAt` values.
+- [x] Withhold `latestAt` whenever either bounded source is degraded or incomplete; missing readable sources remain an explicit no-observation state.
+- [x] Return aggregate source-quality metadata only, without raw observations, witnesses, repository paths, verification digests, or merge authority.
+- [x] Cover newest-valid-time selection, empty readable sources, and degradation of each source; pass focused Vitest, typecheck, lint, and diff checks.
