@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, readlinkSync } from 'node:fs';
-import { isAbsolute, join, posix, win32 } from 'node:path';
+import { isAbsolute, join, posix, relative, resolve, win32 } from 'node:path';
+import { repoAuthorityFilePathError } from './repo-profile.js';
 import type { VerifyCommand, VerifyCommandKind, VerifyCommandProfile } from './verify-commands.js';
 
 const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
@@ -54,6 +55,7 @@ export type VerifierAuthorityFailureCode =
   | 'contract-invalid-mode'
   | 'contract-missing-authority-files'
   | 'contract-invalid-authority-file'
+  | 'contract-missing-direct-argv-authority'
   | 'contract-missing-required-merge-command'
   | 'invalid-merge-command'
   | 'authority-entry-missing'
@@ -63,6 +65,7 @@ export type VerifierAuthorityFailureCode =
   | 'authority-entry-changed'
   | 'authority-worktree-missing'
   | 'authority-worktree-not-regular'
+  | 'authority-worktree-symlink-component'
   | 'authority-index-mismatch'
   | 'authority-worktree-changed'
   | 'candidate-index-changed'
@@ -285,7 +288,18 @@ function normalizedCommandCwd(cwd: string | undefined): string | null {
   return isNormalizedAuthorityPath(cwd) ? cwd : null;
 }
 
+function canonicalCommandCwd(repoRoot: string, cwd: string | undefined): string | null {
+  const root = resolve(repoRoot);
+  const resolved = resolve(root, cwd ?? '.');
+  const rel = relative(root, resolved);
+  if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) return null;
+  if (rel === '') return '.';
+  const portable = rel.replace(/\\/g, '/');
+  return posix.normalize(portable) === portable ? portable : null;
+}
+
 function canonicalizeMergeCommands(
+  repoRoot: string,
   commands: readonly VerifyCommand[],
 ): CanonicalMergeVerifyCommand[] | VerifierAuthorityFailure {
   if (commands.length === 0 || !commands.some((command) => command.required !== false)) {
@@ -293,7 +307,7 @@ function canonicalizeMergeCommands(
   }
   const canonical: CanonicalMergeVerifyCommand[] = [];
   for (const command of commands) {
-    const cwd = normalizedCommandCwd(command.cwd);
+    const cwd = canonicalCommandCwd(repoRoot, command.cwd);
     const profiles = command.profiles ?? [];
     const valid = VERIFY_COMMAND_KINDS.has(command.kind)
       && Array.isArray(command.cmd)
@@ -320,6 +334,46 @@ function canonicalizeMergeCommands(
     });
   }
   return canonical;
+}
+
+function directRepoArgvInputs(
+  repoRoot: string,
+  baseTreeOid: string,
+  commands: readonly CanonicalMergeVerifyCommand[],
+): string[] | VerifierAuthorityFailure {
+  const root = resolve(repoRoot);
+  const inputs = new Set<string>();
+
+  for (const command of commands) {
+    const commandRoot = resolve(root, command.cwd === '.' ? '' : command.cwd);
+    for (const [index, token] of command.cmd.entries()) {
+      const pathBearingExecutable = index === 0
+        && (token.includes('/') || isAbsolute(token) || win32.isAbsolute(token));
+      if (index === 0 && !pathBearingExecutable) continue;
+      if (index > 0 && token.startsWith('-')) continue;
+
+      const resolved = resolve(commandRoot, token);
+      const rel = relative(root, resolved);
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+        if (pathBearingExecutable) {
+          return failure('invalid-merge-command', 'repo-path verifier executable must stay inside the repository');
+        }
+        continue;
+      }
+      const repoPath = rel.replace(/\\/g, '/');
+      const entry = readTreeEntry(repoRoot, baseTreeOid, repoPath);
+      if (!entry) continue;
+      if (entry.type !== 'blob' || (entry.mode !== '100644' && entry.mode !== '100755')) {
+        if (pathBearingExecutable) {
+          return failure('invalid-merge-command', `repo-path verifier executable '${boundedPath(repoPath)}' is not a regular Git file`);
+        }
+        continue;
+      }
+      inputs.add(repoPath);
+    }
+  }
+
+  return [...inputs].sort();
 }
 
 function isFailure(value: unknown): value is VerifierAuthorityFailure {
@@ -392,8 +446,21 @@ export function captureVerifierAuthoritySnapshot(
   if (!contractRaw) return failure('git-unavailable', 'verifier contract blob could not be read');
   const contract = parseAuthorityContract(contractRaw);
   if (isFailure(contract)) return contract;
-  const mergeCommands = canonicalizeMergeCommands(options.mergeCommands);
+  const mergeCommands = canonicalizeMergeCommands(options.repoRoot, options.mergeCommands);
   if (isFailure(mergeCommands)) return mergeCommands;
+  // This binds only exact argv tokens. Package scripts, PATH tools, imports,
+  // plugins, dependency graphs, and discovered configuration remain outside
+  // this snapshot's proof boundary.
+  const directInputs = directRepoArgvInputs(options.repoRoot, baseTreeOid, mergeCommands);
+  if (isFailure(directInputs)) return directInputs;
+  const declaredAuthority = new Set(contract.authorityFiles);
+  const missingDirectInputs = directInputs.filter((path) => !declaredAuthority.has(path));
+  if (missingDirectInputs.length > 0) {
+    return failure(
+      'contract-missing-direct-argv-authority',
+      `verifier authorityFiles omits direct argv input '${boundedPath(missingDirectInputs[0]!)}'`,
+    );
+  }
 
   const authorityPaths = [...new Set([VERIFY_CONTRACT_FILE, ...contract.authorityFiles])].sort();
   const authorityEntries: VerifierAuthorityEntry[] = [];
@@ -472,6 +539,19 @@ export function compareVerifierAuthorityWorktree(
     const indexEntry = readIndexEntry(options.repoRoot, expected.path);
     if (!indexEntry || indexEntry.mode !== expected.mode || indexEntry.oid !== expected.blobOid) {
       return failure('authority-index-mismatch', `authority file '${boundedPath(expected.path)}' differs in the Git index`);
+    }
+    const topologyError = repoAuthorityFilePathError(options.repoRoot, expected.path);
+    if (topologyError?.issue === 'symlink-component') {
+      return failure(
+        'authority-worktree-symlink-component',
+        `authority file '${boundedPath(expected.path)}' traverses symlink or junction component '${boundedPath(topologyError.path)}'`,
+      );
+    }
+    if (topologyError?.issue === 'missing') {
+      return failure('authority-worktree-missing', `authority file '${boundedPath(expected.path)}' is missing from the worktree`);
+    }
+    if (topologyError) {
+      return failure('authority-worktree-not-regular', `authority file '${boundedPath(expected.path)}' is not a regular worktree file`);
     }
     let stat;
     try {

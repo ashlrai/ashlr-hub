@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -72,6 +72,14 @@ function capture(repo: string): VerifierAuthoritySnapshotV1 {
   expect(result).toMatchObject({ ok: true });
   if (!result.ok) throw new Error(result.reason);
   return result.snapshot;
+}
+
+function captureWithCommands(repo: string, mergeCommands: VerifyCommand[]) {
+  return captureVerifierAuthoritySnapshot({
+    repoRoot: repo,
+    baseRevision: 'HEAD',
+    mergeCommands,
+  });
 }
 
 describe('verifier Git authority', () => {
@@ -172,6 +180,88 @@ describe('verifier Git authority', () => {
     }
   });
 
+  it('requires directly named tracked argv inputs to be explicitly declared authority', () => {
+    const repo = makeRepo();
+    try {
+      mkdirSync(join(repo, 'tests'), { recursive: true });
+      writeFileSync(join(repo, 'tests', 'verify.test.js'), 'process.exit(0);\n', 'utf8');
+      const commands: VerifyCommand[] = [{
+        id: 'direct-test',
+        kind: 'test',
+        cmd: ['node', 'tests/verify.test.js'],
+        cwd: '.',
+        required: true,
+        profiles: ['merge'],
+      }];
+      writeContract(repo, {
+        authorityFiles: ['package.json'],
+        commands: [{
+          id: 'direct-test',
+          kind: 'test',
+          cmd: ['node', 'tests/verify.test.js'],
+          required: true,
+          profiles: ['merge'],
+        }],
+      });
+      git(repo, ['add', '.']);
+      git(repo, ['commit', '-qm', 'add direct verifier input']);
+
+      expect(captureWithCommands(repo, commands)).toMatchObject({
+        ok: false,
+        code: 'contract-missing-direct-argv-authority',
+      });
+
+      writeContract(repo, { authorityFiles: ['package.json', 'tests/verify.test.js'] });
+      git(repo, ['add', 'ashlr.verify.json']);
+      git(repo, ['commit', '-qm', 'declare direct verifier input']);
+      const captured = captureWithCommands(repo, commands);
+      expect(captured).toMatchObject({ ok: true });
+      if (!captured.ok) throw new Error(captured.reason);
+      expect(captured.snapshot.authorityEntries.map((entry) => entry.path)).toContain('tests/verify.test.js');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes contained absolute command cwd to portable repo-relative identity', () => {
+    const repo = makeRepo();
+    try {
+      const nested = join(repo, 'apps', 'web');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, 'verify.mjs'), 'process.exit(0);\n', 'utf8');
+      writeContract(repo, {
+        authorityFiles: ['package.json', 'scripts/verify.mjs', 'apps/web/verify.mjs'],
+        commands: [{
+          id: 'nested-test',
+          kind: 'test',
+          cmd: ['node', 'verify.mjs'],
+          cwd: 'apps/web',
+          required: true,
+          profiles: ['merge'],
+        }],
+      });
+      git(repo, ['add', '.']);
+      git(repo, ['commit', '-qm', 'add nested verifier']);
+
+      const command = {
+        id: 'nested-test',
+        kind: 'test' as const,
+        cmd: ['node', 'verify.mjs'],
+        required: true,
+        profiles: ['merge' as const],
+      };
+      const absolute = captureWithCommands(repo, [{ ...command, cwd: nested }]);
+      const relative = captureWithCommands(repo, [{ ...command, cwd: 'apps/web' }]);
+      expect(absolute).toMatchObject({ ok: true });
+      expect(relative).toMatchObject({ ok: true });
+      if (!absolute.ok || !relative.ok) throw new Error('nested authority capture failed');
+      expect(absolute.snapshot).toEqual(relative.snapshot);
+      expect(absolute.snapshot.mergeCommands[0]?.cwd).toBe('apps/web');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it('refuses symlink and gitlink authority entries', () => {
     const repo = makeRepo();
     try {
@@ -238,6 +328,30 @@ describe('verifier Git authority', () => {
       })).toMatchObject({ ok: true, checkedEntryCount: 3, candidateTreeOid: sourceTree });
       expect(compareVerifierAuthorityWorktree({ repoRoot: repo, snapshot }))
         .toEqual({ ok: true, checkedEntryCount: 3 });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a live authority file reached through a symlinked parent component', () => {
+    const repo = makeRepo();
+    try {
+      const snapshot = capture(repo);
+      renameSync(join(repo, 'scripts'), join(repo, 'scripts-real'));
+      try {
+        symlinkSync(
+          join(repo, 'scripts-real'),
+          join(repo, 'scripts'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch {
+        return;
+      }
+
+      expect(compareVerifierAuthorityWorktree({ repoRoot: repo, snapshot })).toMatchObject({
+        ok: false,
+        code: 'authority-worktree-symlink-component',
+      });
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
