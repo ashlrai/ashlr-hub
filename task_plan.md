@@ -1961,3 +1961,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused scheduler, status, lifecycle, and repo-map verification.
 - [x] Pass exhaustive verification and independent adversarial review.
 - [ ] Commit, push, observe CI, and deploy exact green source after the active lease clears naturally.
+
+## Evidence Verifier-Control Fence (2026-07-21)
+- [x] Identify verifier-control configuration as a judge-free trust boundary.
+- [x] Refuse TypeScript, JavaScript test/lint, Python, Rust, and Ruby verifier-control diffs in evidence mode.
+- [x] Verify the evidence gate suite, TypeScript typecheck, and diff integrity.
+- [ ] Require protected CI before promotion.

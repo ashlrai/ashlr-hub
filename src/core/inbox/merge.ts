@@ -381,8 +381,28 @@ function isBuildOrCiOrManifest(p: string): boolean {
     b === '.gitlab-ci.yml' ||
     b === '.npmrc' ||
     b === '.yarnrc' ||
+    b === 'pyproject.toml' ||
+    b === 'pytest.ini' ||
+    b === 'tox.ini' ||
+    b === 'setup.cfg' ||
+    b === 'cargo.toml' ||
+    b === 'cargo.lock' ||
+    b === 'gemfile' ||
+    b === 'gemfile.lock' ||
     b === 'makefile' ||
     b === 'dockerfile'
+  ) {
+    return true;
+  }
+  // Test, typecheck, and lint configuration can weaken an otherwise unchanged
+  // verifier command once the candidate diff is applied.
+  if (
+    b === 'tsconfig.json' ||
+    b.startsWith('tsconfig.') ||
+    b.startsWith('vitest.config.') ||
+    b.startsWith('jest.config.') ||
+    b.startsWith('eslint.config.') ||
+    b.startsWith('.eslintrc')
   ) {
     return true;
   }

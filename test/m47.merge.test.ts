@@ -204,9 +204,9 @@ describe('M47 classifyRisk', () => {
     expect(classifyRisk(p)).toBe('medium');
   });
 
-  it('config *.json change → medium', () => {
+  it('TypeScript verifier config change → high', () => {
     const p = makeProposal({ diff: addFileDiff('tsconfig.app.json', '{ "x": 1 }') });
-    expect(classifyRisk(p)).toBe('medium');
+    expect(classifyRisk(p)).toBe('high');
   });
 
   it('auth/security source path → high', () => {

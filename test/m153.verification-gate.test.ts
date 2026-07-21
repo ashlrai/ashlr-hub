@@ -879,6 +879,37 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     ).toMatch(/build\/CI\/manifest/);
   });
 
+  it('[E8c] verifier-control configuration is refused by evidence preflight', () => {
+    for (const path of [
+      'vitest.config.ts',
+      'tsconfig.build.json',
+      'pyproject.toml',
+      'pytest.ini',
+      'tox.ini',
+      'setup.cfg',
+      'Cargo.toml',
+      'Gemfile',
+    ]) {
+      const diff = [
+        `diff --git a/${path} b/${path}`,
+        `--- a/${path}`,
+        `+++ b/${path}`,
+        '@@ -1 +1 @@',
+        '-strict = true',
+        '+strict = false',
+        '',
+      ].join('\n');
+
+      const result = evaluateEvidenceAutoMergePreflight(
+        evidenceProposal(`e8c-${path.replace(/[^a-z0-9]/gi, '-')}`, diff),
+        evidenceCfg(),
+        { remoteAvailable: true },
+      );
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toMatch(/build\/CI\/manifest/);
+    }
+  });
+
   it('[E9] evidence mode refuses self-target activation even when allowSelfMerge is true', () => {
     const r = evaluateEvidenceAutoMergePreflight(
       evidenceProposal('e9'),
