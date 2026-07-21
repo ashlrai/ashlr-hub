@@ -5130,6 +5130,54 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     ]);
   });
 
+  it('A1h5b-disabled: ordinary outcomes bypass repair handoff authority when proposal repair is disabled', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    fs.mkdirSync(repairHandoffJournalPath(), { recursive: true });
+    mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff' as const,
+        reason: 'proposal repair disabled live recovery fixture',
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+      },
+    }));
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { proposalRepair: false },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(fs.statSync(repairHandoffJournalPath()).isDirectory()).toBe(true);
+    expect(readDispatchProductionEvents().find((event) => event.itemId === item.id)).toMatchObject({
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    });
+    expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
+      itemId: item.id,
+      outcome: 'empty',
+    }));
+  });
+
+  it('A1h5b-disabled-authority: canonical dispatch persistence remains mandatory', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    fs.mkdirSync(join(dispatchProductionDir(), `${today()}.jsonl`), { recursive: true });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { proposalRepair: false },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(loadWorkedLedger().events.some((event) => event.itemId === item.id)).toBe(false);
+  });
+
   it('A1h5b1: generated repair success becomes terminal only when its proposal exists durably', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

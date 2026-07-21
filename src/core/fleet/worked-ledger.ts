@@ -31,6 +31,12 @@ import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import type { WorkItem } from '../types.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { scrubSecrets } from '../util/scrub.js';
+import {
+  readDispatchProductionParents,
+  type DispatchProductionParentIdentity,
+} from './dispatch-production-ledger.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,6 +88,29 @@ export interface WorkedEvent {
 export interface WorkedLedger {
   /** Bounded list of recent outcome events (oldest first). */
   events: WorkedEvent[];
+}
+
+export type WorkedOutcomeReplayResult =
+  | 'recorded'
+  | 'already-recorded'
+  | 'dispatch-receipt-unavailable'
+  | 'invalid'
+  | 'persistence-failed';
+
+export interface WorkedOutcomeReplay {
+  itemId: string;
+  outcome: WorkedOutcome;
+  dispatchReceipt: DispatchProductionParentIdentity;
+}
+
+interface WorkedLedgerTestHooks {
+  afterReplayLoad?: () => void;
+}
+
+let workedLedgerTestHooks: WorkedLedgerTestHooks | undefined;
+
+export function _setWorkedLedgerHooksForTest(hooks: WorkedLedgerTestHooks | undefined): void {
+  workedLedgerTestHooks = hooks;
 }
 
 export function isWorkedOutcome(outcome: unknown): outcome is WorkedOutcome {
@@ -159,6 +188,9 @@ export function loadWorkedLedger(): WorkedLedger {
             outcome: e.outcome,
             ts: e.ts,
             ...(typeof raw['proposalId'] === 'string' ? { proposalId: raw['proposalId'] } : {}),
+            ...(typeof raw['claimCompletionId'] === 'string'
+              ? { claimCompletionId: raw['claimCompletionId'] }
+              : {}),
           };
         })
       : [];
@@ -208,6 +240,88 @@ function saveWorkedLedger(l: WorkedLedger): boolean {
   }
 }
 
+function strictWorkedLedgerForReplay(): WorkedLedger | null {
+  const path = workedLedgerPath();
+  if (!existsSync(path)) return freshLedger();
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const ledgerRecord = parsed as Record<string, unknown>;
+    if (Object.keys(ledgerRecord).some((key) => key !== 'events') ||
+      !Array.isArray(ledgerRecord['events'])) return null;
+    const events = ledgerRecord['events'] as unknown[];
+    if (events.length > MAX_EVENTS) return null;
+    for (const event of events) {
+      if (typeof event !== 'object' || event === null || Array.isArray(event)) return null;
+      const record = event as Record<string, unknown>;
+      if (Object.keys(record).some((key) =>
+        key !== 'itemId' && key !== 'outcome' && key !== 'ts' &&
+        key !== 'proposalId' && key !== 'claimCompletionId') ||
+        typeof record['itemId'] !== 'string' || typeof record['ts'] !== 'string' ||
+        !isWorkedOutcome(record['outcome']) ||
+        (record['proposalId'] !== undefined && typeof record['proposalId'] !== 'string') ||
+        (record['claimCompletionId'] !== undefined && typeof record['claimCompletionId'] !== 'string')) {
+        return null;
+      }
+    }
+    return { events: events as WorkedEvent[] };
+  } catch {
+    return null;
+  }
+}
+
+function expectedWorkedOutcomeForDispatch(outcome: string): WorkedOutcome | null {
+  if (outcome === 'proposal-created') return 'diff';
+  if (outcome === 'empty-diff' || outcome === 'gate-blocked' ||
+    outcome === 'engine-failed' || outcome === 'sandbox-failed' ||
+    outcome === 'proposal-capture-error' || outcome === 'unknown') return 'empty';
+  return null;
+}
+
+/**
+ * Replay a worked outcome only after its immutable dispatch receipt is proven.
+ * The receipt timestamp is the replay timestamp. The operation is idempotent
+ * by item timestamp and never rewrites on an unreadable ledger or when an
+ * equal/newer outcome already exists.
+ */
+export function replayWorkedOutcomeAfterDispatchReceipt(
+  input: WorkedOutcomeReplay,
+): WorkedOutcomeReplayResult {
+  const receipt = input.dispatchReceipt;
+  if (Object.keys(input).some((key) =>
+    key !== 'itemId' && key !== 'outcome' && key !== 'dispatchReceipt') ||
+    !isWorkedOutcome(input.outcome) ||
+    input.itemId.length === 0 || input.itemId.length > 240 || input.itemId.trim() !== input.itemId ||
+    scrubSecrets(input.itemId) !== input.itemId || input.itemId !== receipt.itemId ||
+    expectedWorkedOutcomeForDispatch(receipt.outcome) !== input.outcome) return 'invalid';
+  if (readDispatchProductionParents([receipt])[0] !== 'found') {
+    return 'dispatch-receipt-unavailable';
+  }
+  const lock = acquireLocalStoreLock(`${workedLedgerPath()}.lock`, 2_000, {
+    anchorPath: homedir(),
+    exactPrivateStorage: true,
+  });
+  if (!lock) return 'persistence-failed';
+  try {
+    const ledger = strictWorkedLedgerForReplay();
+    if (ledger === null) return 'persistence-failed';
+    workedLedgerTestHooks?.afterReplayLoad?.();
+    const candidateMs = Date.parse(receipt.ts);
+    for (const event of ledger.events) {
+      if (event.itemId !== input.itemId) continue;
+      const eventMs = Date.parse(event.ts);
+      if (!Number.isFinite(eventMs)) return 'persistence-failed';
+      if (eventMs >= candidateMs) return 'already-recorded';
+    }
+    ledger.events.push({ itemId: input.itemId, outcome: input.outcome, ts: receipt.ts });
+    return saveWorkedLedger(ledger) ? 'recorded' : 'persistence-failed';
+  } catch {
+    return 'persistence-failed';
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Record an outcome
 // ---------------------------------------------------------------------------
@@ -233,6 +347,11 @@ function recordOutcomeEvent(
   ts?: string,
   proposalId?: string,
 ): boolean {
+  const lock = acquireLocalStoreLock(`${workedLedgerPath()}.lock`, 2_000, {
+    anchorPath: homedir(),
+    exactPrivateStorage: true,
+  });
+  if (!lock) return false;
   try {
     const l = loadWorkedLedger();
     l.events.push({
@@ -245,6 +364,8 @@ function recordOutcomeEvent(
   } catch {
     // Never throws.
     return false;
+  } finally {
+    releaseLocalStoreLock(lock);
   }
 }
 
