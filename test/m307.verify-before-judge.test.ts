@@ -75,7 +75,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => []),
-  recordDecision: vi.fn(),
+  recordDecision: vi.fn(() => true),
 }));
 
 vi.mock('../src/core/integrations/fleet-pulse-emit.js', () => ({
