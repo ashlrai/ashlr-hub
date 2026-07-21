@@ -11,11 +11,12 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fsyncSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -24,6 +25,7 @@ import {
   readSync,
   writeSync,
 } from 'node:fs';
+import { fsyncDirectory } from '../util/durability.js';
 import type { DecisionEntry } from '../types.js';
 import { normalizeDecisionLearningFields } from '../learning/causal.js';
 import {
@@ -115,8 +117,21 @@ function isDecisionAction(value: unknown): value is DecisionEntry['action'] {
   return typeof value === 'string' && DECISION_ACTIONS.has(value as DecisionEntry['action']);
 }
 
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nonNegativeSafeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function hasValidAccountingTelemetry(value: Record<string, unknown>): boolean {
+  return (
+    (value['costUsd'] === undefined || nonNegativeFiniteNumber(value['costUsd']) !== undefined) &&
+    (value['tokensIn'] === undefined || nonNegativeSafeInteger(value['tokensIn']) !== undefined) &&
+    (value['tokensOut'] === undefined || nonNegativeSafeInteger(value['tokensOut']) !== undefined) &&
+    (value['durationMs'] === undefined || nonNegativeSafeInteger(value['durationMs']) !== undefined)
+  );
 }
 
 function optionalBoolean(value: unknown): boolean | undefined {
@@ -195,10 +210,10 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
       ? { judgeAttestationIssuedAt: optionalScrubbedText(entry.judgeAttestationIssuedAt) }
       : {}),
     ...(entry.judgeAttestationIntent === 'would-merge' ? { judgeAttestationIntent: 'would-merge' } : {}),
-    ...(finiteNumber(entry.costUsd) !== undefined ? { costUsd: finiteNumber(entry.costUsd) } : {}),
-    ...(finiteNumber(entry.tokensIn) !== undefined ? { tokensIn: finiteNumber(entry.tokensIn) } : {}),
-    ...(finiteNumber(entry.tokensOut) !== undefined ? { tokensOut: finiteNumber(entry.tokensOut) } : {}),
-    ...(finiteNumber(entry.durationMs) !== undefined ? { durationMs: finiteNumber(entry.durationMs) } : {}),
+    ...(nonNegativeFiniteNumber(entry.costUsd) !== undefined ? { costUsd: nonNegativeFiniteNumber(entry.costUsd) } : {}),
+    ...(nonNegativeSafeInteger(entry.tokensIn) !== undefined ? { tokensIn: nonNegativeSafeInteger(entry.tokensIn) } : {}),
+    ...(nonNegativeSafeInteger(entry.tokensOut) !== undefined ? { tokensOut: nonNegativeSafeInteger(entry.tokensOut) } : {}),
+    ...(nonNegativeSafeInteger(entry.durationMs) !== undefined ? { durationMs: nonNegativeSafeInteger(entry.durationMs) } : {}),
     ...(optionalBoolean(entry.cacheHit) !== undefined ? { cacheHit: optionalBoolean(entry.cacheHit) } : {}),
   };
   return normalizeDecisionLearningFields(clean);
@@ -214,28 +229,29 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  *
  * Append-only. Never throws.
  */
-export function recordDecision(entry: DecisionEntry): void {
+export function recordDecision(entry: DecisionEntry): boolean {
   try {
     const record = sanitizeDecisionEntry(entry, true);
     // Reserved positive authority must come from the future proof-bound release
     // writer, never this generic operational ledger API. Check the immutable
     // sanitized snapshot so stateful getters cannot change values after guard.
-    if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return;
+    if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return false;
     const dir = decisionsDir();
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
     const line = JSON.stringify(record) + '\n';
-    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
+    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
-    appendDecisionLine(filePath, line);
+    return appendDecisionLine(filePath, line);
   } catch {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
+    return false;
   }
 }
 
-function appendDecisionLine(path: string, line: string): void {
+function appendDecisionLine(path: string, line: string): boolean {
   let fd: number | undefined;
   try {
     let pathBefore: ReturnType<typeof lstatSync> | undefined;
@@ -264,10 +280,13 @@ function appendDecisionLine(path: string, line: string): void {
       if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
     }
     writeAll(fd, Buffer.from(line, 'utf8'));
+    fsyncSync(fd);
     const pathAfter = lstatSync(path);
     if (!isSafeDecisionAuthorityFile(pathAfter) || !sameFile(opened, pathAfter)) {
       throw new Error('decisions ledger path changed during append');
     }
+    fsyncDirectory(dirname(path));
+    return true;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -533,6 +552,10 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
               typeof obj['action'] === 'string'
             ) {
               if (!isDecisionAction(obj['action'])) {
+                result.invalidRows++;
+                continue;
+              }
+              if (!hasValidAccountingTelemetry(obj)) {
                 result.invalidRows++;
                 continue;
               }

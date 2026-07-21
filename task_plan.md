@@ -2787,7 +2787,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose complete versus sampled state without adding authority or raw payloads.
 - [x] Run focused, integration, isolated regression, typecheck, build, lint, and diff verification.
 - [ ] Publish as a protected draft PR and require fresh platform CI.
-
 ## Current Overnight Cycle - Trajectory Metadata Integrity (2026-07-21)
 - [x] Audit causal metadata and agent-action trajectory reconstruction boundaries without overlapping active verifier, daemon, trajectory-record, or proposal-authority PRs.
 - [x] Enforce exact carrier and nested run-summary identity agreement at writer and persisted-reader boundaries.
@@ -2809,3 +2808,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate the hosted-Windows timeout to M342's 2,048-artifact crash-recovery stress fixture.
 - [x] Retain the 60-second POSIX deadline and add a bounded 120-second Windows allowance.
 - [ ] Require a refreshed protected Windows matrix before promotion.
+
+## Measured Judge Spend Foundation (2026-07-21)
+- [x] Audit judge fallback/retry accounting, inline decision provenance, and daemon maintenance return paths.
+- [x] Make decision-ledger persistence observable to authority callers and durable before success is returned.
+- [x] Reject malformed accounting telemetry at both write sanitization and complete source reads.
+- [x] Pass focused ledger coverage, typecheck, and diff integrity.
+- [ ] Add per-invocation measured/unmetered judge receipts and actual-responder attribution.
+- [ ] Charge only measured receipts once through every daemon maintenance return path.

@@ -524,7 +524,7 @@ describe('m119 decisions-ledger', () => {
   it('recordDecision + readDecisions round-trips a basic entry', async () => {
     const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
 
-    recordDecision({
+    expect(recordDecision({
       ts: new Date().toISOString(),
       proposalId: 'prop-test-001',
       action: 'merged',
@@ -532,7 +532,7 @@ describe('m119 decisions-ledger', () => {
       model: 'codex:gpt-5.5',
       verdict: 'approved',
       reason: 'looks good',
-    });
+    })).toBe(true);
 
     const entries = readDecisions();
     expect(entries.length).toBe(1);
@@ -540,6 +540,46 @@ describe('m119 decisions-ledger', () => {
     expect(entries[0]!.action).toBe('merged');
     expect(entries[0]!.engine).toBe('codex');
     expect(entries[0]!.reason).toBe('looks good');
+  });
+
+  it('omits invalid caller accounting and degrades hostile raw accounting rows', async () => {
+    const { decisionsDir, recordDecision, readDecisions, readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const ts = new Date().toISOString();
+    expect(recordDecision({
+      ts,
+      proposalId: 'prop-invalid-accounting-write',
+      action: 'judged',
+      verdict: 'review',
+      costUsd: -1,
+      tokensIn: 1.5,
+      tokensOut: -2,
+      durationMs: -10,
+    })).toBe(true);
+    expect(readDecisions({ proposalId: 'prop-invalid-accounting-write' })[0]).toEqual(expect.not.objectContaining({
+      costUsd: expect.anything(),
+      tokensIn: expect.anything(),
+      tokensOut: expect.anything(),
+      durationMs: expect.anything(),
+    }));
+
+    fs.mkdirSync(decisionsDir(), { recursive: true });
+    fs.writeFileSync(path.join(decisionsDir(), `${ts.slice(0, 10)}.jsonl`), `${JSON.stringify({
+      ts,
+      proposalId: 'prop-hostile-accounting',
+      action: 'judged',
+      verdict: 'review',
+      judgeDecisionMetadataVersion: 2,
+      judgeReasonCode: 'judge-review',
+      judgeRationaleState: 'not-persisted',
+      costUsd: -1,
+    })}\n`, { flag: 'a' });
+
+    expect(readDecisionsDetailed({ proposalId: 'prop-hostile-accounting' })).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      decisions: [],
+    });
   });
 
   it('generic decision writes reject exact and padded reserved release labels', async () => {
