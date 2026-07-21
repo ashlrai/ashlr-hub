@@ -6,6 +6,20 @@
 - [x] Bind CI topology coverage to the three shard labels, arguments, and one-time pack smoke.
 - [ ] Verify a representative hermetic shard invocation and require the protected matrix.
 
+## Verifier Git-Authority Binding (2026-07-21)
+- [x] Capture a strict base Git-tree authority snapshot from the tracked root contract and declared regular blobs.
+- [x] Bind canonical merge commands, object format, base/candidate tree OIDs, and the authority digest through proposal and signed evidence records.
+- [x] Refuse candidate, index, and worktree authority drift before/between/after verifier execution.
+- [x] Require live snapshot recomputation for cached verification reuse and exact tested-tree equality before outward mutation.
+- [x] Keep snapshotless legacy evidence observational while refusing judge-free authority and positive skill distillation.
+- [x] Pass 260 focused assertions, typecheck, scoped lint, and diff integrity.
+- [ ] Bind immutable dependency/toolchain/runtime image identity before claiming full verifier immutability.
+
+## Protected Production Promotion (2026-07-21)
+- [x] Merge protected PR #94 after all six exact-head checks passed.
+- [x] Rebase and repush #110, #111, and #108 onto production `0a7f3d79`.
+- [ ] Promote deterministic Ubuntu CI sharding after its refreshed protected matrix passes.
+
 ## Current Cycle - Verifier Contract Executable Portability
 - [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
 - [x] Reject path-bearing executable symlink escapes and Windows-only separators while preserving bare PATH tools and missing dependency shims.

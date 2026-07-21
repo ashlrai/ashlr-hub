@@ -5,6 +5,17 @@
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
   - M30 now asserts the three Ubuntu labels, exact shard arguments, and one-time pack-smoke selector, so a future workflow edit cannot silently collapse exhaustive authority back into one cap-bound job.
 
+## Verifier Git-Authority Binding (2026-07-21)
+- Verification can now capture a repository-owned authority snapshot from an immutable base commit. The snapshot binds Git object format, base commit/tree, the tracked root `ashlr.verify.json` blob, sorted declared authority blob/mode tuples, and canonical effective merge commands into a metadata-only SHA-256 digest.
+- Judge-free evidence requires a valid `replace-detected` contract, non-empty tracked authority files, and a required merge command. Candidate authority drift is refused before commands run; index/worktree drift is checked after every command and browser verification; the staged merge tree must equal the candidate tree that passed verification.
+- Snapshot version, object format, base/candidate tree OIDs, and digest flow through durable proposal verification, signed/sealed v3 evidence, resource readiness, and remote handoff matching. Snapshotless legacy evidence remains readable but cannot authorize evidence-trust mutation or skill distillation, and snapshotless cached results reverify.
+- Focused verification passes 260 tests with one intentional platform skip across merge, persistence, policy, readiness, mutation-fence, handoff, evidence, skill-learning, and Git-authority suites. Typecheck and scoped zero-error lint pass.
+- Residual boundary: Git authority does not prove immutable `PATH`, dependency directories, or toolchain/runtime images. Read-only dependency/toolchain identity remains required before claiming complete verifier immutability.
+
+## Protected Production Promotion (2026-07-21)
+- PR #94 passed all six protected Ubuntu, macOS, and Windows checks and merged to production as `0a7f3d79b319f482f4a546723ad2481e12b53e0e`.
+- Active declaration, deterministic CI-sharding, and measured-judge-spend branches were rebased onto that exact production head and repushed for fresh protected matrices.
+
 ## Current Verifier Contract Executable Portability Hardening
 - Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
 - Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.

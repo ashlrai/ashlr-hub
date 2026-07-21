@@ -445,7 +445,7 @@ describe('M407 auto-merge verification mutation fence', () => {
     });
   });
 
-  it('keeps a failed result fail-closed when its base and diff bindings are current', async () => {
+  it('re-verifies a snapshotless failed result even when base and diff bindings are current', async () => {
     const diff = addFileDiff();
     const diffHash = hashDiff(diff);
     const baseHead = git(repo, ['rev-parse', 'main']);
@@ -491,11 +491,10 @@ describe('M407 auto-merge verification mutation fence', () => {
       merged: false,
     });
 
-    expect(verifyMocks.runVerifyCommandAsync).not.toHaveBeenCalled();
+    expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
     expect(loadProposal(proposal.id)?.status).toBe('approved');
     expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({
-      passed: false,
-      detail: 'current cached failure',
+      passed: true,
       diffHash,
       baseBranch: 'main',
       baseHead,

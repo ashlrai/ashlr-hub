@@ -309,6 +309,83 @@ describe('M47 verifyProposal', () => {
     git(dir, ['commit', '-m', 'add package.json']);
   }
 
+  function writeAuthorityContract(dir: string, script: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'authority-check.mjs'), script, 'utf8');
+    fs.writeFileSync(path.join(dir, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      authorityFiles: ['scripts/authority-check.mjs'],
+      commands: [{
+        id: 'authority-check',
+        kind: 'test',
+        cmd: ['node', 'scripts/authority-check.mjs'],
+        cwd: '.',
+        required: true,
+        profiles: ['merge'],
+      }],
+    }), 'utf8');
+    git(dir, ['add', 'ashlr.verify.json', 'scripts/authority-check.mjs']);
+    git(dir, ['commit', '-m', 'add authority contract']);
+  }
+
+  it('records exact base and candidate tree authority for an ordinary source diff', async () => {
+    initRepo(tmpRepo);
+    writeAuthorityContract(tmpRepo, 'process.exit(0);\n');
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/authority.md', 'bound') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(res).toMatchObject({
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+    });
+    expect(res.baseTreeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.candidateTreeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.candidateTreeOid).not.toBe(res.baseTreeOid);
+    expect(res.authoritySnapshotDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('refuses a candidate authority-file change before the verifier executes', async () => {
+    initRepo(tmpRepo);
+    const marker = path.join(tmpHome, 'authority-command-ran');
+    writeAuthorityContract(tmpRepo, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'ran');\n`);
+    fs.appendFileSync(path.join(tmpRepo, 'scripts', 'authority-check.mjs'), '// candidate change\n', 'utf8');
+    git(tmpRepo, ['add', 'scripts/authority-check.mjs']);
+    const diff = git(tmpRepo, ['diff', '--cached']);
+    git(tmpRepo, ['reset', 'HEAD', 'scripts/authority-check.mjs']);
+    git(tmpRepo, ['checkout', '--', 'scripts/authority-check.mjs']);
+
+    const res = await verifyProposal(
+      makeProposal({ diff }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/candidate changed verifier authority/i);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('refuses when a passing command mutates its own authority file', async () => {
+    initRepo(tmpRepo);
+    writeAuthorityContract(
+      tmpRepo,
+      "import { writeFileSync } from 'node:fs';\nwriteFileSync(new URL(import.meta.url), 'process.exit(0);\\n');\n",
+    );
+
+    const res = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/runtime-drift.md', 'drift') }),
+      cfgWith({ autoMerge: { enabled: true, trustBasis: 'evidence', allowWithoutVerification: false } }),
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/changed verifier authority/i);
+    expect(res.ran).toHaveLength(1);
+  });
+
   it('passing test script + a diff → ok', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 0');

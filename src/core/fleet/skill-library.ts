@@ -167,6 +167,32 @@ function evidenceGatesPassed(evidence: AutonomyEvidencePack): boolean {
   }
 }
 
+function hasMatchingVerifierAuthoritySnapshot(
+  proposal: Proposal,
+  evidence: SignedAutonomyEvidencePackV3,
+): boolean {
+  const verify = proposal.verifyResult;
+  const snapshot = evidence.verification;
+  const oidPattern = verify?.verifierAuthorityObjectFormat === 'sha1'
+    ? /^[0-9a-f]{40}$/
+    : verify?.verifierAuthorityObjectFormat === 'sha256'
+      ? /^[0-9a-f]{64}$/
+      : null;
+  return Boolean(
+    verify &&
+    verify.verifierAuthoritySnapshotVersion === 1 &&
+    snapshot.verifierAuthoritySnapshotVersion === 1 &&
+    oidPattern &&
+    typeof verify.baseTreeOid === 'string' && oidPattern.test(verify.baseTreeOid) &&
+    typeof verify.candidateTreeOid === 'string' && oidPattern.test(verify.candidateTreeOid) &&
+    typeof verify.authoritySnapshotDigest === 'string' && /^[0-9a-f]{64}$/.test(verify.authoritySnapshotDigest) &&
+    snapshot.verifierAuthorityObjectFormat === verify.verifierAuthorityObjectFormat &&
+    snapshot.baseTreeOid === verify.baseTreeOid &&
+    snapshot.candidateTreeOid === verify.candidateTreeOid &&
+    snapshot.authoritySnapshotDigest === verify.authoritySnapshotDigest
+  );
+}
+
 /** Load and validate the authoritative state used for skill distillation. */
 function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
   try {
@@ -189,6 +215,7 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     const evidence = readAutonomyEvidencePack(proposalId);
     if (!evidence || evidence.version !== 3 || !verifyAutonomyEvidencePackV3(evidence).ok ||
       evidence.proposal.id !== proposalId) return null;
+    if (!hasMatchingVerifierAuthoritySnapshot(proposal, evidence)) return null;
     if (
       evidence.proposal.repo !== proposal.repo ||
       evidence.proposal.createdAt !== proposal.createdAt ||
