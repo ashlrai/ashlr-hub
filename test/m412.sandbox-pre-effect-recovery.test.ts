@@ -126,5 +126,7 @@ describe('M412 sandbox pre-effect recovery', () => {
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  }, 15_000);
+  // Git worktree creation/removal is materially slower on hosted Windows.
+  // Keep the original POSIX deadline while retaining a bounded platform-local allowance.
+  }, process.platform === 'win32' ? 30_000 : 15_000);
 });
