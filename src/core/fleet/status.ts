@@ -1362,6 +1362,13 @@ export interface FleetStatus {
     applied: number;
     sourceQuality?: FleetProposalSourceQuality;
     authority?: FleetProposalAuthoritySource;
+    /** Read-only repair-only eligibility; it never grants dispatch or merge authority. */
+    repairOnly?: {
+      authority: 'observation-only';
+      sourceState: 'missing' | 'healthy' | 'degraded';
+      complete: boolean;
+      eligibleItems: number | null;
+    };
   };
   merges: {
     recent: number;
@@ -2248,6 +2255,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     invalidFiles: 0,
     unreadableFiles: 0,
   };
+  let proposalRepairOnly: NonNullable<FleetStatus['proposals']['repairOnly']> = {
+    authority: 'observation-only',
+    sourceState: 'degraded',
+    complete: false,
+    eligibleItems: null,
+  };
   try {
     const { listProposalsDetailed } = await import('../inbox/store.js');
     const read = listProposalsDetailed();
@@ -2289,6 +2302,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       invalidFiles: 0,
       unreadableFiles: 0,
     };
+  }
+
+  try {
+    const { listVerifiedFailureProposalRepairWorkItems } = await import('./proposal-repair-work.js');
+    const read = listVerifiedFailureProposalRepairWorkItems();
+    proposalRepairOnly = {
+      authority: 'observation-only',
+      sourceState: read.sourceState,
+      complete: read.complete,
+      eligibleItems: read.sourceState === 'healthy' && read.complete ? read.items.length : null,
+    };
+  } catch {
+    // Preserve the explicit degraded fallback rather than presenting unavailable authority as zero.
   }
 
   try {
@@ -2592,6 +2618,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       applied,
       sourceQuality: proposalSourceQuality,
       authority: proposalAuthority,
+      repairOnly: proposalRepairOnly,
     },
     merges: {
       recent: mergesRecent,

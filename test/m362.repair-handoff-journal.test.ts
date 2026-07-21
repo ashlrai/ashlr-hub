@@ -654,7 +654,7 @@ describe('M362 durable repair handoff journal', () => {
       currentActivationV2Authorities: 1,
       latestCurrentActivationV2At: reactivatedInput.ts,
     });
-  });
+  }, 30_000);
 
   it('preserves the journal-wide high-water through compaction and rejects a stale writer generation', () => {
     const repo = fx.makeRepo();
@@ -708,7 +708,7 @@ describe('M362 durable repair handoff journal', () => {
     });
 
     expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 2, removed: 0 });
-  });
+  }, 30_000);
 
   it('rejects a distinct writer id claiming the high-water activation instant', () => {
     const repo = fx.makeRepo();

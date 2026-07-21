@@ -926,6 +926,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       authority: { gate: 'unavailable' },
     });
     expect(status.proposals.sourceQuality?.stopReasons).toContain('invalid-file');
+    expect(status.proposals.repairOnly).toMatchObject({
+      authority: 'observation-only',
+      sourceState: 'degraded',
+      complete: false,
+      eligibleItems: null,
+    });
     expect(status.autoMergeReadiness).toBeUndefined();
     expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'auto-merge'))
       .toMatchObject({ status: 'unavailable' });
@@ -945,6 +951,40 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       invalidFiles: 1,
     });
     expect(status.merges.sourceQuality?.stopReasons).toContain('invalid-file');
+  });
+
+  it('reports complete verified-failure repair eligibility separately from proposal inventory', async () => {
+    const repo = join(tmpHome, 'repo-repair-only-status');
+    writeBacklogSnapshot(tmpHome, repo, []);
+    createProposal({
+      repo,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Repair-only parent',
+      summary: 'A complete proposal with a deterministic verifier failure.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    createProposal({
+      repo,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Partial capture',
+      summary: 'Not eligible for repair-only.',
+      diff: 'diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      isPartial: true,
+      verifyResult: { passed: false, detail: 'capture failure' },
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.proposals.repairOnly).toEqual({
+      authority: 'observation-only',
+      sourceState: 'healthy',
+      complete: true,
+      eligibleItems: 1,
+    });
+    expect(formatFleetStatus(status)).toContain('repair-only:       1 eligible (healthy)');
   });
 
   it('keeps unavailable proposal authority ahead of degraded queue diagnostics', async () => {

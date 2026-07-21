@@ -331,6 +331,11 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`  pending:           ${s.proposals.pending}`);
   lines.push(`  frontier pending:  ${s.proposals.frontierPending}`);
   lines.push(`  applied:           ${s.proposals.applied}`);
+  if (s.proposals.repairOnly) {
+    const repair = s.proposals.repairOnly;
+    const count = repair.eligibleItems === null ? 'unavailable' : `${repair.eligibleItems} eligible`;
+    lines.push(`  repair-only:       ${count} (${repair.sourceState}${repair.complete ? '' : ', incomplete'})`);
+  }
   lines.push('');
 
   // Proposal production
