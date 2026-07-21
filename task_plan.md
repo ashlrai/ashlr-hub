@@ -2830,8 +2830,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit mutable verifier control inputs and distinguish Git-tree drift from runtime/toolchain trust.
 - [x] Add exact, validated contract authority-file declarations and declare Hub verifier inputs.
 - [x] Cover the Hub merge commands' ESLint and Vitest control inputs and reject malformed declaration fixtures.
-- [ ] Bind a base Git-tree authority snapshot through verification reuse and signed merge evidence.
-- [ ] Make authority/dependency inputs read-only for candidate execution before treating the snapshot as judge-free authority.
+- [x] Bind a base Git-tree authority snapshot through verification reuse, signed merge evidence, and remote handoff.
+- [x] Require direct tracked argv authority, canonical nested cwd, and symlink/junction-free authority ancestry.
+- [x] Fence index, tracked worktree, and non-ignored untracked mutation after every verifier command.
+- [x] Generalize evidence-mode test-integrity review beyond Ashlr's named test files.
+- [x] Repair synthetic merge fixtures and pass the consolidated 17-suite authority gate (449 passed, 1 skipped).
+- [ ] Require all eight protected exact-head checks on PR #112 before promotion.
+- [ ] Add a separately designed hermetic toolchain/dependency identity boundary; do not infer it from the Git-object snapshot.
 
 ## Windows Sandbox-Reservation Fixture Budget (2026-07-21)
 - [x] Isolate the hosted-Windows timeout to M426's real-worktree owner-publication case.

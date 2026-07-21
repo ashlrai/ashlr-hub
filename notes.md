@@ -2934,6 +2934,14 @@
   - Ashlr Hub declares the package scripts/manifests and test runner wrapper used by its merge profile. The declaration is metadata only at this stage: it does not bind a Git-tree snapshot, make dependencies read-only, or authorize judge-free merge reuse.
   - The Hub declaration also covers ESLint's config and Vitest's setup file, both of which are loaded by merge-profile commands. Focused parser fixtures cover canonical duplicates, malformed declarations, absolute paths, directories, and symlinks alongside the existing missing/escape cases.
 
+- Verifier authority snapshot and evidence closure (2026-07-21):
+  - Merge verification now captures base-derived authority inputs from Git objects, binds their digest and source revision through proposal verification, signed evidence, gate explanations, and remote handoff, and refuses stale, incomplete, mismatched, or unsupported object-format snapshots.
+  - Direct tracked argv files are explicit authority inputs. Nested command cwd values are canonicalized portably, and every authority path rejects symlink or junction ancestry both when the contract is parsed and when the live state is compared.
+  - Candidate execution is fenced command-by-command: the exact index tree, tracked worktree content, and hashed non-ignored untracked state must remain identical before and after each verifier/browser command. A mutation blocks subsequent commands and cannot produce reusable merge evidence.
+  - Evidence-mode source review now rejects deletion, rename-out, skip/focus, assertion removal, and assertion trivialization across ordinary JavaScript, TypeScript, Python, Ruby, Go, Rust, Java, .NET, PHP, Swift, Kotlin, and shell test layouts while continuing to allow additive tests.
+  - Synthetic merge fixtures now supply complete authority snapshots instead of bypassing the new prerequisite. Consolidated verification passed typecheck and 17 affected suites: 449 tests passed with 1 intentional skip.
+  - The proof boundary remains explicit: ignored outputs, bare PATH toolchains, package-manager resolution, plugins/imports, and transitive dependencies are not fully identified or hermetic. This is evidence-bound judge-free authority, not a claim that the host toolchain is immutable.
+
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
