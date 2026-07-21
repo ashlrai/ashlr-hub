@@ -569,6 +569,7 @@ describe('m119 decisions-ledger', () => {
         const failure = _getLatestDecisionWriteFailureForTest();
         throw new Error(
           `native Windows decision write failed: stage=${failure?.stage ?? 'unknown'} ` +
+          `operation=${failure?.operation ?? 'unknown'} ` +
           `code=${failure?.code ?? 'unknown'} ` +
           `syscall=${failure?.syscall ?? 'unknown'}`,
         );
