@@ -176,7 +176,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     // The live worktree is preserved — a running swarm is never reclaimed.
     expect(sandboxHomeExists(live.id)).toBe(true);
     expect(listSandboxes().map((s) => s.id)).toContain(live.id);
-  });
+  }, 30_000);
 
   it('--kill sets the kill switch ON (killSwitchOn() === true); default leaves it OFF', async () => {
     expect.hasAssertions();

@@ -2826,3 +2826,7 @@
 - Trajectory reconstruction now carries bounded source receipts for dispatch, outcome, and agent-action ledgers. Any degraded or incomplete mandatory receipt makes the summary unavailable and withholds trajectories, outcomes, coverage, route-spine metrics, gaps, and recent records.
 - Fleet CLI labels the state unavailable and explains that exact metrics are withheld. This is observation-only: it cannot influence dispatch, routing, proposal capture, or merge authority.
 - Verification: M354 trajectory, M304 outcome, and M49 Fleet Status coverage (190 assertions), TypeScript typecheck, and diff integrity pass locally. Protected CI remains the promotion gate.
+
+# Windows H7 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only five-second timeout in H7's live-owner rollback sweep. The fixture creates a real sandbox and proves that its live process owner prevents reclamation; no assertion or product failure was reported.
+- The exact fixture now has a 30-second budget. This changes only CI tolerance for the process/filesystem path and leaves the global timeout and rollback behavior unchanged.

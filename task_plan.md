@@ -2710,3 +2710,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render withheld metrics as unavailable in Fleet CLI rather than healthy zeroes.
 - [x] Verify trajectory, outcome, and Fleet Status coverage with typecheck and diff integrity.
 - [ ] Require protected CI on the updated draft head before promotion.
+
+## Windows H7 Timing Recovery (2026-07-21)
+- [x] Isolate the protected Windows portability failure to the live-owner rollback fixture exceeding Vitest's default five-second budget.
+- [x] Give only that fixture an explicit 30-second timeout; assertions and rollback semantics are unchanged.
+- [ ] Verify the focused H7 fixture and require protected CI on the amended draft head.
