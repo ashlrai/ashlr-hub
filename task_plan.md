@@ -2719,4 +2719,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Require existing physical cwd containment at parse time and immediately before sync or async execution.
 - [x] Prove external-symlink contracts and direct runner inputs fail closed without spawning external code.
 - [x] Pass focused profile and verifier-runner coverage, typecheck, scoped lint, and diff checks.
+## Current Overnight Cycle - Verifier Contract Portability (2026-07-21)
+- [x] Audit the Phantom verifier failure and identify the machine-specific executable gap in Hub's contract parser.
+- [x] Reject POSIX, Windows-drive, UNC, and repo-escaping contract executables while preserving bare tools and repo-local scripts.
+- [x] Pass focused execution-profile coverage, typecheck, scoped lint, and diff checks.
 - [ ] Publish the guarded change as a protected draft PR and wait for the platform matrix.

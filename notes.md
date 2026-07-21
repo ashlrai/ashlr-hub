@@ -2838,3 +2838,7 @@
   - Lexical containment is insufficient for merge evidence: a repo-local directory symlink can resolve outside the checkout and make a repo-relative verifier execute arbitrary external state.
   - Contract parsing now requires an existing directory whose physical `realpath` remains under the repository. The sync and async verifier runners independently recheck the same physical boundary immediately before spawning, closing a parse-to-spawn symlink swap.
   - External or unavailable cwd values return `invalid-command`; they never fall back to the repository root, preserving the claimed verifier scope. Focused profile and execution tests, typecheck, scoped lint, and diff checks passed before protected CI.
+- Verifier-contract executable portability (2026-07-21):
+  - A tracked contract alone cannot prove portable merge evidence when `cmd[0]` names a user-specific executable. Contract parsing now rejects POSIX, Windows-drive, UNC, and repo-escaping executable paths while retaining bare PATH tools and repository-local scripts.
+  - This is a fail-closed schema boundary: invalid contracts contribute no verification commands or merge-grade coverage, so Fleet Status names the portability diagnostic instead of treating local tooling as deployable evidence.
+  - Focused execution-profile tests, typecheck, scoped lint, and diff checks passed before protected CI.

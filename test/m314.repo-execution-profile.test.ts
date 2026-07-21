@@ -425,6 +425,53 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('rejects machine-specific and repo-escaping contract executables', () => {
+    const dir = makeFixture();
+    try {
+      for (const executable of [
+        '/Users/example/.cargo/bin/cargo',
+        'C:\\Users\\example\\cargo.exe',
+        '\\\\server\\share\\verify.exe',
+        '../outside/verify',
+      ]) {
+        writeVerifyContract(dir, {
+          schemaVersion: 1,
+          mode: 'replace-detected',
+          commands: [{ id: 'nonportable', kind: 'test', cmd: [executable], profiles: ['merge'] }],
+        });
+
+        const profile = detectRepoExecutionProfile(dir);
+
+        expect(profile.verifyCommands).toEqual([]);
+        expect(profile.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+        expect(profile.verifyContract?.errors.join('\n')).toMatch(/portable executable|stay inside the repo/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts bare and repo-relative contract executables', () => {
+    const dir = makeFixture();
+    try {
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      for (const executable of ['cargo', './scripts/verify', 'scripts\\verify']) {
+        writeVerifyContract(dir, {
+          schemaVersion: 1,
+          mode: 'replace-detected',
+          commands: [{ id: 'portable', kind: 'test', cmd: [executable], profiles: ['merge'] }],
+        });
+
+        const profile = detectRepoExecutionProfile(dir);
+
+        expect(profile.verifyContract).toMatchObject({ valid: true, mergeGradeExplicit: true });
+        expect(profile.verifyCommands[0]?.cmd).toEqual([executable]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('detects shell-only Bats repos without package manifests', () => {
     const dir = makeFixture();
     try {

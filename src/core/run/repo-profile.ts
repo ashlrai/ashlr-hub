@@ -8,7 +8,7 @@
  */
 
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
 export type RepoPackageManager =
@@ -237,6 +237,28 @@ function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label
   return resolved;
 }
 
+/**
+ * Contracts execute argv directly, so their executable must either resolve from
+ * PATH or remain within the repository. This prevents a locally installed tool
+ * from being mistaken for portable merge evidence.
+ */
+function safeContractExecutable(repoRoot: string, cwd: string, executable: string, errors: string[], label: string): boolean {
+  const normalized = executable.replace(/\\/g, '/');
+  if (isAbsolute(executable) || win32.isAbsolute(executable) || /^[a-zA-Z]:/.test(executable)) {
+    errors.push(`${label}.cmd[0] must be a portable executable name or a repo-relative path`);
+    return false;
+  }
+  if (!normalized.includes('/')) return true;
+
+  const resolved = resolve(cwd, normalized);
+  const rel = relative(resolve(repoRoot), resolved);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    errors.push(`${label}.cmd[0] must stay inside the repo when it includes a path`);
+    return false;
+  }
+  return true;
+}
+
 function parseContractProfiles(raw: unknown, errors: string[], label: string): VerifyCommandProfile[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
@@ -376,6 +398,7 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
 
       const cwd = safeContractCwd(repoRoot, command['cwd'], errors, label);
       if (!cwd) continue;
+      if (!safeContractExecutable(repoRoot, cwd, cmd[0] as string, errors, label)) continue;
 
       const timeoutRaw = command['timeoutMs'];
       let timeoutMs: number | undefined;
