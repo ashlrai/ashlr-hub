@@ -139,6 +139,9 @@ function diff(): string {
 }
 
 const TEST_DIFF_HASH = hashDiff(diff());
+const BASE_TREE_OID = '4'.repeat(40);
+const CANDIDATE_TREE_OID = '5'.repeat(40);
+const AUTHORITY_SNAPSHOT_DIGEST = '6'.repeat(64);
 
 function proposal(id = 'prop-m430'): Proposal {
   return {
@@ -172,6 +175,11 @@ function input(id = 'prop-m430') {
       commandKinds: ['test', 'typecheck'],
       baseBranch: 'main',
       baseHead: 'b'.repeat(40),
+      verifierAuthoritySnapshotVersion: 1 as const,
+      verifierAuthorityObjectFormat: 'sha1' as const,
+      baseTreeOid: BASE_TREE_OID,
+      candidateTreeOid: CANDIDATE_TREE_OID,
+      authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
       diffHash: TEST_DIFF_HASH,
       verifiedAt: '2026-07-16T12:01:00.000Z',
       source: 'auto-merge' as const,
@@ -291,6 +299,13 @@ describe('M430 signed evidence-pack v3 protocol', () => {
     expect(sealedPackDigest).toBe(expectedSeal);
     expect(sealedEvidencePackDigestV3(signedPack)).toBe(sealedPackDigest);
     expect(verifyAutonomyEvidencePackV3(pack)).toEqual(expect.objectContaining({ ok: true }));
+    expect(pack.verification).toMatchObject({
+      verifierAuthoritySnapshotVersion: 1,
+      verifierAuthorityObjectFormat: 'sha1',
+      baseTreeOid: BASE_TREE_OID,
+      candidateTreeOid: CANDIDATE_TREE_OID,
+      authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
+    });
   });
 
   it('verifies independently of object key insertion order', () => {
@@ -308,6 +323,17 @@ describe('M430 signed evidence-pack v3 protocol', () => {
     expect(legacyPack.version).toBe(2);
     expect(signedPack?.version).toBe(3);
     expect(verifyAutonomyEvidencePackV3(signedPack).ok).toBe(true);
+  });
+
+  it('accepts SHA-256 Git tree identities only at the declared object width', () => {
+    const sha256 = legacy('prop-sha256-authority');
+    sha256.verification.verifierAuthorityObjectFormat = 'sha256';
+    sha256.verification.baseTreeOid = '7'.repeat(64);
+    sha256.verification.candidateTreeOid = '8'.repeat(64);
+
+    const sealed = sealAutonomyEvidencePackV3(sha256);
+    expect(sealed).not.toBeNull();
+    expect(verifyAutonomyEvidencePackV3(sealed).ok).toBe(true);
   });
 
   it('persists and reads only a cryptographically valid v3 pack', () => {
@@ -421,6 +447,26 @@ describe('M430 v3 tamper and schema rejection', () => {
       pack.trustBasis = 'evidence';
       pack.remotePreferred = true;
     }],
+    ['partial authority snapshot', (pack: AutonomyEvidencePackLegacy) => {
+      delete pack.verification.candidateTreeOid;
+    }],
+    ['authority snapshot version', (pack: AutonomyEvidencePackLegacy) => {
+      (pack.verification as { verifierAuthoritySnapshotVersion?: number })
+        .verifierAuthoritySnapshotVersion = 2;
+    }],
+    ['authority object format', (pack: AutonomyEvidencePackLegacy) => {
+      (pack.verification as { verifierAuthorityObjectFormat?: string })
+        .verifierAuthorityObjectFormat = 'sha512';
+    }],
+    ['authority tree oid length', (pack: AutonomyEvidencePackLegacy) => {
+      pack.verification.verifierAuthorityObjectFormat = 'sha256';
+    }],
+    ['authority tree oid casing', (pack: AutonomyEvidencePackLegacy) => {
+      pack.verification.baseTreeOid = 'A'.repeat(40);
+    }],
+    ['authority snapshot digest', (pack: AutonomyEvidencePackLegacy) => {
+      pack.verification.authoritySnapshotDigest = 'A'.repeat(64);
+    }],
   ])('refuses semantically invalid %s before signing', (_name, mutate) => {
     const pack = legacy(`prop-semantic-${_name.replaceAll(' ', '-')}`);
     mutate(pack);
@@ -451,6 +497,45 @@ describe('M430 v3 tamper and schema rejection', () => {
       policyHash: 'e'.repeat(64),
     };
     expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
+  });
+
+  it('keeps snapshotless v3 metadata observational but refuses evidence-trust authorization', () => {
+    const authorized = legacy('prop-authority-bound-evidence');
+    authorized.trustBasis = 'evidence';
+    authorized.evidenceOutcome!.trustBasis = 'evidence';
+    authorized.remotePreferred = true;
+    authorized.gates.remoteProtection = {
+      ok: true,
+      live: true,
+      detail: 'exact protected remote fixture',
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead: 'b'.repeat(40),
+      observedAt: '2026-07-16T12:01:30.000Z',
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: 'e'.repeat(64),
+    };
+    authorized.evidenceOutcome!.gateCount = 6;
+    expect(sealAutonomyEvidencePackV3(authorized)).not.toBeNull();
+
+    const observational = structuredClone(authorized);
+    observational.proposal.id = 'prop-snapshotless-observational';
+    observational.trustBasis = 'tier';
+    observational.evidenceOutcome!.trustBasis = 'tier';
+    delete observational.verification.verifierAuthoritySnapshotVersion;
+    delete observational.verification.verifierAuthorityObjectFormat;
+    delete observational.verification.baseTreeOid;
+    delete observational.verification.candidateTreeOid;
+    delete observational.verification.authoritySnapshotDigest;
+    expect(sealAutonomyEvidencePackV3(observational)).not.toBeNull();
+
+    observational.trustBasis = 'evidence';
+    observational.evidenceOutcome!.trustBasis = 'evidence';
+    expect(sealAutonomyEvidencePackV3(observational)).toBeNull();
   });
 
   it('derives the signed builder diff hash and refuses stored hash disagreement', () => {
@@ -645,6 +730,13 @@ describe('M430 key and legacy behavior', () => {
     const v1 = legacy('prop-legacy-v1');
     v1.version = 1;
     const v2 = legacy('prop-legacy-v2');
+    for (const pack of [v1, v2]) {
+      delete pack.verification.verifierAuthoritySnapshotVersion;
+      delete pack.verification.verifierAuthorityObjectFormat;
+      delete pack.verification.baseTreeOid;
+      delete pack.verification.candidateTreeOid;
+      delete pack.verification.authoritySnapshotDigest;
+    }
 
     expect(persistAutonomyEvidencePack(v1)).toBe(true);
     expect(persistAutonomyEvidencePack(v2)).toBe(true);

@@ -29,6 +29,7 @@ import type { GitHubOriginAuthority } from '../git.js';
 import { hashDiff, signLocalMergeIntent, verifyLocalMergeIntent } from '../foundry/provenance.js';
 import {
   readAutonomyEvidencePack,
+  verifierAuthorityBindingsMatch,
   verifyAutonomyEvidencePackV3,
 } from '../autonomy/evidence-pack.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
@@ -207,6 +208,7 @@ function activeV3EvidenceMatches(proposal: Proposal): boolean {
       ) &&
       pack.verification.baseBranch === verification.baseBranch &&
       pack.verification.baseHead === verification.baseHead &&
+      verifierAuthorityBindingsMatch(pack.verification, verification) &&
       pack.verification.diffHash === verification.diffHash &&
       pack.verification.verifiedAt === verification.verifiedAt &&
       pack.verification.source === verification.source &&
