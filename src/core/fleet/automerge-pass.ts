@@ -52,7 +52,13 @@ import {
   type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
-import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
+import {
+  judgeProposal,
+  resolveFrontierJudgeClient,
+  type FrontierJudgeClient,
+  type JudgeUsageReceipt,
+  type ManagerVerdict,
+} from './manager.js';
 // M294: sign + record the attested 'judged'/ship ledger entry that the merge gate
 // (hasRecentShipVerdict / evaluateVerificationGate) requires. Previously the
 // automerge-pass judged 'ship' but never wrote this entry → every merge refused.
@@ -132,6 +138,7 @@ async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfi
 interface AuthorizedJudgeResult {
   requested: boolean;
   verdict: ManagerVerdict | null;
+  receipts: JudgeUsageReceipt[];
   decisionPersisted: boolean;
   authorityLive: boolean;
 }
@@ -139,12 +146,13 @@ interface AuthorizedJudgeResult {
 async function runAuthorizedFrontierJudge(
   proposal: Proposal,
   cfg: AshlrConfig,
-  judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string },
+  judgeClient: FrontierJudgeClient,
 ): Promise<AuthorizedJudgeResult> {
   const repo = proposal.repo;
   const refused = (): AuthorizedJudgeResult => ({
     requested: false,
     verdict: null,
+    receipts: [],
     decisionPersisted: false,
     authorityLive: false,
   });
@@ -158,29 +166,34 @@ async function runAuthorizedFrontierJudge(
     !killSwitchOn() && isEnrolled(repo);
   let requested = false;
   let verdict: ManagerVerdict | null = null;
+  let receipts: JudgeUsageReceipt[] = [];
   let decisionPersisted = false;
   try {
     if (!authorized()) return refused();
     requested = true;
+    const receiptStart = judgeClient.stats?.receipts.length ?? 0;
     try {
       verdict = await judgeProposal(proposal, cfg, judgeClient);
     } catch {
       verdict = null;
     }
+    receipts = judgeClient.stats?.receipts.slice(receiptStart) ?? [];
 
     // KILL is armed before pause waits for this fence. A judge response that
     // loses that race must never become fresh durable merge authority.
     if (!authorized()) {
-      return { requested, verdict, decisionPersisted, authorityLive: false };
+      return { requested, verdict, receipts, decisionPersisted, authorityLive: false };
     }
 
-    if (verdict?.verdict === 'ship' && verdict.wouldMerge === true) {
+    if (verdict !== null) {
       try {
-        const judgeEngine = judgeClient.model;
+        const latestReceipt = receipts.at(-1);
+        const judgeEngine = latestReceipt?.model ?? judgeClient.stats?.model ?? judgeClient.model;
         let judgeAttestation: string | undefined;
         const ts = new Date().toISOString();
         const reviewerIndependent = evaluateReviewerIndependence(proposal, judgeEngine).independent;
-        if (isFrontierJudge(judgeEngine) && reviewerIndependent) {
+        const mergeableShip = verdict.verdict === 'ship' && verdict.wouldMerge === true;
+        if (mergeableShip && isFrontierJudge(judgeEngine) && reviewerIndependent) {
           try {
             judgeAttestation = signJudgeAttestation({
               proposalId: proposal.id,
@@ -195,7 +208,12 @@ async function runAuthorizedFrontierJudge(
           }
         }
         if (authorized()) {
-          recordDecision({
+          const measured = receipts.filter((receipt) => receipt.metering === 'measured');
+          const durationMs = receipts.reduce((total, receipt) => total + receipt.durationMs, 0);
+          const costUsd = measured.reduce((total, receipt) => total + (receipt.costUsd ?? 0), 0);
+          const tokensIn = measured.reduce((total, receipt) => total + (receipt.tokensIn ?? 0), 0);
+          const tokensOut = measured.reduce((total, receipt) => total + (receipt.tokensOut ?? 0), 0);
+          decisionPersisted = recordDecision({
             ts,
             proposalId: proposal.id,
             ...causalMetadataFromProposal(proposal, {
@@ -206,15 +224,16 @@ async function runAuthorizedFrontierJudge(
             action: 'judged',
             engine: judgeEngine,
             model: judgeEngine,
-            verdict: 'ship',
-            detail: reviewerIndependent ? 'would-merge' : '',
+            verdict: verdict.verdict,
+            detail: mergeableShip && reviewerIndependent ? 'would-merge' : '',
+            ...(receipts.length > 0 ? { durationMs } : {}),
+            ...(measured.length > 0 ? { costUsd, tokensIn, tokensOut } : {}),
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
             ...(judgeAttestation !== undefined
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
               : {}),
           });
-          decisionPersisted = true;
         }
       } catch {
         decisionPersisted = false;
@@ -233,7 +252,7 @@ async function runAuthorizedFrontierJudge(
         );
       } catch { /* best-effort observation */ }
     }
-    return { requested, verdict, decisionPersisted, authorityLive: authorized() };
+    return { requested, verdict, receipts, decisionPersisted, authorityLive: authorized() };
   } finally {
     releaseOutwardMutationFence(fence);
   }
@@ -370,6 +389,10 @@ export interface AutoMergePassResult {
 	  verifyBeforeJudgeCapped: number;
 	  /** Display-only estimate for inline frontier judge calls; not measured spend. */
 	  judgeEstimatedSpendUsd: number;
+	  /** Sum of provider-reported judge receipts; never an estimate. */
+	  judgeMeasuredSpendUsd: number;
+	  /** Judge invocations that ran without a complete provider cost receipt. */
+	  judgeUnmeteredCalls: number;
   /**
    * M193: proposals that passed the ship-verdict gate but were blocked by an
    * additive check (red-team / blast-radius / spec-contract). Per-skip detail
@@ -729,6 +752,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 	    verifyBeforeJudgeRan: 0,
 	    verifyBeforeJudgeCapped: 0,
 	    judgeEstimatedSpendUsd: 0,
+	    judgeMeasuredSpendUsd: 0,
+	    judgeUnmeteredCalls: 0,
 	    skipped: [],
 	    autoArchived: 0,
     ttlRejected: 0,
@@ -1090,6 +1115,13 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 	        JUDGE_ESTIMATE_TOKENS_IN,
 	        JUDGE_ESTIMATE_TOKENS_OUT,
 	      );
+	      out.judgeMeasuredSpendUsd += judgeResult.receipts.reduce(
+	        (total, receipt) => total + (receipt.metering === 'measured' ? receipt.costUsd ?? 0 : 0),
+	        0,
+	      );
+	      out.judgeUnmeteredCalls += judgeResult.receipts.length > 0
+	        ? judgeResult.receipts.filter((receipt) => receipt.metering === 'unmetered').length
+	        : 1;
         if (!judgeResult.authorityLive || killSwitchOn() || !p.repo || !isEnrolled(p.repo)) {
           if (killSwitchOn()) break;
           continue;

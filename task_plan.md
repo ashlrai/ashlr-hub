@@ -2827,5 +2827,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make decision-ledger persistence observable to authority callers and durable before success is returned.
 - [x] Reject malformed accounting telemetry at both write sanitization and complete source reads.
 - [x] Pass focused ledger coverage, typecheck, and diff integrity.
-- [ ] Add per-invocation measured/unmetered judge receipts and actual-responder attribution.
+- [x] Add per-invocation measured/unmetered judge receipts and actual-responder attribution.
+- [x] Persist all authorized completed inline judge decisions and require durable decision writes before merge progression.
+- [x] Project measured versus unmetered maintenance data without fabricating spend.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.

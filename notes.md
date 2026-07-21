@@ -2928,3 +2928,9 @@
   - `recordDecision` now returns a durable append result while preserving its never-throw caller contract. The append fsyncs the exact private file and parent directory before reporting success, allowing merge-capable callers to refuse authority when decision persistence fails.
   - Accounting telemetry is strict: cost must be finite and non-negative; token and duration fields must be non-negative safe integers. Invalid caller values are omitted, while hostile raw ledger rows degrade complete source reads rather than reducing recorded spend.
   - Focused M119 ledger coverage passes 41 assertions with typecheck and diff integrity. Receipt aggregation, actual-responder attribution, and daemon charge propagation remain separate pending slices.
+
+- Inline judge receipt truth (2026-07-21):
+  - Claude and Codex CLI judge clients now retain append-only, metadata-only receipts per actual invocation. A complete measured receipt requires a non-negative reported cost plus non-negative safe-integer input/output tokens; all other executed calls are explicitly unmetered. The parser accepts Claude's `cost_usd` and legacy `total_cost_usd` forms.
+  - Inline auto-merge derives attestation identity from the actual final responder, records every authorized completed judge verdict (not only mergeable ships), and refuses merge progression when the durable decision append fails. Only independently reviewed `ship` verdicts with merge intent receive an attestation.
+  - Auto-merge results and daemon tick metadata now distinguish display-only estimates, provider-reported measured spend, and unmetered calls. This does not yet charge `todaySpentUsd`; once-only charge propagation across maintenance early returns remains pending.
+  - Focused M48, M119, M120, and M130 coverage passes 128 assertions plus typecheck. The broader M201 daemon suite was still running in the local hermetic environment and is left to protected CI rather than treated as evidence.
