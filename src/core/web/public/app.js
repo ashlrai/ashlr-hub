@@ -4628,6 +4628,22 @@ async function loadFleetActivity() {
   }
 }
 
+function fleetActivitySourceHealthy(source) {
+  return source?.sourceState === 'healthy' && source.complete === true;
+}
+
+function fleetActivitySourceText(source) {
+  if (!source) return 'unavailable';
+  if (source.sourceState === 'missing') return 'no proposal evidence yet';
+  if (fleetActivitySourceHealthy(source)) return 'healthy';
+  const reasons = Array.isArray(source.stopReasons) ? source.stopReasons.join(', ') : '';
+  return reasons ? `degraded (${reasons})` : 'degraded';
+}
+
+function fleetActivityObservedMetric(source, value) {
+  return fleetActivitySourceHealthy(source) ? String(value ?? 0) : 'unavailable';
+}
+
 function renderFleetActivity() {
   if (state.activeView !== 'fleet-activity') return;
   const main = getMain();
@@ -4655,15 +4671,20 @@ function renderFleetActivity() {
 
   // ── 1. Repo activity table ──────────────────────────────────────────────
   const reposCard = el('div', { cls: 'fa-card card' });
+  const proposalSourceHealthy = fleetActivitySourceHealthy(d.proposalSourceQuality);
   reposCard.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Repo Activity (7d)'),
     el('span', { cls: 'card-subtitle' },
-      `${d.totalProposed} proposed · ${d.totalAutoMerged} merged · ${d.totalPending} pending · ${d.totalDeclined} declined`
+      proposalSourceHealthy
+        ? `${d.totalProposed} proposed · ${d.totalAutoMerged} merged · ${d.totalPending} pending · ${d.totalDeclined} declined`
+        : `Proposal evidence ${fleetActivitySourceText(d.proposalSourceQuality)}; activity counts withheld`
     )
   ));
 
   const repos = Array.isArray(d.repos) ? d.repos : [];
-  if (repos.length === 0) {
+  if (!proposalSourceHealthy) {
+    reposCard.appendChild(el('p', { cls: 'hint fa-card-body' }, 'Proposal evidence is unavailable; repository activity is withheld.'));
+  } else if (repos.length === 0) {
     reposCard.appendChild(el('p', { cls: 'hint fa-card-body' }, 'No repo activity in the last 7 days.'));
   } else {
     const wrap = el('div', { cls: 'table-wrap fa-card-body' });
@@ -4786,13 +4807,18 @@ function renderFleetActivity() {
 
   // ── 4. Recent auto-merge feed ──────────────────────────────────────────
   const mergesCard = el('div', { cls: 'fa-card card' });
+  const mergesSourceHealthy = fleetActivitySourceHealthy(d.recentMergesSourceQuality);
   mergesCard.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Auto-Merge Feed'),
-    el('span', { cls: 'card-subtitle' }, `${(d.recentMerges ?? []).length} recent events`)
+    el('span', { cls: 'card-subtitle' }, mergesSourceHealthy
+      ? `${(d.recentMerges ?? []).length} recent events`
+      : `Merge evidence ${fleetActivitySourceText(d.recentMergesSourceQuality)}; feed withheld`)
   ));
   const mergesBody = el('div', { cls: 'fa-feed fa-card-body' });
   const merges = Array.isArray(d.recentMerges) ? d.recentMerges : [];
-  if (merges.length === 0) {
+  if (!mergesSourceHealthy) {
+    mergesBody.appendChild(el('p', { cls: 'hint' }, 'Merge evidence is unavailable; recent merges are withheld.'));
+  } else if (merges.length === 0) {
     mergesBody.appendChild(el('p', { cls: 'hint' }, 'No auto-merge events recorded.'));
   } else {
     for (const m of merges) {
@@ -4856,12 +4882,14 @@ function renderFleetActivity() {
   statsRow.appendChild(coolCard);
 
   const pendCard = el('div', { cls: 'fa-card card fa-stat-mini' });
-  pendCard.appendChild(el('div', { cls: 'fa-stat-val' }, String(d.totalPending ?? 0)));
+  pendCard.appendChild(el('div', { cls: 'fa-stat-val' }, fleetActivityObservedMetric(d.proposalSourceQuality, d.totalPending)));
   pendCard.appendChild(el('div', { cls: 'fa-stat-lbl' }, 'Pending proposals'));
   statsRow.appendChild(pendCard);
 
   const mergedCard = el('div', { cls: 'fa-card card fa-stat-mini' });
-  mergedCard.appendChild(el('div', { cls: 'fa-stat-val fa-stat-green' }, String(d.totalAutoMerged ?? 0)));
+  mergedCard.appendChild(el('div', {
+    cls: proposalSourceHealthy && d.totalAutoMerged > 0 ? 'fa-stat-val fa-stat-green' : 'fa-stat-val',
+  }, fleetActivityObservedMetric(d.proposalSourceQuality, d.totalAutoMerged)));
   mergedCard.appendChild(el('div', { cls: 'fa-stat-lbl' }, 'Auto-merged (7d)'));
   statsRow.appendChild(mergedCard);
 
