@@ -2827,3 +2827,9 @@
   - This slice adds zero judge or model calls. The existing null critic does not invoke external inference; replacing it is intentionally deferred until there is an explicit token budget and measured selection benefit. Its output is not treated as independent review authority.
   - Verification passes 56 focused assertions across the direct Best-of-N and proposal-verifier suites, plus the adjacent daemon/TITRR/stall/intel consumer matrix. Typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks pass.
   - Published implementation commit `5479155` as protected stacked draft PR #53 on PR #52. No merge, deployment, host automerge activation, or recursive-learning authority was introduced; both duplicate protected matrices remain required.
+
+- Fleet source-provenance hardening (2026-07-21):
+  - Fleet dashboard dispatch yield, repair-recovery, and Global Workspace helpers previously treated omitted source-quality metadata as healthy. A partial or legacy response could therefore display zero values and rates as observed truth.
+  - The dashboard now requires an explicit `sourceState:"healthy"` and `complete:true` before those values are authoritative. Absent metadata renders unknown/unavailable, while explicit missing and degraded inputs retain their existing non-authoritative labels.
+  - Verification passes the focused M213 dashboard suite (36 tests), typecheck, and diff check. This is presentation and operator-decision hardening only; it changes no daemon, routing, merge, or learning authority.
+  - Published commit `d0f22894` as protected draft PR #92. The full protected matrix is the promotion gate.

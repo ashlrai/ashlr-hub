@@ -479,7 +479,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain('renderDispatchProductionCard(\n    f.dispatchProduction,\n    f.dispatchProductionSource,');
     expect(src).toContain('function dispatchProductionSourceText');
-    expect(src).toContain("return !source || (source.sourceState === 'healthy' && source.complete === true)");
+    expect(src).toContain("return source?.sourceState === 'healthy' && source.complete === true");
     expect(src).toContain("['Source', dispatchProductionSourceText(sourceQuality)]");
     expect(src).toContain("renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
@@ -1021,14 +1021,14 @@ describe('M213 Dashboard SSE — /api/events', () => {
   it('app.js keeps unhealthy workspace zeroes distinct from healthy telemetry', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
-    const start = src.indexOf('function workspaceSourceHealthy(workspace)');
+    const start = src.indexOf('function dispatchProductionSourceHealthy(source)');
     const end = src.indexOf('\nfunction fleetRepairRecoveryActive', start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
 
     const formatterSource = src.slice(start, end);
     const helpers = new Function(
-      `${formatterSource}\nreturn { workspaceSourceText, workspaceReadText, workspaceObservedValue };`,
+      `${formatterSource}\nreturn { dispatchProductionSourceHealthy, workspaceSourceHealthy, workspaceSourceText, workspaceReadText, workspaceObservedValue };`,
     )() as Record<string, (...args: any[]) => string>;
     const degraded = {
       sourceQuality: {
@@ -1044,6 +1044,11 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const missing = { sourceQuality: { sourceState: 'missing', complete: true } };
     expect(helpers.workspaceSourceText!(missing)).toBe('missing');
     expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
+
+    expect(helpers.dispatchProductionSourceHealthy!(undefined)).toBe(false);
+    expect(helpers.workspaceSourceHealthy!({})).toBe(false);
+    expect(helpers.workspaceSourceText!({})).toBe('unknown');
+    expect(helpers.workspaceObservedValue!({}, 0)).toBe('unavailable');
   });
 
   it('renders cutoff checkpoints outside readiness and labels evidence source quality honestly', () => {

@@ -2705,3 +2705,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pass focused and adjacent consumer suites, typecheck, scoped lint, production build, zero-vulnerability audit, and diff checks.
 - [x] Publish protected stacked draft PR #53 on PR #52 without activating merge or deployment authority.
 - [ ] Require the complete protected CI matrix on the immutable stacked PR head before promotion.
+
+## Fleet Source Provenance (2026-07-21)
+- [x] Audit Fleet dashboard source-quality consumers for missing metadata that could present zero metrics as healthy observations.
+- [x] Require explicit `healthy` plus `complete:true` provenance before dispatch yield, repair recovery, or workspace metrics are treated as authoritative.
+- [x] Render absent workspace provenance as unavailable and preserve explicit missing/degraded states without fabricating healthy telemetry.
+- [x] Cover explicit healthy, missing, degraded, and absent source states in the executable dashboard helper test.
+- [x] Pass focused M213 dashboard verification, typecheck, and diff check.
+- [x] Publish protected draft PR #92 and require its full CI matrix before promotion.

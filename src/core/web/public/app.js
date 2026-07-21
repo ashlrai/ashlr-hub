@@ -2667,7 +2667,7 @@ function generatedRepairRecoveryMetric(generated) {
 
 function fleetRepairRecoveryMetric(fleet) {
   const source = fleet?.dispatchProductionSource;
-  const dispatchGenerated = (!source || dispatchProductionSourceHealthy(source))
+  const dispatchGenerated = dispatchProductionSourceHealthy(source)
     ? fleet?.dispatchProduction?.generatedRepairAttempts
     : null;
   return generatedRepairRecoveryMetric(
@@ -2686,12 +2686,12 @@ function dispatchProductionSourceText(source) {
 }
 
 function dispatchProductionSourceHealthy(source) {
-  return !source || (source.sourceState === 'healthy' && source.complete === true);
+  return source?.sourceState === 'healthy' && source.complete === true;
 }
 
 function workspaceSourceHealthy(workspace) {
   const source = workspace?.sourceQuality;
-  return !source || (source.sourceState === 'healthy' && source.complete === true);
+  return source?.sourceState === 'healthy' && source.complete === true;
 }
 
 function workspaceSourceText(workspace) {
@@ -2712,7 +2712,7 @@ function workspaceReadText(workspace) {
 
 function workspaceObservedValue(workspace, value, rate = false) {
   if (workspaceSourceHealthy(workspace)) return value;
-  if (workspace?.sourceQuality?.sourceState === 'missing') return 'unavailable';
+  if (!workspace?.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
   return rate ? 'partial' : `${value} observed (partial)`;
 }
 
