@@ -24,6 +24,7 @@ function request(): RemoteCasRequestV1 {
       schemaVersion: 1,
       transactionId: DIGEST,
       transactionAttestation: OTHER_DIGEST,
+      signingKeyId: 'c'.repeat(64),
       proposalId: 'proposal-439',
       phase: 'prepared',
       before: { proposal: null, projection: null },
@@ -32,6 +33,8 @@ function request(): RemoteCasRequestV1 {
         proposal: { present: true, digest: DIGEST, bytes: 12 },
         projection: { present: true, digest: OTHER_DIGEST, bytes: 34 },
       },
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
     },
   };
 }
@@ -45,10 +48,16 @@ describe('M439 remote CAS request contract', () => {
     expect(remoteCasRequestDigest(input)).toBe(remoteCasRequestDigest(parsed.state === 'valid' ? parsed.request : input));
   });
 
-  it('normalizes object property order through parsing and canonical serialization', () => {
+  it('normalizes outer and nested stage property order through canonical serialization', () => {
     const input = request();
     const reordered = {
-      requestedAt: input.requestedAt, schemaVersion: 1, binding: input.binding, action: input.action,
+      requestedAt: input.requestedAt, schemaVersion: 1, binding: {
+        ...input.binding,
+        staged: {
+          proposal: { present: true, bytes: 12, digest: DIGEST },
+          projection: { digest: OTHER_DIGEST, present: true, bytes: 34 },
+        },
+      }, action: input.action,
       expectedEpoch: input.expectedEpoch, repositoryId: input.repositoryId, audience: input.audience,
       authorityId: input.authorityId, requestId: input.requestId,
     };
@@ -59,11 +68,13 @@ describe('M439 remote CAS request contract', () => {
 
   it.each([
     (value: RemoteCasRequestV1) => ({ ...value, expectedEpoch: '01' }),
+    (value: RemoteCasRequestV1) => ({ ...value, expectedEpoch: '9'.repeat(40) }),
+    (value: RemoteCasRequestV1) => ({ ...value, audience: 'authority\u202Eprod' }),
     (value: RemoteCasRequestV1) => ({ ...value, requestedAt: '2026-07-21T00:00:00Z' }),
     (value: RemoteCasRequestV1) => ({ ...value, action: 'would-write-projection' }),
     (value: RemoteCasRequestV1) => ({ ...value, binding: { ...value.binding, staged: { ...value.binding.staged, proposal: { present: false, digest: null, bytes: 0 } } } }),
     (value: RemoteCasRequestV1) => ({ ...value, extra: true }),
-  ])('fails closed for malformed epochs, timestamps, phase actions, and binding metadata', (mutate) => {
+  ])('fails closed for malformed identifiers, epochs, timestamps, phase actions, and binding metadata', (mutate) => {
     expect(parseRemoteCasRequest(mutate(request())).state).toBe('invalid');
   });
 });

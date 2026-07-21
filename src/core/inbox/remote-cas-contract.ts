@@ -11,7 +11,9 @@ const DIGEST_RE = /^[a-f0-9]{64}$/;
 const PROPOSAL_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const EPOCH_RE = /^(0|[1-9]\d*)$/;
 const MAX_ID_LENGTH = 256;
+const MAX_EPOCH_DIGITS = 39;
 const MAX_STAGE_BYTES = 4 * 1024 * 1024;
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/;
 
 const ACTIONS_BY_PHASE: Record<OperationalProjectionTransactionPhase, readonly OperationalProjectionRecoveryNext[]> = {
   prepared: ['would-write-proposal', 'would-delete-proposal', 'would-attest-proposal-installed'],
@@ -24,11 +26,14 @@ export interface RemoteCasTransactionBindingV1 {
   schemaVersion: 1;
   transactionId: string;
   transactionAttestation: string;
+  signingKeyId: string;
   proposalId: string;
   phase: OperationalProjectionTransactionPhase;
   before: OperationalProjectionTransactionDigestsV1;
   after: OperationalProjectionTransactionDigestsV1;
   staged: OperationalProjectionTransactionStagedArtifactsV2;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RemoteCasRequestV1 {
@@ -60,10 +65,7 @@ function canonicalTimestamp(value: unknown): value is string {
 
 function boundedId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH &&
-    value.trim() === value && !Array.from(value).some((character) => {
-      const code = character.charCodeAt(0);
-      return code < 32 || code === 127;
-    });
+    ID_RE.test(value);
 }
 
 function validDigest(value: unknown): value is string | null {
@@ -93,9 +95,11 @@ function validBinding(value: unknown): value is RemoteCasTransactionBindingV1 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   if (!exactKeys(record, [
-    'after', 'before', 'phase', 'proposalId', 'schemaVersion', 'staged', 'transactionAttestation', 'transactionId',
+    'after', 'before', 'createdAt', 'phase', 'proposalId', 'schemaVersion', 'signingKeyId', 'staged',
+    'transactionAttestation', 'transactionId', 'updatedAt',
   ]) || record.schemaVersion !== 1 || !DIGEST_RE.test(record.transactionId as string) ||
-    !DIGEST_RE.test(record.transactionAttestation as string) || typeof record.proposalId !== 'string' ||
+    !DIGEST_RE.test(record.transactionAttestation as string) || !DIGEST_RE.test(record.signingKeyId as string) ||
+    !canonicalTimestamp(record.createdAt) || !canonicalTimestamp(record.updatedAt) || typeof record.proposalId !== 'string' ||
     record.proposalId.length > 240 || !PROPOSAL_ID_RE.test(record.proposalId) ||
     !Object.hasOwn(ACTIONS_BY_PHASE, record.phase as string) || !validDigests(record.before) ||
     !validDigests(record.after) || !record.staged || typeof record.staged !== 'object' || Array.isArray(record.staged)) return false;
@@ -117,7 +121,8 @@ export function parseRemoteCasRequest(value: unknown): RemoteCasRequestParseResu
   if (!boundedId(record.requestId) || !boundedId(record.authorityId) || !boundedId(record.audience) || !boundedId(record.repositoryId)) {
     return { state: 'invalid', reason: 'identifier-invalid' };
   }
-  if (record.expectedEpoch !== null && (typeof record.expectedEpoch !== 'string' || !EPOCH_RE.test(record.expectedEpoch))) {
+  if (record.expectedEpoch !== null && (typeof record.expectedEpoch !== 'string' ||
+    record.expectedEpoch.length > MAX_EPOCH_DIGITS || !EPOCH_RE.test(record.expectedEpoch))) {
     return { state: 'invalid', reason: 'expected-epoch-invalid' };
   }
   if (!canonicalTimestamp(record.requestedAt)) return { state: 'invalid', reason: 'requested-at-invalid' };
@@ -150,15 +155,26 @@ export function canonicalRemoteCasRequest(request: RemoteCasRequestV1): string {
     binding: {
       after: { projection: request.binding.after.projection, proposal: request.binding.after.proposal },
       before: { projection: request.binding.before.projection, proposal: request.binding.before.proposal },
+      createdAt: request.binding.createdAt,
       phase: request.binding.phase,
       proposalId: request.binding.proposalId,
       schemaVersion: request.binding.schemaVersion,
+      signingKeyId: request.binding.signingKeyId,
       staged: {
-        projection: request.binding.staged.projection,
-        proposal: request.binding.staged.proposal,
+        projection: {
+          bytes: request.binding.staged.projection.bytes,
+          digest: request.binding.staged.projection.digest,
+          present: request.binding.staged.projection.present,
+        },
+        proposal: {
+          bytes: request.binding.staged.proposal.bytes,
+          digest: request.binding.staged.proposal.digest,
+          present: request.binding.staged.proposal.present,
+        },
       },
       transactionAttestation: request.binding.transactionAttestation,
       transactionId: request.binding.transactionId,
+      updatedAt: request.binding.updatedAt,
     },
     expectedEpoch: request.expectedEpoch,
     repositoryId: request.repositoryId,
