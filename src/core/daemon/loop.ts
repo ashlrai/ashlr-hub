@@ -3270,18 +3270,84 @@ export async function tick(
     stillOwnsTick();
     return null;
   };
+  let autoMergeMaintenanceSpendUsd = 0;
+  // Shared with the final post-dispatch maintenance pass, which executes after
+  // regular dispatch accounting has opened its durable spend guard.
+  let tickSpent = 0;
+  let autoMergeMaintenanceAccountingFailure: string | null = null;
+  const maintenanceSpentUsd = (dispatchSpentUsd = 0): number =>
+    dispatchSpentUsd + autoMergeMaintenanceSpendUsd;
+  const autoMergeMaintenanceFailureTick = (): DaemonTick | null => {
+    if (!autoMergeMaintenanceAccountingFailure) return null;
+    return persistenceRefusal(
+      `tick refused: ${autoMergeMaintenanceAccountingFailure}; spend guard remains armed`,
+      'error',
+    );
+  };
   const runAutoMergeMaintenancePass = async (
     ownershipAlreadyFenced = false,
   ): Promise<AutoMergePassResult | null> => {
     if (directionPlan?.runAutoMergeMaintenance === false || opts.dryRun || stopRequested()) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
+    // The post-dispatch caller already holds the normal tick spend guard. Early
+    // maintenance has no dispatch guard, so it gets a narrow durable boundary.
+    const spendGuard = ownershipAlreadyFenced
+      ? null
+      : armDaemonSpendGuard(['automerge-maintenance']);
+    if (spendGuard && !spendGuard.ok) {
+      autoMergeMaintenanceAccountingFailure = `failed to arm auto-merge maintenance spend guard (${spendGuard.error})`;
+      releaseLocalStoreLock(fence);
+      return null;
+    }
     try {
       if (!stillOwnsTick()) return null;
       const result = await runAutoMergePass(liveCfg);
-      return stillOwnsTick() ? result : null;
+      if (!stillOwnsTick()) return null;
+      const measuredSpend = result?.judgeMeasuredSpendUsd;
+      if (
+        measuredSpend !== undefined &&
+        (!Number.isFinite(measuredSpend) || measuredSpend < 0)
+      ) {
+        autoMergeMaintenanceAccountingFailure = 'auto-merge maintenance returned invalid measured judge spend';
+        return null;
+      }
+      const spendToCommit = measuredSpend ?? 0;
+      if (spendToCommit > 0) {
+        if (ownershipAlreadyFenced) {
+          // The normal tick guard stays armed until its final state commit.
+          tickSpent += spendToCommit;
+        } else {
+          const latest = loadDaemonStateStrict();
+          if (!latest.ok) {
+            autoMergeMaintenanceAccountingFailure =
+              `failed to reload daemon state for auto-merge maintenance spend (${latest.error})`;
+            return null;
+          }
+          state = resetDayIfNeeded(latest.state);
+          state.todaySpentUsd += spendToCommit;
+          const save = saveTickState(state);
+          if (!save.ok) {
+            autoMergeMaintenanceAccountingFailure =
+              `failed to persist auto-merge maintenance spend (${save.error})`;
+            return null;
+          }
+          autoMergeMaintenanceSpendUsd += spendToCommit;
+        }
+      }
+      if (spendGuard?.ok) {
+        const clear = clearDaemonSpendGuard(spendGuard.guard.token);
+        if (!clear.ok) {
+          autoMergeMaintenanceAccountingFailure =
+            `failed to clear auto-merge maintenance spend guard (${clear.error})`;
+          return null;
+        }
+      }
+      return result;
     } catch (err) {
       console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err);
+      autoMergeMaintenanceAccountingFailure =
+        `auto-merge maintenance failed after spend guard was armed (${(err as Error)?.message ?? err})`;
       return null;
     } finally {
       releaseLocalStoreLock(fence);
@@ -3964,6 +4030,8 @@ export async function tick(
 
     if (!directionPlan.allowDispatch) {
       const autoMergePassResult = await runAutoMergeMaintenancePass();
+      const maintenanceFailure = autoMergeMaintenanceFailureTick();
+      if (maintenanceFailure) return maintenanceFailure;
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;
       if (!stillOwnsTick()) {
@@ -3983,7 +4051,7 @@ export async function tick(
         ts: now,
         itemsConsidered: 0,
         proposalsCreated: 0,
-        spentUsd: 0,
+        spentUsd: maintenanceSpentUsd(),
         reason: directionPlan.mode,
         directionMode,
         directionReason: directionPlan.reason,
@@ -4051,6 +4119,8 @@ export async function tick(
 
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();
+    const maintenanceFailure = autoMergeMaintenanceFailureTick();
+    if (maintenanceFailure) return maintenanceFailure;
     preDispatchAutoMergePassResult = autoMergePassResult;
     preDispatchAutoMergePassRan = true;
     const autoMerge = autoMergeTickSummary(autoMergePassResult);
@@ -4095,7 +4165,7 @@ export async function tick(
         ts: now,
         itemsConsidered: 0,
         proposalsCreated: 0,
-        spentUsd: 0,
+        spentUsd: maintenanceSpentUsd(),
         reason: 'no-backlog',
         ...(directionMode ? { directionMode } : {}),
         ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -4129,6 +4199,8 @@ export async function tick(
 
     if (backlogItems.length === 0) {
       const autoMergePassResult = await runAutoMergeMaintenancePass();
+      const maintenanceFailure = autoMergeMaintenanceFailureTick();
+      if (maintenanceFailure) return maintenanceFailure;
       preDispatchAutoMergePassResult = autoMergePassResult;
       preDispatchAutoMergePassRan = true;
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
@@ -4151,7 +4223,7 @@ export async function tick(
         ts: now,
         itemsConsidered: 0,
         proposalsCreated: 0,
-        spentUsd: 0,
+        spentUsd: maintenanceSpentUsd(),
         reason: 'no-backlog',
         ...(directionMode ? { directionMode } : {}),
         ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -4934,7 +5006,7 @@ export async function tick(
   // task so later dispatches can short-circuit once cumulative realized spend
   // reaches the remaining daily headroom (the USD daily cap is otherwise only
   // enforced BETWEEN ticks — this keeps a single tick from overshooting it).
-  let tickSpent = 0;
+  tickSpent = 0;
   // M48: per-backend dispatch tally for this tick (observability only).
   const backendDispatch: Record<string, number> = {};
 
@@ -6902,6 +6974,8 @@ export async function tick(
   let merged = 0;
   let autoMergePassResult: AutoMergePassResult | null = null;
   autoMergePassResult = preDispatchAutoMergePassRan ? preDispatchAutoMergePassResult : await runAutoMergeMaintenancePass(true);
+  const maintenanceFailure = autoMergeMaintenanceFailureTick();
+  if (maintenanceFailure) return maintenanceFailure;
   const autoMerge = autoMergeTickSummary(autoMergePassResult);
   merged = autoMergePassResult?.merged ?? 0;
   const producerMaintenance = producerMaintenanceSummary();
@@ -6911,7 +6985,7 @@ export async function tick(
       ts: now,
       itemsConsidered: selected.length,
       proposalsCreated,
-      spentUsd: tickSpent,
+      spentUsd: maintenanceSpentUsd(tickSpent),
       reason: 'shutdown-requested',
       ...(dispatches ? { dispatches } : {}),
     });
@@ -6926,7 +7000,7 @@ export async function tick(
       ts: now,
       itemsConsidered: selected.length,
       proposalsCreated,
-      spentUsd: tickSpent,
+      spentUsd: maintenanceSpentUsd(tickSpent),
 	      reason: 'state-persistence-failed',
 	      ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
 	      ...(directionMode ? { directionMode } : {}),
@@ -6968,7 +7042,7 @@ export async function tick(
     ts: now,
     itemsConsidered: selected.length,
     proposalsCreated,
-    spentUsd: tickSpent,
+    spentUsd: maintenanceSpentUsd(tickSpent),
     reason: stopRequested()
       ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
       : workedOutcomeFailedItemIds.size > 0 ||
@@ -7099,7 +7173,7 @@ export async function tick(
     action: 'daemon:tick',
     repo: null,
     sandboxId: null,
-    summary: `tick ${tickRecord.reason}: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${tickSpent.toFixed(4)} spent`,
+    summary: `tick ${tickRecord.reason}: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${maintenanceSpentUsd(tickSpent).toFixed(4)} spent`,
     result: tickRecord.reason === 'state-persistence-failed' ? 'error' : 'ok',
   });
 

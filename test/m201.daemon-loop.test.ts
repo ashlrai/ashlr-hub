@@ -3441,7 +3441,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	    expect(result.directionMode).toBe('verify-only');
 	    expect(result.directionReason).toBe('pending proposals need verification');
 	    expect(result.merged).toBe(1);
-	    expect(result.spentUsd).toBe(0);
+	    expect(result.spentUsd).toBe(0.0045);
     expect(result.autoMerge).toEqual({
 	      attempted: 3,
 	      judgePerPass: 4,
@@ -3459,11 +3459,47 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      invalidRejected: 1,
     });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+	    expect(loadDaemonState().todaySpentUsd).toBe(0.0045);
+    expect(readDaemonSpendGuard().exists).toBe(false);
     expect(mockReconcileRemoteHandoffs).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f0: post-dispatch maintenance commits measured judge spend under the tick guard', async () => {
+    enrollWithItems(1);
+    mockRunAutoMergePass.mockResolvedValue({ judgeMeasuredSpendUsd: 0.0045, merged: 0 });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.spentUsd).toBeCloseTo(0.0055, 10);
+    expect(loadDaemonState().todaySpentUsd).toBeCloseTo(0.0055, 10);
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('A1f0a: a maintenance failure leaves a durable guard that blocks a retry', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'run maintenance'));
+    mockRunAutoMergePass.mockRejectedValue(new Error('provider connection lost'));
+    const config = {
+      ...cfgBuiltin(),
+      foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } },
+    } as AshlrConfig;
+
+    const failed = await tick(config, { dryRun: false });
+    expect(failed.reason).toBe('state-persistence-failed');
+    expect(readDaemonSpendGuard().exists).toBe(true);
+
+    const retried = await tick(config, { dryRun: false });
+    expect(retried.reason).toBe('state-persistence-failed');
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
   });
 
   it('A1f1: real strategy conversion blocks verify-only maintenance without proposal authority', async () => {

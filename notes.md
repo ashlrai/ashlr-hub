@@ -2935,3 +2935,8 @@
   - Auto-merge results and daemon tick metadata now distinguish display-only estimates, provider-reported measured spend, and unmetered calls. This does not yet charge `todaySpentUsd`; once-only charge propagation across maintenance early returns remains pending.
   - Focused M48, M119, M120, and M130 coverage passes 128 assertions plus typecheck. The broader M201 daemon suite was still running in the local hermetic environment and is left to protected CI rather than treated as evidence.
   - Follow-up review closed three integrity gaps: new ledger-directory creation now fsyncs its parent before a durable write can report success; manager-path decisions aggregate only the current proposal's receipts; and absence of any receipt is not falsely labelled as an unmetered provider call. Daemon projection rejects non-finite totals and non-integer call counts.
+
+- Measured maintenance spend commit (2026-07-21):
+  - Maintenance-only auto-merge now arms a dedicated durable spend guard before contacting a judge. Measured provider cost is reloaded into daemon state and atomically persisted before the guard clears; a thrown pass, invalid amount, persistence failure, or guard-clear failure leaves the guard armed and blocks the next tick.
+  - Post-dispatch auto-merge reuses the already-armed dispatch spend guard and adds measured cost to the same final state transaction. Tick telemetry reports maintenance plus dispatch spend without double-debiting `todaySpentUsd`.
+  - Focused daemon coverage proves verify-only charge persistence, post-dispatch accumulation, and a failed maintenance pass blocking retry. Direct `autoMergeProposal` manager-gate calls still need the same durable decision/receipt treatment before judge-cost accounting can be called complete.
