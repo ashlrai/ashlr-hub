@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
-import { detectRepoExecutionProfile } from './repo-profile.js';
+import { detectRepoExecutionProfile, verifyExecutablePathError } from './repo-profile.js';
 import { buildToolPath } from './tool-path.js';
 
 // ---------------------------------------------------------------------------
@@ -413,6 +413,18 @@ export function runVerifyCommand(
       repo: workspaceRoot,
       sandboxId: null,
       summary: `${vc.kind}: ${command} → invalid cwd`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+  }
+  const executableError = verifyExecutablePathError(workspaceRoot, commandRoot, bin);
+  if (executableError) {
+    const output = renderToolText(`${command}\n[verify-runner] command executable ${executableError}`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid executable`,
       result: 'error',
     });
     return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
@@ -901,6 +913,18 @@ export async function runVerifyCommandAsync(
       repo: workspaceRoot,
       sandboxId: null,
       summary: `${vc.kind}: ${command} → invalid cwd`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+  }
+  const executableError = verifyExecutablePathError(workspaceRoot, commandRoot, bin);
+  if (executableError) {
+    const output = renderToolText(`${command}\n[verify-runner] command executable ${executableError}`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → invalid executable`,
       result: 'error',
     });
     return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };

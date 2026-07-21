@@ -1,5 +1,10 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Verifier Contract Executable Portability Hardening
+- Contract `cmd[0]` entries with slash paths now resolve from the declared command cwd, must remain lexically and physically inside the repository, and reject symlink escapes before contributing merge-grade verification.
+- Windows backslash path separators are rejected rather than normalized, preventing a contract from appearing valid on one platform while attempting to execute a literal invalid filename on POSIX.
+- Bare PATH executables and absent dependency-installed relative shims remain valid. The runner performs the same physical-path check immediately before spawn, so a dependency shim created after parsing still cannot escape the workspace through a symlink.
+
 ## 2026-07-21 - Bounded trajectory trace projection
 - Added an in-memory `trajectoryLearning.traces` projection; it adds no ledger, API endpoint, mutation route, or lookup-by-identity capability.
 - Each trace is keyed by the existing opaque `trajectory:<sha256-prefix>` reference and exposes at most eight chronological events. The projection emits only allowlisted kind/outcome/action, known engine/tier categories, normalized model family, safe policy/epoch values, bounded evidence classification, and closed label/source categories.

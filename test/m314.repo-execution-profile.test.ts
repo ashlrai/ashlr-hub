@@ -406,6 +406,81 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('rejects contract executable symlinks that resolve outside the repo', () => {
+    const dir = makeFixture();
+    const outside = makeFixture();
+    try {
+      const outsideVerify = join(outside, 'verify');
+      writeFileSync(outsideVerify, '#!/bin/sh\nexit 0\n', 'utf8');
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      try {
+        symlinkSync(outsideVerify, join(dir, 'scripts', 'verify'), 'file');
+      } catch {
+        return;
+      }
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'escape-executable', kind: 'test', cmd: ['scripts/verify'], profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([]);
+      expect(profile.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('without escaping through a symlink');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects Windows-separator contract executables as nonportable', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'windows-path', kind: 'test', cmd: ['scripts\\verify'], profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([]);
+      expect(profile.verifyContract?.errors.join('\n')).toContain('must not use Windows backslash path separators');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts bare PATH executables and legitimate repo-relative paths', () => {
+    const dir = makeFixture();
+    try {
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      writeFileSync(join(dir, 'scripts', 'verify'), '#!/bin/sh\nexit 0\n', 'utf8');
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          { id: 'npm', kind: 'typecheck', cmd: ['npm', 'run', 'typecheck'], profiles: ['merge'] },
+          { id: 'repo-script', kind: 'test', cmd: ['scripts/verify'], profiles: ['merge'] },
+          { id: 'vitest', kind: 'test', cmd: ['./node_modules/.bin/vitest', 'run'], profiles: ['merge'] },
+        ],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyContract).toMatchObject({ valid: true, mergeGradeExplicit: true });
+      expect(profile.verifyCommands.map((command) => command.cmd)).toEqual([
+        ['npm', 'run', 'typecheck'],
+        ['scripts/verify'],
+        ['./node_modules/.bin/vitest', 'run'],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects missing contract cwd directories', () => {
     const dir = makeFixture();
     try {

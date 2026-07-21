@@ -472,6 +472,31 @@ describe('runVerifyCommand', () => {
     }
   });
 
+  it('fails closed before spawning when a path executable escapes through a symlink', async () => {
+    const outside = makeFixture();
+    const marker = join(outside, 'should-not-exist');
+    try {
+      const target = join(outside, 'verify.js');
+      writeFileSync(target, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`, 'utf8');
+      mkdirSync(join(workdir, 'scripts'), { recursive: true });
+      try {
+        symlinkSync(target, join(workdir, 'scripts', 'verify.js'), 'file');
+      } catch {
+        return;
+      }
+      const vc: VerifyCommand = { kind: 'test', cmd: ['scripts/verify.js'] };
+
+      const sync = runVerifyCommand(vc, workdir, cfg);
+      const async = await runVerifyCommandAsync(vc, workdir, cfg);
+
+      expect(sync).toMatchObject({ ok: false, failureCategory: 'invalid-command' });
+      expect(async).toMatchObject({ ok: false, failureCategory: 'invalid-command' });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('never throws on a missing binary — returns ok:false', () => {
     const vc: VerifyCommand = { kind: 'lint', cmd: ['definitely-not-a-real-binary-xyz'] };
     const res = runVerifyCommand(vc, workdir, cfg);

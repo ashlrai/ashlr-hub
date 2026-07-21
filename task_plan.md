@@ -1,5 +1,10 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Cycle - Verifier Contract Executable Portability
+- [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
+- [x] Reject path-bearing executable symlink escapes and Windows-only separators while preserving bare PATH tools and missing dependency shims.
+- [x] Run focused parser/runner coverage, typecheck, scoped lint, and diff validation; commit the isolated hardening patch.
+
 ## 2026-07-21 - Bounded trajectory trace projection
 - [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.
 - [x] Add a capped read-only projection under `trajectoryLearning` (five opaque traces, eight chronological allowlisted events).
