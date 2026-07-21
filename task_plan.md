@@ -2813,6 +2813,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Verifier Authority Snapshot V1 (2026-07-21)
 - [x] Audit mutable verifier control inputs and distinguish Git-tree drift from runtime/toolchain trust.
 - [x] Add exact, validated contract authority-file declarations and declare Hub verifier inputs.
+- [x] Cover the Hub merge commands' ESLint and Vitest control inputs and reject malformed declaration fixtures.
 - [ ] Bind a base Git-tree authority snapshot through verification reuse and signed merge evidence.
 - [ ] Make authority/dependency inputs read-only for candidate execution before treating the snapshot as judge-free authority.
 
