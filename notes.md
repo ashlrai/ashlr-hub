@@ -3342,3 +3342,6 @@
 # Repair Retry Route Recovery (2026-07-21)
 - Normal-lane trusted repairs now participate in the existing same-tier alternate-backend reroute before durable reservation. An authorized verified-failure repair no longer repeatedly selects a prior failed backend only to be refused later by retry policy.
 - Verification: TypeScript typecheck, focused M201 alternative-backend and repair-only coverage (3 assertions), and `git diff --check` pass locally. Protected CI remains the promotion gate.
+# Windows M426 Timing Recovery (2026-07-21)
+- Protected CI isolated a Windows-only 15-second timeout in M426's real-Git worktree publication fixture. The fixture already performs transient-lock-aware cleanup, and no assertion or production failure was reported.
+- The exact test now has a 30-second budget. This changes only CI tolerance for the known filesystem contention path.

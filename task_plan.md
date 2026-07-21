@@ -3089,3 +3089,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Let every trusted generated repair use same-tier alternate-backend recovery in the normal lane.
 - [x] Verify alternative-backend and repair-only daemon coverage with typecheck and diff integrity.
 - [ ] Require protected CI on the immutable draft head before promotion.
+# Windows M426 Timing Recovery (2026-07-21)
+- [x] Diagnose the protected Windows portability 2/3 failure as the real-Git worktree publication fixture exceeding Vitest's default 15-second budget.
+- [x] Give only the lock-aware fixture an explicit 30-second timeout; assertions and production behavior are unchanged.
+- [x] Pass the focused M426 fixture and publish the CI recovery commit.
