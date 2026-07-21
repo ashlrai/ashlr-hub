@@ -30,6 +30,7 @@ export type AutonomousDirectionMode =
   | 'pause'
   | 'local-only'
   | 'verify-only'
+  | 'repair-only'
   | 'backlog-build'
   | 'auto-merge-ready';
 
@@ -156,6 +157,7 @@ export interface ResourceStrategyOptions {
 export interface ResourceStrategyDaemonPlan {
   mode: AutonomousDirectionMode;
   allowDispatch: boolean;
+  dispatchScope: 'none' | 'normal' | 'proposal-repair';
   forceLocalOnly: boolean;
   runAutoMergeMaintenance: boolean;
   reason: string;
@@ -488,6 +490,28 @@ function recommendMode(
     return { mode: 'pause', confidence: 'high', reasons, recommendedActions: actions };
   }
 
+  const stalePendingOnly =
+    proposalSource.gate === 'ready' &&
+    productionVelocity.enabled &&
+    fleet.queue.backlogItems > 0 &&
+    fleet.proposals.pending > 0 &&
+    outcomes.stalePending >= fleet.proposals.pending &&
+    ecosystem.posture !== 'fail';
+
+  if (
+    proposalSource.gate === 'ready' &&
+    fleet.proposals.pending > 0 &&
+    outcomes.verificationFailures > 0 &&
+    !stalePendingOnly &&
+    (cfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
+    ecosystem.posture !== 'fail'
+  ) {
+    reasons.push(`${outcomes.verificationFailures} pending proposal(s) have deterministic verification failures`);
+    actions.push('dispatch only exact verified-failure proposal repairs');
+    actions.push('do not run merge, handoff, judge, or ordinary backlog work in this lane');
+    return { mode: 'repair-only', confidence: 'high', reasons, recommendedActions: actions };
+  }
+
   const localOpen = hasOpenLocal(resources.backends);
   const cloudHeld = cloudConstrained(resources.backends);
   if ((cloudHeld || budgets.daemonBudgetLevel === 'near') && localOpen) {
@@ -510,14 +534,6 @@ function recommendMode(
     actions.push('do not widen merge authority from this advisory report');
     return { mode: 'auto-merge-ready', confidence: 'medium', reasons, recommendedActions: actions };
   }
-
-  const stalePendingOnly =
-    proposalSource.gate === 'ready' &&
-    productionVelocity.enabled &&
-    fleet.queue.backlogItems > 0 &&
-    fleet.proposals.pending > 0 &&
-    outcomes.stalePending >= fleet.proposals.pending &&
-    ecosystem.posture !== 'fail';
 
   if (
     (proposalSource.gate === 'ready' && fleet.proposals.pending > 0 && !stalePendingOnly) ||
@@ -710,6 +726,7 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
       return {
         mode: report.mode,
         allowDispatch: false,
+        dispatchScope: 'none',
         forceLocalOnly: false,
         runAutoMergeMaintenance: false,
         reason,
@@ -719,14 +736,25 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
       return {
         mode: report.mode,
         allowDispatch: false,
+        dispatchScope: 'none',
         forceLocalOnly: false,
         runAutoMergeMaintenance: proposalAuthorityReady,
+        reason,
+      };
+    case 'repair-only':
+      return {
+        mode: report.mode,
+        allowDispatch: true,
+        dispatchScope: 'proposal-repair',
+        forceLocalOnly: false,
+        runAutoMergeMaintenance: false,
         reason,
       };
     case 'local-only':
       return {
         mode: report.mode,
         allowDispatch: true,
+        dispatchScope: 'normal',
         forceLocalOnly: true,
         runAutoMergeMaintenance: proposalAuthorityReady,
         reason,
@@ -735,6 +763,7 @@ export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): Re
       return {
         mode: report.mode,
         allowDispatch: true,
+        dispatchScope: 'normal',
         forceLocalOnly: false,
         runAutoMergeMaintenance: proposalAuthorityReady,
         reason,

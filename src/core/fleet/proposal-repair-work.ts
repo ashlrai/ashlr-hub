@@ -207,6 +207,8 @@ export interface ProposalRepairWorkResult {
 }
 
 export interface ProposalRepairWorkOptions {
+  /** Restrict mutation to exact pending non-partial deterministic verification failures. */
+  verifiedFailureProposalOnly?: boolean;
   dispatchEvents?: DispatchProductionEvent[];
   includeDispatchCaptureFailures?: boolean;
   includeDispatchNoDiffReslices?: boolean;
@@ -1226,6 +1228,7 @@ export function queueProposalRepairWorkForPendingProposals(
   now = new Date(),
   opts?: ProposalRepairWorkOptions,
 ): ProposalRepairWorkResult {
+  const verifiedFailureProposalOnly = opts?.verifiedFailureProposalOnly === true;
   let handoffs: ReturnType<typeof readRepairHandoffs> | undefined;
   let pending: Proposal[];
   let availableProposals: Proposal[];
@@ -1246,10 +1249,13 @@ export function queueProposalRepairWorkForPendingProposals(
       .filter((proposal) => isRecentRejectedCaptureArtifact(proposal, now, captureDecisionProof))
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
       .slice(0, REJECTED_CAPTURE_MAX_SCANNED);
-    pending = [
-      ...availableProposals.filter((proposal) => proposal.status === 'pending'),
-      ...rejectedCapture,
-    ];
+    pending = verifiedFailureProposalOnly
+      ? availableProposals.filter((proposal) =>
+          proposal.status === 'pending' && proposal.isPartial !== true && proposal.verifyResult?.passed === false)
+      : [
+          ...availableProposals.filter((proposal) => proposal.status === 'pending'),
+          ...rejectedCapture,
+        ];
   } catch {
     return {
       scanned: 0,
@@ -1276,8 +1282,8 @@ export function queueProposalRepairWorkForPendingProposals(
     lifecycleProposals = opts?.lifecycleProposals ?? availableProposals;
   }
   const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
-  const includeCaptureRepairs = opts?.includeDispatchCaptureFailures !== false;
-  const includeNoDiffReslices = opts?.includeDispatchNoDiffReslices !== false;
+  const includeCaptureRepairs = !verifiedFailureProposalOnly && opts?.includeDispatchCaptureFailures !== false;
+  const includeNoDiffReslices = !verifiedFailureProposalOnly && opts?.includeDispatchNoDiffReslices !== false;
   const dispatchRead: RecentDispatchEventsRead = includeCaptureRepairs || includeNoDiffReslices
     ? proposals === undefined
       ? readRecentDispatchEvents(now, opts, handoffs)
@@ -1441,7 +1447,7 @@ export function queueProposalRepairWorkForPendingProposals(
     blockedItemKeys.add(key);
     return lifecycle.disposition === 'quarantined' ? 'quarantined' : 'terminal';
   };
-  const prune = terminalLifecycleEnabled
+  const prune = terminalLifecycleEnabled && !verifiedFailureProposalOnly
       ? pruneQueuedSelfHealItems((item) => {
         if (
           item.tags.includes('rejected-capture-recovery') &&
@@ -1539,6 +1545,9 @@ export function queueProposalRepairWorkForPendingProposals(
       const current = requiresLiveFence ? loadProposal(proposal.id) : proposal;
       const currentProof = requiresLiveFence ? readCaptureDecisionProof(now) : captureDecisionProof;
       if (!current) continue;
+      if (verifiedFailureProposalOnly && (
+        current.status !== 'pending' || current.isPartial === true || current.verifyResult?.passed !== false
+      )) continue;
       const item = proposalRepairWorkItem(current, now, currentProof);
       if (!item) continue;
       const lifecycle = observeLifecycle(item);

@@ -703,6 +703,28 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.ts).toBe(proposal.createdAt);
   });
 
+  it('scopes repair-only maintenance to complete deterministic verification failures', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const failed = partialProposal(repo.dir, {
+      id: 'prop-verified-failure',
+      isPartial: false,
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    const partial = partialProposal(repo.dir, {
+      id: 'prop-partial-capture',
+      verifyResult: { passed: false, detail: 'capture gate failed', source: 'capture-gate' },
+    });
+
+    const result = queueProposalRepairWorkForPendingProposals([failed, partial], new Date(), {
+      verifiedFailureProposalOnly: true,
+    });
+
+    expect(result).toMatchObject({ scanned: 1, eligible: 1, queued: 1 });
+    const queued = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    expect(queued.map((item) => item.id)).toEqual([proposalRepairId(repo.dir, failed.id)]);
+  });
+
   it('authorizes only the exact complete failed-verification proposal repair', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

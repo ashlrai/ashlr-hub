@@ -200,7 +200,10 @@ const mockResolveDiagnosticResliceParents = vi.fn();
 const mockGeneratedRepairProposalDispatchAuthority = vi.fn();
 const mockIsRejectedCaptureRecoveryAuthorized = vi.fn();
 const mockBeginRejectedCaptureRecoveryDispatch = vi.fn();
-vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
+vi.mock('../src/core/fleet/proposal-repair-work.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/proposal-repair-work.js')>();
+  return {
+  ...actual,
   beginRejectedCaptureRecoveryDispatch: (...args: unknown[]) => mockBeginRejectedCaptureRecoveryDispatch(...args),
   generatedRepairRootKey: (item: WorkItem) =>
     /^[a-f0-9]{64}$/.test(item.repairRootId ?? '') && (item.repairDepth === 0 || item.repairDepth === 1)
@@ -211,7 +214,8 @@ vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
   isRejectedCaptureRecoveryAuthorized: (...args: unknown[]) => mockIsRejectedCaptureRecoveryAuthorized(...args),
   queueProposalRepairWorkForPendingProposals: (...args: unknown[]) => mockQueueProposalRepairWorkForPendingProposals(...args),
   resolveDiagnosticResliceParents: (...args: unknown[]) => mockResolveDiagnosticResliceParents(...args),
-}));
+  };
+});
 
 const mockRunViaAshlrcode = vi.fn();
 vi.mock('../src/core/run/ashlrcode-engine.js', () => ({
@@ -285,7 +289,7 @@ vi.mock('../src/core/autonomy/resource-strategy.js', async (importOriginal) => {
   };
 });
 
-type StrategyMode = 'pause' | 'local-only' | 'verify-only' | 'backlog-build' | 'auto-merge-ready';
+type StrategyMode = 'pause' | 'local-only' | 'verify-only' | 'repair-only' | 'backlog-build' | 'auto-merge-ready';
 
 function strategyReport(
   mode: StrategyMode,
@@ -3597,6 +3601,54 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f-repair-only: dispatches only an exact verified-failure repair', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Fix verified failure',
+      summary: 'Repair the failed check.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: 'repo:goal:verified-parent',
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    const actual = await vi.importActual<typeof import('../src/core/fleet/proposal-repair-work.js')>(
+      '../src/core/fleet/proposal-repair-work.js',
+    );
+    const repair = actual.proposalRepairWorkItem(proposal);
+    expect(repair).not.toBeNull();
+    if (!repair) throw new Error('expected verified failure repair');
+    const ordinary = makeItems(repo.dir, 1)[0]!;
+    ordinary.score = 100;
+    mockBuildBacklog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [ordinary, repair] });
+    mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('repair-only', 'verified failure requires repair'));
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 1, eligible: 1, queued: 0, failed: 0, proposalInboxAvailable: true,
+      dispatchSourceState: 'healthy', dispatchSourceComplete: true,
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.directionMode).toBe('repair-only');
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.dispatches).toEqual([
+      expect.objectContaining({ itemId: repair.id, dispatched: true }),
+    ]);
+    expect(mockRunGoal.mock.calls.length + mockRunSwarm.mock.calls.length).toBe(1);
+    expect(result.dispatches).toEqual([
+      expect.objectContaining({ itemId: repair.id, dispatched: true }),
+    ]);
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
   });
 
   it('A1f1: real strategy conversion blocks verify-only maintenance without proposal authority', async () => {

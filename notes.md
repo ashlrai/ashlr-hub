@@ -3296,3 +3296,8 @@
 - `isVerifiedFailureProposalRepairAuthorized` proves a queued depth-zero proposal repair against a complete, healthy inbox snapshot: its pending parent must be non-partial, have an explicit failed deterministic verification, retain the exact canonical repair id and root lineage, and remain enrolled.
 - Queue tags and prose cannot grant this authority. Partial capture, rejected capture, capture-repair, diagnostic/no-diff repair, missing repo, degraded inbox, and tampered lineage all fail closed.
 - This is a prerequisite for the future `repair-only` dispatch mode, not an activation of that mode or any merge, judge, or general dispatch authority.
+
+# Repair-Only Dispatch Lane (2026-07-21)
+- The autonomy strategy now selects `repair-only` only for complete pending proposals with deterministic verification failures, ahead of local-capacity and merge-ready modes but behind hard stops and the stale-pending velocity escape.
+- The lane scopes maintenance and selection to exact verified-failure proposal repairs. It disables capture/no-diff repair generation, global repair pruning, auto-merge, remote-handoff reconciliation, self-heal, invention, and ancillary maintenance.
+- The canonical failed parent is exempt only from duplicate suppression and diagnostic/capture retry-tier machinery after it passes the complete-inbox exact-lineage authority check. Other generated repair families retain their existing lifecycle and tier guards.

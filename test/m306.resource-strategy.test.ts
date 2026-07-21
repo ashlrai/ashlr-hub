@@ -494,7 +494,7 @@ describe('buildResourceStrategyReport', () => {
     },
   );
 
-  it('recommends verify-only for pending proposals and verification failures', async () => {
+  it('recommends repair-only for pending deterministic verification failures', async () => {
     const failed = outcome({
       proposal: {
         ...outcome().proposal,
@@ -511,9 +511,15 @@ describe('buildResourceStrategyReport', () => {
       }),
     });
 
-    expect(report.mode).toBe('verify-only');
+    expect(report.mode).toBe('repair-only');
     expect(report.outcomes.verificationFailures).toBe(1);
-    expect(report.reasons.join(' ')).toContain('pending proposal');
+    expect(report.reasons.join(' ')).toContain('deterministic verification failures');
+    expect(resourceStrategyToDaemonPlan(report)).toMatchObject({
+      mode: 'repair-only',
+      allowDispatch: true,
+      dispatchScope: 'proposal-repair',
+      runAutoMergeMaintenance: false,
+    });
   });
 
   it('does not let stale pending proposals force verify-only under production velocity', async () => {

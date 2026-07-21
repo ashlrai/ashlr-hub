@@ -3029,3 +3029,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add a complete-inbox, exact-lineage validator for pending non-partial proposals with explicit deterministic verification failure.
 - [x] Cover authorized and tampered/partial rejection paths; run the repair-queue suite, typecheck, and diff integrity.
 - [ ] Use this validator only behind structural repair-only selection and maintenance fences; require protected CI before promotion.
+
+## Repair-Only Dispatch Lane (2026-07-21)
+- [x] Add explicit repair-only direction and proposal-repair dispatch scope.
+- [x] Restrict queue maintenance, selection, and duplicate suppression to exact verified-failure proposal repair lineage.
+- [x] Preserve hard stops, stale-pending throughput, and all non-proposal-repair lifecycle/tier guards.
+- [x] Prove one canonical repair executes while ordinary work and unrelated maintenance remain off; run focused tests and typecheck.
+- [ ] Require protected CI before promotion.
