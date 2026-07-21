@@ -2789,3 +2789,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Defer TITRR pre-capture terminal actions and emit one capture-owned terminal action so `proposal-disabled` cannot conflict with final capture outcomes.
 - [x] Retain a created proposal id through persistence-read failures, attempt machine rejection, and require fail-closed reconciliation rather than re-filing.
 - [x] Make deferred TITRR attempts suppress every internal terminal action, including cancellation, retention, sandbox, and pre-execution exits; the epilogue owns the sole terminal action.
+
+## Verifier Authority Snapshot V1 (2026-07-21)
+- [x] Audit mutable verifier control inputs and distinguish Git-tree drift from runtime/toolchain trust.
+- [x] Add exact, validated contract authority-file declarations and declare Hub verifier inputs.
+- [ ] Bind a base Git-tree authority snapshot through verification reuse and signed merge evidence.
+- [ ] Make authority/dependency inputs read-only for candidate execution before treating the snapshot as judge-free authority.
