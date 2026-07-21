@@ -2960,3 +2960,7 @@
   - A metadata-only test hook now records only the code and syscall of a swallowed decision-ledger write failure. A Windows-only M119 probe fails with those fields when a native durable write returns false.
   - The production API remains never-throw and fail-closed. No error messages, paths, ledger contents, prompts, or credentials are persisted or exposed; this is a bounded diagnostic to identify the precise compatibility boundary before changing it.
   - The probe now also reports one allowlisted operation stage (`sanitize`, directory setup/durability, or append). The prior Windows result had no native errno, so this stage is required to distinguish an internal durability invariant from a filesystem capability mismatch without exposing error text.
+
+- Decision-directory first-use durability (2026-07-21):
+  - The first-use directory traversal had started at the new leaf's parent, so it did not persist the newly-created `decisions/` leaf before reporting a durable write. The traversal now starts at that leaf and continues through the first existing parent.
+  - Focused coverage records the exact leaf-to-parent order. This correctness repair retains fail-closed directory sync semantics and does not relax the pending Windows compatibility boundary.
