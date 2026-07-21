@@ -394,7 +394,7 @@ describe('repo execution profile', () => {
       writeVerifyContract(dir, {
         schemaVersion: 1,
         mode: 'replace-detected',
-        commands: [{ id: 'internal-link', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'scripts-link' }],
+        commands: [{ id: 'internal-link', kind: 'test', cmd: ['node', 'verify.js'], cwd: 'scripts-link', profiles: ['merge'] }],
       });
 
       const profile = detectRepoExecutionProfile(dir);
