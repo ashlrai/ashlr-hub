@@ -2870,3 +2870,8 @@
   - The synchronous watchdog wrapper now receives the repository root and independently revalidates the physical cwd and path-bearing executable immediately before its own spawn. This closes the parent-to-wrapper validation gap. A mutable checkout can still race a check immediately before `spawn`; merge-grade snapshot immutability remains a separate required boundary rather than an implied guarantee.
   - Synchronous verification now fails closed when that packaged watchdog is unavailable, rather than falling back to an unchecked direct spawn.
   - Async verification now repeats cwd and executable containment in the shared subprocess primitive immediately before spawn. Contract fixtures use the portable bare `node` executable; absolute host runtime paths remain intentionally invalid as nonportable merge evidence.
+- Bounded trajectory trace retention (2026-07-21):
+  - Chronological truncation retained the first eight events only, which could omit a terminal evidence or action event while the trace still advertised its later terminal outcome.
+  - Sampling now preserves the first and last events plus latest lifecycle-stage representatives within the existing eight-event cap, and reports `eventState: complete|sampled` so downstream consumers do not mistake a bounded trace for a full record.
+  - The trace remains metadata-only and observation-only: no raw identities, prompts, diffs, reasoning, outputs, paths, or authority changes were introduced.
+  - Verification: 39 focused and 180 Fleet/dashboard integration assertions, typecheck, build, and zero-error lint. An initial full run had setup/load-only failures; after building and isolation the affected files passed 143 assertions with 4 intentional skips.
