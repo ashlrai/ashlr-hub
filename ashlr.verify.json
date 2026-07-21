@@ -5,7 +5,9 @@
     "package.json",
     "package-lock.json",
     "tsconfig.json",
+    "eslint.config.js",
     "vitest.config.ts",
+    "test/setup/home.ts",
     "scripts/test-ci.mjs"
   ],
   "commands": [
