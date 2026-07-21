@@ -981,6 +981,31 @@ describe('M213 Dashboard SSE — /api/events', () => {
     })).toBe('fresh · healthy sources · 1 required withheld / 1 required cold-start · evidence degraded');
   });
 
+  it('app.js renders repair-only eligibility as an observation, never dispatch authority', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function repairOnlyObservationText(repair)');
+    const end = src.indexOf('\nfunction fdFormatDurationMs', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const repairOnlyObservationText = new Function(
+      `${src.slice(start, end)}\nreturn repairOnlyObservationText;`,
+    )() as (repair: unknown) => string;
+
+    expect(repairOnlyObservationText({
+      sourceQuality: { badge: 'healthy-source' }, eligibleItems: 2,
+    })).toBe('healthy-source: 2 observed eligible');
+    expect(repairOnlyObservationText({
+      sourceQuality: { badge: 'healthy-zero' }, eligibleItems: 0,
+    })).toBe('healthy-zero: no observed repairs');
+    expect(repairOnlyObservationText({
+      sourceQuality: { badge: 'degraded-source' }, eligibleItems: null,
+    })).toBe('degraded-source: data withheld');
+    expect(src).toContain("['Repair observation', repairOnlyObservationText(f.proposals?.repairOnly)]");
+    expect(src).toContain("controlMetric('Repair observation', repairOnlyObservationText(props.repairOnly), '#fbbf24')");
+    expect(src).toContain("mkMeta('Repair observation', repairOnlyObservationText(repairOnly)");
+  });
+
   it('app.js keeps unhealthy workspace zeroes distinct from healthy telemetry', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

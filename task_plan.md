@@ -3063,3 +3063,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Align Fleet Status repair-only coverage with canonical enrolled-repository provenance.
 - [x] Verify typecheck, strategy/repair authority coverage, full Fleet Status coverage, and diff integrity locally.
 - [ ] Require protected CI on the amended draft head before promotion.
+
+## Repair-Only Observation Quality (2026-07-21)
+- [x] Normalize repair-only observation health into the existing source-quality badge vocabulary.
+- [x] Render bounded aggregate repair observations in Fleet, Mission Control, dashboard status, and CLI without dispatch controls.
+- [x] Keep resource strategy and daemon selection on their independent complete-reader authority path.
+- [x] Verify Fleet Status/dashboard contracts, typecheck, browser-script syntax, and diff integrity.
+- [ ] Require protected CI on the immutable draft head before promotion.

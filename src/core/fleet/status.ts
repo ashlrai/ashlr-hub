@@ -1368,6 +1368,7 @@ export interface FleetStatus {
       sourceState: 'missing' | 'healthy' | 'degraded';
       complete: boolean;
       eligibleItems: number | null;
+      sourceQuality: FleetReadinessSourceQuality;
     };
   };
   merges: {
@@ -2260,6 +2261,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     sourceState: 'degraded',
     complete: false,
     eligibleItems: null,
+    sourceQuality: {
+      badge: 'degraded-source',
+      label: 'degraded source',
+      empty: false,
+      sourcePresent: false,
+      detail: 'repair-only observation is unavailable',
+    },
   };
   try {
     const { listProposalsDetailed } = await import('../inbox/store.js');
@@ -2312,6 +2320,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       sourceState: read.sourceState,
       complete: read.complete,
       eligibleItems: read.sourceState === 'healthy' && read.complete ? read.items.length : null,
+      sourceQuality: repairOnlyObservationSourceQuality(read.sourceState, read.complete, read.items.length),
     };
   } catch {
     // Preserve the explicit degraded fallback rather than presenting unavailable authority as zero.
@@ -2933,6 +2942,47 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   return status;
+}
+
+function repairOnlyObservationSourceQuality(
+  sourceState: 'missing' | 'healthy' | 'degraded',
+  complete: boolean,
+  itemCount: number,
+): FleetReadinessSourceQuality {
+  if (sourceState === 'missing') {
+    return {
+      badge: 'missing-source',
+      label: 'missing source',
+      empty: false,
+      sourcePresent: false,
+      detail: 'repair-only observation source is unavailable',
+    };
+  }
+  if (sourceState !== 'healthy' || !complete) {
+    return {
+      badge: 'degraded-source',
+      label: 'degraded source',
+      empty: false,
+      sourcePresent: true,
+      detail: 'repair-only observation data is incomplete',
+    };
+  }
+  if (itemCount === 0) {
+    return {
+      badge: 'healthy-zero',
+      label: 'healthy zero',
+      empty: true,
+      sourcePresent: true,
+      detail: 'no observed eligible repairs',
+    };
+  }
+  return {
+    badge: 'healthy-source',
+    label: 'healthy source',
+    empty: false,
+    sourcePresent: true,
+    detail: `${itemCount} observed eligible repair${itemCount === 1 ? '' : 's'}`,
+  };
 }
 
 async function buildDispatchManifestStatus(): Promise<{

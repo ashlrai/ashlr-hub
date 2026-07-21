@@ -3625,6 +3625,7 @@ function renderFleet() {
     ['Frontier pending', f.proposals?.frontierPending ?? 0],
     ['Host PRs', f.proposals?.awaitingHostMerge ?? 0],
     ['Applied', f.proposals?.applied ?? 0],
+    ['Repair observation', repairOnlyObservationText(f.proposals?.repairOnly)],
   ]));
   section.appendChild(propsCard);
 
@@ -3984,6 +3985,9 @@ function renderControl() {
     heroMetrics.appendChild(controlMetric('Active work', activeWork.itemCount ?? '—', activeWork.malformed ? '#f97316' : '#38bdf8'));
   }
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
+  if (props.repairOnly) {
+    heroMetrics.appendChild(controlMetric('Repair observation', repairOnlyObservationText(props.repairOnly), '#fbbf24'));
+  }
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence authority', autonomyEvidenceHeroMetric(autonomy), autonomyEvidenceAccent(autonomy)));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
@@ -5050,6 +5054,15 @@ function fdMetricPill(label, value, title) {
   );
 }
 
+function repairOnlyObservationText(repair) {
+  if (!repair) return 'unavailable';
+  const badge = repair.sourceQuality?.badge
+    ?? (repair.sourceState === 'missing' ? 'missing-source' : repair.sourceState === 'healthy' && repair.complete ? 'healthy-source' : 'degraded-source');
+  if (repair.eligibleItems == null) return `${badge}: data withheld`;
+  if (repair.eligibleItems === 0) return `${badge}: no observed repairs`;
+  return `${badge}: ${repair.eligibleItems} observed eligible`;
+}
+
 function fdFormatDurationMs(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 60_000) return '<1m';
@@ -5251,6 +5264,7 @@ function fdRenderStatusPanel(snap) {
   const activeWork = queue.activeWork ?? null;
   const autonomy = snap.fleet?.autonomy ?? snap.control?.fleet?.autonomy ?? null;
   const phantom = snap.fleet?.phantom ?? snap.control?.fleet?.phantom ?? null;
+  const repairOnly = snap.fleet?.proposals?.repairOnly ?? snap.control?.fleet?.proposals?.repairOnly ?? null;
 
   const body = el('div', { cls: 'fd-panel__body' });
   const readinessRail = fdRenderReadinessRail(snap);
@@ -5283,6 +5297,10 @@ function fdRenderStatusPanel(snap) {
   grid.appendChild(mkMeta('Pending proposals', String(pendingCount),
     pendingCount > 0 ? 'fd-meta-val--warn' : null));
   grid.appendChild(mkMeta('Items processed', String(daemon.itemsProcessed ?? 0)));
+  if (repairOnly) {
+    grid.appendChild(mkMeta('Repair observation', repairOnlyObservationText(repairOnly),
+      repairOnly.eligibleItems == null ? 'fd-meta-val--warn' : null));
+  }
   if (sharedQueue) {
     grid.appendChild(mkMeta('Shared queue', sharedQueueMetric(sharedQueue),
       !sharedQueue.authorityReady || !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 ||
