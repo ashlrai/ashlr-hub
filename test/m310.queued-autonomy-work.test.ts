@@ -743,6 +743,34 @@ describe('queued autonomy work scanner', () => {
     expect(isVerifiedFailureProposalRepairAuthorized({ ...repair, tags: [...repair.tags, 'partial'] })).toBe(false);
   });
 
+  it('does not authorize a parent again after its exact repair files a complete child proposal', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const input = partialProposal(repo.dir, {
+      id: 'prop-repair-parent',
+      isPartial: false,
+      verifyResult: { passed: false, detail: 'typecheck failed' },
+    });
+    const { id: _id, status: _status, createdAt: _createdAt, ...proposalInput } = input;
+    const parent = createProposal(proposalInput);
+    const repair = proposalRepairWorkItem(parent);
+    expect(repair).not.toBeNull();
+    if (!repair) throw new Error('expected proposal repair');
+    expect(isVerifiedFailureProposalRepairAuthorized(repair)).toBe(true);
+
+    createProposal({
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Repair child',
+      summary: 'A complete repair proposal was filed.',
+      diff: 'diff --git a/src/fixed.ts b/src/fixed.ts\n+export const fixed = true;\n',
+      workItemId: repair.id,
+    });
+
+    expect(isVerifiedFailureProposalRepairAuthorized(repair)).toBe(false);
+  });
+
   it('recovers a recent rejected capture artifact without reopening or copying it', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

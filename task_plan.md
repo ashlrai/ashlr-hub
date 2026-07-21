@@ -3035,4 +3035,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Restrict queue maintenance, selection, and duplicate suppression to exact verified-failure proposal repair lineage.
 - [x] Preserve hard stops, stale-pending throughput, and all non-proposal-repair lifecycle/tier guards.
 - [x] Prove one canonical repair executes while ordinary work and unrelated maintenance remain off; run focused tests and typecheck.
+- [x] Fence the final parent-authority check through producer start and refuse a second repair once a complete exact child exists.
+- [x] Cover parent-child deduplication in queue and daemon regression tests; rerun strategy and repair-queue suites.
 - [ ] Require protected CI before promotion.

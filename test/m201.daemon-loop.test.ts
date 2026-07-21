@@ -3649,6 +3649,24 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
+
+    createProposal({
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: 'Complete repair child',
+      summary: 'The first repair produced a complete successor proposal.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+fixed\n',
+      workItemId: repair.id,
+    });
+    const second = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(second.reason).toBe('repair-only');
+    expect(second.itemsConsidered).toBe(0);
+    expect(mockRunGoal.mock.calls.length + mockRunSwarm.mock.calls.length).toBe(1);
   });
 
   it('A1f1: real strategy conversion blocks verify-only maintenance without proposal authority', async () => {

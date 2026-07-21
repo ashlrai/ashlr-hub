@@ -569,21 +569,77 @@ export function isVerifiedFailureProposalRepairAuthorized(item: WorkItem): boole
   try {
     const read = listProposalsDetailed({ requireComplete: true });
     if (!read.complete || read.sourceState === 'degraded') return false;
-    return read.proposals.some((proposal) => {
-      if (proposal.status !== 'pending' || proposal.isPartial === true || proposal.verifyResult?.passed !== false) {
-        return false;
-      }
-      if (typeof proposal.repo !== 'string' || !proposal.repo) return false;
-      const repo = canonicalEnrolledExistingRepo(proposal.repo);
-      if (!repo || repo !== item.repo || proposalRepairId(repo, proposal.id) !== item.id) return false;
-      const root = proposalRepairRootIdentity(proposal, repo);
-      return root !== null &&
-        item.repairRootId === root.repairRootId &&
-        item.repairRootAuthorityId === root.repairRootAuthorityId &&
-        item.repairDepth === root.repairDepth;
-    });
+    return verifiedFailureProposalRepairParent(item, read.proposals) !== undefined;
   } catch {
     return false;
+  }
+}
+
+function verifiedFailureProposalRepairParent(
+  item: WorkItem,
+  proposals: readonly Proposal[],
+): Proposal | undefined {
+  const parent = proposals.find((proposal) => {
+    if (proposal.status !== 'pending' || proposal.isPartial === true || proposal.verifyResult?.passed !== false) {
+      return false;
+    }
+    if (typeof proposal.repo !== 'string' || !proposal.repo) return false;
+    const repo = canonicalEnrolledExistingRepo(proposal.repo);
+    if (!repo || repo !== item.repo || proposalRepairId(repo, proposal.id) !== item.id) return false;
+    const root = proposalRepairRootIdentity(proposal, repo);
+    return root !== null &&
+      item.repairRootId === root.repairRootId &&
+      item.repairRootAuthorityId === root.repairRootAuthorityId &&
+      item.repairDepth === root.repairDepth;
+  });
+  if (!parent) return undefined;
+
+  // A non-partial child from this exact repair is durable evidence that this
+  // parent has already consumed its one repair dispatch. The parent remains
+  // pending for operator review, but it must not re-enter a repair loop.
+  const hasRepairChild = proposals.some((proposal) =>
+    proposal.id !== parent.id &&
+    proposal.workItemId === item.id &&
+    proposal.isPartial !== true &&
+    (proposal.kind === 'patch' || proposal.kind === 'pr') &&
+    typeof proposal.diff === 'string' && proposal.diff.trim().length > 0,
+  );
+  return hasRepairChild ? undefined : parent;
+}
+
+/**
+ * Fence a repair parent from its final authority check through producer start.
+ * Proposal writers share this per-proposal lock, so a concurrent lifecycle
+ * transition cannot turn a stale repair selection into a launched dispatch.
+ */
+export function beginVerifiedFailureProposalRepairDispatch<T>(
+  item: WorkItem,
+  begin: () => T,
+): { authorized: true; value: T } | { authorized: false } {
+  if (!isTrustedProposalRepairItem(item) || item.tags.includes('partial')) return { authorized: false };
+  let initial: Proposal | undefined;
+  try {
+    const read = listProposalsDetailed({ requireComplete: true });
+    if (!read.complete || read.sourceState === 'degraded') return { authorized: false };
+    initial = verifiedFailureProposalRepairParent(item, read.proposals);
+  } catch {
+    return { authorized: false };
+  }
+  if (!initial) return { authorized: false };
+
+  const lock = acquireProposalMutationLock(initial.id);
+  if (!lock) return { authorized: false };
+  try {
+    const read = listProposalsDetailed({ requireComplete: true });
+    if (!read.complete || read.sourceState === 'degraded' ||
+      verifiedFailureProposalRepairParent(item, read.proposals)?.id !== initial.id) {
+      return { authorized: false };
+    }
+    return { authorized: true, value: begin() };
+  } catch {
+    return { authorized: false };
+  } finally {
+    releaseProposalMutationLock(lock);
   }
 }
 
