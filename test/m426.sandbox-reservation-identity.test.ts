@@ -389,7 +389,9 @@ describe('M426 sandbox reservation and path identity', () => {
     } finally {
       removeSandbox(sandbox);
     }
-  });
+  // Real Git worktree setup exceeds Vitest's default timeout on hosted Windows.
+  // Preserve the normal deadline elsewhere and keep the Windows allowance bounded.
+  }, process.platform === 'win32' ? 30_000 : 5_000);
 
   it('keeps fresh metadata-free homes and reclaims them after a nonzero recovery age', () => {
     const id = 'm426-metadata-free';
