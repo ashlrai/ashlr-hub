@@ -161,6 +161,8 @@ export interface RunEngineSandboxedOptions {
   signal?: AbortSignal;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
+  /** Internal TITRR handoff: caller emits the one authoritative terminal action. */
+  deferTerminalAction?: boolean;
 }
 
 export interface CaptureSandboxedProposalOptions {
@@ -473,7 +475,7 @@ function sandboxAgentOutcome(
   }
 }
 
-function recordSandboxedRunAgentAction(fields: {
+function writeSandboxedRunAgentAction(fields: {
   engine: EngineId;
   engineModel: string;
   tier: EngineTier;
@@ -555,6 +557,10 @@ function recordSandboxedRunAgentAction(fields: {
   } catch {
     // Terminal telemetry is best-effort and must never perturb sandbox behavior.
   }
+}
+
+export function recordSandboxedRunAgentAction(fields: Parameters<typeof writeSandboxedRunAgentAction>[0]): void {
+  writeSandboxedRunAgentAction(fields);
 }
 
 const TRIVIAL_PROPOSAL_CHANGED_LINE_THRESHOLD = 15;
@@ -1037,12 +1043,15 @@ export async function captureSandboxedProposal(
     ),
   });
   let proposalCreationStarted = false;
+  let createdProposal: Proposal | undefined;
+  let capturedDiff: SandboxDiff | undefined;
   if (opts.signal?.aborted) return cancelledCapture();
 
   try {
     const wt = await import('../sandbox/worktree.js');
     if (opts.signal?.aborted) return cancelledCapture();
     const diff: SandboxDiff = wt.sandboxDiff(sb);
+    capturedDiff = diff;
     setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
       const outcome = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
@@ -1188,6 +1197,7 @@ export async function captureSandboxedProposal(
         proposalOutcome: outcome,
       };
     }
+    createdProposal = proposal;
     const persisted = inbox.load(proposal.id);
     const durablePending =
       proposal.status === 'pending' &&
@@ -1210,21 +1220,25 @@ export async function captureSandboxedProposal(
         persisted?.status === 'pending' &&
         persisted.id === proposal.id &&
         persisted.runId === id
-      ) {
+      ) try {
         inbox.setStatus(
           proposal.id,
           'rejected',
           PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
           PROPOSAL_PERSISTENCE_MISMATCH_REASON,
         );
+      } catch {
+        // Reconciliation evidence is unavailable; retain the created id below.
       }
       const outcome = proposalOutcome(
         'proposal-capture-error',
-        'proposal was not durably persisted with matching capture metadata',
+        'proposal capture requires persistence reconciliation',
         diff,
+        proposal.id,
       );
       return {
         state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalId: proposal.id,
         proposalOutcome: outcome,
       };
     }
@@ -1274,10 +1288,26 @@ export async function captureSandboxedProposal(
       proposalId: proposal.id,
       proposalOutcome: outcome,
     };
-  } catch (err) {
+  } catch {
     if (opts.signal?.aborted && !proposalCreationStarted) return cancelledCapture();
-    const msg = err instanceof Error ? err.message : String(err);
-    const outcome = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
+    if (createdProposal) {
+      // A thrown read proves neither the pending record nor a rejection transition.
+      const outcome = proposalOutcome(
+        'proposal-capture-error',
+        'proposal capture requires persistence reconciliation',
+        capturedDiff,
+        createdProposal.id,
+      );
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalId: createdProposal.id,
+        proposalOutcome: outcome,
+      };
+    }
+    const outcome = proposalOutcome(
+      'proposal-capture-error',
+      'proposal capture failed before durable proposal filing',
+    );
     return {
       state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
       proposalOutcome: outcome,
@@ -1303,6 +1333,9 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const recordSandboxedRunAgentAction = opts.deferTerminalAction
+    ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
+    : writeSandboxedRunAgentAction;
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -1809,6 +1842,7 @@ export async function runEngineSandboxed(
       // marked isPartial:true so the judge/reviewer knows it may be incomplete.
       // A truly-empty diff (agent made no edits) is not filed — no-op run stays blocked.
       if (opts.propose !== false) {
+        const captureAttemptsBefore = actionCounts.proposalCaptureAttempts ?? 0;
         try {
           const captured = await captureSandboxedProposal(engine, goal, cfg, {
             sourceRepo: opts.sourceRepo,
@@ -1838,17 +1872,29 @@ export async function runEngineSandboxed(
               `engine "${engine}" failed before producing a diff: ${res.error ?? terminationReason ?? 'unknown error'}`,
             );
           }
-        } catch (err) {
+        } catch {
           if (opts.signal?.aborted) return cancelledAfterSpawn();
-          const msg = err instanceof Error ? err.message : String(err);
-          proposalOutcomeResult = proposalOutcome('proposal-capture-error', `proposal capture failed after engine error: ${msg}`);
-          // diff/proposal capture is best-effort — never fail the run on it.
+          if ((actionCounts.proposalCaptureAttempts ?? 0) <= captureAttemptsBefore) {
+            incrementRunActionCount(actionCounts, 'proposalCaptureAttempts');
+          }
+          let knownDiff: SandboxDiff | undefined;
+          try {
+            knownDiff = wt.sandboxDiff(sb);
+            setRunDiffActionCounts(actionCounts, knownDiff);
+          } catch {
+            // Only bounded metadata is retained; a failed diff read is not retried.
+          }
+          proposalOutcomeResult = proposalOutcome(
+            'proposal-capture-error',
+            'proposal capture failed before durable proposal filing',
+            knownDiff,
+          );
         }
       } else {
         trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
         proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this sandboxed attempt');
       }
-      recordSandboxedRunAgentAction({
+      if (!opts.deferTerminalAction) recordSandboxedRunAgentAction({
         engine,
         engineModel,
         tier,
@@ -2228,6 +2274,9 @@ export async function runApiModelSandboxed(
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
   const actionCounts: RunActionCounts = {};
+  const recordSandboxedRunAgentAction = opts.deferTerminalAction
+    ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
+    : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'api-model' || !spec.api) {
     const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
@@ -2598,38 +2647,60 @@ export async function runApiModelSandboxed(
 
     if (task.status === 'failed') {
       if (opts.propose !== false) {
-        const captured = await captureSandboxedProposal(engine, goal, cfg, {
-          sourceRepo: opts.sourceRepo,
-          model,
-          budget: opts.budget,
-          runId: id,
-          existingWorktree: sb,
-          workItemId: opts.workItemId,
-          workItemGenerationId: opts.workItemGenerationId,
-          workSource: opts.workSource,
-          delegationScope,
-          ...(opts.signal ? { signal: opts.signal } : {}),
-          isPartial: true,
-          sourceLabel: 'api-model',
-          usage: finalUsage,
-          durationMs,
-          producerStatus: 'failed',
-          actionCounts,
-          contextSummary: m264ContextSummary,
-        });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
-          return cancelledAfterTask(captured);
+        const captureAttemptsBefore = actionCounts.proposalCaptureAttempts ?? 0;
+        try {
+          const captured = await captureSandboxedProposal(engine, goal, cfg, {
+            sourceRepo: opts.sourceRepo,
+            model,
+            budget: opts.budget,
+            runId: id,
+            existingWorktree: sb,
+            workItemId: opts.workItemId,
+            workItemGenerationId: opts.workItemGenerationId,
+            workSource: opts.workSource,
+            delegationScope,
+            ...(opts.signal ? { signal: opts.signal } : {}),
+            isPartial: true,
+            sourceLabel: 'api-model',
+            usage: finalUsage,
+            durationMs,
+            producerStatus: 'failed',
+            actionCounts,
+            contextSummary: m264ContextSummary,
+          });
+          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+            return cancelledAfterTask(captured);
+          }
+          proposalId = captured.proposalId;
+          proposalOutcomeResult =
+            captured.proposalOutcome?.kind === 'empty-diff'
+              ? proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed')
+              : captured.proposalOutcome;
+        } catch {
+          if (opts.signal?.aborted) return cancelledAfterTask();
+          // Capture normally returns a structured failure, but preserve the same
+          // terminal contract if an import seam or future dependency throws.
+          if ((actionCounts.proposalCaptureAttempts ?? 0) <= captureAttemptsBefore) {
+            incrementRunActionCount(actionCounts, 'proposalCaptureAttempts');
+          }
+          let knownDiff: SandboxDiff | undefined;
+          try {
+            knownDiff = wt.sandboxDiff(sb);
+            setRunDiffActionCounts(actionCounts, knownDiff);
+          } catch {
+            // Only bounded metadata is retained; a failed diff read is not retried.
+          }
+          proposalOutcomeResult = proposalOutcome(
+            'proposal-capture-error',
+            'api-model proposal capture failed before durable proposal filing',
+            knownDiff,
+          );
         }
-        proposalId = captured.proposalId;
-        proposalOutcomeResult =
-          captured.proposalOutcome?.kind === 'empty-diff'
-            ? proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed')
-            : captured.proposalOutcome;
       } else {
         trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
         proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this api-model attempt');
       }
-      recordSandboxedRunAgentAction({
+      if (!opts.deferTerminalAction) recordSandboxedRunAgentAction({
         engine,
         engineModel,
         tier,
@@ -2693,11 +2764,13 @@ export async function runApiModelSandboxed(
         if (proposalOutcomeResult?.kind === 'empty-diff') {
           proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
         }
-      } catch (err) {
+      } catch {
         if (opts.signal?.aborted) return cancelledAfterTask();
-        const msg = err instanceof Error ? err.message : String(err);
-        proposalOutcomeResult = proposalOutcome('proposal-capture-error', `api-model proposal capture failed: ${msg}`);
-        // diff/proposal capture is best-effort
+        proposalOutcomeResult = proposalOutcome(
+          'proposal-capture-error',
+          'api-model proposal capture failed before durable proposal filing',
+        );
+        // Capture failures never expose dependency text through durable telemetry.
       }
     } else {
       trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
@@ -2710,7 +2783,7 @@ export async function runApiModelSandboxed(
       );
     }
 
-    recordSandboxedRunAgentAction({
+    if (!opts.deferTerminalAction) recordSandboxedRunAgentAction({
       engine,
       engineModel,
       tier,

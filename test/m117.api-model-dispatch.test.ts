@@ -384,6 +384,84 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     vi.resetModules();
   });
 
+  it('fails closed when a failed api-model producer capture dependency throws', async () => {
+    const agentActions: Array<Record<string, unknown>> = [];
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: (repo: string) => ({
+        id: 'sb-failed-capture',
+        worktreePath: tmpRepo,
+        sourceRepo: repo,
+        branch: 'ashlr-sandbox-test',
+      }),
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
+      removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
+      sandboxDiff: () => ({
+        files: 2,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 3,
+        deletions: 1,
+      }),
+    }));
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
+    }));
+    vi.doMock('../src/core/run/agent-loop.js', () => ({
+      runTask: async (task: { status: string; error?: string }) => {
+        task.status = 'failed';
+        task.error = 'model task failed after editing';
+        return task;
+      },
+    }));
+    vi.doMock('../src/core/mcp-native-engineer.js', () => ({
+      buildEngineerToolSpecs: () => [{ name: 'write_file', fn: async () => 'ok' }],
+    }));
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => { throw new Error('capture dependency exploded with raw patch'); },
+    }));
+    vi.doMock('../src/core/fleet/agent-action-ledger.js', () => ({
+      recordAgentAction: (action: Record<string, unknown>) => agentActions.push(action),
+    }));
+
+    const { runApiModelSandboxed } = await import(
+      '../src/core/run/sandboxed-engine.js?bust=' + randomUUID(),
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+    const result = await runApiModelSandboxed('local-coder', 'increment x', {
+      foundry: { models: { 'local-coder': 'qwen' } },
+    } as never, {
+      sourceRepo: tmpRepo,
+      propose: true,
+    });
+
+    expect(result).toMatchObject({
+      proposalId: undefined,
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        reason: 'proposal capture failed before durable proposal filing',
+      },
+      state: {
+        status: 'failed',
+        proposalOutcome: { kind: 'proposal-capture-error' },
+        runEventSummary: {
+          outcome: 'proposal-capture-error',
+          proposalCreated: false,
+          diffFiles: 2,
+          diffLines: 4,
+          actionCounts: { proposalCaptureAttempts: 1, proposalBlocked: 1, proposalCreated: 0 },
+        },
+      },
+    });
+    expect(result.state.result).toBe('model task failed after editing');
+    expect(JSON.stringify(result)).not.toContain('raw patch');
+    expect(agentActions).toEqual([expect.objectContaining({
+      runId: result.state.id,
+      outcome: 'failed',
+      reason: 'proposal-capture-error',
+      runEventSummary: expect.objectContaining({ outcome: 'proposal-capture-error', proposalCreated: false }),
+    })]);
+  });
+
   it('runs the completeness gate before filing an api-model proposal', async () => {
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
@@ -489,6 +567,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedProposalArgs: unknown[] = [];
     const setStatus = vi.fn();
     let returnMismatchedPending = false;
+    let throwOnLoad = false;
     let lastCreated: Record<string, unknown> | null = null;
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
@@ -513,9 +592,12 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
           };
           return lastCreated;
         },
-        load: () => returnMismatchedPending && lastCreated
-          ? { ...lastCreated, repo: '/mismatched-repo' }
-          : null,
+        load: () => {
+          if (throwOnLoad) throw new Error('load failed with raw proposal contents');
+          return returnMismatchedPending && lastCreated
+            ? { ...lastCreated, repo: '/mismatched-repo' }
+            : null;
+        },
         setStatus,
       }),
     }));
@@ -554,18 +636,23 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 
     expect(capturedProposalArgs).toHaveLength(1);
     expect(setStatus).not.toHaveBeenCalled();
-    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalId).toBe('optimistic-only-prop');
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-capture-error',
-      reason: 'proposal was not durably persisted with matching capture metadata',
+      reason: 'proposal capture requires persistence reconciliation',
+      proposalId: 'optimistic-only-prop',
       files: 1,
       insertions: 1,
       deletions: 1,
     });
     expect(result.state.proposalOutcome).toMatchObject({
       kind: 'proposal-capture-error',
+      proposalId: 'optimistic-only-prop',
     });
-    expect(result.state.proposalId).toBeUndefined();
+    expect(result.state.runEventSummary).toMatchObject({
+      proposalId: 'optimistic-only-prop',
+      proposalCreated: false,
+    });
 
     returnMismatchedPending = true;
     setStatus.mockClear();
@@ -590,6 +677,31 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
       PROPOSAL_PERSISTENCE_MISMATCH_REASON,
     );
+
+    throwOnLoad = true;
+    setStatus.mockClear();
+    const loadFailureResult = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: { models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' } },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-test',
+      },
+      runId: 'run-m117-durable-load-throws',
+    });
+    expect(loadFailureResult).toMatchObject({
+      proposalId: 'optimistic-only-prop',
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        reason: 'proposal capture requires persistence reconciliation',
+        proposalId: 'optimistic-only-prop',
+      },
+    });
+    expect(JSON.stringify(loadFailureResult)).not.toContain('raw proposal contents');
+    expect(setStatus).not.toHaveBeenCalled();
 
     vi.resetModules();
   });
