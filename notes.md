@@ -2940,3 +2940,8 @@
   - Maintenance-only auto-merge now arms a dedicated durable spend guard before contacting a judge. Measured provider cost is reloaded into daemon state and atomically persisted before the guard clears; a thrown pass, invalid amount, persistence failure, or guard-clear failure leaves the guard armed and blocks the next tick.
   - Post-dispatch auto-merge reuses the already-armed dispatch spend guard and adds measured cost to the same final state transaction. Tick telemetry reports maintenance plus dispatch spend without double-debiting `todaySpentUsd`.
   - Focused daemon coverage proves verify-only charge persistence, post-dispatch accumulation, and a failed maintenance pass blocking retry. Direct `autoMergeProposal` manager-gate calls still need the same durable decision/receipt treatment before judge-cost accounting can be called complete.
+
+- Direct manager-gate authority and receipt metadata (2026-07-21):
+  - Gate 7 now refuses before mutation when either its inline `judged` record or its `merge-authorized` record cannot durably append. Cached and freshly judged ships therefore cannot turn a transient ledger failure into merge authority.
+  - Inline manager-gate calls retain only metadata-only receipts in the decision ledger: actual final responder, aggregate duration, and measured-only cost/token totals. They deliberately do not write daemon daily spend because direct commands execute outside the daemon's durable spend transaction.
+  - Decision-ledger first-use setup now fsyncs every created ancestor boundary through the first pre-existing parent before authority writes can report success. Windows retains its explicit best-effort directory-fsync limitation.

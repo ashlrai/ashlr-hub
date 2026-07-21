@@ -15,7 +15,7 @@
 - [x] Charge measured maintenance judge spend exactly once on maintenance-only early-return paths behind a durable pre-call guard.
 - [x] Fold post-dispatch maintenance spend into the existing tick guard and final state commit without double charging.
 - [x] Cover verify-only, normal dispatch, and failed-maintenance retry-blocking paths with focused daemon tests.
-- [ ] Close direct `autoMergeProposal` manager-gate decision durability and receipt-accounting gaps before calling judge-cost accounting complete.
+- [x] Close direct `autoMergeProposal` manager-gate decision durability and receipt-metadata gaps before calling judge-cost accounting complete.
 
 ## 2026-07-21 - Bounded trajectory trace projection
 - [x] Map the existing metadata-only trajectory join, Fleet Status, CLI, and dashboard contracts.
