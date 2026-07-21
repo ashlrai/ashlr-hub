@@ -84,6 +84,7 @@ const MAX_DIRECTORY_ENTRIES = 2_048;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
 interface DecisionWriteFailureForTest {
+  stage: 'sanitize' | 'ensure-directory' | 'create-directory-durability' | 'append';
   code?: string;
   syscall?: string;
 }
@@ -242,6 +243,7 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
  * Append-only. Never throws.
  */
 export function recordDecision(entry: DecisionEntry): boolean {
+  let stage: DecisionWriteFailureForTest['stage'] = 'sanitize';
   try {
     latestDecisionWriteFailureForTest = undefined;
     const record = sanitizeDecisionEntry(entry, true);
@@ -250,9 +252,11 @@ export function recordDecision(entry: DecisionEntry): boolean {
     // sanitized snapshot so stateful getters cannot change values after guard.
     if (record.labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL) return false;
     const dir = decisionsDir();
+    stage = 'ensure-directory';
     if (!existsSync(dir)) {
       const firstCreated = mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (firstCreated) {
+        stage = 'create-directory-durability';
         // Persist the leaf entry and every newly-created ancestor entry through
         // the first pre-existing parent. Without this, a first-use nested
         // ASHLR_HOME can lose the whole ledger tree after reporting success.
@@ -271,10 +275,12 @@ export function recordDecision(entry: DecisionEntry): boolean {
     const line = JSON.stringify(record) + '\n';
     if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
+    stage = 'append';
     return appendDecisionLine(filePath, line);
   } catch (error) {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
     latestDecisionWriteFailureForTest = {
+      stage,
       ...(typeof error === 'object' && error !== null &&
         typeof (error as NodeJS.ErrnoException).code === 'string'
         ? { code: (error as NodeJS.ErrnoException).code }

@@ -2840,4 +2840,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover the Windows unsupported-directory-descriptor compatibility path without weakening POSIX durability failures.
 - [x] Add a native hosted-Windows directory durability probe that reports exact failing capability metadata.
 - [x] Add a metadata-only native Windows decision-write probe for swallowed durable-write failures.
+- [x] Add an allowlisted diagnostic stage when a swallowed write has no native errno.
 - [ ] Charge only measured receipts once through every daemon maintenance return path.
