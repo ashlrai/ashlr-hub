@@ -112,7 +112,7 @@ describe('external skill-pack quarantine audit', () => {
     const report = auditExternalSkillPack(validPack());
 
     expect(report).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       mode: 'quarantine',
       skillCount: 2,
       structural: { passed: true, errors: 0 },
@@ -187,12 +187,15 @@ describe('external skill-pack quarantine audit', () => {
     const afterSupport = auditExternalSkillPack(root).packDigest;
     writeFileSync(join(root, 'LICENSE'), 'MIT v2');
     const afterLicense = auditExternalSkillPack(root).packDigest;
+    const portableBeforeMode = auditExternalSkillPack(root).portablePackDigest;
     chmodSync(join(root, 'LICENSE'), 0o600);
-    const afterMode = auditExternalSkillPack(root).packDigest;
+    const modeReport = auditExternalSkillPack(root);
+    const afterMode = modeReport.packDigest;
 
     expect(afterSupport).not.toBe(initial);
     expect(afterLicense).not.toBe(afterSupport);
     expect(afterMode).not.toBe(afterLicense);
+    expect(modeReport.portablePackDigest).toBe(portableBeforeMode);
   });
 
   it('rejects symlinked skill files instead of following content outside the pack', () => {

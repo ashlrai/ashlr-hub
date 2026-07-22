@@ -123,9 +123,10 @@ export interface ExternalSkillCollision {
 }
 
 export interface ExternalSkillAuditReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   mode: 'quarantine';
   packDigest: string | null;
+  portablePackDigest: string | null;
   skillCount: number;
   caseFileCount: number;
   bytesRead: number;
@@ -198,6 +199,7 @@ interface AuditState {
   treeDigests: Map<string, string>;
   snapshotFiles: Map<string, Buffer>;
   snapshotTreeDigests: Map<string, string>;
+  snapshotPortableTreeDigests: Map<string, string>;
   snapshotDirectoryEntries: Map<string, string[]>;
   snapshotPathKinds: Map<string, 'file' | 'directory' | 'symlink'>;
   fixtureEntriesObserved: number;
@@ -336,6 +338,16 @@ function digestTreePath(
     ]));
     state.snapshotPathKinds.set(path, 'symlink');
     state.snapshotTreeDigests.set(path, digest);
+    const portableResolvedTarget = Buffer.from(
+      relative(containmentRoot, target).split(sep).join('/'),
+      'utf8',
+    );
+    state.snapshotPortableTreeDigests.set(path, sha256(Buffer.concat([
+      Buffer.from(`symlink\0${rawLinkTarget.length}\0`, 'utf8'),
+      rawLinkTarget,
+      Buffer.from(`\0${portableResolvedTarget.length}\0`, 'utf8'),
+      portableResolvedTarget,
+    ])));
     return digest;
   }
   const canonical = realpathSync(path);
@@ -364,6 +376,11 @@ function digestTreePath(
     state.snapshotFiles.set(path, bytes);
     state.snapshotPathKinds.set(path, 'file');
     state.snapshotTreeDigests.set(path, digest);
+    const portableMode = '644';
+    state.snapshotPortableTreeDigests.set(path, sha256(Buffer.concat([
+      Buffer.from(`file\0${portableMode}\0${bytes.length}\0`, 'utf8'),
+      bytes,
+    ])));
     return digest;
   }
   if (!stat.isDirectory()) throw new Error('tree-not-regular');
@@ -385,7 +402,7 @@ function digestTreePath(
   entries.sort((left, right) => Buffer.compare(left.rawName, right.rawName));
   state.fixtureEntriesObserved += entries.length;
   if (state.fixtureEntriesObserved > MAX_FIXTURE_ENTRIES) throw new Error('tree-total-entry-limit');
-  const parts: Array<{ rawName: Buffer; digest: string }> = [];
+  const parts: Array<{ rawName: Buffer; digest: string; portableDigest: string }> = [];
   for (const entry of entries) {
     if (depth === 0 && entry.name === '.git') {
       const gitStat = lstatSync(join(path, entry.name), { bigint: true });
@@ -403,7 +420,9 @@ function digestTreePath(
       depth + 1,
       allowInternalSymlinks,
     );
-    parts.push({ rawName: entry.rawName, digest: childDigest });
+    const portableDigest = state.snapshotPortableTreeDigests.get(child);
+    if (!portableDigest) throw new Error('portable-tree-digest-missing');
+    parts.push({ rawName: entry.rawName, digest: childDigest, portableDigest });
   }
   const after = lstatSync(path, { bigint: true });
   if (
@@ -421,10 +440,18 @@ function digestTreePath(
     hasher.update(`\0${part.digest}`);
   }
   const digest = hasher.digest('hex');
+  const portableHasher = createHash('sha256').update(`directory\0${'755'}\0${parts.length}\0`);
+  for (const part of parts) {
+    portableHasher.update(`${part.rawName.length}\0`);
+    portableHasher.update(part.rawName);
+    portableHasher.update(`\0${part.portableDigest}`);
+  }
+  const portableDigest = portableHasher.digest('hex');
   state.treeDigests.set(canonical, digest);
   state.snapshotDirectoryEntries.set(path, entries.map((entry) => entry.name));
   state.snapshotPathKinds.set(path, 'directory');
   state.snapshotTreeDigests.set(path, digest);
+  state.snapshotPortableTreeDigests.set(path, portableDigest);
   return digest;
 }
 
@@ -978,9 +1005,10 @@ function rank(
 
 function missingReport(code: ExternalSkillAuditIssueCode): ExternalSkillAuditReport {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     mode: 'quarantine',
     packDigest: null,
+    portablePackDigest: null,
     skillCount: 0,
     caseFileCount: 0,
     bytesRead: 0,
@@ -1029,6 +1057,7 @@ export function auditExternalSkillPack(packPath: string): ExternalSkillAuditRepo
     treeDigests: new Map(),
     snapshotFiles: new Map(),
     snapshotTreeDigests: new Map(),
+    snapshotPortableTreeDigests: new Map(),
     snapshotDirectoryEntries: new Map(),
     snapshotPathKinds: new Map(),
     fixtureEntriesObserved: 0,
@@ -1036,6 +1065,7 @@ export function auditExternalSkillPack(packPath: string): ExternalSkillAuditRepo
   let root: string;
   let skillsRoot: string;
   let packDigest: string;
+  let portablePackDigest: string;
   try {
     const requestedRoot = resolve(packPath);
     const requestedRootStat = lstatSync(requestedRoot);
@@ -1050,6 +1080,8 @@ export function auditExternalSkillPack(packPath: string): ExternalSkillAuditRepo
     if (!skillsStat.isDirectory() || skillsStat.isSymbolicLink()) return missingReport('invalid-skills-directory');
     if (!inside(root, realpathSync(skillsRoot))) return missingReport('skills-directory-escapes-pack');
     packDigest = digestTreePath(root, root, root, state, 0, true);
+    portablePackDigest = state.snapshotPortableTreeDigests.get(root) ?? '';
+    if (!portablePackDigest) return missingReport('pack-unavailable-or-unsafe');
   } catch {
     return missingReport('pack-unavailable-or-unsafe');
   }
@@ -1279,9 +1311,10 @@ export function auditExternalSkillPack(packPath: string): ExternalSkillAuditRepo
   const trialReady = structuralPassed && routingPassed && behavioralState === 'declared';
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     mode: 'quarantine',
     packDigest,
+    portablePackDigest,
     skillCount: skills.length,
     caseFileCount,
     bytesRead: state.bytesRead,
@@ -1361,6 +1394,7 @@ export function formatExternalSkillAudit(report: ExternalSkillAuditReport): stri
     `External skill pack: ${report.trialReady ? 'trial-ready' : 'blocked'}`,
     `Mode: ${report.mode} (never active)`,
     `Digest: ${report.packDigest ?? 'unavailable'}`,
+    `Portable digest: ${report.portablePackDigest ?? 'unavailable'}`,
     `Skills: ${report.skillCount}; eval files: ${report.caseFileCount}; bytes read: ${report.bytesRead}`,
     `Structural: ${report.structural.passed ? 'pass' : 'fail'} (${report.structural.errors} errors, ${report.structural.warnings} warnings)`,
     `Routing: ${report.routing.passed ? 'pass' : 'fail'} (rank-1 ${rate}; top-k ${report.routing.topKPassed}/${report.routing.positivePrompts}; negatives ${report.routing.negativePassed}/${report.routing.negativePrompts})`,
