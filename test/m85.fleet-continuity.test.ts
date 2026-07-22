@@ -415,6 +415,49 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(loadWorkedLedger().events).toEqual([]);
   });
 
+  it('rejects malformed replay records and nested receipt near-matches without throwing', () => {
+    const receipt = {
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:runtime-validation',
+      repo: tmpRepo,
+      outcome: 'empty-diff',
+      attemptId: 'run:attempt-runtime-validation',
+    };
+    const throwing = {
+      itemId: receipt.itemId,
+      outcome: 'empty',
+      get dispatchReceipt(): never { throw new Error('must not escape'); },
+    };
+    const malformed: unknown[] = [
+      null,
+      [],
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: null },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: [] },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: { ...receipt, extra: true } },
+      {
+        itemId: receipt.itemId,
+        outcome: 'empty',
+        dispatchReceipt: { ...receipt, ts: '2026-07-21T23:24:36.686+00:00' },
+      },
+      {
+        itemId: receipt.itemId,
+        outcome: 'empty',
+        dispatchReceipt: { ...receipt, backend: 42 },
+      },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: receipt, extra: true },
+      throwing,
+    ];
+
+    for (const value of malformed) {
+      let result: unknown;
+      expect(() => {
+        result = replayWorkedOutcomeAfterDispatchReceipt(value as never);
+      }).not.toThrow();
+      expect(result).toBe('invalid');
+    }
+    expect(loadWorkedLedger().events).toEqual([]);
+  });
+
   it('serializes replay with a concurrent ordinary worked writer', async () => {
     expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
     const event = sanitizeDispatchProductionEvent({
@@ -503,6 +546,83 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(replacement);
     expect(fs.readFileSync(path.join(displacedFleet, 'worked.json'), 'utf8'))
       .toContain('directory-seed');
+  });
+
+  it('refuses a swapped random temp pathname before destructive publication', () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    expect(recordOutcome('temp-swap-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const original = fs.readFileSync(workedLedgerPath(), 'utf8');
+    const victim = path.join(tmpHome, 'random-temp-swap-victim');
+    fs.writeFileSync(victim, 'victim-must-not-change', 'utf8');
+    let swappedTemporary = '';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: (temporaryPath) => {
+        swappedTemporary = temporaryPath;
+        fs.unlinkSync(temporaryPath);
+        fs.symlinkSync(victim, temporaryPath, 'file');
+      },
+    });
+
+    expect(recordOutcome('must-not-publish-swapped-temp', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(original);
+    expect(fs.lstatSync(workedLedgerPath()).isFile()).toBe(true);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('victim-must-not-change');
+    expect(fs.lstatSync(swappedTemporary).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses to overwrite a valid worked destination replaced after load', () => {
+    expect(recordOutcome('destination-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const replacement = '{"events":[{"itemId":"concurrent-replacement","outcome":"diff","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => {
+        const candidate = path.join(path.dirname(workedLedgerPath()), '.concurrent-worked.json');
+        fs.writeFileSync(candidate, replacement, { mode: 0o600 });
+        fs.renameSync(candidate, workedLedgerPath());
+      },
+    });
+
+    expect(recordOutcome('must-not-lose-concurrent-event', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(replacement);
+    expect(loadWorkedLedger().events).toEqual([
+      {
+        itemId: 'concurrent-replacement',
+        outcome: 'diff',
+        ts: '2026-07-21T23:24:36.000Z',
+      },
+    ]);
+  });
+
+  it('refuses to overwrite same-inode worked content changed after load', () => {
+    expect(recordOutcome('content-snapshot-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const before = fs.lstatSync(workedLedgerPath());
+    const concurrent = '{"events":[{"itemId":"same-inode-concurrent","outcome":"diff","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 }),
+    });
+
+    expect(recordOutcome('must-not-overwrite-changed-content', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    const after = fs.lstatSync(workedLedgerPath());
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
+  });
+
+  it('refuses to overwrite a worked destination created after a missing snapshot', () => {
+    expect(recordOutcome('missing-snapshot-seed', 'diff')).toBe(true);
+    fs.unlinkSync(workedLedgerPath());
+    const concurrent = '{"events":[{"itemId":"created-concurrently","outcome":"empty","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 }),
+    });
+
+    expect(recordOutcome('must-not-overwrite-created-destination', 'diff')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
   });
 
   it('never follows the legacy fixed worked temp symlink', () => {

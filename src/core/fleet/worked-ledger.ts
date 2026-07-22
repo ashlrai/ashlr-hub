@@ -225,6 +225,15 @@ interface WorkedDirectoryAuthority {
   ino: bigint;
 }
 
+type WorkedDestinationSnapshot =
+  | { state: 'missing' }
+  | { state: 'present'; dev: bigint; ino: bigint; bytes: Buffer };
+
+interface LoadedWorkedLedger {
+  ledger: WorkedLedger;
+  destination: WorkedDestinationSnapshot;
+}
+
 function ownedByCurrentUser(stat: BigIntStats): boolean {
   return typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
 }
@@ -377,7 +386,7 @@ function strictFsyncWorkedDirectory(authority: WorkedDirectoryAuthority): boolea
 
 function readBoundWorkedFile(
   authority: WorkedDirectoryAuthority,
-): { found: false } | { found: true; text: string } | null {
+): { found: false } | { found: true; bytes: Buffer; dev: bigint; ino: bigint } | null {
   if (!stableWorkedDirectory(authority)) return null;
   const path = join(authority.path, 'worked.json');
   let named: BigIntStats;
@@ -403,10 +412,14 @@ function readBoundWorkedFile(
       if (count <= 0) return null;
       offset += count;
     }
+    const openedAfter = fstatSync(fd, { bigint: true });
     const namedAfter = lstatSync(path, { bigint: true });
-    if (!safeWorkedFile(namedAfter) || !sameIdentity(opened, namedAfter) ||
+    if (!safeWorkedFile(openedAfter) || !safeWorkedFile(namedAfter) ||
+      !sameIdentity(opened, openedAfter) || !sameIdentity(openedAfter, namedAfter) ||
+      openedAfter.size !== opened.size || openedAfter.mtimeNs !== opened.mtimeNs ||
+      openedAfter.ctimeNs !== opened.ctimeNs ||
       !stableWorkedDirectory(authority)) return null;
-    return { found: true, text: bytes.toString('utf8') };
+    return { found: true, bytes, dev: opened.dev, ino: opened.ino };
   } catch {
     return null;
   } finally {
@@ -458,11 +471,53 @@ function parseWorkedLedger(raw: string, strict: boolean): WorkedLedger | null {
 function loadBoundWorkedLedger(
   authority: WorkedDirectoryAuthority,
   strict: boolean,
-): WorkedLedger | null {
+): LoadedWorkedLedger | null {
   const loaded = readBoundWorkedFile(authority);
   if (loaded === null) return null;
-  if (!loaded.found) return freshLedger();
-  return parseWorkedLedger(loaded.text, strict) ?? (strict ? null : freshLedger());
+  if (!loaded.found) {
+    return { ledger: freshLedger(), destination: { state: 'missing' } };
+  }
+  const ledger = parseWorkedLedger(loaded.bytes.toString('utf8'), strict) ??
+    (strict ? null : freshLedger());
+  return ledger === null ? null : {
+    ledger,
+    destination: {
+      state: 'present',
+      dev: loaded.dev,
+      ino: loaded.ino,
+      bytes: loaded.bytes,
+    },
+  };
+}
+
+function destinationMatchesSnapshot(
+  authority: WorkedDirectoryAuthority,
+  expected: WorkedDestinationSnapshot,
+): boolean {
+  const current = readBoundWorkedFile(authority);
+  if (current === null) return false;
+  if (expected.state === 'missing') return !current.found;
+  return current.found && current.dev === expected.dev && current.ino === expected.ino &&
+    current.bytes.equals(expected.bytes);
+}
+
+function exactWorkedTemporary(
+  authority: WorkedDirectoryAuthority,
+  path: string,
+  identity: BigIntStats,
+  fd: number,
+  expectedSize: number,
+): boolean {
+  try {
+    if (!stableWorkedDirectory(authority)) return false;
+    const named = lstatSync(path, { bigint: true });
+    const opened = fstatSync(fd, { bigint: true });
+    return safeWorkedFile(named) && safeWorkedFile(opened) &&
+      sameIdentity(identity, named) && sameIdentity(identity, opened) &&
+      opened.size === BigInt(expectedSize) && stableWorkedDirectory(authority);
+  } catch {
+    return false;
+  }
 }
 
 function cleanupExactWorkedTemporary(
@@ -484,6 +539,7 @@ function saveWorkedLedger(
   ledger: WorkedLedger,
   authority: WorkedDirectoryAuthority,
   requireStrictDurability: boolean,
+  expectedDestination: WorkedDestinationSnapshot,
 ): boolean {
   let temporaryPath: string | undefined;
   let temporaryIdentity: BigIntStats | undefined;
@@ -513,14 +569,14 @@ function saveWorkedLedger(
     }
     fchmodSync(writeFd, 0o600);
     fsyncSync(writeFd);
-    const namedTemporary = lstatSync(temporaryPath, { bigint: true });
-    const openedTemporary = fstatSync(writeFd, { bigint: true });
-    if (!safeWorkedFile(namedTemporary) || !safeWorkedFile(openedTemporary) ||
-      !sameIdentity(temporaryIdentity, namedTemporary) ||
-      !sameIdentity(temporaryIdentity, openedTemporary) ||
-      openedTemporary.size !== BigInt(bytes.length)) return false;
+    if (!exactWorkedTemporary(
+      authority, temporaryPath, temporaryIdentity, writeFd, bytes.length,
+    )) return false;
     workedLedgerTestHooks?.beforePublication?.(temporaryPath);
-    if (!stableWorkedDirectory(authority)) return false;
+    if (!destinationMatchesSnapshot(authority, expectedDestination) ||
+      !exactWorkedTemporary(
+        authority, temporaryPath, temporaryIdentity, writeFd, bytes.length,
+      )) return false;
     const targetPath = join(authority.path, 'worked.json');
     renameSync(temporaryPath, targetPath);
     published = true;
@@ -572,6 +628,86 @@ function expectedWorkedOutcomeForDispatch(outcome: string): WorkedOutcome | null
   return null;
 }
 
+const WORKED_REPLAY_KEYS = new Set(['itemId', 'outcome', 'dispatchReceipt']);
+const DISPATCH_RECEIPT_KEYS = new Set([
+  'ts', 'itemId', 'repo', 'outcome', 'attemptId',
+  'source', 'backend', 'tier', 'objectiveHash',
+]);
+
+function exactPlainRecord(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (prototype === Object.prototype || prototype === null) &&
+    Reflect.ownKeys(value).every((key) => {
+      if (typeof key !== 'string' || !allowedKeys.has(key)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor !== undefined && descriptor.enumerable && 'value' in descriptor;
+    });
+}
+
+function boundedReplayText(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength &&
+    value.trim() === value && scrubSecrets(value) === value &&
+    ![...value].some((char) => char.charCodeAt(0) < 32);
+}
+
+function canonicalReplayTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function validateWorkedOutcomeReplay(value: unknown): WorkedOutcomeReplay | null {
+  try {
+    if (!exactPlainRecord(value, WORKED_REPLAY_KEYS) ||
+      !hasOwn(value, 'itemId') || !hasOwn(value, 'outcome') ||
+      !hasOwn(value, 'dispatchReceipt') ||
+      !boundedReplayText(value['itemId'], 240) || !isWorkedOutcome(value['outcome'])) return null;
+    const receipt = value['dispatchReceipt'];
+    if (!exactPlainRecord(receipt, DISPATCH_RECEIPT_KEYS) ||
+      !hasOwn(receipt, 'ts') || !hasOwn(receipt, 'itemId') || !hasOwn(receipt, 'repo') ||
+      !hasOwn(receipt, 'outcome') || !hasOwn(receipt, 'attemptId') ||
+      !canonicalReplayTimestamp(receipt['ts']) ||
+      !boundedReplayText(receipt['itemId'], 240) ||
+      !boundedReplayText(receipt['repo'], 4_096) ||
+      !boundedReplayText(receipt['outcome'], 80) ||
+      !boundedReplayText(receipt['attemptId'], 240) ||
+      (hasOwn(receipt, 'source') && !boundedReplayText(receipt['source'], 80)) ||
+      (hasOwn(receipt, 'backend') && receipt['backend'] !== null &&
+        !boundedReplayText(receipt['backend'], 160)) ||
+      (hasOwn(receipt, 'tier') && receipt['tier'] !== null &&
+        !boundedReplayText(receipt['tier'], 80)) ||
+      (hasOwn(receipt, 'objectiveHash') && !boundedReplayText(receipt['objectiveHash'], 160))) {
+      return null;
+    }
+    const normalizedReceipt = {
+      ts: receipt['ts'],
+      itemId: receipt['itemId'],
+      repo: receipt['repo'],
+      outcome: receipt['outcome'],
+      attemptId: receipt['attemptId'],
+      ...(hasOwn(receipt, 'source') ? { source: receipt['source'] } : {}),
+      ...(hasOwn(receipt, 'backend') ? { backend: receipt['backend'] } : {}),
+      ...(hasOwn(receipt, 'tier') ? { tier: receipt['tier'] } : {}),
+      ...(hasOwn(receipt, 'objectiveHash') ? { objectiveHash: receipt['objectiveHash'] } : {}),
+    } as DispatchProductionParentIdentity;
+    return {
+      itemId: value['itemId'],
+      outcome: value['outcome'],
+      dispatchReceipt: normalizedReceipt,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Replay a worked outcome only after its immutable dispatch receipt is proven.
  * The receipt timestamp is the replay timestamp. The operation is idempotent
@@ -581,13 +717,11 @@ function expectedWorkedOutcomeForDispatch(outcome: string): WorkedOutcome | null
 export function replayWorkedOutcomeAfterDispatchReceipt(
   input: WorkedOutcomeReplay,
 ): WorkedOutcomeReplayResult {
-  const receipt = input.dispatchReceipt;
-  if (Object.keys(input).some((key) =>
-    key !== 'itemId' && key !== 'outcome' && key !== 'dispatchReceipt') ||
-    !isWorkedOutcome(input.outcome) ||
-    input.itemId.length === 0 || input.itemId.length > 240 || input.itemId.trim() !== input.itemId ||
-    scrubSecrets(input.itemId) !== input.itemId || input.itemId !== receipt.itemId ||
-    expectedWorkedOutcomeForDispatch(receipt.outcome) !== input.outcome) return 'invalid';
+  const replay = validateWorkedOutcomeReplay(input);
+  if (replay === null) return 'invalid';
+  const receipt = replay.dispatchReceipt;
+  if (replay.itemId !== receipt.itemId ||
+    expectedWorkedOutcomeForDispatch(receipt.outcome) !== replay.outcome) return 'invalid';
   if (readDispatchProductionParents([receipt])[0] !== 'found') {
     return 'dispatch-receipt-unavailable';
   }
@@ -604,18 +738,20 @@ export function replayWorkedOutcomeAfterDispatchReceipt(
       !strictFsyncWorkedDirectory(authority)) {
       return 'persistence-failed';
     }
-    const ledger = loadBoundWorkedLedger(authority, true);
-    if (ledger === null) return 'persistence-failed';
+    const loaded = loadBoundWorkedLedger(authority, true);
+    if (loaded === null) return 'persistence-failed';
     workedLedgerTestHooks?.afterReplayLoad?.();
     const candidateMs = Date.parse(receipt.ts);
-    for (const event of ledger.events) {
-      if (event.itemId !== input.itemId) continue;
+    for (const event of loaded.ledger.events) {
+      if (event.itemId !== replay.itemId) continue;
       const eventMs = Date.parse(event.ts);
       if (!Number.isFinite(eventMs)) return 'persistence-failed';
       if (eventMs >= candidateMs) return 'already-recorded';
     }
-    ledger.events.push({ itemId: input.itemId, outcome: input.outcome, ts: receipt.ts });
-    return saveWorkedLedger(ledger, authority, true) ? 'recorded' : 'persistence-failed';
+    loaded.ledger.events.push({ itemId: replay.itemId, outcome: replay.outcome, ts: receipt.ts });
+    return saveWorkedLedger(loaded.ledger, authority, true, loaded.destination)
+      ? 'recorded'
+      : 'persistence-failed';
   } catch {
     return 'persistence-failed';
   } finally {
@@ -657,15 +793,15 @@ function recordOutcomeEvent(
   try {
     const authority = pinWorkedDirectory();
     if (authority === null) return false;
-    const l = loadBoundWorkedLedger(authority, false);
-    if (l === null) return false;
-    l.events.push({
+    const loaded = loadBoundWorkedLedger(authority, false);
+    if (loaded === null) return false;
+    loaded.ledger.events.push({
       itemId,
       outcome,
       ts: ts ?? new Date().toISOString(),
       ...(proposalId ? { proposalId } : {}),
     });
-    return saveWorkedLedger(l, authority, false);
+    return saveWorkedLedger(loaded.ledger, authority, false, loaded.destination);
   } catch {
     // Never throws.
     return false;
