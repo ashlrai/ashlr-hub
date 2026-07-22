@@ -368,6 +368,13 @@ describe('install() — mocked spawnSync', () => {
     expect(hasLoad).toBe(true);
   });
 
+  it('darwin: enables the launchd label before loading an autostart service', async () => {
+    await install(baseOpts('darwin'));
+    const calls = spawnSyncMock.mock.calls as [string, string[]][];
+
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('enable'))).toBe(true);
+  });
+
   it('darwin: launchctl load receives the plist file path', async () => {
     await install(baseOpts('darwin'));
     const loadCall = spawnSyncMock.mock.calls.find(
@@ -376,6 +383,15 @@ describe('install() — mocked spawnSync', () => {
     expect(loadCall).toBeDefined();
     const plistPath = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
     expect((loadCall as [string, string[]])[1]).toContain(plistPath);
+  });
+
+  it('darwin: autostart false unloads an existing job without loading the replacement', async () => {
+    await install({ ...baseOpts('darwin'), autostart: false });
+    const calls = spawnSyncMock.mock.calls as [string, string[]][];
+
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('unload'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('disable'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('load'))).toBe(false);
   });
 
   it('darwin: treats launchctl zero-exit error output as a load failure', async () => {
@@ -403,6 +419,14 @@ describe('install() — mocked spawnSync', () => {
     await expect(install(baseOpts('linux'))).resolves.not.toThrow();
   });
 
+  it('linux: autostart false disables an existing unit without enabling it', async () => {
+    await install({ ...baseOpts('linux'), autostart: false });
+    const calls = spawnSyncMock.mock.calls as [string, string[]][];
+
+    expect(calls.some(([cmd, args]) => cmd === 'systemctl' && args.includes('disable') && args.includes('--now'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'systemctl' && args.includes('enable'))).toBe(false);
+  });
+
   it('win32: calls schtasks /Create', async () => {
     await install(baseOpts('win32'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
@@ -413,6 +437,14 @@ describe('install() — mocked spawnSync', () => {
   it('win32: does not throw when schtasks returns non-zero (best-effort)', async () => {
     spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'access denied', error: undefined });
     await expect(install(baseOpts('win32'))).resolves.not.toThrow();
+  });
+
+  it('win32: autostart false deletes an existing task without creating one', async () => {
+    await install({ ...baseOpts('win32'), autostart: false });
+    const calls = spawnSyncMock.mock.calls as [string, string[]][];
+
+    expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Delete'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Create'))).toBe(false);
   });
 });
 
