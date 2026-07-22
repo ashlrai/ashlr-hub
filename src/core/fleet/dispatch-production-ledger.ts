@@ -3513,11 +3513,19 @@ function canonicalTreatmentOutcomeReceiptEvent(
     const canonicalInput = hashUsesRunId && value.trajectoryId !== undefined
       ? { ...value, trajectoryId: undefined }
       : value;
-    const canonical = JSON.stringify(sanitizeDispatchProductionEvent(
+    const canonical = sanitizeDispatchProductionEvent(
       canonicalInput,
       { materializeLearningLabel: true },
-    ));
-    return canonical === line;
+    );
+    if (JSON.stringify(canonical) === line) return true;
+    if (canonical.learningLabel === undefined) return false;
+    return JSON.stringify({
+      ...canonical,
+      learningLabel: {
+        ...canonical.learningLabel,
+        classifierVersion: 'attempt-shape-v1',
+      },
+    }) === line;
   } catch {
     return false;
   }

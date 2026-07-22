@@ -538,6 +538,12 @@ export function formatFleetStatus(s: FleetStatus): string {
   const attemptCoverage = s.attemptCoverage;
   const learningMetrics = s.learningMetrics;
   lines.push('Attempt coverage:');
+  if (learningMetrics?.settledThrough) {
+    lines.push(
+      `  settled:   through ${learningMetrics.settledThrough}; ` +
+        `${learningMetrics.excludedRows ?? 0} newer row(s) excluded`,
+    );
+  }
   if (!attemptCoverage) {
     lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
@@ -1123,6 +1129,12 @@ function formatLearningMetricsAvailability(source: FleetStatus['learningMetrics'
   const quality = source.sourceQuality;
   if (source.reason === 'dispatch-source-missing') {
     return 'withheld (dispatch denominator missing)';
+  }
+  if (source.reason === 'learning-snapshot-settling') {
+    return 'withheld (dispatch rows are still inside the settlement window)';
+  }
+  if (source.reason === 'learning-snapshot-unstable') {
+    return 'withheld (cross-source learning snapshot changed during read)';
   }
   const details = [
     quality.invalidRows > 0 ? `${quality.invalidRows} invalid row(s)` : null,

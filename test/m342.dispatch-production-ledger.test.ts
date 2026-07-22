@@ -5537,6 +5537,76 @@ describe('M342 dispatch production ledger', () => {
     })).toBe(false);
   });
 
+  it('accepts an exact attempt-shape-v1 treatment receipt without rewriting stored bytes', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    const canonical = sanitizeDispatchProductionEvent(witness, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const stored = `${JSON.stringify({
+      ...canonical,
+      learningLabel: { ...canonical.learningLabel!, classifierVersion: 'attempt-shape-v1' },
+    })}\n`;
+    writeFileSync(receiptPath, stored, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+
+    const read = readDispatchProductionEventsDetailed();
+
+    expect(read).toMatchObject({
+      sourceState: 'healthy', complete: true, invalidRows: 0,
+      events: [{ learningLabel: { classifierVersion: 'attempt-shape-v1' } }],
+    });
+    expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+  });
+
+  it('rejects attempt-shape-v1 treatment receipts with any different label semantics', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    const canonical = sanitizeDispatchProductionEvent(witness, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const labels = [
+      {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        attemptShape: {
+          ...canonical.learningLabel!.attemptShape,
+          backendNoDiff: canonical.learningLabel!.attemptShape.backendNoDiff + 1,
+        },
+      },
+      {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        policySuppressed: !canonical.learningLabel!.policySuppressed,
+      },
+      {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        diagnosticNoProposal: !canonical.learningLabel!.diagnosticNoProposal,
+      },
+      {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        diagnosticAttempt: !canonical.learningLabel!.diagnosticAttempt,
+      },
+    ];
+    protectWindowsFixtureTree(dirname(receiptPath));
+    for (const learningLabel of labels) {
+      const stored = `${JSON.stringify({ ...canonical, learningLabel })}\n`;
+      writeFileSync(receiptPath, stored, { mode: 0o600 });
+      expect(readDispatchProductionEventsDetailed()).toMatchObject({
+        events: [], sourceState: 'degraded', complete: false, invalidRows: 1,
+      });
+      expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+    }
+  });
+
   it('rejects contradictory, unknown-field, and noncanonical treatment receipt bytes everywhere', () => {
     const witness = treatmentEvents().find((event) =>
       event.basis === 'repair-lifecycle-outcome' && event.repairTreatmentOutcome === 'converted')!;

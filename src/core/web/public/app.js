@@ -74,6 +74,10 @@ const state = {
   // M210: Fleet Dashboard
   fleetDashboard: null,             // latest DashboardSnapshot
   fleetDashboardInterval: null,     // auto-refresh timer
+  fleetSnapshotWatchdog: null,      // one bounded stale-snapshot watchdog
+  fleetSnapshotStale: false,        // client-observed learning freshness
+  fleetObservedAt: null,            // client receipt time for /api/fleet
+  fleetLoading: false,              // suppress overlapping stale refreshes
   fleetDashboardSettings: null,     // persisted settings (loaded lazily)
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
@@ -345,23 +349,25 @@ function connectSSE() {
   try {
     const es = new EventSource('/api/events');
     state.eventSource = es;
+    ensureFleetSnapshotWatchdog();
 
     es.addEventListener('snapshot', (e) => {
       try {
         const data = JSON.parse(e.data);
+        const learningFresh = fleetSnapshotLearningFresh(data);
         // M213: snapshot SSE push — update both overview state and fleet-dashboard state.
         state.snapshot = data;
         state.fleetDashboard = data;
+        state.fleetSnapshotStale = !learningFresh;
         if (state.activeView === 'fleet-dashboard') {
           renderFleetDashboard();
         } else if (state.activeView === 'overview') {
           renderActiveView();
         }
-        // SSE is live — suppress the polling fallback interval to avoid redundant fetches.
-        if (state.fleetDashboardInterval) {
-          clearInterval(state.fleetDashboardInterval);
-          state.fleetDashboardInterval = null;
-        }
+        // Only a fresh snapshot proves the SSE data path is healthy. Other SSE
+        // events can continue while snapshot construction is failing.
+        if (learningFresh) stopFleetDashboardPolling();
+        else startFleetDashboardPolling();
       } catch {}
     });
     es.addEventListener('runs', (e) => {
@@ -416,17 +422,7 @@ function connectSSE() {
     es.addEventListener('error', () => {
       // M213: SSE dropped — restart polling fallback so fleet-dashboard stays fresh.
       updateSseDot(false);
-      if (state.activeView === 'fleet-dashboard' && !state.fleetDashboardInterval) {
-        const settings = fdLoadSettings();
-        state.fleetDashboardInterval = setInterval(() => {
-          if (state.activeView !== 'fleet-dashboard') {
-            clearInterval(state.fleetDashboardInterval);
-            state.fleetDashboardInterval = null;
-            return;
-          }
-          loadFleetDashboard();
-        }, settings.refreshSecs * 1000);
-      }
+      startFleetDashboardPolling();
     });
   } catch {
     // EventSource not available or server not yet up — silent
@@ -2271,12 +2267,19 @@ function renderDaemon() {
 // ---------------------------------------------------------------------------
 
 async function loadFleet() {
-  showLoading('fleet');
+  if (state.fleetLoading) return;
+  state.fleetLoading = true;
+  ensureFleetSnapshotWatchdog();
+  if (!state.fleet) showLoading('fleet');
   try {
     state.fleet = await apiFetch('/api/fleet');
+    state.fleetObservedAt = new Date().toISOString();
+    state.fleetSnapshotStale = false;
     renderFleet();
   } catch (err) {
-    showError('fleet', err.message);
+    if (!state.fleet) showError('fleet', err.message);
+  } finally {
+    state.fleetLoading = false;
   }
 }
 
@@ -2904,6 +2907,8 @@ function learningMetricsAvailabilityText(source) {
   if (source.state === 'available') return 'available';
   const quality = source.sourceQuality ?? {};
   if (source.reason === 'dispatch-source-missing') return 'withheld: dispatch denominator missing';
+  if (source.reason === 'learning-snapshot-settling') return 'withheld: dispatch rows are still settling';
+  if (source.reason === 'learning-snapshot-unstable') return 'withheld: cross-source snapshot changed during read';
   const details = [];
   if (Number(quality.invalidRows) > 0) details.push(`${Number(quality.invalidRows)} invalid row(s)`);
   if (Number(quality.unreadableFiles) > 0) details.push(`${Number(quality.unreadableFiles)} unreadable file(s)`);
@@ -2919,9 +2924,25 @@ function renderLearningMetricsUnavailableCard(source, cls = 'ctrl-card card') {
     el('span', { cls: 'card-title' }, 'Learning Telemetry'),
     el('span', { cls: 'card-subtitle' }, 'rates withheld')
   ));
-  card.appendChild(el('div', { cls: 'card-body' }, infoGrid([
+  const body = el('div', { cls: 'card-body' }, infoGrid([
     ['State', 'withheld'],
     ['Denominator', learningMetricsAvailabilityText(source)],
+  ]));
+  const settlement = learningSettlementText(source);
+  if (settlement) body.appendChild(el('p', { cls: 'hint' }, settlement));
+  card.appendChild(body);
+  return card;
+}
+
+function renderStaleLearningSnapshotCard(cls = 'ctrl-card card') {
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Learning Telemetry'),
+    el('span', { cls: 'card-subtitle' }, 'rates withheld')
+  ));
+  card.appendChild(el('div', { cls: 'card-body' }, infoGrid([
+    ['State', 'withheld'],
+    ['Snapshot', 'stale'],
   ])));
   return card;
 }
@@ -2937,7 +2958,12 @@ function learningMetricWithholdingText(availability) {
   return `Withheld${metrics ? `: ${metrics}` : ''}${reasons ? ` (${reasons})` : ''}`;
 }
 
-function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card', availability = null) {
+function learningSettlementText(metrics) {
+  if (!metrics?.settledThrough) return null;
+  return `Settled through ${metrics.settledThrough}; ${Number(metrics.excludedRows ?? 0)} newer row(s) excluded`;
+}
+
+function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card', availability = null, learningMetrics = null) {
   if (!attemptCoverage) return null;
   const attempts = attemptCoverage.attempts ?? 0;
   const cancelled = attemptCoverage.production?.cancelled ?? 0;
@@ -2989,6 +3015,8 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card', avai
   }
   const withholding = learningMetricWithholdingText(availability);
   if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
+  const settlement = learningSettlementText(learningMetrics);
+  if (settlement) body.appendChild(el('p', { cls: 'hint' }, settlement));
   card.appendChild(body);
   return card;
 }
@@ -3600,6 +3628,7 @@ function renderFleet() {
 
   const section = el('section', { cls: 'view-section' });
   const f = state.fleet;
+  const learningSnapshotFresh = fleetSnapshotLearningFresh({ generatedAt: state.fleetObservedAt });
   section.appendChild(el('div', { cls: 'view-header' },
     el('div', {},
       el('h1', { cls: 'view-title' }, 'Fleet'),
@@ -3669,32 +3698,42 @@ function renderFleet() {
   const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
   if (effectivenessCard) section.appendChild(effectivenessCard);
 
-  const productionCard = renderProposalProductionCard(f.proposalProduction, 'fleet-card card');
+  if (!learningSnapshotFresh) {
+    section.appendChild(renderStaleLearningSnapshotCard('fleet-card card'));
+  }
+
+  const productionCard = learningSnapshotFresh
+    ? renderProposalProductionCard(f.proposalProduction, 'fleet-card card')
+    : null;
   if (productionCard) section.appendChild(productionCard);
 
-  const dispatchProductionCard = renderDispatchProductionCard(
+  const dispatchProductionCard = learningSnapshotFresh ? renderDispatchProductionCard(
     f.dispatchProduction,
     f.dispatchProductionSource,
     'fleet-card card'
-  );
+  ) : null;
   if (dispatchProductionCard) section.appendChild(dispatchProductionCard);
 
-  const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
+  const workspaceCard = learningSnapshotFresh
+    ? renderGlobalWorkspaceCard(f.workspace, 'fleet-card card')
+    : null;
   if (workspaceCard) section.appendChild(workspaceCard);
 
-  const attemptCoverage = dispatchProductionSourceHealthy(f.dispatchProductionSource)
+  const attemptCoverage = learningSnapshotFresh && dispatchProductionSourceHealthy(f.dispatchProductionSource)
     ? f.attemptCoverage
     : null;
   const attemptCoverageCard = renderAttemptCoverageCard(
-    attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage
+    attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage, f.learningMetrics
   );
   if (attemptCoverageCard) section.appendChild(attemptCoverageCard);
-  const learningUnavailableCard = !attemptCoverage
+  const learningUnavailableCard = learningSnapshotFresh && !attemptCoverage
     ? renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')
     : null;
   if (learningUnavailableCard) section.appendChild(learningUnavailableCard);
 
-  const contextCard = renderContextEfficiencyCard(f.contextEfficiency, 'fleet-card card');
+  const contextCard = learningSnapshotFresh
+    ? renderContextEfficiencyCard(f.contextEfficiency, 'fleet-card card')
+    : null;
   if (contextCard) section.appendChild(contextCard);
 
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
@@ -3964,10 +4003,12 @@ async function loadControl() {
   // up requests (and freeze the tab waiting). Skip if one is already in flight.
   if (state.controlLoading) return;
   state.controlLoading = true;
+  ensureFleetSnapshotWatchdog();
   // Don't show skeleton loading flash on poll refreshes — only on first load
   if (!state.control) showLoading('control');
   try {
     state.control = await apiFetch('/api/control');
+    state.fleetSnapshotStale = !fleetSnapshotLearningFresh(state.control);
     renderControl();
   } catch (err) {
     if (!state.control) showError('control', err.message);
@@ -4015,6 +4056,7 @@ function renderControl() {
   }
 
   // ── 1. Fleet Pulse (hero) ──────────────────────────────────────────────
+  const learningSnapshotFresh = fleetSnapshotLearningFresh(d);
   const fleet = d.fleet ?? d.daemon ?? {};
   const daemon = d.daemon ?? {};
   const fleetDaemon = d.fleet?.daemon ?? fleet.daemon ?? daemon;
@@ -4098,13 +4140,20 @@ function renderControl() {
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
   const shipReadiness = d.fleet?.autonomousShipReadiness ?? fleet.autonomousShipReadiness ?? null;
   const missionBrief = d.fleet?.missionBrief ?? fleet.missionBrief ?? null;
-  const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
-  const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
+  const production = learningSnapshotFresh
+    ? d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null
+    : null;
+  const dispatchProduction = learningSnapshotFresh
+    ? d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null
+    : null;
   const dispatchProductionSource = d.fleet?.dispatchProductionSource ?? fleet.dispatchProductionSource ?? null;
-  const repairRecovery = fleetRepairRecoveryMetric(d.fleet ?? fleet);
+  const repairRecovery = learningSnapshotFresh ? fleetRepairRecoveryMetric(d.fleet ?? fleet) : null;
   const isRepairRecoveryActive = fleetRepairRecoveryActive(shipReadiness, missionBrief);
-  const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
-  const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+  const workspace = learningSnapshotFresh
+    ? d.fleet?.workspace ?? fleet.workspace ?? null
+    : null;
+  const learningDenominatorHealthy = learningSnapshotFresh &&
+    dispatchProductionSourceHealthy(dispatchProductionSource);
   const attemptCoverage = learningDenominatorHealthy
     ? d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null
     : null;
@@ -4112,7 +4161,9 @@ function renderControl() {
     ? d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null
     : null;
   const learningMetrics = d.fleet?.learningMetrics ?? fleet.learningMetrics ?? null;
-  const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null;
+  const skillCorpusReadiness = learningSnapshotFresh
+    ? d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null
+    : null;
   const repairHandoffRollout = d.fleet?.repairHandoffRollout ?? fleet.repairHandoffRollout ?? null;
   if (repairHandoffRollout) {
     const rolloutAccent = repairHandoffRollout.phase === 'degraded'
@@ -4174,7 +4225,7 @@ function renderControl() {
   if (effectiveness) {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
   }
-  if (production) {
+  if (learningSnapshotFresh && production) {
     const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
     heroMetrics.appendChild(controlMetric('No-prop 24h', noProposal, noProposal > 0 ? '#f97316' : '#4ade80'));
   }
@@ -4286,6 +4337,10 @@ function renderControl() {
   const missionEffectivenessCard = renderAutonomyEffectivenessCard(effectiveness);
   if (missionEffectivenessCard) section.appendChild(missionEffectivenessCard);
 
+  if (!learningSnapshotFresh) {
+    section.appendChild(renderStaleLearningSnapshotCard());
+  }
+
   const missionProductionCard = renderProposalProductionCard(production);
   if (missionProductionCard) section.appendChild(missionProductionCard);
 
@@ -4293,7 +4348,7 @@ function renderControl() {
   if (missionWorkspaceCard) section.appendChild(missionWorkspaceCard);
 
   const missionAttemptCoverageCard = renderAttemptCoverageCard(
-    attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage
+    attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage, learningMetrics
   );
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
 
@@ -4307,7 +4362,9 @@ function renderControl() {
   );
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
 
-  const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
+  const missionContextCard = learningSnapshotFresh
+    ? renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null)
+    : null;
   if (missionContextCard) section.appendChild(missionContextCard);
 
   const missionActionsCard = renderFleetNextActionsCard(d.fleet?.nextActions ?? fleet.nextActions ?? null);
@@ -5033,6 +5090,9 @@ function renderFleetActivity() {
 // ── Settings helpers ────────────────────────────────────────────────────────
 
 const FD_SETTINGS_KEY = 'ashlr-fleet-dashboard-settings';
+const FD_SNAPSHOT_MAX_AGE_MS = 30_000;
+const FD_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
+const FD_SNAPSHOT_WATCHDOG_MS = 5_000;
 
 const FD_DEFAULT_SETTINGS = {
   panels: { status: true, running: true, usage: true, activity: true, production: true, intelligence: true, visibility: true },
@@ -5078,14 +5138,71 @@ function fdApplyTheme(theme) {
 
 let _fdLoading = false;
 
+function fleetSnapshotLearningFresh(snapshot, nowMs = Date.now()) {
+  const generatedAtMs = Date.parse(snapshot?.generatedAt);
+  if (!Number.isFinite(generatedAtMs) || !Number.isFinite(nowMs)) return false;
+  return generatedAtMs <= nowMs + FD_SNAPSHOT_MAX_FUTURE_SKEW_MS &&
+    nowMs - generatedAtMs <= FD_SNAPSHOT_MAX_AGE_MS;
+}
+
+function stopFleetDashboardPolling() {
+  if (!state.fleetDashboardInterval) return;
+  clearInterval(state.fleetDashboardInterval);
+  state.fleetDashboardInterval = null;
+}
+
+function startFleetDashboardPolling() {
+  if (state.activeView !== 'fleet-dashboard' || state.fleetDashboardInterval) return;
+  const configuredSecs = Number(fdLoadSettings().refreshSecs);
+  const refreshSecs = Number.isFinite(configuredSecs)
+    ? Math.min(300, Math.max(5, configuredSecs))
+    : FD_DEFAULT_SETTINGS.refreshSecs;
+  state.fleetDashboardInterval = setInterval(() => {
+    if (state.activeView !== 'fleet-dashboard') {
+      stopFleetDashboardPolling();
+      return;
+    }
+    loadFleetDashboard();
+  }, refreshSecs * 1000);
+}
+
+function ensureFleetSnapshotWatchdog() {
+  if (state.fleetSnapshotWatchdog) return;
+  state.fleetSnapshotWatchdog = setInterval(() => {
+    const snapshot = state.activeView === 'fleet-dashboard'
+      ? state.fleetDashboard
+      : state.activeView === 'control'
+        ? state.control
+        : state.activeView === 'fleet'
+          ? { generatedAt: state.fleetObservedAt }
+          : null;
+    if (!snapshot) return;
+    const stale = !fleetSnapshotLearningFresh(snapshot);
+    const changed = stale !== state.fleetSnapshotStale;
+    state.fleetSnapshotStale = stale;
+    if (!stale) return;
+    if (state.activeView === 'fleet-dashboard') {
+      startFleetDashboardPolling();
+      if (changed) renderFleetDashboard();
+    } else if (state.activeView === 'control') {
+      if (changed) renderControl();
+    } else if (state.activeView === 'fleet') {
+      if (changed) renderFleet();
+      void loadFleet();
+    }
+  }, FD_SNAPSHOT_WATCHDOG_MS);
+}
+
 async function loadFleetDashboard() {
   if (_fdLoading) return;
   _fdLoading = true;
+  ensureFleetSnapshotWatchdog();
 
   // Don't show skeleton flash on poll refreshes
   if (!state.fleetDashboard) showLoading('fleet-dashboard');
   try {
     state.fleetDashboard = await apiFetch('/api/snapshot');
+    state.fleetSnapshotStale = !fleetSnapshotLearningFresh(state.fleetDashboard);
     renderFleetDashboard();
   } catch (err) {
     if (!state.fleetDashboard) showError('fleet-dashboard', err.message);
@@ -5096,16 +5213,7 @@ async function loadFleetDashboard() {
   // Start auto-refresh interval if not already running
   const settings = fdLoadSettings();
   fdApplyTheme(settings.theme);
-  if (state.activeView === 'fleet-dashboard' && !state.fleetDashboardInterval) {
-    state.fleetDashboardInterval = setInterval(() => {
-      if (state.activeView !== 'fleet-dashboard') {
-        clearInterval(state.fleetDashboardInterval);
-        state.fleetDashboardInterval = null;
-        return;
-      }
-      loadFleetDashboard();
-    }, settings.refreshSecs * 1000);
-  }
+  startFleetDashboardPolling();
 }
 
 // ── Panel renderers ─────────────────────────────────────────────────────────
@@ -5340,7 +5448,8 @@ function fdRenderReadinessRail(snap) {
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
   const generatedMetric = generatedWorkMetric(queue.generatedWork);
   const drainMetric = diagnosticResliceDrainMetric(queue.diagnosticResliceDrain);
-  const repairRecovery = fleetRepairRecoveryMetric(fleet);
+  const learningSnapshotFresh = fleetSnapshotLearningFresh(snap);
+  const repairRecovery = learningSnapshotFresh ? fleetRepairRecoveryMetric(fleet) : null;
   const isRepairRecoveryActive = fleetRepairRecoveryActive(readiness, missionBrief);
   const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
   const loop = isRepairRecoveryActive ? 'repair recovery -> learning' : effectiveness?.phase ?? 'unknown';
@@ -5366,7 +5475,9 @@ function fdRenderReadinessRail(snap) {
     repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
     drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
-    fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction, dispatchProductionSource))
+    fdMetricPill('Yield', learningSnapshotFresh
+      ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
+      : 'withheld (stale snapshot)')
   ));
   return rail;
 }
@@ -5624,7 +5735,9 @@ function fdRenderProductionPanel(snap) {
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const dispatchProductionSource = snap.fleet?.dispatchProductionSource ?? snap.control?.fleet?.dispatchProductionSource ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
-  const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+  const learningSnapshotFresh = fleetSnapshotLearningFresh(snap);
+  const learningDenominatorHealthy = learningSnapshotFresh &&
+    dispatchProductionSourceHealthy(dispatchProductionSource);
   const attemptCoverage = learningDenominatorHealthy
     ? snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null
     : null;
@@ -5642,7 +5755,17 @@ function fdRenderProductionPanel(snap) {
     if (!contextEfficiency) return body;
   }
 
-  if (production) {
+  if (!learningSnapshotFresh) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Learning telemetry'));
+    body.appendChild(infoGrid([
+      ['Snapshot', 'stale'],
+      ['Exact learning metrics', 'withheld'],
+    ]));
+  }
+  const settlement = learningSnapshotFresh ? learningSettlementText(learningMetrics) : null;
+  if (settlement) body.appendChild(el('p', { cls: 'hint' }, settlement));
+
+  if (learningSnapshotFresh && production) {
     const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
     const suppressed = production.suppressedDispatches ?? 0;
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Proposal production'));
@@ -5661,7 +5784,7 @@ function fdRenderProductionPanel(snap) {
     }
   }
 
-  if (dispatchProduction && dispatchProductionSourceHealthy(dispatchProductionSource)) {
+  if (learningSnapshotFresh && dispatchProduction && dispatchProductionSourceHealthy(dispatchProductionSource)) {
     const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
     const diagnosticAttempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
     const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
@@ -5697,23 +5820,23 @@ function fdRenderProductionPanel(snap) {
   else if (dispatchProductionSource || dispatchProduction) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
     body.appendChild(infoGrid([
-      ['Source', dispatchProductionSourceText(dispatchProductionSource)],
-      ['Yield', 'unavailable'],
+      ['Source', learningSnapshotFresh ? dispatchProductionSourceText(dispatchProductionSource) : 'stale snapshot'],
+      ['Yield', learningSnapshotFresh ? 'unavailable' : 'withheld'],
     ]));
   }
 
-  if (trajectoryLearning) {
+  if (learningSnapshotFresh && trajectoryLearning) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Trajectory learning'));
     body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)));
     body.appendChild(renderTrajectoryTraceList(trajectoryLearning));
     const withholding = learningMetricWithholdingText(learningMetrics?.trajectoryLearning);
     if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
-  } else if (skillCorpusReadiness) {
+  } else if (learningSnapshotFresh && skillCorpusReadiness) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Skill learning'));
     body.appendChild(infoGrid(skillCorpusReadinessRows(skillCorpusReadiness)));
   }
 
-  if (workspace) {
+  if (learningSnapshotFresh && workspace) {
     const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
     const policySuppressed = workspace.policySuppressedEvents ?? 0;
     const diagnosticProposalRate = typeof workspace.diagnosticProposalRate === 'number'
@@ -5738,7 +5861,7 @@ function fdRenderProductionPanel(snap) {
     }
   }
 
-  if (attemptCoverage) {
+  if (learningSnapshotFresh && attemptCoverage) {
     const causal = attemptCoverage.causalCoverage ?? {};
     const weak = attemptCoverage.causalWeak ?? {};
     const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
@@ -5775,7 +5898,7 @@ function fdRenderProductionPanel(snap) {
     if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
   }
 
-  if (contextEfficiency) {
+  if (learningSnapshotFresh && contextEfficiency) {
     const signals = contextEfficiency.signals ?? {};
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Context efficiency'));
     body.appendChild(infoGrid([
@@ -5814,23 +5937,26 @@ function fdRenderProductionPanel(snap) {
   propBlock.appendChild(propCounts);
   scorecard.appendChild(propBlock);
 
-  // Judge verdicts 24h block
-  const jv = prod.judgeVerdicts24h;
-  const judgeBlock = el('div', { cls: 'fd-prod-block' });
-  judgeBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Judge verdicts (24h)'));
-  const judgeCounts = el('div', { cls: 'fd-prod-counts' });
-  const addJudgeCount = (n, lbl, cls) => {
-    judgeCounts.appendChild(el('div', { cls: 'fd-prod-count' },
-      el('span', { cls: `fd-prod-count__num ${cls}` }, String(n)),
-      el('span', { cls: 'fd-prod-count__lbl' }, lbl)
-    ));
-  };
-  addJudgeCount(jv.ship,    'ship',    'fd-prod-count__num--ok');
-  addJudgeCount(jv.review,  'review',  jv.review > 0  ? 'fd-prod-count__num--warn' : '');
-  addJudgeCount(jv.noise,   'noise',   'fd-prod-count__num--muted');
-  addJudgeCount(jv.harmful, 'harmful', jv.harmful > 0 ? 'fd-prod-count__num--fail' : '');
-  judgeBlock.appendChild(judgeCounts);
-  scorecard.appendChild(judgeBlock);
+  // Judge verdicts are learning labels, so stale snapshots must not expose
+  // their exact counts as if they were current.
+  if (learningSnapshotFresh) {
+    const jv = prod.judgeVerdicts24h;
+    const judgeBlock = el('div', { cls: 'fd-prod-block' });
+    judgeBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Judge verdicts (24h)'));
+    const judgeCounts = el('div', { cls: 'fd-prod-counts' });
+    const addJudgeCount = (n, lbl, cls) => {
+      judgeCounts.appendChild(el('div', { cls: 'fd-prod-count' },
+        el('span', { cls: `fd-prod-count__num ${cls}` }, String(n)),
+        el('span', { cls: 'fd-prod-count__lbl' }, lbl)
+      ));
+    };
+    addJudgeCount(jv.ship,    'ship',    'fd-prod-count__num--ok');
+    addJudgeCount(jv.review,  'review',  jv.review > 0  ? 'fd-prod-count__num--warn' : '');
+    addJudgeCount(jv.noise,   'noise',   'fd-prod-count__num--muted');
+    addJudgeCount(jv.harmful, 'harmful', jv.harmful > 0 ? 'fd-prod-count__num--fail' : '');
+    judgeBlock.appendChild(judgeCounts);
+    scorecard.appendChild(judgeBlock);
+  }
 
   body.appendChild(scorecard);
 
@@ -5904,6 +6030,7 @@ function fdRenderProductionPanel(snap) {
 
 function fdRenderIntelligencePanel(snap) {
   const intel = snap.intelligence;
+  const learningSnapshotFresh = fleetSnapshotLearningFresh(snap);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!intel) {
@@ -5911,8 +6038,13 @@ function fdRenderIntelligencePanel(snap) {
     return body;
   }
 
+  if (!learningSnapshotFresh) {
+    body.appendChild(el('p', { cls: 'hint' },
+      'Learning telemetry stale; exact intelligence metrics withheld.'));
+  }
+
   // ── Per-engine scorecards ─────────────────────────────────────────────────
-  if (intel.engineScorecards && intel.engineScorecards.length > 0) {
+  if (learningSnapshotFresh && intel.engineScorecards && intel.engineScorecards.length > 0) {
     body.appendChild(el('div', { cls: 'fd-intel-section-title' }, 'Engine scorecards (24h)'));
     const table = el('div', { cls: 'fd-intel-engine-table' });
     // Header
@@ -5939,7 +6071,7 @@ function fdRenderIntelligencePanel(snap) {
   }
 
   // ── M240: Learned routing scores ─────────────────────────────────────────
-  if (intel.routingScores && intel.routingScores.length > 0) {
+  if (learningSnapshotFresh && intel.routingScores && intel.routingScores.length > 0) {
     body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Learned routing (M240)'));
     const routeList = el('ul', { cls: 'fd-intel-route-list' });
     for (const rs of intel.routingScores.slice(0, 10)) {
@@ -5961,14 +6093,16 @@ function fdRenderIntelligencePanel(snap) {
       routeList.appendChild(row);
     }
     body.appendChild(routeList);
-  } else {
+  } else if (learningSnapshotFresh) {
     body.appendChild(el('p', { cls: 'hint', style: 'margin-top:8px' },
       'No routing data yet. Scores appear after 5+ judged decisions per engine.'));
   }
 
   // ── M235: Anti-playbook lessons ───────────────────────────────────────────
-  body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Anti-playbooks (M235)'));
-  if (intel.antiPlaybooks && intel.antiPlaybooks.length > 0) {
+  if (learningSnapshotFresh) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Anti-playbooks (M235)'));
+  }
+  if (learningSnapshotFresh && intel.antiPlaybooks && intel.antiPlaybooks.length > 0) {
     const apList = el('ul', { cls: 'fd-intel-ap-list' });
     for (const ap of intel.antiPlaybooks) {
       const item = el('li', { cls: 'fd-intel-ap-item' });
@@ -5978,7 +6112,7 @@ function fdRenderIntelligencePanel(snap) {
       apList.appendChild(item);
     }
     body.appendChild(apList);
-  } else {
+  } else if (learningSnapshotFresh) {
     body.appendChild(el('p', { cls: 'hint' },
       'No anti-playbooks yet. Lessons appear when the judge rejects proposals.'));
   }
@@ -6283,7 +6417,10 @@ function renderFleetDashboard() {
   settingsBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.22 3.22l1.06 1.06M11.72 11.72l1.06 1.06M12.78 3.22l-1.06 1.06M4.28 11.72l-1.06 1.06" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg> Settings';
   settingsBtn.addEventListener('click', fdOpenSettings);
 
-  const lastUpdated = snap ? `Updated ${fmtRelative(snap.generatedAt)}` : 'Loading…';
+  const snapshotLearningFresh = fleetSnapshotLearningFresh(snap);
+  const lastUpdated = snap
+    ? `Updated ${fmtRelative(snap.generatedAt)}${snapshotLearningFresh ? '' : ' · learning metrics withheld'}`
+    : 'Loading…';
   section.appendChild(el('div', { cls: 'fd-header-row' },
     el('div', {},
       el('span', { cls: 'fd-header-title' }, 'Fleet Dashboard'),

@@ -12,12 +12,13 @@
  *   8. drainSseConnections() ends the SSE response
  *   9. POST /api/events returns 404 (not a valid mutation route)
  *  10. server.ts HOST_RE allowlist — loopback-only binding verified
- *  11. app.js snapshot SSE handler suppresses polling interval while SSE live
+ *  11. app.js snapshot SSE handler suppresses polling only while snapshots are fresh
  *  12. app.js SSE error handler restores polling fallback
- *  13. app.js Fleet Dashboard wires the M262 visibility panel
- *  14. app.js Fleet Dashboard status panel renders readiness rail
- *  15. app.js inbox detail reads current proposal review fields
- *  16. SSE response has Cache-Control: no-cache + Connection: keep-alive
+ *  13. app.js stale-snapshot watchdog restores polling and withholds exact learning metrics
+ *  14. app.js Fleet Dashboard wires the M262 visibility panel
+ *  15. app.js Fleet Dashboard status panel renders readiness rail
+ *  16. app.js inbox detail reads current proposal review fields
+ *  17. SSE response has Cache-Control: no-cache + Connection: keep-alive
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -403,18 +404,18 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
   // ── 11. app.js: snapshot SSE handler suppresses polling interval ──────────
 
-  it('app.js snapshot SSE handler clears fleetDashboardInterval when SSE is live', () => {
+  it('app.js snapshot SSE handler suppresses polling only for a fresh snapshot', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
       'utf8',
     );
     expect(src).toContain("es.addEventListener('snapshot'");
     expect(src).toContain('state.fleetDashboard = data');
-    // The snapshot handler must clear the polling interval
     const snapshotHandlerMatch = src.match(/es\.addEventListener\('snapshot'[\s\S]*?\}\);/);
     expect(snapshotHandlerMatch).not.toBeNull();
-    expect(snapshotHandlerMatch![0]).toContain('clearInterval');
-    expect(snapshotHandlerMatch![0]).toContain('fleetDashboardInterval');
+    expect(snapshotHandlerMatch![0]).toContain('fleetSnapshotLearningFresh(data)');
+    expect(snapshotHandlerMatch![0]).toContain('if (learningFresh) stopFleetDashboardPolling()');
+    expect(snapshotHandlerMatch![0]).toContain('else startFleetDashboardPolling()');
   });
 
   // ── 12. app.js: SSE error handler restores polling fallback ──────────────
@@ -427,8 +428,73 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('SSE dropped — restart polling fallback');
     const errorHandlerMatch = src.match(/es\.addEventListener\('error'[\s\S]*?\}\);/);
     expect(errorHandlerMatch).not.toBeNull();
-    expect(errorHandlerMatch![0]).toContain('fleetDashboardInterval');
-    expect(errorHandlerMatch![0]).toContain('setInterval');
+    expect(errorHandlerMatch![0]).toContain('startFleetDashboardPolling()');
+  });
+
+  it('app.js bounds snapshot freshness and restarts polling while EventSource remains open', () => {
+    vi.useFakeTimers();
+    const now = Date.parse('2026-07-22T12:00:00.000Z');
+    vi.setSystemTime(now);
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const helpersStart = src.indexOf('function fleetSnapshotLearningFresh(snapshot, nowMs = Date.now())');
+    const helpersEnd = src.indexOf('\nasync function loadFleetDashboard()', helpersStart);
+    expect(helpersStart).toBeGreaterThanOrEqual(0);
+    expect(helpersEnd).toBeGreaterThan(helpersStart);
+
+    const state = {
+      activeView: 'fleet-dashboard',
+      fleetDashboard: { generatedAt: new Date(now).toISOString() },
+      fleetDashboardInterval: null as ReturnType<typeof setInterval> | null,
+      fleetSnapshotWatchdog: null as ReturnType<typeof setInterval> | null,
+      fleetSnapshotStale: false,
+    };
+    const loadFleetDashboard = vi.fn();
+    const renderFleetDashboard = vi.fn();
+    const helpers = new Function(
+      'state', 'fdLoadSettings', 'loadFleetDashboard', 'renderFleetDashboard',
+      'FD_SNAPSHOT_MAX_AGE_MS', 'FD_SNAPSHOT_MAX_FUTURE_SKEW_MS',
+      'FD_SNAPSHOT_WATCHDOG_MS', 'FD_DEFAULT_SETTINGS',
+      `${src.slice(helpersStart, helpersEnd)}\nreturn { fleetSnapshotLearningFresh, ensureFleetSnapshotWatchdog };`,
+    )(
+      state,
+      () => ({ refreshSecs: 15 }),
+      loadFleetDashboard,
+      renderFleetDashboard,
+      30_000,
+      5_000,
+      5_000,
+      { refreshSecs: 15 },
+    ) as {
+      fleetSnapshotLearningFresh: (snapshot: unknown, nowMs?: number) => boolean;
+      ensureFleetSnapshotWatchdog: () => void;
+    };
+
+    expect(helpers.fleetSnapshotLearningFresh(
+      { generatedAt: new Date(now - 30_000).toISOString() }, now,
+    )).toBe(true);
+    expect(helpers.fleetSnapshotLearningFresh(
+      { generatedAt: new Date(now - 30_001).toISOString() }, now,
+    )).toBe(false);
+    expect(helpers.fleetSnapshotLearningFresh(
+      { generatedAt: new Date(now + 5_001).toISOString() }, now,
+    )).toBe(false);
+    expect(helpers.fleetSnapshotLearningFresh({ generatedAt: 'invalid' }, now)).toBe(false);
+
+    helpers.ensureFleetSnapshotWatchdog();
+    const watchdog = state.fleetSnapshotWatchdog;
+    helpers.ensureFleetSnapshotWatchdog();
+    expect(state.fleetSnapshotWatchdog).toBe(watchdog);
+    vi.advanceTimersByTime(30_000);
+    expect(state.fleetDashboardInterval).toBeNull();
+    vi.advanceTimersByTime(5_000);
+    expect(state.fleetSnapshotStale).toBe(true);
+    expect(state.fleetDashboardInterval).not.toBeNull();
+    expect(renderFleetDashboard).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(15_000);
+    expect(loadFleetDashboard).toHaveBeenCalledTimes(1);
   });
 
   // ── 13. app.js: Fleet Dashboard includes visibility panel ────────────────
@@ -484,13 +550,13 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function dispatchProductionSourceText');
     expect(src).toContain("return source?.sourceState === 'healthy' && source.complete === true");
     expect(src).toContain("['Source', dispatchProductionSourceText(sourceQuality)]");
-    expect(src).toContain('const attemptCoverage = dispatchProductionSourceHealthy(f.dispatchProductionSource)');
-    expect(src).toContain("attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage");
+    expect(src).toContain('const attemptCoverage = learningSnapshotFresh && dispatchProductionSourceHealthy(f.dispatchProductionSource)');
+    expect(src).toContain("attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage, f.learningMetrics");
     expect(src).toContain("renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain("['Diagnostic drain', diagnosticResliceDrainMetric(f.queue?.diagnosticResliceDrain) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
-    expect(src).toContain("attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage");
+    expect(src).toContain("attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage, learningMetrics");
     expect(src).toContain('renderLearningMetricsUnavailableCard(learningMetrics)');
     expect(src).toContain('renderPhantomAgentReportCard(f.phantom');
     expect(src).toContain('renderPhantomAgentReportCard(d.fleet?.phantom');
@@ -519,7 +585,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)');
     expect(src).toContain('if (!dispatchProduction || !sourceHealthy)');
     expect(src.match(/if \(dispatchProduction && dispatchProductionSourceHealthy\(dispatchProductionSource\)\)/g))
-      .toHaveLength(2);
+      .toHaveLength(1);
+    expect(src).toContain('if (learningSnapshotFresh && dispatchProduction && dispatchProductionSourceHealthy(dispatchProductionSource))');
     expect(src).toContain("if (!metric || typeof metric !== 'object') return 'withheld'");
   });
 
@@ -543,6 +610,12 @@ describe('M213 Dashboard SSE — /api/events', () => {
       state: 'withheld', reason: 'dispatch-source-degraded',
       sourceQuality: { invalidRows: 4, unreadableFiles: 1, stopReasons: ['row-limit'] },
     })).toBe('withheld: dispatch denominator degraded; 4 invalid row(s); 1 unreadable file(s); stopped: row-limit');
+    expect(format({
+      state: 'withheld', reason: 'learning-snapshot-unstable', sourceQuality: {},
+    })).toBe('withheld: cross-source snapshot changed during read');
+    expect(format({
+      state: 'withheld', reason: 'learning-snapshot-settling', sourceQuality: {},
+    })).toBe('withheld: dispatch rows are still settling');
 
     const metricStart = src.indexOf('function formatCoverageMetric(metric)');
     const metricEnd = src.indexOf('\nfunction learningMetricsAvailabilityText', metricStart);
@@ -570,12 +643,15 @@ describe('M213 Dashboard SSE — /api/events', () => {
     });
     const renderPanel = new Function(
       'el', 'infoGrid', 'dispatchProductionSourceHealthy', 'dispatchProductionSourceText',
+      'fleetSnapshotLearningFresh', 'learningSettlementText',
       `${src.slice(panelStart, panelEnd)}\nreturn fdRenderProductionPanel;`,
     )(
       (_tag: string, _attrs: unknown, ...children: unknown[]) => node(...children),
       (rows: unknown[][]) => node(...rows.flat()),
       sourceHealthy,
       (source?: { sourceState?: string }) => source?.sourceState ?? 'unknown',
+      () => true,
+      () => null,
     ) as (snap: Record<string, unknown>) => FakeNode;
     const rendered = renderPanel({
       fleet: {
@@ -595,6 +671,93 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(renderedText).not.toContain('Attempts');
     expect(renderedText).not.toContain('No-proposal');
     expect(renderedText).not.toContain('0%');
+
+    const renderStalePanel = new Function(
+      'el', 'infoGrid', 'dispatchProductionSourceHealthy', 'dispatchProductionSourceText',
+      'fleetSnapshotLearningFresh', 'learningSettlementText',
+      `${src.slice(panelStart, panelEnd)}\nreturn fdRenderProductionPanel;`,
+    )(
+      (_tag: string, _attrs: unknown, ...children: unknown[]) => node(...children),
+      (rows: unknown[][]) => node(...rows.flat()),
+      sourceHealthy,
+      (source?: { sourceState?: string }) => source?.sourceState ?? 'unknown',
+      () => false,
+      () => null,
+    ) as (snap: Record<string, unknown>) => FakeNode;
+    const staleText = flatten(renderStalePanel({
+      generatedAt: '2026-07-22T00:00:00.000Z',
+      production: {
+        proposals24h: { applied: 4, pending: 1, rejected: 2 },
+        judgeVerdicts24h: { ship: 3, review: 2, noise: 1, harmful: 1 },
+        autoMergesToday: { count: 0, titles: [] },
+        activeGoals: [],
+        shipsPerDayTrend: [],
+      },
+      fleet: {
+        proposalProduction: {
+          selected: 4, dispatched: 3, proposalsCreated: 2,
+          diagnosticNoProposalDispatches: 1, suppressedDispatches: 1, errors: 0,
+        },
+        dispatchProductionSource: { sourceState: 'healthy', complete: true },
+        dispatchProduction: {
+          attempts: 2, proposalsCreated: 0, diagnosticNoProposal: 2,
+          diagnosticProposalRate: 0, byBackend: [{ backend: 'local', attempts: 2, proposalsCreated: 0 }],
+        },
+        attemptCoverage: { attempts: 2 },
+        trajectoryLearning: { trajectories: 2 },
+        workspace: { eventCount: 2, diagnosticProposalRate: 0 },
+      },
+    }));
+    expect(staleText).toContain('Exact learning metrics withheld');
+    expect(staleText).toContain('stale snapshot Yield withheld');
+    expect(staleText).not.toContain('0/2');
+    expect(staleText).not.toContain('Attempt coverage');
+    expect(staleText).not.toContain('Trajectory learning');
+    expect(staleText).not.toContain('Global workspace');
+    expect(staleText).not.toContain('Proposal production');
+    expect(staleText).not.toContain('Judge verdicts');
+    expect(staleText).toContain('Proposals (24h)');
+
+    const intelligenceStart = src.indexOf('function fdRenderIntelligencePanel(snap)');
+    const intelligenceEnd = src.indexOf('\nfunction fdRenderVisibilityPanel', intelligenceStart);
+    expect(intelligenceStart).toBeGreaterThanOrEqual(0);
+    expect(intelligenceEnd).toBeGreaterThan(intelligenceStart);
+    const renderStaleIntelligence = new Function(
+      'el', 'fleetSnapshotLearningFresh',
+      `${src.slice(intelligenceStart, intelligenceEnd)}\nreturn fdRenderIntelligencePanel;`,
+    )(
+      (_tag: string, _attrs: unknown, ...children: unknown[]) => node(...children),
+      () => false,
+    ) as (snap: Record<string, unknown>) => FakeNode;
+    const staleIntelligenceText = flatten(renderStaleIntelligence({
+      intelligence: {
+        engineScorecards: [{ engine: 'codex', ship: 3, review: 1, noise: 0, harmful: 0, shipRate: 0.75 }],
+        routingScores: [{ engine: 'codex', taskClass: 'code', score: 0.75, trend: 'promoted', samples: 8 }],
+        antiPlaybooks: [{ title: 'Old lesson', snippet: 'stale', ts: '2026-07-22T00:00:00.000Z' }],
+      },
+    }));
+    expect(staleIntelligenceText).toContain('exact intelligence metrics withheld');
+    expect(staleIntelligenceText).not.toContain('Engine scorecards');
+    expect(staleIntelligenceText).not.toContain('Learned routing');
+    expect(staleIntelligenceText).not.toContain('Anti-playbooks');
+    expect(staleIntelligenceText).not.toContain('75%');
+  });
+
+  it('withholds stale learning metrics in Fleet and Mission Control as well as Fleet Dashboard', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain(
+      "const learningSnapshotFresh = fleetSnapshotLearningFresh({ generatedAt: state.fleetObservedAt });",
+    );
+    expect(src).toContain('const learningSnapshotFresh = fleetSnapshotLearningFresh(d);');
+    expect(src).toContain("else if (state.activeView === 'control')");
+    expect(src).toContain("else if (state.activeView === 'fleet')");
+    expect(src).toContain("section.appendChild(renderStaleLearningSnapshotCard('fleet-card card'))");
+    expect(src).toContain('section.appendChild(renderStaleLearningSnapshotCard());');
+    expect(src).toContain('const learningDenominatorHealthy = learningSnapshotFresh &&');
+    expect(src).toContain('if (learningSnapshotFresh && production)');
   });
 
   it('app.js renders activity evidence without a misleading healthy zero', () => {
@@ -763,9 +926,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
 
     expect(src).toContain('function renderTrajectoryLearningCard');
-    expect(src).toContain('const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource)');
+    expect(src).toContain('const learningDenominatorHealthy = learningSnapshotFresh &&');
     expect(src).toContain('? d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null');
-    expect(src).toContain("const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null");
+    expect(src).toContain('const skillCorpusReadiness = learningSnapshotFresh');
     expect(src).toContain("trajectoryLearning, skillCorpusReadiness, 'ctrl-card card', learningMetrics?.trajectoryLearning");
     expect(src).toContain("trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'");
     expect(src).toContain("trajectoryLearning || skillCorpusReadiness");

@@ -593,7 +593,7 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     );
     expect(appSource).toContain("['Cancelled', attemptCoverage.production?.cancelled ?? 0]");
     expect(appSource).toContain('topWeak.denominator ?? attempts');
-    expect(appSource).toContain("['Cancelled', terminal.cancelled ?? 0]");
+    expect(appSource).toContain("['Cancelled', terminal ? (terminal.cancelled ?? 0) : 'withheld']");
     expect(appSource).toContain('dispatchProductionDiagnosticRate(dispatchProduction)');
   });
 
