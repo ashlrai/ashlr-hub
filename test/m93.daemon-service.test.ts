@@ -95,6 +95,18 @@ function useSuccessfulLaunchdTransactionMock(): void {
   });
 }
 
+function launchctlPrintDisabledFixture(disabled: boolean): string {
+  return [
+    '',
+    '\tdisabled services = {',
+    '\t\t"com.docker.helper" => enabled',
+    '\t\t"ai.ashlr.fleet" => disabled',
+    `\t\t"ai.ashlr.daemon" => ${disabled ? 'disabled' : 'enabled'}`,
+    '\t}',
+    '',
+  ].join('\n');
+}
+
 function successfulServiceCommands() {
   let launchdLoaded = true;
   let launchdDisabled = false;
@@ -104,7 +116,12 @@ function successfulServiceCommands() {
   return (cmd: string, args: string[]) => {
     if (cmd === 'launchctl') {
       if (args[0] === 'print-disabled') {
-        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${launchdDisabled} }`, stderr: '', error: undefined };
+        return {
+          status: 0,
+          stdout: launchctlPrintDisabledFixture(launchdDisabled),
+          stderr: '',
+          error: undefined,
+        };
       }
       if (args[0] === 'print') {
         return launchdLoaded
@@ -443,6 +460,24 @@ describe('install() — mocked spawnSync', () => {
     expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('enable'))).toBe(true);
   });
 
+  it.each([
+    ['fictional boolean', 'disabled services = {\n\t"ai.ashlr.daemon" => true\n}'],
+    ['unknown token', 'disabled services = {\n\t"ai.ashlr.daemon" => maybe\n}'],
+    ['missing label', 'disabled services = {\n\t"another.service" => enabled\n}'],
+    ['duplicate label', 'disabled services = {\n\t"ai.ashlr.daemon" => enabled\n\t"ai.ashlr.daemon" => disabled\n}'],
+  ])('darwin: print-disabled fails closed for %s output', async (_case, stdout) => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'launchctl' && args[0] === 'print-disabled'
+        ? { status: 0, stdout, stderr: '', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'did not contain exactly one native state',
+    );
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootout'))).toBe(false);
+  });
+
   it('darwin: launchctl bootstrap receives the domain and plist path', async () => {
     await install(baseOpts('darwin'));
     const loadCall = spawnSyncMock.mock.calls.find(
@@ -467,7 +502,12 @@ describe('install() — mocked spawnSync', () => {
     let disabled = false;
     spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
       if (args[0] === 'print-disabled') {
-        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${disabled} }`, stderr: '', error: undefined };
+        return {
+          status: 0,
+          stdout: launchctlPrintDisabledFixture(disabled),
+          stderr: '',
+          error: undefined,
+        };
       }
       if (args[0] === 'disable') {
         disabled = true;
@@ -575,7 +615,12 @@ describe('install() — mocked spawnSync', () => {
           : { status: 113, stdout: '', stderr: 'Could not find service', error: undefined };
       }
       if (args[0] === 'print-disabled') {
-        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${disabled} }`, stderr: '', error: undefined };
+        return {
+          status: 0,
+          stdout: launchctlPrintDisabledFixture(disabled),
+          stderr: '',
+          error: undefined,
+        };
       }
       if (args[0] === 'bootout') loaded = false;
       if (args[0] === 'enable') { disabled = false; activationCalls.push('enable'); }
@@ -599,6 +644,28 @@ describe('install() — mocked spawnSync', () => {
     expect(disabled).toBe(true);
     expect(bootstrapCount).toBe(2);
     expect(activationCalls).toEqual(['enable', 'bootstrap', 'enable', 'bootstrap', 'disable']);
+  });
+
+  it('darwin: restart recovery restores the persisted activation state, not process memory', async () => {
+    installLaunchdPlistTransactionMock.mockImplementation((options: {
+      preflight: (state: { hasPrior: boolean }) => {
+        ok: boolean;
+        stderr: string;
+        recoveryState?: unknown;
+      };
+      recover: (state: unknown) => { ok: boolean; stderr: string };
+    }) => {
+      const preflight = options.preflight({ hasPrior: true });
+      expect(preflight.recoveryState).toEqual({ loaded: true, disabled: false });
+      expect(options.recover({ loaded: false, disabled: true }).ok).toBe(true);
+      throw new Error('restart recovery complete');
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow('restart recovery complete');
+    const calls = spawnSyncMock.mock.calls as [string, string[]][];
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('disable'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('bootstrap'))).toBe(false);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('bootout'))).toBe(true);
   });
 
   it('linux: calls systemctl --user daemon-reload then enable --now', async () => {
@@ -915,16 +982,38 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.platformSpec).toBe('systemd');
   });
 
-  it('win32: running=true when schtasks /Query output contains AshlrDaemon', () => {
+  it('win32: Ready means registered but not running', () => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({
       status: 0,
-      stdout: '"AshlrDaemon","Ready","N/A"\r\n',
+      stdout: '"\\AshlrDaemon","N/A","Ready"\r\n',
       stderr: '',
     });
     const s = serviceStatus(baseOpts('win32'));
-    expect(s.running).toBe(true);
+    expect(s.running).toBe(false);
     expect(s.platformSpec).toBe('schtasks');
+  });
+
+  it('win32: Running is parsed as the exact active runtime state', () => {
+    existsSyncMock.mockReturnValue(true);
+    spawnSyncMock.mockReturnValue({
+      status: 0,
+      stdout: '"\\AshlrDaemon","N/A","Running"\r\n',
+      stderr: '',
+    });
+    expect(serviceStatus(baseOpts('win32')).running).toBe(true);
+  });
+
+  it.each([
+    '"\\AshlrDaemon","N/A","Unknown"\r\n',
+    '"\\AshlrDaemon","Running"\r\n',
+    'AshlrDaemon,N/A,Running\r\n',
+    '"\\OtherTask","N/A","Running"\r\n',
+    '"\\AshlrDaemon","N/A","Running"\r\n"\\AshlrDaemon","N/A","Ready"\r\n',
+  ])('win32: malformed or unknown CSV is not reported running (%s)', (stdout) => {
+    existsSyncMock.mockReturnValue(true);
+    spawnSyncMock.mockReturnValue({ status: 0, stdout, stderr: '' });
+    expect(serviceStatus(baseOpts('win32')).running).toBe(false);
   });
 
   it('win32: running=false when schtasks /Query exits non-zero', () => {
@@ -1012,9 +1101,9 @@ describe('ensureRunning() — mocked OS activation', () => {
 
   it('win32: runs an installed scheduled task when stopped', async () => {
     spawnSyncMock
-      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'not running' })
+      .mockReturnValueOnce({ status: 0, stdout: '"\\AshlrDaemon","N/A","Ready"\r\n', stderr: '' })
       .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
-      .mockReturnValueOnce({ status: 0, stdout: '"AshlrDaemon","Ready","N/A"\r\n', stderr: '' });
+      .mockReturnValueOnce({ status: 0, stdout: '"\\AshlrDaemon","N/A","Running"\r\n', stderr: '' });
 
     const status = await ensureRunning(baseOpts('win32'));
 
@@ -1024,6 +1113,34 @@ describe('ensureRunning() — mocked OS activation', () => {
       ['/Run', '/TN', 'AshlrDaemon'],
       expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
     );
+  });
+
+  it('win32: treats malformed state as stopped and attempts a bounded start', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ status: 0, stdout: 'not,csv', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '"\\AshlrDaemon","N/A","Running"\r\n', stderr: '' });
+
+    const status = await ensureRunning(baseOpts('win32'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'schtasks',
+      ['/Run', '/TN', 'AshlrDaemon'],
+      expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
+    );
+  });
+
+  it('win32: does not run an already Running scheduled task', async () => {
+    spawnSyncMock.mockReturnValueOnce({
+      status: 0,
+      stdout: '"\\AshlrDaemon","N/A","Running"\r\n',
+      stderr: '',
+    });
+
+    const status = await ensureRunning(baseOpts('win32'));
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not start when the service is not installed', async () => {
