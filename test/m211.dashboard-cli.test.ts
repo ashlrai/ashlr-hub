@@ -64,6 +64,16 @@ function mockOpenBrowser() {
   return vi.fn(async () => {});
 }
 
+const launchdCrashCheckpoints = [
+  'journal-prepared',
+  'service-stopped',
+  'journal-stopped',
+  'plist-replaced',
+  'journal-replaced',
+  'service-activated',
+  'journal-activated',
+] as const;
+
 // ---------------------------------------------------------------------------
 // 1. generateServePlist — pure shape contract
 // ---------------------------------------------------------------------------
@@ -253,7 +263,7 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'prior plist and activation state were restored from',
+      'prior plist and activation state were restored',
     );
     expect(fs.readFileSync(pp)).toEqual(prior);
     expect(calls.map((args) => args[1])).toEqual(['unload', 'load', 'unload', 'load']);
@@ -315,6 +325,78 @@ describe('installServeAgent', () => {
     expect(unload).not.toHaveBeenCalled();
   });
 
+  describe.each([
+    { scenario: 'upgrade', hasPrior: true },
+    { scenario: 'first install', hasPrior: false },
+  ])('durable launchd recovery: $scenario', ({ hasPrior }) => {
+    it.each(launchdCrashCheckpoints)('recovers a restart at %s before beginning new work', async (checkpoint) => {
+      const {
+        installLaunchdPlistTransaction,
+      } = await import('../src/core/daemon/launchd-plist-transaction.js');
+      const pp = path.join(
+        tmpHome,
+        'Library',
+        'LaunchAgents',
+        `restart-${hasPrior ? 'upgrade' : 'first-install'}-${checkpoint}.plist`,
+      );
+      const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+      fs.mkdirSync(path.dirname(pp), { recursive: true });
+      if (hasPrior) fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+
+      const runtime = { loaded: hasPrior, disabled: hasPrior };
+      const unload = vi.fn(() => {
+        runtime.loaded = false;
+        return { ok: true, stderr: '' };
+      });
+      const load = vi.fn(() => {
+        runtime.loaded = true;
+        runtime.disabled = false;
+        return { ok: true, stderr: '' };
+      });
+      const recover = vi.fn((state: unknown) => {
+        if (!state || typeof state !== 'object' || Array.isArray(state)) {
+          return { ok: false, stderr: 'missing persisted runtime state' };
+        }
+        const persisted = state as { loaded?: unknown; disabled?: unknown };
+        if (typeof persisted.loaded !== 'boolean' || typeof persisted.disabled !== 'boolean') {
+          return { ok: false, stderr: 'invalid persisted runtime state' };
+        }
+        runtime.loaded = persisted.loaded;
+        runtime.disabled = persisted.disabled;
+        return { ok: true, stderr: '' };
+      });
+      const transaction = (content: string, checkpointHook?: (value: typeof checkpoint) => void) =>
+        installLaunchdPlistTransaction({
+          plistPath: pp,
+          trustedRoot: tmpHome,
+          content,
+          lockDir,
+          preflight: () => ({
+            ok: true,
+            stderr: '',
+            recoveryState: { ...runtime },
+          }),
+          unload,
+          load,
+          recover,
+          ...(checkpointHook ? { checkpointHook } : {}),
+        });
+
+      expect(() => transaction('<interrupted/>', (value) => {
+        if (value === checkpoint) throw new Error(`simulated restart at ${checkpoint}`);
+      })).toThrow(`simulated restart at ${checkpoint}`);
+      expect(fs.readdirSync(lockDir).filter((name) => name.endsWith('.journal.json'))).toHaveLength(1);
+
+      transaction('<final/>');
+
+      expect(fs.readFileSync(pp, 'utf8')).toBe('<final/>');
+      expect(runtime).toEqual({ loaded: true, disabled: false });
+      expect(recover).toHaveBeenCalledOnce();
+      expect(recover).toHaveBeenCalledWith({ loaded: hasPrior, disabled: hasPrior });
+      expect(fs.readdirSync(lockDir).filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+    });
+  });
+
   it('treats launchctl zero-exit error output as a load failure', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
@@ -347,7 +429,7 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'launchctl load failed: new load failed; prior plist was restored but activation rollback failed: old reload failed',
+      'launchd transaction recovery could not restore activation: old reload failed',
     );
     expect(fs.readFileSync(pp, 'utf8')).toBe('<old/>');
   });
@@ -369,7 +451,7 @@ describe('installServeAgent', () => {
       unload: () => ({ ok: false, stderr: 'permission denied' }),
       load,
       rollback,
-    })).toThrow('prior plist and activation state were restored');
+    })).toThrow('prior activation state was restored');
 
     expect(fs.readFileSync(pp)).toEqual(prior);
     expect(load).not.toHaveBeenCalled();
@@ -461,15 +543,19 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'compensating unload failed: job still active',
+      'launchd transaction recovery could not stop active service: job still active',
     );
     expect(fs.existsSync(pp)).toBe(true);
+    expect(fs.readdirSync(path.join(tmpHome, '.ashlr', 'locks'))
+      .some((name) => name.endsWith('.journal.json'))).toBe(true);
   });
 
   it('refuses to load a plist replaced during the initial unload', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
     const outside = path.join(tmpHome, 'malicious.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
     fs.writeFileSync(outside, 'MALICIOUS');
     let loads = 0;
     const rc = vi.fn((args: string[]) => {
@@ -483,7 +569,7 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'unsafe installed plist',
+      'unsafe active plist',
     );
     expect(loads).toBe(0);
     expect(fs.readFileSync(outside, 'utf8')).toBe('MALICIOUS');
@@ -534,7 +620,7 @@ describe('installServeAgent', () => {
         return { ok: true, stderr: '' };
       },
       rollback,
-    })).toThrow('compensating unload failed: new job still owns PID 987');
+    })).toThrow('launchd transaction recovery could not stop active service: new job still owns PID 987');
 
     expect(unloads).toBe(2);
     expect(rollback).not.toHaveBeenCalled();
@@ -561,7 +647,7 @@ describe('installServeAgent', () => {
         return { ok: true, stderr: '' };
       },
       rollback,
-    })).toThrow('prior plist restore rejected an interloper');
+    })).toThrow('launchd transaction recovery rejected an interleaved plist');
 
     expect(rollback).not.toHaveBeenCalled();
     expect(fs.readFileSync(pp, 'utf8')).toBe('INTERLOPER');

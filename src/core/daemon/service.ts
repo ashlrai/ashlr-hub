@@ -391,8 +391,13 @@ function launchdLoaded(serviceTarget: string): boolean {
 function launchdDisabled(domainTarget: string, label: string): boolean {
   const result = runCmd(['launchctl', 'print-disabled', domainTarget]);
   if (!result.ok) throw commandError(`launchctl print-disabled ${domainTarget}`, result);
-  const match = result.stdout.match(new RegExp(`"${escapeRegExp(label)}"\\s*=>\\s*(true|false)`, 'i'));
-  return match?.[1]?.toLowerCase() === 'true';
+  const matches = [...result.stdout.matchAll(
+    new RegExp(`"${escapeRegExp(label)}"\\s*=>\\s*(enabled|disabled)(?:\\s|$)`, 'g'),
+  )];
+  if (matches.length !== 1 || !matches[0]?.[1]) {
+    throw new Error(`launchctl print-disabled did not contain exactly one native state for ${label}`);
+  }
+  return matches[0][1] === 'disabled';
 }
 
 function setLaunchdDisabled(serviceTarget: string, domainTarget: string, label: string, disabled: boolean): CommandResult {
@@ -484,6 +489,14 @@ function restoreLaunchdActivation(
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function parseLaunchdRecoveryState(state: unknown): { loaded: boolean; disabled: boolean } | undefined {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined;
+  const value = state as Record<string, unknown>;
+  if (typeof value.loaded !== 'boolean' || typeof value.disabled !== 'boolean') return undefined;
+  if (Object.keys(value).some((key) => key !== 'loaded' && key !== 'disabled')) return undefined;
+  return { loaded: value.loaded, disabled: value.disabled };
 }
 
 function assertSystemdPostcondition(autostart: boolean): void {
@@ -579,7 +592,7 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
             loaded: runtime.loaded,
             disabled: launchdDisabled(domainTarget, label),
           };
-          return { ok: true, stdout: '', stderr: '' };
+          return { ok: true, stdout: '', stderr: '', recoveryState: priorActivation };
         } catch (error) {
           return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
         }
@@ -601,6 +614,20 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
           def.filePath,
           priorActivation.loaded,
           priorActivation.disabled,
+        );
+      },
+      recover: (state) => {
+        const activation = parseLaunchdRecoveryState(state);
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'invalid persisted launchd activation state' };
+        }
+        return restoreLaunchdActivation(
+          domainTarget,
+          serviceTarget,
+          label,
+          def.filePath,
+          activation.loaded,
+          activation.disabled,
         );
       },
     });
@@ -759,15 +786,48 @@ function querySystemd(filePath: string, installed: boolean): ServiceStatusResult
 
 function querySchtasks(filePath: string, installed: boolean): ServiceStatusResult {
   try {
-    const result = spawnSync('schtasks', ['/Query', '/TN', 'AshlrDaemon', '/FO', 'CSV'], {
+    const result = spawnSync('schtasks', ['/Query', '/TN', 'AshlrDaemon', '/FO', 'CSV', '/NH'], {
       encoding: 'utf8',
       timeout: 5_000,
     });
-    const running = result.status === 0 && result.stdout.includes('AshlrDaemon');
+    const rows = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const fields = rows.length === 1 ? parseCsvRow(rows[0]!) : undefined;
+    const taskName = fields?.[0]?.replace(/^\\/, '');
+    const runtimeState = fields?.[2];
+    const running = result.status === 0 && fields?.length === 3 && taskName === 'AshlrDaemon' && runtimeState === 'Running';
     return { installed, running, platformSpec: 'schtasks', serviceFilePath: filePath };
   } catch {
     return { installed, running: false, platformSpec: 'schtasks', serviceFilePath: filePath };
   }
+}
+
+function parseCsvRow(row: string): string[] | undefined {
+  const fields: string[] = [];
+  let current = '';
+  let quoted = false;
+  for (let index = 0; index < row.length; index++) {
+    const char = row[index]!;
+    if (quoted) {
+      if (char === '"' && row[index + 1] === '"') {
+        current += '"';
+        index++;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        current += char;
+      }
+    } else if (char === '"' && current.length === 0) {
+      quoted = true;
+    } else if (char === ',') {
+      fields.push(current);
+      current = '';
+    } else {
+      return undefined;
+    }
+  }
+  if (quoted) return undefined;
+  fields.push(current);
+  return fields;
 }
 
 // ---------------------------------------------------------------------------
