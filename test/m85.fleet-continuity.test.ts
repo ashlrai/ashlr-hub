@@ -678,6 +678,60 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(recordOutcome('portable-ordinary-write', 'diff', event.ts)).toBe(true);
   });
 
+  it('never reports recorded after final durability mutates the installed ledger', () => {
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:final-readback-refusal',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Prove final worked bytes',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'final durability mutation fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-66666666-6666-4666-8666-666666666666',
+      trajectoryId: 'run:attempt-66666666-6666-4666-8666-666666666666',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const concurrent = '{"events":[{"itemId":"final-boundary-concurrent","outcome":"diff","ts":"2026-07-21T23:24:36.500Z"}]}\n';
+    let durabilityCalls = 0;
+    _setWorkedLedgerHooksForTest({
+      strictDirectoryDurability: () => {
+        durabilityCalls += 1;
+        if (durabilityCalls === 3) {
+          fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 });
+        }
+        return true;
+      },
+    });
+
+    const result = replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    });
+    _setWorkedLedgerHooksForTest(undefined);
+    const ledger = loadWorkedLedger();
+    expect(durabilityCalls).toBe(3);
+    expect({
+      result,
+      replayPresent: ledger.events.some((row) => row.itemId === event.itemId),
+    }).toEqual({ result: 'persistence-failed', replayPresent: false });
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
+  });
+
   it('rejects future receipt replay and future suppressible cooldowns', () => {
     const futureTs = new Date(Date.now() + 2 * 60_000).toISOString();
     const event = sanitizeDispatchProductionEvent({
@@ -844,6 +898,34 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(() => loadWorkedLedger()).not.toThrow();
     // loadWorkedLedger should return a fresh empty ledger
     expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('returns a fresh ledger without reading an oversized worked file', () => {
+    const p = workedLedgerPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(p, Buffer.alloc(2 * 1024 * 1024 + 1, 0x20), { mode: 0o600 });
+
+    expect(() => loadWorkedLedger()).not.toThrow();
+    expect(loadWorkedLedger()).toEqual({ events: [] });
+    expect(fs.statSync(p).size).toBe(2 * 1024 * 1024 + 1);
+  });
+
+  it('returns a fresh ledger without following a worked file symlink', () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    const p = workedLedgerPath();
+    const victim = path.join(tmpHome, 'public-load-worked-victim.json');
+    const victimBytes = '{"events":[{"itemId":"must-not-load-through-link","outcome":"empty","ts":"2026-07-21T23:24:36.686Z"}]}\n';
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(victim, victimBytes, { mode: 0o600 });
+    fs.symlinkSync(victim, p, 'file');
+
+    expect(() => loadWorkedLedger()).not.toThrow();
+    expect(loadWorkedLedger()).toEqual({ events: [] });
+    expect(fs.readFileSync(victim, 'utf8')).toBe(victimBytes);
+    expect(fs.lstatSync(p).isSymbolicLink()).toBe(true);
   });
 
   it('recordOutcome never throws on a read-only directory (simulated by bad path)', () => {

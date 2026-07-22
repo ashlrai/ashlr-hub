@@ -21,14 +21,12 @@
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readSync,
   realpathSync,
   renameSync,
@@ -176,41 +174,14 @@ function freshLedger(): WorkedLedger {
  * Returns a fresh empty ledger when the file is missing or malformed.
  */
 export function loadWorkedLedger(): WorkedLedger {
-  const p = workedLedgerPath();
-  if (!existsSync(p)) return freshLedger();
   try {
-    const raw = readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return freshLedger();
-    }
-    const obj = parsed as Record<string, unknown>;
-    const events = Array.isArray(obj['events'])
-      ? (obj['events'] as unknown[]).filter(
-          (e): e is WorkedEvent =>
-            typeof e === 'object' &&
-            e !== null &&
-            !Array.isArray(e) &&
-            typeof (e as Record<string, unknown>)['itemId'] === 'string' &&
-            typeof (e as Record<string, unknown>)['ts'] === 'string' &&
-            isWorkedOutcome((e as Record<string, unknown>)['outcome']),
-        )
-        .map((e) => {
-          const raw = e as unknown as Record<string, unknown>;
-          return {
-            itemId: e.itemId,
-            outcome: e.outcome,
-            ts: e.ts,
-            ...(typeof raw['proposalId'] === 'string' ? { proposalId: raw['proposalId'] } : {}),
-            ...(typeof raw['claimCompletionId'] === 'string'
-              ? { claimCompletionId: raw['claimCompletionId'] }
-              : {}),
-          };
-        })
-      : [];
-    return { events };
+    const authority = pinWorkedDirectory();
+    if (authority === null) return freshLedger();
+    const loaded = readBoundWorkedFile(authority);
+    if (loaded === null || !loaded.found) return freshLedger();
+    return parseWorkedLedger(loaded.bytes.toString('utf8'), false) ?? freshLedger();
   } catch {
-    // Corrupt JSON or any other read error — return a fresh empty ledger.
+    // Missing, oversized, linked, unstable, corrupt, or unreadable — fail fresh.
     return freshLedger();
   }
 }
@@ -227,7 +198,27 @@ interface WorkedDirectoryAuthority {
 
 type WorkedDestinationSnapshot =
   | { state: 'missing' }
-  | { state: 'present'; dev: bigint; ino: bigint; bytes: Buffer };
+  | {
+      state: 'present';
+      dev: bigint;
+      ino: bigint;
+      size: bigint;
+      mtimeNs: bigint;
+      ctimeNs: bigint;
+      bytes: Buffer;
+    };
+
+type BoundWorkedFile =
+  | { found: false }
+  | {
+      found: true;
+      dev: bigint;
+      ino: bigint;
+      size: bigint;
+      mtimeNs: bigint;
+      ctimeNs: bigint;
+      bytes: Buffer;
+    };
 
 interface LoadedWorkedLedger {
   ledger: WorkedLedger;
@@ -386,7 +377,7 @@ function strictFsyncWorkedDirectory(authority: WorkedDirectoryAuthority): boolea
 
 function readBoundWorkedFile(
   authority: WorkedDirectoryAuthority,
-): { found: false } | { found: true; bytes: Buffer; dev: bigint; ino: bigint } | null {
+): BoundWorkedFile | null {
   if (!stableWorkedDirectory(authority)) return null;
   const path = join(authority.path, 'worked.json');
   let named: BigIntStats;
@@ -419,7 +410,15 @@ function readBoundWorkedFile(
       openedAfter.size !== opened.size || openedAfter.mtimeNs !== opened.mtimeNs ||
       openedAfter.ctimeNs !== opened.ctimeNs ||
       !stableWorkedDirectory(authority)) return null;
-    return { found: true, bytes, dev: opened.dev, ino: opened.ino };
+    return {
+      found: true,
+      bytes,
+      dev: openedAfter.dev,
+      ino: openedAfter.ino,
+      size: openedAfter.size,
+      mtimeNs: openedAfter.mtimeNs,
+      ctimeNs: openedAfter.ctimeNs,
+    };
   } catch {
     return null;
   } finally {
@@ -485,6 +484,9 @@ function loadBoundWorkedLedger(
       state: 'present',
       dev: loaded.dev,
       ino: loaded.ino,
+      size: loaded.size,
+      mtimeNs: loaded.mtimeNs,
+      ctimeNs: loaded.ctimeNs,
       bytes: loaded.bytes,
     },
   };
@@ -498,7 +500,20 @@ function destinationMatchesSnapshot(
   if (current === null) return false;
   if (expected.state === 'missing') return !current.found;
   return current.found && current.dev === expected.dev && current.ino === expected.ino &&
+    current.size === expected.size && current.mtimeNs === expected.mtimeNs &&
+    current.ctimeNs === expected.ctimeNs &&
     current.bytes.equals(expected.bytes);
+}
+
+function installedWorkedFileMatches(
+  current: BoundWorkedFile | null,
+  installed: Extract<BoundWorkedFile, { found: true }>,
+  expectedBytes: Buffer,
+): boolean {
+  return current !== null && current.found && current.dev === installed.dev &&
+    current.ino === installed.ino && current.size === installed.size &&
+    current.size === BigInt(expectedBytes.length) && current.mtimeNs === installed.mtimeNs &&
+    current.ctimeNs === installed.ctimeNs && current.bytes.equals(expectedBytes);
 }
 
 function exactWorkedTemporary(
@@ -544,7 +559,6 @@ function saveWorkedLedger(
   let temporaryPath: string | undefined;
   let temporaryIdentity: BigIntStats | undefined;
   let writeFd: number | undefined;
-  let readFd: number | undefined;
   let published = false;
   try {
     if (!stableWorkedDirectory(authority) ||
@@ -580,41 +594,20 @@ function saveWorkedLedger(
     const targetPath = join(authority.path, 'worked.json');
     renameSync(temporaryPath, targetPath);
     published = true;
-    const installed = lstatSync(targetPath, { bigint: true });
-    if (!safeWorkedFile(installed) || !sameIdentity(temporaryIdentity, installed) ||
-      !stableWorkedDirectory(authority)) return false;
-    readFd = openSync(targetPath, fsConstants.O_RDONLY | noFollow);
-    const openedInstalled = fstatSync(readFd, { bigint: true });
-    if (!safeWorkedFile(openedInstalled) || !sameIdentity(installed, openedInstalled) ||
-      openedInstalled.size !== BigInt(bytes.length)) return false;
-    const readback = Buffer.alloc(bytes.length);
-    let readOffset = 0;
-    while (readOffset < readback.length) {
-      const count = readSync(
-        readFd, readback, readOffset, readback.length - readOffset, readOffset,
-      );
-      if (count <= 0) return false;
-      readOffset += count;
-    }
-    const installedAfterReadback = lstatSync(targetPath, { bigint: true });
-    if (!readback.equals(bytes) || !safeWorkedFile(installedAfterReadback) ||
-      !sameIdentity(installed, installedAfterReadback) ||
-      !stableWorkedDirectory(authority)) return false;
+    const installed = readBoundWorkedFile(authority);
+    if (installed === null || !installed.found ||
+      installed.dev !== temporaryIdentity.dev || installed.ino !== temporaryIdentity.ino ||
+      installed.size !== BigInt(bytes.length) || !installed.bytes.equals(bytes)) return false;
     if (requireStrictDurability) {
       if (!strictFsyncWorkedDirectory(authority)) return false;
     } else {
       fsyncDirectory(authority.path, { expectedIdentity: authority });
       if (!stableWorkedDirectory(authority)) return false;
     }
-    const installedAfterDurability = lstatSync(targetPath, { bigint: true });
-    if (!safeWorkedFile(installedAfterDurability) ||
-      !sameIdentity(installed, installedAfterDurability) ||
-      !stableWorkedDirectory(authority)) return false;
-    return true;
+    return installedWorkedFileMatches(readBoundWorkedFile(authority), installed, bytes);
   } catch {
     return false;
   } finally {
-    if (readFd !== undefined) { try { closeSync(readFd); } catch { /* best effort */ } }
     if (writeFd !== undefined) { try { closeSync(writeFd); } catch { /* best effort */ } }
     if (!published) cleanupExactWorkedTemporary(authority, temporaryPath, temporaryIdentity);
   }
