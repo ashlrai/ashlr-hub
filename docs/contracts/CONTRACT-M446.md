@@ -42,8 +42,8 @@ not a same-principal security boundary against deliberately obfuscated code.
 `ExternalSkillGitCaptureResult` version 1 returns only bounded metadata:
 
 - `state: captured|replayed|withheld` and a fixed `reason` enum;
-- `captureDigest`, `portablePackDigest`, and opaque `sourceIdentity` when
-  capture succeeds;
+- `captureDigest`, `captureReceiptDigest`, `portablePackDigest`, and opaque
+  `sourceIdentity` when capture succeeds;
 - file, symlink, and byte counts;
 - `custody.localIntegrity: verified|unavailable` and
   `custody.authenticated: false`; and
@@ -178,6 +178,12 @@ tree OID, selected pack tree OID, a hash of the selected subdirectory, ordered
 entry paths and modes, Git OIDs, independent SHA-256 content digests, and the
 captured bytes. `sourceIdentity` binds the Git provenance tuple, while
 `captureDigest` domain-separates and binds the canonical bundle bytes.
+After constructing the canonical receipt bytes, M446 derives
+`captureReceiptDigest` as
+`SHA-256("ashlr:external-skill-capture-receipt:v1\\0" || receiptBytes)`.
+The digest is not stored inside the receipt because that would be
+self-referential. It is returned only after the exact bytes have been
+published and durably reread.
 
 ## Store And Publication
 
@@ -197,6 +203,12 @@ Publication is no-clobber and commit-last:
    fsync the containing directory;
 3. publish `receipts/<captureDigest>.json` by the same no-clobber procedure;
 4. reopen and byte-compare both installed files before returning success.
+
+Captured and replayed results derive the same `captureReceiptDigest` from the
+same canonical receipt bytes. Reordered keys, alternate whitespace, appended
+bytes, or any other semantically equivalent but byte-distinct encoding is not
+canonical and causes replay to fail as `store-conflict`; M446 never reparses or
+normalizes an installed receipt into a new identity.
 
 The computation deadline is checked before receipt publication begins. Once
 the commit-marker critical section starts, synchronous link, fsync, reread,
@@ -261,7 +273,7 @@ deterministic outcome evidence, and an independently trial-ready pack.
 
 - exact bare-repository capture into the private CAS with false authority;
 - metadata-only public output and omission of private paths/text;
-- idempotent replay;
+- idempotent replay with stable canonical receipt identity;
 - full commit-OID enforcement, SHA-1/SHA-256 object formats, exact subtree
   selection, duplicate-ancestor rejection, and rejection of refs or non-commit
   object identities;
@@ -270,7 +282,8 @@ deterministic outcome evidence, and an independently trial-ready pack.
 - inert binding of direct and intermediate internal symlinks and rejection of
   broken, escaping, or `.git` targets;
 - preservation of executable mode as inert bundle metadata; and
-- detection of a tampered bundle without repair or overwrite;
+- detection of tampered bundle or non-canonical receipt bytes without repair
+  or overwrite;
 - rejection of oversized individual and aggregate object stores, oversized
   repository control files, and externally including local Git config before
   invoking Git object parsing;

@@ -34,7 +34,7 @@ const CAPTURE_BLOCKERS = [
   'outcome-attestation-required',
 ] as const;
 
-const INPUT_KEYS = ['capture', 'captureReceiptReferenceDigest', 'receipt', 'trustPolicy'] as const;
+const INPUT_KEYS = ['capture', 'receipt', 'trustPolicy'] as const;
 const POLICY_KEYS = ['keys', 'policyVersion', 'protocol', 'schemaVersion'] as const;
 const TRUST_KEY_KEYS = [
   'expectedCustodyAuthorityDigest',
@@ -49,7 +49,7 @@ const TRUST_KEY_KEYS = [
 const RECEIPT_KEYS = [
   'bundleDigest',
   'captureDigest',
-  'captureReceiptReferenceDigest',
+  'captureReceiptDigest',
   'claimedCustodyAuthorityDigest',
   'custodyClass',
   'custodyUntil',
@@ -98,7 +98,7 @@ export interface ExternalSkillCustodyAttestationUnsigned {
   protocol: typeof CAPTURE_PROTOCOL;
   captureDigest: string;
   bundleDigest: string;
-  captureReceiptReferenceDigest: string;
+  captureReceiptDigest: string;
   portablePackDigest: string;
   sourceIdentity: string;
   fileCount: number;
@@ -126,7 +126,6 @@ export interface ExternalSkillCustodyAttestation extends ExternalSkillCustodyAtt
 
 export interface ExternalSkillCustodyAttestationInput {
   capture: ExternalSkillGitCaptureResult;
-  captureReceiptReferenceDigest: string;
   receipt: ExternalSkillCustodyAttestation;
   trustPolicy: ExternalSkillCustodyTrustPolicy;
 }
@@ -138,7 +137,7 @@ export type ExternalSkillCustodyAttestationReason =
   | 'trust-policy-invalid'
   | 'trust-policy-mismatch'
   | 'capture-mismatch'
-  | 'capture-receipt-reference-mismatch'
+  | 'capture-receipt-mismatch'
   | 'custody-authority-claim-mismatch'
   | 'retention-policy-claim-mismatch'
   | 'trust-key-unknown'
@@ -162,6 +161,7 @@ export type ExternalSkillCustodyAttestationResult = ExternalSkillCustodyAttestat
     state: 'statement-signature-verified';
     reason: 'statement-signature-verified';
     captureDigest: string;
+    captureReceiptDigest: string;
     receiptDigest: string;
     trustPolicyDigest: string;
     keyId: string;
@@ -187,6 +187,7 @@ export type ExternalSkillCustodyAttestationResult = ExternalSkillCustodyAttestat
     state: 'withheld';
     reason: Exclude<ExternalSkillCustodyAttestationReason, 'statement-signature-verified'>;
     captureDigest: null;
+    captureReceiptDigest: null;
     receiptDigest: null;
     trustPolicyDigest: null;
     keyId: null;
@@ -288,7 +289,8 @@ function canonicalBase64Url(value: unknown, minimumBytes: number, maximumBytes: 
 
 function captureComplete(value: unknown): value is Extract<ExternalSkillGitCaptureResult, { state: 'captured' | 'replayed' }> {
   if (!exactPlainRecord(value, [
-    'authority', 'blockers', 'captureDigest', 'custody', 'executionEligible', 'fileCount', 'mode',
+    'authority', 'blockers', 'captureDigest', 'captureReceiptDigest', 'custody', 'executionEligible',
+    'fileCount', 'mode',
     'policyEligible', 'portablePackDigest', 'promotionEligible', 'reason', 'schemaVersion',
     'sourceIdentity', 'state', 'symlinkCount', 'totalBytes',
   ])) return false;
@@ -300,6 +302,8 @@ function captureComplete(value: unknown): value is Extract<ExternalSkillGitCaptu
     value['authority'] === 'observation-only' && value['executionEligible'] === false &&
     value['policyEligible'] === false && value['promotionEligible'] === false &&
     typeof value['captureDigest'] === 'string' && DIGEST.test(value['captureDigest']) &&
+    typeof value['captureReceiptDigest'] === 'string' &&
+    DIGEST.test(value['captureReceiptDigest']) &&
     typeof value['portablePackDigest'] === 'string' && DIGEST.test(value['portablePackDigest']) &&
     typeof value['sourceIdentity'] === 'string' && DIGEST.test(value['sourceIdentity']) &&
     safeCount(value['fileCount'], 2_048) && safeCount(value['symlinkCount'], 2_048) &&
@@ -370,8 +374,8 @@ function unsignedReceiptShape(value: unknown): value is ExternalSkillCustodyAtte
   return value['schemaVersion'] === 1 && value['protocol'] === CAPTURE_PROTOCOL &&
     typeof value['captureDigest'] === 'string' && DIGEST.test(value['captureDigest']) &&
     typeof value['bundleDigest'] === 'string' && DIGEST.test(value['bundleDigest']) &&
-    typeof value['captureReceiptReferenceDigest'] === 'string' &&
-    DIGEST.test(value['captureReceiptReferenceDigest']) &&
+    typeof value['captureReceiptDigest'] === 'string' &&
+    DIGEST.test(value['captureReceiptDigest']) &&
     typeof value['portablePackDigest'] === 'string' && DIGEST.test(value['portablePackDigest']) &&
     typeof value['sourceIdentity'] === 'string' && DIGEST.test(value['sourceIdentity']) &&
     safeCount(value['fileCount'], 2_048) && safeCount(value['symlinkCount'], 2_048) &&
@@ -410,7 +414,7 @@ export function canonicalExternalSkillCustodyAttestationPayload(
       snapshot.protocol,
       snapshot.captureDigest,
       snapshot.bundleDigest,
-      snapshot.captureReceiptReferenceDigest,
+      snapshot.captureReceiptDigest,
       snapshot.portablePackDigest,
       snapshot.sourceIdentity,
       snapshot.fileCount,
@@ -460,6 +464,7 @@ function withheld(
     state: 'withheld',
     reason,
     captureDigest: null,
+    captureReceiptDigest: null,
     receiptDigest: null,
     trustPolicyDigest: null,
     keyId: null,
@@ -514,13 +519,9 @@ export function verifyExternalSkillCustodyAttestation(
   } catch { return withheld('invalid-input'); }
   if (!exactPlainRecord(snapshot, INPUT_KEYS)) return withheld('invalid-input');
   const capture = snapshot['capture'];
-  const captureReceiptReferenceDigest = snapshot['captureReceiptReferenceDigest'];
   const receipt = snapshot['receipt'];
   const policy = snapshot['trustPolicy'];
   if (!captureComplete(capture)) return withheld('capture-incomplete');
-  if (typeof captureReceiptReferenceDigest !== 'string' || !DIGEST.test(captureReceiptReferenceDigest)) {
-    return withheld('invalid-input');
-  }
   if (!trustPolicyShape(policy)) return withheld('trust-policy-invalid');
   if (!receiptShape(receipt)) return withheld('invalid-input');
 
@@ -541,8 +542,8 @@ export function verifyExternalSkillCustodyAttestation(
   if (!key) return withheld('trust-key-unknown');
   const publicKey = trustedPublicKey(key);
   if (!publicKey) return withheld('trust-key-invalid');
-  if (receipt.captureReceiptReferenceDigest !== captureReceiptReferenceDigest) {
-    return withheld('capture-receipt-reference-mismatch');
+  if (receipt.captureReceiptDigest !== capture.captureReceiptDigest) {
+    return withheld('capture-receipt-mismatch');
   }
   if (receipt.claimedCustodyAuthorityDigest !== key.expectedCustodyAuthorityDigest) {
     return withheld('custody-authority-claim-mismatch');
@@ -580,6 +581,7 @@ export function verifyExternalSkillCustodyAttestation(
     state: 'statement-signature-verified',
     reason: 'statement-signature-verified',
     captureDigest: capture.captureDigest,
+    captureReceiptDigest: capture.captureReceiptDigest,
     receiptDigest,
     trustPolicyDigest: policyDigest,
     keyId: key.keyId,
