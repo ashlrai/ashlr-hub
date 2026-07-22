@@ -12,7 +12,7 @@ routing without executing, importing, persisting, or trusting pack content.
 ashlr skills audit <pack-path> [--json]
 ```
 
-The JSON result is `ExternalSkillAuditReport` version 1. Exit code `0` means
+The JSON result is `ExternalSkillAuditReport` version 2. Exit code `0` means
 only that the exact audited snapshot is ready for a later isolated trial. Exit
 code `1` means the snapshot is not trial-ready. Exit code `2` means bad usage,
 including help flags; therefore exit code `0` has exactly one meaning. With
@@ -25,6 +25,8 @@ Every result has:
 - fixed promotion blockers requiring isolation, behavioral evidence, and
   verified outcomes, including immutable source reacquisition
 - a SHA-256 digest over the complete non-Git pack tree
+- a portable SHA-256 digest over the same names, types, and bytes with
+  checkout-only read/write permission bits normalized
 - bounded structural, routing, collision, fixture, issue-code, and per-skill
   hash metadata
 
@@ -54,6 +56,14 @@ runs the pass in a killable process with a 30-second deadline, detects observed
 mutation, and blocks on timeout or worker failure. A later trial MUST reacquire
 the digest into separate immutable content-addressed storage and MUST NOT reuse
 the audited live path.
+
+`portablePackDigest` is a separate transport identity for that reacquisition.
+It normalizes regular files to `0644` and directories to `0755`, so clone
+umasks, Windows executable-bit loss, and later read-only sealing cannot change
+content identity. Git executable modes remain separately bound by M446's
+capture envelope. `packDigest` remains the forensic live-snapshot digest
+and continues to bind the exact observed permission bits. Neither digest grants
+trial, execution, routing, learning, proposal, verification, or merge authority.
 
 - Ignore `.git` metadata only when the root entry is a real directory; reject a
   symlink or special entry there. Hash every other supported entry by relative
