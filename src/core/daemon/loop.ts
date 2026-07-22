@@ -6488,10 +6488,12 @@ export async function tick(
       : []),
   );
   const sharedQueueMode = liveCfg.fleet?.sharedQueue?.mode === 'filesystem';
+  const proposalRepairEnabled =
+    (liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false;
   const ownershipLostBeforeDispatchWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeDispatchWrites) return ownershipLostBeforeDispatchWrites;
   for (const event of productionEvents) {
-    const repairable = repairHandoffFromDispatchEvent(event) !== null;
+    const repairable = proposalRepairEnabled && repairHandoffFromDispatchEvent(event) !== null;
     let canonicalProductionRecorded = false;
     if (sharedQueueMode) {
       const parentWrite = recordDispatchProduction(event);

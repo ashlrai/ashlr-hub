@@ -4186,20 +4186,23 @@ export function readDispatchProductionParents(
       ? loaded.text.slice(0, -1).split('\n')
       : loaded.text.split('\n').slice(0, -1);
     const eventsByIdentity = new Map<string, Map<string, DispatchProductionEvent>>();
-    let invalid = !complete || loaded.truncated || lines.length > HARD_READ_MAX_ROWS;
+    const invalidIdentities = new Set<string>();
+    let partitionInvalid = !complete || loaded.truncated || lines.length > HARD_READ_MAX_ROWS;
     for (const line of lines.slice(0, HARD_READ_MAX_ROWS)) {
       if (!line.trim()) {
-        invalid = true;
+        partitionInvalid = true;
         continue;
       }
       if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
-        invalid = true;
+        partitionInvalid = true;
         continue;
       }
       try {
         const parsed: unknown = JSON.parse(line);
         if (!canonicalStoredDispatchProductionEvent(parsed, line, date)) {
-          invalid = true;
+          const identities = storedDispatchProductionIdentities(parsed, line, date);
+          if (identities === null) partitionInvalid = true;
+          else for (const identity of identities) invalidIdentities.add(identity);
           continue;
         }
         const key = JSON.stringify([
@@ -4210,11 +4213,11 @@ export function readDispatchProductionParents(
         semantic.set(JSON.stringify(parsed), parsed);
         eventsByIdentity.set(key, semantic);
       } catch {
-        invalid = true;
+        partitionInvalid = true;
       }
     }
     for (const index of indices) {
-      if (invalid) {
+      if (partitionInvalid) {
         statuses[index] = 'degraded';
         continue;
       }
@@ -4228,9 +4231,14 @@ export function readDispatchProductionParents(
         statuses[index] = 'degraded';
         continue;
       }
-      const semanticEvents = [...(eventsByIdentity.get(JSON.stringify([
+      const targetIdentity = JSON.stringify([
         target.ts, target.itemId, targetRepo, target.outcome, target.attemptId,
-      ]))?.values() ?? [])];
+      ]);
+      if (invalidIdentities.has(targetIdentity)) {
+        statuses[index] = 'degraded';
+        continue;
+      }
+      const semanticEvents = [...(eventsByIdentity.get(targetIdentity)?.values() ?? [])];
       if (semanticEvents.length > 1) {
         statuses[index] = 'degraded';
         continue;
@@ -4340,14 +4348,15 @@ function canonicalStoredDispatchProductionEvent(
 ): value is DispatchProductionEvent {
   if (!isPlainRecord(value) || JSON.stringify(value) !== line || !isDispatchProductionEvent(value)) return false;
   try {
-    if (JSON.stringify(sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true })) !== line) {
-      return false;
-    }
+    const canonical = sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true });
+    if (JSON.stringify(canonical) !== line &&
+      !legacyV1LearningLabelMatchesCanonicalEvent(value, canonical, line)) return false;
   } catch {
     return false;
   }
   const ts = canonicalUtcTimestamp(value['ts']);
   if (ts === null || ts.slice(0, 10) !== partitionDate) return false;
+  if (Date.parse(ts) > Date.now() + MAX_ATTEMPT_FUTURE_SKEW_MS) return false;
   if (!WORK_SOURCES.has(value['source'] as WorkItem['source'])) return false;
   if (!DISPATCH_PRODUCTION_OUTCOMES.has(value['outcome'] as DaemonDispatchProductionOutcome)) return false;
   if (!DISPATCH_PRODUCTION_BASES.has(value['basis'] as DispatchProductionBasis)) return false;
@@ -4355,6 +4364,50 @@ function canonicalStoredDispatchProductionEvent(
   if (value['tier'] !== null && !ENGINE_TIERS.has(value['tier'] as EngineTier)) return false;
   if (hasOwn(value, 'model') && value['model'] !== null && !boundedStoredText(value['model'], 160)) return false;
   return true;
+}
+
+function legacyV1LearningLabelMatchesCanonicalEvent(
+  stored: Record<string, unknown>,
+  canonical: DispatchProductionEvent,
+  line: string,
+): boolean {
+  const label = stored['learningLabel'];
+  if (!isPlainRecord(label) ||
+    !hasOnlyKeys(label, new Set([
+      'schemaVersion', 'classifierVersion', 'authoritative', 'learningKind',
+      'policySuppressed', 'diagnosticNoProposal', 'diagnosticAttempt', 'attemptShape',
+    ])) ||
+    label['classifierVersion'] !== 'attempt-shape-v1' ||
+    !isPlainRecord(label['attemptShape']) ||
+    !hasOnlyKeys(label['attemptShape'], new Set([
+      'backendNoDiff', 'captureOrGateBlocked', 'repairAttempts', 'policyDisabled',
+    ]))) return false;
+  const normalized = sanitizeProductionAttemptLearningLabel(label);
+  if (normalized === undefined || canonical.learningLabel === undefined ||
+    JSON.stringify(normalized) !== JSON.stringify(canonical.learningLabel)) return false;
+  return JSON.stringify({ ...canonical, learningLabel: label }) === line;
+}
+
+function storedDispatchProductionIdentities(
+  value: unknown,
+  line: string,
+  partitionDate: string,
+): string[] | null {
+  if (!isPlainRecord(value) || JSON.stringify(value) !== line) return null;
+  const ts = canonicalUtcTimestamp(value['ts']);
+  const attemptId = value['trajectoryId'] ?? value['runId'];
+  const rawRepo = value['repo'];
+  if (ts === null || ts.slice(0, 10) !== partitionDate ||
+    !boundedStoredText(value['itemId'], 240) ||
+    !DISPATCH_PRODUCTION_OUTCOMES.has(value['outcome'] as DaemonDispatchProductionOutcome) ||
+    !boundedStoredText(attemptId, 240) || !boundedStoredText(rawRepo, 500) ||
+    !isAbsolute(rawRepo)) return null;
+  const repos = [rawRepo];
+  const canonicalRepo = canonicalDispatchRepoIdentity(rawRepo);
+  if (canonicalRepo !== null && canonicalRepo !== rawRepo) repos.push(canonicalRepo);
+  return repos.map((repo) => JSON.stringify([
+    ts, value['itemId'], repo, value['outcome'], attemptId,
+  ]));
 }
 
 function parseDispatchProductionReceiptAuthority(

@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
 
@@ -85,13 +86,19 @@ import { tick } from '../src/core/daemon/loop.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 import {
+  _setWorkedLedgerHooksForTest,
   recordOutcome,
+  replayWorkedOutcomeAfterDispatchReceipt,
   recentlyDeclined,
   loadWorkedLedger,
   latestWorkedEventForKeys,
   workedEventIsCooling,
   workedLedgerPath,
 } from '../src/core/fleet/worked-ledger.js';
+import {
+  recordDispatchProduction,
+  sanitizeDispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,6 +168,7 @@ function swarmStub(repo: string) {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  _setWorkedLedgerHooksForTest(undefined);
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m85-home-'));
   tmpRepo  = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m85-repo-'));
   tmpRepo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m85-repo2-'));
@@ -204,6 +212,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setWorkedLedgerHooksForTest(undefined);
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   try { unenroll(tmpRepo2); } catch { /* ignore */ }
   try { unenroll(tmpRepo3); } catch { /* ignore */ }
@@ -228,10 +237,600 @@ afterEach(() => {
 // ===========================================================================
 
 describe('M85 worked-ledger — pure unit', () => {
+  it('securely creates missing home and fleet storage for ordinary first use', () => {
+    const firstUseHome = path.join(tmpHome, 'missing-first-use-home');
+    process.env.HOME = firstUseHome;
+    expect(fs.existsSync(firstUseHome)).toBe(false);
+
+    expect(recordOutcome('first-use-item', 'diff', '2026-07-21T23:24:36.686Z')).toBe(true);
+    expect(loadWorkedLedger().events).toEqual([
+      { itemId: 'first-use-item', outcome: 'diff', ts: '2026-07-21T23:24:36.686Z' },
+    ]);
+    expect(fs.statSync(path.dirname(workedLedgerPath())).isDirectory()).toBe(true);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.dirname(workedLedgerPath())).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('does not follow or chmod a symlinked first-use fleet target', () => {
+    const ashlr = path.join(tmpHome, '.ashlr');
+    const victim = path.join(tmpHome, 'first-use-fleet-victim');
+    fs.mkdirSync(ashlr, { mode: 0o700 });
+    fs.mkdirSync(victim, { mode: 0o755 });
+    fs.writeFileSync(path.join(victim, 'marker'), 'untouched', 'utf8');
+    fs.symlinkSync(
+      victim,
+      path.join(ashlr, 'fleet'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const before = fs.statSync(victim);
+
+    expect(recordOutcome('must-not-escape-first-use', 'diff')).toBe(false);
+    expect(fs.readFileSync(path.join(victim, 'marker'), 'utf8')).toBe('untouched');
+    expect(fs.readdirSync(victim)).toEqual(['marker']);
+    expect(fs.statSync(victim).mode).toBe(before.mode);
+    expect(fs.lstatSync(path.join(ashlr, 'fleet')).isSymbolicLink()).toBe(true);
+  });
+
   it('recordOutcome persists an event and loadWorkedLedger returns it', () => {
     expect(recordOutcome('item-abc', 'diff')).toBe(true);
     const l = loadWorkedLedger();
     expect(l.events.some(e => e.itemId === 'item-abc' && e.outcome === 'diff')).toBe(true);
+  });
+
+  it('idempotently replays a worked outcome only after an exact dispatch receipt', () => {
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:5f35267a0405',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Repair binshield verification',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'operator recovery fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      trajectoryId: 'run:attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      spentUsd: 0.346986,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const dispatchReceipt = {
+      ts: event.ts,
+      itemId: event.itemId,
+      repo: event.repo,
+      outcome: event.outcome,
+      attemptId: event.trajectoryId!,
+      source: event.source,
+      backend: event.backend,
+      tier: event.tier,
+    };
+    const replay = {
+      itemId: event.itemId,
+      outcome: 'empty' as const,
+      dispatchReceipt,
+    };
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt(replay)).toBe('recorded');
+    expect(replayWorkedOutcomeAfterDispatchReceipt(replay)).toBe('already-recorded');
+    expect(loadWorkedLedger().events.filter((row) => row.itemId === event.itemId)).toEqual([
+      { itemId: event.itemId, outcome: 'empty', ts: event.ts },
+    ]);
+  });
+
+  it('keeps the copied live replay restart-idempotent', () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:5f35267a0405',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Repair binshield verification',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'copied live restart fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      trajectoryId: 'run:attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      spentUsd: 0.346986,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const input = {
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    };
+    const workedModule = path.join(process.cwd(), 'src/core/fleet/worked-ledger.ts');
+    const script = `
+      import { replayWorkedOutcomeAfterDispatchReceipt } from ${JSON.stringify(workedModule)};
+      process.stdout.write(replayWorkedOutcomeAfterDispatchReceipt(${JSON.stringify(input)}));
+    `;
+    const env = { ...process.env, HOME: tmpHome };
+    const run = () => spawnSync(
+      path.join(process.cwd(), 'node_modules/.bin/tsx'), ['--eval', script],
+      { cwd: process.cwd(), env, encoding: 'utf8' },
+    );
+
+    const first = run();
+    const restarted = run();
+    expect({ status: first.status, stdout: first.stdout, stderr: first.stderr })
+      .toEqual({ status: 0, stdout: 'recorded', stderr: '' });
+    expect({ status: restarted.status, stdout: restarted.stdout, stderr: restarted.stderr })
+      .toEqual({ status: 0, stdout: 'already-recorded', stderr: '' });
+    expect(loadWorkedLedger().events.filter((row) => row.itemId === event.itemId)).toHaveLength(1);
+  });
+
+  it('rejects a caller-supplied future replay timestamp', () => {
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:future-replay-refusal',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Reject future replay time',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'operator recovery fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-22222222-2222-4222-8222-222222222222',
+      trajectoryId: 'run:attempt-22222222-2222-4222-8222-222222222222',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const hostile = {
+      itemId: event.itemId,
+      outcome: 'empty' as const,
+      ts: '2099-01-01T00:00:00.000Z',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    };
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt(hostile)).toBe('invalid');
+    expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('rejects malformed replay records and nested receipt near-matches without throwing', () => {
+    const receipt = {
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:runtime-validation',
+      repo: tmpRepo,
+      outcome: 'empty-diff',
+      attemptId: 'run:attempt-runtime-validation',
+    };
+    const throwing = {
+      itemId: receipt.itemId,
+      outcome: 'empty',
+      get dispatchReceipt(): never { throw new Error('must not escape'); },
+    };
+    const malformed: unknown[] = [
+      null,
+      [],
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: null },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: [] },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: { ...receipt, extra: true } },
+      {
+        itemId: receipt.itemId,
+        outcome: 'empty',
+        dispatchReceipt: { ...receipt, ts: '2026-07-21T23:24:36.686+00:00' },
+      },
+      {
+        itemId: receipt.itemId,
+        outcome: 'empty',
+        dispatchReceipt: { ...receipt, backend: 42 },
+      },
+      { itemId: receipt.itemId, outcome: 'empty', dispatchReceipt: receipt, extra: true },
+      throwing,
+    ];
+
+    for (const value of malformed) {
+      let result: unknown;
+      expect(() => {
+        result = replayWorkedOutcomeAfterDispatchReceipt(value as never);
+      }).not.toThrow();
+      expect(result).toBe('invalid');
+    }
+    expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('serializes replay with a concurrent ordinary worked writer', async () => {
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:concurrent-replay',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Serialize worked recovery',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'operator recovery fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-33333333-3333-4333-8333-333333333333',
+      trajectoryId: 'run:attempt-33333333-3333-4333-8333-333333333333',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const started = path.join(tmpHome, 'ordinary-writer-started');
+    let child: ChildProcess | undefined;
+    _setWorkedLedgerHooksForTest({
+      afterReplayLoad: () => {
+        const workedModule = path.join(process.cwd(), 'src/core/fleet/worked-ledger.ts');
+        child = spawn(path.join(process.cwd(), 'node_modules/.bin/tsx'), ['--eval', `
+          import { writeFileSync } from 'node:fs';
+          import { recordOutcome } from ${JSON.stringify(workedModule)};
+          writeFileSync(${JSON.stringify(started)}, 'started');
+          if (!recordOutcome('ordinary:concurrent-writer', 'diff', '2026-07-21T23:24:37.000Z')) process.exit(1);
+        `], { cwd: process.cwd(), env: { ...process.env, HOME: tmpHome } });
+        const deadline = Date.now() + 2_000;
+        const sleep = new Int32Array(new SharedArrayBuffer(4));
+        while (!fs.existsSync(started) && Date.now() < deadline) Atomics.wait(sleep, 0, 0, 10);
+        expect(fs.existsSync(started)).toBe(true);
+        Atomics.wait(sleep, 0, 0, 100);
+      },
+    });
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    })).toBe('recorded');
+    _setWorkedLedgerHooksForTest(undefined);
+    await new Promise<void>((resolveChild, rejectChild) => {
+      if (!child) return rejectChild(new Error('ordinary writer did not start'));
+      if (child.exitCode !== null) {
+        return child.exitCode === 0
+          ? resolveChild()
+          : rejectChild(new Error(`ordinary writer exited ${child.exitCode}`));
+      }
+      child.once('error', rejectChild);
+      child.once('exit', (code) => code === 0
+        ? resolveChild()
+        : rejectChild(new Error(`ordinary writer exited ${code}`)));
+    });
+    expect(loadWorkedLedger().events).toEqual(expect.arrayContaining([
+      { itemId: event.itemId, outcome: 'empty', ts: event.ts },
+      { itemId: 'ordinary:concurrent-writer', outcome: 'diff', ts: '2026-07-21T23:24:37.000Z' },
+    ]));
+  });
+
+  it('refuses a replaced fleet directory without overwriting replacement state', () => {
+    expect(recordOutcome('directory-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const originalFleet = path.dirname(workedLedgerPath());
+    const displacedFleet = `${originalFleet}-displaced`;
+    const replacement = '{"events":[{"itemId":"replacement","outcome":"diff","ts":"2026-07-21T23:24:35.500Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => {
+        fs.renameSync(originalFleet, displacedFleet);
+        fs.mkdirSync(originalFleet, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(workedLedgerPath(), replacement, { mode: 0o600 });
+      },
+    });
+
+    expect(recordOutcome('must-not-overwrite', 'empty', '2026-07-21T23:24:36.686Z')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(replacement);
+    expect(fs.readFileSync(path.join(displacedFleet, 'worked.json'), 'utf8'))
+      .toContain('directory-seed');
+  });
+
+  it('refuses a swapped random temp pathname before destructive publication', () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    expect(recordOutcome('temp-swap-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const original = fs.readFileSync(workedLedgerPath(), 'utf8');
+    const victim = path.join(tmpHome, 'random-temp-swap-victim');
+    fs.writeFileSync(victim, 'victim-must-not-change', 'utf8');
+    let swappedTemporary = '';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: (temporaryPath) => {
+        swappedTemporary = temporaryPath;
+        fs.unlinkSync(temporaryPath);
+        fs.symlinkSync(victim, temporaryPath, 'file');
+      },
+    });
+
+    expect(recordOutcome('must-not-publish-swapped-temp', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(original);
+    expect(fs.lstatSync(workedLedgerPath()).isFile()).toBe(true);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('victim-must-not-change');
+    expect(fs.lstatSync(swappedTemporary).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses to overwrite a valid worked destination replaced after load', () => {
+    expect(recordOutcome('destination-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const replacement = '{"events":[{"itemId":"concurrent-replacement","outcome":"diff","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => {
+        const candidate = path.join(path.dirname(workedLedgerPath()), '.concurrent-worked.json');
+        fs.writeFileSync(candidate, replacement, { mode: 0o600 });
+        fs.renameSync(candidate, workedLedgerPath());
+      },
+    });
+
+    expect(recordOutcome('must-not-lose-concurrent-event', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(replacement);
+    expect(loadWorkedLedger().events).toEqual([
+      {
+        itemId: 'concurrent-replacement',
+        outcome: 'diff',
+        ts: '2026-07-21T23:24:36.000Z',
+      },
+    ]);
+  });
+
+  it('refuses to overwrite same-inode worked content changed after load', () => {
+    expect(recordOutcome('content-snapshot-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const before = fs.lstatSync(workedLedgerPath());
+    const concurrent = '{"events":[{"itemId":"same-inode-concurrent","outcome":"diff","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 }),
+    });
+
+    expect(recordOutcome('must-not-overwrite-changed-content', 'empty')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    const after = fs.lstatSync(workedLedgerPath());
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
+  });
+
+  it('refuses to overwrite a worked destination created after a missing snapshot', () => {
+    expect(recordOutcome('missing-snapshot-seed', 'diff')).toBe(true);
+    fs.unlinkSync(workedLedgerPath());
+    const concurrent = '{"events":[{"itemId":"created-concurrently","outcome":"empty","ts":"2026-07-21T23:24:36.000Z"}]}\n';
+    _setWorkedLedgerHooksForTest({
+      beforePublication: () => fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 }),
+    });
+
+    expect(recordOutcome('must-not-overwrite-created-destination', 'diff')).toBe(false);
+    _setWorkedLedgerHooksForTest(undefined);
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
+  });
+
+  it('never follows the legacy fixed worked temp symlink', () => {
+    expect(recordOutcome('symlink-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const victim = path.join(tmpHome, 'worked-temp-victim');
+    const legacyTemporary = `${workedLedgerPath()}.tmp`;
+    fs.writeFileSync(victim, 'victim-must-not-change', 'utf8');
+    fs.symlinkSync(victim, legacyTemporary, 'file');
+
+    expect(recordOutcome('symlink-safe', 'empty', '2026-07-21T23:24:36.686Z')).toBe(true);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('victim-must-not-change');
+    expect(fs.lstatSync(legacyTemporary).isSymbolicLink()).toBe(true);
+    expect(loadWorkedLedger().events).toContainEqual({
+      itemId: 'symlink-safe', outcome: 'empty', ts: '2026-07-21T23:24:36.686Z',
+    });
+  });
+
+  it('fails replay closed when strict directory durability is unsupported', () => {
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:windows-durability-refusal',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Require replay durability',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'unsupported directory fsync fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-44444444-4444-4444-8444-444444444444',
+      trajectoryId: 'run:attempt-44444444-4444-4444-8444-444444444444',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    _setWorkedLedgerHooksForTest({ strictDirectoryDurability: () => false });
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    })).toBe('persistence-failed');
+    expect(loadWorkedLedger().events.some((row) => row.itemId === event.itemId)).toBe(false);
+    expect(recordOutcome('portable-ordinary-write', 'diff', event.ts)).toBe(true);
+  });
+
+  it('never reports recorded after final durability mutates the installed ledger', () => {
+    expect(recordOutcome('worked-authority-seed', 'diff', '2026-07-21T23:24:35.000Z')).toBe(true);
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:final-readback-refusal',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Prove final worked bytes',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'final durability mutation fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-66666666-6666-4666-8666-666666666666',
+      trajectoryId: 'run:attempt-66666666-6666-4666-8666-666666666666',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const concurrent = '{"events":[{"itemId":"final-boundary-concurrent","outcome":"diff","ts":"2026-07-21T23:24:36.500Z"}]}\n';
+    let durabilityCalls = 0;
+    _setWorkedLedgerHooksForTest({
+      strictDirectoryDurability: () => {
+        durabilityCalls += 1;
+        if (durabilityCalls === 3) {
+          fs.writeFileSync(workedLedgerPath(), concurrent, { mode: 0o600 });
+        }
+        return true;
+      },
+    });
+
+    const result = replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    });
+    _setWorkedLedgerHooksForTest(undefined);
+    const ledger = loadWorkedLedger();
+    expect(durabilityCalls).toBe(3);
+    expect({
+      result,
+      replayPresent: ledger.events.some((row) => row.itemId === event.itemId),
+    }).toEqual({ result: 'persistence-failed', replayPresent: false });
+    expect(fs.readFileSync(workedLedgerPath(), 'utf8')).toBe(concurrent);
+  });
+
+  it('rejects future receipt replay and future suppressible cooldowns', () => {
+    const futureTs = new Date(Date.now() + 2 * 60_000).toISOString();
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: futureTs,
+      itemId: 'binshield:self-heal:future-authority-refusal',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Reject future authority',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'future receipt fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-55555555-5555-4555-8555-555555555555',
+      trajectoryId: 'run:attempt-55555555-5555-4555-8555-555555555555',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    })).toBe('dispatch-receipt-unavailable');
+    expect(workedEventIsCooling(
+      { itemId: event.itemId, outcome: 'empty', ts: futureTs },
+      60 * 60_000,
+      Date.now(),
+    )).toBe(false);
+    expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('refuses worked replay for missing receipts and adversarial outcome near-matches', () => {
+    const receipt = {
+      ts: '2026-07-21T23:25:00.000Z',
+      itemId: 'ashlr-hub:goal:c290bd029f',
+      repo: tmpRepo,
+      outcome: 'proposal-created',
+      attemptId: 'run:attempt-missing-receipt',
+    };
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: receipt.itemId,
+      outcome: 'empty',
+      dispatchReceipt: receipt,
+    })).toBe('invalid');
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: receipt.itemId,
+      outcome: 'diff',
+      dispatchReceipt: receipt,
+    })).toBe('dispatch-receipt-unavailable');
+    expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('leaves noncanonical worked history byte-for-byte unchanged during replay refusal', () => {
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:25:00.000Z',
+      itemId: 'binshield:self-heal:recovery-preserves-history',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Preserve worked history',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'operator recovery fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-11111111-1111-4111-8111-111111111111',
+      trajectoryId: 'run:attempt-11111111-1111-4111-8111-111111111111',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    const pathToLedger = workedLedgerPath();
+    fs.mkdirSync(path.dirname(pathToLedger), { recursive: true });
+    const historical = '{"events":[{"itemId":"historical","outcome":"empty","ts":"bad-time"}],"unknown":true}\n';
+    fs.writeFileSync(pathToLedger, historical, 'utf8');
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    })).toBe('persistence-failed');
+    expect(fs.readFileSync(pathToLedger, 'utf8')).toBe(historical);
   });
 
   it('recentlyDeclined returns false when no entry exists', () => {
@@ -299,6 +898,34 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(() => loadWorkedLedger()).not.toThrow();
     // loadWorkedLedger should return a fresh empty ledger
     expect(loadWorkedLedger().events).toEqual([]);
+  });
+
+  it('returns a fresh ledger without reading an oversized worked file', () => {
+    const p = workedLedgerPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(p, Buffer.alloc(2 * 1024 * 1024 + 1, 0x20), { mode: 0o600 });
+
+    expect(() => loadWorkedLedger()).not.toThrow();
+    expect(loadWorkedLedger()).toEqual({ events: [] });
+    expect(fs.statSync(p).size).toBe(2 * 1024 * 1024 + 1);
+  });
+
+  it('returns a fresh ledger without following a worked file symlink', () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    const p = workedLedgerPath();
+    const victim = path.join(tmpHome, 'public-load-worked-victim.json');
+    const victimBytes = '{"events":[{"itemId":"must-not-load-through-link","outcome":"empty","ts":"2026-07-21T23:24:36.686Z"}]}\n';
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(victim, victimBytes, { mode: 0o600 });
+    fs.symlinkSync(victim, p, 'file');
+
+    expect(() => loadWorkedLedger()).not.toThrow();
+    expect(loadWorkedLedger()).toEqual({ events: [] });
+    expect(fs.readFileSync(victim, 'utf8')).toBe(victimBytes);
+    expect(fs.lstatSync(p).isSymbolicLink()).toBe(true);
   });
 
   it('recordOutcome never throws on a read-only directory (simulated by bad path)', () => {

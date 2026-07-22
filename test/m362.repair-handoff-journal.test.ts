@@ -1426,6 +1426,40 @@ describe('M362 durable repair handoff journal', () => {
     }
   });
 
+  it('keeps a live-shape v1 parent authoritative beside unrelated noncanonical history', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, {
+      itemId: 'binshield:self-heal:5f35267a0405',
+      runId: 'attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      trajectoryId: 'run:attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+    });
+    expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1, failed: 0 });
+    const parentPath = join(dispatchProductionDir(), '2026-07-10.jsonl');
+    const parent = JSON.parse(readFileSync(parentPath, 'utf8').trim()) as DispatchProductionEvent;
+    const historical = {
+      ...parent,
+      learningLabel: { ...parent.learningLabel!, classifierVersion: 'attempt-shape-v1' },
+    };
+    const unrelated = sanitizeDispatchProductionEvent(event(repo.dir, {
+      itemId: 'repo:goal:unrelated-historical-repair',
+      source: 'goal',
+      runId: 'attempt-32345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-32345678-1234-4123-8123-123456789abc',
+    }), { materializeLearningLabel: true });
+    const stored = `${JSON.stringify(historical)}\n${JSON.stringify({
+      ...unrelated,
+      repairHandoffId: 'b'.repeat(64),
+    })}\n`;
+    writeFileSync(parentPath, stored, { mode: 0o600 });
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      conflictingIds: 0,
+      observations: [expect.objectContaining({ parentItemId: input.itemId })],
+    });
+    expect(readFileSync(parentPath, 'utf8')).toBe(stored);
+  });
+
   it('does not append a child when parent persistence is unavailable', () => {
     const prior = process.env.ASHLR_HOME;
     const unavailable = join(fx.home, 'dispatch-home-file');

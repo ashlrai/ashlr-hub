@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
@@ -744,6 +744,148 @@ describe('M342 dispatch production ledger', () => {
       outcome: event.outcome,
       attemptId: event.trajectoryId!,
     }])).toEqual(['degraded']);
+  });
+
+  it('accepts an exact attempt-shape-v1 parent without rewriting stored bytes', () => {
+    const canonical = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'binshield:self-heal:5f35267a0405',
+      runId: 'attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      trajectoryId: 'run:attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+    }), { materializeLearningLabel: true });
+    const historical = {
+      ...canonical,
+      learningLabel: { ...canonical.learningLabel!, classifierVersion: 'attempt-shape-v1' },
+    };
+    const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    const stored = `${JSON.stringify(historical)}\n`;
+    writeFileSync(path, stored, 'utf8');
+
+    expect(readDispatchProductionParents([{
+      ts: canonical.ts,
+      itemId: canonical.itemId,
+      repo: canonical.repo,
+      outcome: canonical.outcome,
+      attemptId: canonical.trajectoryId!,
+    }])).toEqual(['found']);
+    expect(readFileSync(path, 'utf8')).toBe(stored);
+  });
+
+  it('rejects a near-match v1 label and scopes parseable noncanonical rows to exact identity', () => {
+    const accepted = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-v1-exact',
+      runId: 'run-parent-v1-exact',
+      trajectoryId: 'run:attempt-parent-v1-exact',
+    }), { materializeLearningLabel: true });
+    const nearMatch = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-v1-near-match',
+      runId: 'run-parent-v1-near-match',
+      trajectoryId: 'run:attempt-parent-v1-near-match',
+    }), { materializeLearningLabel: true });
+    const unrelated = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'unrelated-noncanonical',
+      runId: 'run-unrelated-noncanonical',
+      trajectoryId: 'run:attempt-unrelated-noncanonical',
+    }), { materializeLearningLabel: true });
+    const acceptedV1 = {
+      ...accepted,
+      learningLabel: { ...accepted.learningLabel!, classifierVersion: 'attempt-shape-v1' },
+    };
+    const adversarialV1 = {
+      ...nearMatch,
+      learningLabel: {
+        ...nearMatch.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        attemptShape: { ...nearMatch.learningLabel!.attemptShape, backendNoDiff: 0 },
+      },
+    };
+    const noncanonicalLineage = { ...unrelated, repairHandoffId: 'a'.repeat(64) };
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-08.jsonl'),
+      `${JSON.stringify(acceptedV1)}\n${JSON.stringify(adversarialV1)}\n${JSON.stringify(noncanonicalLineage)}\n`,
+      'utf8',
+    );
+    const target = (event: DispatchProductionEvent) => ({
+      ts: event.ts,
+      itemId: event.itemId,
+      repo: event.repo,
+      outcome: event.outcome,
+      attemptId: event.trajectoryId!,
+    });
+
+    expect(readDispatchProductionParents([
+      target(accepted), target(nearMatch), target(unrelated),
+    ])).toEqual(['found', 'degraded', 'degraded']);
+  });
+
+  it('production-copy probe scopes a noncanonical repo row to its raw and canonical identity', () => {
+    const healthy = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-production-copy-healthy',
+      runId: 'run-parent-production-copy-healthy',
+      trajectoryId: 'run:attempt-parent-production-copy-healthy',
+    }), { materializeLearningLabel: true });
+    const quarantined = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-production-copy-noncanonical-repo',
+      runId: 'run-parent-production-copy-noncanonical-repo',
+      trajectoryId: 'run:attempt-parent-production-copy-noncanonical-repo',
+    }), { materializeLearningLabel: true });
+    const copiedProductionRow = { ...quarantined, repo: `${quarantined.repo}${sep}.` };
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-08.jsonl'),
+      `${JSON.stringify(healthy)}\n${JSON.stringify(copiedProductionRow)}\n`,
+      'utf8',
+    );
+    const target = (event: DispatchProductionEvent) => ({
+      ts: event.ts,
+      itemId: event.itemId,
+      repo: event.repo,
+      outcome: event.outcome,
+      attemptId: event.trajectoryId!,
+    });
+
+    expect(readDispatchProductionParents([target(healthy), target(quarantined)]))
+      .toEqual(['found', 'degraded']);
+  });
+
+  it('rejects future ordinary parent authority without poisoning an unrelated identity', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-07-21T12:00:00.000Z');
+    try {
+      const futureTs = new Date(Date.now() + 2 * 60_000).toISOString();
+      const siblingTs = new Date(Date.parse(futureTs) - 70_000).toISOString();
+      const future = sanitizeDispatchProductionEvent(makeEvent({
+        ts: futureTs,
+        itemId: 'parent-future-ordinary',
+        runId: 'run-parent-future-ordinary',
+        trajectoryId: 'run:attempt-parent-future-ordinary',
+      }), { materializeLearningLabel: true });
+      const healthy = sanitizeDispatchProductionEvent(makeEvent({
+        ts: siblingTs,
+        itemId: 'parent-near-clock-ordinary',
+        runId: 'run-parent-near-clock-ordinary',
+        trajectoryId: 'run:attempt-parent-near-clock-ordinary',
+      }), { materializeLearningLabel: true });
+      mkdirSync(dispatchProductionDir(), { recursive: true });
+      writeFileSync(
+        join(dispatchProductionDir(), `${future.ts.slice(0, 10)}.jsonl`),
+        `${JSON.stringify(healthy)}\n${JSON.stringify(future)}\n`,
+        'utf8',
+      );
+      const target = (event: DispatchProductionEvent) => ({
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      });
+
+      expect(readDispatchProductionParents([target(healthy), target(future)]))
+        .toEqual(['found', 'degraded']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('degrades parent authority when a matching partition has a torn tail', () => {
