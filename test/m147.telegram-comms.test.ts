@@ -222,6 +222,7 @@ function makeCallbackUpdate(
 
 let _tmpHome: string;
 let _prevHome: string | undefined;
+let _prevTelegramToken: string | undefined;
 
 beforeEach(() => {
   expect.hasAssertions();
@@ -231,6 +232,8 @@ beforeEach(() => {
 
   // Isolate ~/.ashlr/comms in a tmp HOME
   _prevHome = process.env.HOME;
+  _prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_BOT_TOKEN;
   _tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m147-'));
   process.env.HOME = _tmpHome;
 });
@@ -239,6 +242,8 @@ afterEach(() => {
   vi.clearAllMocks();
   if (_prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = _prevHome;
+  if (_prevTelegramToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+  else process.env.TELEGRAM_BOT_TOKEN = _prevTelegramToken;
   try { rmSync(_tmpHome, { recursive: true, force: true }); } catch { /* cleanup */ }
 });
 
@@ -260,6 +265,16 @@ describe('telegramEnabled', () => {
   });
 
   it('false when botToken missing', () => {
+    expect(telegramEnabled(cfgTelegramMissingToken())).toBe(false);
+  });
+
+  it('uses TELEGRAM_BOT_TOKEN when plaintext config is absent', () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
+    expect(telegramEnabled(cfgTelegramMissingToken())).toBe(true);
+  });
+
+  it('rejects phantom placeholder tokens when the vault is unavailable', () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'phm_placeholder_token_for_test';
     expect(telegramEnabled(cfgTelegramMissingToken())).toBe(false);
   });
 
@@ -300,6 +315,17 @@ describe('sendTelegramMessage', () => {
     const body = call!.body as Record<string, unknown>;
     expect(body['chat_id']).toBe(CHAT_ID);
     expect(body['text']).toBe('fleet report');
+  });
+
+  it('uses one configured token snapshot even when the environment differs', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'different-env-token';
+    _mockHttpResponse = { ok: true, result: { message_id: 43 } };
+
+    const result = await sendTelegramMessage('fleet report', undefined, cfgTelegram());
+
+    expect(result.ok).toBe(true);
+    expect(_httpCalls[0]?.path).toContain(BOT_TOKEN);
+    expect(_httpCalls[0]?.path).not.toContain('different-env-token');
   });
 
   it('builds inline_keyboard with callback_data = "<requestId>:<idx>"', async () => {

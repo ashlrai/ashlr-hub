@@ -21,6 +21,7 @@
 import { loadConfig } from '../core/config.js';
 import { commsEnabled } from '../core/integrations/imessage.js';
 import { telegramEnabled } from '../core/integrations/telegram.js';
+import { resolveProviderKey } from '../core/integrations/secrets.js';
 import { listRequests, outstanding, postRequest } from '../core/comms/requests.js';
 import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
@@ -228,6 +229,11 @@ async function cmdStatus(): Promise<number> {
   const isTelegram = telegramEnabled(cfg);
   const isIMessage = commsEnabled(cfg);
   const enabled = isTelegram || isIMessage;
+  const telegramTokenAvailable = channel === 'telegram'
+    ? Boolean(resolveProviderKey('TELEGRAM_BOT_TOKEN', cfg, {
+      configuredValue: cfg.comms?.telegram?.botToken,
+    }))
+    : false;
 
   console.log('comms channel:');
   console.log(`  transport: ${channel}`);
@@ -235,7 +241,7 @@ async function cmdStatus(): Promise<number> {
 
   if (channel === 'telegram' || isTelegram) {
     console.log(`  chat_id:   ${cfg.comms?.telegram?.chatId ?? '(unset)'}`);
-    console.log(`  bot_token: ${cfg.comms?.telegram?.botToken ? '(set)' : process.env['TELEGRAM_BOT_TOKEN'] ? '(set via env)' : '(unset)'}`);
+    console.log(`  bot_token: ${telegramTokenAvailable ? '(set)' : '(unset)'}`);
   } else {
     console.log(`  handle:    ${cfg.comms?.imessageHandle ?? '(unset)'}`);
     console.log(`  service:   ${cfg.comms?.service ?? 'iMessage'}`);
@@ -510,19 +516,25 @@ async function cmdSetupTelegram(): Promise<number> {
   console.log('  3. Follow prompts to name your bot (e.g. "ashlr-comms")');
   console.log('  4. Copy the API token (looks like: 123456789:ABCDefgh...)');
   console.log('');
-  console.log('Step 2 — Add the token to your ashlr config');
-  console.log('  In ~/.ashlr/config.json, add:');
+  console.log('Step 2 — Store the token in a stable Phantom project');
+  console.log('  In a private directory, run `phantom init`, then');
+  console.log('  `phantom add TELEGRAM_BOT_TOKEN` and enter the token at the prompt.');
+  console.log('  Configure that absolute directory for the daemon:');
   console.log('  {');
+  console.log('    "phantom": {');
+  console.log('      "enabled": true,');
+  console.log('      "projectDir": "/absolute/path/to/phantom-project"');
+  console.log('    },');
   console.log('    "comms": {');
   console.log('      "enabled": true,');
   console.log('      "channel": "telegram",');
   console.log('      "telegram": {');
-  console.log('        "botToken": "<YOUR_BOT_TOKEN>",');
   console.log('        "chatId": ""');
   console.log('      }');
   console.log('    }');
   console.log('  }');
-  console.log('  (Or set TELEGRAM_BOT_TOKEN env var instead of botToken in config)');
+  console.log('  TELEGRAM_BOT_TOKEN in the process environment is also supported.');
+  console.log('  Plaintext comms.telegram.botToken remains a legacy fallback only.');
   console.log('');
   console.log('Step 3 — Discover your chat id');
   console.log('  1. Send any message to your bot in Telegram (e.g. "hello")');
@@ -532,7 +544,9 @@ async function cmdSetupTelegram(): Promise<number> {
 
   // If a token is set, call getUpdates to discover the chat id
   const cfg = await loadConfig();
-  const token = cfg.comms?.telegram?.botToken ?? process.env['TELEGRAM_BOT_TOKEN'];
+  const token = resolveProviderKey('TELEGRAM_BOT_TOKEN', cfg, {
+    configuredValue: cfg.comms?.telegram?.botToken,
+  });
 
   if (!token) {
     console.log('No bot token configured yet — complete Step 1 and 2 first.');

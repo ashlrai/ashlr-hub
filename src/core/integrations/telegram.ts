@@ -26,6 +26,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
+import { resolveProviderKey } from './secrets.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,12 +94,15 @@ function saveOffset(offset: number): void {
 }
 
 /**
- * Resolve the bot token. Prefer cfg; fall back to TELEGRAM_BOT_TOKEN env.
- * Returns undefined when neither is set.
+ * Resolve one token snapshot for the whole request. Phantom-backed
+ * TELEGRAM_BOT_TOKEN wins when enabled; plaintext config remains a legacy
+ * fallback during migration, followed by a normal environment value.
  * NEVER log the returned value.
  */
 function resolveToken(cfg: AshlrConfig): string | undefined {
-  return cfg.comms?.telegram?.botToken ?? process.env['TELEGRAM_BOT_TOKEN'];
+  return resolveProviderKey('TELEGRAM_BOT_TOKEN', cfg, {
+    configuredValue: cfg.comms?.telegram?.botToken,
+  });
 }
 
 function resolveChatId(cfg: AshlrConfig): string | undefined {
@@ -107,19 +111,19 @@ function resolveChatId(cfg: AshlrConfig): string | undefined {
 
 /** True when Telegram transport is usably configured. */
 export function telegramEnabled(cfg: AshlrConfig): boolean {
+  const token = resolveToken(cfg);
   return (
     cfg.comms?.channel === 'telegram' &&
     cfg.comms?.enabled === true &&
-    typeof resolveToken(cfg) === 'string' &&
-    (resolveToken(cfg)?.length ?? 0) > 0 &&
+    typeof token === 'string' &&
+    token.length > 0 &&
     typeof resolveChatId(cfg) === 'string' &&
     (resolveChatId(cfg)?.length ?? 0) > 0
   );
 }
 
 /** Build the Telegram Bot API base URL without ever logging the token. */
-function apiUrl(cfg: AshlrConfig, method: string): string {
-  const token = resolveToken(cfg) ?? '';
+function apiUrl(token: string, method: string): string {
   return `https://api.telegram.org/bot${token}/${method}`;
 }
 
@@ -189,10 +193,11 @@ export async function sendTelegramMessage(
   opts?: TelegramSendOpts,
   cfg?: AshlrConfig,
 ): Promise<TelegramSendResult> {
-  if (!cfg || !telegramEnabled(cfg)) return { ok: false };
+  if (!cfg || cfg.comms?.channel !== 'telegram' || cfg.comms?.enabled !== true) return { ok: false };
 
   const token = resolveToken(cfg);
-  const chatId = resolveChatId(cfg)!;
+  const chatId = resolveChatId(cfg);
+  if (!token || !chatId) return { ok: false };
 
   try {
     const body: Record<string, unknown> = {
@@ -210,7 +215,7 @@ export async function sendTelegramMessage(
       };
     }
 
-    const url = apiUrl(cfg, 'sendMessage');
+    const url = apiUrl(token, 'sendMessage');
     const resp = await postJson(url, body, token);
 
     if (
@@ -242,10 +247,12 @@ export async function sendTelegramMessage(
  * Never throws.
  */
 export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult> {
-  if (!telegramEnabled(cfg)) return { updates: [], newOffset: 0 };
-
+  if (cfg.comms?.channel !== 'telegram' || cfg.comms?.enabled !== true) {
+    return { updates: [], newOffset: 0 };
+  }
   const token = resolveToken(cfg);
-  const allowedChatId = resolveChatId(cfg)!;
+  const allowedChatId = resolveChatId(cfg);
+  if (!token || !allowedChatId) return { updates: [], newOffset: 0 };
   const offset = loadOffset();
 
   try {
@@ -255,7 +262,7 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
     };
     if (offset > 0) body['offset'] = offset;
 
-    const url = apiUrl(cfg, 'getUpdates');
+    const url = apiUrl(token, 'getUpdates');
     const resp = await postJson(url, body, token);
 
     if (
@@ -344,10 +351,12 @@ export async function answerCallbackQuery(
   callbackQueryId: string,
   cfg: AshlrConfig,
 ): Promise<void> {
-  if (!telegramEnabled(cfg)) return;
+  if (cfg.comms?.channel !== 'telegram' || cfg.comms?.enabled !== true) return;
+  const token = resolveToken(cfg);
+  if (!token || !resolveChatId(cfg)) return;
   try {
-    const url = apiUrl(cfg, 'answerCallbackQuery');
-    await postJson(url, { callback_query_id: callbackQueryId }, resolveToken(cfg));
+    const url = apiUrl(token, 'answerCallbackQuery');
+    await postJson(url, { callback_query_id: callbackQueryId }, token);
   } catch {
     // best-effort ack — failure is harmless (spinner times out on its own)
   }

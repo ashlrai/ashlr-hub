@@ -516,6 +516,11 @@ export interface AshlrConfig {
   /** Optional Phantom secrets integration toggle. */
   phantom?: {
     enabled: boolean;
+    /**
+     * Absolute directory containing the fleet's `.phantom.toml`.
+     * Required for cwd-independent daemon/service secret resolution.
+     */
+    projectDir?: string;
     /** Count-only `phantom agent report --json` rollup. Default off. */
     agentReportRollup?: {
       enabled?: boolean;
@@ -1475,7 +1480,8 @@ export interface AshlrConfig {
     service?: 'iMessage';
     /**
      * Telegram Bot API configuration. Only used when channel === 'telegram'.
-     * botToken — from @BotFather. Can also be set via TELEGRAM_BOT_TOKEN env.
+     * botToken — legacy plaintext fallback from @BotFather. Prefer a
+     *            Phantom-managed TELEGRAM_BOT_TOKEN, or an environment value.
      *            NEVER commit this value.
      * chatId   — numeric chat id to send to / accept messages from.
      *            Run `ashlr comms setup-telegram` to discover it.

@@ -21,6 +21,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { phantomInstalled } from '../phantom.js';
 
@@ -29,7 +30,12 @@ const TIMEOUT_MS = 5_000;
 
 function isPhantomPlaceholderToken(value: string | undefined | null): boolean {
   const trimmed = value?.trim();
-  return typeof trimmed === 'string' && /^phm_[A-Za-z0-9_-]+$/.test(trimmed);
+  return typeof trimmed === 'string' && trimmed.startsWith('phm_');
+}
+
+function usableSecret(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && !isPhantomPlaceholderToken(trimmed) ? value ?? undefined : undefined;
 }
 
 /**
@@ -38,11 +44,12 @@ function isPhantomPlaceholderToken(value: string | undefined | null): boolean {
  * empty). Uses `-y` (skip confirmation) + `--quiet` for non-interactive use.
  * Never throws; never logs the value.
  */
-export function revealSecret(name: string): string | null {
+export function revealSecret(name: string, options: { cwd?: string } = {}): string | null {
   try {
     const res = spawnSync(PHANTOM_BIN, ['reveal', name, '--yes', '--quiet'], {
       encoding: 'utf8',
       timeout: TIMEOUT_MS,
+      cwd: options.cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
     });
@@ -55,18 +62,25 @@ export function revealSecret(name: string): string | null {
 }
 
 /**
- * Resolve a provider API key by env-var name. When phantom is ENABLED and
+ * Resolve an in-process credential by env-var name. When phantom is ENABLED and
  * installed, prefer the phantom-vault value (because `phantom init` rewrites the
- * env to a worthless token — a raw env read would send that token to the API);
- * fall back to `process.env[envKey]` for keys phantom doesn't manage or when
- * phantom is off. Returns undefined when neither source has a non-empty value.
+ * env to a worthless token — a raw env read would send that token to the API).
+ * A caller-supplied legacy config value takes precedence over the environment
+ * only after Phantom is unavailable. Placeholder tokens are never returned.
  */
-export function resolveProviderKey(envKey: string, cfg: AshlrConfig): string | undefined {
+export function resolveProviderKey(
+  envKey: string,
+  cfg: AshlrConfig,
+  options: { configuredValue?: string } = {},
+): string | undefined {
   if (!envKey) return undefined;
-  if (cfg.phantom?.enabled && phantomInstalled()) {
-    const fromVault = revealSecret(envKey);
-    if (fromVault && !isPhantomPlaceholderToken(fromVault)) return fromVault;
+  const configuredProjectDir = cfg.phantom?.projectDir?.trim();
+  const phantomCwd = configuredProjectDir
+    ? isAbsolute(configuredProjectDir) ? configuredProjectDir : null
+    : undefined;
+  if (cfg.phantom?.enabled && phantomCwd !== null && phantomInstalled({ cwd: phantomCwd })) {
+    const fromVault = usableSecret(revealSecret(envKey, { cwd: phantomCwd }));
+    if (fromVault) return fromVault;
   }
-  const fromEnv = process.env[envKey];
-  return fromEnv && fromEnv.trim().length > 0 && !isPhantomPlaceholderToken(fromEnv) ? fromEnv : undefined;
+  return usableSecret(options.configuredValue) ?? usableSecret(process.env[envKey]);
 }

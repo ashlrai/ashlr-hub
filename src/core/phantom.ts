@@ -34,6 +34,7 @@ type CountKind = 'status' | 'risk' | 'severity' | 'safety' | 'action';
 interface PhantomStatusOptions {
   timeoutMs?: number;
   includeAgentReport?: boolean;
+  cwd?: string;
 }
 
 export const PHANTOM_KNOWN_FLEET_SECRET_NAMES = [
@@ -43,6 +44,7 @@ export const PHANTOM_KNOWN_FLEET_SECRET_NAMES = [
   'ASHLR_PULSE_PAT',
   'ASHLR_PULSE_TOKEN',
   'NVIDIA_NIM_API_KEY',
+  'TELEGRAM_BOT_TOKEN',
 ] as const;
 
 /**
@@ -84,11 +86,12 @@ function runPhantom(
 
 let cachedFleetStatus: { key: string; expiresAt: number; status: PhantomStatus } | null = null;
 
-function phantomCacheKey(options: { includeAgentReport?: boolean } = {}): string {
+function phantomCacheKey(options: { includeAgentReport?: boolean; cwd?: string } = {}): string {
   return JSON.stringify({
     home: process.env.HOME ?? '',
     userProfile: process.env.USERPROFILE ?? '',
     path: process.env.PATH ?? '',
+    cwd: options.cwd ?? '',
     includeAgentReport: options.includeAgentReport === true,
   });
 }
@@ -97,7 +100,7 @@ function phantomCacheKey(options: { includeAgentReport?: boolean } = {}): string
  * Returns true when the `phantom` binary is resolvable and executes without a
  * fatal error.  Uses `phantom --version` as the probe (fast, side-effect-free).
  */
-export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean {
+export function phantomInstalled(options: { timeoutMs?: number; cwd?: string } = {}): boolean {
   const { status, error } = runPhantom(['--version'], options);
   // spawnSync returns null status when the binary could not be found/launched.
   return error === undefined && status !== null && status === 0;
@@ -114,8 +117,12 @@ export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean 
  */
 export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomStatus {
   const timeoutMs = options.timeoutMs;
+  const runOptions = {
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  };
   // ── 1. Binary presence ──────────────────────────────────────────────────
-  if (!phantomInstalled({ timeoutMs })) {
+  if (!phantomInstalled(runOptions)) {
     return {
       installed: false,
       version: null,
@@ -132,7 +139,7 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
   // ── 2. Version ──────────────────────────────────────────────────────────
   let version: string | null = null;
   {
-    const { stdout, status } = runPhantom(['--version'], { timeoutMs });
+    const { stdout, status } = runPhantom(['--version'], runOptions);
     if (status === 0) {
       // Expected format: "phantom 0.6.0"
       const match = stdout.trim().match(/\d+\.\d+(?:\.\d+)?/);
@@ -158,7 +165,7 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
   let initialized = false;
   let statusError: string | undefined;
   {
-    const { stdout, stderr, status, error } = runPhantom(['status', '--json'], { timeoutMs });
+    const { stdout, stderr, status, error } = runPhantom(['status', '--json'], runOptions);
     if (error !== undefined) {
       // Genuine spawn failure (could not launch the binary).
       statusError = error;
@@ -187,15 +194,15 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
   // risk accidentally surfacing values.
   let secretNames: string[] = [];
   if (initialized) {
-    const { stdout, status, error } = runPhantom(['list', '--json'], { timeoutMs });
+    const { stdout, status, error } = runPhantom(['list', '--json'], runOptions);
     if (error === undefined && status === 0 && stdout.trim().length > 0) {
       secretNames = parseSecretNames(stdout);
     }
   }
 
-  const commands = detectPhantomCommandSupport({ timeoutMs });
+  const commands = detectPhantomCommandSupport(runOptions);
   const agentReport = options.includeAgentReport === true && commands.agentAvailable
-    ? readPhantomAgentReport({ timeoutMs })
+    ? readPhantomAgentReport(runOptions)
     : undefined;
 
   const base = {
@@ -224,15 +231,20 @@ export function getCachedFleetPhantomStatus(options: {
   timeoutMs?: number;
   nowMs?: number;
   includeAgentReport?: boolean;
+  cwd?: string;
 } = {}): PhantomStatus {
   const nowMs = options.nowMs ?? Date.now();
-  const key = phantomCacheKey({ includeAgentReport: options.includeAgentReport });
+  const key = phantomCacheKey({
+    includeAgentReport: options.includeAgentReport,
+    cwd: options.cwd,
+  });
   if (cachedFleetStatus && cachedFleetStatus.key === key && cachedFleetStatus.expiresAt > nowMs) {
     return cachedFleetStatus.status;
   }
   const status = getPhantomStatus({
     timeoutMs: options.timeoutMs ?? FLEET_TIMEOUT_MS,
     includeAgentReport: options.includeAgentReport,
+    cwd: options.cwd,
   });
   cachedFleetStatus = {
     key,
@@ -336,14 +348,14 @@ function parseInitializedFromJson(raw: string): boolean | null {
 }
 
 function detectPhantomCommandSupport(
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; cwd?: string } = {},
 ): PhantomCapabilitySnapshot['commands'] {
   const { stdout, stderr, status, error } = runPhantom(['--help'], options);
   if (error !== undefined || status !== 0) return UNKNOWN_PHANTOM_COMMANDS;
   return parsePhantomCommandHelp(`${stdout}\n${stderr}`);
 }
 
-function readPhantomAgentReport(options: { timeoutMs?: number } = {}): PhantomAgentReportRollup {
+function readPhantomAgentReport(options: { timeoutMs?: number; cwd?: string } = {}): PhantomAgentReportRollup {
   const { stdout, error } = runPhantom(['agent', 'report', '--json'], options);
   if (error !== undefined || stdout.trim().length === 0) {
     return failedAgentReportRollup();

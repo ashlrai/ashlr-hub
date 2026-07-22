@@ -2902,6 +2902,7 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
     const includeAgentReport = cfg.phantom?.agentReportRollup?.enabled === true;
     const status = getCachedFleetPhantomStatus({
       includeAgentReport,
+      ...(cfg.phantom?.projectDir ? { cwd: cfg.phantom.projectDir } : {}),
       ...(cfg.phantom?.agentReportRollup?.timeoutMs ? { timeoutMs: cfg.phantom.agentReportRollup.timeoutMs } : {}),
       ...(cfg.phantom?.agentReportRollup?.cacheTtlMs ? { ttlMs: cfg.phantom.agentReportRollup.cacheTtlMs } : {}),
     });

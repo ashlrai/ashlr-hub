@@ -36,6 +36,7 @@ function phantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
     'ASHLR_PULSE_PAT',
     'ASHLR_PULSE_TOKEN',
     'NVIDIA_NIM_API_KEY',
+    'TELEGRAM_BOT_TOKEN',
   ];
   const present = ['ANTHROPIC_API_KEY', 'ASHLR_PULSE_TOKEN'];
   return {
@@ -172,9 +173,9 @@ describe('M348 FleetStatus Phantom capability', () => {
         valueMode: 'metadata-and-names-only',
         secretCount: 2,
         knownFleetSecrets: {
-          total: 6,
+          total: 7,
           presentCount: 2,
-          missingCount: 4,
+          missingCount: 5,
           pulseCredentialPresent: true,
           nimApiKeyPresent: false,
         },
@@ -199,7 +200,7 @@ describe('M348 FleetStatus Phantom capability', () => {
       const rendered = formatFleetStatus(status);
       expect(rendered).toContain('Phantom:');
       expect(rendered).toContain('ready v0.6.0');
-      expect(rendered).toContain('2/6 known fleet secrets');
+      expect(rendered).toContain('2/7 known fleet secrets');
       expect(rendered).toContain('pulse yes');
       expect(rendered).toContain('nim no');
       expect(rendered).toContain('mcp yes');

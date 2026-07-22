@@ -299,6 +299,7 @@ describe('getPhantomStatus — installed and initialized', () => {
     ]);
     expect(status.capability.knownFleetSecrets.missing).toContain('ASHLR_PULSE_PAT');
     expect(status.capability.knownFleetSecrets.missing).toContain('ASHLR_PULSE_TOKEN');
+    expect(status.capability.knownFleetSecrets.missing).toContain('TELEGRAM_BOT_TOKEN');
   });
 });
 
@@ -939,5 +940,40 @@ describe('getCachedFleetPhantomStatus — short fleet cache', () => {
 
     expect(third).not.toBe(first);
     expect(calls).toBe(10);
+  });
+
+  it('binds every Phantom probe and cache entry to the configured project directory', () => {
+    const responses = [
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets(['TELEGRAM_BOT_TOKEN']),
+      spawnHelp(),
+    ];
+    let calls = 0;
+    const observedCwds: Array<string | undefined> = [];
+    _spawnSyncImpl = (...args: unknown[]) => {
+      const options = args[2] as { cwd?: string } | undefined;
+      observedCwds.push(options?.cwd);
+      return responses[calls++ % responses.length]!;
+    };
+
+    const first = getCachedFleetPhantomStatus({
+      nowMs: 1_000,
+      ttlMs: 30_000,
+      cwd: '/private/phantom-a',
+    });
+    const second = getCachedFleetPhantomStatus({
+      nowMs: 2_000,
+      ttlMs: 30_000,
+      cwd: '/private/phantom-b',
+    });
+
+    expect(first.initialized).toBe(true);
+    expect(second.initialized).toBe(true);
+    expect(second).not.toBe(first);
+    expect(calls).toBe(10);
+    expect(observedCwds.slice(0, 5)).toEqual(Array(5).fill('/private/phantom-a'));
+    expect(observedCwds.slice(5)).toEqual(Array(5).fill('/private/phantom-b'));
   });
 });
