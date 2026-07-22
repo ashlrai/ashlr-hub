@@ -115,3 +115,16 @@ export type {
   SkillRoutingCalibrationSampleV1,
   SkillRoutingCalibrationV1,
 } from '../core/fleet/skill-routing-calibration.js';
+
+export type {
+  ExternalSkillAuditReceipt,
+  ExternalSkillAuditReceiptInput,
+  ExternalSkillAuditReceiptReason,
+  ExternalSkillAuditReceiptUnsigned,
+  ExternalSkillAuditReceiptVerificationResult,
+} from '../core/fleet/external-skill-audit-receipt.js';
+
+export type {
+  ExternalSkillAuditTrustPolicy,
+  ExternalSkillAuditTrustRoot,
+} from '../core/fleet/external-skill-audit-trust-roots.js';

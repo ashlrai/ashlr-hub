@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { extname, resolve } from 'node:path';
 import {
   auditExternalSkillPack,
+  EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES,
   failedExternalSkillAudit,
   formatExternalSkillAudit,
 } from '../core/fleet/external-skill-audit.js';
 import type { ExternalSkillAuditReport } from '../core/fleet/external-skill-audit.js';
 
 const AUDIT_TIMEOUT_MS = 30_000;
-const MAX_AUDIT_OUTPUT_BYTES = 1024 * 1024;
 
 function runAuditProcess(packPath: string): Promise<ExternalSkillAuditReport> {
   const currentFile = fileURLToPath(import.meta.url);
@@ -48,7 +48,7 @@ function runAuditProcess(packPath: string): Promise<ExternalSkillAuditReport> {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       output += chunk;
-      if (Buffer.byteLength(output, 'utf8') > MAX_AUDIT_OUTPUT_BYTES) {
+      if (Buffer.byteLength(output, 'utf8') > EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES) {
         child.kill('SIGKILL');
         finish(failedExternalSkillAudit('audit-worker-failed'));
       }
