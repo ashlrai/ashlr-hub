@@ -2914,6 +2914,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       filesRead: 1,
       invalidRows: 0,
     });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'available',
+      denominator: 'dispatch-production',
+      sourceQuality: { sourceState: 'healthy', complete: true },
+    });
     expect(s.dispatchProduction).toMatchObject({
       events: 3,
       attempts: 3,
@@ -3012,8 +3017,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       complete: false,
       invalidRows: 1,
     });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality: { sourceState: 'degraded', complete: false, invalidRows: 1 },
+    });
+    expect(s.attemptCoverage).toBeUndefined();
+    expect(s.trajectoryLearning).toBeUndefined();
     expect(s.dispatchYieldDiagnostics).toBeUndefined();
-    expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('source:    degraded (partial)');
+    expect(formatted).toContain('withheld (dispatch denominator degraded; 1 invalid row(s))');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+    expect(formatted).not.toContain('trajectories: 0 in 24h');
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {

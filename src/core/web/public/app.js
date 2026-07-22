@@ -2900,6 +2900,33 @@ function formatCoverageMetric(metric) {
   return `${Number(metric.count ?? 0)} (${formatFleetPercent(metric.rate)})`;
 }
 
+function learningMetricsAvailabilityText(source) {
+  if (!source || typeof source !== 'object') return 'unavailable';
+  if (source.state === 'available') return 'available';
+  const quality = source.sourceQuality ?? {};
+  if (source.reason === 'dispatch-source-missing') return 'withheld: dispatch denominator missing';
+  const details = [];
+  if (Number(quality.invalidRows) > 0) details.push(`${Number(quality.invalidRows)} invalid row(s)`);
+  if (Number(quality.unreadableFiles) > 0) details.push(`${Number(quality.unreadableFiles)} unreadable file(s)`);
+  const stopReasons = Array.isArray(quality.stopReasons) ? quality.stopReasons.filter((reason) => typeof reason === 'string') : [];
+  if (stopReasons.length > 0) details.push(`stopped: ${stopReasons.join(', ')}`);
+  return `withheld: dispatch denominator degraded${details.length > 0 ? `; ${details.join('; ')}` : ''}`;
+}
+
+function renderLearningMetricsUnavailableCard(source, cls = 'ctrl-card card') {
+  if (!source || source.state !== 'withheld') return null;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Learning Telemetry'),
+    el('span', { cls: 'card-subtitle' }, 'rates withheld')
+  ));
+  card.appendChild(el('div', { cls: 'card-body' }, infoGrid([
+    ['State', 'withheld'],
+    ['Denominator', learningMetricsAvailabilityText(source)],
+  ])));
+  return card;
+}
+
 function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   if (!attemptCoverage) return null;
   const attempts = attemptCoverage.attempts ?? 0;
@@ -3644,6 +3671,10 @@ function renderFleet() {
 
   const attemptCoverageCard = renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card');
   if (attemptCoverageCard) section.appendChild(attemptCoverageCard);
+  const learningUnavailableCard = !f.attemptCoverage
+    ? renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')
+    : null;
+  if (learningUnavailableCard) section.appendChild(learningUnavailableCard);
 
   const contextCard = renderContextEfficiencyCard(f.contextEfficiency, 'fleet-card card');
   if (contextCard) section.appendChild(contextCard);
@@ -4057,6 +4088,7 @@ function renderControl() {
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
   const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
   const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null;
+  const learningMetrics = d.fleet?.learningMetrics ?? fleet.learningMetrics ?? null;
   const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null;
   const repairHandoffRollout = d.fleet?.repairHandoffRollout ?? fleet.repairHandoffRollout ?? null;
   if (repairHandoffRollout) {
@@ -4239,6 +4271,11 @@ function renderControl() {
 
   const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
+
+  const missionLearningUnavailableCard = !attemptCoverage
+    ? renderLearningMetricsUnavailableCard(learningMetrics)
+    : null;
+  if (missionLearningUnavailableCard) section.appendChild(missionLearningUnavailableCard);
 
   const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness);
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);

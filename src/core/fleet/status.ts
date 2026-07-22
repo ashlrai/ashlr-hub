@@ -102,6 +102,7 @@ import {
 } from './proposal-matching.js';
 import {
   readDispatchProductionYieldDetailed,
+  type DispatchProductionEvent,
   type DispatchProductionSourceQuality,
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
@@ -1392,6 +1393,13 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Whether dispatch-backed learning metrics have a complete denominator. */
+  learningMetrics?: {
+    state: 'available' | 'withheld';
+    denominator: 'dispatch-production';
+    reason?: 'dispatch-source-missing' | 'dispatch-source-degraded';
+    sourceQuality: DispatchProductionSourceQuality;
+  };
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -1820,6 +1828,7 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
  */
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
+  let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
   let queueSnapshotAt: string | null = null;
   let queueAuthorityObservedAt: string | null = null;
   let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
@@ -2635,6 +2644,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitPerDimension: 8,
     });
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    status.learningMetrics = dispatchRead.sourceQuality.sourceState === 'healthy' && dispatchRead.sourceQuality.complete
+      ? {
+          state: 'available',
+          denominator: 'dispatch-production',
+          sourceQuality: dispatchRead.sourceQuality,
+        }
+      : {
+          state: 'withheld',
+          denominator: 'dispatch-production',
+          reason: dispatchRead.sourceQuality.sourceState === 'missing'
+            ? 'dispatch-source-missing'
+            : 'dispatch-source-degraded',
+          sourceQuality: dispatchRead.sourceQuality,
+        };
+    if (status.learningMetrics.state === 'available') {
+      dispatchLearningEvents = dispatchRead.events;
+    }
     const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
@@ -2643,8 +2669,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     }
   } catch {
-    // Optional history/analytics surface only. Fleet status must stay read-only
-    // and available even when the append-only ledger is absent or corrupt.
+    const sourceQuality: DispatchProductionSourceQuality = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, datedFilesRead: 0, looseFilesRead: 0,
+      bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
+    };
+    status.dispatchProductionSource = sourceQuality;
+    status.learningMetrics = {
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality,
+    };
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();
@@ -2744,19 +2780,22 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const workspaceSource = status.workspace?.sourceQuality;
   const agentActionLearningEligible = status.workspace !== undefined &&
     (workspaceSource === undefined || (workspaceSource.sourceState === 'healthy' && workspaceSource.complete));
-  try {
-    const attemptRecords = listAttemptRecords({
-      windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
-      limit: 500,
-      ...(workspaceRead ? {
-        deps: { readAgentActions: () => workspaceRead!.events },
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const attemptRecords = listAttemptRecords({
+        windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
+        limit: 500,
+        deps: {
+          readDispatchProductionEvents: () => dispatchLearningEvents ?? [],
+          ...(workspaceRead ? { readAgentActions: () => workspaceRead!.events } : {}),
+        },
         useDefaultReaders: true,
-      } : {}),
-    });
-    status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
-    if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
-  } catch {
-    // Optional learning coverage surface only.
+      });
+      status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
+      if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
+    } catch {
+      // Optional learning coverage surface only.
+    }
   }
   const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
   const skillUseSource = readSkillUseEventsWithDiagnostics({
@@ -2764,12 +2803,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     limit: Math.max(500 * 8, 400),
     maxFiles: 3,
   });
-  if (agentActionLearningEligible) {
+  if (agentActionLearningEligible && status.learningMetrics?.state === 'available') {
     try {
       const trajectoryRecords = listTrajectoryRecords({
         windowHours,
         limit: 500,
         deps: {
+          readDispatchProductionEvents: () => dispatchLearningEvents ?? [],
           ...(workspaceRead ? { readAgentActions: () => workspaceRead!.events } : {}),
           readSkillUseEvents: () => skillUseSource.events,
         },
