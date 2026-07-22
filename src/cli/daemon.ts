@@ -28,8 +28,44 @@ import { makeColors } from './ui.js';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
-import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
+
+type DaemonSubcommand = 'start' | 'stop' | 'status' | 'install' | 'uninstall' | 'service-status';
+
+const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
+  'start',
+  'stop',
+  'status',
+  'install',
+  'uninstall',
+  'service-status',
+]);
+
+const NO_FLAGS = new Set<string>();
+const JSON_FLAG = new Set(['--json']);
+const INSTALL_FLAGS = new Set(['--no-autostart']);
+
+const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
+  start:
+    'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
+  stop: 'Usage: ashlr daemon stop',
+  status: 'Usage: ashlr daemon status [--json]',
+  install: 'Usage: ashlr daemon install [--no-autostart]',
+  uninstall: 'Usage: ashlr daemon uninstall',
+  'service-status': 'Usage: ashlr daemon service-status [--json]',
+};
+
+const DAEMON_TOP_LEVEL_USAGE = `Usage: ashlr daemon [subcommand] [flags]
+
+Subcommands:
+  start           Run the proposal-only daemon
+  stop            Request an orderly daemon shutdown
+  status          Show daemon state [--json]
+  install         Install the OS service [--no-autostart]
+  uninstall       Remove the OS service
+  service-status  Show OS service state [--json]
+
+Run \`ashlr daemon <subcommand> --help\` for subcommand usage.`;
 
 // ---------------------------------------------------------------------------
 // Lazy loaders — degrade gracefully if a core module is not yet built.
@@ -103,9 +139,47 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
   }
 }
 
+async function importServiceConfig(): Promise<
+  ((cfg: AshlrConfig | null, overrides?: { autostart?: boolean }) => ServiceInstallOptions) | null
+> {
+  try {
+    const mod = await import('../core/daemon/service-config.js');
+    return mod.daemonServiceInstallOptions;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Flag parsing
 // ---------------------------------------------------------------------------
+
+function isHelpFlag(arg: string): boolean {
+  return arg === '--help' || arg === '-h';
+}
+
+function isDaemonSubcommand(value: string): value is DaemonSubcommand {
+  return DAEMON_SUBCOMMANDS.has(value as DaemonSubcommand);
+}
+
+function printDaemonUsage(subcommand?: DaemonSubcommand): void {
+  console.log(subcommand ? DAEMON_USAGE[subcommand] : DAEMON_TOP_LEVEL_USAGE);
+}
+
+function validateExactFlags(args: string[], allowed: ReadonlySet<string>): string | undefined {
+  for (const arg of args) {
+    if (allowed.has(arg)) continue;
+    return arg.startsWith('-') ? `Unknown flag: ${arg}` : `Unexpected argument: ${arg}`;
+  }
+  return undefined;
+}
+
+function printDaemonUsageError(message: string, subcommand?: DaemonSubcommand): number {
+  const col = makeColors(process.stdout.isTTY === true);
+  console.error(col.red('error: ') + message);
+  console.error(col.dim(subcommand ? DAEMON_USAGE[subcommand] : DAEMON_TOP_LEVEL_USAGE));
+  return 2;
+}
 
 interface StartFlags {
   once: boolean;
@@ -169,8 +243,7 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
       }
       default:
         if (a?.startsWith('-')) return { flags, err: `Unknown flag: ${a}` };
-        // ignore stray positionals
-        break;
+        return { flags, err: `Unexpected argument: ${a}` };
     }
   }
   if (flags.limit !== undefined && flags.drain === undefined) {
@@ -215,7 +288,7 @@ function relAge(iso: string | null): string {
 // Subcommand: start
 // ---------------------------------------------------------------------------
 
-async function cmdDaemonStart(args: string[]): Promise<number> {
+async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
@@ -229,17 +302,6 @@ async function cmdDaemonStart(args: string[]): Promise<number> {
         `daemon start refused: ${which} is set — no daemon-inside-daemon / daemon-inside-swarm.`,
     );
     return 1;
-  }
-
-  const { flags, err } = parseStartFlags(args);
-  if (err) {
-    console.error(col.red('error: ') + err);
-    console.error(
-      col.dim(
-        'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
-      ),
-    );
-    return 2;
   }
 
   const loadConfig = await importConfig();
@@ -503,15 +565,19 @@ async function importServiceManager(): Promise<{
 // Subcommand: install
 // ---------------------------------------------------------------------------
 
-async function cmdDaemonInstall(args: string[]): Promise<number> {
+async function cmdDaemonInstall(autostart: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
-
-  const autostart = !args.includes('--no-autostart');
 
   const svcMod = await importServiceManager();
   if (!svcMod) {
     console.error(col.red('error: ') + 'daemon service manager not available (M93 module not built).');
+    return 1;
+  }
+
+  const daemonServiceInstallOptions = await importServiceConfig();
+  if (!daemonServiceInstallOptions) {
+    console.error(col.red('error: ') + 'daemon service config not available (M93 module not built).');
     return 1;
   }
 
@@ -553,10 +619,9 @@ async function cmdDaemonInstall(args: string[]): Promise<number> {
 // Subcommand: uninstall
 // ---------------------------------------------------------------------------
 
-async function cmdDaemonUninstall(args: string[]): Promise<number> {
+async function cmdDaemonUninstall(): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
-  void args; // no flags currently
 
   const svcMod = await importServiceManager();
   if (!svcMod) {
@@ -581,10 +646,9 @@ async function cmdDaemonUninstall(args: string[]): Promise<number> {
 // Subcommand: service-status
 // ---------------------------------------------------------------------------
 
-async function cmdDaemonServiceStatus(args: string[]): Promise<number> {
+async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
-  const jsonMode = args.includes('--json');
 
   const svcMod = await importServiceManager();
   if (!svcMod) {
@@ -625,32 +689,53 @@ async function cmdDaemonServiceStatus(args: string[]): Promise<number> {
  * Returns a process exit code (0 = success, non-zero = error/usage).
  */
 export async function cmdDaemon(args: string[]): Promise<number> {
-  const tty = process.stdout.isTTY === true;
-  const col = makeColors(tty);
+  const requestedSub = args[0];
+  if (requestedSub !== undefined && isHelpFlag(requestedSub)) {
+    printDaemonUsage();
+    return 0;
+  }
+  if (requestedSub !== undefined && !isDaemonSubcommand(requestedSub)) {
+    const message = requestedSub.startsWith('-')
+      ? `Unknown flag: ${requestedSub}`
+      : `Unknown daemon subcommand: ${requestedSub}`;
+    return printDaemonUsageError(message);
+  }
 
-  const sub = args[0] ?? 'status';
+  const sub: DaemonSubcommand = requestedSub ?? 'status';
   const rest = args.slice(1);
+  if (rest.some(isHelpFlag)) {
+    printDaemonUsage(sub);
+    return 0;
+  }
+
+  let startFlags: StartFlags | undefined;
+  let validationError: string | undefined;
+  if (sub === 'start') {
+    const parsed = parseStartFlags(rest);
+    startFlags = parsed.flags;
+    validationError = parsed.err;
+  } else {
+    const allowed = sub === 'install'
+      ? INSTALL_FLAGS
+      : sub === 'status' || sub === 'service-status'
+        ? JSON_FLAG
+        : NO_FLAGS;
+    validationError = validateExactFlags(rest, allowed);
+  }
+  if (validationError) return printDaemonUsageError(validationError, sub);
 
   switch (sub) {
     case 'start':
-      return cmdDaemonStart(rest);
+      return cmdDaemonStart(startFlags!);
     case 'stop':
       return cmdDaemonStop();
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
     case 'install':
-      return cmdDaemonInstall(rest);
+      return cmdDaemonInstall(!rest.includes('--no-autostart'));
     case 'uninstall':
-      return cmdDaemonUninstall(rest);
+      return cmdDaemonUninstall();
     case 'service-status':
-      return cmdDaemonServiceStatus(rest);
-    default:
-      console.error(col.red('error: ') + `Unknown daemon subcommand: ${sub}`);
-      console.error(
-        col.dim(
-          'Usage: ashlr daemon [start|stop|status|install|uninstall|service-status]',
-        ),
-      );
-      return 2;
+      return cmdDaemonServiceStatus(rest.includes('--json'));
   }
 }
