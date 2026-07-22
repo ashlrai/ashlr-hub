@@ -2667,9 +2667,8 @@ function generatedRepairRecoveryMetric(generated) {
 
 function fleetRepairRecoveryMetric(fleet) {
   const source = fleet?.dispatchProductionSource;
-  const dispatchGenerated = (!source || dispatchProductionSourceHealthy(source))
-    ? fleet?.dispatchProduction?.generatedRepairAttempts
-    : null;
+  if (!dispatchProductionSourceHealthy(source)) return null;
+  const dispatchGenerated = fleet?.dispatchProduction?.generatedRepairAttempts;
   return generatedRepairRecoveryMetric(
     fleet?.dispatchYieldDiagnostics?.generatedRepairAttempts ??
     dispatchGenerated ??
@@ -2686,7 +2685,7 @@ function dispatchProductionSourceText(source) {
 }
 
 function dispatchProductionSourceHealthy(source) {
-  return !source || (source.sourceState === 'healthy' && source.complete === true);
+  return source?.sourceState === 'healthy' && source.complete === true;
 }
 
 function workspaceSourceHealthy(workspace) {
@@ -2768,7 +2767,8 @@ function dispatchProductionWeakestBackend(backends) {
 
 function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = 'ctrl-card card') {
   const card = el('div', { cls });
-  if (!dispatchProduction) {
+  const sourceHealthy = dispatchProductionSourceHealthy(sourceQuality);
+  if (!dispatchProduction || !sourceHealthy) {
     const sourceText = dispatchProductionSourceText(sourceQuality);
     card.appendChild(el('div', { cls: 'card-header' },
       el('span', { cls: 'card-title' }, 'Dispatch Yield'),
@@ -2776,13 +2776,12 @@ function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = '
     ));
     card.appendChild(el('div', { cls: 'card-body' },
       el('p', { cls: 'hint' }, sourceQuality?.sourceState === 'degraded'
-        ? 'Dispatch yield source is degraded; no valid bounded rows were readable.'
+        ? 'Dispatch yield withheld because the bounded source is incomplete.'
         : 'Dispatch yield data unavailable.')
     ));
     return card;
   }
 
-  const sourceHealthy = dispatchProductionSourceHealthy(sourceQuality);
   const diagnosticAttempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
   const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
     Math.max(0, diagnosticAttempts - Number(dispatchProduction.proposalsCreated ?? 0));
@@ -2896,7 +2895,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
 }
 
 function formatCoverageMetric(metric) {
-  if (!metric || typeof metric !== 'object') return '0 (0%)';
+  if (!metric || typeof metric !== 'object') return 'withheld';
   return `${Number(metric.count ?? 0)} (${formatFleetPercent(metric.rate)})`;
 }
 
@@ -2927,7 +2926,18 @@ function renderLearningMetricsUnavailableCard(source, cls = 'ctrl-card card') {
   return card;
 }
 
-function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
+function learningMetricWithholdingText(availability) {
+  if (!availability || availability.state === 'available') return null;
+  const metrics = Array.isArray(availability.withheldMetrics)
+    ? availability.withheldMetrics.slice(0, 6).join(', ')
+    : '';
+  const reasons = Array.isArray(availability.reasons)
+    ? availability.reasons.slice(0, 4).join(', ')
+    : '';
+  return `Withheld${metrics ? `: ${metrics}` : ''}${reasons ? ` (${reasons})` : ''}`;
+}
+
+function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card', availability = null) {
   if (!attemptCoverage) return null;
   const attempts = attemptCoverage.attempts ?? 0;
   const cancelled = attemptCoverage.production?.cancelled ?? 0;
@@ -2937,11 +2947,9 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
   const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
   const actionSource = attemptCoverage.agentActionSource;
-  const actionCoverage = !actionSource || (actionSource.sourceState === 'healthy' && actionSource.complete === true)
+  const actionCoverage = joins.agentAction && (!actionSource || (actionSource.sourceState === 'healthy' && actionSource.complete === true))
     ? formatCoverageMetric(joins.agentAction)
-    : actionSource.sourceState === 'missing'
-      ? 'unavailable'
-      : `${formatCoverageMetric(joins.agentAction)} observed (partial)`;
+    : 'withheld';
   const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
   const actionableCause = Array.isArray(diagnostics.actionableCauses) ? diagnostics.actionableCauses[0] : null;
   const card = el('div', { cls });
@@ -2979,6 +2987,8 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
       `Actionable: ${actionableCause.cause} on ${actionableCause.count ?? 0} attempt${actionableCause.count === 1 ? '' : 's'}`
     ));
   }
+  const withholding = learningMetricWithholdingText(availability);
+  if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
   card.appendChild(body);
   return card;
 }
@@ -3053,7 +3063,7 @@ function skillCorpusReadinessRows(skillCorpusReadiness) {
 
 function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null) {
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
-  const terminal = trajectoryLearning?.terminalOutcomes ?? {};
+  const terminal = trajectoryLearning?.terminalOutcomes;
   const skill = trajectoryLearning?.skillObservation ?? {};
   const skillObserved = skill.sampleState === 'observed';
   const skillEventsPresent = skill.eventState === 'present';
@@ -3066,10 +3076,10 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
     ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
     ['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)],
     ['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)],
-    ['Merged', terminal.merged ?? 0],
-    ['No-proposal', terminal['no-proposal'] ?? 0],
-    ['Cancelled', terminal.cancelled ?? 0],
-    ['Failed', terminal.failed ?? 0],
+    ['Merged', terminal ? terminal.merged : 'withheld'],
+    ['No-proposal', terminal ? terminal['no-proposal'] : 'withheld'],
+    ['Cancelled', terminal ? (terminal.cancelled ?? 0) : 'withheld'],
+    ['Failed', terminal ? terminal.failed : 'withheld'],
     ['Skill-observed trajectories', skillObserved ? formatCoverageMetric(skill.observedTrajectoryCoverage) : skillNone ? 'none' : withheldLabel],
     ['Observation sample', skillEventsPresent && skill.sampleState === 'none' ? 'no joined sample' : skill.sampleState ?? 'unavailable'],
     ['Observed selections', skillObserved ? (skill.joined ?? 0) : skillNone ? 'none' : skillAwaitingJoin ? 'present; counts withheld' : 'withheld'],
@@ -3116,7 +3126,8 @@ function renderTrajectoryTraceList(trajectoryLearning) {
     const outcome = trajectoryTraceValue(trace?.terminalOutcome, outcomes);
     const sourceState = trajectoryTraceValue(trace?.sourceState, sourceStates);
     const coverage = trace?.coverage ?? {};
-    const coverageText = `d=${coverage.dispatch === true ? 'y' : 'n'} p=${coverage.proposal === true ? 'y' : 'n'} e=${coverage.evidence === true ? 'y' : 'n'} c=${coverage.decision === true ? 'y' : 'n'} a=${coverage.agentAction === true ? 'y' : 'n'}`;
+    const coverageFlag = (value) => value === undefined ? '?' : value === true ? 'y' : 'n';
+    const coverageText = `d=${coverageFlag(coverage.dispatch)} p=${coverageFlag(coverage.proposal)} e=${coverageFlag(coverage.evidence)} c=${coverageFlag(coverage.decision)} a=${coverageFlag(coverage.agentAction)}`;
     const item = el('div', { cls: 'trajectory-trace' },
       el('div', { cls: 'trajectory-trace-head' }, `${ref} · ${outcome} · ${sourceState} · ${coverageText}`),
     );
@@ -3151,7 +3162,7 @@ function renderTrajectoryTraceList(trajectoryLearning) {
   return list;
 }
 
-function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card') {
+function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card', availability = null) {
   if (!trajectoryLearning && !skillCorpusReadiness) return null;
   const trajectories = trajectoryLearning?.trajectories ?? 0;
   const rows = trajectoryLearning
@@ -3165,6 +3176,8 @@ function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness =
       : 'observe-only readiness')
   ));
   const body = el('div', { cls: 'card-body' }, infoGrid(rows));
+  const withholding = learningMetricWithholdingText(availability);
+  if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
   if (trajectoryLearning) body.appendChild(renderTrajectoryTraceList(trajectoryLearning));
   card.appendChild(body);
   return card;
@@ -3669,9 +3682,14 @@ function renderFleet() {
   const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
   if (workspaceCard) section.appendChild(workspaceCard);
 
-  const attemptCoverageCard = renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card');
+  const attemptCoverage = dispatchProductionSourceHealthy(f.dispatchProductionSource)
+    ? f.attemptCoverage
+    : null;
+  const attemptCoverageCard = renderAttemptCoverageCard(
+    attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage
+  );
   if (attemptCoverageCard) section.appendChild(attemptCoverageCard);
-  const learningUnavailableCard = !f.attemptCoverage
+  const learningUnavailableCard = !attemptCoverage
     ? renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')
     : null;
   if (learningUnavailableCard) section.appendChild(learningUnavailableCard);
@@ -4086,8 +4104,13 @@ function renderControl() {
   const repairRecovery = fleetRepairRecoveryMetric(d.fleet ?? fleet);
   const isRepairRecoveryActive = fleetRepairRecoveryActive(shipReadiness, missionBrief);
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
-  const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
-  const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null;
+  const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+  const attemptCoverage = learningDenominatorHealthy
+    ? d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null
+    : null;
+  const trajectoryLearning = learningDenominatorHealthy
+    ? d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null
+    : null;
   const learningMetrics = d.fleet?.learningMetrics ?? fleet.learningMetrics ?? null;
   const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null;
   const repairHandoffRollout = d.fleet?.repairHandoffRollout ?? fleet.repairHandoffRollout ?? null;
@@ -4155,7 +4178,7 @@ function renderControl() {
     const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
     heroMetrics.appendChild(controlMetric('No-prop 24h', noProposal, noProposal > 0 ? '#f97316' : '#4ade80'));
   }
-  if (dispatchProduction) {
+  if (dispatchProduction && dispatchProductionSourceHealthy(dispatchProductionSource)) {
     const sourceHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
     const diagnosticRate = dispatchProductionDiagnosticRate(dispatchProduction);
     heroMetrics.appendChild(controlMetric(
@@ -4269,7 +4292,9 @@ function renderControl() {
   const missionWorkspaceCard = renderGlobalWorkspaceCard(workspace);
   if (missionWorkspaceCard) section.appendChild(missionWorkspaceCard);
 
-  const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
+  const missionAttemptCoverageCard = renderAttemptCoverageCard(
+    attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage
+  );
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
 
   const missionLearningUnavailableCard = !attemptCoverage
@@ -4277,7 +4302,9 @@ function renderControl() {
     : null;
   if (missionLearningUnavailableCard) section.appendChild(missionLearningUnavailableCard);
 
-  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness);
+  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(
+    trajectoryLearning, skillCorpusReadiness, 'ctrl-card card', learningMetrics?.trajectoryLearning
+  );
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
 
   const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
@@ -5597,8 +5624,14 @@ function fdRenderProductionPanel(snap) {
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const dispatchProductionSource = snap.fleet?.dispatchProductionSource ?? snap.control?.fleet?.dispatchProductionSource ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
-  const attemptCoverage = snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null;
-  const trajectoryLearning = snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null;
+  const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+  const attemptCoverage = learningDenominatorHealthy
+    ? snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null
+    : null;
+  const trajectoryLearning = learningDenominatorHealthy
+    ? snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null
+    : null;
+  const learningMetrics = snap.fleet?.learningMetrics ?? snap.control?.fleet?.learningMetrics ?? null;
   const skillCorpusReadiness = snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const hasProductionData = Boolean(prod || production || dispatchProduction || dispatchProductionSource || workspace || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
@@ -5628,7 +5661,7 @@ function fdRenderProductionPanel(snap) {
     }
   }
 
-  if (dispatchProduction) {
+  if (dispatchProduction && dispatchProductionSourceHealthy(dispatchProductionSource)) {
     const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
     const diagnosticAttempts = dispatchProductionDiagnosticAttempts(dispatchProduction);
     const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
@@ -5639,9 +5672,7 @@ function fdRenderProductionPanel(snap) {
       ['Window', proposalProductionWindowLabel(dispatchProduction)],
       ['Attempts', diagnosticAttempts],
       ['Proposals', dispatchProduction.proposalsCreated ?? 0],
-      ['Yield', dispatchProductionSourceHealthy(dispatchProductionSource)
-        ? formatFleetPercent(dispatchProductionDiagnosticRate(dispatchProduction))
-        : 'partial'],
+      ['Yield', formatFleetPercent(dispatchProductionDiagnosticRate(dispatchProduction))],
       ['Repair recovery', repairRecovery?.value ?? '—'],
       ['No-proposal', diagnosticNoProposal],
       ['Cancelled', dispatchProduction.outcomes?.cancelled ?? 0],
@@ -5663,7 +5694,7 @@ function fdRenderProductionPanel(snap) {
       ));
     }
   }
-  else if (dispatchProductionSource) {
+  else if (dispatchProductionSource || dispatchProduction) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
     body.appendChild(infoGrid([
       ['Source', dispatchProductionSourceText(dispatchProductionSource)],
@@ -5675,6 +5706,8 @@ function fdRenderProductionPanel(snap) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Trajectory learning'));
     body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)));
     body.appendChild(renderTrajectoryTraceList(trajectoryLearning));
+    const withholding = learningMetricWithholdingText(learningMetrics?.trajectoryLearning);
+    if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
   } else if (skillCorpusReadiness) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Skill learning'));
     body.appendChild(infoGrid(skillCorpusReadinessRows(skillCorpusReadiness)));
@@ -5738,6 +5771,8 @@ function fdRenderProductionPanel(snap) {
         `Actionable: ${actionableCause.cause} on ${actionableCause.count ?? 0} attempt${actionableCause.count === 1 ? '' : 's'}`
       ));
     }
+    const withholding = learningMetricWithholdingText(learningMetrics?.attemptCoverage);
+    if (withholding) body.appendChild(el('p', { cls: 'hint' }, withholding));
   }
 
   if (contextEfficiency) {

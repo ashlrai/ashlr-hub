@@ -461,6 +461,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function diagnosticResliceDrainMetric');
     expect(src).toContain('function generatedRepairRecoveryMetric');
     expect(src).toContain('function fleetRepairRecoveryMetric');
+    expect(src).toContain('if (!dispatchProductionSourceHealthy(source)) return null');
     expect(src).toContain('generated-repair-recovery-active');
     expect(src).toContain('repair recovery -> learning');
     expect(src).toContain("'Repair Loop'");
@@ -481,14 +482,15 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain('renderDispatchProductionCard(\n    f.dispatchProduction,\n    f.dispatchProductionSource,');
     expect(src).toContain('function dispatchProductionSourceText');
-    expect(src).toContain("return !source || (source.sourceState === 'healthy' && source.complete === true)");
+    expect(src).toContain("return source?.sourceState === 'healthy' && source.complete === true");
     expect(src).toContain("['Source', dispatchProductionSourceText(sourceQuality)]");
-    expect(src).toContain("renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card')");
+    expect(src).toContain('const attemptCoverage = dispatchProductionSourceHealthy(f.dispatchProductionSource)');
+    expect(src).toContain("attemptCoverage, 'fleet-card card', f.learningMetrics?.attemptCoverage");
     expect(src).toContain("renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain("['Diagnostic drain', diagnosticResliceDrainMetric(f.queue?.diagnosticResliceDrain) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
-    expect(src).toContain('renderAttemptCoverageCard(attemptCoverage)');
+    expect(src).toContain("attemptCoverage, 'ctrl-card card', learningMetrics?.attemptCoverage");
     expect(src).toContain('renderLearningMetricsUnavailableCard(learningMetrics)');
     expect(src).toContain('renderPhantomAgentReportCard(f.phantom');
     expect(src).toContain('renderPhantomAgentReportCard(d.fleet?.phantom');
@@ -515,6 +517,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function dispatchProductionWeakestBackend(backends)');
     expect(src).toContain('.filter((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
     expect(src).toContain('dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)');
+    expect(src).toContain('if (!dispatchProduction || !sourceHealthy)');
+    expect(src.match(/if \(dispatchProduction && dispatchProductionSourceHealthy\(dispatchProductionSource\)\)/g))
+      .toHaveLength(2);
+    expect(src).toContain("if (!metric || typeof metric !== 'object') return 'withheld'");
   });
 
   it('withholds learning rates when the dispatch denominator is degraded or missing', () => {
@@ -537,6 +543,58 @@ describe('M213 Dashboard SSE — /api/events', () => {
       state: 'withheld', reason: 'dispatch-source-degraded',
       sourceQuality: { invalidRows: 4, unreadableFiles: 1, stopReasons: ['row-limit'] },
     })).toBe('withheld: dispatch denominator degraded; 4 invalid row(s); 1 unreadable file(s); stopped: row-limit');
+
+    const metricStart = src.indexOf('function formatCoverageMetric(metric)');
+    const metricEnd = src.indexOf('\nfunction learningMetricsAvailabilityText', metricStart);
+    const formatMetric = new Function(
+      `${src.slice(metricStart, metricEnd)}\nreturn formatCoverageMetric;`,
+    )() as (metric?: Record<string, number>) => string;
+    expect(formatMetric()).toBe('withheld');
+
+    const healthStart = src.indexOf('function dispatchProductionSourceHealthy(source)');
+    const healthEnd = src.indexOf('\nfunction workspaceSourceHealthy', healthStart);
+    const sourceHealthy = new Function(
+      `${src.slice(healthStart, healthEnd)}\nreturn dispatchProductionSourceHealthy;`,
+    )() as (source?: { sourceState: string; complete: boolean }) => boolean;
+    expect(sourceHealthy()).toBe(false);
+    expect(sourceHealthy({ sourceState: 'missing', complete: false })).toBe(false);
+    expect(sourceHealthy({ sourceState: 'degraded', complete: false })).toBe(false);
+    expect(sourceHealthy({ sourceState: 'healthy', complete: true })).toBe(true);
+
+    const panelStart = src.indexOf('function fdRenderProductionPanel(snap)');
+    const panelEnd = src.indexOf('\nfunction fdRenderIntelligencePanel', panelStart);
+    type FakeNode = { children: unknown[]; appendChild: (child: unknown) => unknown };
+    const node = (...children: unknown[]): FakeNode => ({
+      children,
+      appendChild(child: unknown) { this.children.push(child); return child; },
+    });
+    const renderPanel = new Function(
+      'el', 'infoGrid', 'dispatchProductionSourceHealthy', 'dispatchProductionSourceText',
+      `${src.slice(panelStart, panelEnd)}\nreturn fdRenderProductionPanel;`,
+    )(
+      (_tag: string, _attrs: unknown, ...children: unknown[]) => node(...children),
+      (rows: unknown[][]) => node(...rows.flat()),
+      sourceHealthy,
+      (source?: { sourceState?: string }) => source?.sourceState ?? 'unknown',
+    ) as (snap: Record<string, unknown>) => FakeNode;
+    const rendered = renderPanel({
+      fleet: {
+        dispatchProductionSource: { sourceState: 'degraded', complete: false },
+        dispatchProduction: {
+          attempts: 2, proposalsCreated: 0, diagnosticNoProposal: 2,
+          diagnosticProposalRate: 0, byBackend: [{ backend: 'local', attempts: 2, proposalsCreated: 0 }],
+        },
+      },
+    });
+    const flatten = (value: unknown): string => value && typeof value === 'object' && 'children' in value
+      ? (value as FakeNode).children.map(flatten).join(' ')
+      : String(value ?? '');
+    const renderedText = flatten(rendered);
+    expect(renderedText).toContain('degraded');
+    expect(renderedText).not.toContain('0/2');
+    expect(renderedText).not.toContain('Attempts');
+    expect(renderedText).not.toContain('No-proposal');
+    expect(renderedText).not.toContain('0%');
   });
 
   it('app.js renders activity evidence without a misleading healthy zero', () => {
@@ -705,9 +763,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
 
     expect(src).toContain('function renderTrajectoryLearningCard');
-    expect(src).toContain("const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null");
+    expect(src).toContain('const learningDenominatorHealthy = dispatchProductionSourceHealthy(dispatchProductionSource)');
+    expect(src).toContain('? d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null');
     expect(src).toContain("const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null");
-    expect(src).toContain('renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness)');
+    expect(src).toContain("trajectoryLearning, skillCorpusReadiness, 'ctrl-card card', learningMetrics?.trajectoryLearning");
     expect(src).toContain("trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'");
     expect(src).toContain("trajectoryLearning || skillCorpusReadiness");
     expect(src).toContain('snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning');
@@ -716,9 +775,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)]");
     expect(src).toContain("['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)]");
     expect(src).toContain("['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)]");
-    expect(src).toContain("['Merged', terminal.merged ?? 0]");
-    expect(src).toContain("['No-proposal', terminal['no-proposal'] ?? 0]");
-    expect(src).toContain("['Failed', terminal.failed ?? 0]");
+    expect(src).toContain("['Merged', terminal ? terminal.merged : 'withheld']");
+    expect(src).toContain("['No-proposal', terminal ? terminal['no-proposal'] : 'withheld']");
+    expect(src).toContain("['Failed', terminal ? terminal.failed : 'withheld']");
     expect(src).toContain("['Top gap', formatTrajectoryLearningGap(trajectoryLearning)]");
     expect(src).toContain('function renderTrajectoryTraceList(trajectoryLearning)');
     expect(src).toContain('trajectoryLearning?.traces');
@@ -766,6 +825,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
       skillObservation: { sampleState: 'insufficient-sample' },
     }) as Array<[string, string | number]>;
     const values = Object.fromEntries(rows);
+    expect(values.Merged).toBe('withheld');
+    expect(values['Dispatch -> decision']).toBe('coverage');
     expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
     expect(values['Observed selections']).toBe('withheld');
     expect(values['Observation join gaps']).toBe('withheld');

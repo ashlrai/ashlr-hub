@@ -4046,7 +4046,7 @@ describe('M342 dispatch production ledger', () => {
     expect(read).toMatchObject({ events: [], sourceState: 'degraded', invalidRows: 1 });
   });
 
-  it('propagates bounded read quality through yield diagnostics while preserving wrappers', () => {
+  it('propagates bounded read quality while withholding yield wrappers', () => {
     const dir = dispatchProductionDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -4056,10 +4056,10 @@ describe('M342 dispatch production ledger', () => {
     );
 
     const detailed = readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000, limit: 20 });
-    expect(detailed.summary).toMatchObject({ events: 1 });
+    expect(detailed.summary).toBeUndefined();
     expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
     expect(detailed.events).toHaveLength(1);
-    expect(readDispatchProductionYield({ windowMs: 60 * 60 * 1000, limit: 20 })).toMatchObject({ events: 1 });
+    expect(readDispatchProductionYield({ windowMs: 60 * 60 * 1000, limit: 20 })).toBeUndefined();
     expect(readDispatchProductionEvents({ limit: 20 })).toHaveLength(1);
   });
 
@@ -5821,12 +5821,7 @@ describe('M342 dispatch production ledger', () => {
     const truncated = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 100, maxRows: 6 });
     expect(truncated.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
     expect(truncated.sourceQuality.stopReasons).toContain('row-limit');
-    expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution?.distinctUnits).toBeLessThan(6);
-    expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({
-      gate: 'withheld',
-      blockers: expect.arrayContaining(['source-incomplete']),
-    });
-    expect(truncated.summary?.generatedRepairAttempts).not.toHaveProperty('treatmentConversions');
+    expect(truncated.summary).toBeUndefined();
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });
     mkdirSync(dispatchProductionDir(), { recursive: true });
@@ -5837,12 +5832,67 @@ describe('M342 dispatch production ledger', () => {
     );
     const degraded = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 100 });
     expect(degraded.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
-    expect(degraded.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({
-      distinctUnits: 6,
-      gate: 'withheld',
-      blockers: expect.arrayContaining(['source-incomplete']),
+    expect(degraded.summary).toBeUndefined();
+  });
+
+  it('withholds every yield projection for a live six-row source with four invalid rows', () => {
+    const now = new Date().toISOString();
+    const first = makeEvent({ ts: now, itemId: 'valid-a', proposalCreated: false, outcome: 'empty-diff' });
+    const second = makeEvent({ ts: now, itemId: 'valid-b', proposalCreated: false, outcome: 'gate-blocked' });
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), [
+      JSON.stringify(first),
+      'not-json',
+      JSON.stringify(second),
+      '{}',
+      '[]',
+      '{"schemaVersion":1}',
+      '',
+    ].join('\n'), 'utf8');
+
+    const read = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 100 });
+
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'degraded', complete: false, rowsScanned: 6, invalidRows: 4,
     });
-    expect(degraded.summary?.generatedRepairAttempts).not.toHaveProperty('treatmentConversions');
+    expect(read.events).toHaveLength(2);
+    expect(read.summary).toBeUndefined();
+    expect(JSON.stringify(read)).not.toContain('proposalRate');
+    expect(JSON.stringify(read)).not.toContain('diagnosticProposalRate');
+  });
+
+  it('fails closed when a dispatch partition is rewritten in place with the same size mid-read', () => {
+    const now = new Date().toISOString();
+    const dir = dispatchProductionDir();
+    const path = join(dir, `${now.slice(0, 10)}.jsonl`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, `${JSON.stringify(makeEvent({
+      ts: now,
+      itemId: 'same-size-mutation',
+      title: 'AAAA stable snapshot',
+    }))}\n`, 'utf8');
+    let mutated = false;
+    _setDispatchProductionLedgerRetentionHooksForTest({
+      afterDispatchReadPass: (readPath) => {
+        if (mutated || readPath !== path) return;
+        mutated = true;
+        const before = readFileSync(path, 'utf8');
+        const after = before.replace('AAAA stable snapshot', 'BBBB stable snapshot');
+        expect(Buffer.byteLength(after)).toBe(Buffer.byteLength(before));
+        writeFileSync(path, after, 'utf8');
+      },
+    });
+
+    const read = readDispatchProductionEventsDetailed();
+
+    expect(mutated).toBe(true);
+    expect(read).toMatchObject({
+      sourceState: 'degraded', complete: false, unreadableFiles: 1,
+      stopReasons: expect.arrayContaining(['io-error']),
+    });
+    expect(read.events).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toContain('BBBB stable snapshot');
   });
 
   it('keeps raw proposal-disabled reasons while exposing diagnostic reasons for operators', () => {

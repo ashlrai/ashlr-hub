@@ -1890,6 +1890,7 @@ interface DispatchProductionLedgerRetentionHooksForTest {
   afterAttemptRetentionMarker?: () => void;
   afterFailureAttemptAppend?: () => void;
   afterTreatmentCompactedMarkers?: () => void;
+  afterDispatchReadPass?: (path: string) => void;
   assureStableRegularFiles?: (
     paths: string[],
     anchorPath: string,
@@ -4089,32 +4090,64 @@ function safeDispatchProductionFile(stat: Stats): boolean {
     (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
+function safeDispatchProductionBigIntFile(stat: BigIntStats): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && stat.nlink === 1n &&
+    (process.platform === 'win32' || typeof process.getuid !== 'function' ||
+      stat.uid === BigInt(process.getuid())) &&
+    (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
+}
+
+function sameBigIntFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.mode === right.mode && left.uid === right.uid && left.gid === right.gid &&
+    left.nlink === right.nlink && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
 function readDispatchProductionFileTail(
   path: string,
   maxBytes: number,
 ): { text: string; bytesRead: number; truncated: boolean } | null {
   let fd: number | undefined;
   try {
-    const pathBefore = lstatSync(path);
-    if (!safeDispatchProductionFile(pathBefore)) return null;
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const before = fstatSync(fd);
-    if (!safeDispatchProductionFile(before) || !sameFile(pathBefore, before)) return null;
-    const bytes = Math.min(before.size, maxBytes);
-    const start = Math.max(0, before.size - bytes);
-    const buffer = Buffer.alloc(bytes);
-    const bytesRead = bytes > 0 ? readSync(fd, buffer, 0, bytes, start) : 0;
-    const after = fstatSync(fd);
-    const pathAfter = lstatSync(path);
+    const pathBefore = lstatSync(path, { bigint: true });
+    if (!safeDispatchProductionBigIntFile(pathBefore)) return null;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    const before = fstatSync(fd, { bigint: true });
+    if (!safeDispatchProductionBigIntFile(before) || !sameBigIntFileSnapshot(pathBefore, before)) return null;
+    const fileSize = Number(before.size);
+    if (!Number.isSafeInteger(fileSize) || fileSize < 0) return null;
+    const bytes = Math.min(fileSize, maxBytes);
+    const start = Math.max(0, fileSize - bytes);
+    const readPass = (): Buffer | null => {
+      const buffer = Buffer.alloc(bytes);
+      let offset = 0;
+      while (offset < bytes) {
+        const count = readSync(fd!, buffer, offset, bytes - offset, start + offset);
+        if (count <= 0) return null;
+        offset += count;
+      }
+      return buffer;
+    };
+    const buffer = readPass();
+    if (buffer === null) return null;
+    dispatchProductionLedgerRetentionHooksForTest?.afterDispatchReadPass?.(path);
+    const between = fstatSync(fd, { bigint: true });
+    const pathBetween = lstatSync(path, { bigint: true });
+    if (!sameBigIntFileSnapshot(before, between) || !sameBigIntFileSnapshot(between, pathBetween)) return null;
+    const verification = readPass();
+    if (verification === null || !buffer.equals(verification)) return null;
+    const after = fstatSync(fd, { bigint: true });
+    const pathAfter = lstatSync(path, { bigint: true });
     if (
       pathAfter.isSymbolicLink() ||
-      !safeDispatchProductionFile(pathAfter) ||
-      !safeDispatchProductionFile(after) ||
-      !sameFile(before, after) ||
-      !sameFile(after, pathAfter) ||
-      after.size !== before.size ||
-      bytesRead !== bytes
+      !safeDispatchProductionBigIntFile(pathAfter) ||
+      !safeDispatchProductionBigIntFile(after) ||
+      !sameBigIntFileSnapshot(before, after) ||
+      !sameBigIntFileSnapshot(after, pathAfter)
     ) return null;
+    const bytesRead = buffer.length;
     let text: string;
     if (start > 0) {
       const boundaryWasNewline = buffer[0] === 0x0a;
@@ -7329,30 +7362,6 @@ export function summarizeDispatchProductionYield(
   };
 }
 
-function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | undefined): void {
-  if (!summary) return;
-  const withhold = (generated: GeneratedRepairAttemptSummary | undefined): void => {
-    if (!generated) return;
-    delete generated.treatmentConversions;
-    const attribution = generated.treatmentAttribution;
-    if (!attribution) return;
-    attribution.gate = 'withheld';
-    if (!attribution.blockers.includes('source-incomplete')) {
-      attribution.blockers = [...attribution.blockers, 'source-incomplete'];
-    }
-  };
-  withhold(summary.generatedRepairAttempts);
-  for (const buckets of [
-    summary.byBackend,
-    summary.bySource,
-    summary.byRepo,
-    summary.byBackendModel,
-    summary.byBackendSource,
-  ]) {
-    for (const bucket of buckets) withhold(bucket.generatedRepairAttempts);
-  }
-}
-
 export function readDispatchProductionYieldDetailed(opts?: {
   windowMs?: number;
   limit?: number;
@@ -7370,11 +7379,13 @@ export function readDispatchProductionYieldDetailed(opts?: {
     maxBytes: opts?.maxBytes,
     maxRows: opts?.maxRows,
   });
-  const summary = summarizeDispatchProductionYield(read.events, {
-    windowHours: windowMs / (60 * 60 * 1000),
-    limitPerDimension: opts?.limitPerDimension,
-  });
-  if (read.sourceState !== 'healthy' || !read.complete) withholdTreatmentConversions(summary);
+  const sourceComplete = read.sourceState === 'healthy' && read.complete;
+  const summary = sourceComplete
+    ? summarizeDispatchProductionYield(read.events, {
+        windowHours: windowMs / (60 * 60 * 1000),
+        limitPerDimension: opts?.limitPerDimension,
+      })
+    : undefined;
   const { events: _events, ...sourceQuality } = read;
   return {
     ...(summary ? { summary } : {}),
