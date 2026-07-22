@@ -60,8 +60,10 @@ export default defineConfig({
     maxWorkers: 4,
     // Windows hosted runners execute the same hermetic durability fixtures
     // several times slower than local/POSIX hosts. CI injects a bounded
-    // platform-specific default; explicit fixture deadlines still win.
+    // platform-specific default for both test bodies and fixture setup;
+    // explicit fixture deadlines still win.
     testTimeout: testTimeoutMs,
+    hookTimeout: testTimeoutMs,
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

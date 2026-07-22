@@ -19,6 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 
 const ciYml = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
 const pkg = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
@@ -108,6 +109,8 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain('npm run test:ci');
     expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
     expect(ciYml).toContain("ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}");
+    expect(vitestConfig).toContain('testTimeout: testTimeoutMs');
+    expect(vitestConfig).toContain('hookTimeout: testTimeoutMs');
   });
 
   it('runs Ubuntu exhaustively through deterministic shards with fixed Windows and macOS portability partitions', () => {
