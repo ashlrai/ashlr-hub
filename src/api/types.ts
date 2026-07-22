@@ -65,3 +65,11 @@ export type {
   SeamStatus,
   SeamRegistry,
 } from '../core/seams/types.js';
+
+export type {
+  SkillRoutingCalibrationCollisionsV1,
+  SkillRoutingCalibrationReasonV1,
+  SkillRoutingCalibrationRoutingV1,
+  SkillRoutingCalibrationSampleV1,
+  SkillRoutingCalibrationV1,
+} from '../core/fleet/skill-routing-calibration.js';
