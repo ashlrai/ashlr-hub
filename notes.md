@@ -1,5 +1,16 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Activity Rollover Audit Closure (2026-07-21)
+- Exact base: clean `b195eb01ebe4e0e90fbeed987e6a149c3e6944eb` on `codex/daemon-activity-rollover`.
+- Audit blockers: retention marker/key deletion restored false completeness; ordinary appends exhausted 1,024 retired files; simulated Windows could prune when directory fsync succeeded; torn first/new observational partitions wedged writes; FleetStatus ignored proven current-owner horizons after retention.
+- Intended authority boundary: daemon activity remains metadata-only and observation-only. The fixes may preserve current-owner display evidence, but never dispatch, readiness, learning, verification, or merge authority.
+- Implemented a private monotonic `.activity-truncated-v1` anchor plus retained-partition gap proof, so deletion of retention marker, key, and even the anchor cannot restore false completeness in the reproduced history.
+- Reused one validated zero-byte retired inode for each next append intent; 1,025 durable heartbeats completed with one retired marker.
+- Bound destructive retention to `nativeMode === "crash-durable"`; Windows-selected mode refuses inherited durable create/staging transactions and retains all partitions even when directory fsync succeeds.
+- Observational recovery now quarantines and erases only a pinned newest inode with no complete row, preserving older partitions and allowing first/new trailing writes to recover.
+- FleetStatus publishes active tick/child state from sampled history only when the current owner matches, is alive/fresh, and has a proven owner horizon; lifetime `complete` remains false.
+- Verification: focused activity/status 179/179; adjacent daemon/durability 287/287; typecheck, lint (existing warnings only), and build passed. Full suite: 12,107 passed, 26 skipped, with only two unrelated 5-second stress-fixture timeouts; both files passed 25/25 under an explicit 30-second budget.
+
 - Deterministic Ubuntu CI authority shards (2026-07-21):
   - The exhaustive Ubuntu suite was active but could reach the hermetic 15-minute hard cap, leaving no scheduler margin. CI now runs Vitest's deterministic file shards 1/3, 2/3, and 3/3 in separate fresh hermetic homes.
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.

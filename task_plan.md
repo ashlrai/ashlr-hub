@@ -1,5 +1,23 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Cycle - Activity Rollover Audit Closure (2026-07-21)
+- [x] Rehydrate clean `b195eb01` and map all five independent audit findings.
+- [x] Add monotonic truncation evidence and bounded retired-marker reuse.
+- [x] Make Windows activity storage categorically observational and recover torn new partitions.
+- [x] Admit current-owner horizon evidence into FleetStatus without claiming lifetime completeness.
+- [x] Add exact adversarial regressions and run focused/full verification.
+- [x] Commit locally without pushing and confirm the final worktree state.
+
+### Decisions
+- A dedicated zero-byte private truncation anchor is monotonic and never reused; marker/key omission can only reduce source quality.
+- Retired zero-byte inodes are recycled as the next append intent so heartbeat volume cannot grow the marker set.
+- `nativeMode`, not incidental directory-fsync success, controls whether destructive retention is permitted.
+- Sampled activity may describe current-owner work only when `ownerHorizonComplete` is proven; it remains observational and `complete:false`.
+
+### Errors Encountered
+- The first post-proof M49 run retained an old expectation that a forged single-row journal was lifetime-complete. The source now correctly reports sampled because its declared daemon start predates visible history; the no-authority invariant remains unchanged.
+- The exhaustive run passed 12,107 tests and skipped 26; only M374 and M432 exceeded their unrelated 5-second 4,097-record fixture budgets. Both suites passed all 25 tests in isolation with `--testTimeout=30000`.
+
 ## Deterministic Ubuntu CI Authority Shards (2026-07-21)
 - [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
 - [x] Partition the complete suite through Vitest's deterministic three-way file sharding.

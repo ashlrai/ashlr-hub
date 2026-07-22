@@ -42,6 +42,7 @@ const FUTURE_TOLERANCE_MS = 5_000;
 export const DAEMON_ACTIVITY_STALE_MS = 90_000;
 const ACTIVITY_KEY_NAME = '.activity-auth-key';
 const RETENTION_NAME = '.activity-retention-v1.json';
+const TRUNCATION_ANCHOR_NAME = '.activity-truncated-v1';
 const RETENTION_DOMAIN = 'ashlr:daemon-activity-retention:v1\0';
 
 export type DaemonActivityPhase = 'starting' | 'tick' | 'post-tick' | 'idle' | 'stopping';
@@ -564,6 +565,45 @@ function readRetentionMarker(
   }
 }
 
+function readTruncationAnchor(
+  directory: string,
+  expectedDirectory: Stats,
+): 'absent' | 'valid' | 'invalid' {
+  const path = join(directory, TRUNCATION_ANCHOR_NAME);
+  if (!existsSync(path)) return 'absent';
+  try {
+    if (!stableDirectory(directory, expectedDirectory)) return 'invalid';
+    const marker = lstatSync(path);
+    return privateFile(marker) && marker.size === 0 ? 'valid' : 'invalid';
+  } catch {
+    return 'invalid';
+  }
+}
+
+function ensureTruncationAnchor(directory: string, expectedDirectory: Stats): boolean {
+  const existing = readTruncationAnchor(directory, expectedDirectory);
+  if (existing === 'valid') return true;
+  if (existing === 'invalid') return false;
+  const path = join(directory, TRUNCATION_ANCHOR_NAME);
+  let fd: number | undefined;
+  try {
+    if (!fsyncStableDirectory(directory, expectedDirectory) || existsSync(path)) return false;
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+      fsConstants.O_NOFOLLOW, 0o600);
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    const marker = fstatSync(fd);
+    if (!privateFile(marker) || marker.size !== 0 || !fsyncStableDirectory(directory, expectedDirectory)) {
+      return false;
+    }
+    return readTruncationAnchor(directory, expectedDirectory) === 'valid';
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
 function readOpenedBytes(fd: number, size: number): Buffer | null {
   const bytes = Buffer.alloc(size);
   let offset = 0;
@@ -671,6 +711,45 @@ function retiredMarkerCount(directory: string): number | null {
   }
 }
 
+function reuseRetiredMarker(
+  intentPath: string,
+  directory: string,
+  expectedDirectory: Stats,
+  directoryDurable: boolean,
+): 'reused' | 'absent' | 'invalid' {
+  let fd: number | undefined;
+  try {
+    const reusableNames = readdirSync(directory).filter((name) => RETIRED_RE.test(name)).sort();
+    const reusableName = reusableNames.find((name) => {
+      try {
+        const candidate = lstatSync(join(directory, name));
+        return privateFile(candidate) && candidate.size === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (!reusableName) return 'absent';
+    const reusablePath = join(directory, reusableName);
+    const named = lstatSync(reusablePath);
+    if (!privateFile(named) || named.size !== 0 || existsSync(intentPath) ||
+      !stableDirectory(directory, expectedDirectory)) return 'invalid';
+    fd = openSync(reusablePath, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    const rebound = lstatSync(reusablePath);
+    if (!privateFile(opened) || !privateFile(rebound) || !sameNode(named, opened) ||
+      !sameNode(opened, rebound)) return 'invalid';
+    renameSync(reusablePath, intentPath);
+    if (directoryDurable && !fsyncStableDirectory(directory, expectedDirectory)) return 'invalid';
+    const moved = lstatSync(intentPath);
+    return privateFile(moved) && sameNode(opened, moved) && moved.size === 0 &&
+      stableDirectory(directory, expectedDirectory) ? 'reused' : 'invalid';
+  } catch {
+    return 'invalid';
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
 function hasRetiredTwin(directory: string, expected: Stats): boolean {
   try {
     return readdirSync(directory).some((name) => {
@@ -695,29 +774,8 @@ function createIntentMarker(
   let fd: number | undefined;
   try {
     if (!fsyncStableDirectory(directory, expectedDirectory) || existsSync(intentPath)) return false;
-    const reusableName = readdirSync(directory).find((name) => {
-      if (!RETIRED_RE.test(name)) return false;
-      try {
-        const candidate = lstatSync(join(directory, name));
-        return privateFile(candidate) && candidate.size === 0;
-      } catch {
-        return false;
-      }
-    });
-    if (reusableName) {
-      const reusablePath = join(directory, reusableName);
-      const named = lstatSync(reusablePath);
-      if (!privateFile(named) || named.size !== 0) return false;
-      fd = openSync(reusablePath, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
-      const opened = fstatSync(fd);
-      const rebound = lstatSync(reusablePath);
-      if (!privateFile(opened) || !privateFile(rebound) || !sameNode(named, opened) ||
-        !sameNode(opened, rebound)) return false;
-      renameSync(reusablePath, intentPath);
-      if (!fsyncStableDirectory(directory, expectedDirectory)) return false;
-      const moved = lstatSync(intentPath);
-      return privateFile(moved) && sameNode(opened, moved) && moved.size === 0;
-    }
+    const reused = reuseRetiredMarker(intentPath, directory, expectedDirectory, true);
+    if (reused !== 'absent') return reused === 'reused';
     const retired = retiredMarkerCount(directory);
     if (retired === null || retired >= MAX_RETIRED_FILES) return false;
     fd = openSync(
@@ -747,6 +805,8 @@ function createAppendIntentMarker(
   try {
     if ((directoryDurable && !fsyncStableDirectory(directory, expectedDirectory)) || existsSync(intentPath) ||
       !stableDirectory(directory, expectedDirectory)) return false;
+    const reused = reuseRetiredMarker(intentPath, directory, expectedDirectory, directoryDurable);
+    if (reused !== 'absent') return reused === 'reused';
     const retired = retiredMarkerCount(directory);
     if (retired === null || retired >= MAX_RETIRED_FILES) return false;
     fd = openSync(intentPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
@@ -769,11 +829,12 @@ function ensureRetentionMarker(
   dropping: ActivityPartition,
 ): boolean {
   const existing = readRetentionMarker(directory, expectedDirectory);
-  if (existing.state === 'valid') return true;
+  if (existing.state === 'valid') return ensureTruncationAnchor(directory, expectedDirectory);
   const bytes = readPartitionBytes(dropping.path, expectedDirectory);
   const rows = readPartition(dropping.path, expectedDirectory);
   const key = loadOrCreateActivityKey(directory, expectedDirectory);
-  if (!bytes || !rows || rows.length === 0 || !key) return false;
+  if (!bytes || !rows || rows.length === 0 || !key ||
+    !ensureTruncationAnchor(directory, expectedDirectory)) return false;
   const unsigned = {
     schemaVersion: 1 as const,
     authority: 'none' as const,
@@ -922,14 +983,29 @@ function recoverObservationalTrailingAppend(
   let fd: number | undefined;
   try {
     const named = lstatSync(latest.path);
-    if (!privateFile(named) || named.size < 2 || named.size > MAX_PARTITION_BYTES) return false;
+    if (!privateFile(named) || named.size > MAX_PARTITION_BYTES) return false;
     fd = openSync(latest.path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
     const opened = fstatSync(fd);
     if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== named.size) return false;
     const bytes = readOpenedBytes(fd, opened.size);
     if (!bytes || bytes.at(-1) === 0x0a) return false;
     const finalNewline = bytes.lastIndexOf(0x0a);
-    if (finalNewline < 1) return false;
+    if (finalNewline < 1) {
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      const retiredPath = join(directory, `.activity-retired-${randomUUID()}-${digest}.tmp`);
+      if (existsSync(retiredPath) || !stableDirectory(directory, expectedDirectory)) return false;
+      renameSync(latest.path, retiredPath);
+      const moved = lstatSync(retiredPath);
+      const pinned = fstatSync(fd);
+      if (!privateFile(moved) || !privateFile(pinned) || !sameNode(opened, moved) ||
+        !sameNode(moved, pinned)) return false;
+      ftruncateSync(fd, 0);
+      fsyncSync(fd);
+      const erased = fstatSync(fd);
+      const finalPath = lstatSync(retiredPath);
+      return privateFile(erased) && privateFile(finalPath) && sameNode(opened, erased) &&
+        sameNode(erased, finalPath) && erased.size === 0 && stableDirectory(directory, expectedDirectory);
+    }
     const prefix = bytes.subarray(0, finalNewline + 1).toString('utf8');
     let priorObservedAt: string | null = null;
     for (const line of prefix.slice(0, -1).split('\n')) {
@@ -978,11 +1054,15 @@ function recoverActivityTransactions(
       const pendingPartitions = listPartitions(directory);
       if (!directoryDurable || !pendingPartitions || pendingPartitions.length <= MAX_PARTITIONS) return false;
     }
+    if (retention.state === 'valid' && directoryDurable &&
+      !ensureTruncationAnchor(directory, expectedDirectory)) return false;
 
     // A hard-linked legacy stage cannot be unlinked safely against a same-UID
     // pathname swap. Migrate a valid published pair by retiring the target
     // through its descriptor; both legacy links become zero-byte inert markers.
-    for (const name of readdirSync(directory).filter((entry) => LEGACY_STAGING_RE.test(entry)).sort()) {
+    const legacyStageNames = readdirSync(directory).filter((entry) => LEGACY_STAGING_RE.test(entry)).sort();
+    if (!directoryDurable && legacyStageNames.length > 0) return false;
+    for (const name of legacyStageNames) {
       const match = LEGACY_STAGING_RE.exec(name);
       if (!match) return false;
       const stagePath = join(directory, name);
@@ -1003,6 +1083,7 @@ function recoverActivityTransactions(
 
     const intentNames = readdirSync(directory).filter((name) => INTENT_RE.test(name)).sort();
     if (intentNames.length > 1) return false;
+    if (!directoryDurable && intentNames.length > 0) return false;
     for (const name of intentNames) {
       const match = INTENT_RE.exec(name);
       if (!match) return false;
@@ -1154,17 +1235,20 @@ export function readDaemonActivity(options: {
     if (partitions.length > partitionLimit) return degraded;
     if (partitions.some((partition) => !inspectPartitionEnvelope(partition.path, directory))) return degraded;
     const retention = readRetentionMarker(directoryPath, directory);
-    if (retention.state === 'invalid') return degraded;
+    const truncationAnchor = readTruncationAnchor(directoryPath, directory);
+    if (retention.state === 'invalid' || truncationAnchor === 'invalid') return degraded;
 
     let activity: DaemonActivityRowV1 | null = null;
     let phaseStartedAt: string | null = null;
     let newerObservedAt: string | null = null;
     let remainingRows = MAX_PHASE_SCAN_ROWS;
     let phaseContinuityResolved = false;
-    let historyComplete = retention.state === 'absent' && durability === 'crash-durable';
+    let historyComplete = retention.state === 'absent' && truncationAnchor === 'absent' &&
+      durability === 'crash-durable';
     let scanComplete = true;
     let ownerHorizonComplete = false;
     let oldestObservedAt: string | null = null;
+    let oldestRow: DaemonActivityRowV1 | null = null;
     scan: for (let partitionIndex = partitions.length - 1; partitionIndex >= 0; partitionIndex--) {
       const partition = partitions[partitionIndex]!;
       const lines = partitionLines(partition.path, directory);
@@ -1197,11 +1281,15 @@ export function readDaemonActivity(options: {
         }
         newerObservedAt = row.observedAt;
         oldestObservedAt = row.observedAt;
+        oldestRow = row;
         remainingRows--;
       }
     }
     if (!activity || !stableDirectory(directoryPath, directory)) return degraded;
-    if (scanComplete && retention.state === 'absent') ownerHorizonComplete = true;
+    const oldestPartition = partitions[0]!;
+    if (oldestPartition.index > 0 ||
+      (oldestRow && oldestRow.daemonStartedAt.slice(0, 10) < oldestPartition.day)) historyComplete = false;
+    if (scanComplete && historyComplete) ownerHorizonComplete = true;
     if (retention.marker && oldestObservedAt && retention.marker.removedThrough > oldestObservedAt) return degraded;
     const nowMs = options.nowMs ?? Date.now();
     const observedMs = Date.parse(activity.observedAt);
@@ -1264,12 +1352,13 @@ export function writeDaemonActivity(input: {
     if (!lock) return false;
     const directoryAfterLock = lstatSync(daemonActivityDirectory());
     if (!privateDirectory(directoryAfterLock) || !sameNode(directories.directory, directoryAfterLock)) return false;
-    directoryDurable = input.runtime?.directoryDurability === 'unproven'
+    const nativeMode = selectDaemonActivityNativeMode(input.runtime?.platform);
+    const directoryFsyncProven = input.runtime?.directoryDurability === 'unproven'
       ? false
       : fsyncStableDirectory(daemonActivityDirectory(), directories.directory);
-    const nativeMode = selectDaemonActivityNativeMode(input.runtime?.platform);
+    directoryDurable = nativeMode === 'crash-durable' && directoryFsyncProven;
     if (!directoryDurable && nativeMode !== 'observational') return false;
-    const partitionLimit = directoryDurable ? MAX_PARTITIONS : MAX_OBSERVATIONAL_PARTITIONS;
+    const partitionLimit = nativeMode === 'crash-durable' ? MAX_PARTITIONS : MAX_OBSERVATIONAL_PARTITIONS;
     if (!recoverActivityTransactions(
       daemonActivityDirectory(), directories.directory, partitionLimit, directoryDurable,
     )) return false;

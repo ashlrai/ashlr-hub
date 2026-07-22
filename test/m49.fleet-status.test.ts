@@ -611,7 +611,12 @@ function recordFrontierShipDecision(proposal: Proposal): void {
   });
 }
 
-function writeRunningDaemon(home: string, ticks: DaemonTick[] = [], lastTickAt = '2026-07-03T00:05:00.000Z'): void {
+function writeRunningDaemon(
+  home: string,
+  ticks: DaemonTick[] = [],
+  lastTickAt = '2026-07-03T00:05:00.000Z',
+  startedAt = '2026-07-03T00:00:00.000Z',
+): void {
   const ashlrDir = join(home, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
   writeFileSync(
@@ -619,7 +624,7 @@ function writeRunningDaemon(home: string, ticks: DaemonTick[] = [], lastTickAt =
     JSON.stringify({
       running: true,
       pid: process.pid,
-      startedAt: '2026-07-03T00:00:00.000Z',
+      startedAt,
       lastTickAt,
       todayDate: lastTickAt.slice(0, 10),
       todaySpentUsd: 0,
@@ -6355,6 +6360,47 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('reports current-owner work from a proven sampled owner horizon without claiming complete history', async () => {
+    await withFakeNow(new Date('2026-07-09T00:01:00.000Z'), async () => {
+      const oldInstance = '123e4567-e89b-42d3-a456-426614174010';
+      for (let day = 1; day <= 9; day++) {
+        expect(writeDaemonActivity({
+          instanceId: oldInstance,
+          daemonStartedAt: '2026-07-01T00:00:00.000Z',
+          phase: 'idle',
+          now: new Date(`2026-07-${String(day).padStart(2, '0')}T00:00:00.000Z`),
+        })).toBe(true);
+      }
+      const currentStartedAt = '2026-07-09T00:00:30.000Z';
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174011',
+        daemonStartedAt: currentStartedAt,
+        phase: 'starting',
+        now: new Date('2026-07-09T00:00:30.000Z'),
+      })).toBe(true);
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174011',
+        daemonStartedAt: currentStartedAt,
+        phase: 'tick',
+        now: new Date('2026-07-09T00:01:00.000Z'),
+      })).toBe(true);
+      writeRunningDaemon(tmpHome, [], '2026-07-08T23:55:00.000Z', currentStartedAt);
+      writeDaemonLock(tmpHome, '2026-07-09T00:01:00.000Z');
+
+      const status = await buildFleetStatus(baseConfig());
+      expect(status.daemon.activity).toMatchObject({
+        sourceState: 'sampled',
+        complete: false,
+        ownerHorizonComplete: true,
+        freshness: 'fresh',
+        ownerMatches: true,
+        phase: 'tick',
+      });
+      expect(status.daemon.tickInProgress).toBe(true);
+      expect(formatFleetStatus(status)).toContain('activity:      tick active');
+    });
+  });
+
   it('does not infer tick progress or change readiness from missing activity evidence', async () => {
     await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
       writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
@@ -6391,7 +6437,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       })).toBe(true);
       const forged = await buildFleetStatus(baseConfig());
 
-      expect(forged.daemon.activity).toMatchObject({ sourceState: 'healthy', complete: true, ownerMatches: false });
+      expect(forged.daemon.activity).toMatchObject({ sourceState: 'sampled', complete: false, ownerMatches: false });
       expect(forged.daemon.tickInProgress).toBeUndefined();
       const readinessAuthority = (value: FleetStatus) => ({
         verdict: value.autonomousShipReadiness?.verdict,
@@ -7671,8 +7717,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       .toContain('activity:      activity stale');
     expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
       .toContain('activity:      activity unavailable');
-    expect(render({ ...activityBase, sourceState: 'sampled', complete: false, freshness: 'fresh' }))
+    expect(render({
+      ...activityBase, sourceState: 'sampled', complete: false, ownerHorizonComplete: false,
+      freshness: 'fresh',
+    }))
       .toContain('activity:      activity unavailable');
+    expect(render({
+      ...activityBase, sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+      freshness: 'fresh',
+    })).toContain('activity:      activity idle');
     expect(render({
       ...activityBase, sourceState: 'healthy', freshness: 'fresh', ownerMatches: false,
     })).toContain('activity:      activity owner unavailable');

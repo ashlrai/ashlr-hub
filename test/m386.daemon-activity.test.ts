@@ -300,6 +300,49 @@ describe('daemon activity — observational private state', () => {
     expect(readDaemonActivity().sourceState).toBe('degraded');
   });
 
+  it('keeps lifetime history sampled when the retention marker and key are deleted', () => {
+    for (let day = 1; day <= 9; day++) {
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: '2026-07-01T00:00:00.000Z',
+        phase: 'idle',
+        now: new Date(`2026-07-${String(day).padStart(2, '0')}T00:00:00.000Z`),
+      })).toBe(true);
+    }
+    const anchor = join(daemonActivityDirectory(), '.activity-truncated-v1');
+    expect(existsSync(anchor)).toBe(true);
+    expect(lstatSync(anchor).size).toBe(0);
+    rmSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'));
+    rmSync(join(daemonActivityDirectory(), '.activity-auth-key'));
+    rmSync(anchor);
+
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-09T00:00:01.000Z') })).toMatchObject({
+      sourceState: 'sampled',
+      complete: false,
+      ownerHorizonComplete: false,
+      activity: { observedAt: '2026-07-09T00:00:00.000Z' },
+    });
+  });
+
+  it('reuses retired append markers across more than 1,024 heartbeats', () => {
+    const startedAt = '2026-07-13T05:00:00.000Z';
+    const baseMs = Date.parse(startedAt);
+    for (let index = 0; index < 1_025; index++) {
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: startedAt,
+        phase: 'idle',
+        now: new Date(baseMs + index + 1),
+      }), `heartbeat ${index}`).toBe(true);
+    }
+
+    const retired = readdirSync(daemonActivityDirectory())
+      .filter((name) => name.startsWith('.activity-retired-'));
+    expect(retired).toHaveLength(1);
+    expect(lstatSync(join(daemonActivityDirectory(), retired[0]!)).size).toBe(0);
+    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8').trim().split('\n')).toHaveLength(1_025);
+  }, 180_000);
+
   it('recovers a torn ordinary append from its durable pre-length intent', () => {
     createActivityStorage();
     const path = daemonActivityPath('2026-07-13');
@@ -386,6 +429,53 @@ describe('daemon activity — observational private state', () => {
     expect(existsSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'))).toBe(false);
   });
 
+  it('never prunes Windows-selected storage even when directory fsync succeeds', () => {
+    for (let day = 1; day <= 9; day++) {
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: '2026-07-01T00:00:00.000Z',
+        phase: 'idle',
+        now: new Date(`2026-07-${String(day).padStart(2, '0')}T00:00:00.000Z`),
+        runtime: { platform: 'win32' },
+      })).toBe(true);
+    }
+
+    expect(readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl'))).toHaveLength(9);
+    expect(existsSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'))).toBe(false);
+    expect(existsSync(join(daemonActivityDirectory(), '.activity-truncated-v1'))).toBe(false);
+  });
+
+  it('refuses inherited durable create intents in Windows mode without pruning history', () => {
+    createActivityStorage();
+    for (let day = 1; day <= 9; day++) {
+      const observedAt = `2026-07-${String(day).padStart(2, '0')}T00:00:00.000Z`;
+      writeFileSync(
+        daemonActivityPath(observedAt.slice(0, 10)),
+        `${JSON.stringify({
+          ...activityRow(observedAt, 'idle'),
+          daemonStartedAt: '2026-07-01T00:00:00.000Z',
+        })}\n`,
+        { mode: 0o600 },
+      );
+    }
+    const intended = `${JSON.stringify({
+      ...activityRow('2026-07-10T00:00:00.000Z', 'idle'),
+      daemonStartedAt: '2026-07-01T00:00:00.000Z',
+    })}\n`;
+    writeFileSync(intentPath('2026-07-10', 0, intended), '', { mode: 0o600 });
+    writeFileSync(daemonActivityPath('2026-07-10'), intended, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-01T00:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-10T00:00:01.000Z'),
+      runtime: { platform: 'win32' },
+    })).toBe(false);
+    expect(readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl'))).toHaveLength(10);
+    expect(existsSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'))).toBe(false);
+  });
+
   it('repairs an observational torn tail even when its directory intent was not durable', () => {
     expect(writeDaemonActivity({
       instanceId,
@@ -410,6 +500,56 @@ describe('daemon activity — observational private state', () => {
       '2026-07-13T05:00:01.000Z',
       '2026-07-13T05:00:03.000Z',
     ]);
+  });
+
+  it('quarantines a torn first observational partition and permits the next write', () => {
+    createActivityStorage();
+    const path = daemonActivityPath('2026-07-13');
+    writeFileSync(path, JSON.stringify(activityRow('2026-07-13T05:00:01.000Z')).slice(0, 47), {
+      mode: 0o600,
+    });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:02.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+
+    expect(readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt))
+      .toEqual(['2026-07-13T05:00:02.000Z']);
+    const retired = readdirSync(daemonActivityDirectory())
+      .filter((name) => name.startsWith('.activity-retired-'));
+    expect(retired).toHaveLength(1);
+    expect(lstatSync(join(daemonActivityDirectory(), retired[0]!)).size).toBe(0);
+  });
+
+  it('quarantines a torn new observational partition without losing prior history', () => {
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+    const trailing = daemonActivityPath('2026-07-14');
+    writeFileSync(trailing, JSON.stringify(activityRow('2026-07-14T05:00:01.000Z')).slice(0, 63), {
+      mode: 0o600,
+    });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-14T05:00:02.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+
+    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8'))
+      .toContain('"observedAt":"2026-07-13T05:00:01.000Z"');
+    expect(readFileSync(trailing, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt))
+      .toEqual(['2026-07-14T05:00:02.000Z']);
   });
 
   it('rolls a saturated legacy partition into a numbered segment without losing freshness', () => {
@@ -722,7 +862,8 @@ describe('daemon activity — observational private state', () => {
 
     rmSync(daemonActivityPath('2026-07-13'));
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:03.000Z') })).toMatchObject({
-      sourceState: 'healthy',
+      sourceState: 'sampled',
+      complete: false,
       activity: { observedAt: '2026-07-13T05:00:02.000Z' },
     });
   });
