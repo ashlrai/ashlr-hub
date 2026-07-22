@@ -92,7 +92,6 @@ import {
   type LocalStoreLock,
 } from '../fleet/local-store-lock.js';
 import {
-  readDaemonActivity,
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
@@ -1351,12 +1350,10 @@ function staleResidentProof(state: DaemonState): 'dead' | 'reused' | null {
   } catch (error) {
     return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH' ? 'dead' : null;
   }
-  const activity = readDaemonActivity();
-  return activity.sourceState === 'healthy' && activity.complete && activity.ownerState === 'reused' &&
-    activity.activity?.pid === state.pid &&
-    activity.activity.daemonStartedAt === state.startedAt
-    ? 'reused'
-    : null;
+  // The activity journal is explicitly observational. A live PID, including a
+  // possibly reused one, requires an authority-bearing resident-state proof;
+  // metadata-only heartbeats can never authorize takeover.
+  return null;
 }
 
 function lastProducerMaintenanceAtMs(state: DaemonState): number | null {

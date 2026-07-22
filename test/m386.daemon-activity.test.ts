@@ -19,6 +19,7 @@ import {
   daemonActivityDirectory,
   daemonActivityPath,
   readDaemonActivity,
+  selectDaemonActivityNativeMode,
   writeDaemonActivity,
 } from '../src/core/daemon/activity.js';
 
@@ -82,7 +83,8 @@ describe('daemon activity — observational private state', () => {
   it('does not create storage while reading a missing source', () => {
     const root = process.env['ASHLR_HOME']!;
     expect(readDaemonActivity()).toEqual({
-      sourceState: 'missing', complete: false, freshness: 'unknown', ownerState: 'unknown',
+      sourceState: 'missing', complete: false, ownerHorizonComplete: false,
+      durability: 'crash-durable', freshness: 'unknown', ownerState: 'unknown',
       activity: null, phaseStartedAt: null, ageMs: null,
     });
     expect(existsSync(root)).toBe(false);
@@ -250,8 +252,8 @@ describe('daemon activity — observational private state', () => {
     expect(readinessBlock).not.toMatch(/daemon\.activity|tickInProgress|childActivity/);
     const loopSource = readFileSync(join(process.cwd(), 'src/core/daemon/loop.ts'), 'utf8');
     const staleProof = loopSource.match(/function staleResidentProof[\s\S]*?^}/m)?.[0] ?? '';
-    expect(staleProof).toMatch(/sourceState === 'healthy'/);
-    expect(staleProof).toMatch(/activity\.complete/);
+    expect(staleProof).not.toMatch(/readDaemonActivity|activity\.complete|ownerState/);
+    expect(staleProof).toMatch(/metadata-only heartbeats can never authorize takeover/);
     expect(readFileSync(join(process.cwd(), 'src/core/daemon/activity.ts'), 'utf8')).not.toMatch(/unlinkSync/);
   });
 
@@ -271,6 +273,143 @@ describe('daemon activity — observational private state', () => {
     const retired = readdirSync(daemonActivityDirectory()).filter((name) => name.startsWith('.activity-retired-'));
     expect(retired).toHaveLength(2);
     expect(retired.every((name) => lstatSync(join(daemonActivityDirectory(), name)).size === 0)).toBe(true);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-09T00:00:01.000Z') })).toMatchObject({
+      sourceState: 'sampled',
+      complete: false,
+      ownerHorizonComplete: false,
+      durability: 'crash-durable',
+      freshness: 'fresh',
+      activity: { observedAt: '2026-07-09T00:00:00.000Z' },
+    });
+    const retention = readFileSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'), 'utf8');
+    expect(retention).not.toMatch(/prompt|objective|command|stdout|stderr|backend|model|repo|diff|env/i);
+    expect(JSON.parse(retention)).toMatchObject({
+      schemaVersion: 1,
+      authority: 'none',
+      truncated: true,
+      firstRemovedPartition: '2026-07-01.jsonl',
+      removedThrough: '2026-07-01T00:00:00.000Z',
+    });
+    const tampered = JSON.parse(retention);
+    tampered.removedThrough = '2026-07-01T00:00:00.001Z';
+    writeFileSync(
+      join(daemonActivityDirectory(), '.activity-retention-v1.json'),
+      `${JSON.stringify(tampered)}\n`,
+      { mode: 0o600 },
+    );
+    expect(readDaemonActivity().sourceState).toBe('degraded');
+  });
+
+  it('recovers a torn ordinary append from its durable pre-length intent', () => {
+    createActivityStorage();
+    const path = daemonActivityPath('2026-07-13');
+    const first = `${JSON.stringify(activityRow('2026-07-13T05:00:01.000Z'))}\n`;
+    const torn = `${JSON.stringify(activityRow('2026-07-13T05:00:02.000Z', 'idle'))}\n`;
+    writeFileSync(path, first, { mode: 0o600 });
+    const digest = createHash('sha256').update(torn).digest('hex');
+    const intent = join(
+      daemonActivityDirectory(),
+      `.activity-append-2026-07-13-0000-123e4567-e89b-42d3-a456-426614174001-${Buffer.byteLength(first)}-${Buffer.byteLength(torn)}-${digest}.tmp`,
+    );
+    writeFileSync(intent, '', { mode: 0o600 });
+    writeFileSync(path, `${first}${torn.slice(0, 47)}`, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:03.000Z'),
+    })).toBe(true);
+
+    const rows = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(rows.map((row) => row.observedAt)).toEqual([
+      '2026-07-13T05:00:01.000Z',
+      '2026-07-13T05:00:03.000Z',
+    ]);
+    expect(existsSync(intent)).toBe(false);
+  });
+
+  it('repairs an interrupted truncation anchor before retiring intact history', () => {
+    createActivityStorage();
+    for (let day = 1; day <= 9; day++) {
+      writeFileSync(
+        daemonActivityPath(`2026-07-${String(day).padStart(2, '0')}`),
+        `${JSON.stringify({
+          ...activityRow(`2026-07-${String(day).padStart(2, '0')}T05:00:00.000Z`, 'idle'),
+          daemonStartedAt: '2026-07-01T00:00:00.000Z',
+        })}\n`,
+        { mode: 0o600 },
+      );
+    }
+    writeFileSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'), '{"schemaVersion":', {
+      mode: 0o600,
+    });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-01T00:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-09T05:00:01.000Z'),
+    })).toBe(true);
+    expect(readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl'))).toHaveLength(8);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-09T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'sampled', complete: false, activity: { observedAt: '2026-07-09T05:00:01.000Z' },
+    });
+  });
+
+  it('selects observational Windows storage and publishes without retention authority', () => {
+    expect(selectDaemonActivityNativeMode('linux')).toBe('crash-durable');
+    expect(selectDaemonActivityNativeMode('win32')).toBe('observational');
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+    expect(readDaemonActivity({
+      nowMs: Date.parse('2026-07-13T05:00:02.000Z'),
+      platform: 'win32',
+    })).toMatchObject({
+      sourceState: 'sampled', complete: false, durability: 'observational', freshness: 'fresh',
+    });
+    for (let offset = 1; offset < 9; offset++) {
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: '2026-07-13T05:00:00.000Z',
+        phase: 'idle',
+        now: new Date(Date.parse('2026-07-13T05:00:01.000Z') + offset * 86_400_000),
+        runtime: { platform: 'win32', directoryDurability: 'unproven' },
+      })).toBe(true);
+    }
+    expect(readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl'))).toHaveLength(9);
+    expect(existsSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'))).toBe(false);
+  });
+
+  it('repairs an observational torn tail even when its directory intent was not durable', () => {
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+    const path = daemonActivityPath('2026-07-13');
+    const intact = readFileSync(path, 'utf8');
+    const torn = `${JSON.stringify(activityRow('2026-07-13T05:00:02.000Z', 'idle'))}\n`;
+    writeFileSync(path, `${intact}${torn.slice(0, 53)}`, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:03.000Z'),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+    expect(readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt)).toEqual([
+      '2026-07-13T05:00:01.000Z',
+      '2026-07-13T05:00:03.000Z',
+    ]);
   });
 
   it('rolls a saturated legacy partition into a numbered segment without losing freshness', () => {
@@ -317,7 +456,8 @@ describe('daemon activity — observational private state', () => {
     );
 
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:32.000Z') })).toEqual({
-      sourceState: 'degraded', complete: false, freshness: 'unknown', ownerState: 'unknown',
+      sourceState: 'degraded', complete: false, ownerHorizonComplete: false,
+      durability: 'crash-durable', freshness: 'unknown', ownerState: 'unknown',
       activity: null, phaseStartedAt: null, ageMs: null,
     });
     expect(writeDaemonActivity({
@@ -596,7 +736,8 @@ describe('daemon activity — observational private state', () => {
     );
 
     expect(readDaemonActivity({ nowMs: Date.parse('2026-08-01T05:00:02.000Z') })).toEqual({
-      sourceState: 'degraded', complete: false, freshness: 'unknown', ownerState: 'unknown',
+      sourceState: 'degraded', complete: false, ownerHorizonComplete: false,
+      durability: 'crash-durable', freshness: 'unknown', ownerState: 'unknown',
       activity: null, phaseStartedAt: null, ageMs: null,
     });
   });

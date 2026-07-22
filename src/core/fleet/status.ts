@@ -1308,6 +1308,8 @@ export interface FleetStatus {
       source: 'daemon-activity';
       sourceState: 'missing' | 'healthy' | 'sampled' | 'degraded';
       complete: boolean;
+      ownerHorizonComplete: boolean;
+      durability: 'crash-durable' | 'observational';
       freshness: 'fresh' | 'stale' | 'future' | 'unknown';
       ownerState: 'alive' | 'dead' | 'reused' | 'unknown';
       phase: 'starting' | 'tick' | 'post-tick' | 'idle' | 'stopping' | null;
@@ -1865,6 +1867,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         source: 'daemon-activity',
         sourceState: activityRead.sourceState,
         complete: activityRead.complete,
+        ownerHorizonComplete: activityRead.ownerHorizonComplete,
+        durability: activityRead.durability,
         freshness: activityRead.freshness,
         ownerState: activityRead.ownerState,
         phase: activity?.phase ?? null,
