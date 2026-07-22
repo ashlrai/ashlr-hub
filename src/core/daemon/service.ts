@@ -348,7 +348,7 @@ function runCmd(args: string[]): CommandResult {
     return {
       ok,
       stdout: result.stdout ?? '',
-      stderr: result.stderr ?? result.error?.message ?? '',
+      stderr: result.stderr || result.error?.message || '',
     };
   } catch (e) {
     return { ok: false, stdout: '', stderr: e instanceof Error ? e.message : String(e) };
@@ -368,11 +368,24 @@ function launchdAbsent(result: CommandResult): boolean {
   return !result.ok && /(?:could not find (?:specified )?service|service .* not found|no such process|not loaded)/i.test(output);
 }
 
-function launchdLoaded(serviceTarget: string): boolean {
+interface LaunchdRuntimeState {
+  loaded: boolean;
+  pid?: number;
+}
+
+function readLaunchdRuntimeState(serviceTarget: string): LaunchdRuntimeState {
   const result = runCmd(['launchctl', 'print', serviceTarget]);
-  if (result.ok) return true;
-  if (launchdAbsent(result)) return false;
+  if (result.ok) {
+    const pidMatch = result.stdout.match(/(?:^|\s)"?pid"?\s*=\s*(\d+)/im);
+    const pid = pidMatch?.[1] ? Number(pidMatch[1]) : undefined;
+    return { loaded: true, ...(pid && pid > 0 ? { pid } : {}) };
+  }
+  if (launchdAbsent(result)) return { loaded: false };
   throw commandError(`launchctl print ${serviceTarget}`, result);
+}
+
+function launchdLoaded(serviceTarget: string): boolean {
+  return readLaunchdRuntimeState(serviceTarget).loaded;
 }
 
 function launchdDisabled(domainTarget: string, label: string): boolean {
@@ -396,16 +409,39 @@ function setLaunchdDisabled(serviceTarget: string, domainTarget: string, label: 
 }
 
 function stopLaunchdService(serviceTarget: string): CommandResult {
-  const stopped = runCmd(['launchctl', 'bootout', serviceTarget]);
-  if (stopped.ok && /(?:boot-?out|unload) failed:/im.test(stopped.stderr)) return { ...stopped, ok: false };
-  if (!stopped.ok && !launchdAbsent(stopped)) return stopped;
+  let before: LaunchdRuntimeState;
   try {
-    return launchdLoaded(serviceTarget)
-      ? { ok: false, stdout: '', stderr: `${serviceTarget} remains loaded after bootout` }
-      : { ok: true, stdout: '', stderr: '' };
+    before = readLaunchdRuntimeState(serviceTarget);
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
+
+  const stopped = runCmd(['launchctl', 'bootout', '--wait', serviceTarget]);
+  if (stopped.ok && /(?:boot-?out|unload) failed:/im.test(stopped.stderr)) return { ...stopped, ok: false };
+  if (!stopped.ok && !launchdAbsent(stopped)) return stopped;
+  try {
+    if (launchdLoaded(serviceTarget)) {
+      return { ok: false, stdout: '', stderr: `${serviceTarget} remains loaded after bootout --wait` };
+    }
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+
+  if (before.pid) {
+    const processProbe = runCmd(['/bin/kill', '-0', String(before.pid)]);
+    if (processProbe.ok) {
+      return { ok: false, stdout: '', stderr: `prior launchd PID ${before.pid} remains alive after bootout --wait` };
+    }
+    if (!/(?:no such process|not found)/i.test(`${processProbe.stdout}\n${processProbe.stderr}`)) {
+      return {
+        ok: false,
+        stdout: '',
+        stderr: `could not prove prior launchd PID ${before.pid} exited: ` +
+          `${processProbe.stderr.trim() || processProbe.stdout.trim() || 'exit non-zero'}`,
+      };
+    }
+  }
+  return { ok: true, stdout: '', stderr: '' };
 }
 
 function loadLaunchdService(domainTarget: string, serviceTarget: string, plistPath: string): CommandResult {
@@ -428,13 +464,23 @@ function restoreLaunchdActivation(
   loaded: boolean,
   disabled: boolean,
 ): CommandResult {
-  const state = setLaunchdDisabled(serviceTarget, domainTarget, label, disabled);
-  if (!state.ok) return state;
-  if (!loaded) return stopLaunchdService(serviceTarget);
+  if (!loaded) {
+    const state = setLaunchdDisabled(serviceTarget, domainTarget, label, disabled);
+    if (!state.ok) return state;
+    return stopLaunchdService(serviceTarget);
+  }
   try {
+    if (!launchdLoaded(serviceTarget)) {
+      const temporarilyEnabled = setLaunchdDisabled(serviceTarget, domainTarget, label, false);
+      if (!temporarilyEnabled.ok) return temporarilyEnabled;
+      const restored = loadLaunchdService(domainTarget, serviceTarget, plistPath);
+      if (!restored.ok) return restored;
+    }
+    const finalDisabledState = setLaunchdDisabled(serviceTarget, domainTarget, label, disabled);
+    if (!finalDisabledState.ok) return finalDisabledState;
     return launchdLoaded(serviceTarget)
-      ? { ok: true, stdout: '', stderr: '' }
-      : loadLaunchdService(domainTarget, serviceTarget, plistPath);
+      ? finalDisabledState
+      : { ok: false, stdout: '', stderr: `${serviceTarget} did not remain loaded while restoring disabled=${disabled}` };
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
@@ -513,13 +559,31 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
     const domainTarget = `gui/${uid}`;
     const label = 'ai.ashlr.daemon';
     const serviceTarget = `${domainTarget}/${label}`;
-    const priorLoaded = launchdLoaded(serviceTarget);
-    const priorDisabled = launchdDisabled(domainTarget, label);
+    let priorActivation: { loaded: boolean; disabled: boolean } | undefined;
     installLaunchdPlistTransaction({
       plistPath: def.filePath,
       trustedRoot: home,
       content: def.content,
       lockDir: path.join(home, '.ashlr', 'locks'),
+      preflight: ({ hasPrior }) => {
+        try {
+          const runtime = readLaunchdRuntimeState(serviceTarget);
+          if (runtime.loaded && !hasPrior) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: `refusing to replace loaded ${serviceTarget} without a trusted prior plist`,
+            };
+          }
+          priorActivation = {
+            loaded: runtime.loaded,
+            disabled: launchdDisabled(domainTarget, label),
+          };
+          return { ok: true, stdout: '', stderr: '' };
+        } catch (error) {
+          return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+        }
+      },
       unload: () => stopLaunchdService(serviceTarget),
       load: () => {
         const state = setLaunchdDisabled(serviceTarget, domainTarget, label, !autostart);
@@ -527,13 +591,16 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
         return loadLaunchdService(domainTarget, serviceTarget, def.filePath);
       },
       rollback: () => {
+        if (!priorActivation) {
+          return { ok: false, stdout: '', stderr: 'launchd activation preflight state is unavailable' };
+        }
         return restoreLaunchdActivation(
           domainTarget,
           serviceTarget,
           label,
           def.filePath,
-          priorLoaded,
-          priorDisabled,
+          priorActivation.loaded,
+          priorActivation.disabled,
         );
       },
     });

@@ -82,9 +82,12 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
 
 function useSuccessfulLaunchdTransactionMock(): void {
   installLaunchdPlistTransactionMock.mockImplementation((options: {
+    preflight?: (state: { hasPrior: boolean }) => { ok: boolean; stderr: string };
     unload: () => { ok: boolean; stderr: string };
     load: () => { ok: boolean; stderr: string };
   }) => {
+    const preflight = options.preflight?.({ hasPrior: true });
+    if (preflight && !preflight.ok) throw new Error(`launchd transaction preflight failed: ${preflight.stderr}`);
     const unloaded = options.unload();
     if (!unloaded.ok) throw new Error(`launchctl unload failed: ${unloaded.stderr}`);
     const loaded = options.load();
@@ -113,6 +116,9 @@ function successfulServiceCommands() {
       if (args[0] === 'disable') launchdDisabled = true;
       if (args[0] === 'enable') launchdDisabled = false;
       return { status: 0, stdout: '', stderr: '', error: undefined };
+    }
+    if (cmd === '/bin/kill') {
+      return { status: 1, stdout: '', stderr: 'kill: 123: No such process', error: undefined };
     }
     if (cmd === 'systemctl') {
       if (args.includes('enable')) { systemdEnabled = true; systemdActive = true; }
@@ -418,6 +424,16 @@ describe('install() — mocked spawnSync', () => {
     const hasLoad = calls.some((c: string) => c.includes('launchctl') && c.includes('bootstrap'));
     expect(hasUnload).toBe(true);
     expect(hasLoad).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'launchctl',
+      ['bootout', '--wait', expect.stringMatching(/^gui\/\d+\/ai\.ashlr\.daemon$/)],
+      expect.objectContaining({ timeout: 15_000 }),
+    );
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      '/bin/kill',
+      ['-0', '123'],
+      expect.objectContaining({ timeout: 15_000 }),
+    );
   });
 
   it('darwin: enables the launchd label before loading an autostart service', async () => {
@@ -489,12 +505,60 @@ describe('install() — mocked spawnSync', () => {
     expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootstrap'))).toBe(false);
   });
 
+  it('darwin: refuses bootstrap while the snapshotted PID is still alive', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === '/bin/kill'
+        ? { status: 0, stdout: '', stderr: '', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow('prior launchd PID 123 remains alive');
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootstrap'))).toBe(false);
+  });
+
+  it('darwin: fails closed when bounded bootout --wait times out', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'launchctl' && args.includes('bootout')
+        ? {
+            status: null,
+            stdout: '',
+            stderr: '',
+            error: Object.assign(new Error('spawnSync launchctl ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+          }
+        : normal(cmd, args));
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow('ETIMEDOUT');
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootstrap'))).toBe(false);
+  });
+
+  it('darwin: rejects a loaded service without a trusted prior plist before mutation', async () => {
+    installLaunchdPlistTransactionMock.mockImplementation((options: {
+      preflight: (state: { hasPrior: boolean }) => { ok: boolean; stderr: string };
+      unload: () => unknown;
+      load: () => unknown;
+    }) => {
+      const preflight = options.preflight({ hasPrior: false });
+      if (!preflight.ok) throw new Error(`launchd transaction preflight failed: ${preflight.stderr}`);
+      options.unload();
+      options.load();
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'without a trusted prior plist',
+    );
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootout'))).toBe(false);
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootstrap'))).toBe(false);
+  });
+
   it('darwin: rollback restores the prior loaded and disabled states exactly', async () => {
     installLaunchdPlistTransactionMock.mockImplementation((options: {
+      preflight: (state: { hasPrior: boolean }) => { ok: boolean; stderr: string };
       unload: () => { ok: boolean; stderr: string };
       load: () => { ok: boolean; stderr: string };
       rollback: () => { ok: boolean; stderr: string };
     }) => {
+      expect(options.preflight({ hasPrior: true }).ok).toBe(true);
       expect(options.unload().ok).toBe(true);
       expect(options.load().ok).toBe(false);
       expect(options.rollback().ok).toBe(true);
@@ -503,7 +567,8 @@ describe('install() — mocked spawnSync', () => {
     let loaded = true;
     let disabled = true;
     let bootstrapCount = 0;
-    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+    const activationCalls: string[] = [];
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (args[0] === 'print') {
         return loaded
           ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
@@ -513,14 +578,18 @@ describe('install() — mocked spawnSync', () => {
         return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${disabled} }`, stderr: '', error: undefined };
       }
       if (args[0] === 'bootout') loaded = false;
-      if (args[0] === 'enable') disabled = false;
-      if (args[0] === 'disable') disabled = true;
+      if (args[0] === 'enable') { disabled = false; activationCalls.push('enable'); }
+      if (args[0] === 'disable') { disabled = true; activationCalls.push('disable'); }
       if (args[0] === 'bootstrap') {
+        activationCalls.push('bootstrap');
         bootstrapCount++;
         if (bootstrapCount === 1) {
           return { status: 5, stdout: '', stderr: 'new plist rejected', error: undefined };
         }
         loaded = true;
+      }
+      if (cmd === '/bin/kill') {
+        return { status: 1, stdout: '', stderr: 'No such process', error: undefined };
       }
       return { status: 0, stdout: '', stderr: '', error: undefined };
     });
@@ -529,6 +598,7 @@ describe('install() — mocked spawnSync', () => {
     expect(loaded).toBe(true);
     expect(disabled).toBe(true);
     expect(bootstrapCount).toBe(2);
+    expect(activationCalls).toEqual(['enable', 'bootstrap', 'enable', 'bootstrap', 'disable']);
   });
 
   it('linux: calls systemctl --user daemon-reload then enable --now', async () => {
