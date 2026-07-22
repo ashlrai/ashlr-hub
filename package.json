@@ -83,6 +83,7 @@
     "vite": "6.4.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "marked": "^17.0.0"
   }
 }

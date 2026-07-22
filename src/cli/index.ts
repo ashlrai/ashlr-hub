@@ -17,6 +17,7 @@
  *   run show <id>              Print a past run in detail.
  *   runs [--json]              List past runs.
  *   pulse [--json] [--window]  Local observability dashboard: tokens, cost, activity.
+ *   skills audit <path>        Quarantine-audit an external skill pack (read-only).
  *   new <name> [opts]          Scaffold a new project and register it in the index.
  *   ship [path] [opts]         Run pre-ship gate (lint/test/build/deps) + optional deploy.
  *   recall "<query>"           Search shared genome memory; return top relevant entries.
@@ -149,6 +150,18 @@ const loadEvalCmd = lazyCmd(
   () => import('./eval.js' as unknown as string),
   (m) => m.cmdEval as Cmd,
   'eval command requires src/cli/eval.ts (M44 module not yet built).',
+);
+
+const loadSkillsCmd = lazyCmd(
+  () => import('./skills.js' as unknown as string),
+  (m) => m.cmdSkills as Cmd,
+  'skills command requires src/cli/skills.ts.',
+);
+
+const loadSkillsAuditWorkerCmd = lazyCmd(
+  () => import('./skills.js' as unknown as string),
+  (m) => m.cmdSkillsAuditWorker as Cmd,
+  'skills audit worker requires src/cli/skills.ts.',
 );
 
 // ─── M49 fleet control plane + observability ──────────────────────────────────
@@ -1683,6 +1696,18 @@ async function main(): Promise<void> {
         // prompts OFF vs ON and reports steps/done/tokens.
         const cmdEval = await loadEvalCmd();
         process.exitCode = await cmdEval(rest);
+        break;
+      }
+
+      case 'skills': {
+        const cmdSkills = await loadSkillsCmd();
+        process.exitCode = await cmdSkills(rest);
+        break;
+      }
+
+      case '__skills-audit-worker': {
+        const cmdSkillsAuditWorker = await loadSkillsAuditWorkerCmd();
+        process.exitCode = await cmdSkillsAuditWorker(rest);
         break;
       }
 

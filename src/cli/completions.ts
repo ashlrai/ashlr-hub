@@ -20,6 +20,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'enroll', 'backlog', 'inbox', 'daemon', 'ask', 'knowledge', 'reflect',
   'health', 'goals', 'fleet', 'recovery', 'digest', 'seams', 'verify-safety', 'preflight',
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'help',
+  'skills',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -52,6 +53,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   seams: ['status'],
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
+  skills: ['audit'],
 };
 
 const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [
