@@ -48,10 +48,14 @@ export interface LaunchdPlistTransactionOptions {
   trustedRoot: string;
   content: string;
   lockDir: string;
+  /** Stable diagnostic label; defaults to launchd for compatibility. */
+  operationLabel?: string;
   /** Validate external activation state after the plist snapshot and before any write. */
   preflight?: (state: { hasPrior: boolean }) => LaunchdCommandResult;
   unload: () => LaunchdCommandResult;
   load: () => LaunchdCommandResult;
+  /** Recheck the requested external state at the final durable boundary. */
+  verify?: () => LaunchdCommandResult;
   /** Restore the activation state captured before installation. Defaults to load(). */
   rollback?: () => LaunchdCommandResult;
   /** Restore activation state persisted by preflight after an interrupted process restarts. */
@@ -71,6 +75,11 @@ export interface LaunchdPlistRemovalOptions {
 
 function owned(stat: fs.Stats): boolean {
   return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+}
+
+function trustedDirectory(stat: fs.Stats): boolean {
+  const safePosixMode = process.platform === 'win32' || (stat.mode & 0o022) === 0;
+  return !stat.isSymbolicLink() && stat.isDirectory() && owned(stat) && safePosixMode;
 }
 
 function missing(error: unknown): boolean {
@@ -196,6 +205,7 @@ function atomicReplace(
     ) {
       throw new Error(`atomic replacement ownership check failed for ${filePath}`);
     }
+    fsyncParent(filePath);
     return installed;
   } finally {
     try {
@@ -217,6 +227,7 @@ function replaceBackup(
   try {
     assertParentIdentity(plistPath, expectedParent);
     fs.renameSync(temporary, backupPath);
+    fsyncParent(backupPath);
   } finally {
     try {
       const remaining = fs.lstatSync(temporary);
@@ -271,7 +282,7 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
   }
 
   const rootStat = fs.lstatSync(root);
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || !owned(rootStat)) {
+  if (!trustedDirectory(rootStat)) {
     throw new Error(`unsafe launchd trusted root ${root}`);
   }
 
@@ -280,14 +291,14 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
     current = path.join(current, component);
     try {
       const stat = fs.lstatSync(current);
-      if (stat.isSymbolicLink() || !stat.isDirectory() || !owned(stat)) {
+      if (!trustedDirectory(stat)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
     } catch (error) {
       if (!missing(error)) throw error;
       fs.mkdirSync(current, { mode: 0o700 });
       const created = fs.lstatSync(current);
-      if (created.isSymbolicLink() || !created.isDirectory() || !owned(created)) {
+      if (!trustedDirectory(created)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
     }
@@ -297,7 +308,7 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
 
 function assertParentIdentity(plistPath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
   const parent = fs.lstatSync(path.dirname(plistPath));
-  if (parent.isSymbolicLink() || !parent.isDirectory() || !owned(parent) ||
+  if (!trustedDirectory(parent) ||
       parent.dev !== expected.dev || parent.ino !== expected.ino) {
     throw new Error(`launchd plist parent changed during transaction: ${path.dirname(plistPath)}`);
   }
@@ -425,10 +436,11 @@ function restoreInterruptedTransaction(
   filePath: string,
   pending: { journal: LaunchdInstallJournal; stat: fs.Stats },
 ): void {
+  const operation = options.operationLabel ?? 'launchd';
   const stopped = options.unload();
   if (!stopped.ok) {
     throw new Error(
-      `launchd transaction recovery could not stop active service: ${stopped.stderr.trim() || 'exit non-zero'}`,
+      `${operation} transaction recovery could not stop active service: ${stopped.stderr.trim() || 'exit non-zero'}`,
     );
   }
 
@@ -464,7 +476,7 @@ function restoreInterruptedTransaction(
       : options.rollback?.();
   if (activation && !activation.ok) {
     throw new Error(
-      `launchd transaction recovery could not restore activation: ${activation.stderr.trim() || 'exit non-zero'}`,
+      `${operation} transaction recovery could not restore activation: ${activation.stderr.trim() || 'exit non-zero'}`,
     );
   }
   removeJournal(filePath, pending.stat);
@@ -482,13 +494,17 @@ function restoreActivationAfterUncertainStop(
 }
 
 export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionOptions): void {
+  const operation = options.operationLabel ?? 'launchd';
+  const transactionFileLabel = options.operationLabel ? `${operation} service-file` : 'launchd plist';
+  const unloadLabel = options.operationLabel ? `${operation} transaction unload` : 'launchctl unload';
+  const activationLabel = options.operationLabel ? `${operation} transaction activation` : 'launchctl load';
   const parent = ensureTrustedParent(options.trustedRoot, options.plistPath);
   const transactionLockPath = lockPath(options.lockDir, options.plistPath);
   ensureTrustedParent(options.trustedRoot, transactionLockPath);
   const pendingJournalPath = journalPath(options.lockDir, options.plistPath);
   const journalParent = ensureTrustedParent(options.trustedRoot, pendingJournalPath);
   const lock = acquireLocalStoreLock(transactionLockPath, options.lockWaitMs ?? 2_000);
-  if (!lock) throw new Error(`could not acquire launchd plist transaction lock for ${options.plistPath}`);
+  if (!lock) throw new Error(`could not acquire ${transactionFileLabel} transaction lock for ${options.plistPath}`);
 
   let releaseFailure: string | undefined;
   try {
@@ -504,7 +520,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       const preflight = options.preflight({ hasPrior: !!prior });
       if (!preflight.ok) {
         throw new Error(
-          `launchd transaction preflight failed: ${preflight.stderr.trim() || 'exit non-zero'}`,
+          `${operation} transaction preflight failed: ${preflight.stderr.trim() || 'exit non-zero'}`,
         );
       }
       recoveryState = preflight.recoveryState;
@@ -569,12 +585,12 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       const activation = restoreActivationAfterUncertainStop(options, journal);
       if (activation && !activation.ok) {
         throw new Error(
-          `launchctl unload failed: ${unloadFailure}; activation recovery failed: ` +
+          `${unloadLabel} failed: ${unloadFailure}; activation recovery failed: ` +
           `${activation.stderr.trim() || 'exit non-zero'}`,
         );
       }
       removeJournal(pendingJournalPath, journalStat);
-      throw new Error(`launchctl unload failed: ${unloadFailure}; prior activation state was restored`);
+      throw new Error(`${unloadLabel} failed: ${unloadFailure}; prior activation state was restored`);
     }
     options.checkpointHook?.('service-stopped');
     advance('stopped');
@@ -611,10 +627,18 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
     }
     if (!loaded.ok) {
       const loadFailure = loaded.stderr.trim() || 'exit non-zero';
-      recoverAndThrow(`launchctl load failed: ${loadFailure}`);
+      recoverAndThrow(`${activationLabel} failed: ${loadFailure}`);
     }
     options.checkpointHook?.('service-activated');
     advance('activated');
+    if (options.verify) {
+      const verified = options.verify();
+      if (!verified.ok) {
+        recoverAndThrow(
+          `service final verification failed: ${verified.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+    }
     removeJournal(pendingJournalPath, journalStat);
   } finally {
     releaseLocalStoreLock(lock);
@@ -645,6 +669,7 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
         throw new Error(`active plist changed during removal: ${options.plistPath}`);
       }
       fs.unlinkSync(options.plistPath);
+      fsyncParent(options.plistPath);
     }
   } finally {
     releaseLocalStoreLock(lock);
