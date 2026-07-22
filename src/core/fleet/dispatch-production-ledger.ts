@@ -424,6 +424,8 @@ export interface DispatchProductionEventsReadResult extends DispatchProductionSo
 export interface DispatchProductionYieldReadResult {
   summary?: DispatchProductionYieldSummary;
   sourceQuality: DispatchProductionSourceQuality;
+  /** Exact bounded event snapshot used to derive both summary and source quality. */
+  events: DispatchProductionEvent[];
 }
 
 export interface DispatchProductionReasonCount {
@@ -7377,6 +7379,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
   return {
     ...(summary ? { summary } : {}),
     sourceQuality,
+    events: read.events,
   };
 }
 
