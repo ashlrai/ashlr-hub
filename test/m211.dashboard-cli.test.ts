@@ -530,6 +530,56 @@ describe('installServeAgent', () => {
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
+  it('rejects group/world-writable trusted roots and parent components', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const options = (pp: string) => ({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: true, stderr: '' }),
+    });
+
+    fs.chmodSync(tmpHome, 0o777);
+    expect(() => installLaunchdPlistTransaction(options(path.join(tmpHome, 'Library', 'unsafe-root.plist'))))
+      .toThrow('unsafe launchd trusted root');
+
+    fs.chmodSync(tmpHome, 0o700);
+    const library = path.join(tmpHome, 'Library');
+    fs.mkdirSync(library);
+    fs.chmodSync(library, 0o777);
+    expect(() => installLaunchdPlistTransaction(options(path.join(library, 'unsafe-parent.plist'))))
+      .toThrow('unsafe launchd plist parent component');
+  });
+
+  it('rolls back when final verification detects concurrent reactivation', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'final-verification.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+    const runtime = { loaded: true };
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => { runtime.loaded = false; return { ok: true, stderr: '' }; },
+      load: () => ({ ok: true, stderr: '' }),
+      verify: () => {
+        runtime.loaded = true;
+        return { ok: false, stderr: 'service became loaded after no-autostart activation' };
+      },
+      rollback: () => { runtime.loaded = true; return { ok: true, stderr: '' }; },
+    })).toThrow('service final verification failed');
+
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<prior/>');
+    expect(runtime.loaded).toBe(true);
+    expect(fs.readdirSync(path.join(tmpHome, '.ashlr', 'locks'))
+      .some((name) => name.endsWith('.journal.json'))).toBe(false);
+  });
+
   it('does not restore disk state when the compensating unload fails', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
