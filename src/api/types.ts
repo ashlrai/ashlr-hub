@@ -65,3 +65,12 @@ export type {
   SeamStatus,
   SeamRegistry,
 } from '../core/seams/types.js';
+
+export type {
+  ExternalSkillAuditEntry,
+  ExternalSkillAuditIssue,
+  ExternalSkillAuditIssueCode,
+  ExternalSkillCollision,
+  ExternalSkillAuditReport,
+  ExternalSkillPromotionBlocker,
+} from '../core/fleet/external-skill-audit.js';
