@@ -74,3 +74,19 @@ export type {
   ExternalSkillAuditReport,
   ExternalSkillPromotionBlocker,
 } from '../core/fleet/external-skill-audit.js';
+
+export type {
+  ExternalSkillTrialArm,
+  ExternalSkillTrialArmProgress,
+  ExternalSkillTrialCaseInput,
+  ExternalSkillTrialEffect,
+  ExternalSkillTrialEvaluation,
+  ExternalSkillTrialEvaluationBlocker,
+  ExternalSkillTrialEvaluationInput,
+  ExternalSkillTrialOutcomeInput,
+  ExternalSkillTrialOutcomeReceipt,
+  ExternalSkillTrialPairAssignment,
+  ExternalSkillTrialPlan,
+  ExternalSkillTrialPlanInput,
+  ExternalSkillTrialRunAssignment,
+} from '../core/fleet/external-skill-shadow-eval.js';
