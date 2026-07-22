@@ -68,6 +68,10 @@ const MAX_CAPTURE_MS = 30_000;
 const MAX_BUNDLE_BYTES = 24 * 1024 * 1024;
 const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DIGEST = /^[0-9a-f]{64}$/;
+const CAPTURE_RECEIPT_DIGEST_DOMAIN = Buffer.from(
+  'ashlr:external-skill-capture-receipt:v1\0',
+  'utf8',
+);
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const FIXED_BLOCKERS = [
   'capture-custody-authentication-required',
@@ -125,6 +129,7 @@ export type ExternalSkillGitCaptureResult = ExternalSkillGitCaptureResultBase & 
     state: 'captured' | 'replayed';
     reason: 'captured' | 'replayed';
     captureDigest: string;
+    captureReceiptDigest: string;
     portablePackDigest: string;
     sourceIdentity: string;
     fileCount: number;
@@ -136,6 +141,7 @@ export type ExternalSkillGitCaptureResult = ExternalSkillGitCaptureResultBase & 
     state: 'withheld';
     reason: ExternalSkillGitCaptureFailureReason;
     captureDigest: null;
+    captureReceiptDigest: null;
     portablePackDigest: null;
     sourceIdentity: null;
     fileCount: 0;
@@ -243,6 +249,7 @@ function withheld(
     state: 'withheld',
     reason,
     captureDigest: null,
+    captureReceiptDigest: null,
     portablePackDigest: null,
     sourceIdentity: null,
     fileCount: 0,
@@ -260,6 +267,7 @@ function withheld(
 function completed(
   state: 'captured' | 'replayed',
   marker: CaptureMarker,
+  captureReceiptDigest: string,
 ): ExternalSkillGitCaptureResult {
   return {
     schemaVersion: 1,
@@ -267,6 +275,7 @@ function completed(
     state,
     reason: state,
     captureDigest: marker.captureDigest,
+    captureReceiptDigest,
     portablePackDigest: marker.portablePackDigest,
     sourceIdentity: marker.sourceIdentity,
     fileCount: marker.fileCount,
@@ -1075,6 +1084,11 @@ export function captureExternalSkillGitObject(
       policyEligible: false,
       promotionEligible: false,
     };
+    const markerBytes = canonicalMarkerBytes(marker);
+    const captureReceiptDigest = sha256(Buffer.concat([
+      CAPTURE_RECEIPT_DIGEST_DOMAIN,
+      markerBytes,
+    ]));
 
     requireDeadline();
     const sourceAfter = lstatSync(sourceRepoPath);
@@ -1153,7 +1167,6 @@ export function captureExternalSkillGitObject(
       if (!ownsLocalStoreLock(lock) || !storageStillPinned()) {
         throw new CaptureFailure('store-unavailable');
       }
-      const markerBytes = canonicalMarkerBytes(marker);
       const markerState = publishNoClobber(
         markerBytes, markerTarget, join(storageRoot, 'staging'), storageRoot, 'skill capture receipt',
         { targetDirectory: receiptsPin!, stagingDirectory: stagingPin! },
@@ -1168,6 +1181,7 @@ export function captureExternalSkillGitObject(
       operationResult = completed(
         bundleState === 'replayed' && markerState === 'replayed' ? 'replayed' : 'captured',
         marker,
+        captureReceiptDigest,
       );
     } catch (error) {
       operationError = error;
