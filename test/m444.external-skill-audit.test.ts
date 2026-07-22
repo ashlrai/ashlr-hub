@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   auditExternalSkillPack,
+  canonicalExternalSkillAuditReportBytes,
+  EXTERNAL_SKILL_AUDIT_POLICY_DIGEST,
   formatExternalSkillAudit,
 } from '../src/core/fleet/external-skill-audit.js';
 import { cmdSkills } from '../src/cli/skills.js';
@@ -159,6 +161,32 @@ describe('external skill-pack quarantine audit', () => {
     expect(second.packDigest).not.toBe(first.packDigest);
     expect(second.skills[0]).not.toHaveProperty('description');
     expect(second.skills[0]).not.toHaveProperty('source');
+  });
+
+  it('emits one key-order-independent canonical report encoding', () => {
+    const report = auditExternalSkillPack(validPack());
+    const reordered = { skills: report.skills, ...report };
+
+    expect(canonicalExternalSkillAuditReportBytes(reordered))
+      .toEqual(canonicalExternalSkillAuditReportBytes(report));
+    expect(canonicalExternalSkillAuditReportBytes({ ...report, extra: true })).toBeNull();
+    expect(canonicalExternalSkillAuditReportBytes(Object.create(report))).toBeNull();
+  });
+
+  it('pins the complete routing policy manifest identity', () => {
+    expect(EXTERNAL_SKILL_AUDIT_POLICY_DIGEST)
+      .toBe('5d4b4af74034d3d935b7aea8b719cd771013c06ad783dc21ad9571163d29acab');
+    const source = readFileSync(join(
+      process.cwd(), 'src/core/fleet/external-skill-audit.ts',
+    ), 'utf8');
+    expect(source).toContain('stopWords: [...STOP_WORDS].sort(asciiCompare)');
+    expect(source).toContain('stemSuffixes: [...STEM_SUFFIXES]');
+    expect(source).toContain('for (const suffix of STEM_SUFFIXES)');
+    expect(source).toContain("algorithmRevision: AUDIT_ALGORITHM_REVISION");
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    expect(packageJson.dependencies.marked).toBe('17.0.0');
   });
 
   it('content-binds eval contracts and behavioral fixtures', () => {

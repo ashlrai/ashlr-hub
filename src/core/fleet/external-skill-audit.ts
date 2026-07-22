@@ -39,6 +39,42 @@ const MIN_BEHAVIORAL_EVALS = 1;
 const MIN_RANK_ONE_RATE = 0.8;
 const COLLISION_WARNING = 0.5;
 const COLLISION_ERROR = 0.75;
+const MAX_AUDIT_REPORT_NODES = 65_536;
+const MAX_AUDIT_REPORT_ARRAY_ENTRIES = MAX_SKILLS * MAX_SKILLS;
+export const EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES = 1024 * 1024;
+const AUDIT_REPORT_KEYS = [
+  'behavioral', 'bytesRead', 'caseFileCount', 'collisions', 'issues', 'mode',
+  'packDigest', 'portablePackDigest', 'promotion', 'routing', 'schemaVersion',
+  'skillCount', 'skills', 'structural', 'trialReady',
+] as const;
+const AUDIT_POLICY_DOMAIN = 'ashlr:external-skill-audit-policy:v1\0';
+const AUDIT_ALGORITHM_REVISION = 'm444-external-skill-audit-2026-07-22.1';
+const AUDIT_ISSUE_CODES = new Set<ExternalSkillAuditIssueCode>([
+  'invalid-eval-file',
+  'incomplete-eval-contract',
+  'invalid-pack-root',
+  'invalid-skills-directory',
+  'skills-directory-escapes-pack',
+  'pack-unavailable-or-unsafe',
+  'skills-directory-unreadable',
+  'skill-directory-entry-limit',
+  'skill-count-limit',
+  'invalid-skill-directory',
+  'skill-file-unreadable',
+  'invalid-skill-frontmatter',
+  'incomplete-workflow-sections',
+  'missing-adversarial-sections',
+  'no-valid-skills',
+  'unexpected-eval-entry',
+  'invalid-eval-case-name',
+  'orphan-eval-file',
+  'eval-cases-directory-unavailable',
+  'missing-eval-file',
+  'unknown-negative-owner',
+  'duplicate-cross-skill-trigger',
+  'audit-worker-timeout',
+  'audit-worker-failed',
+]);
 const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const BUN_RUNTIME = typeof process.versions.bun === 'string';
 
@@ -48,6 +84,7 @@ const STOP_WORDS = new Set([
   'or', 'our', 'so', 'that', 'the', 'them', 'this', 'to', 'use', 'want', 'we',
   'when', 'with', 'you', 'your', 'help', 'me', 'i',
 ]);
+const STEM_SUFFIXES = ['ally', 'ing', 'ed', 'es', 'al'] as const;
 
 export interface ExternalSkillAuditEntry {
   name: string;
@@ -163,6 +200,292 @@ export interface ExternalSkillAuditReport {
   issues: ExternalSkillAuditIssue[];
   collisions: ExternalSkillCollision[];
   skills: ExternalSkillAuditEntry[];
+}
+
+function exactPlainRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, 'value'))) {
+    return false;
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function plainDataGraph(value: unknown, seen = new Set<object>(), depth = 0): boolean {
+  if (value === null || typeof value !== 'object') return true;
+  if (depth > 10 || seen.size >= MAX_AUDIT_REPORT_NODES || seen.has(value)) return false;
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype || value.length > MAX_AUDIT_REPORT_ARRAY_ENTRIES) return false;
+    if (Object.getOwnPropertyNames(value).length !== value.length + 1) return false;
+  } else if (prototype !== Object.prototype && prototype !== null) return false;
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (!Object.hasOwn(descriptor, 'value') || !plainDataGraph(descriptor.value, seen, depth + 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function safeAuditCount(value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
+}
+
+function digestOrNull(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value));
+}
+
+function boundedRate(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1);
+}
+
+function ratesEqual(value: number | null, passed: number, total: number): boolean {
+  const expected = total === 0 ? null : Math.round((passed / total) * 1_000_000) / 1_000_000;
+  return value === expected;
+}
+
+function validAuditReportShape(value: unknown): value is ExternalSkillAuditReport {
+  if (!exactPlainRecord(value, AUDIT_REPORT_KEYS)) return false;
+  const structural = value['structural'];
+  const routing = value['routing'];
+  const behavioral = value['behavioral'];
+  const promotion = value['promotion'];
+  const issues = value['issues'];
+  const collisions = value['collisions'];
+  const skills = value['skills'];
+  if (value['schemaVersion'] !== 2 || value['mode'] !== 'quarantine' ||
+    !digestOrNull(value['packDigest']) || !digestOrNull(value['portablePackDigest']) ||
+    !safeAuditCount(value['skillCount'], MAX_SKILLS) ||
+    !safeAuditCount(value['caseFileCount'], MAX_SKILLS) ||
+    !safeAuditCount(value['bytesRead'], MAX_TOTAL_BYTES) || typeof value['trialReady'] !== 'boolean') {
+    return false;
+  }
+  if (!exactPlainRecord(structural, ['errors', 'passed', 'warnings']) ||
+    typeof structural['passed'] !== 'boolean' || !safeAuditCount(structural['errors'], 4_096) ||
+    !safeAuditCount(structural['warnings'], 4_096)) return false;
+  if (!exactPlainRecord(routing, [
+    'collisionErrors', 'collisionWarnings', 'negativePassed', 'negativePrompts',
+    'passed', 'positivePrompts', 'rankOnePassed', 'rankOneRate', 'thresholds', 'topKPassed',
+  ]) || typeof routing['passed'] !== 'boolean' ||
+    !safeAuditCount(routing['positivePrompts'], MAX_SKILLS * MAX_TRIGGER_CASES) ||
+    !safeAuditCount(routing['topKPassed'], MAX_SKILLS * MAX_TRIGGER_CASES) ||
+    !safeAuditCount(routing['rankOnePassed'], MAX_SKILLS * MAX_TRIGGER_CASES) ||
+    !boundedRate(routing['rankOneRate']) ||
+    !safeAuditCount(routing['negativePrompts'], MAX_SKILLS * MAX_TRIGGER_CASES) ||
+    !safeAuditCount(routing['negativePassed'], MAX_SKILLS * MAX_TRIGGER_CASES) ||
+    !safeAuditCount(routing['collisionErrors'], MAX_SKILLS * MAX_SKILLS) ||
+    !safeAuditCount(routing['collisionWarnings'], MAX_SKILLS * MAX_SKILLS) ||
+    !exactPlainRecord(routing['thresholds'], [
+      'collisionError', 'collisionWarning', 'minimumRankOneRate',
+    ]) || routing['thresholds']['minimumRankOneRate'] !== MIN_RANK_ONE_RATE ||
+    routing['thresholds']['collisionWarning'] !== COLLISION_WARNING ||
+    routing['thresholds']['collisionError'] !== COLLISION_ERROR) return false;
+  if (!exactPlainRecord(behavioral, ['declaredCases', 'state']) ||
+    !['declared', 'missing', 'invalid'].includes(String(behavioral['state'])) ||
+    !safeAuditCount(behavioral['declaredCases'], MAX_SKILLS * MAX_BEHAVIORAL_CASES)) return false;
+  if (!exactPlainRecord(promotion, ['blockers', 'eligible']) || promotion['eligible'] !== false ||
+    !Array.isArray(promotion['blockers']) || promotion['blockers'].length !== 6 ||
+    promotion['blockers'].some((entry, index) => entry !== [
+      'external-content-quarantined',
+      'source-provenance-required',
+      'immutable-source-snapshot-required',
+      'license-review-required',
+      'behavioral-evidence-required',
+      'verified-outcome-required',
+    ][index])) return false;
+  if (!Array.isArray(issues) || issues.length > 4_096 || !Array.isArray(collisions) ||
+    collisions.length > MAX_SKILLS * MAX_SKILLS || !Array.isArray(skills) ||
+    skills.length !== value['skillCount']) return false;
+  if (issues.some((entry) => !exactPlainRecord(entry, Object.hasOwn(entry as object, 'skill')
+    ? ['code', 'level', 'skill'] : ['code', 'level']) ||
+    !['error', 'warning'].includes(String(entry['level'])) ||
+    !AUDIT_ISSUE_CODES.has(entry['code'] as ExternalSkillAuditIssueCode) ||
+    entry['level'] !== (entry['code'] === 'missing-adversarial-sections' ? 'warning' : 'error') ||
+    (Object.hasOwn(entry, 'skill') && (typeof entry['skill'] !== 'string' || !SKILL_NAME_RE.test(entry['skill']))))) {
+    return false;
+  }
+  if (collisions.some((entry) => !exactPlainRecord(entry, ['left', 'level', 'right', 'similarity']) ||
+    typeof entry['left'] !== 'string' || !SKILL_NAME_RE.test(entry['left']) ||
+    typeof entry['right'] !== 'string' || !SKILL_NAME_RE.test(entry['right']) ||
+    !['error', 'warning'].includes(String(entry['level'])) || !boundedRate(entry['similarity']))) return false;
+  const skillNames = new Set<string>();
+  let positiveTotal = 0;
+  let topKTotal = 0;
+  let rankOneTotal = 0;
+  let negativeTotal = 0;
+  let negativePassedTotal = 0;
+  let behavioralTotal = 0;
+  let skillBytesTotal = 0;
+  let priorSkillName = '';
+  for (const skill of skills) {
+    if (!exactPlainRecord(skill, [
+      'bytes', 'contentHash', 'descriptionHash', 'name', 'routing', 'sections', 'triggerCases',
+    ]) || typeof skill['name'] !== 'string' || !SKILL_NAME_RE.test(skill['name']) ||
+      typeof skill['contentHash'] !== 'string' || !/^[0-9a-f]{64}$/.test(skill['contentHash']) ||
+      typeof skill['descriptionHash'] !== 'string' || !/^[0-9a-f]{64}$/.test(skill['descriptionHash']) ||
+      !safeAuditCount(skill['bytes'], MAX_FILE_BYTES) ||
+      !exactPlainRecord(skill['sections'], [
+        'process', 'rationalizations', 'redFlags', 'verification', 'whenToUse',
+      ]) || Object.values(skill['sections']).some((entry) => typeof entry !== 'boolean') ||
+      !exactPlainRecord(skill['triggerCases'], ['behavioral', 'negative', 'positive']) ||
+      !safeAuditCount(skill['triggerCases']['positive'], MAX_TRIGGER_CASES) ||
+      !safeAuditCount(skill['triggerCases']['negative'], MAX_TRIGGER_CASES) ||
+      !safeAuditCount(skill['triggerCases']['behavioral'], MAX_BEHAVIORAL_CASES) ||
+      !exactPlainRecord(skill['routing'], [
+        'negativePassed', 'passed', 'rankOnePassed', 'rankOneRate', 'topKPassed',
+      ]) || typeof skill['routing']['passed'] !== 'boolean' ||
+      !safeAuditCount(skill['routing']['topKPassed'], MAX_TRIGGER_CASES) ||
+      !safeAuditCount(skill['routing']['rankOnePassed'], MAX_TRIGGER_CASES) ||
+      !boundedRate(skill['routing']['rankOneRate']) ||
+      !safeAuditCount(skill['routing']['negativePassed'], MAX_TRIGGER_CASES)) return false;
+    const name = skill['name'] as string;
+    if (name <= priorSkillName || skillNames.has(name)) return false;
+    priorSkillName = name;
+    skillNames.add(name);
+    const triggerCases = skill['triggerCases'] as ExternalSkillAuditEntry['triggerCases'];
+    const skillRoute = skill['routing'] as ExternalSkillAuditEntry['routing'];
+    if (skillRoute['topKPassed'] > triggerCases['positive'] ||
+      skillRoute['rankOnePassed'] > triggerCases['positive'] ||
+      skillRoute['negativePassed'] > triggerCases['negative'] ||
+      !ratesEqual(skillRoute['rankOneRate'], skillRoute['rankOnePassed'], triggerCases['positive']) ||
+      (skillRoute['passed'] && (
+        skillRoute['topKPassed'] !== triggerCases['positive'] ||
+        skillRoute['negativePassed'] !== triggerCases['negative'] ||
+        skillRoute['rankOneRate'] === null || skillRoute['rankOneRate'] < MIN_RANK_ONE_RATE
+      ))) return false;
+    positiveTotal += triggerCases['positive'];
+    topKTotal += skillRoute['topKPassed'];
+    rankOneTotal += skillRoute['rankOnePassed'];
+    negativeTotal += triggerCases['negative'];
+    negativePassedTotal += skillRoute['negativePassed'];
+    behavioralTotal += triggerCases['behavioral'];
+    skillBytesTotal += skill['bytes'] as number;
+  }
+  const typedIssues = issues as ExternalSkillAuditIssue[];
+  const typedCollisions = collisions as ExternalSkillCollision[];
+  if (typedIssues.some((entry) => entry.skill !== undefined && !skillNames.has(entry.skill))) {
+    return false;
+  }
+  if (typedCollisions.some((entry) => !skillNames.has(entry.left) || !skillNames.has(entry.right) ||
+    entry.left >= entry.right ||
+    entry.level !== (entry.similarity >= COLLISION_ERROR ? 'error' : 'warning'))) return false;
+  for (let index = 1; index < typedIssues.length; index += 1) {
+    const prior = typedIssues[index - 1]!;
+    const current = typedIssues[index]!;
+    if (asciiCompare(prior.skill ?? '', current.skill ?? '') > 0 ||
+      ((prior.skill ?? '') === (current.skill ?? '') && asciiCompare(prior.code, current.code) >= 0)) {
+      return false;
+    }
+  }
+  for (let index = 1; index < typedCollisions.length; index += 1) {
+    const prior = typedCollisions[index - 1]!;
+    const current = typedCollisions[index]!;
+    if (prior.similarity < current.similarity ||
+      (prior.similarity === current.similarity && asciiCompare(prior.left, current.left) > 0) ||
+      (prior.similarity === current.similarity && prior.left === current.left &&
+        asciiCompare(prior.right, current.right) >= 0)) return false;
+  }
+  const errorCount = typedIssues.filter((entry) => entry.level === 'error').length;
+  const warningCount = typedIssues.length - errorCount;
+  const collisionErrorCount = typedCollisions.filter((entry) => entry.level === 'error').length;
+  const collisionWarningCount = typedCollisions.length - collisionErrorCount;
+  if (structural['errors'] !== errorCount || structural['warnings'] !== warningCount ||
+    structural['passed'] !== (errorCount === 0) || routing['positivePrompts'] !== positiveTotal ||
+    routing['topKPassed'] !== topKTotal || routing['rankOnePassed'] !== rankOneTotal ||
+    !ratesEqual(routing['rankOneRate'], rankOneTotal, positiveTotal) ||
+    routing['negativePrompts'] !== negativeTotal || routing['negativePassed'] !== negativePassedTotal ||
+    routing['collisionErrors'] !== collisionErrorCount ||
+    routing['collisionWarnings'] !== collisionWarningCount ||
+    behavioral['declaredCases'] !== behavioralTotal || value['bytesRead'] < skillBytesTotal) return false;
+  const expectedRoutingPassed = structural['passed'] && positiveTotal > 0 &&
+    topKTotal === positiveTotal && negativePassedTotal === negativeTotal &&
+    routing['rankOneRate'] !== null && routing['rankOneRate'] >= MIN_RANK_ONE_RATE &&
+    skills.every((skill) => skill.routing.passed &&
+      skill.triggerCases.positive >= MIN_POSITIVE_TRIGGERS &&
+      skill.triggerCases.negative >= MIN_NEGATIVE_TRIGGERS) && collisionErrorCount === 0;
+  if (routing['passed'] !== expectedRoutingPassed) return false;
+  const expectedTrialReady = structural['passed'] && expectedRoutingPassed &&
+    behavioral['state'] === 'declared' && value['caseFileCount'] === skills.length &&
+    skills.every((skill) => skill.triggerCases.behavioral >= MIN_BEHAVIORAL_EVALS &&
+      skill.sections.whenToUse && skill.sections.process && skill.sections.verification);
+  if (value['trialReady'] !== expectedTrialReady) return false;
+  return true;
+}
+
+/** Digest of the deterministic M444 policy that a receipt signer claims to have run. */
+export const EXTERNAL_SKILL_AUDIT_POLICY_DIGEST = createHash('sha256')
+  .update(AUDIT_POLICY_DOMAIN, 'utf8')
+  .update(JSON.stringify({
+    schemaVersion: 1,
+    reportSchemaVersion: 2,
+    algorithmRevision: AUDIT_ALGORITHM_REVISION,
+    upstreamReference: 'addyosmani/agent-skills@fefc4075',
+    parserArtifacts: {
+      markdown: 'marked@17.0.0',
+      frontmatter: 'closed-name-description-v1',
+      json: 'bounded-streaming-closed-schema-v1',
+      sectionEvidence: 'visible-markdown-token-sections-v2',
+      treeDigest: 'bounded-content-addressed-tree-v2',
+    },
+    routing: {
+      algorithm: 'tf-idf-cosine-v2',
+      tokenizer: 'ascii-lowercase-hyphen-v1',
+      stemmer: 'light-suffix-collapse-v1',
+      stopWords: [...STOP_WORDS].sort(asciiCompare),
+      stemSuffixes: [...STEM_SUFFIXES],
+      minimumRankOneRate: MIN_RANK_ONE_RATE,
+      collisionWarning: COLLISION_WARNING,
+      collisionError: COLLISION_ERROR,
+      nameTokenWeight: 2,
+    },
+    limits: {
+      skills: MAX_SKILLS,
+      directoryEntries: MAX_DIRECTORY_ENTRIES,
+      fileBytes: MAX_FILE_BYTES,
+      totalBytes: MAX_TOTAL_BYTES,
+      fixtureEntries: MAX_FIXTURE_ENTRIES,
+      descriptionChars: MAX_DESCRIPTION_CHARS,
+      triggerCases: MAX_TRIGGER_CASES,
+      behavioralCases: MAX_BEHAVIORAL_CASES,
+      caseTextChars: MAX_CASE_TEXT_CHARS,
+      expectations: MAX_EXPECTATIONS,
+      fixtureRefs: MAX_FIXTURE_REFS,
+      topK: MAX_TOP_K,
+      canonicalReportBytes: EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES,
+    },
+    minimums: {
+      positiveTriggers: MIN_POSITIVE_TRIGGERS,
+      negativeTriggers: MIN_NEGATIVE_TRIGGERS,
+      behavioralEvals: MIN_BEHAVIORAL_EVALS,
+    },
+    promotionEligible: false,
+  }), 'utf8')
+  .digest('hex');
+
+function stableAuditValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableAuditValue);
+  if (value === null || typeof value !== 'object') return value;
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort(asciiCompare)) {
+    output[key] = stableAuditValue((value as Record<string, unknown>)[key]);
+  }
+  return output;
+}
+
+/** Strict minified bytes for one complete M444 report. Raw pack text is never added. */
+export function canonicalExternalSkillAuditReportBytes(value: unknown): Buffer | null {
+  try {
+    if (!plainDataGraph(value)) return null;
+    const snapshot = structuredClone(value);
+    if (!validAuditReportShape(snapshot)) return null;
+    const bytes = Buffer.from(JSON.stringify(stableAuditValue(snapshot)), 'utf8');
+    return bytes.length <= EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES ? bytes : null;
+  } catch { return null; }
 }
 
 interface LoadedSkill {
@@ -883,7 +1206,7 @@ function stem(token: string): string {
    * IN THE SOFTWARE.
    */
   let value = token;
-  for (const suffix of ['ally', 'ing', 'ed', 'es', 'al']) {
+  for (const suffix of STEM_SUFFIXES) {
     if (value.length > suffix.length + 3 && value.endsWith(suffix)) {
       value = value.slice(0, -suffix.length);
       break;
