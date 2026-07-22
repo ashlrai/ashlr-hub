@@ -44,7 +44,11 @@ import {
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
-import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
+import {
+  agentActionsDir,
+  recordAgentAction,
+  type AgentActionEvent,
+} from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
@@ -239,6 +243,10 @@ async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
   } finally {
     vi.useRealTimers();
   }
+}
+
+function settledLearningTimestamp(): string {
+  return new Date(Date.now() - 5 * 60 * 1000).toISOString();
 }
 
 function makeEvidencePack(id: string, generatedAt: string) {
@@ -2867,7 +2875,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -2913,6 +2921,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       complete: true,
       filesRead: 1,
       invalidRows: 0,
+    });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'available',
+      denominator: 'dispatch-production',
+      sourceQuality: { sourceState: 'healthy', complete: true },
     });
     expect(s.dispatchProduction).toMatchObject({
       events: 3,
@@ -2982,9 +2995,120 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('codex 1/1 100%');
   });
 
-  it('surfaces degraded dispatch source quality and withholds yield diagnosis', async () => {
+  it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
+    const now = settledLearningTimestamp();
+    const cfg = baseConfig();
+    const proposal = createSignedProposal(cfg, {
+      title: 'Snapshot race fixture',
+      diff: docsDiff('snapshot race'),
+    });
+    proposal.createdAt = now;
+    proposal.routeSnapshot = {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: 'stable local route',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    };
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'snapshot-race-attempt',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Snapshot race fixture',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const first = inboxStore.listProposalsDetailed();
+    const changed = {
+      ...first,
+      proposals: first.proposals.map((row) => row.id === proposal.id
+        ? {
+            ...row,
+            routeSnapshot: row.routeSnapshot
+              ? { ...row.routeSnapshot, reason: 'mutated private route reason' }
+              : row.routeSnapshot,
+          }
+        : row),
+    };
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(changed);
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        attemptCoverage: { state: 'withheld' },
+        trajectoryLearning: { state: 'withheld' },
+      });
+      expect(status.attemptCoverage).toBeUndefined();
+      expect(status.trajectoryLearning).toBeUndefined();
+      expect(JSON.stringify(status.learningMetrics)).not.toContain('proposalRate');
+      expect(formatFleetStatus(status)).toContain(
+        'withheld (cross-source learning snapshot changed during read)',
+      );
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds all-recent learning activity until the shared cutoff settles', async () => {
     const now = new Date().toISOString();
     recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'still-settling',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Still settling',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'learning-snapshot-settling',
+      excludedRows: 1,
+      settledThrough: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      attemptCoverage: { state: 'withheld' },
+      trajectoryLearning: { state: 'withheld' },
+    });
+    expect(status.attemptCoverage).toBeUndefined();
+    expect(status.trajectoryLearning).toBeUndefined();
+    const formatted = formatFleetStatus(status);
+    expect(formatted).toContain('1 newer row(s) excluded');
+    expect(formatted).toContain('withheld (dispatch rows are still inside the settlement window)');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+  });
+
+  it('withholds every public yield projection for the live six-row/four-invalid source shape', async () => {
+    const now = new Date().toISOString();
+    const valid = {
       schemaVersion: 1,
       ts: now,
       itemId: 'valid-partial-source',
@@ -2999,21 +3123,166 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalCreated: false,
       spentUsd: 0.001,
       basis: 'run-proposal-outcome',
-    });
+    } satisfies DispatchProductionEvent;
+    recordDispatchProduction([
+      valid,
+      { ...valid, itemId: 'valid-partial-source-b', title: 'Second valid partial source row' },
+    ]);
     const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
     const path = join(dir, `${now.slice(0, 10)}.jsonl`);
-    writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+    writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n{}\n[]\n{"schemaVersion":1}\n`, 'utf8');
 
     const s = await buildFleetStatus(baseConfig());
 
-    expect(s.dispatchProduction).toMatchObject({ events: 1 });
+    expect(s.dispatchProduction).toBeUndefined();
     expect(s.dispatchProductionSource).toMatchObject({
       sourceState: 'degraded',
       complete: false,
-      invalidRows: 1,
+      rowsScanned: 6,
+      invalidRows: 4,
     });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality: { sourceState: 'degraded', complete: false, rowsScanned: 6, invalidRows: 4 },
+      dispatchProduction: {
+        state: 'withheld',
+        reasons: ['dispatch-production-source-degraded'],
+        withheldMetrics: ['dispatchProduction'],
+      },
+    });
+    expect(s.attemptCoverage).toBeUndefined();
+    expect(s.trajectoryLearning).toBeUndefined();
     expect(s.dispatchYieldDiagnostics).toBeUndefined();
-    expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('source:    degraded (partial)');
+    expect(formatted).toContain('withheld because the bounded dispatch source is incomplete');
+    expect(formatted).toContain('withheld (dispatch denominator degraded; 4 invalid row(s))');
+    expect(formatted).not.toContain('proposals 0/2');
+    expect(JSON.stringify(s)).not.toContain('"diagnosticProposalRate":0');
+    expect(JSON.stringify(s)).not.toContain('"proposalRate":0');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+    expect(formatted).not.toContain('trajectories: 0 in 24h');
+    const staleSummary: NonNullable<FleetStatus['dispatchProduction']> = {
+      windowHours: 24,
+      events: 2,
+      attempts: 2,
+      noProposal: 2,
+      proposalRate: 0,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 2,
+      diagnosticProposalRate: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      outcomes: {
+        proposalCreated: 0, emptyDiff: 2, gateBlocked: 0, engineFailed: 0,
+        sandboxFailed: 0, proposalCaptureError: 0, proposalDisabled: 0,
+      },
+      topReasons: [], diagnosticTopReasons: [], byBackend: [], bySource: [],
+      byRepo: [], byBackendModel: [], byBackendSource: [],
+    };
+    const staleFormatted = formatFleetStatus({
+      ...s,
+      dispatchProduction: staleSummary,
+    });
+    expect(staleFormatted).not.toContain('proposals 0/2');
+    expect(staleFormatted).toContain('withheld because the bounded dispatch source is incomplete');
+    const missingFormatted = formatFleetStatus({
+      ...s,
+      dispatchProduction: staleSummary,
+      dispatchProductionSource: undefined,
+    });
+    expect(missingFormatted).not.toContain('proposals 0/2');
+    expect(missingFormatted).toContain('Dispatch yield:\n  unavailable');
+  });
+
+  it('withholds degraded and missing join metrics instead of publishing false zeros', async () => {
+    const now = settledLearningTimestamp();
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'join-source-attempt',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Join source attempt',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'empty-diff',
+      action: 'daemon:dispatch',
+      summary: 'local empty-diff for join source attempt',
+      repo: '/repo/a',
+      itemId: 'join-source-attempt',
+      source: 'goal',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    const actionPath = join(agentActionsDir(), `${now.slice(0, 10)}.jsonl`);
+    writeFileSync(actionPath, `${readFileSync(actionPath, 'utf8')}not-json\n`, 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.learningMetrics).toMatchObject({
+      state: 'available',
+      attemptCoverage: {
+        state: 'partial',
+        reasons: expect.arrayContaining([
+          'agent-actions-source-degraded',
+          'outcomes-source-missing',
+          'decisions-source-missing',
+          'evidence-source-missing',
+          'worked-source-missing',
+        ]),
+        withheldMetrics: expect.arrayContaining([
+          'coverage.agentAction',
+          'coverage.outcomeRecord',
+          'coverage.decision',
+          'coverage.evidence',
+          'coverage.worked',
+        ]),
+      },
+      trajectoryLearning: {
+        state: 'partial',
+        reasons: expect.arrayContaining([
+          'agent-actions-source-degraded',
+          'outcomes-source-missing',
+          'post-merge-source-missing',
+          'skill-use-source-missing',
+        ]),
+      },
+    });
+    expect(s.attemptCoverage?.production).toMatchObject({ attempts: 1, diagnosticAttempts: 1 });
+    expect(s.attemptCoverage?.coverage).toEqual({});
+    expect(s.attemptCoverage?.recent[0]?.coverage).toEqual({});
+    expect(s.trajectoryLearning?.coverage).toEqual({ dispatch: { count: 1, rate: 1 } });
+    expect(s.trajectoryLearning?.terminalOutcomes).toBeUndefined();
+    expect(s.trajectoryLearning?.realizedOutcomes).toBeUndefined();
+    expect(s.trajectoryLearning?.routeSpine).toEqual({});
+    expect(s.trajectoryLearning?.recent).toBeUndefined();
+    expect(s.trajectoryLearning?.traces).toEqual({ state: 'degraded', records: [] });
+    expect(s.trajectoryLearning?.skillObservation).toEqual({
+      eventState: 'none', sampleState: 'unavailable',
+    });
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('actions withheld, worked withheld, decisions withheld, evidence withheld');
+    expect(formatted).toContain('outcomes:     withheld (outcome denominator unavailable)');
+    expect(formatted).not.toContain('actions 0 (0%)');
+    expect(formatted).not.toContain('dispatch->decision 0 (0%)');
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {
@@ -3264,7 +3533,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const repo = join(tmpHome, 'repo-attempts');
     const cfg = withFoundry({
       autoMerge: {
@@ -3279,6 +3548,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       diff: docsDiff('attempt coverage'),
       verifyResult: { passed: true, source: 'manual' },
     });
+    proposal.createdAt = now;
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
 
     writeRunningDaemon(tmpHome, [], now);
     writeBacklogSnapshot(tmpHome, repo, [], now);
@@ -3486,12 +3761,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.trajectoryLearning?.recent[0]?.coverage).not.toHaveProperty('skillUse');
-    expect(s.trajectoryLearning?.traces).toMatchObject({
-      state: 'available',
-      records: [expect.objectContaining({
-        ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
-        sourceState: expect.stringMatching(/^(complete|incomplete|degraded)$/),
-      })],
+    expect(s.trajectoryLearning?.traces).toEqual({ state: 'degraded', records: [] });
+    expect(s.learningMetrics?.trajectoryLearning).toMatchObject({
+      state: 'partial',
+      reasons: expect.arrayContaining([
+        'post-merge-source-missing',
+        'judge-traces-source-missing',
+      ]),
+      withheldMetrics: expect.arrayContaining(['realizedOutcomes', 'traces']),
     });
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
@@ -3554,7 +3831,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('promotes weak causal attempt coverage into next actions', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-causal');
     mkdirSync(ashlrDir, { recursive: true });
@@ -4963,7 +5240,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'disabled-a',
       source: 'goal',
@@ -5033,7 +5310,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'diagnostic-a',
       source: 'goal',
@@ -5108,7 +5385,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'capture-missing-a',
       source: 'goal',
@@ -7343,6 +7620,12 @@ describe('skill corpus readiness projection', () => {
 });
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  const healthyDispatchProductionSource: NonNullable<FleetStatus['dispatchProductionSource']> = {
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesRead: 1, datedFilesRead: 1, looseFilesRead: 0, bytesRead: 1024,
+    rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+  };
+
   it('renders compact build identity and omits it for legacy snapshots', () => {
     const base = {
       generatedAt: '2026-07-11T00:00:00.000Z',
@@ -7705,13 +7988,16 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       byBackendSource: [],
     };
 
-    const out = formatFleetStatus({ ...base, dispatchProduction });
+    const out = formatFleetStatus({
+      ...base, dispatchProduction, dispatchProductionSource: healthyDispatchProductionSource,
+    });
     expect(out).toContain('reasons:   1x engine "local-coder" completed without file changes');
     expect(out).toContain('repair yield: capture 1 attempt, no-diff 1 attempt; 1/2 converted (50%)');
     expect(out).not.toContain('proposal filing disabled');
 
     const emptyDiagnosticOut = formatFleetStatus({
       ...base,
+      dispatchProductionSource: healthyDispatchProductionSource,
       dispatchProduction: {
         ...dispatchProduction,
         diagnosticTopReasons: [],
@@ -7784,7 +8070,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       killed: false,
     };
 
-    const out = formatFleetStatus({ ...base, dispatchProduction });
+    const out = formatFleetStatus({
+      ...base, dispatchProduction, dispatchProductionSource: healthyDispatchProductionSource,
+    });
 
     expect(out).toContain(
       'treatment: baseline-reslice 1/3 terminal, target-localization 2/3 terminal; ' +
@@ -7795,6 +8083,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
 
     const withoutTreatment = formatFleetStatus({
       ...base,
+      dispatchProductionSource: healthyDispatchProductionSource,
       dispatchProduction: {
         ...dispatchProduction,
         generatedRepairAttempts: {
@@ -7867,6 +8156,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       queue: { backlogItems: 0 },
       proposals: { pending: 0, frontierPending: 0, applied: 0 },
       dispatchProduction,
+      dispatchProductionSource: healthyDispatchProductionSource,
       merges: { recent: 0 },
       killed: false,
     });
@@ -8130,6 +8420,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         byBackendModel: [],
         byBackendSource: [],
       },
+      dispatchProductionSource: healthyDispatchProductionSource,
       merges: { recent: 2 },
       nextActions: [
         {

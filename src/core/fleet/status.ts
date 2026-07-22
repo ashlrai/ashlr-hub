@@ -35,6 +35,7 @@ import { realizedMergeOf } from '../inbox/realized-merge.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type {
   AutonomyEvidencePack,
+  AutonomyEvidencePacksReadResult,
   AutonomyEvidenceSourceQuality,
 } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -44,8 +45,10 @@ import { listGoals } from '../goals/store.js';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
+  type AttemptRecordCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
+import { listOutcomeRecords, type OutcomeRecord } from '../autonomy/outcome-records.js';
 import {
   readGeneratedRepairQueueSnapshot,
   type GeneratedRepairDispatchState,
@@ -67,6 +70,7 @@ import {
   MIN_SKILL_OBSERVED_TRAJECTORIES,
   suppressDegradedSkillObservation,
   summarizeTrajectoryLearning,
+  type TrajectoryRecordCoverage,
   type TrajectoryLearningStatus,
 } from '../autonomy/trajectory-records.js';
 import {
@@ -92,7 +96,9 @@ import {
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   isSuppressibleWorkedOutcome,
   latestWorkedEventForKeys,
+  loadWorkedLedgerDetailed,
   type WorkedEvent,
+  type WorkedLedgerReadResult,
 } from './worked-ledger.js';
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 import {
@@ -102,6 +108,7 @@ import {
 } from './proposal-matching.js';
 import {
   readDispatchProductionYieldDetailed,
+  type DispatchProductionEvent,
   type DispatchProductionSourceQuality,
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
@@ -129,7 +136,10 @@ import {
   readResolutionObserverStatus,
   type ResolutionObserverStatus,
 } from './resolution-observer.js';
-import { readPostMergeObservations } from './post-merge-observations.js';
+import {
+  readPostMergeObservations,
+  type PostMergeObservationReadResult,
+} from './post-merge-observations.js';
 import {
   postMergeStabilityRepoDigest,
   readPostMergeStability,
@@ -1291,6 +1301,33 @@ function degradedAutoMergeCanaryStatus(): FleetAutoMergeCanaryStatus {
   };
 }
 
+export type FleetLearningSourceName =
+  | 'dispatch-production'
+  | 'agent-actions'
+  | 'outcomes'
+  | 'decisions'
+  | 'evidence'
+  | 'worked'
+  | 'post-merge'
+  | 'judge-traces'
+  | 'skill-use';
+
+export type FleetLearningWithholdingReason = `${FleetLearningSourceName}-source-missing` |
+  `${FleetLearningSourceName}-source-degraded`;
+
+export interface FleetLearningSourceAvailability {
+  source: FleetLearningSourceName;
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+}
+
+export interface FleetLearningMetricAvailability {
+  state: 'available' | 'partial' | 'withheld';
+  reasons: FleetLearningWithholdingReason[];
+  sources: FleetLearningSourceAvailability[];
+  withheldMetrics: string[];
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -1392,6 +1429,24 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Whether dispatch-backed learning metrics have a complete denominator. */
+  learningMetrics?: {
+    state: 'available' | 'withheld';
+    denominator: 'dispatch-production';
+    reason?:
+      | 'dispatch-source-missing'
+      | 'dispatch-source-degraded'
+      | 'learning-snapshot-settling'
+      | 'learning-snapshot-unstable';
+    /** Exact upper timestamp bound shared by every joined learning source. */
+    settledThrough?: string;
+    /** Valid rows intentionally excluded because they are newer than settledThrough. */
+    excludedRows?: number;
+    sourceQuality: DispatchProductionSourceQuality;
+    dispatchProduction: FleetLearningMetricAvailability;
+    attemptCoverage?: FleetLearningMetricAvailability;
+    trajectoryLearning?: FleetLearningMetricAvailability;
+  };
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -1435,7 +1490,97 @@ export interface FleetStatus {
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Keep concurrently appended rows outside exact cross-source joins until settled. */
+const LEARNING_SNAPSHOT_SETTLE_MS = 2 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+const LEARNING_SNAPSHOT_TEXT_KEYS = new Set([
+  'argv',
+  'cmd',
+  'content',
+  'contents',
+  'detail',
+  'diff',
+  'env',
+  'fileContents',
+  'fullReasoning',
+  'promptContext',
+  'reason',
+  'stderr',
+  'stdout',
+  'summary',
+  'title',
+]);
+
+/**
+ * Produce a deterministic metadata-only projection for an in-memory stability
+ * digest. The digest is never returned or persisted.
+ */
+function learningSnapshotMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(learningSnapshotMetadata);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [
+        key,
+        LEARNING_SNAPSHOT_TEXT_KEYS.has(key)
+          ? `sha256:${createHash('sha256').update(JSON.stringify(entry) ?? 'undefined').digest('hex')}`
+          : learningSnapshotMetadata(entry),
+      ]),
+  );
+}
+
+function learningSnapshotDigest(source: unknown, rows: readonly unknown[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify(learningSnapshotMetadata({ source, rows })))
+    .digest('hex');
+}
+
+function learningSnapshotSourceQuality(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return { sourceState: 'degraded', complete: false };
+  const source = value as Record<string, unknown>;
+  return {
+    sourceState: source.sourceState,
+    sourcePresent: source.sourcePresent,
+    complete: source.complete,
+    stopReasons: source.stopReasons,
+    reasons: source.reasons,
+    invalidFiles: source.invalidFiles,
+    invalidRows: source.invalidRows,
+    conflictingEvents: source.conflictingEvents,
+    duplicateRows: source.duplicateRows,
+    supersededRows: source.supersededRows,
+    semanticRejectedRows: source.semanticRejectedRows,
+    unreadableFiles: source.unreadableFiles,
+    limitExceeded: source.limitExceeded,
+  };
+}
+
+function learningSnapshotTimestamp(...values: Array<string | undefined>): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const timestampMs = Date.parse(value);
+    if (Number.isFinite(timestampMs) && timestampMs > latestMs) {
+      latest = value;
+      latestMs = timestampMs;
+    }
+  }
+  return latest;
+}
+
+function settledLearningRows<T>(
+  rows: readonly T[],
+  cutoffMs: number,
+  timestamp: (row: T) => string | undefined,
+): T[] {
+  return rows.filter((row) => {
+    const timestampMs = Date.parse(timestamp(row) ?? '');
+    return Number.isFinite(timestampMs) && timestampMs <= cutoffMs;
+  });
+}
 
 function queueInventoryFreshness(
   observedAt: string | null,
@@ -1818,8 +1963,101 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
  * Build a read-only snapshot of the fleet. Async because the backlog scan is
  * async. NEVER throws — each source is independently guarded.
  */
+const MAX_LEARNING_WITHHOLDING_REASONS = 12;
+const MAX_LEARNING_WITHHELD_METRICS = 24;
+
+type LearningSourceQualityLike = {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+};
+
+function learningSourceAvailability(
+  source: FleetLearningSourceName,
+  quality: LearningSourceQualityLike | undefined,
+): FleetLearningSourceAvailability {
+  return {
+    source,
+    sourceState: quality?.sourceState ?? 'degraded',
+    complete: quality?.complete === true,
+  };
+}
+
+function learningSourceAvailable(source: FleetLearningSourceAvailability): boolean {
+  return source.sourceState === 'healthy' && source.complete;
+}
+
+function learningMetricAvailability(
+  sources: FleetLearningSourceAvailability[],
+  withheldMetrics: string[],
+  totalMetrics: number,
+): FleetLearningMetricAvailability {
+  const reasons = sources
+    .filter((source) => !learningSourceAvailable(source))
+    .map((source): FleetLearningWithholdingReason =>
+      `${source.source}-source-${source.sourceState === 'missing' ? 'missing' : 'degraded'}`)
+    .slice(0, MAX_LEARNING_WITHHOLDING_REASONS);
+  const boundedMetrics = [...new Set(withheldMetrics)].slice(0, MAX_LEARNING_WITHHELD_METRICS);
+  return {
+    state: boundedMetrics.length === 0 ? 'available' : boundedMetrics.length >= totalMetrics ? 'withheld' : 'partial',
+    reasons,
+    sources: sources.slice(0, MAX_LEARNING_WITHHOLDING_REASONS),
+    withheldMetrics: boundedMetrics,
+  };
+}
+
+function withholdAttemptJoinMetrics(
+  summary: AttemptCoverageStatus,
+  unavailable: Set<keyof AttemptRecordCoverage>,
+): AttemptCoverageStatus {
+  if (unavailable.size === 0) return summary;
+  const coverage = { ...summary.coverage };
+  for (const key of unavailable) delete coverage[key];
+  return {
+    ...summary,
+    coverage,
+    gaps: summary.gaps.filter((gap) => !unavailable.has(gap.kind)),
+    recent: summary.recent.map((record) => {
+      const recordCoverage = { ...record.coverage };
+      for (const key of unavailable) delete recordCoverage[key];
+      return { ...record, coverage: recordCoverage };
+    }),
+  };
+}
+
+function withholdTrajectoryMetrics(
+  summary: TrajectoryLearningStatus,
+  unavailable: Set<keyof TrajectoryRecordCoverage>,
+  options: { terminal: boolean; realized: boolean; traces: boolean },
+): TrajectoryLearningStatus {
+  const coverage = { ...summary.coverage };
+  for (const key of unavailable) delete coverage[key];
+  const routeSpine = { ...summary.routeSpine };
+  if (unavailable.has('decision')) delete routeSpine.dispatchToDecision;
+  if (unavailable.has('evidence')) delete routeSpine.dispatchToEvidence;
+  if (!options.terminal) delete routeSpine.dispatchToMerge;
+  return {
+    ...summary,
+    coverage,
+    routeSpine,
+    ...(!options.terminal ? { terminalOutcomes: undefined, recent: undefined } : {}),
+    ...(!options.realized ? { realizedOutcomes: undefined } : {}),
+    ...(!options.traces ? { traces: { state: 'degraded', records: [] } } : {}),
+    gaps: summary.gaps.filter((gap) => !unavailable.has(gap.kind)),
+    ...(summary.recent && options.terminal
+      ? {
+          recent: summary.recent.map((record) => {
+            const recordCoverage = { ...record.coverage };
+            for (const key of unavailable) delete recordCoverage[key];
+            return { ...record, coverage: recordCoverage };
+          }),
+        }
+      : {}),
+  };
+}
+
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
+  let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
   let queueSnapshotAt: string | null = null;
   let queueAuthorityObservedAt: string | null = null;
   let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
@@ -2368,9 +2606,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitExceeded: false,
     },
   };
+  let learningEvidenceRead: AutonomyEvidencePacksReadResult | undefined;
   try {
     const { readAutonomyEvidencePacksDetailed } = await import('../autonomy/evidence-pack.js');
     const evidenceRead = readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+    learningEvidenceRead = evidenceRead;
     autonomy = buildAutonomyStatus(evidenceRead.packs, evidenceRead);
   } catch {
     // leave fallback
@@ -2576,8 +2816,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
+  let learningDecisionsRead: ReturnType<typeof readDecisionsDetailed> | undefined;
   try {
-    const decisionsRead = readDecisionsDetailed({ limit: 1 });
+    const decisionsRead = readDecisionsDetailed();
+    learningDecisionsRead = decisionsRead;
     status.decisionsSource = {
       sourceState: decisionsRead.sourceState,
       sourcePresent: decisionsRead.sourcePresent,
@@ -2602,8 +2844,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       unreadableFiles: 1,
     };
   }
+  let learningJudgeTracesRead: ReturnType<typeof readJudgeTracesDetailed> | undefined;
   try {
-    const traceRead = readJudgeTracesDetailed({ limit: 1 });
+    const traceRead = readJudgeTracesDetailed();
+    learningJudgeTracesRead = traceRead;
     status.judgeTraceSource = {
       sourceState: traceRead.sourceState,
       sourcePresent: traceRead.sourcePresent,
@@ -2635,6 +2879,33 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitPerDimension: 8,
     });
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    const dispatchAvailabilitySource = learningSourceAvailability(
+      'dispatch-production', dispatchRead.sourceQuality,
+    );
+    const dispatchProductionAvailability = learningMetricAvailability(
+      [dispatchAvailabilitySource],
+      learningSourceAvailable(dispatchAvailabilitySource) ? [] : ['dispatchProduction'],
+      1,
+    );
+    status.learningMetrics = dispatchRead.sourceQuality.sourceState === 'healthy' && dispatchRead.sourceQuality.complete
+      ? {
+          state: 'available',
+          denominator: 'dispatch-production',
+          sourceQuality: dispatchRead.sourceQuality,
+          dispatchProduction: dispatchProductionAvailability,
+        }
+      : {
+          state: 'withheld',
+          denominator: 'dispatch-production',
+          reason: dispatchRead.sourceQuality.sourceState === 'missing'
+            ? 'dispatch-source-missing'
+            : 'dispatch-source-degraded',
+          sourceQuality: dispatchRead.sourceQuality,
+          dispatchProduction: dispatchProductionAvailability,
+        };
+    if (status.learningMetrics.state === 'available') {
+      dispatchLearningEvents = dispatchRead.events;
+    }
     const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
@@ -2643,8 +2914,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     }
   } catch {
-    // Optional history/analytics surface only. Fleet status must stay read-only
-    // and available even when the append-only ledger is absent or corrupt.
+    const sourceQuality: DispatchProductionSourceQuality = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, datedFilesRead: 0, looseFilesRead: 0,
+      bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
+    };
+    status.dispatchProductionSource = sourceQuality;
+    status.learningMetrics = {
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality,
+      dispatchProduction: learningMetricAvailability(
+        [learningSourceAvailability('dispatch-production', sourceQuality)],
+        ['dispatchProduction'],
+        1,
+      ),
+    };
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();
@@ -2681,8 +2967,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       };
     }
   }
+  let learningPostMergeRead: PostMergeObservationReadResult | undefined;
   try {
     const adverse = readPostMergeObservations({ requireComplete: true });
+    learningPostMergeRead = adverse;
     const stability = readPostMergeStability({ requireComplete: true });
     const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
       !adverse.complete || !stability.complete;
@@ -2729,6 +3017,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       invalidRows: 0, unreadableFiles: 1,
     };
   }
+  let workedLearningRead: WorkedLedgerReadResult;
+  try {
+    workedLearningRead = loadWorkedLedgerDetailed();
+  } catch {
+    workedLearningRead = {
+      ledger: { events: [] },
+      sourceQuality: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        reasons: ['unstable-read'], bytesRead: 0,
+      },
+    };
+  }
   let workspaceRead: AgentWorkspaceReadResult | undefined;
   try {
     workspaceRead = readAgentWorkspaceDetailed({
@@ -2741,22 +3041,257 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional history/analytics surface only.
   }
+  const learningCutoffMs = Date.parse(generatedAt) - LEARNING_SNAPSHOT_SETTLE_MS;
+  let learningProposals = settledLearningRows(
+    allProposals,
+    learningCutoffMs,
+    (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+  );
+  let learningDispatchEvents = settledLearningRows(
+    dispatchLearningEvents ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningActions = settledLearningRows(
+    workspaceRead?.events ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningDecisions = settledLearningRows(
+    learningDecisionsRead?.decisions ?? [],
+    learningCutoffMs,
+    (decision) => decision.ts,
+  );
+  let learningJudgeTraces = settledLearningRows(
+    learningJudgeTracesRead?.traces ?? [],
+    learningCutoffMs,
+    (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+  );
+  let learningEvidencePacks = settledLearningRows(
+    learningEvidenceRead?.packs ?? [],
+    learningCutoffMs,
+    (pack) => pack.generatedAt,
+  );
+  let learningWorkedEvents = settledLearningRows(
+    workedLearningRead.ledger.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningPostMergeObservations = settledLearningRows(
+    learningPostMergeRead?.observations ?? [],
+    learningCutoffMs,
+    (observation) => observation.observedAt,
+  );
+  if (status.learningMetrics) {
+    const rawLearningRows =
+      allProposals.length +
+      (dispatchLearningEvents?.length ?? 0) +
+      (workspaceRead?.events.length ?? 0) +
+      (learningDecisionsRead?.decisions.length ?? 0) +
+      (learningJudgeTracesRead?.traces.length ?? 0) +
+      (learningEvidenceRead?.packs.length ?? 0) +
+      workedLearningRead.ledger.events.length +
+      (learningPostMergeRead?.observations.length ?? 0);
+    const settledLearningRowCount =
+      learningProposals.length +
+      learningDispatchEvents.length +
+      learningActions.length +
+      learningDecisions.length +
+      learningJudgeTraces.length +
+      learningEvidencePacks.length +
+      learningWorkedEvents.length +
+      learningPostMergeObservations.length;
+    status.learningMetrics = {
+      ...status.learningMetrics,
+      settledThrough: new Date(learningCutoffMs).toISOString(),
+      excludedRows: Math.max(0, rawLearningRows - settledLearningRowCount),
+    };
+    if ((dispatchLearningEvents?.length ?? 0) > 0 && learningDispatchEvents.length === 0) {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-settling',
+      };
+    }
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalReadAfter = listProposalsDetailed();
+      const dispatchReadAfter = readDispatchProductionYieldDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 1200,
+        limitPerDimension: 8,
+      });
+      const actionReadAfter = readAgentWorkspaceDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 5000,
+        limitPerDimension: 8,
+        recentLimit: 8,
+      });
+      const decisionReadAfter = readDecisionsDetailed();
+      const judgeTraceReadAfter = readJudgeTracesDetailed();
+      const evidenceReadAfter = (await import('../autonomy/evidence-pack.js'))
+        .readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+      const workedReadAfter = loadWorkedLedgerDetailed();
+      const postMergeReadAfter = readPostMergeObservations({ requireComplete: true });
+
+      const proposalRowsAfter = settledLearningRows(
+        proposalReadAfter.proposals,
+        learningCutoffMs,
+        (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+      );
+      const dispatchRowsAfter = settledLearningRows(
+        dispatchReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const actionRowsAfter = settledLearningRows(
+        actionReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const decisionRowsAfter = settledLearningRows(
+        decisionReadAfter.decisions,
+        learningCutoffMs,
+        (decision) => decision.ts,
+      );
+      const judgeTraceRowsAfter = settledLearningRows(
+        judgeTraceReadAfter.traces,
+        learningCutoffMs,
+        (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+      );
+      const evidenceRowsAfter = settledLearningRows(
+        evidenceReadAfter.packs,
+        learningCutoffMs,
+        (pack) => pack.generatedAt,
+      );
+      const workedRowsAfter = settledLearningRows(
+        workedReadAfter.ledger.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const postMergeRowsAfter = settledLearningRows(
+        postMergeReadAfter.observations,
+        learningCutoffMs,
+        (observation) => observation.observedAt,
+      );
+
+      const stable = [
+        learningSnapshotDigest(learningSnapshotSourceQuality(proposalSourceQuality), learningProposals) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(proposalReadAfter), proposalRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(status.dispatchProductionSource), learningDispatchEvents) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality), dispatchRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(workspaceRead?.sourceQuality), learningActions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(actionReadAfter.sourceQuality), actionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningDecisionsRead), learningDecisions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(decisionReadAfter), decisionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningJudgeTracesRead), learningJudgeTraces) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(judgeTraceReadAfter), judgeTraceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningEvidenceRead), learningEvidencePacks) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(evidenceReadAfter), evidenceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(workedLearningRead.sourceQuality), learningWorkedEvents) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(workedReadAfter.sourceQuality), workedRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningPostMergeRead), learningPostMergeObservations) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(postMergeReadAfter), postMergeRowsAfter),
+      ].every(Boolean);
+
+      if (stable) {
+        learningProposals = proposalRowsAfter;
+        learningDispatchEvents = dispatchRowsAfter;
+        learningActions = actionRowsAfter;
+        learningDecisions = decisionRowsAfter;
+        learningJudgeTraces = judgeTraceRowsAfter;
+        learningEvidencePacks = evidenceRowsAfter;
+        learningWorkedEvents = workedRowsAfter;
+        learningPostMergeObservations = postMergeRowsAfter;
+      } else {
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+      }
+    } catch {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+      };
+    }
+  }
   const workspaceSource = status.workspace?.sourceQuality;
-  const agentActionLearningEligible = status.workspace !== undefined &&
-    (workspaceSource === undefined || (workspaceSource.sourceState === 'healthy' && workspaceSource.complete));
-  try {
-    const attemptRecords = listAttemptRecords({
-      windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
-      limit: 500,
-      ...(workspaceRead ? {
-        deps: { readAgentActions: () => workspaceRead!.events },
-        useDefaultReaders: true,
-      } : {}),
-    });
-    status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
-    if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
-  } catch {
-    // Optional learning coverage surface only.
+  const dispatchSource = learningSourceAvailability('dispatch-production', status.dispatchProductionSource);
+  const actionSource = learningSourceAvailability('agent-actions', workspaceSource);
+  const outcomeSource = learningSourceAvailability('outcomes', proposalSourceQuality);
+  const decisionSource = learningSourceAvailability('decisions', status.decisionsSource);
+  const evidenceSource = learningSourceAvailability('evidence', learningEvidenceRead);
+  const workedSource = learningSourceAvailability('worked', workedLearningRead.sourceQuality);
+  const postMergeSource = learningSourceAvailability('post-merge', learningPostMergeRead);
+  const judgeTraceSource = learningSourceAvailability('judge-traces', status.judgeTraceSource);
+  const proposalById = new Map(learningProposals.map((proposal) => [proposal.id, proposal]));
+  const evidencePacks = learningEvidencePacks;
+  const evidenceByProposal = new Map(evidencePacks.map((pack) => [pack.proposal.id, pack]));
+  const unavailablePostMerge: PostMergeObservationReadResult = {
+    observations: [], sourceState: 'degraded', sourcePresent: true, complete: false,
+    stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, physicalRows: 0,
+    invalidRows: 0, conflictingEvents: 0, duplicateRows: 0, supersededRows: 0,
+    limitExceeded: false,
+  };
+  let outcomeRecords: OutcomeRecord[] = [];
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      outcomeRecords = listOutcomeRecords({
+        limit: 1000,
+        deps: {
+          listProposals: () => learningProposals,
+          readDecisions: () => learningDecisions,
+          readJudgeTraces: () => learningJudgeTraces,
+          listAutonomyEvidencePacks: () => evidencePacks,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
+          readPostMergeObservations: () => learningPostMergeRead
+            ? { ...learningPostMergeRead, observations: learningPostMergeObservations }
+            : unavailablePostMerge,
+        },
+      });
+      const attemptRecords = listAttemptRecords({
+        windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
+        limit: 500,
+        deps: {
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
+          listOutcomeRecords: () => outcomeRecords,
+          loadProposal: (id) => proposalById.get(id) ?? null,
+          readDecisions: () => learningDecisions,
+          listAutonomyEvidencePacks: () => evidencePacks,
+          readAutonomyEvidencePack: (id) => evidenceByProposal.get(id) ?? null,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
+        },
+        useDefaultReaders: false,
+      });
+      const unavailable = new Set<keyof AttemptRecordCoverage>();
+      if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
+      if (!learningSourceAvailable(outcomeSource)) unavailable.add('outcomeRecord');
+      if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
+      if (!learningSourceAvailable(evidenceSource)) unavailable.add('evidence');
+      if (!learningSourceAvailable(workedSource)) unavailable.add('worked');
+      status.attemptCoverage = withholdAttemptJoinMetrics(
+        summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000)),
+        unavailable,
+      );
+      if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
+      status.learningMetrics.attemptCoverage = learningMetricAvailability(
+        [dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource, workedSource],
+        [...unavailable].map((metric) => `coverage.${metric}`),
+        6,
+      );
+    } catch {
+      status.learningMetrics.attemptCoverage = learningMetricAvailability(
+        [dispatchSource, { source: 'outcomes', sourceState: 'degraded', complete: false }],
+        ['coverage.agentAction', 'coverage.outcomeRecord', 'coverage.decision', 'coverage.evidence', 'coverage.worked'],
+        5,
+      );
+    }
   }
   const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
   const skillUseSource = readSkillUseEventsWithDiagnostics({
@@ -2764,25 +3299,138 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     limit: Math.max(500 * 8, 400),
     maxFiles: 3,
   });
-  if (agentActionLearningEligible) {
+  let learningSkillUseEvents = settledLearningRows(
+    skillUseSource.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  if (status.learningMetrics) {
+    status.learningMetrics.excludedRows =
+      (status.learningMetrics.excludedRows ?? 0) +
+      Math.max(0, skillUseSource.events.length - learningSkillUseEvents.length);
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const skillUseSourceAfter = readSkillUseEventsWithDiagnostics({
+        sinceMs: Date.parse(generatedAt) - RECENT_WINDOW_MS,
+        limit: Math.max(500 * 8, 400),
+        maxFiles: 3,
+      });
+      const skillRowsAfter = settledLearningRows(
+        skillUseSourceAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const skillQuality = {
+        sourceState: skillUseSource.sourceState,
+        sourcePresent: skillUseSource.sourcePresent,
+        eventState: skillUseSource.eventState,
+      };
+      const skillQualityAfter = {
+        sourceState: skillUseSourceAfter.sourceState,
+        sourcePresent: skillUseSourceAfter.sourcePresent,
+        eventState: skillUseSourceAfter.eventState,
+      };
+      if (learningSnapshotDigest(skillQuality, learningSkillUseEvents) ===
+          learningSnapshotDigest(skillQualityAfter, skillRowsAfter)) {
+        learningSkillUseEvents = skillRowsAfter;
+      } else {
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+        status.attemptCoverage = undefined;
+      }
+    } catch {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+      };
+      status.attemptCoverage = undefined;
+    }
+  }
+  const skillSource = learningSourceAvailability('skill-use', {
+    sourceState: skillUseSource.sourceState,
+    complete: skillUseSource.sourceState === 'healthy',
+  });
+  if (status.learningMetrics?.state === 'available') {
     try {
       const trajectoryRecords = listTrajectoryRecords({
         windowHours,
         limit: 500,
         deps: {
-          ...(workspaceRead ? { readAgentActions: () => workspaceRead!.events } : {}),
-          readSkillUseEvents: () => skillUseSource.events,
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
+          readSkillUseEvents: () => learningSkillUseEvents,
+          listOutcomeRecords: () => outcomeRecords,
+          loadProposal: (id) => proposalById.get(id) ?? null,
         },
       });
-      status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
+      const unavailable = new Set<keyof TrajectoryRecordCoverage>();
+      if (!learningSourceAvailable(outcomeSource)) unavailable.add('proposal');
+      if (!learningSourceAvailable(evidenceSource)) unavailable.add('evidence');
+      if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
+      if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
+      if (!learningSourceAvailable(skillSource)) unavailable.add('skillUse');
+      const terminalAvailable = learningSourceAvailable(outcomeSource) && learningSourceAvailable(decisionSource);
+      const realizedAvailable = terminalAvailable && learningSourceAvailable(postMergeSource);
+      const tracesAvailable = terminalAvailable && learningSourceAvailable(evidenceSource) &&
+        learningSourceAvailable(actionSource) && learningSourceAvailable(workedSource) &&
+        learningSourceAvailable(postMergeSource) && learningSourceAvailable(judgeTraceSource);
+      status.trajectoryLearning = withholdTrajectoryMetrics(
+        summarizeTrajectoryLearning(trajectoryRecords, windowHours),
+        unavailable,
+        { terminal: terminalAvailable, realized: realizedAvailable, traces: tracesAvailable },
+      );
+      const withheldMetrics = [
+        ...[...unavailable].map((metric) => `coverage.${metric}`),
+        ...(!terminalAvailable ? ['terminalOutcomes', 'routeSpine.dispatchToMerge'] : []),
+        ...(!realizedAvailable ? ['realizedOutcomes'] : []),
+        ...(!learningSourceAvailable(decisionSource) ? ['routeSpine.dispatchToDecision'] : []),
+        ...(!learningSourceAvailable(evidenceSource) ? ['routeSpine.dispatchToEvidence'] : []),
+        ...(!tracesAvailable ? ['traces'] : []),
+      ];
+      status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+        [
+          dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource,
+          workedSource, postMergeSource, judgeTraceSource, skillSource,
+        ],
+        withheldMetrics,
+        12,
+      );
     } catch {
-      // Optional route-to-outcome learning surface only.
+      status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+        [dispatchSource, { source: 'outcomes', sourceState: 'degraded', complete: false }],
+        [
+          'terminalOutcomes', 'realizedOutcomes', 'coverage.proposal', 'coverage.evidence',
+          'coverage.decision', 'coverage.agentAction', 'coverage.skillUse', 'routeSpine', 'traces', 'recent',
+        ],
+        10,
+      );
     }
   }
-  if (status.trajectoryLearning && skillUseSource.eventState === 'degraded') {
+  if (status.trajectoryLearning && !learningSourceAvailable(skillSource)) {
     status.trajectoryLearning = suppressDegradedSkillObservation(
       status.trajectoryLearning,
       skillUseSource.events.length > 0 ? 'present' : 'none',
+    );
+  }
+  if (status.learningMetrics?.state === 'withheld') {
+    status.learningMetrics.attemptCoverage = learningMetricAvailability(
+      [dispatchSource],
+      ['production', 'coverage.agentAction', 'coverage.outcomeRecord', 'coverage.decision', 'coverage.evidence', 'coverage.worked'],
+      6,
+    );
+    status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+      [dispatchSource],
+      [
+        'trajectories', 'terminalOutcomes', 'realizedOutcomes', 'coverage.dispatch',
+        'coverage.proposal', 'coverage.evidence', 'coverage.decision', 'coverage.agentAction',
+        'coverage.skillUse', 'routeSpine', 'traces', 'recent',
+      ],
+      12,
     );
   }
   status.skillCorpusReadiness = await readSkillCorpusReadiness(

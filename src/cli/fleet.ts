@@ -401,20 +401,23 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Durable dispatch-production yield
   const dispatchProduction = s.dispatchProduction;
+  const dispatchProductionSource = s.dispatchProductionSource;
+  const dispatchProductionComplete = dispatchProductionSource?.sourceState === 'healthy' &&
+    dispatchProductionSource.complete;
   lines.push('Dispatch yield:');
-  if (!dispatchProduction) {
-    const source = s.dispatchProductionSource;
+  if (!dispatchProduction || !dispatchProductionComplete) {
+    const source = dispatchProductionSource;
     if (source?.sourceState === 'degraded') {
       lines.push(
         `  source:    degraded (partial); files ${source.filesRead}, bytes ${source.bytesRead}, ` +
           `rows ${source.rowsScanned}, invalid ${source.invalidRows}, unreadable ${source.unreadableFiles}`,
       );
-      lines.push('  output:    unavailable because no valid bounded rows were readable');
+      lines.push('  output:    withheld because the bounded dispatch source is incomplete');
     } else {
       lines.push(`  unavailable${source?.sourceState === 'missing' ? ' (source missing)' : ''}`);
     }
   } else {
-    const source = s.dispatchProductionSource;
+    const source = dispatchProductionSource;
     const sourceDetail = source
       ? `${source.sourceState}${source.complete ? '' : ' (partial)'}; files ${source.filesRead}, ` +
         `bytes ${source.bytesRead}, rows ${source.rowsScanned}, invalid ${source.invalidRows}, ` +
@@ -533,9 +536,16 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Attempt coverage
   const attemptCoverage = s.attemptCoverage;
+  const learningMetrics = s.learningMetrics;
   lines.push('Attempt coverage:');
+  if (learningMetrics?.settledThrough) {
+    lines.push(
+      `  settled:   through ${learningMetrics.settledThrough}; ` +
+        `${learningMetrics.excludedRows ?? 0} newer row(s) excluded`,
+    );
+  }
   if (!attemptCoverage) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     lines.push(`  attempts:  ${attemptCoverage.attempts} in ${formatProductionWindow(attemptCoverage.windowHours)}`);
     lines.push(
@@ -553,6 +563,10 @@ export function formatFleetStatus(s: FleetStatus): string {
         `decisions ${formatCoverageMetric(attemptCoverage.coverage.decision)}, ` +
         `evidence ${formatCoverageMetric(attemptCoverage.coverage.evidence)}`,
     );
+    const attemptAvailability = learningMetrics?.attemptCoverage;
+    if (attemptAvailability && attemptAvailability.state !== 'available') {
+      lines.push(`  withheld: ${formatLearningMetricWithholding(attemptAvailability)}`);
+    }
     lines.push(
       `  metadata:  trajectory ${formatCoverageMetric(attemptCoverage.causalCoverage.trajectoryId)}, ` +
         `route ${formatCoverageMetric(attemptCoverage.causalCoverage.routeSnapshot)}, ` +
@@ -603,14 +617,14 @@ export function formatFleetStatus(s: FleetStatus): string {
   const trajectoryLearning = s.trajectoryLearning;
   lines.push('Trajectory learning:');
   if (!trajectoryLearning) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     const outcomes = trajectoryLearning.terminalOutcomes;
     lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
-    lines.push(
-      `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
-        `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`,
-    );
+    lines.push(outcomes
+      ? `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
+        `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`
+      : '  outcomes:     withheld (outcome denominator unavailable)');
     lines.push(
       `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToDecision)}, ` +
         `dispatch->evidence ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToEvidence)}, ` +
@@ -626,12 +640,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (skillObservation) {
       if (skillObservation.sampleState === 'observed') {
         lines.push(
-          `  skill observations: ${formatCoverageMetric(skillObservation.observedTrajectoryCoverage ?? { count: 0, rate: 0 })} trajectories, ` +
+          `  skill observations: ${formatCoverageMetric(skillObservation.observedTrajectoryCoverage)} trajectories, ` +
             `${skillObservation.joined ?? 0} event(s), ${skillObservation.unjoined ?? 0} unjoined, ` +
             `${skillObservation.conflicting ?? 0} conflicting (observed)`,
         );
       } else if (skillObservation.sampleState === 'unavailable') {
-        lines.push('  skill observations: source degraded (exact counts withheld)');
+        lines.push('  skill observations: source unavailable (exact counts withheld)');
       } else if (skillObservation.sampleState === 'insufficient-sample') {
         lines.push('  skill observations: insufficient sample (<3 trajectories; exact counts withheld)');
       } else if (skillObservation.eventState === 'present') {
@@ -642,7 +656,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     }
     const gap = trajectoryLearning.gaps[0];
     if (gap) lines.push(`  top gap:      ${gap.kind} missing on ${gap.count} trajector${gap.count === 1 ? 'y' : 'ies'}`);
-    const recent = trajectoryLearning.recent[0];
+    const recent = trajectoryLearning.recent?.[0];
     if (recent) {
       lines.push(`  recent:       ${recent.ref} ${recent.terminalOutcome} at ${recent.latestAt}`);
     }
@@ -658,8 +672,9 @@ export function formatFleetStatus(s: FleetStatus): string {
       for (const trace of traces.records.slice(0, 5)) {
         lines.push(
           `    ${trace.ref} ${trace.terminalOutcome} ${trace.sourceState} ` +
-            `coverage d=${trace.coverage.dispatch ? 'y' : 'n'} p=${trace.coverage.proposal ? 'y' : 'n'} ` +
-            `e=${trace.coverage.evidence ? 'y' : 'n'} c=${trace.coverage.decision ? 'y' : 'n'} a=${trace.coverage.agentAction ? 'y' : 'n'}`,
+            `coverage d=${formatCoverageFlag(trace.coverage.dispatch)} p=${formatCoverageFlag(trace.coverage.proposal)} ` +
+            `e=${formatCoverageFlag(trace.coverage.evidence)} c=${formatCoverageFlag(trace.coverage.decision)} ` +
+            `a=${formatCoverageFlag(trace.coverage.agentAction)}`,
         );
         for (const event of trace.events.slice(0, 8)) {
           const route = event.route
@@ -676,6 +691,10 @@ export function formatFleetStatus(s: FleetStatus): string {
           );
         }
       }
+    }
+    const trajectoryAvailability = learningMetrics?.trajectoryLearning;
+    if (trajectoryAvailability && trajectoryAvailability.state !== 'available') {
+      lines.push(`  withheld: ${formatLearningMetricWithholding(trajectoryAvailability)}`);
     }
   }
   lines.push('');
@@ -1087,8 +1106,42 @@ function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
 
-function formatCoverageMetric(metric: { count: number; rate: number }): string {
+function formatCoverageMetric(metric: { count: number; rate: number } | undefined): string {
+  if (!metric) return 'withheld';
   return `${metric.count} (${formatPercent(metric.rate)})`;
+}
+
+function formatCoverageFlag(value: boolean | undefined): string {
+  return value === undefined ? '?' : value ? 'y' : 'n';
+}
+
+function formatLearningMetricWithholding(
+  availability: NonNullable<FleetStatus['learningMetrics']>['dispatchProduction'],
+): string {
+  const metrics = availability.withheldMetrics.slice(0, 6).join(', ');
+  const reasons = availability.reasons.slice(0, 4).join(', ');
+  return `${metrics || 'dependent metrics'}${reasons ? ` (${reasons})` : ''}`;
+}
+
+function formatLearningMetricsAvailability(source: FleetStatus['learningMetrics']): string {
+  if (!source) return 'unavailable';
+  if (source.state === 'available') return 'unavailable';
+  const quality = source.sourceQuality;
+  if (source.reason === 'dispatch-source-missing') {
+    return 'withheld (dispatch denominator missing)';
+  }
+  if (source.reason === 'learning-snapshot-settling') {
+    return 'withheld (dispatch rows are still inside the settlement window)';
+  }
+  if (source.reason === 'learning-snapshot-unstable') {
+    return 'withheld (cross-source learning snapshot changed during read)';
+  }
+  const details = [
+    quality.invalidRows > 0 ? `${quality.invalidRows} invalid row(s)` : null,
+    quality.unreadableFiles > 0 ? `${quality.unreadableFiles} unreadable file(s)` : null,
+    quality.stopReasons.length > 0 ? `stopped: ${quality.stopReasons.join(', ')}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  return `withheld (dispatch denominator degraded${details.length > 0 ? `; ${details.join('; ')}` : ''})`;
 }
 
 function formatNullablePercent(rate: number | null | undefined): string {
@@ -1233,12 +1286,9 @@ function formatWorkspaceRate(
 
 function formatAttemptActionCoverage(attempt: NonNullable<FleetStatus['attemptCoverage']>): string {
   const source = attempt.agentActionSource;
-  if (!source || (source.sourceState === 'healthy' && source.complete)) {
-    return formatCoverageMetric(attempt.coverage.agentAction);
-  }
-  return source.sourceState === 'missing'
-    ? 'unavailable'
-    : `${formatCoverageMetric(attempt.coverage.agentAction)} observed (partial)`;
+  if (!attempt.coverage.agentAction ||
+    (source && (source.sourceState !== 'healthy' || !source.complete))) return 'withheld';
+  return formatCoverageMetric(attempt.coverage.agentAction);
 }
 
 function formatWorkspaceAttention(row: NonNullable<FleetStatus['workspace']>['attention'][number]): string {
