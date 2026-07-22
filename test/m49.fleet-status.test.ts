@@ -246,6 +246,10 @@ async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+function settledLearningTimestamp(): string {
+  return new Date(Date.now() - 5 * 60 * 1000).toISOString();
+}
+
 function makeEvidencePack(id: string, generatedAt: string) {
   const proposal: Proposal = {
     id,
@@ -2985,7 +2989,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -3105,6 +3109,117 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('codex 1/1 100%');
   });
 
+  it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
+    const now = settledLearningTimestamp();
+    const cfg = baseConfig();
+    const proposal = createSignedProposal(cfg, {
+      title: 'Snapshot race fixture',
+      diff: docsDiff('snapshot race'),
+    });
+    proposal.createdAt = now;
+    proposal.routeSnapshot = {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: 'stable local route',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    };
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'snapshot-race-attempt',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Snapshot race fixture',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const first = inboxStore.listProposalsDetailed();
+    const changed = {
+      ...first,
+      proposals: first.proposals.map((row) => row.id === proposal.id
+        ? {
+            ...row,
+            routeSnapshot: row.routeSnapshot
+              ? { ...row.routeSnapshot, reason: 'mutated private route reason' }
+              : row.routeSnapshot,
+          }
+        : row),
+    };
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(changed);
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        attemptCoverage: { state: 'withheld' },
+        trajectoryLearning: { state: 'withheld' },
+      });
+      expect(status.attemptCoverage).toBeUndefined();
+      expect(status.trajectoryLearning).toBeUndefined();
+      expect(JSON.stringify(status.learningMetrics)).not.toContain('proposalRate');
+      expect(formatFleetStatus(status)).toContain(
+        'withheld (cross-source learning snapshot changed during read)',
+      );
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds all-recent learning activity until the shared cutoff settles', async () => {
+    const now = new Date().toISOString();
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'still-settling',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Still settling',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'learning-snapshot-settling',
+      excludedRows: 1,
+      settledThrough: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      attemptCoverage: { state: 'withheld' },
+      trajectoryLearning: { state: 'withheld' },
+    });
+    expect(status.attemptCoverage).toBeUndefined();
+    expect(status.trajectoryLearning).toBeUndefined();
+    const formatted = formatFleetStatus(status);
+    expect(formatted).toContain('1 newer row(s) excluded');
+    expect(formatted).toContain('withheld (dispatch rows are still inside the settlement window)');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+  });
+
   it('withholds every public yield projection for the live six-row/four-invalid source shape', async () => {
     const now = new Date().toISOString();
     const valid = {
@@ -3197,7 +3312,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('withholds degraded and missing join metrics instead of publishing false zeros', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     recordDispatchProduction({
       schemaVersion: 1,
       ts: now,
@@ -3532,7 +3647,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const repo = join(tmpHome, 'repo-attempts');
     const cfg = withFoundry({
       autoMerge: {
@@ -3547,6 +3662,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       diff: docsDiff('attempt coverage'),
       verifyResult: { passed: true, source: 'manual' },
     });
+    proposal.createdAt = now;
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
 
     writeRunningDaemon(tmpHome, [], now);
     writeBacklogSnapshot(tmpHome, repo, [], now);
@@ -3824,7 +3945,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   });
 
   it('promotes weak causal attempt coverage into next actions', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-causal');
     mkdirSync(ashlrDir, { recursive: true });
@@ -5242,7 +5363,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'disabled-a',
       source: 'goal',
@@ -5312,7 +5433,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'diagnostic-a',
       source: 'goal',
@@ -5387,7 +5508,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'capture-missing-a',
       source: 'goal',
