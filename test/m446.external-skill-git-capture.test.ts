@@ -12,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -903,6 +904,95 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
     expect(JSON.stringify(result)).not.toContain(outside);
   });
 
+  it('rejects oversized source object files before invoking Git object parsing', () => {
+    const fixture = committedPack();
+    const oversized = join(fixture.bare, 'objects', 'oversized.pack');
+    writeFileSync(oversized, '');
+    truncateSync(oversized, 32 * 1024 * 1024 + 1);
+    const storageRoot = store();
+
+    const result = captureExternalSkillGitObject({
+      repoPath: fixture.bare,
+      commitOid: fixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: fixture.portablePackDigest,
+    }, { storageRoot, storageAnchor: storageRoot });
+
+    expect(result).toMatchObject({ state: 'withheld', reason: 'capture-limit' });
+    expect(existsSync(join(storageRoot, 'objects'))).toBe(false);
+  });
+
+  it('rejects aggregate oversized object stores even when each file is below the per-file cap', () => {
+    const fixture = committedPack();
+    for (const name of ['oversized-a.pack', 'oversized-b.pack', 'oversized-c.pack']) {
+      const path = join(fixture.bare, 'objects', name);
+      writeFileSync(path, '');
+      truncateSync(path, 24 * 1024 * 1024);
+    }
+    const storageRoot = store();
+
+    const result = captureExternalSkillGitObject({
+      repoPath: fixture.bare,
+      commitOid: fixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: fixture.portablePackDigest,
+    }, { storageRoot, storageAnchor: storageRoot });
+
+    expect(result).toMatchObject({ state: 'withheld', reason: 'capture-limit' });
+    expect(existsSync(join(storageRoot, 'objects'))).toBe(false);
+  });
+
+  it('rejects oversized or externally including repository config before Git invocation', () => {
+    const oversizedFixture = committedPack();
+    truncateSync(join(oversizedFixture.bare, 'config'), 64 * 1024 + 1);
+    const oversizedStore = store();
+    expect(captureExternalSkillGitObject({
+      repoPath: oversizedFixture.bare,
+      commitOid: oversizedFixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: oversizedFixture.portablePackDigest,
+    }, { storageRoot: oversizedStore, storageAnchor: oversizedStore })).toMatchObject({
+      state: 'withheld', reason: 'source-unsafe',
+    });
+
+    const includeFixture = committedPack();
+    const configPath = join(includeFixture.bare, 'config');
+    writeFileSync(configPath, `${readFileSync(configPath, 'utf8')}\n[include]\n\tpath = /private/tmp/forbidden\n`);
+    const includeStore = store();
+    expect(captureExternalSkillGitObject({
+      repoPath: includeFixture.bare,
+      commitOid: includeFixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: includeFixture.portablePackDigest,
+    }, { storageRoot: includeStore, storageAnchor: includeStore })).toMatchObject({
+      state: 'withheld', reason: 'source-unsafe',
+    });
+
+    const worktreeFixture = committedPack();
+    writeFileSync(join(worktreeFixture.bare, 'config.worktree'), '[include]\n\tpath = /private/tmp/forbidden\n');
+    const worktreeStore = store();
+    expect(captureExternalSkillGitObject({
+      repoPath: worktreeFixture.bare,
+      commitOid: worktreeFixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: worktreeFixture.portablePackDigest,
+    }, { storageRoot: worktreeStore, storageAnchor: worktreeStore })).toMatchObject({
+      state: 'withheld', reason: 'source-unsafe',
+    });
+
+    const commonFixture = committedPack();
+    writeFileSync(join(commonFixture.bare, 'commondir'), '../redirected-git-dir\n');
+    const commonStore = store();
+    expect(captureExternalSkillGitObject({
+      repoPath: commonFixture.bare,
+      commitOid: commonFixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: commonFixture.portablePackDigest,
+    }, { storageRoot: commonStore, storageAnchor: commonStore })).toMatchObject({
+      state: 'withheld', reason: 'source-unsafe',
+    });
+  });
+
   it('keeps repository paths, commit messages, filenames, and blob contents out of public output', () => {
     const repository = initializeRawRepository();
     const filenameSecret = 'credential-canary-9f43.txt';
@@ -935,13 +1025,16 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
     const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
     const sourceRoot = join(repositoryRoot, 'src');
     const references: Array<{ file: string; kind: string; typeOnly: boolean }> = [];
-    const target = /(?:^|\/)external-skill-git-capture\.js$/;
+    const literalReferences: string[] = [];
+    const target = /(?:^|\/)external-skill-git-capture\.js(?:[?#].*)?$/;
+    expect(target.test('../core/fleet/external-skill-git-capture.js?runtime-edge')).toBe(true);
+    expect(target.test('../core/fleet/external-skill-git-capture.js#runtime-edge')).toBe(true);
     const sourceFiles = (directory: string): string[] => readdirSync(directory, {
       withFileTypes: true,
     }).flatMap((entry) => {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) return sourceFiles(path);
-      return entry.isFile() && /\.(?:ts|tsx|mts|cts)$/.test(entry.name) ? [path] : [];
+      return entry.isFile() && /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(entry.name) ? [path] : [];
     });
     const moduleText = (node: ts.Expression | undefined): string | null =>
       node && ts.isStringLiteralLike(node) ? node.text : null;
@@ -964,6 +1057,9 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
         path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
       );
       const inspect = (node: ts.Node): void => {
+        if (ts.isStringLiteralLike(node) && target.test(node.text)) {
+          literalReferences.push(relative(repositoryRoot, path).replaceAll('\\', '/'));
+        }
         if (ts.isImportDeclaration(node) && target.test(moduleText(node.moduleSpecifier) ?? '')) {
           references.push({
             file: relative(repositoryRoot, path).replaceAll('\\', '/'),
@@ -1009,6 +1105,7 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
       kind: 'export',
       typeOnly: true,
     }]);
+    expect([...new Set(literalReferences)]).toEqual(['src/api/types.ts']);
   });
 
   it.runIf(process.platform !== 'win32')(
