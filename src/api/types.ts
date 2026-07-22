@@ -107,3 +107,16 @@ export type {
   ExternalSkillCustodyTrustKey,
   ExternalSkillCustodyTrustPolicy,
 } from '../core/fleet/external-skill-custody-attestation.js';
+
+export type {
+  ExternalSkillAuditReceipt,
+  ExternalSkillAuditReceiptInput,
+  ExternalSkillAuditReceiptReason,
+  ExternalSkillAuditReceiptUnsigned,
+  ExternalSkillAuditReceiptVerificationResult,
+} from '../core/fleet/external-skill-audit-receipt.js';
+
+export type {
+  ExternalSkillAuditTrustPolicy,
+  ExternalSkillAuditTrustRoot,
+} from '../core/fleet/external-skill-audit-trust-roots.js';
