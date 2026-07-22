@@ -24,7 +24,7 @@ import {
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const BUNDLE_DIGEST = 'b'.repeat(64);
-const CAPTURE_RECEIPT_REFERENCE_DIGEST = 'a'.repeat(64);
+const CAPTURE_RECEIPT_DIGEST = 'a'.repeat(64);
 const CUSTODY_AUTHORITY_DIGEST = '1'.repeat(64);
 const RETENTION_POLICY_DIGEST = '2'.repeat(64);
 const CAPTURE_DIGEST = createHash('sha256')
@@ -54,6 +54,7 @@ function capture(
     state: 'captured',
     reason: 'captured',
     captureDigest: CAPTURE_DIGEST,
+    captureReceiptDigest: CAPTURE_RECEIPT_DIGEST,
     portablePackDigest: 'c'.repeat(64),
     sourceIdentity: 'd'.repeat(64),
     fileCount: 17,
@@ -103,7 +104,7 @@ function fixture(options: {
     protocol: 'ashlr-external-skill-custody-v1',
     captureDigest: captured.captureDigest,
     bundleDigest: BUNDLE_DIGEST,
-    captureReceiptReferenceDigest: CAPTURE_RECEIPT_REFERENCE_DIGEST,
+    captureReceiptDigest: captured.captureReceiptDigest,
     portablePackDigest: captured.portablePackDigest,
     sourceIdentity: captured.sourceIdentity,
     fileCount: captured.fileCount,
@@ -136,7 +137,6 @@ function fixture(options: {
     receipt,
     input: {
       capture: captured,
-      captureReceiptReferenceDigest: CAPTURE_RECEIPT_REFERENCE_DIGEST,
       receipt,
       trustPolicy: policy,
     },
@@ -174,6 +174,7 @@ describe('M447 external skill custody statement verification', () => {
       state: 'statement-signature-verified',
       reason: 'statement-signature-verified',
       captureDigest: CAPTURE_DIGEST,
+      captureReceiptDigest: CAPTURE_RECEIPT_DIGEST,
       trustPolicyDigest: value.unsigned.trustPolicyDigest,
       keyId: value.unsigned.keyId,
       claimedCustodyAuthorityDigest: CUSTODY_AUTHORITY_DIGEST,
@@ -227,7 +228,7 @@ describe('M447 external skill custody statement verification', () => {
       'ashlr-external-skill-custody-v1',
       value.unsigned.captureDigest,
       value.unsigned.bundleDigest,
-      value.unsigned.captureReceiptReferenceDigest,
+      value.unsigned.captureReceiptDigest,
       value.unsigned.portablePackDigest,
       value.unsigned.sourceIdentity,
       value.unsigned.fileCount,
@@ -271,15 +272,19 @@ describe('M447 external skill custody statement verification', () => {
     expect(verifyExternalSkillCustodyAttestation(value.input).reason).toBe('capture-mismatch');
   });
 
-  it('requires the statement to match an independently supplied opaque receipt reference', () => {
+  it('requires the signed statement to match the M446-derived canonical receipt identity', () => {
+    const value = fixture();
+    const resigned = resign(value, { captureReceiptDigest: '9'.repeat(64) });
+    expect(verifyExternalSkillCustodyAttestation(resigned.input).reason)
+      .toBe('capture-receipt-mismatch');
+  });
+
+  it('rejects caller-invented legacy receipt references without migration guessing', () => {
     const value = fixture();
     expect(verifyExternalSkillCustodyAttestation({
       ...value.input,
-      captureReceiptReferenceDigest: '9'.repeat(64),
-    }).reason).toBe('capture-receipt-reference-mismatch');
-    const resigned = resign(value, { captureReceiptReferenceDigest: '9'.repeat(64) });
-    expect(verifyExternalSkillCustodyAttestation(resigned.input).reason)
-      .toBe('capture-receipt-reference-mismatch');
+      captureReceiptReferenceDigest: value.input.capture.captureReceiptDigest,
+    }).reason).toBe('invalid-input');
   });
 
   it.each([
@@ -452,6 +457,7 @@ describe('M447 external skill custody statement verification', () => {
       state: 'withheld',
       reason: 'source-unavailable',
       captureDigest: null,
+      captureReceiptDigest: null,
       portablePackDigest: null,
       sourceIdentity: null,
       fileCount: 0,
@@ -470,6 +476,15 @@ describe('M447 external skill custody statement verification', () => {
     expect(verifyExternalSkillCustodyAttestation({
       ...value.input,
       capture: { ...value.input.capture, executionEligible: true },
+    }).reason).toBe('capture-incomplete');
+
+    const {
+      captureReceiptDigest: _legacyMissingReceiptIdentity,
+      ...legacyCapture
+    } = value.input.capture;
+    expect(verifyExternalSkillCustodyAttestation({
+      ...value.input,
+      capture: legacyCapture,
     }).reason).toBe('capture-incomplete');
 
     const sparseBlockers = new Array(4);
@@ -533,6 +548,7 @@ describe('M447 external skill custody statement verification', () => {
     expect(result).toMatchObject({
       state: 'withheld',
       captureDigest: null,
+      captureReceiptDigest: null,
       receiptDigest: null,
       trustPolicyDigest: null,
       keyId: null,

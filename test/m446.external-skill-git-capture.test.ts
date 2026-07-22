@@ -327,6 +327,7 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
       custody: { localIntegrity: 'verified', authenticated: false },
     });
     expect(result.captureDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.captureReceiptDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(result.sourceIdentity).toMatch(/^[a-f0-9]{64}$/);
     expect(result.fileCount).toBeGreaterThan(0);
     expect(result.totalBytes).toBeGreaterThan(0);
@@ -349,6 +350,30 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
 
     expect(first.state).toBe('captured');
     expect(second).toEqual({ ...first, state: 'replayed', reason: 'replayed' });
+  });
+
+  it('derives receipt identity from the exact canonical bytes published by M446', () => {
+    const fixture = committedPack();
+    const storageRoot = store();
+    const result = captureExternalSkillGitObject({
+      repoPath: fixture.bare,
+      commitOid: fixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: fixture.portablePackDigest,
+    }, { storageRoot, storageAnchor: storageRoot });
+    if (!result.captureDigest || !result.captureReceiptDigest) {
+      throw new Error('capture receipt identity unavailable');
+    }
+    const receiptBytes = readFileSync(
+      join(storageRoot, 'receipts', `${result.captureDigest}.json`),
+    );
+    const expected = createHash('sha256')
+      .update('ashlr:external-skill-capture-receipt:v1\0', 'utf8')
+      .update(receiptBytes)
+      .digest('hex');
+
+    expect(result.captureReceiptDigest).toBe(expected);
+    expect(JSON.stringify(result)).not.toContain(receiptBytes.toString('utf8'));
   });
 
   it.runIf(process.platform !== 'win32')(
@@ -557,6 +582,26 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
 
     const second = captureExternalSkillGitObject(input, { storageRoot, storageAnchor: storageRoot });
     expect(second).toMatchObject({ state: 'withheld', reason: 'store-conflict' });
+  });
+
+  it('rejects semantically equivalent but non-canonical receipt bytes on replay', () => {
+    const fixture = committedPack();
+    const storageRoot = store();
+    const input = {
+      repoPath: fixture.bare,
+      commitOid: fixture.commitOid,
+      packSubdir: '.',
+      expectedPortablePackDigest: fixture.portablePackDigest,
+    };
+    const first = captureExternalSkillGitObject(input, { storageRoot, storageAnchor: storageRoot });
+    if (!first.captureDigest) throw new Error('capture digest unavailable');
+    const receiptPath = join(storageRoot, 'receipts', `${first.captureDigest}.json`);
+    const parsed = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+
+    const replay = captureExternalSkillGitObject(input, { storageRoot, storageAnchor: storageRoot });
+
+    expect(replay).toMatchObject({ state: 'withheld', reason: 'store-conflict' });
   });
 
   it('rejects a receipt without its bundle and never repairs beneath the commit marker', () => {

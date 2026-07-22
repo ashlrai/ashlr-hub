@@ -19,16 +19,22 @@ trial readiness, or execution isolation.
 record containing:
 
 - an exact completed M446 `captured|replayed` result;
-- a separately supplied opaque digest reference for an M446 capture receipt;
 - a signed custody statement; and
 - a supplied policy containing 1-16 sorted Ed25519 public keys.
 
-The reference prevents accidental substitution between those two inputs, but
-M447 defines no canonical M446 receipt serialization or digest construction. It
-does not read a receipt from stable storage or establish who supplied the
-reference. A caller that fabricates both inputs can still produce a
-self-consistent signed statement. The result therefore keeps custody
-unauthenticated.
+The completed M446 result carries `captureReceiptDigest`, the
+domain-separated digest of the exact canonical bytes M446 published as its
+commit-last receipt. M447 accepts no separate receipt-reference input and does
+not infer legacy references. The signed statement must bind exactly the digest
+on the completed M446 result. A cross-stage mismatch is
+`capture-receipt-mismatch`; an old caller-supplied reference is an unknown input
+field and fails as `invalid-input`.
+
+M447 still does not read the receipt from stable storage. A caller that
+fabricates an entire internally consistent M446 result and signed statement can
+still produce a self-consistent story. The bridge removes caller-selected
+reference substitution; it does not authenticate custody, so the result keeps
+custody unauthenticated.
 
 The module has no private-key type, key-generation function, signing function,
 ambient trust-store lookup, environment-variable input, path input, URL, fetch,
@@ -72,8 +78,8 @@ revocation feed, certificate chain, or rotation authority.
 
 The canonical signed payload binds:
 
-- the M446 capture, opaque receipt-reference, bundle, portable-pack, and source
-  digests;
+- the M446 capture, canonical capture-receipt, bundle, portable-pack, and
+  source digests;
 - file, symlink, and byte counts;
 - opaque object-version, custody-authority, and retention-policy digests;
 - fixed `external-retention-lock` and `canonical-bundle-rehashed` claims;
@@ -100,6 +106,7 @@ A successful result is named `statement-signature-verified` and reports:
 ```text
 mode: external-custody-statement-verification
 authority: observation-only
+captureReceiptDigest: <exact M446-derived identity>
 statement.signatureVerified: true
 statement.keyMatchedSuppliedPolicy: true
 statement.trustPolicyApprovalVerified: false
@@ -134,8 +141,7 @@ M447 does not provide or claim:
   identity, certificate chains, revocation, or historical policy validation;
 - live remote reads, write-once enforcement, deletion audit, availability
   monitoring, replay prevention, or append-only receipt transparency;
-- a canonical construction or trusted-storage proof for the opaque M446 receipt
-  reference;
+- a trusted-storage reread or independent proof for the M446 receipt bytes;
 - materialization, disposable no-network sandboxing, exact mount verification,
   exposure receipts, deterministic outcome evidence, or trial execution;
 - structural or behavioral safety, license review, usefulness, promotion, or
@@ -144,14 +150,15 @@ M447 does not provide or claim:
   root, kernel, clock, or cryptographic implementation.
 
 Before a real paired trial, Ashlr still needs verifier-owned trust distribution,
-stable canonical capture-receipt admission, append-only transparency and replay controls,
-live custody revalidation, a disposable no-network sandbox, exact exposure
-verification, and separately signed deterministic outcomes.
+trusted canonical capture-receipt admission, append-only transparency and
+replay controls, live custody revalidation, a disposable no-network sandbox,
+exact exposure verification, and separately signed deterministic outcomes.
 
 ## Verification
 
 Focused tests cover exact statement verification without custody elevation,
-capture-receipt and bundle-domain binding, every policy key, canonical DER,
+M446-derived capture-receipt identity, legacy-reference rejection, replay and
+cross-stage mismatch behavior, bundle-domain binding, every policy key, canonical DER,
 non-Ed25519 keys, policy generations, signing windows, future/expired/overlong
 claims, metadata mismatch, signature corruption, canonical base64url, closed
 schemas, sparse and named-property arrays, stateful input cloning, output
