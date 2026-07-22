@@ -253,7 +253,7 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'prior plist was restored and reloaded from',
+      'prior plist and activation state were restored from',
     );
     expect(fs.readFileSync(pp)).toEqual(prior);
     expect(calls.map((args) => args[1])).toEqual(['unload', 'load', 'unload', 'load']);
@@ -272,6 +272,25 @@ describe('installServeAgent', () => {
     );
     expect(fs.existsSync(pp)).toBe(false);
     expect(rc).toHaveBeenCalledTimes(3);
+  });
+
+  it('restores activation state after a fresh install fails', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'fresh-rollback.plist');
+    const rollback = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: false, stderr: 'rejected' }),
+      rollback,
+    })).toThrow('first-install plist was removed and activation state restored');
+
+    expect(fs.existsSync(pp)).toBe(false);
+    expect(rollback).toHaveBeenCalledOnce();
   });
 
   it('treats launchctl zero-exit error output as a load failure', async () => {
@@ -306,9 +325,33 @@ describe('installServeAgent', () => {
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'launchctl load failed: new load failed; prior plist was restored but rollback reload failed: old reload failed',
+      'launchctl load failed: new load failed; prior plist was restored but activation rollback failed: old reload failed',
     );
     expect(fs.readFileSync(pp, 'utf8')).toBe('<old/>');
+  });
+
+  it('restores the prior plist and activation callback when the initial unload fails', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'unload-failure.plist');
+    const prior = Buffer.from('<prior/>');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, prior);
+    const load = vi.fn(() => ({ ok: true, stderr: '' }));
+    const rollback = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: false, stderr: 'permission denied' }),
+      load,
+      rollback,
+    })).toThrow('prior plist and activation state were restored');
+
+    expect(fs.readFileSync(pp)).toEqual(prior);
+    expect(load).not.toHaveBeenCalled();
+    expect(rollback).toHaveBeenCalledOnce();
   });
 
   it('rejects symlinked active and fixed backup targets without touching their referents', async () => {
@@ -346,7 +389,7 @@ describe('installServeAgent', () => {
       ? { ok: false, stderr: 'rejected', stdout: '' }
       : { ok: true, stderr: '', stdout: '' });
 
-    expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow('restored and reloaded');
+    expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow('activation state were restored');
     expect(fs.readFileSync(pp)).toEqual(prior);
     expect(fs.statSync(pp).mode & 0o777).toBe(0o600);
     expect(fs.statSync(`${pp}.bak`).mode & 0o777).toBe(0o600);

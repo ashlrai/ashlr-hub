@@ -165,6 +165,9 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
 
   // PATH that mirrors common developer shells without requiring a login shell.
   const pathEnv = buildToolPath({ home: o.home, basePath: '' });
+  const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+  const domainTarget = `gui/${uid}`;
+  const serviceTarget = `${domainTarget}/ai.ashlr.daemon`;
 
   // When keepAwake is set, prepend `caffeinate -i -s --` so launchd keeps the
   // daemon alive through idle + system sleep while on AC power (lid-closed use).
@@ -230,8 +233,8 @@ ${programArgs.join('\n')}
   return {
     filePath: plistPath,
     content,
-    registerArgs: ['launchctl', 'load', plistPath],
-    unregisterArgs: ['launchctl', 'unload', plistPath],
+    registerArgs: ['launchctl', 'bootstrap', domainTarget, plistPath],
+    unregisterArgs: ['launchctl', 'bootout', serviceTarget],
   };
 }
 
@@ -276,16 +279,16 @@ WantedBy=default.target
 // ---------------------------------------------------------------------------
 
 function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
-  // On Windows, write a tiny launcher .cmd to a known location.
-  const startupDir = path.join(o.home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
-  const cmdPath = path.join(startupDir, 'ashlr-daemon.cmd');
+  // Task Scheduler owns activation. Keeping the launcher outside Startup is
+  // essential: otherwise --no-autostart would still run it at next login.
+  const cmdPath = path.join(o.configDir, 'services', 'ashlr-daemon.cmd');
 
   // schtasks /Create args (exec-safe array — no shell expansion)
   const taskArgs = [
     'schtasks',
     '/Create',
     '/TN', 'AshlrDaemon',
-    '/TR', `"${o.nodePath}" "${o.binPath}" daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}`,
+    '/TR', `"${cmdPath}"`,
     '/SC', 'ONLOGON',
     '/RL', 'LIMITED',
     '/F',  // force overwrite if exists
@@ -327,19 +330,164 @@ function writeServiceFile(filePath: string, content: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Run a command exec-safely (no shell). Returns { ok, stderr }.
+ * Run a command exec-safely (no shell) and retain output for postcondition checks.
  * Never throws — captures errors into the return value.
  */
-function runCmd(args: string[]): { ok: boolean; stderr: string } {
+interface CommandResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+function runCmd(args: string[]): CommandResult {
   const [cmd, ...rest] = args;
-  if (!cmd) return { ok: false, stderr: 'empty command' };
+  if (!cmd) return { ok: false, stdout: '', stderr: 'empty command' };
   try {
     const result = spawnSync(cmd, rest, { encoding: 'utf8', timeout: 15_000 });
     const ok = result.status === 0 && !result.error;
-    return { ok, stderr: result.stderr ?? result.error?.message ?? '' };
+    return {
+      ok,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? result.error?.message ?? '',
+    };
   } catch (e) {
-    return { ok: false, stderr: e instanceof Error ? e.message : String(e) };
+    return { ok: false, stdout: '', stderr: e instanceof Error ? e.message : String(e) };
   }
+}
+
+function commandError(label: string, result: CommandResult): Error {
+  return new Error(`${label} failed: ${result.stderr.trim() || result.stdout.trim() || 'exit non-zero'}`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function launchdAbsent(result: CommandResult): boolean {
+  const output = `${result.stdout}\n${result.stderr}`;
+  return !result.ok && /(?:could not find (?:specified )?service|service .* not found|no such process|not loaded)/i.test(output);
+}
+
+function launchdLoaded(serviceTarget: string): boolean {
+  const result = runCmd(['launchctl', 'print', serviceTarget]);
+  if (result.ok) return true;
+  if (launchdAbsent(result)) return false;
+  throw commandError(`launchctl print ${serviceTarget}`, result);
+}
+
+function launchdDisabled(domainTarget: string, label: string): boolean {
+  const result = runCmd(['launchctl', 'print-disabled', domainTarget]);
+  if (!result.ok) throw commandError(`launchctl print-disabled ${domainTarget}`, result);
+  const match = result.stdout.match(new RegExp(`"${escapeRegExp(label)}"\\s*=>\\s*(true|false)`, 'i'));
+  return match?.[1]?.toLowerCase() === 'true';
+}
+
+function setLaunchdDisabled(serviceTarget: string, domainTarget: string, label: string, disabled: boolean): CommandResult {
+  const changed = runCmd(['launchctl', disabled ? 'disable' : 'enable', serviceTarget]);
+  if (!changed.ok || /failed:/im.test(changed.stderr)) return { ...changed, ok: false };
+  try {
+    const actual = launchdDisabled(domainTarget, label);
+    return actual === disabled
+      ? changed
+      : { ok: false, stdout: '', stderr: `disabled state is ${actual}; expected ${disabled}` };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function stopLaunchdService(serviceTarget: string): CommandResult {
+  const stopped = runCmd(['launchctl', 'bootout', serviceTarget]);
+  if (stopped.ok && /(?:boot-?out|unload) failed:/im.test(stopped.stderr)) return { ...stopped, ok: false };
+  if (!stopped.ok && !launchdAbsent(stopped)) return stopped;
+  try {
+    return launchdLoaded(serviceTarget)
+      ? { ok: false, stdout: '', stderr: `${serviceTarget} remains loaded after bootout` }
+      : { ok: true, stdout: '', stderr: '' };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function loadLaunchdService(domainTarget: string, serviceTarget: string, plistPath: string): CommandResult {
+  const loaded = runCmd(['launchctl', 'bootstrap', domainTarget, plistPath]);
+  if (!loaded.ok || /(?:bootstrap|load) failed:/im.test(loaded.stderr)) return { ...loaded, ok: false };
+  try {
+    return launchdLoaded(serviceTarget)
+      ? loaded
+      : { ok: false, stdout: '', stderr: `${serviceTarget} is absent after bootstrap` };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function restoreLaunchdActivation(
+  domainTarget: string,
+  serviceTarget: string,
+  label: string,
+  plistPath: string,
+  loaded: boolean,
+  disabled: boolean,
+): CommandResult {
+  const state = setLaunchdDisabled(serviceTarget, domainTarget, label, disabled);
+  if (!state.ok) return state;
+  if (!loaded) return stopLaunchdService(serviceTarget);
+  try {
+    return launchdLoaded(serviceTarget)
+      ? { ok: true, stdout: '', stderr: '' }
+      : loadLaunchdService(domainTarget, serviceTarget, plistPath);
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function assertSystemdPostcondition(autostart: boolean): void {
+  const active = runCmd(['systemctl', '--user', 'is-active', 'ashlr-daemon']);
+  const enabled = runCmd(['systemctl', '--user', 'is-enabled', 'ashlr-daemon']);
+  if (autostart) {
+    if (!active.ok || active.stdout.trim() !== 'active') throw commandError('systemd active-state verification', active);
+    if (!enabled.ok || enabled.stdout.trim() !== 'enabled') throw commandError('systemd enabled-state verification', enabled);
+    return;
+  }
+  if (active.stdout.trim() !== 'inactive') throw commandError('systemd inactive-state verification', active);
+  if (enabled.stdout.trim() !== 'disabled') throw commandError('systemd disabled-state verification', enabled);
+}
+
+function windowsTaskAbsent(result: CommandResult): boolean {
+  const output = `${result.stdout}\n${result.stderr}`;
+  return !result.ok && /(?:cannot find (?:the file|the task)|task .* does not exist|specified task name .* does not exist)/i.test(output);
+}
+
+function stopAndDeleteWindowsTask(): void {
+  const ended = runCmd(['schtasks', '/End', '/TN', 'AshlrDaemon']);
+  const notRunning = /not currently running/i.test(`${ended.stdout}\n${ended.stderr}`);
+  if (!ended.ok && !notRunning && !windowsTaskAbsent(ended)) throw commandError('schtasks /End', ended);
+
+  const deleted = runCmd(['schtasks', '/Delete', '/TN', 'AshlrDaemon', '/F']);
+  if (!deleted.ok && !windowsTaskAbsent(deleted)) throw commandError('schtasks /Delete', deleted);
+
+  const queried = runCmd(['schtasks', '/Query', '/TN', 'AshlrDaemon']);
+  if (!windowsTaskAbsent(queried)) {
+    if (queried.ok) throw new Error('schtasks deletion verification failed: AshlrDaemon still exists');
+    throw commandError('schtasks deletion verification', queried);
+  }
+}
+
+function migrateLegacyWindowsLauncher(home: string, destinationDir: string): void {
+  const legacy = path.join(
+    home,
+    'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
+    'ashlr-daemon.cmd',
+  );
+  if (!fs.existsSync(legacy)) return;
+  const stat = fs.lstatSync(legacy);
+  const owned = typeof process.getuid !== 'function' || stat.uid === process.getuid();
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || !owned) {
+    throw new Error(`unsafe legacy Windows launcher: expected a regular, singly-linked owned file at ${legacy}`);
+  }
+  ensureServiceFileDir(path.join(destinationDir, 'placeholder'));
+  const archived = path.join(destinationDir, 'ashlr-daemon.startup-legacy.cmd.disabled');
+  if (fs.existsSync(archived)) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
+  fs.renameSync(legacy, archived);
 }
 
 // ---------------------------------------------------------------------------
@@ -350,9 +498,9 @@ function runCmd(args: string[]): { ok: boolean; stderr: string } {
  * Install and register the ashlr daemon as an OS service.
  *
  * Idempotent: backs up any existing service file, writes fresh, then loads.
- * On Linux: runs `systemctl --user daemon-reload` first; if systemctl is
- * absent, writes the unit and prints manual instructions.
- * On Windows: registers via schtasks; best-effort.
+ * Every platform verifies the requested activation state before returning.
+ * Missing service managers, permission failures, and ambiguous status output
+ * fail closed so callers cannot mistake a partial install for success.
  */
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
@@ -362,56 +510,59 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);
     const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
-    const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
+    const domainTarget = `gui/${uid}`;
+    const label = 'ai.ashlr.daemon';
+    const serviceTarget = `${domainTarget}/${label}`;
+    const priorLoaded = launchdLoaded(serviceTarget);
+    const priorDisabled = launchdDisabled(domainTarget, label);
     installLaunchdPlistTransaction({
       plistPath: def.filePath,
       trustedRoot: home,
       content: def.content,
       lockDir: path.join(home, '.ashlr', 'locks'),
-      unload: () => runCmd(['launchctl', 'unload', def.filePath]),
+      unload: () => stopLaunchdService(serviceTarget),
       load: () => {
-        if (!autostart) return runCmd(['launchctl', 'disable', serviceTarget]);
-        const enabled = runCmd(['launchctl', 'enable', serviceTarget]);
-        if (!enabled.ok) return enabled;
-        const result = runCmd(def.registerArgs);
-        return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
+        const state = setLaunchdDisabled(serviceTarget, domainTarget, label, !autostart);
+        if (!state.ok || !autostart) return state;
+        return loadLaunchdService(domainTarget, serviceTarget, def.filePath);
+      },
+      rollback: () => {
+        return restoreLaunchdActivation(
+          domainTarget,
+          serviceTarget,
+          label,
+          def.filePath,
+          priorLoaded,
+          priorDisabled,
+        );
       },
     });
   } else if (platform === 'linux') {
     writeServiceFile(def.filePath, def.content);
-    // daemon-reload first
-    runCmd(['systemctl', '--user', 'daemon-reload']);
+    const reloaded = runCmd(['systemctl', '--user', 'daemon-reload']);
+    if (!reloaded.ok) throw commandError('systemctl --user daemon-reload', reloaded);
     if (!autostart) {
-      runCmd(def.unregisterArgs);
+      const disabled = runCmd(def.unregisterArgs);
+      if (!disabled.ok) throw commandError('systemctl --user disable --now', disabled);
+      assertSystemdPostcondition(false);
       clearServiceStatusCache();
       return;
     }
-    const { ok, stderr } = runCmd(def.registerArgs);
-    if (!ok) {
-      // systemctl may be absent in containers / minimal environments
-      console.warn(
-        `[ashlr] systemctl not available or failed (${stderr.trim() || 'exit non-zero'}).\n` +
-        `Unit written to ${def.filePath}\n` +
-        `Enable manually:\n` +
-        `  systemctl --user daemon-reload\n` +
-        `  systemctl --user enable --now ashlr-daemon`,
-      );
-    }
+    const registered = runCmd(def.registerArgs);
+    if (!registered.ok) throw commandError('systemctl --user enable --now', registered);
+    assertSystemdPostcondition(true);
   } else if (platform === 'win32') {
     writeServiceFile(def.filePath, def.content);
+    migrateLegacyWindowsLauncher(resolveHome(opts.homeDir), path.dirname(def.filePath));
     if (!autostart) {
-      runCmd(def.unregisterArgs);
+      stopAndDeleteWindowsTask();
       clearServiceStatusCache();
       return;
     }
-    const { ok, stderr } = runCmd(def.registerArgs);
-    if (!ok) {
-      console.warn(
-        `[ashlr] schtasks registration failed (${stderr.trim() || 'exit non-zero'}).\n` +
-        `Startup script written to ${def.filePath}\n` +
-        `Register manually: ${def.registerArgs.join(' ')}`,
-      );
-    }
+    const registered = runCmd(def.registerArgs);
+    if (!registered.ok) throw commandError('schtasks /Create', registered);
+    const queried = runCmd(['schtasks', '/Query', '/TN', 'AshlrDaemon']);
+    if (!queried.ok) throw commandError('schtasks creation verification', queried);
   }
   clearServiceStatusCache();
 }
@@ -426,15 +577,14 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
 
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);
+    const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+    const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
     try {
       removeLaunchdPlistTransaction({
         plistPath: def.filePath,
         trustedRoot: home,
         lockDir: path.join(home, '.ashlr', 'locks'),
-        unload: () => {
-          const result = runCmd(def.unregisterArgs);
-          return { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
-        },
+        unload: () => stopLaunchdService(serviceTarget),
       });
     } catch { /* uninstall remains best-effort */ }
   } else {
