@@ -97,3 +97,13 @@ export type {
   ExternalSkillGitCaptureReason,
   ExternalSkillGitCaptureResult,
 } from '../core/fleet/external-skill-git-capture.js';
+
+export type {
+  ExternalSkillCustodyAttestation,
+  ExternalSkillCustodyAttestationInput,
+  ExternalSkillCustodyAttestationReason,
+  ExternalSkillCustodyAttestationResult,
+  ExternalSkillCustodyAttestationUnsigned,
+  ExternalSkillCustodyTrustKey,
+  ExternalSkillCustodyTrustPolicy,
+} from '../core/fleet/external-skill-custody-attestation.js';
