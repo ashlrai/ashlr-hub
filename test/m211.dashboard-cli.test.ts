@@ -293,6 +293,28 @@ describe('installServeAgent', () => {
     expect(rollback).toHaveBeenCalledOnce();
   });
 
+  it('rejects a failed activation preflight before writing or unloading', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'preflight-rejected.plist');
+    const unload = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      preflight: ({ hasPrior }) => ({
+        ok: false,
+        stderr: `loaded=${!hasPrior} without prior definition`,
+      }),
+      unload,
+      load: () => ({ ok: true, stderr: '' }),
+    })).toThrow('launchd transaction preflight failed: loaded=true without prior definition');
+
+    expect(fs.existsSync(pp)).toBe(false);
+    expect(unload).not.toHaveBeenCalled();
+  });
+
   it('treats launchctl zero-exit error output as a load failure', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
@@ -487,6 +509,62 @@ describe('installServeAgent', () => {
     );
     expect(calls).toEqual(['unload', 'load', 'unload']);
     expect(fs.readFileSync(outside, 'utf8')).toBe('MALICIOUS');
+  });
+
+  it('reports checked unload failure after a post-load plist interloper', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'post-load-unload-failure.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>');
+    let unloads = 0;
+    const rollback = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ++unloads === 1
+        ? { ok: true, stderr: '' }
+        : { ok: false, stderr: 'new job still owns PID 987' },
+      load: () => {
+        const interloper = `${pp}.interloper`;
+        fs.writeFileSync(interloper, 'INTERLOPER', { mode: 0o600 });
+        fs.renameSync(interloper, pp);
+        return { ok: true, stderr: '' };
+      },
+      rollback,
+    })).toThrow('compensating unload failed: new job still owns PID 987');
+
+    expect(unloads).toBe(2);
+    expect(rollback).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pp, 'utf8')).toBe('INTERLOPER');
+  });
+
+  it('rejects a post-load plist interloper before prior activation rollback', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'post-load-interloper.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>');
+    const rollback = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => {
+        const interloper = `${pp}.interloper`;
+        fs.writeFileSync(interloper, 'INTERLOPER', { mode: 0o600 });
+        fs.renameSync(interloper, pp);
+        return { ok: true, stderr: '' };
+      },
+      rollback,
+    })).toThrow('prior plist restore rejected an interloper');
+
+    expect(rollback).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pp, 'utf8')).toBe('INTERLOPER');
   });
 
   it('serializes nested transactions for the same plist', async () => {

@@ -23,6 +23,8 @@ export interface LaunchdPlistTransactionOptions {
   trustedRoot: string;
   content: string;
   lockDir: string;
+  /** Validate external activation state after the plist snapshot and before any write. */
+  preflight?: (state: { hasPrior: boolean }) => LaunchdCommandResult;
   unload: () => LaunchdCommandResult;
   load: () => LaunchdCommandResult;
   /** Restore the activation state captured before installation. Defaults to load(). */
@@ -289,6 +291,72 @@ function lockReleaseFailure(lock: { path: string; dev: number; ino: number }): s
   return undefined;
 }
 
+function compensateFailedInstall(
+  options: LaunchdPlistTransactionOptions,
+  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  installed: fs.Stats,
+  prior: PlistSnapshot | undefined,
+  rollbackPath: string | undefined,
+  failure: string,
+): never {
+  const compensatingUnload = options.unload();
+  if (!compensatingUnload.ok) {
+    throw new Error(
+      `${failure}; compensating unload failed: ` +
+      `${compensatingUnload.stderr.trim() || 'exit non-zero'}`,
+    );
+  }
+
+  if (!prior) {
+    try {
+      unlinkIfOwned(options.plistPath, installed);
+    } catch (error) {
+      throw new Error(
+        `${failure}; first-install plist cleanup rejected an interloper: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (options.rollback) {
+      const rollbackActivation = options.rollback();
+      if (!rollbackActivation.ok) {
+        throw new Error(
+          `${failure}; first-install plist was removed but activation rollback failed: ` +
+          `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+      throw new Error(`${failure}; first-install plist was removed and activation state restored`);
+    }
+    throw new Error(`${failure}; first-install plist was removed`);
+  }
+
+  let restored: fs.Stats;
+  try {
+    restored = atomicReplace(
+      options.plistPath,
+      prior.bytes,
+      prior.mode,
+      { dev: installed.dev, ino: installed.ino },
+      false,
+      parent,
+    );
+  } catch (error) {
+    throw new Error(
+      `${failure}; prior plist restore rejected an interloper: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  assertOwnedTarget(options.plistPath, restored);
+  const rollbackActivation = (options.rollback ?? options.load)();
+  if (!rollbackActivation.ok) {
+    throw new Error(
+      `${failure}; prior plist was restored but activation rollback failed: ` +
+      `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
+    );
+  }
+  throw new Error(`${failure}; prior plist and activation state were restored from ${rollbackPath}`);
+}
+
 export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionOptions): void {
   const parent = ensureTrustedParent(options.trustedRoot, options.plistPath);
   const transactionLockPath = lockPath(options.lockDir, options.plistPath);
@@ -300,6 +368,14 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
   try {
     const prior = readSnapshot(options.plistPath);
     validateRegularTarget(`${options.plistPath}.bak`, 'plist backup');
+    if (options.preflight) {
+      const preflight = options.preflight({ hasPrior: !!prior });
+      if (!preflight.ok) {
+        throw new Error(
+          `launchd transaction preflight failed: ${preflight.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+    }
 
     let rollbackPath: string | undefined;
     if (prior) {
@@ -381,73 +457,24 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       assertParentIdentity(options.plistPath, parent);
       assertOwnedTarget(options.plistPath, installed);
     } catch (error) {
-      options.unload();
-      throw new Error(
+      compensateFailedInstall(
+        options,
+        parent,
+        installed,
+        prior,
+        rollbackPath,
         `active plist changed during launchctl load: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     if (!loaded.ok) {
       const loadFailure = loaded.stderr.trim() || 'exit non-zero';
-      const compensatingUnload = options.unload();
-      if (!compensatingUnload.ok) {
-        throw new Error(
-          `launchctl load failed: ${loadFailure}; compensating unload failed: ` +
-          `${compensatingUnload.stderr.trim() || 'exit non-zero'}`,
-        );
-      }
-      if (!prior) {
-        try {
-          unlinkIfOwned(options.plistPath, installed);
-        } catch (error) {
-          throw new Error(
-            `launchctl load failed: ${loadFailure}; first-install plist cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        if (options.rollback) {
-          const rollbackActivation = options.rollback();
-          if (!rollbackActivation.ok) {
-            throw new Error(
-              `launchctl load failed: ${loadFailure}; first-install plist was removed but activation rollback failed: ` +
-              `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
-            );
-          }
-          throw new Error(
-            `launchctl load failed: ${loadFailure}; first-install plist was removed and activation state restored`,
-          );
-        }
-        throw new Error(`launchctl load failed: ${loadFailure}; first-install plist was removed`);
-      }
-
-      let restored: fs.Stats;
-      try {
-        const current = fs.lstatSync(options.plistPath);
-        if (current.dev !== installed.dev || current.ino !== installed.ino) {
-          throw new Error(`transaction no longer owns ${options.plistPath}`);
-        }
-        restored = atomicReplace(
-          options.plistPath,
-          prior.bytes,
-          prior.mode,
-          { dev: installed.dev, ino: installed.ino },
-          false,
-          parent,
-        );
-      } catch (error) {
-        throw new Error(
-          `launchctl load failed: ${loadFailure}; prior plist restore failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-
-      assertOwnedTarget(options.plistPath, restored);
-      const rollbackLoad = (options.rollback ?? options.load)();
-      if (!rollbackLoad.ok) {
-        throw new Error(
-          `launchctl load failed: ${loadFailure}; prior plist was restored but activation rollback failed: ` +
-          `${rollbackLoad.stderr.trim() || 'exit non-zero'}`,
-        );
-      }
-      throw new Error(
-        `launchctl load failed: ${loadFailure}; prior plist and activation state were restored from ${rollbackPath}`,
+      compensateFailedInstall(
+        options,
+        parent,
+        installed,
+        prior,
+        rollbackPath,
+        `launchctl load failed: ${loadFailure}`,
       );
     }
   } finally {
