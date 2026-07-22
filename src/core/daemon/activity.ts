@@ -14,21 +14,20 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
   renameSync,
-  unlinkSync,
   writeSync,
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { fsyncDirectory } from '../util/durability.js';
+import { fsyncDirectory, fsyncDirectoryProven } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 
 const MAX_PARTITION_BYTES = 2 * 1024 * 1024;
@@ -37,6 +36,7 @@ const MAX_ROW_BYTES = 768;
 const MAX_PARTITIONS = 8;
 const MAX_SEGMENT_INDEX = 9_999;
 const MAX_PHASE_SCAN_ROWS = 512;
+const MAX_RETIRED_FILES = 1_024;
 const FUTURE_TOLERANCE_MS = 5_000;
 export const DAEMON_ACTIVITY_STALE_MS = 90_000;
 
@@ -57,7 +57,8 @@ export interface DaemonActivityRowV1 {
 }
 
 export interface DaemonActivityReadResult {
-  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourceState: 'missing' | 'healthy' | 'sampled' | 'degraded';
+  complete: boolean;
   freshness: DaemonActivityFreshness;
   ownerState: DaemonActivityOwnerState;
   activity: DaemonActivityRowV1 | null;
@@ -73,11 +74,16 @@ const INSTANCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const START_REF_RE = /^[a-f0-9]{64}$/;
 const PARTITION_RE = /^(\d{4}-\d{2}-\d{2})(?:\.(\d{4}))?\.jsonl$/;
 const UUID_RE_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-const STAGING_RE = new RegExp(
+const LEGACY_STAGING_RE = new RegExp(
   `^\\.activity-stage-(\\d{4}-\\d{2}-\\d{2})-(\\d{4})-(${UUID_RE_SOURCE})-([a-f0-9]{64})\\.tmp$`,
   'i',
 );
-const DELETE_RE = new RegExp(`^\\.activity-delete-(${UUID_RE_SOURCE})\\.tmp$`, 'i');
+const INTENT_RE = new RegExp(
+  `^\\.activity-intent-(\\d{4}-\\d{2}-\\d{2})-(\\d{4})-(${UUID_RE_SOURCE})-([a-f0-9]{64})\\.tmp$`,
+  'i',
+);
+const RETIRED_RE = new RegExp(`^\\.activity-retired-(${UUID_RE_SOURCE})-([a-f0-9]{64})\\.tmp$`, 'i');
+const LEGACY_DELETE_RE = new RegExp(`^\\.activity-delete-(${UUID_RE_SOURCE})\\.tmp$`, 'i');
 
 interface ActivityPartition {
   day: string;
@@ -113,11 +119,11 @@ function daemonActivitySegmentPath(day: string, index: number): string {
     : join(daemonActivityDirectory(), `${day}.${String(index).padStart(4, '0')}.jsonl`);
 }
 
-function daemonActivityStagePath(day: string, index: number, bytes: Buffer): string {
+function daemonActivityIntentPath(day: string, index: number, bytes: Buffer): string {
   const digest = createHash('sha256').update(bytes).digest('hex');
   return join(
     daemonActivityDirectory(),
-    `.activity-stage-${day}-${String(index).padStart(4, '0')}-${randomUUID()}-${digest}.tmp`,
+    `.activity-intent-${day}-${String(index).padStart(4, '0')}-${randomUUID()}-${digest}.tmp`,
   );
 }
 
@@ -378,24 +384,67 @@ function stableDirectory(directory: string, expectedDirectory: Stats): boolean {
 function fsyncStableDirectory(directory: string, expectedDirectory: Stats): boolean {
   try {
     if (!stableDirectory(directory, expectedDirectory)) return false;
-    fsyncDirectory(directory);
-    return stableDirectory(directory, expectedDirectory);
+    return fsyncDirectoryProven(directory) && stableDirectory(directory, expectedDirectory);
   } catch {
     return false;
   }
 }
 
+function readOpenedBytes(fd: number, size: number): Buffer | null {
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = readSync(fd, bytes, offset, size - offset, offset);
+    if (count <= 0) return null;
+    offset += count;
+  }
+  return bytes;
+}
+
+function finishRetiredFile(
+  path: string,
+  directory: string,
+  expectedDirectory: Stats,
+  expectedDigest?: string,
+): boolean {
+  let fd: number | undefined;
+  try {
+    if (!stableDirectory(directory, expectedDirectory)) return false;
+    const named = lstatSync(path);
+    if (!privateFileWithLinks(named, [1, 2]) || named.size > MAX_PARTITION_BYTES) return false;
+    fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    const rebound = lstatSync(path);
+    if (!privateFileWithLinks(opened, [1, 2]) || !privateFileWithLinks(rebound, [1, 2]) ||
+      !sameNode(named, opened) || !sameNode(opened, rebound)) return false;
+    if (opened.size > 0) {
+      const bytes = readOpenedBytes(fd, opened.size);
+      if (!bytes || (expectedDigest && createHash('sha256').update(bytes).digest('hex') !== expectedDigest)) {
+        return false;
+      }
+      ftruncateSync(fd, 0);
+      fsyncSync(fd);
+    }
+    const retired = fstatSync(fd);
+    const finalPath = lstatSync(path);
+    return privateFileWithLinks(retired, [1, 2]) && privateFileWithLinks(finalPath, [1, 2]) &&
+      sameNode(opened, retired) && sameNode(retired, finalPath) && retired.size === 0 &&
+      stableDirectory(directory, expectedDirectory);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
 /**
- * Remove an identity-pinned file without unlinking its public pathname.
- *
- * Portable Node has no unlinkat(2) or fd-relative remove. Renaming the verified
- * inode to an unpredictable tombstone first prevents a pathname swap from
- * deleting a different public entry. A same-UID process could still discover
- * and replace the tombstone between the final lstat and unlink; the private
- * directory, random name, immediate recheck, and post-unlink nlink check narrow
- * that irreducible portable window, and any detected mismatch fails closed.
+ * Retire only the inode already opened and verified by this process. The public
+ * pathname is renamed to an unpredictable marker, the rename is proven durable,
+ * and content is erased through the pinned descriptor. Markers stay zero-byte:
+ * portable Node has no compare-and-unlink primitive that is safe from a same-UID
+ * pathname swap after validation.
  */
-function removeVerifiedFile(
+function retireVerifiedFile(
   path: string,
   directory: string,
   expectedDirectory: Stats,
@@ -403,29 +452,109 @@ function removeVerifiedFile(
 ): boolean {
   let fd: number | undefined;
   try {
-    if (!stableDirectory(directory, expectedDirectory)) return false;
+    // Probe directory-entry durability before changing the namespace. Windows
+    // filesystems that cannot prove it fail without pruning anything.
+    if (!fsyncStableDirectory(directory, expectedDirectory)) return false;
     const named = lstatSync(path);
-    if (!privateFileWithLinks(named, allowedLinks)) return false;
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    if (!privateFileWithLinks(named, allowedLinks) || named.size > MAX_PARTITION_BYTES) return false;
+    fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
     const opened = fstatSync(fd);
     const rebound = lstatSync(path);
     if (!privateFileWithLinks(opened, allowedLinks) || !privateFileWithLinks(rebound, allowedLinks) ||
-      !sameNode(named, opened) || !sameNode(opened, rebound)) return false;
+      !sameNode(named, opened) ||
+      !sameNode(opened, rebound)) return false;
+    const bytes = readOpenedBytes(fd, opened.size);
+    if (!bytes) return false;
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const retiredPath = join(directory, `.activity-retired-${randomUUID()}-${digest}.tmp`);
+    if (existsSync(retiredPath) || !stableDirectory(directory, expectedDirectory)) return false;
+    renameSync(path, retiredPath);
+    if (!fsyncStableDirectory(directory, expectedDirectory)) return false;
+    const moved = lstatSync(retiredPath);
+    const pinned = fstatSync(fd);
+    if (!privateFileWithLinks(moved, allowedLinks) || !privateFileWithLinks(pinned, allowedLinks) ||
+      !sameNode(opened, moved) ||
+      !sameNode(moved, pinned)) return false;
+    ftruncateSync(fd, 0);
+    fsyncSync(fd);
+    const erased = fstatSync(fd);
+    const finalPath = lstatSync(retiredPath);
+    return privateFileWithLinks(erased, allowedLinks) && privateFileWithLinks(finalPath, allowedLinks) &&
+      sameNode(opened, erased) &&
+      sameNode(erased, finalPath) && erased.size === 0 && stableDirectory(directory, expectedDirectory);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
 
-    const tombstone = join(directory, `.activity-delete-${randomUUID()}.tmp`);
-    if (existsSync(tombstone) || !stableDirectory(directory, expectedDirectory)) return false;
-    renameSync(path, tombstone);
-    if (!stableDirectory(directory, expectedDirectory)) return false;
-    const moved = lstatSync(tombstone);
-    const openedAfterMove = fstatSync(fd);
-    if (!privateFileWithLinks(moved, allowedLinks) || !privateFileWithLinks(openedAfterMove, allowedLinks) ||
-      !sameNode(opened, moved) || !sameNode(moved, openedAfterMove)) return false;
-    const immediatelyBeforeUnlink = lstatSync(tombstone);
-    if (!sameNode(openedAfterMove, immediatelyBeforeUnlink) ||
-      !privateFileWithLinks(immediatelyBeforeUnlink, allowedLinks)) return false;
-    unlinkSync(tombstone);
-    const afterUnlink = fstatSync(fd);
-    if (!sameNode(opened, afterUnlink) || afterUnlink.nlink !== opened.nlink - 1) return false;
+function retiredMarkerCount(directory: string): number | null {
+  try {
+    return readdirSync(directory).filter((name) => RETIRED_RE.test(name) || LEGACY_DELETE_RE.test(name)).length;
+  } catch {
+    return null;
+  }
+}
+
+function hasRetiredTwin(directory: string, expected: Stats): boolean {
+  try {
+    return readdirSync(directory).some((name) => {
+      if (!RETIRED_RE.test(name)) return false;
+      try {
+        const candidate = lstatSync(join(directory, name));
+        return candidate.size === 0 && privateFileWithLinks(candidate, [2]) && sameNode(candidate, expected);
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
+function createIntentMarker(
+  intentPath: string,
+  directory: string,
+  expectedDirectory: Stats,
+): boolean {
+  let fd: number | undefined;
+  try {
+    if (!fsyncStableDirectory(directory, expectedDirectory) || existsSync(intentPath)) return false;
+    const reusableName = readdirSync(directory).find((name) => {
+      if (!RETIRED_RE.test(name)) return false;
+      try {
+        const candidate = lstatSync(join(directory, name));
+        return privateFile(candidate) && candidate.size === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (reusableName) {
+      const reusablePath = join(directory, reusableName);
+      const named = lstatSync(reusablePath);
+      if (!privateFile(named) || named.size !== 0) return false;
+      fd = openSync(reusablePath, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+      const opened = fstatSync(fd);
+      const rebound = lstatSync(reusablePath);
+      if (!privateFile(opened) || !privateFile(rebound) || !sameNode(named, opened) ||
+        !sameNode(opened, rebound)) return false;
+      renameSync(reusablePath, intentPath);
+      if (!fsyncStableDirectory(directory, expectedDirectory)) return false;
+      const moved = lstatSync(intentPath);
+      return privateFile(moved) && sameNode(opened, moved) && moved.size === 0;
+    }
+    const retired = retiredMarkerCount(directory);
+    if (retired === null || retired >= MAX_RETIRED_FILES) return false;
+    fd = openSync(
+      intentPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    if (!privateFile(opened) || opened.size !== 0) return false;
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
     return fsyncStableDirectory(directory, expectedDirectory);
   } catch {
     return false;
@@ -443,7 +572,10 @@ function prunePartitions(
   try {
     const dropping = partitions.slice(0, Math.max(0, partitions.length - keepCount));
     for (const partition of dropping) {
-      if (!removeVerifiedFile(partition.path, directory, expectedDirectory)) return false;
+      const retired = retiredMarkerCount(directory);
+      // Reserve one marker for retiring the active intent after pruning.
+      if (retired === null || retired >= MAX_RETIRED_FILES - 1 ||
+        !retireVerifiedFile(partition.path, directory, expectedDirectory)) return false;
     }
     return true;
   } catch {
@@ -454,38 +586,69 @@ function prunePartitions(
 function recoverActivityTransactions(directory: string, expectedDirectory: Stats): boolean {
   try {
     const initialNames = readdirSync(directory);
-    for (const name of initialNames.filter((entry) => DELETE_RE.test(entry)).sort()) {
-      if (!removeVerifiedFile(join(directory, name), directory, expectedDirectory, [1, 2])) return false;
+    for (const name of initialNames.filter((entry) => RETIRED_RE.test(entry)).sort()) {
+      const digest = RETIRED_RE.exec(name)?.[2];
+      if (!digest || !finishRetiredFile(join(directory, name), directory, expectedDirectory, digest)) return false;
+    }
+    for (const name of initialNames.filter((entry) => LEGACY_DELETE_RE.test(entry)).sort()) {
+      if (!finishRetiredFile(join(directory, name), directory, expectedDirectory)) return false;
+    }
+    const retired = retiredMarkerCount(directory);
+    if (retired === null || retired > MAX_RETIRED_FILES) return false;
+
+    // A hard-linked legacy stage cannot be unlinked safely against a same-UID
+    // pathname swap. Migrate a valid published pair by retiring the target
+    // through its descriptor; both legacy links become zero-byte inert markers.
+    for (const name of readdirSync(directory).filter((entry) => LEGACY_STAGING_RE.test(entry)).sort()) {
+      const match = LEGACY_STAGING_RE.exec(name);
+      if (!match) return false;
+      const stagePath = join(directory, name);
+      const stage = lstatSync(stagePath);
+      const targetPath = daemonActivitySegmentPath(match[1]!, Number(match[2]));
+      if (!privateFileWithLinks(stage, [1, 2])) return false;
+      if (stage.nlink === 2 && stage.size === 0 && hasRetiredTwin(directory, stage)) continue;
+      if (stage.nlink === 2 && existsSync(targetPath) && sameNode(stage, lstatSync(targetPath))) {
+        const bytes = readPartitionBytes(targetPath, expectedDirectory, [2]);
+        const rows = readPartition(targetPath, expectedDirectory, [2]);
+        if (!bytes || createHash('sha256').update(bytes).digest('hex') !== match[4] ||
+          !rows || rows.length !== 1 || rows[0]!.observedAt.slice(0, 10) !== match[1] ||
+          !retireVerifiedFile(targetPath, directory, expectedDirectory, [2])) return false;
+        continue;
+      }
+      if (stage.nlink !== 1 || !retireVerifiedFile(stagePath, directory, expectedDirectory)) return false;
     }
 
-    const stagingNames = readdirSync(directory).filter((name) => STAGING_RE.test(name)).sort();
-    let publishedTransactions = 0;
-    for (const name of stagingNames) {
-      const match = STAGING_RE.exec(name);
+    const intentNames = readdirSync(directory).filter((name) => INTENT_RE.test(name)).sort();
+    if (intentNames.length > 1) return false;
+    for (const name of intentNames) {
+      const match = INTENT_RE.exec(name);
       if (!match) return false;
       const day = match[1]!;
       const index = Number(match[2]);
       const expectedDigest = match[4]!;
       if (!canonicalDay(day) || !Number.isSafeInteger(index) || index < 0 || index > MAX_SEGMENT_INDEX) return false;
-      const stagePath = join(directory, name);
-      const stage = lstatSync(stagePath);
-      if (!privateFileWithLinks(stage, [1, 2])) return false;
+      const intentPath = join(directory, name);
+      const intent = lstatSync(intentPath);
+      if (!privateFile(intent) || intent.size !== 0) return false;
       const targetPath = daemonActivitySegmentPath(day, index);
 
       if (!existsSync(targetPath)) {
-        if (stage.nlink !== 1 || !removeVerifiedFile(stagePath, directory, expectedDirectory)) return false;
+        if (!retireVerifiedFile(intentPath, directory, expectedDirectory)) return false;
         continue;
       }
-
-      const target = lstatSync(targetPath);
-      if (!sameNode(stage, target)) {
-        if (stage.nlink !== 1 || !removeVerifiedFile(stagePath, directory, expectedDirectory)) return false;
+      const publishedBytes = readPartitionBytes(targetPath, expectedDirectory);
+      const rows = readPartition(targetPath, expectedDirectory);
+      if (!publishedBytes || createHash('sha256').update(publishedBytes).digest('hex') !== expectedDigest) {
+        const partitions = listPartitions(directory);
+        if (!partitions || partitions.length > MAX_PARTITIONS + 1 || partitions.at(-1)?.path !== targetPath) {
+          return false;
+        }
+        // A malformed target paired with the durable intent is a torn create,
+        // not an append to an established partition. Retire only that inode.
+        if (!rows && !retireVerifiedFile(targetPath, directory, expectedDirectory)) return false;
+        if (!retireVerifiedFile(intentPath, directory, expectedDirectory)) return false;
         continue;
       }
-      if (stage.nlink !== 2 || target.nlink !== 2 || ++publishedTransactions > 1) return false;
-      const publishedBytes = readPartitionBytes(targetPath, expectedDirectory, [2]);
-      if (!publishedBytes || createHash('sha256').update(publishedBytes).digest('hex') !== expectedDigest) return false;
-      const rows = readPartition(targetPath, expectedDirectory, [2]);
       if (!rows || rows.length !== 1 || rows[0]!.observedAt.slice(0, 10) !== day) return false;
       const partitions = listPartitions(directory);
       if (!partitions || partitions.length > MAX_PARTITIONS + 1 || partitions.at(-1)?.path !== targetPath) return false;
@@ -495,9 +658,9 @@ function recoverActivityTransactions(directory: string, expectedDirectory: Stats
         if (!predecessorRows || predecessorRows.at(-1)!.observedAt > rows[0]!.observedAt) return false;
       }
       if (!prunePartitions(directory, expectedDirectory, partitions, MAX_PARTITIONS)) return false;
-      if (!removeVerifiedFile(stagePath, directory, expectedDirectory, [2])) return false;
+      if (!retireVerifiedFile(intentPath, directory, expectedDirectory)) return false;
       const published = lstatSync(targetPath);
-      if (!privateFile(published) || !sameNode(stage, published)) return false;
+      if (!privateFile(published)) return false;
     }
 
     const recovered = listPartitions(directory);
@@ -507,7 +670,7 @@ function recoverActivityTransactions(directory: string, expectedDirectory: Stats
   }
 }
 
-function publishStagedPartition(
+function publishPartition(
   path: string,
   day: string,
   index: number,
@@ -515,46 +678,39 @@ function publishStagedPartition(
   directory: string,
   expectedDirectory: Stats,
 ): boolean {
-  const stagePath = daemonActivityStagePath(day, index, bytes);
+  const intentPath = daemonActivityIntentPath(day, index, bytes);
   let fd: number | undefined;
   try {
-    if (!stableDirectory(directory, expectedDirectory) || existsSync(path)) return false;
-    fd = openSync(
-      stagePath,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-      0o600,
-    );
-    const opened = fstatSync(fd);
-    if (!privateFile(opened) || opened.size !== 0) return false;
-    if (writeSync(fd, bytes) !== bytes.length) return false;
+    // An intent is independent from the target inode, so it can be retired by
+    // descriptor without ever unlinking a potentially swapped pathname.
+    if (existsSync(path) || !createIntentMarker(intentPath, directory, expectedDirectory) || existsSync(path)) {
+      return false;
+    }
+
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const targetOpened = fstatSync(fd);
+    if (!privateFile(targetOpened) || targetOpened.size !== 0 || writeSync(fd, bytes) !== bytes.length) return false;
     fchmodSync(fd, 0o600);
     fsyncSync(fd);
-    const persisted = fstatSync(fd);
-    if (!privateFile(persisted) || !sameNode(opened, persisted) || persisted.size !== bytes.length) return false;
+    const targetPersisted = fstatSync(fd);
+    if (!privateFile(targetPersisted) || !sameNode(targetOpened, targetPersisted) ||
+      targetPersisted.size !== bytes.length) return false;
     closeSync(fd);
     fd = undefined;
-    if (!fsyncStableDirectory(directory, expectedDirectory) || existsSync(path)) return false;
-
-    // linkSync is an atomic no-overwrite publication: unlike renameSync it
-    // refuses a raced target. The staging hard link remains the recovery marker
-    // until the new partition is durable and retention pruning has completed.
-    linkSync(stagePath, path);
-    const stage = lstatSync(stagePath);
+    if (!fsyncStableDirectory(directory, expectedDirectory)) return false;
     const published = lstatSync(path);
-    if (!privateFileWithLinks(stage, [2]) || !privateFileWithLinks(published, [2]) ||
-      !sameNode(persisted, stage) || !sameNode(stage, published) || published.size !== bytes.length ||
-      !fsyncStableDirectory(directory, expectedDirectory)) return false;
-    const publishedBytes = readPartitionBytes(path, expectedDirectory, [2]);
+    if (!privateFile(published) || !sameNode(targetPersisted, published)) return false;
+    const publishedBytes = readPartitionBytes(path, expectedDirectory);
     if (!publishedBytes || !publishedBytes.equals(bytes)) return false;
 
     const publishedPartitions = listPartitions(directory);
     if (!publishedPartitions || publishedPartitions.length > MAX_PARTITIONS + 1 ||
       publishedPartitions.at(-1)?.path !== path ||
       !prunePartitions(directory, expectedDirectory, publishedPartitions, MAX_PARTITIONS)) return false;
-    if (!removeVerifiedFile(stagePath, directory, expectedDirectory, [2])) return false;
+    if (!retireVerifiedFile(intentPath, directory, expectedDirectory)) return false;
     const final = lstatSync(path);
     const finalBytes = readPartitionBytes(path, expectedDirectory);
-    return privateFile(final) && sameNode(stage, final) && final.size === bytes.length &&
+    return privateFile(final) && sameNode(targetPersisted, final) && final.size === bytes.length &&
       finalBytes !== null && finalBytes.equals(bytes) && fsyncStableDirectory(directory, expectedDirectory);
   } catch {
     return false;
@@ -565,7 +721,7 @@ function publishStagedPartition(
 
 export function readDaemonActivity(options: { nowMs?: number; staleMs?: number } = {}): DaemonActivityReadResult {
   const missing: DaemonActivityReadResult = {
-    sourceState: 'missing', freshness: 'unknown', ownerState: 'unknown',
+    sourceState: 'missing', complete: false, freshness: 'unknown', ownerState: 'unknown',
     activity: null, phaseStartedAt: null, ageMs: null,
   };
   const degraded: DaemonActivityReadResult = {
@@ -588,18 +744,17 @@ export function readDaemonActivity(options: { nowMs?: number; staleMs?: number }
     let phaseStartedAt: string | null = null;
     let newerObservedAt: string | null = null;
     let remainingRows = MAX_PHASE_SCAN_ROWS;
-    let continuityResolved = false;
-    for (let partitionIndex = partitions.length - 1; partitionIndex >= 0 && !continuityResolved; partitionIndex--) {
+    let phaseContinuityResolved = false;
+    let historyComplete = true;
+    scan: for (let partitionIndex = partitions.length - 1; partitionIndex >= 0; partitionIndex--) {
       const partition = partitions[partitionIndex]!;
       const lines = partitionLines(partition.path, directory);
       if (!lines) return degraded;
       for (let rowIndex = lines.length - 1; rowIndex >= 0; rowIndex--) {
         if (remainingRows === 0) {
-          // The latest heartbeat remains valid, but claiming a phase start
-          // beyond the bounded evidence window would manufacture continuity.
-          phaseStartedAt = null;
-          continuityResolved = true;
-          break;
+          historyComplete = false;
+          if (!phaseContinuityResolved) phaseStartedAt = null;
+          break scan;
         }
         let row: DaemonActivityRowV1 | null;
         try {
@@ -607,13 +762,16 @@ export function readDaemonActivity(options: { nowMs?: number; staleMs?: number }
         } catch {
           return degraded;
         }
-        if (!row || (newerObservedAt !== null && row.observedAt > newerObservedAt)) return degraded;
+        if (!row || row.observedAt.slice(0, 10) !== partition.day ||
+          (newerObservedAt !== null && row.observedAt > newerObservedAt)) return degraded;
         if (activity === null) activity = row;
-        if (row.instanceId !== activity.instanceId || row.phase !== activity.phase) {
-          continuityResolved = true;
-          break;
+        if (!phaseContinuityResolved) {
+          if (row.instanceId !== activity.instanceId || row.phase !== activity.phase) {
+            phaseContinuityResolved = true;
+          } else {
+            phaseStartedAt = row.observedAt;
+          }
         }
-        phaseStartedAt = row.observedAt;
         newerObservedAt = row.observedAt;
         remainingRows--;
       }
@@ -628,7 +786,8 @@ export function readDaemonActivity(options: { nowMs?: number; staleMs?: number }
       ? 'unknown'
       : delta < -FUTURE_TOLERANCE_MS ? 'future' : delta > staleMs ? 'stale' : 'fresh';
     return {
-      sourceState: 'healthy',
+      sourceState: historyComplete ? 'healthy' : 'sampled',
+      complete: historyComplete,
       freshness,
       ownerState: pidState(activity.pid, activity.processStartRef),
       activity,
@@ -701,7 +860,7 @@ export function writeDaemonActivity(input: {
     if (prior) {
       fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_NOFOLLOW);
     } else {
-      return publishStagedPartition(
+      return publishPartition(
         path,
         day,
         latest && day === latest.day ? latest.index + 1 : 0,

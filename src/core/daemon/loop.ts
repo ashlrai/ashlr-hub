@@ -1352,7 +1352,7 @@ function staleResidentProof(state: DaemonState): 'dead' | 'reused' | null {
     return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH' ? 'dead' : null;
   }
   const activity = readDaemonActivity();
-  return activity.ownerState === 'reused' &&
+  return activity.sourceState === 'healthy' && activity.complete && activity.ownerState === 'reused' &&
     activity.activity?.pid === state.pid &&
     activity.activity.daemonStartedAt === state.startedAt
     ? 'reused'

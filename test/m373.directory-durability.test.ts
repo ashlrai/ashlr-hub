@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   fsyncDirectory,
+  fsyncDirectoryProven,
   type DirectoryDurabilityFs,
 } from '../src/core/util/durability.js';
 
@@ -70,6 +71,16 @@ describe('M373 directory durability', () => {
   );
 
   it.each(['EPERM', 'EINVAL'])(
+    'reports Windows directory-open %s as unproven for destructive callers',
+    (code) => {
+      const fs = fakeFs({ openSync: vi.fn(() => { throw codedError(code); }) });
+
+      expect(fsyncDirectoryProven(directory, { platform: 'win32', fs })).toBe(false);
+      expect(fs.fsyncSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['EPERM', 'EINVAL'])(
     'tolerates Windows directory-fsync %s but still closes the descriptor',
     (code) => {
       const fs = fakeFs({ fsyncSync: vi.fn(() => { throw codedError(code); }) });
@@ -78,6 +89,23 @@ describe('M373 directory durability', () => {
       expect(fs.closeSync).toHaveBeenCalledWith(41);
     },
   );
+
+  it.each(['EPERM', 'EINVAL'])(
+    'reports Windows directory-fsync %s as unproven and closes the descriptor',
+    (code) => {
+      const fs = fakeFs({ fsyncSync: vi.fn(() => { throw codedError(code); }) });
+
+      expect(fsyncDirectoryProven(directory, { platform: 'win32', fs })).toBe(false);
+      expect(fs.closeSync).toHaveBeenCalledWith(41);
+    },
+  );
+
+  it('reports successful identity-bound directory fsync as proven', () => {
+    const fs = fakeFs();
+
+    expect(fsyncDirectoryProven(directory, { platform: 'linux', fs })).toBe(true);
+    expect(fs.fsyncSync).toHaveBeenCalledWith(41);
+  });
 
   it('keeps POSIX directory fsync failures fail-closed', () => {
     const fs = fakeFs({ fsyncSync: vi.fn(() => { throw codedError('EPERM'); }) });

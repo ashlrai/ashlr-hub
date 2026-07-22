@@ -40,7 +40,7 @@ const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
 function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
   if (!daemon.running) return null;
   const activity = daemon.activity;
-  if (!activity || activity.sourceState !== 'healthy') return 'activity unavailable';
+  if (!activity || activity.sourceState !== 'healthy' || !activity.complete) return 'activity unavailable';
   if (activity.freshness !== 'fresh') return `activity ${activity.freshness}`;
   if (!activity.ownerMatches || activity.ownerState !== 'alive') return 'activity owner unavailable';
   if (daemon.tickInProgress) return 'tick active';

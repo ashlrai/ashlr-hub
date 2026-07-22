@@ -1306,7 +1306,8 @@ export interface FleetStatus {
     childActivity?: boolean;
     activity?: {
       source: 'daemon-activity';
-      sourceState: 'missing' | 'healthy' | 'degraded';
+      sourceState: 'missing' | 'healthy' | 'sampled' | 'degraded';
+      complete: boolean;
       freshness: 'fresh' | 'stale' | 'future' | 'unknown';
       ownerState: 'alive' | 'dead' | 'reused' | 'unknown';
       phase: 'starting' | 'tick' | 'post-tick' | 'idle' | 'stopping' | null;
@@ -1848,7 +1849,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const activity = activityRead.activity;
     const ownerMatches = ds.running === true && activity !== null && activity.pid === ds.pid &&
       activity.daemonStartedAt === startedAt;
-    const activityHealthy = ownerMatches && activityRead.sourceState === 'healthy' &&
+    const activityHealthy = ownerMatches && activityRead.sourceState === 'healthy' && activityRead.complete &&
       activityRead.freshness === 'fresh' && activityRead.ownerState === 'alive';
     const tickInProgress = activityHealthy && activity?.phase === 'tick';
     const childActivity = activityHealthy && activity?.phase === 'post-tick' &&
@@ -1863,6 +1864,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       activity: {
         source: 'daemon-activity',
         sourceState: activityRead.sourceState,
+        complete: activityRead.complete,
         freshness: activityRead.freshness,
         ownerState: activityRead.ownerState,
         phase: activity?.phase ?? null,

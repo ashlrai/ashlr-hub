@@ -69,7 +69,7 @@ function mayIgnoreWindowsDirectoryFdError(error: unknown, platform: NodeJS.Platf
  * validates the named directory, then tolerates only errors that mean directory
  * descriptors or their fsync operation are unsupported by the filesystem.
  */
-export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions = {}): void {
+export function fsyncDirectoryProven(path: string, options: DirectoryDurabilityOptions = {}): boolean {
   const fs = options.fs ?? DEFAULT_FS;
   const platform = options.platform ?? process.platform;
   const named = requireNamedDirectory(path, fs);
@@ -87,7 +87,7 @@ export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions
         : fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
       fd = fs.openSync(path, flags);
     } catch (error) {
-      if (mayIgnoreWindowsDirectoryFdError(error, platform)) return;
+      if (mayIgnoreWindowsDirectoryFdError(error, platform)) return false;
       throw error;
     }
 
@@ -100,9 +100,20 @@ export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions
       options.beforeFsync?.();
       fs.fsyncSync(fd);
     } catch (error) {
-      if (!mayIgnoreWindowsDirectoryFdError(error, platform)) throw error;
+      if (mayIgnoreWindowsDirectoryFdError(error, platform)) return false;
+      throw error;
     }
+    return true;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+/**
+ * Preserve the legacy best-effort API for callers that do not make destructive
+ * decisions from directory durability. Authority-sensitive callers must use
+ * `fsyncDirectoryProven` and require a true result.
+ */
+export function fsyncDirectory(path: string, options: DirectoryDurabilityOptions = {}): void {
+  fsyncDirectoryProven(path, options);
 }

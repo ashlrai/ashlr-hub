@@ -3543,7 +3543,7 @@ function autonomyRecentRows(autonomy) {
 function daemonActivityDisplay(daemon) {
   const activity = daemon?.activity;
   if (daemon?.running !== true) return 'not applicable';
-  if (!activity || activity.sourceState !== 'healthy') return 'activity unavailable';
+  if (!activity || activity.sourceState !== 'healthy' || activity.complete !== true) return 'activity unavailable';
   if (activity.freshness !== 'fresh') return `activity ${activity.freshness}`;
   if (!activity.ownerMatches || activity.ownerState !== 'alive') return 'activity owner unavailable';
   if (activity.phase === 'post-tick' && daemon.childActivity) {

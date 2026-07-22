@@ -6316,6 +6316,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         tickInProgress: true,
         activity: {
           sourceState: 'healthy',
+          complete: true,
           phase: 'tick',
           ownerMatches: true,
         },
@@ -6330,6 +6331,27 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           sourcePresent: true,
         },
       });
+    });
+  });
+
+  it('never treats sampled activity history as live tick authority', async () => {
+    await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
+      writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
+      writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174001',
+        daemonStartedAt: '2026-07-03T00:00:00.000Z',
+        phase: 'tick',
+      })).toBe(true);
+      const activityPath = join(process.env.ASHLR_HOME!, 'daemon-activity', '2026-07-03.jsonl');
+      const row = readFileSync(activityPath, 'utf8').trim();
+      writeFileSync(activityPath, `${Array.from({ length: 513 }, () => row).join('\n')}\n`, { mode: 0o600 });
+
+      const status = await buildFleetStatus(baseConfig());
+      expect(status.daemon.activity).toMatchObject({
+        sourceState: 'sampled', complete: false, phase: 'tick', ownerMatches: true,
+      });
+      expect(status.daemon.tickInProgress).toBeUndefined();
     });
   });
 
@@ -6369,7 +6391,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       })).toBe(true);
       const forged = await buildFleetStatus(baseConfig());
 
-      expect(forged.daemon.activity).toMatchObject({ sourceState: 'healthy', ownerMatches: false });
+      expect(forged.daemon.activity).toMatchObject({ sourceState: 'healthy', complete: true, ownerMatches: false });
       expect(forged.daemon.tickInProgress).toBeUndefined();
       const readinessAuthority = (value: FleetStatus) => ({
         verdict: value.autonomousShipReadiness?.verdict,
@@ -6401,7 +6423,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(status.daemon.tickInProgress).toBeUndefined();
       expect(status.daemon.childActivity).toBe(true);
       expect(status.daemon.activity).toMatchObject({
-        sourceState: 'healthy', phase: 'post-tick', activeChildren: 2, ownerMatches: true,
+        sourceState: 'healthy', complete: true, phase: 'post-tick', activeChildren: 2, ownerMatches: true,
       });
       expect(daemonSource).toMatchObject({
         status: 'healthy',
@@ -7570,6 +7592,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         activity: {
           source: 'daemon-activity',
           sourceState: 'healthy',
+          complete: true,
           freshness: 'fresh',
           ownerState: 'alive',
           phase: 'tick',
@@ -7603,7 +7626,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         lastTickAt: '2026-06-17T00:02:00.000Z',
         childActivity: true,
         activity: {
-          source: 'daemon-activity', sourceState: 'healthy', freshness: 'fresh', ownerState: 'alive', phase: 'post-tick',
+          source: 'daemon-activity', sourceState: 'healthy', complete: true, freshness: 'fresh', ownerState: 'alive', phase: 'post-tick',
           phaseStartedAt: '2026-06-17T00:02:01.000Z', observedAt: '2026-06-17T00:02:30.000Z',
           ageMs: 30_000, activeChildren: 2, ownerMatches: true,
         },
@@ -7630,6 +7653,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     };
     const activityBase = {
       source: 'daemon-activity' as const,
+      complete: true,
       phase: 'idle' as const,
       phaseStartedAt: '2026-06-17T00:02:01.000Z',
       observedAt: '2026-06-17T00:02:30.000Z',
@@ -7646,6 +7670,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(render({ ...activityBase, sourceState: 'healthy', freshness: 'stale' }))
       .toContain('activity:      activity stale');
     expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
+      .toContain('activity:      activity unavailable');
+    expect(render({ ...activityBase, sourceState: 'sampled', complete: false, freshness: 'fresh' }))
       .toContain('activity:      activity unavailable');
     expect(render({
       ...activityBase, sourceState: 'healthy', freshness: 'fresh', ownerMatches: false,
