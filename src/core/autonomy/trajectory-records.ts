@@ -233,18 +233,15 @@ export function suppressDegradedSkillObservation(
     ...status,
     coverage,
     skillObservation: { eventState, sampleState: 'unavailable' },
-    recent: status.recent.map((record) => {
+    ...(status.recent ? { recent: status.recent.map((record) => {
       const { skillUse: _skillUse, ...publicCoverage } = record.coverage;
       return { ...record, coverage: publicCoverage };
-    }),
+    }) } : {}),
   };
 }
 
-type PublishedTrajectoryCoverage = Omit<TrajectoryRecordCoverage, 'skillUse'> & { skillUse?: boolean };
-type PublishedCoverageMetrics = Omit<
-  Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>,
-  'skillUse'
-> & { skillUse?: TrajectoryCoverageMetric };
+type PublishedTrajectoryCoverage = Partial<TrajectoryRecordCoverage>;
+type PublishedCoverageMetrics = Partial<Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>>;
 export type TrajectoryTerminalOutcomeCounts = Omit<
   Record<TrajectoryTerminalOutcome, number>,
   'cancelled'
@@ -254,21 +251,21 @@ export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
   trajectories: number;
-  terminalOutcomes: TrajectoryTerminalOutcomeCounts;
-  realizedOutcomes: Record<TrajectoryRealizedOutcome, number>;
+  terminalOutcomes?: TrajectoryTerminalOutcomeCounts;
+  realizedOutcomes?: Record<TrajectoryRealizedOutcome, number>;
   coverage: PublishedCoverageMetrics;
-  routeSpine: {
+  routeSpine: Partial<{
     dispatchToDecision: TrajectoryCoverageMetric;
     dispatchToEvidence: TrajectoryCoverageMetric;
     dispatchToMerge: TrajectoryCoverageMetric;
-  };
+  }>;
   /** Bounded action-only preclaim observations, excluded from learning metrics. */
   routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
   skillObservation: TrajectorySkillObservationSummary;
   /** Capped, opaque, metadata-only route-to-outcome traces for operators. */
   traces: TrajectoryTraceSummary;
   gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
-  recent: Array<{
+  recent?: Array<{
     ref: string;
     latestAt: string;
     terminalOutcome: TrajectoryTerminalOutcome;
