@@ -39,6 +39,7 @@ import { dirname, join, resolve } from 'node:path';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
+  Backlog,
   DaemonConfig,
   DaemonDrainMode,
   DaemonDrainSummary,
@@ -1006,6 +1007,8 @@ const DEFAULTS: DaemonConfig = {
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
 const KILL_SWITCH_POLL_MS = 50;
+const VERIFY_ONLY_BACKLOG_REFRESH_CADENCE_MS = 60 * 60_000;
+const VERIFY_ONLY_BACKLOG_FUTURE_SKEW_MS = 5 * 60_000;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
 
 /** Register detached work that must settle before this tick can be called quiescent. */
@@ -1271,6 +1274,18 @@ function cachedBacklogCountForEnrolledRepos(enrolled: string[]): number {
   } catch {
     return 0;
   }
+}
+
+function freshBacklogSnapshotForVerifyOnly(enrolled: readonly string[], nowMs: number): Backlog | null {
+  const backlog = loadBacklog();
+  if (!backlog?.snapshotId || !/^[a-f0-9]{32}$/.test(backlog.snapshotId)) return null;
+  const generatedMs = Date.parse(backlog.generatedAt);
+  if (!Number.isFinite(generatedMs) || generatedMs > nowMs + VERIFY_ONLY_BACKLOG_FUTURE_SKEW_MS) return null;
+  if (nowMs - generatedMs >= VERIFY_ONLY_BACKLOG_REFRESH_CADENCE_MS) return null;
+  const expected = new Set(enrolled.map((repo) => resolve(repo)));
+  const observed = new Set(backlog.repos.map((repo) => resolve(repo)));
+  if (expected.size !== observed.size || [...expected].some((repo) => !observed.has(repo))) return null;
+  return backlog;
 }
 
 function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
@@ -1543,9 +1558,9 @@ async function buildDaemonStrategyPlan(
   const guardHealth = diagnoseGuardHealth();
   const productionVelocity = resolveProductionVelocityProfile(cfg);
   const report = await buildResourceStrategyReport(cfg, {
-	    maxOutcomes: 6,
-	    maxChecks: 1,
-	    deps: {
+    maxOutcomes: 6,
+    maxChecks: 1,
+    deps: {
       buildFleetStatus: async () => buildTickFleetStatus(cfg, state, backlogItems, guardHealth),
       runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
       diagnoseGuardHealth: () => guardHealth,
@@ -1556,7 +1571,11 @@ async function buildDaemonStrategyPlan(
               limit: Math.min(opts?.limit ?? 6, 6),
               deps: { loadWorkedLedger: () => ({ events: [] }) },
             })
-        : () => [],
+          : () => [],
+      listPendingProposals: () => {
+        const read = listProposalsDetailed({ status: 'pending', requireComplete: true });
+        return read.complete && read.sourceState !== 'degraded' ? read.proposals : null;
+      },
     },
   });
   return resourceStrategyToDaemonPlan(report);
@@ -3955,6 +3974,15 @@ export async function tick(
     }
 
     if (!directionPlan.allowDispatch) {
+      if (directionPlan.mode === 'verify-only') {
+        const cachedSnapshot = freshBacklogSnapshotForVerifyOnly(enrolled, Date.parse(now));
+        if (cachedSnapshot) {
+          backlogSnapshotAt = cachedSnapshot.generatedAt;
+          backlogSnapshotId = cachedSnapshot.snapshotId;
+        } else {
+          await refreshBacklogForTick();
+        }
+      }
       const autoMergePassResult = await runAutoMergeMaintenancePass();
       const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;

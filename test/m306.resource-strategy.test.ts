@@ -16,7 +16,7 @@ import {
   buildResourceStrategyReport,
   resourceStrategyToDaemonPlan,
 } from '../src/core/autonomy/resource-strategy.js';
-import type { AshlrConfig } from '../src/core/types.js';
+import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
 function cfg(overrides: Partial<AshlrConfig> = {}): AshlrConfig {
   return {
@@ -213,6 +213,21 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
     },
     ...overrides,
   } as OutcomeRecord;
+}
+
+function pendingProposal(overrides: Partial<Proposal> = {}): Proposal {
+  return {
+    id: 'prop-actionable',
+    repo: '/repo',
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Actionable proposal',
+    summary: 'ready for merge maintenance',
+    diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+    status: 'pending',
+    createdAt: '2026-07-02T11:30:00.000Z',
+    ...overrides,
+  } as Proposal;
 }
 
 function deps(overrides: Partial<ResourceStrategyReadDeps> = {}): ResourceStrategyReadDeps {
@@ -568,6 +583,67 @@ describe('buildResourceStrategyReport', () => {
     expect(report.mode).toBe('verify-only');
     expect(report.outcomes.stalePending).toBe(0);
     expect(report.reasons.join(' ')).toContain('pending proposal');
+  });
+
+  it('keeps incomplete pending observations visible without turning them into global pressure', async () => {
+    const partial = pendingProposal({ id: 'prop-partial', isPartial: true });
+    const failedCapture = pendingProposal({
+      id: 'prop-failed-capture',
+      runEventSummary: { proposalCreated: false, outcome: 'gate-blocked' },
+    });
+    const emptyDiff = pendingProposal({ id: 'prop-empty-diff', diff: '   ' });
+    const repositoryless = pendingProposal({ id: 'prop-repositoryless', repo: null });
+    const failedRecord = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: partial.id,
+        verifyResult: { passed: false },
+      },
+      evidencePacks: [],
+    });
+
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({
+          queue: { backlogItems: 4 },
+          proposals: proposals({ pending: 4 }),
+        }),
+        listPendingProposals: () => [partial, failedCapture, emptyDiff, repositoryless],
+        listOutcomeRecords: () => [failedRecord],
+      }),
+    });
+
+    expect(report.mode).toBe('backlog-build');
+    expect(report.outcomes).toMatchObject({
+      actionablePending: 0,
+      quarantinedPending: 4,
+      verificationFailures: 0,
+    });
+    expect(report.reasons.join(' ')).toContain('repair or quarantine');
+  });
+
+  it('keeps complete merge candidates as verify-only pressure', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 1 }) }),
+        listPendingProposals: () => [pendingProposal()],
+      }),
+    });
+
+    expect(report.mode).toBe('verify-only');
+    expect(report.outcomes).toMatchObject({ actionablePending: 1, quarantinedPending: 0 });
+  });
+
+  it('preserves observed pending pressure when the detailed proposal source is unavailable', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: proposals({ pending: 2 }) }),
+        listPendingProposals: () => null,
+      }),
+    });
+
+    expect(report.mode).toBe('verify-only');
+    expect(report.outcomes).toMatchObject({ actionablePending: 2, quarantinedPending: 0 });
   });
 
   it('ignores verification failures after proposals are no longer pending', async () => {
