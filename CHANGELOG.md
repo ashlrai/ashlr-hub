@@ -11,6 +11,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+- **External-skill quarantine preview (M444/M446).** Audit reports now expose a
+  version-2 portable tree digest, and a POSIX-only internal Git-object capture
+  can bind that digest into inert, content-addressed private storage. The
+  capture has no runtime consumer or execution/policy/promotion authority;
+  Windows and authenticated custody remain explicitly withheld. Hostile bare
+  repositories are byte-bounded before Git parsing; common-directory redirects,
+  worktree-local/external config, and partial-clone/promisor settings are rejected.
+
 - **v3 gate opened — Team Command Center spec.** `docs/SPEC-V3-TEAM.md`: the
   hand-written end-state spec for the team / multi-machine backbone (one team
   memory, shared approval inbox with owner-apply routing, coordinated

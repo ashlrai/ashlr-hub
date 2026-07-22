@@ -63,7 +63,7 @@ function runAuditProcess(packPath: string): Promise<ExternalSkillAuditReport> {
       try {
         const parsed = JSON.parse(output) as Partial<ExternalSkillAuditReport>;
         if (
-          parsed.schemaVersion !== 1
+          parsed.schemaVersion !== 2
           || parsed.mode !== 'quarantine'
           || parsed.promotion?.eligible !== false
         ) throw new Error('invalid audit worker report');
