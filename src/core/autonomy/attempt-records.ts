@@ -159,16 +159,16 @@ export interface AttemptCoverageStatus {
     diagnosticAttempt?: boolean;
     policySuppressed?: boolean;
     labelAuthoritative?: boolean;
-    coverage: AttemptRecordCoverage;
+    coverage: Partial<AttemptRecordCoverage>;
     causalCoverage: AttemptCausalCoverage;
   }>;
-  coverage: {
+  coverage: Partial<{
     agentAction: AttemptCoverageMetric;
     outcomeRecord: AttemptCoverageMetric;
     decision: AttemptCoverageMetric;
     evidence: AttemptCoverageMetric;
     worked: AttemptCoverageMetric;
-  };
+  }>;
   causalCoverage: {
     trajectoryId: AttemptCoverageMetric;
     routeSnapshot: AttemptCoverageMetric;
