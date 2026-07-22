@@ -82,8 +82,9 @@ attestation omissions.
 
 The source must be an existing, caller-supplied bare repository directory. M446
 requires that directory to be owned by the current user and rejects symlinked
-roots, non-bare layouts, Git alternates, HTTP alternates, grafts, shallow state,
-replace refs, and detected promisor packs. It records the source directory's
+roots, non-bare layouts, common-directory redirects, worktree-local config, Git
+alternates, HTTP alternates, grafts, shallow state, replace refs, and detected
+promisor packs. It records the source directory's
 physical identity before reading and requires the same identity and safety
 checks after object traversal. Canonical source ancestors must be owned by the
 current user or root and cannot be group-writable or non-sticky world-writable;
@@ -110,6 +111,12 @@ or hash-mismatched objects fail closed and publish no successful receipt.
 
 The compile-time source and expansion ceilings are:
 
+- 32 MiB per source object-store file, 64 MiB across the complete object store,
+  and 8,192 total source entries before any Git object parsing;
+- 64 KiB local repository config, 4 KiB `HEAD`, and 8 MiB `packed-refs`,
+  each stable-read from one owned non-writable regular file; common-directory
+  redirects, worktree-local config, local includes, worktreeConfig, and
+  promisor/partial-clone settings are rejected;
 - 1 MiB per commit object and per tree object;
 - 256 KiB per blob and 16 MiB total blob bytes;
 - 2,048 parsed ancestor entries and 2,048 expanded paths, depth 12, and 4,096
@@ -264,9 +271,15 @@ deterministic outcome evidence, and an independently trial-ready pack.
   broken, escaping, or `.git` targets;
 - preservation of executable mode as inert bundle metadata; and
 - detection of a tampered bundle without repair or overwrite;
+- rejection of oversized individual and aggregate object stores, oversized
+  repository control files, and externally including local Git config before
+  invoking Git object parsing;
 - recovery of an interrupted hard-link handoff; and
 - a TypeScript-AST import-graph assertion that permits only the public
-  type-only export and rejects runtime authority edges.
+  type-only export and rejects runtime authority edges. The supplemental fence
+  scans TypeScript and JavaScript string literals so a module path first stored
+  in a variable is also visible; it is still not a same-principal security
+  boundary against deliberately obfuscated source construction.
 
 M444 tests separately verify that `portablePackDigest` is stable across local
 permission changes while its forensic `packDigest` still changes. M446's

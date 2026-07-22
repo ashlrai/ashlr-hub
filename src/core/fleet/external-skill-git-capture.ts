@@ -59,6 +59,11 @@ const MAX_DEPTH = 12;
 const MAX_PATH_BYTES = 4_096;
 const MAX_GIT_INVOCATIONS = MAX_ENTRIES + 64;
 const MAX_SOURCE_STORE_ENTRIES = 8_192;
+const MAX_SOURCE_OBJECT_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_SOURCE_OBJECT_STORE_BYTES = 64 * 1024 * 1024;
+const MAX_SOURCE_CONFIG_BYTES = 64 * 1024;
+const MAX_SOURCE_HEAD_BYTES = 4 * 1024;
+const MAX_SOURCE_PACKED_REFS_BYTES = 8 * 1024 * 1024;
 const MAX_CAPTURE_MS = 30_000;
 const MAX_BUNDLE_BYTES = 24 * 1024 * 1024;
 const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -508,17 +513,58 @@ function secureSourceRoot(path: string): Stats | null {
       (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
       !securePosixHierarchy(path, 'directory', true)) return null;
     for (const relative of [
-      'objects/info/alternates', 'objects/info/http-alternates', 'info/grafts', 'shallow',
+      'commondir', 'config.worktree', 'objects/info/alternates', 'objects/info/http-alternates',
+      'info/grafts', 'shallow',
     ]) {
       if (existsSync(join(path, relative))) return null;
     }
     if (existsSync(join(path, 'refs', 'replace'))) return null;
+    const boundedSourceFile = (name: string, maximum: number): Buffer | null => {
+      const sourcePath = join(path, name);
+      if (!existsSync(sourcePath)) return Buffer.alloc(0);
+      let fd: number | undefined;
+      try {
+        const before = lstatSync(sourcePath, { bigint: true });
+        if (!before.isFile() || before.isSymbolicLink() || before.size < 0n ||
+          before.size > BigInt(maximum) || before.nlink !== 1n ||
+          (typeof process.getuid === 'function' && before.uid !== BigInt(process.getuid())) ||
+          (before.mode & 0o022n) !== 0n) return null;
+        const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+        fd = openSync(sourcePath, fsConstants.O_RDONLY | noFollow);
+        const opened = fstatSync(fd, { bigint: true });
+        if (!sameExecutableIdentity(before, opened)) return null;
+        const bytes = Buffer.alloc(Number(opened.size));
+        let offset = 0;
+        while (offset < bytes.length) {
+          const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (read <= 0) return null;
+          offset += read;
+        }
+        const after = fstatSync(fd, { bigint: true });
+        const named = lstatSync(sourcePath, { bigint: true });
+        return sameExecutableIdentity(opened, after) && sameExecutableIdentity(after, named)
+          ? bytes
+          : null;
+      } finally {
+        if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+      }
+    };
+    const head = boundedSourceFile('HEAD', MAX_SOURCE_HEAD_BYTES);
+    const config = boundedSourceFile('config', MAX_SOURCE_CONFIG_BYTES);
+    const packedRefs = boundedSourceFile('packed-refs', MAX_SOURCE_PACKED_REFS_BYTES);
+    if (!head || !config || !packedRefs) return null;
+    const configText = strictUtf8(config);
+    if (configText === null || configText.includes('\0') ||
+      /^\s*\[\s*include(?:if\b[^\]]*)?\s*\]/imu.test(configText) ||
+      /^\s*worktreeconfig\s*=/imu.test(configText) ||
+      /^\s*(?:promisor|partialclone)\s*=/imu.test(configText)) return null;
     return stat;
   } catch { return null; }
 }
 
 function secureSourceObjectStore(path: string, checkDeadline: () => void): boolean {
   let observed = 0;
+  let observedBytes = 0;
   const visit = (directory: string, depth: number): boolean => {
     if (depth > 4) return false;
     let handle: ReturnType<typeof opendirSync>;
@@ -540,6 +586,14 @@ function secureSourceObjectStore(path: string, checkDeadline: () => void): boole
         if (stat.isDirectory()) {
           if (!visit(child, depth + 1)) return false;
         } else if (!stat.isFile()) return false;
+        else {
+          if (!Number.isSafeInteger(stat.size) || stat.size < 0 ||
+            stat.size > MAX_SOURCE_OBJECT_FILE_BYTES ||
+            observedBytes > MAX_SOURCE_OBJECT_STORE_BYTES - stat.size) {
+            throw new CaptureFailure('capture-limit');
+          }
+          observedBytes += stat.size;
+        }
       }
     } finally {
       try { handle.closeSync(); } catch { /* best effort */ }
