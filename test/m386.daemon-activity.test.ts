@@ -47,6 +47,23 @@ describe('daemon activity — observational private state', () => {
     mkdirSync(daemonActivityDirectory(), { mode: 0o700 });
   }
 
+  function activityRowsOnDisk(): Array<{ observedAt: string }> {
+    return readdirSync(daemonActivityDirectory())
+      .filter((name) => name.endsWith('.jsonl'))
+      .flatMap((name) => {
+        const raw = readFileSync(join(daemonActivityDirectory(), name), 'utf8').trim();
+        return raw ? raw.split('\n').map((line) => JSON.parse(line) as { observedAt: string }) : [];
+      })
+      .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+  }
+
+  function observationalSlotPaths(): string[] {
+    return readdirSync(daemonActivityDirectory())
+      .filter((name) => /^\.activity-observation-\d{2}\.jsonl$/.test(name))
+      .sort()
+      .map((name) => join(daemonActivityDirectory(), name));
+  }
+
   function stagingPath(
     day: string,
     index: number,
@@ -108,7 +125,7 @@ describe('daemon activity — observational private state', () => {
 
     const read = readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:32.000Z') });
     expect(read).toMatchObject({
-      sourceState: 'healthy', freshness: 'fresh', ageMs: 1_000,
+      sourceState: 'sampled', complete: false, freshness: 'fresh', ageMs: 1_000,
       ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
       phaseStartedAt: '2026-07-13T05:00:01.000Z',
     });
@@ -300,7 +317,7 @@ describe('daemon activity — observational private state', () => {
     expect(readDaemonActivity().sourceState).toBe('degraded');
   });
 
-  it('keeps lifetime history sampled when the retention marker and key are deleted', () => {
+  it('degrades partial local integrity deletion instead of trusting the remaining co-located state', () => {
     for (let day = 1; day <= 9; day++) {
       expect(writeDaemonActivity({
         instanceId,
@@ -317,14 +334,14 @@ describe('daemon activity — observational private state', () => {
     rmSync(anchor);
 
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-09T00:00:01.000Z') })).toMatchObject({
-      sourceState: 'sampled',
+      sourceState: 'degraded',
       complete: false,
       ownerHorizonComplete: false,
-      activity: { observedAt: '2026-07-09T00:00:00.000Z' },
+      activity: null,
     });
   });
 
-  it('requires intact authenticated genesis and continuity for first-ever lifetime completeness', () => {
+  it('never upgrades co-located key and journal state to authenticated completeness after replacement', () => {
     expect(writeDaemonActivity({
       instanceId,
       daemonStartedAt: '2026-07-13T05:00:00.000Z',
@@ -332,22 +349,34 @@ describe('daemon activity — observational private state', () => {
       now: new Date('2026-07-13T05:00:01.000Z'),
     })).toBe(true);
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
-      sourceState: 'healthy', complete: true,
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: false,
     });
+    const originalKey = readFileSync(join(daemonActivityDirectory(), '.activity-auth-key'));
 
-    rmSync(join(daemonActivityDirectory(), '.activity-genesis-v1.json'));
-    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
-      sourceState: 'sampled', complete: false,
-    });
     for (const name of readdirSync(daemonActivityDirectory())) {
-      if (name.startsWith('.activity-continuity-v1.')) rmSync(join(daemonActivityDirectory(), name));
+      if (name !== '.activity.lock') rmSync(join(daemonActivityDirectory(), name));
     }
-    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
-      sourceState: 'sampled', complete: false,
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-14T05:00:00.000Z',
+      phase: 'starting',
+      now: new Date('2026-07-14T05:00:00.000Z'),
+    })).toBe(true);
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-14T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-14T05:00:01.000Z'),
+    })).toBe(true);
+
+    expect(readFileSync(join(daemonActivityDirectory(), '.activity-auth-key')).equals(originalKey)).toBe(false);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-14T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+      activity: { observedAt: '2026-07-14T05:00:01.000Z' },
     });
   });
 
-  it('uses bounded authenticated append state across more than 4,096 heartbeats', () => {
+  it('uses bounded local-integrity append state across more than 4,096 heartbeats', () => {
     const startedAt = '2026-07-13T05:00:00.000Z';
     const baseMs = Date.parse(startedAt);
     for (let index = 0; index < 4_097; index++) {
@@ -391,7 +420,7 @@ describe('daemon activity — observational private state', () => {
     rmSync(join(daemonActivityDirectory(), '.activity-truncated-v1'));
     const nowMs = baseMs + 4_096 * 86_400_000 + 1_000;
     expect(readDaemonActivity({ nowMs })).toMatchObject({
-      sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+      sourceState: 'degraded', complete: false, ownerHorizonComplete: false,
     });
 
     rmSync(join(daemonActivityDirectory(), '.activity-genesis-v1.json'));
@@ -458,7 +487,7 @@ describe('daemon activity — observational private state', () => {
         '2026-07-13T05:00:03.000Z',
       ]);
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:04.000Z') })).toMatchObject({
-      sourceState: 'healthy', complete: true,
+      sourceState: 'sampled', complete: false,
       activity: { observedAt: '2026-07-13T05:00:03.000Z' },
     });
   });
@@ -482,7 +511,7 @@ describe('daemon activity — observational private state', () => {
         '2026-07-13T05:00:02.000Z',
       ]);
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:03.000Z') })).toMatchObject({
-      sourceState: 'healthy', complete: true,
+      sourceState: 'sampled', complete: false,
     });
   });
 
@@ -598,7 +627,7 @@ describe('daemon activity — observational private state', () => {
       now: new Date('2026-07-13T05:00:01.000Z'),
       runtime: { platform: 'win32', directoryDurability: 'unproven' },
     })).toBe(true);
-    const path = daemonActivityPath('2026-07-13');
+    const path = observationalSlotPaths()[0]!;
     const intact = readFileSync(path, 'utf8');
     const torn = `${JSON.stringify(activityRow('2026-07-13T05:00:02.000Z', 'idle'))}\n`;
     writeFileSync(path, `${intact}${torn.slice(0, 53)}`, { mode: 0o600 });
@@ -610,13 +639,13 @@ describe('daemon activity — observational private state', () => {
       now: new Date('2026-07-13T05:00:03.000Z'),
       runtime: { platform: 'win32', directoryDurability: 'unproven' },
     })).toBe(true);
-    expect(readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt)).toEqual([
+    expect(activityRowsOnDisk().map((row) => row.observedAt)).toEqual([
       '2026-07-13T05:00:01.000Z',
       '2026-07-13T05:00:03.000Z',
     ]);
   });
 
-  it('quarantines a torn first observational partition and permits the next write', () => {
+  it('repairs a torn first observational partition in place and permits the next write', () => {
     createActivityStorage();
     const path = daemonActivityPath('2026-07-13');
     writeFileSync(path, JSON.stringify(activityRow('2026-07-13T05:00:01.000Z')).slice(0, 47), {
@@ -633,10 +662,8 @@ describe('daemon activity — observational private state', () => {
 
     expect(readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt))
       .toEqual(['2026-07-13T05:00:02.000Z']);
-    const retired = readdirSync(daemonActivityDirectory())
-      .filter((name) => name.startsWith('.activity-retired-'));
-    expect(retired).toHaveLength(1);
-    expect(lstatSync(join(daemonActivityDirectory(), retired[0]!)).size).toBe(0);
+    expect(readdirSync(daemonActivityDirectory())
+      .filter((name) => name.startsWith('.activity-retired-'))).toHaveLength(0);
   });
 
   it('quarantines a torn new observational partition without losing prior history', () => {
@@ -660,11 +687,101 @@ describe('daemon activity — observational private state', () => {
       runtime: { platform: 'win32', directoryDurability: 'unproven' },
     })).toBe(true);
 
-    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8'))
-      .toContain('"observedAt":"2026-07-13T05:00:01.000Z"');
-    expect(readFileSync(trailing, 'utf8').trim().split('\n').map((line) => JSON.parse(line).observedAt))
-      .toEqual(['2026-07-14T05:00:02.000Z']);
+    expect(activityRowsOnDisk().map((row) => row.observedAt)).toEqual([
+      '2026-07-13T05:00:01.000Z',
+      '2026-07-14T05:00:02.000Z',
+    ]);
   });
+
+  it('reuses a bounded Windows sampled ring indefinitely beyond forty days', () => {
+    const baseMs = Date.parse('2026-01-01T00:00:00.000Z');
+    for (let index = 0; index < 45; index++) {
+      const observedAt = new Date(baseMs + index * 86_400_000).toISOString();
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: '2026-01-01T00:00:00.000Z',
+        phase: index === 0 ? 'starting' : 'idle',
+        now: new Date(observedAt),
+        runtime: { platform: 'win32', directoryDurability: 'unproven' },
+      }), `day ${index + 1}`).toBe(true);
+    }
+
+    const rows = activityRowsOnDisk();
+    expect(observationalSlotPaths()).toHaveLength(32);
+    expect(rows).toHaveLength(32);
+    expect(rows[0]!.observedAt).toBe(new Date(baseMs + 13 * 86_400_000).toISOString());
+    expect(rows.at(-1)!.observedAt).toBe(new Date(baseMs + 44 * 86_400_000).toISOString());
+    expect(readDaemonActivity({
+      platform: 'win32',
+      nowMs: baseMs + 44 * 86_400_000 + 1_000,
+    })).toMatchObject({
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: false,
+      durability: 'observational', freshness: 'fresh',
+      activity: { observedAt: new Date(baseMs + 44 * 86_400_000).toISOString() },
+    });
+  });
+
+  it('recovers a torn observational slot after restart and continues ring reuse', () => {
+    const baseMs = Date.parse('2026-08-01T00:00:00.000Z');
+    for (let index = 0; index < 32; index++) {
+      expect(writeDaemonActivity({
+        instanceId,
+        daemonStartedAt: '2026-08-01T00:00:00.000Z',
+        phase: 'idle',
+        now: new Date(baseMs + index * 86_400_000),
+        runtime: { platform: 'win32', directoryDurability: 'unproven' },
+      })).toBe(true);
+    }
+    const oldest = observationalSlotPaths().find((path) =>
+      readFileSync(path, 'utf8').includes('2026-08-01T00:00:00.000Z'))!;
+    const interruptedAt = new Date(baseMs + 32 * 86_400_000).toISOString();
+    const interrupted = `${JSON.stringify(activityRow(
+      interruptedAt,
+      'idle',
+    ))}\n`;
+    writeFileSync(oldest, interrupted.slice(0, 71), { mode: 0o600 });
+    expect(readDaemonActivity({ platform: 'win32' }).sourceState).toBe('degraded');
+
+    const resumedAt = new Date(baseMs + 33 * 86_400_000).toISOString();
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-08-01T00:00:00.000Z',
+      phase: 'idle',
+      now: new Date(resumedAt),
+      runtime: { platform: 'win32', directoryDurability: 'unproven' },
+    })).toBe(true);
+
+    const rows = activityRowsOnDisk();
+    expect(observationalSlotPaths()).toHaveLength(32);
+    expect(rows).toHaveLength(32);
+    expect(rows.some((row) => row.observedAt === interruptedAt)).toBe(false);
+    expect(rows.at(-1)!.observedAt).toBe(resumedAt);
+    expect(readDaemonActivity({ platform: 'win32', nowMs: Date.parse(resumedAt) + 1_000 })).toMatchObject({
+      sourceState: 'sampled', complete: false, durability: 'observational',
+      activity: { observedAt: resumedAt },
+    });
+  });
+
+  it('fails reads and writes closed after the total directory-entry budget is exceeded', () => {
+    createActivityStorage();
+    const sentinel = join(daemonActivityDirectory(), 'sentinel.txt');
+    writeFileSync(sentinel, 'unchanged', { mode: 0o600 });
+    for (let index = 0; index < 2_049; index++) {
+      writeFileSync(join(daemonActivityDirectory(), `hostile-${String(index).padStart(4, '0')}`), '', { mode: 0o600 });
+    }
+
+    expect(readDaemonActivity()).toMatchObject({
+      sourceState: 'degraded', complete: false, ownerHorizonComplete: false,
+    });
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+    })).toBe(false);
+    expect(readFileSync(sentinel, 'utf8')).toBe('unchanged');
+    expect(readdirSync(daemonActivityDirectory()).filter((name) => name.endsWith('.jsonl'))).toHaveLength(0);
+  }, 30_000);
 
   it('rolls a saturated legacy partition into a numbered segment without losing freshness', () => {
     createActivityStorage();
@@ -955,7 +1072,7 @@ describe('daemon activity — observational private state', () => {
     expect(existsSync(tombstone)).toBe(true);
     expect(lstatSync(tombstone).size).toBe(0);
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
-      sourceState: 'healthy',
+      sourceState: 'sampled', complete: false,
       activity: { observedAt: '2026-07-13T05:00:01.000Z' },
     });
   });

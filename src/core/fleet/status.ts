@@ -1852,7 +1852,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const ownerMatches = ds.running === true && activity !== null && activity.pid === ds.pid &&
       activity.daemonStartedAt === startedAt;
     const currentOwnerActivity = ownerMatches && activityRead.ownerHorizonComplete &&
-      (activityRead.sourceState === 'healthy' || activityRead.sourceState === 'sampled') &&
+      activityRead.sourceState === 'sampled' &&
       activityRead.freshness === 'fresh' && activityRead.ownerState === 'alive';
     const tickInProgress = currentOwnerActivity && activity?.phase === 'tick';
     const childActivity = currentOwnerActivity && activity?.phase === 'post-tick' &&

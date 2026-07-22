@@ -1,5 +1,6 @@
 /**
- * Append-only metadata-only daemon activity journal.
+ * Bounded metadata-only daemon activity journal. Crash-durable platforms use
+ * append/rollover continuity; observational platforms use a reusable ring.
  *
  * This source is explicitly observational (`authority: "none"`). It must never
  * authorize dispatch, readiness, learning labels, verification, or merges.
@@ -19,8 +20,8 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readSync,
-  readdirSync,
   renameSync,
   writeSync,
   type Stats,
@@ -38,6 +39,7 @@ const MAX_SEGMENT_INDEX = 9_999;
 const MAX_PHASE_SCAN_ROWS = 512;
 const MAX_RETIRED_FILES = 1_024;
 const MAX_OBSERVATIONAL_PARTITIONS = 32;
+const MAX_DIRECTORY_ENTRIES = 2_048;
 const FUTURE_TOLERANCE_MS = 5_000;
 export const DAEMON_ACTIVITY_STALE_MS = 90_000;
 const ACTIVITY_KEY_NAME = '.activity-auth-key';
@@ -68,8 +70,9 @@ export interface DaemonActivityRowV1 {
 }
 
 export interface DaemonActivityReadResult {
-  sourceState: 'missing' | 'healthy' | 'sampled' | 'degraded';
+  sourceState: 'missing' | 'sampled' | 'degraded';
   complete: boolean;
+  /** True only when the bounded rows include this owner's explicit start boundary. */
   ownerHorizonComplete: boolean;
   durability: 'crash-durable' | 'observational';
   freshness: DaemonActivityFreshness;
@@ -101,12 +104,14 @@ const APPEND_INTENT_RE = new RegExp(
 );
 const RETIRED_RE = new RegExp(`^\\.activity-retired-(${UUID_RE_SOURCE})-([a-f0-9]{64})\\.tmp$`, 'i');
 const LEGACY_DELETE_RE = new RegExp(`^\\.activity-delete-(${UUID_RE_SOURCE})\\.tmp$`, 'i');
+const OBSERVATIONAL_SLOT_RE = /^\.activity-observation-(\d{2})\.jsonl$/;
 
 interface ActivityPartition {
   day: string;
   index: number;
   name: string;
   path: string;
+  observational: boolean;
 }
 
 interface RetentionMarkerV1 {
@@ -476,17 +481,51 @@ function inspectPartitionEnvelope(path: string, expectedDirectory: Stats): boole
   }
 }
 
-function listPartitions(directory: string): ActivityPartition[] | null {
+function boundedDirectoryNames(directory: string): string[] | null {
+  let handle: ReturnType<typeof opendirSync> | undefined;
   try {
+    handle = opendirSync(directory);
+    const names: string[] = [];
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) return names;
+      if (names.length >= MAX_DIRECTORY_ENTRIES) return null;
+      names.push(entry.name);
+    }
+  } catch {
+    return null;
+  } finally {
+    try { handle?.closeSync(); } catch { /* best effort */ }
+  }
+}
+
+function listPartitions(directory: string, observational = false): ActivityPartition[] | null {
+  try {
+    const names = boundedDirectoryNames(directory);
+    if (!names) return null;
     const partitions: ActivityPartition[] = [];
-    for (const name of readdirSync(directory)) {
+    const slotIds = new Set<number>();
+    for (const name of names) {
       const match = PARTITION_RE.exec(name);
-      if (!match) continue;
-      const day = match[1]!;
-      const index = match[2] === undefined ? 0 : Number(match[2]);
-      if (!canonicalDay(day) || !Number.isSafeInteger(index) || index < 0 || index > MAX_SEGMENT_INDEX ||
-        (match[2] !== undefined && index === 0)) return null;
-      partitions.push({ day, index, name, path: join(directory, name) });
+      if (match) {
+        const day = match[1]!;
+        const index = match[2] === undefined ? 0 : Number(match[2]);
+        if (!canonicalDay(day) || !Number.isSafeInteger(index) || index < 0 || index > MAX_SEGMENT_INDEX ||
+          (match[2] !== undefined && index === 0)) return null;
+        partitions.push({ day, index, name, path: join(directory, name), observational });
+        continue;
+      }
+      const slot = observational ? OBSERVATIONAL_SLOT_RE.exec(name) : null;
+      if (!slot) continue;
+      const index = Number(slot[1]);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_OBSERVATIONAL_PARTITIONS ||
+        slotIds.has(index)) return null;
+      slotIds.add(index);
+      partitions.push({ day: '', index, name, path: join(directory, name), observational: true });
+    }
+    if (observational) {
+      partitions.sort((left, right) => left.name.localeCompare(right.name));
+      return partitions;
     }
     partitions.sort((left, right) => left.day.localeCompare(right.day) || left.index - right.index);
     for (let index = 1; index < partitions.length; index++) {
@@ -905,7 +944,7 @@ function scanPartition(
       return null;
     }
     const prior = rows.at(-1);
-    if (!row || row.observedAt.slice(0, 10) !== partition.day ||
+    if (!row || (!partition.observational && row.observedAt.slice(0, 10) !== partition.day) ||
       (prior && row.observedAt < prior.observedAt)) return null;
     rows.push(row);
     const rowBytes = Buffer.from(`${line}\n`, 'utf8');
@@ -930,12 +969,26 @@ function scanPartition(
 function scanPartitions(
   partitions: ActivityPartition[],
   expectedDirectory: Stats,
+  observational = false,
 ): ScannedPartition[] | null {
-  const scanned: ScannedPartition[] = [];
-  let priorObservedAt: string | null = null;
+  const pairs: Array<{ partition: ActivityPartition; scanned: ScannedPartition }> = [];
   for (const partition of partitions) {
     const current = scanPartition(partition, expectedDirectory);
-    if (!current || (priorObservedAt !== null && current.rows[0]!.observedAt < priorObservedAt)) return null;
+    if (!current) return null;
+    pairs.push({ partition, scanned: current });
+  }
+  if (observational) {
+    pairs.sort((left, right) =>
+      left.scanned.cursor.firstObservedAt.localeCompare(right.scanned.cursor.firstObservedAt) ||
+      left.scanned.cursor.lastObservedAt.localeCompare(right.scanned.cursor.lastObservedAt) ||
+      left.partition.name.localeCompare(right.partition.name));
+    partitions.splice(0, partitions.length, ...pairs.map((pair) => pair.partition));
+  }
+  let priorObservedAt: string | null = null;
+  const scanned: ScannedPartition[] = [];
+  for (const pair of pairs) {
+    const current = pair.scanned;
+    if (priorObservedAt !== null && current.rows[0]!.observedAt < priorObservedAt) return null;
     priorObservedAt = current.rows.at(-1)!.observedAt;
     scanned.push(current);
   }
@@ -1466,7 +1519,8 @@ function retireVerifiedFile(
 
 function retiredMarkerCount(directory: string): number | null {
   try {
-    return readdirSync(directory).filter((name) => RETIRED_RE.test(name) || LEGACY_DELETE_RE.test(name)).length;
+    const names = boundedDirectoryNames(directory);
+    return names?.filter((name) => RETIRED_RE.test(name) || LEGACY_DELETE_RE.test(name)).length ?? null;
   } catch {
     return null;
   }
@@ -1480,7 +1534,9 @@ function reuseRetiredMarker(
 ): 'reused' | 'absent' | 'invalid' {
   let fd: number | undefined;
   try {
-    const reusableNames = readdirSync(directory).filter((name) => RETIRED_RE.test(name)).sort();
+    const names = boundedDirectoryNames(directory);
+    if (!names) return 'invalid';
+    const reusableNames = names.filter((name) => RETIRED_RE.test(name)).sort();
     const reusableName = reusableNames.find((name) => {
       try {
         const candidate = lstatSync(join(directory, name));
@@ -1511,9 +1567,11 @@ function reuseRetiredMarker(
   }
 }
 
-function hasRetiredTwin(directory: string, expected: Stats): boolean {
+function hasRetiredTwin(directory: string, expected: Stats): boolean | null {
   try {
-    return readdirSync(directory).some((name) => {
+    const names = boundedDirectoryNames(directory);
+    if (!names) return null;
+    return names.some((name) => {
       if (!RETIRED_RE.test(name)) return false;
       try {
         const candidate = lstatSync(join(directory, name));
@@ -1523,7 +1581,7 @@ function hasRetiredTwin(directory: string, expected: Stats): boolean {
       }
     });
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1737,48 +1795,128 @@ function recoverObservationalTrailingAppend(
   directory: string,
   expectedDirectory: Stats,
 ): boolean {
-  const partitions = listPartitions(directory);
-  const latest = partitions?.at(-1);
-  if (!partitions || !latest) return partitions !== null;
-  if (readPartition(latest.path, expectedDirectory)) return true;
+  const partitions = listPartitions(directory, true);
+  if (!partitions || partitions.length > MAX_OBSERVATIONAL_PARTITIONS) return false;
+  let repairedCount = 0;
+  for (const partition of partitions) {
+    if (readPartition(partition.path, expectedDirectory)) continue;
+    if (++repairedCount > 1) return false;
+    let fd: number | undefined;
+    try {
+      const named = lstatSync(partition.path);
+      if (!privateFile(named) || named.size > MAX_PARTITION_BYTES) return false;
+      fd = openSync(partition.path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+      const opened = fstatSync(fd);
+      if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== named.size) return false;
+      const bytes = readOpenedBytes(fd, opened.size);
+      if (!bytes) return false;
+      if (bytes.length === 0) continue;
+      if (bytes.at(-1) === 0x0a) return false;
+      const finalNewline = bytes.lastIndexOf(0x0a);
+      if (finalNewline >= 1) {
+        const prefix = bytes.subarray(0, finalNewline + 1).toString('utf8');
+        let priorObservedAt: string | null = null;
+        for (const line of prefix.slice(0, -1).split('\n')) {
+          const row = parseRow(JSON.parse(line));
+          if (!row || (priorObservedAt !== null && row.observedAt < priorObservedAt)) return false;
+          priorObservedAt = row.observedAt;
+        }
+        ftruncateSync(fd, finalNewline + 1);
+      } else {
+        // A one-row observational slot can be torn at any byte. It carries no
+        // authority, so erase the incomplete bytes and reuse the same inode.
+        ftruncateSync(fd, 0);
+      }
+      fsyncSync(fd);
+      const repaired = fstatSync(fd);
+      if (!privateFile(repaired) || !sameNode(opened, repaired) ||
+        (finalNewline >= 1 ? repaired.size !== finalNewline + 1 : repaired.size !== 0)) return false;
+    } catch {
+      return false;
+    } finally {
+      if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+  return stableDirectory(directory, expectedDirectory);
+}
+
+function observationalSlotPath(directory: string, index: number): string {
+  return join(directory, `.activity-observation-${String(index).padStart(2, '0')}.jsonl`);
+}
+
+function writeObservationalRing(
+  directory: string,
+  expectedDirectory: Stats,
+  bytes: Buffer,
+  observedAt: string,
+): boolean {
   let fd: number | undefined;
   try {
-    const named = lstatSync(latest.path);
-    if (!privateFile(named) || named.size > MAX_PARTITION_BYTES) return false;
-    fd = openSync(latest.path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
-    if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== named.size) return false;
-    const bytes = readOpenedBytes(fd, opened.size);
-    if (!bytes || bytes.at(-1) === 0x0a) return false;
-    const finalNewline = bytes.lastIndexOf(0x0a);
-    if (finalNewline < 1) {
-      const digest = createHash('sha256').update(bytes).digest('hex');
-      const retiredPath = join(directory, `.activity-retired-${randomUUID()}-${digest}.tmp`);
-      if (existsSync(retiredPath) || !stableDirectory(directory, expectedDirectory)) return false;
-      renameSync(latest.path, retiredPath);
-      const moved = lstatSync(retiredPath);
-      const pinned = fstatSync(fd);
-      if (!privateFile(moved) || !privateFile(pinned) || !sameNode(opened, moved) ||
-        !sameNode(moved, pinned)) return false;
+    const partitions = listPartitions(directory, true);
+    if (!partitions || partitions.length > MAX_OBSERVATIONAL_PARTITIONS) return false;
+    const observed: Array<{ partition: ActivityPartition; rows: DaemonActivityRowV1[] }> = [];
+    const empty: ActivityPartition[] = [];
+    for (const partition of partitions) {
+      const named = lstatSync(partition.path);
+      if (!privateFile(named) || named.size > MAX_PARTITION_BYTES) return false;
+      if (named.size === 0) {
+        empty.push(partition);
+        continue;
+      }
+      const rows = readPartition(partition.path, expectedDirectory);
+      if (!rows) return false;
+      observed.push({ partition, rows });
+    }
+    const newest = observed
+      .map((entry) => entry.rows.at(-1)!.observedAt)
+      .sort()
+      .at(-1);
+    if (newest && observedAt < newest) return false;
+
+    let target: ActivityPartition | null = empty[0] ?? null;
+    if (!target && partitions.length < MAX_OBSERVATIONAL_PARTITIONS) {
+      const usedSlots = new Set(partitions.map((partition) =>
+        OBSERVATIONAL_SLOT_RE.exec(partition.name)).filter(Boolean).map((match) => Number(match![1])));
+      for (let index = 0; index < MAX_OBSERVATIONAL_PARTITIONS; index++) {
+        if (usedSlots.has(index)) continue;
+        const path = observationalSlotPath(directory, index);
+        if (existsSync(path)) return false;
+        target = { day: '', index, name: basename(path), path, observational: true };
+        break;
+      }
+    }
+    if (!target) {
+      target = observed.sort((left, right) =>
+        left.rows.at(-1)!.observedAt.localeCompare(right.rows.at(-1)!.observedAt) ||
+        left.partition.name.localeCompare(right.partition.name))[0]?.partition ?? null;
+    }
+    if (!target || !stableDirectory(directory, expectedDirectory)) return false;
+
+    if (existsSync(target.path)) {
+      const named = lstatSync(target.path);
+      if (!privateFile(named) || named.size > MAX_PARTITION_BYTES) return false;
+      fd = openSync(target.path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+      const opened = fstatSync(fd);
+      if (!privateFile(opened) || !sameNode(named, opened) || opened.size !== named.size) return false;
       ftruncateSync(fd, 0);
       fsyncSync(fd);
-      const erased = fstatSync(fd);
-      const finalPath = lstatSync(retiredPath);
-      return privateFile(erased) && privateFile(finalPath) && sameNode(opened, erased) &&
-        sameNode(erased, finalPath) && erased.size === 0 && stableDirectory(directory, expectedDirectory);
+      if (writeSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
+    } else {
+      fd = openSync(target.path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+        fsConstants.O_NOFOLLOW, 0o600);
+      const opened = fstatSync(fd);
+      if (!privateFile(opened) || opened.size !== 0 || writeSync(fd, bytes) !== bytes.length) return false;
     }
-    const prefix = bytes.subarray(0, finalNewline + 1).toString('utf8');
-    let priorObservedAt: string | null = null;
-    for (const line of prefix.slice(0, -1).split('\n')) {
-      const row = parseRow(JSON.parse(line));
-      if (!row || row.observedAt.slice(0, 10) !== latest.day ||
-        (priorObservedAt !== null && row.observedAt < priorObservedAt)) return false;
-      priorObservedAt = row.observedAt;
-    }
-    ftruncateSync(fd, finalNewline + 1);
+    fchmodSync(fd, 0o600);
     fsyncSync(fd);
-    const repaired = fstatSync(fd);
-    return privateFile(repaired) && sameNode(opened, repaired) && repaired.size === finalNewline + 1;
+    const persisted = fstatSync(fd);
+    if (!privateFile(persisted) || persisted.size !== bytes.length) return false;
+    closeSync(fd);
+    fd = undefined;
+    const rebound = lstatSync(target.path);
+    const observedBytes = readPartitionBytes(target.path, expectedDirectory);
+    return privateFile(rebound) && sameNode(persisted, rebound) && observedBytes?.equals(bytes) === true &&
+      stableDirectory(directory, expectedDirectory);
   } catch {
     return false;
   } finally {
@@ -1793,7 +1931,8 @@ function recoverActivityTransactions(
   directoryDurable = true,
 ): boolean {
   try {
-    const initialNames = readdirSync(directory);
+    const initialNames = boundedDirectoryNames(directory);
+    if (!initialNames) return false;
     const appendIntents = initialNames.filter((entry) => APPEND_INTENT_RE.test(entry)).sort();
     if (appendIntents.length > 1) return false;
     for (const name of appendIntents) {
@@ -1821,7 +1960,9 @@ function recoverActivityTransactions(
     // A hard-linked legacy stage cannot be unlinked safely against a same-UID
     // pathname swap. Migrate a valid published pair by retiring the target
     // through its descriptor; both legacy links become zero-byte inert markers.
-    const legacyStageNames = readdirSync(directory).filter((entry) => LEGACY_STAGING_RE.test(entry)).sort();
+    const afterRetirementNames = boundedDirectoryNames(directory);
+    if (!afterRetirementNames) return false;
+    const legacyStageNames = afterRetirementNames.filter((entry) => LEGACY_STAGING_RE.test(entry)).sort();
     if (!directoryDurable && legacyStageNames.length > 0) return false;
     for (const name of legacyStageNames) {
       const match = LEGACY_STAGING_RE.exec(name);
@@ -1830,7 +1971,11 @@ function recoverActivityTransactions(
       const stage = lstatSync(stagePath);
       const targetPath = daemonActivitySegmentPath(match[1]!, Number(match[2]));
       if (!privateFileWithLinks(stage, [1, 2])) return false;
-      if (stage.nlink === 2 && stage.size === 0 && hasRetiredTwin(directory, stage)) continue;
+      if (stage.nlink === 2 && stage.size === 0) {
+        const retiredTwin = hasRetiredTwin(directory, stage);
+        if (retiredTwin === null) return false;
+        if (retiredTwin) continue;
+      }
       if (stage.nlink === 2 && existsSync(targetPath) && sameNode(stage, lstatSync(targetPath))) {
         const bytes = readPartitionBytes(targetPath, expectedDirectory, [2]);
         const rows = readPartition(targetPath, expectedDirectory, [2]);
@@ -1842,7 +1987,9 @@ function recoverActivityTransactions(
       if (stage.nlink !== 1 || !retireVerifiedFile(stagePath, directory, expectedDirectory)) return false;
     }
 
-    const intentNames = readdirSync(directory).filter((name) => INTENT_RE.test(name)).sort();
+    const afterLegacyNames = boundedDirectoryNames(directory);
+    if (!afterLegacyNames) return false;
+    const intentNames = afterLegacyNames.filter((name) => INTENT_RE.test(name)).sort();
     if (intentNames.length > 1) return false;
     if (!directoryDurable && intentNames.length > 0) return false;
     for (const name of intentNames) {
@@ -1888,7 +2035,7 @@ function recoverActivityTransactions(
       if (!privateFile(published)) return false;
     }
 
-    let recovered = listPartitions(directory);
+    let recovered = listPartitions(directory, !directoryDurable);
     if (recovered && directoryDurable && recovered.length > MAX_PARTITIONS) {
       if (recovered.length > MAX_PARTITIONS + 1 ||
         !prunePartitions(directory, expectedDirectory, recovered, MAX_PARTITIONS)) return false;
@@ -2006,7 +2153,8 @@ export function readDaemonActivity(options: {
     const root = lstatSync(rootPath);
     const directory = lstatSync(directoryPath);
     if (!privateDirectory(root) || !privateDirectory(directory)) return degraded;
-    const partitions = listPartitions(directoryPath);
+    const observational = durability === 'observational';
+    const partitions = listPartitions(directoryPath, observational);
     if (!partitions) return degraded;
     if (partitions.length === 0) return missing;
     const partitionLimit = durability === 'crash-durable' ? MAX_PARTITIONS : MAX_OBSERVATIONAL_PARTITIONS;
@@ -2018,24 +2166,23 @@ export function readDaemonActivity(options: {
     const key = readActivityKey(directoryPath, directory);
     const genesis = key ? readGenesis(directoryPath, directory, key) : null;
     const continuity = key && genesis ? readContinuity(directoryPath, directory, key, genesis) : null;
-    const scanned = scanPartitions(partitions, directory);
+    const scanned = scanPartitions(partitions, directory, observational);
     const effectiveContinuity = scanned && continuity ? projectCompletedPending(continuity, scanned) : null;
     const continuityMatches = scanned !== null && effectiveContinuity !== null &&
       effectiveContinuity.partitions.length === scanned.length &&
       scanned.every((partition, index) => cursorEquals(partition.cursor, effectiveContinuity.partitions[index]!));
+    const localIntegrityStatePresent = existsSync(activityKeyPath(directoryPath)) ||
+      existsSync(join(directoryPath, GENESIS_NAME)) ||
+      CONTINUITY_NAMES.some((name) => existsSync(join(directoryPath, name)));
+    if (localIntegrityStatePresent && !continuityMatches) return degraded;
 
     let activity: DaemonActivityRowV1 | null = null;
     let phaseStartedAt: string | null = null;
     let newerObservedAt: string | null = null;
     let remainingRows = MAX_PHASE_SCAN_ROWS;
     let phaseContinuityResolved = false;
-    let historyComplete = continuityMatches && genesis?.lifetimeComplete === true &&
-      effectiveContinuity?.lifetimeComplete === true && !effectiveContinuity.truncated && retention.state === 'absent' &&
-      truncationAnchor === 'absent' && durability === 'crash-durable';
-    let scanComplete = true;
     let ownerHorizonComplete = false;
     let oldestObservedAt: string | null = null;
-    let oldestRow: DaemonActivityRowV1 | null = null;
     scan: for (let partitionIndex = partitions.length - 1; partitionIndex >= 0; partitionIndex--) {
       const partition = partitions[partitionIndex]!;
       const rows = scanned?.[partitionIndex]?.rows ?? null;
@@ -2044,8 +2191,6 @@ export function readDaemonActivity(options: {
       const rowCount = rows?.length ?? fallbackLines!.length;
       for (let rowIndex = rowCount - 1; rowIndex >= 0; rowIndex--) {
         if (remainingRows === 0) {
-          historyComplete = false;
-          scanComplete = false;
           if (!phaseContinuityResolved) phaseStartedAt = null;
           break scan;
         }
@@ -2057,7 +2202,7 @@ export function readDaemonActivity(options: {
             return degraded;
           }
         }
-        if (!row || row.observedAt.slice(0, 10) !== partition.day ||
+        if (!row || (!partition.observational && row.observedAt.slice(0, 10) !== partition.day) ||
           (newerObservedAt !== null && row.observedAt > newerObservedAt)) return degraded;
         if (activity === null) activity = row;
         const sameOwner = row.instanceId === activity.instanceId && row.pid === activity.pid &&
@@ -2072,15 +2217,10 @@ export function readDaemonActivity(options: {
         }
         newerObservedAt = row.observedAt;
         oldestObservedAt = row.observedAt;
-        oldestRow = row;
         remainingRows--;
       }
     }
     if (!activity || !stableDirectory(directoryPath, directory)) return degraded;
-    const oldestPartition = partitions[0]!;
-    if (oldestPartition.index > 0 ||
-      (oldestRow && oldestRow.daemonStartedAt.slice(0, 10) < oldestPartition.day)) historyComplete = false;
-    if (scanComplete && historyComplete) ownerHorizonComplete = true;
     if (retention.marker && oldestObservedAt && retention.marker.removedThrough > oldestObservedAt) return degraded;
     const nowMs = options.nowMs ?? Date.now();
     const observedMs = Date.parse(activity.observedAt);
@@ -2091,8 +2231,8 @@ export function readDaemonActivity(options: {
       ? 'unknown'
       : delta < -FUTURE_TOLERANCE_MS ? 'future' : delta > staleMs ? 'stale' : 'fresh';
     return {
-      sourceState: historyComplete ? 'healthy' : 'sampled',
-      complete: historyComplete,
+      sourceState: 'sampled',
+      complete: false,
       ownerHorizonComplete,
       durability,
       freshness,
@@ -2149,12 +2289,18 @@ export function writeDaemonActivity(input: {
       stableDirectory(daemonActivityDirectory(), directories.directory);
     if (!directoryDurable && nativeMode !== 'observational') return false;
     const partitionLimit = nativeMode === 'crash-durable' ? MAX_PARTITIONS : MAX_OBSERVATIONAL_PARTITIONS;
-    const transactionNames = readdirSync(daemonActivityDirectory());
+    const transactionNames = boundedDirectoryNames(daemonActivityDirectory());
+    if (!transactionNames) return false;
     const hadRecoveryTransaction = transactionNames.some((name) =>
       APPEND_INTENT_RE.test(name) || INTENT_RE.test(name) || LEGACY_STAGING_RE.test(name));
     if (!recoverActivityTransactions(
       daemonActivityDirectory(), directories.directory, partitionLimit, directoryDurable,
     )) return false;
+    if (nativeMode === 'observational') {
+      return writeObservationalRing(
+        daemonActivityDirectory(), directories.directory, bytes, observedAt,
+      );
+    }
     const partitions = listPartitions(daemonActivityDirectory());
     if (!partitions || partitions.length > partitionLimit) return false;
 

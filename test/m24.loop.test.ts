@@ -774,7 +774,7 @@ describe('M24 runDaemon --once — exactly one tick', () => {
 
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(readDaemonActivity()).toMatchObject({
-      sourceState: 'healthy',
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
       ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
       activity: { phase: 'tick', pid: process.pid, activeChildren: null },
     });
@@ -789,7 +789,7 @@ describe('M24 runDaemon --once — exactly one tick', () => {
 
     expect(loadDaemonState()).toMatchObject({ running: true, pid: process.pid });
     expect(readDaemonActivity()).toMatchObject({
-      sourceState: 'healthy',
+      sourceState: 'sampled', complete: false,
       activity: { authority: 'none', phase: 'stopping', pid: process.pid },
     });
     expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
@@ -803,7 +803,7 @@ describe('M24 runDaemon --once — exactly one tick', () => {
     const finalState = await running;
     expect(finalState).toMatchObject({ running: false, pid: null });
     expect(readDaemonActivity()).toMatchObject({
-      sourceState: 'healthy',
+      sourceState: 'sampled', complete: false,
       activity: { authority: 'none', phase: 'stopping' },
     });
   });

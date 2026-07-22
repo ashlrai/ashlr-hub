@@ -520,6 +520,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
     expect(src).toContain('function daemonActivityDisplay');
     expect(src).toContain("return 'activity unavailable'");
+    expect(src).toContain('activity.ownerHorizonComplete');
+    expect(src).toContain("activity.sourceState === 'degraded'");
     expect(src).toContain('activity.ownerState');
     expect(src).toContain('children active');
     expect(src).toContain('d.fleet?.daemon ?? fleet.daemon ?? daemon');

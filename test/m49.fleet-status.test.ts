@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -6307,6 +6307,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(writeDaemonActivity({
         instanceId: '123e4567-e89b-42d3-a456-426614174001',
         daemonStartedAt: '2026-07-03T00:00:00.000Z',
+        phase: 'starting',
+        now: new Date('2026-07-03T00:00:00.000Z'),
+      })).toBe(true);
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174001',
+        daemonStartedAt: '2026-07-03T00:00:00.000Z',
         phase: 'tick',
       })).toBe(true);
 
@@ -6320,8 +6326,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         lockHeartbeatAt: '2026-07-03T00:01:00.000Z',
         tickInProgress: true,
         activity: {
-          sourceState: 'healthy',
-          complete: true,
+          sourceState: 'sampled',
+          complete: false,
+          ownerHorizonComplete: true,
           phase: 'tick',
           ownerMatches: true,
         },
@@ -6351,6 +6358,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       const activityPath = join(process.env.ASHLR_HOME!, 'daemon-activity', '2026-07-03.jsonl');
       const row = readFileSync(activityPath, 'utf8').trim();
       writeFileSync(activityPath, `${Array.from({ length: 513 }, () => row).join('\n')}\n`, { mode: 0o600 });
+      for (const name of readdirSync(join(process.env.ASHLR_HOME!, 'daemon-activity'))) {
+        if (name === '.activity-auth-key' || name === '.activity-genesis-v1.json' ||
+          name.startsWith('.activity-continuity-v1.')) {
+          rmSync(join(process.env.ASHLR_HOME!, 'daemon-activity', name));
+        }
+      }
 
       const status = await buildFleetStatus(baseConfig());
       expect(status.daemon.activity).toMatchObject({
@@ -6460,6 +6473,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(writeDaemonActivity({
         instanceId: '123e4567-e89b-42d3-a456-426614174002',
         daemonStartedAt: '2026-07-03T00:00:00.000Z',
+        phase: 'starting',
+        now: new Date('2026-07-03T00:00:00.000Z'),
+      })).toBe(true);
+      expect(writeDaemonActivity({
+        instanceId: '123e4567-e89b-42d3-a456-426614174002',
+        daemonStartedAt: '2026-07-03T00:00:00.000Z',
         phase: 'post-tick',
         activeChildren: 2,
       })).toBe(true);
@@ -6469,7 +6488,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(status.daemon.tickInProgress).toBeUndefined();
       expect(status.daemon.childActivity).toBe(true);
       expect(status.daemon.activity).toMatchObject({
-        sourceState: 'healthy', complete: true, phase: 'post-tick', activeChildren: 2, ownerMatches: true,
+        sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+        phase: 'post-tick', activeChildren: 2, ownerMatches: true,
       });
       expect(daemonSource).toMatchObject({
         status: 'healthy',
@@ -7637,8 +7657,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         tickInProgress: true,
         activity: {
           source: 'daemon-activity',
-          sourceState: 'healthy',
-          complete: true,
+          sourceState: 'sampled',
+          complete: false,
+          ownerHorizonComplete: true,
           freshness: 'fresh',
           ownerState: 'alive',
           phase: 'tick',
@@ -7672,7 +7693,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         lastTickAt: '2026-06-17T00:02:00.000Z',
         childActivity: true,
         activity: {
-          source: 'daemon-activity', sourceState: 'healthy', complete: true, freshness: 'fresh', ownerState: 'alive', phase: 'post-tick',
+          source: 'daemon-activity', sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+          freshness: 'fresh', ownerState: 'alive', phase: 'post-tick',
           phaseStartedAt: '2026-06-17T00:02:01.000Z', observedAt: '2026-06-17T00:02:30.000Z',
           ageMs: 30_000, activeChildren: 2, ownerMatches: true,
         },
@@ -7699,7 +7721,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     };
     const activityBase = {
       source: 'daemon-activity' as const,
-      complete: true,
+      complete: false,
+      ownerHorizonComplete: true,
       phase: 'idle' as const,
       phaseStartedAt: '2026-06-17T00:02:01.000Z',
       observedAt: '2026-06-17T00:02:30.000Z',
@@ -7713,7 +7736,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       daemon: { running: true, lastTickAt: null, todaySpentUsd: 0, activity },
     });
 
-    expect(render({ ...activityBase, sourceState: 'healthy', freshness: 'stale' }))
+    expect(render({ ...activityBase, sourceState: 'sampled', freshness: 'stale' }))
       .toContain('activity:      activity stale');
     expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
       .toContain('activity:      activity unavailable');
@@ -7727,7 +7750,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       freshness: 'fresh',
     })).toContain('activity:      activity idle');
     expect(render({
-      ...activityBase, sourceState: 'healthy', freshness: 'fresh', ownerMatches: false,
+      ...activityBase, sourceState: 'sampled', freshness: 'fresh', ownerMatches: false,
     })).toContain('activity:      activity owner unavailable');
     expect(render({ ...activityBase, sourceState: 'missing', freshness: 'unknown' }))
       .not.toMatch(/child work:|0 active/);

@@ -1,5 +1,18 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Current Cycle - Activity Retention Authority And Bounded Observation (2026-07-21)
+- [x] Rehydrate clean `8af04a8f` and reproduce the three independent audit boundaries.
+- [x] Downgrade co-located MAC state to explicitly sampled observational evidence.
+- [x] Replace the finite Windows partition set with an indefinitely reusable bounded ring.
+- [x] Bound every directory walk and fail degraded above the hard entry budget.
+- [x] Run focused security, restart, rollover, performance, typecheck, lint, and diff checks.
+- [x] Commit locally without pushing and record the residual authority boundary.
+
+### Decisions
+- No production-ready noninteractive Phantom/Keychain anchor exists in this repository. Local HMAC state remains corruption detection only and cannot establish authenticated completeness against same-user replacement.
+- Windows uses fixed one-row observational slots. Slot contents may be lost across a torn in-place reuse, but restart recovery remains bounded and subsequent writes continue indefinitely without claiming completeness.
+- Directory enumeration stops after a fixed total-entry budget; unknown-entry floods degrade reads and reject writes without work proportional to attacker-controlled directory size.
+
 ## Current Cycle - Activity Rollover Audit Closure (2026-07-21)
 - [x] Rehydrate clean `b195eb01` and map all five independent audit findings.
 - [x] Add monotonic truncation evidence and bounded retired-marker reuse.
