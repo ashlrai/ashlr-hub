@@ -90,3 +90,10 @@ export type {
   ExternalSkillTrialPlanInput,
   ExternalSkillTrialRunAssignment,
 } from '../core/fleet/external-skill-shadow-eval.js';
+
+export type {
+  ExternalSkillGitCaptureInput,
+  ExternalSkillGitCaptureOptions,
+  ExternalSkillGitCaptureReason,
+  ExternalSkillGitCaptureResult,
+} from '../core/fleet/external-skill-git-capture.js';
