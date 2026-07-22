@@ -174,13 +174,13 @@ describe('daemon activity — observational private state', () => {
     };
     writeFileSync(daemonActivityPath('2026-07-13'), `${JSON.stringify(row)}\n`, { mode: 0o600 });
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:32.000Z') })).toMatchObject({
-      sourceState: 'healthy', freshness: 'fresh', ownerState: 'dead',
+      sourceState: 'sampled', complete: false, freshness: 'fresh', ownerState: 'dead',
     });
 
     row.pid = process.pid;
     writeFileSync(daemonActivityPath('2026-07-13'), `${JSON.stringify(row)}\n`, { mode: 0o600 });
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:03:00.000Z') })).toMatchObject({
-      sourceState: 'healthy', freshness: 'stale', ownerState: 'unknown',
+      sourceState: 'sampled', complete: false, freshness: 'stale', ownerState: 'unknown',
     });
   });
 
@@ -271,7 +271,7 @@ describe('daemon activity — observational private state', () => {
     expect(partitions[0]).toBe('2026-07-02.jsonl');
     expect(partitions.at(-1)).toBe('2026-07-09.jsonl');
     const retired = readdirSync(daemonActivityDirectory()).filter((name) => name.startsWith('.activity-retired-'));
-    expect(retired).toHaveLength(2);
+    expect(retired).toHaveLength(0);
     expect(retired.every((name) => lstatSync(join(daemonActivityDirectory(), name)).size === 0)).toBe(true);
     expect(readDaemonActivity({ nowMs: Date.parse('2026-07-09T00:00:01.000Z') })).toMatchObject({
       sourceState: 'sampled',
@@ -324,10 +324,33 @@ describe('daemon activity — observational private state', () => {
     });
   });
 
-  it('reuses retired append markers across more than 1,024 heartbeats', () => {
+  it('requires intact authenticated genesis and continuity for first-ever lifetime completeness', () => {
+    expect(writeDaemonActivity({
+      instanceId,
+      daemonStartedAt: '2026-07-13T05:00:00.000Z',
+      phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+    })).toBe(true);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'healthy', complete: true,
+    });
+
+    rmSync(join(daemonActivityDirectory(), '.activity-genesis-v1.json'));
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'sampled', complete: false,
+    });
+    for (const name of readdirSync(daemonActivityDirectory())) {
+      if (name.startsWith('.activity-continuity-v1.')) rmSync(join(daemonActivityDirectory(), name));
+    }
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:02.000Z') })).toMatchObject({
+      sourceState: 'sampled', complete: false,
+    });
+  });
+
+  it('uses bounded authenticated append state across more than 4,096 heartbeats', () => {
     const startedAt = '2026-07-13T05:00:00.000Z';
     const baseMs = Date.parse(startedAt);
-    for (let index = 0; index < 1_025; index++) {
+    for (let index = 0; index < 4_097; index++) {
       expect(writeDaemonActivity({
         instanceId,
         daemonStartedAt: startedAt,
@@ -338,10 +361,47 @@ describe('daemon activity — observational private state', () => {
 
     const retired = readdirSync(daemonActivityDirectory())
       .filter((name) => name.startsWith('.activity-retired-'));
-    expect(retired).toHaveLength(1);
-    expect(lstatSync(join(daemonActivityDirectory(), retired[0]!)).size).toBe(0);
-    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8').trim().split('\n')).toHaveLength(1_025);
-  }, 180_000);
+    expect(retired).toHaveLength(0);
+    expect(readdirSync(daemonActivityDirectory()).filter((name) =>
+      name.startsWith('.activity-continuity-v1.'))).toHaveLength(2);
+    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8').trim().split('\n')).toHaveLength(4_097);
+  }, 300_000);
+
+  it('bounds rollover state across 4,097 daily owners and never restores lifetime completeness', () => {
+    const baseMs = Date.parse('2010-01-01T00:00:00.000Z');
+    for (let index = 0; index < 4_097; index++) {
+      const observedAt = new Date(baseMs + index * 86_400_000).toISOString();
+      const owner = `123e4567-e89b-42d3-a456-${index.toString(16).padStart(12, '0')}`;
+      expect(writeDaemonActivity({
+        instanceId: owner,
+        daemonStartedAt: observedAt,
+        phase: 'idle',
+        now: new Date(observedAt),
+      }), `rollover ${index}`).toBe(true);
+    }
+
+    const names = readdirSync(daemonActivityDirectory());
+    expect(names.filter((name) => name.endsWith('.jsonl'))).toHaveLength(8);
+    expect(names.filter((name) => name.startsWith('.activity-retired-'))).toHaveLength(0);
+    expect(names.filter((name) => name.startsWith('.activity-continuity-v1.'))).toHaveLength(2);
+    expect(names.filter((name) => name.startsWith('.activity-')).length).toBeLessThanOrEqual(7);
+
+    rmSync(join(daemonActivityDirectory(), '.activity-retention-v1.json'));
+    rmSync(join(daemonActivityDirectory(), '.activity-auth-key'));
+    rmSync(join(daemonActivityDirectory(), '.activity-truncated-v1'));
+    const nowMs = baseMs + 4_096 * 86_400_000 + 1_000;
+    expect(readDaemonActivity({ nowMs })).toMatchObject({
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+    });
+
+    rmSync(join(daemonActivityDirectory(), '.activity-genesis-v1.json'));
+    for (const name of readdirSync(daemonActivityDirectory())) {
+      if (name.startsWith('.activity-continuity-v1.')) rmSync(join(daemonActivityDirectory(), name));
+    }
+    expect(readDaemonActivity({ nowMs })).toMatchObject({
+      sourceState: 'sampled', complete: false, ownerHorizonComplete: true,
+    });
+  }, 420_000);
 
   it('recovers a torn ordinary append from its durable pre-length intent', () => {
     createActivityStorage();
@@ -370,6 +430,60 @@ describe('daemon activity — observational private state', () => {
       '2026-07-13T05:00:03.000Z',
     ]);
     expect(existsSync(intent)).toBe(false);
+  });
+
+  it('replays a torn authenticated append exactly once before accepting later activity', () => {
+    const startedAt = '2026-07-13T05:00:00.000Z';
+    expect(writeDaemonActivity({
+      instanceId, daemonStartedAt: startedAt, phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+    })).toBe(true);
+    const first = readFileSync(daemonActivityPath('2026-07-13'), 'utf8');
+    expect(writeDaemonActivity({
+      instanceId, daemonStartedAt: startedAt, phase: 'idle',
+      now: new Date('2026-07-13T05:00:02.000Z'),
+    })).toBe(true);
+    const complete = readFileSync(daemonActivityPath('2026-07-13'), 'utf8');
+    const second = complete.slice(first.length);
+    writeFileSync(daemonActivityPath('2026-07-13'), `${first}${second.slice(0, 53)}`, { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId, daemonStartedAt: startedAt, phase: 'idle',
+      now: new Date('2026-07-13T05:00:03.000Z'),
+    })).toBe(true);
+    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8').trim().split('\n')
+      .map((line) => JSON.parse(line).observedAt)).toEqual([
+        '2026-07-13T05:00:01.000Z',
+        '2026-07-13T05:00:02.000Z',
+        '2026-07-13T05:00:03.000Z',
+      ]);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:04.000Z') })).toMatchObject({
+      sourceState: 'healthy', complete: true,
+      activity: { observedAt: '2026-07-13T05:00:03.000Z' },
+    });
+  });
+
+  it('replays a torn authenticated first publish without inventing or dropping its row', () => {
+    const startedAt = '2026-07-13T05:00:00.000Z';
+    expect(writeDaemonActivity({
+      instanceId, daemonStartedAt: startedAt, phase: 'idle',
+      now: new Date('2026-07-13T05:00:01.000Z'),
+    })).toBe(true);
+    const complete = readFileSync(daemonActivityPath('2026-07-13'), 'utf8');
+    writeFileSync(daemonActivityPath('2026-07-13'), complete.slice(0, 61), { mode: 0o600 });
+
+    expect(writeDaemonActivity({
+      instanceId, daemonStartedAt: startedAt, phase: 'idle',
+      now: new Date('2026-07-13T05:00:02.000Z'),
+    })).toBe(true);
+    expect(readFileSync(daemonActivityPath('2026-07-13'), 'utf8').trim().split('\n')
+      .map((line) => JSON.parse(line).observedAt)).toEqual([
+        '2026-07-13T05:00:01.000Z',
+        '2026-07-13T05:00:02.000Z',
+      ]);
+    expect(readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:03.000Z') })).toMatchObject({
+      sourceState: 'healthy', complete: true,
+    });
   });
 
   it('repairs an interrupted truncation anchor before retiring intact history', () => {

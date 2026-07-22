@@ -2849,3 +2849,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Cover 5,000-row saturation, interrupted rollover, malformed retained history, same-day retention, daily retention, and legacy single-file compatibility.
 - [x] Pass 13 focused assertions, typecheck, scoped lint, and diff integrity.
 - [ ] Require the complete protected platform matrix before promotion or daemon deployment.
+
+## Authenticated Activity Continuity V1 Audit Remediation (2026-07-21)
+- [x] Require an HMAC-authenticated genesis plus dual continuity slots before retained partitions can imply lifetime completeness.
+- [x] Make missing, deleted, torn, or mismatched genesis/continuity fail sampled without suppressing valid current-owner observations.
+- [x] Replace ordinary append intent files with an authenticated bounded pending cursor and crash replay.
+- [x] Recycle the oldest authenticated partition inode during durable rollover so successful operation creates no retired markers.
+- [x] Keep Windows-selected operation observational and categorically outside destructive rollover.
+- [x] Prove exact 4,097 same-partition appends and 4,097 daily-owner rollovers with bounded state.
+- [x] Pass the complete activity suite, FleetStatus suite, adjacent daemon/durability matrix, typecheck, lint, build, and diff integrity.
+- [ ] Keep the change local; do not push or deploy until independent protected-platform review.
