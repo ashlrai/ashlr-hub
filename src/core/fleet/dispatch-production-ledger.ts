@@ -4200,12 +4200,15 @@ export function readDispatchProductionParents(
       try {
         const parsed: unknown = JSON.parse(line);
         if (!canonicalStoredDispatchProductionEvent(parsed, line, date)) {
-          const identity = storedDispatchProductionIdentity(parsed, line, date);
-          if (identity === null) partitionInvalid = true;
-          else invalidIdentities.add(identity);
+          const identities = storedDispatchProductionIdentities(parsed, line, date);
+          if (identities === null) partitionInvalid = true;
+          else for (const identity of identities) invalidIdentities.add(identity);
           continue;
         }
-        const key = storedDispatchProductionIdentity(parsed, line, date)!;
+        const key = JSON.stringify([
+          parsed.ts, parsed.itemId, parsed.repo, parsed.outcome,
+          parsed.trajectoryId ?? parsed.runId ?? null,
+        ]);
         const semantic = eventsByIdentity.get(key) ?? new Map<string, DispatchProductionEvent>();
         semantic.set(JSON.stringify(parsed), parsed);
         eventsByIdentity.set(key, semantic);
@@ -4353,6 +4356,7 @@ function canonicalStoredDispatchProductionEvent(
   }
   const ts = canonicalUtcTimestamp(value['ts']);
   if (ts === null || ts.slice(0, 10) !== partitionDate) return false;
+  if (Date.parse(ts) > Date.now() + MAX_ATTEMPT_FUTURE_SKEW_MS) return false;
   if (!WORK_SOURCES.has(value['source'] as WorkItem['source'])) return false;
   if (!DISPATCH_PRODUCTION_OUTCOMES.has(value['outcome'] as DaemonDispatchProductionOutcome)) return false;
   if (!DISPATCH_PRODUCTION_BASES.has(value['basis'] as DispatchProductionBasis)) return false;
@@ -4384,20 +4388,26 @@ function legacyV1LearningLabelMatchesCanonicalEvent(
   return JSON.stringify({ ...canonical, learningLabel: label }) === line;
 }
 
-function storedDispatchProductionIdentity(
+function storedDispatchProductionIdentities(
   value: unknown,
   line: string,
   partitionDate: string,
-): string | null {
-  if (!isPlainRecord(value) || JSON.stringify(value) !== line ||
-    !isDispatchProductionEvent(value)) return null;
+): string[] | null {
+  if (!isPlainRecord(value) || JSON.stringify(value) !== line) return null;
   const ts = canonicalUtcTimestamp(value['ts']);
   const attemptId = value['trajectoryId'] ?? value['runId'];
+  const rawRepo = value['repo'];
   if (ts === null || ts.slice(0, 10) !== partitionDate ||
     !boundedStoredText(value['itemId'], 240) ||
     !DISPATCH_PRODUCTION_OUTCOMES.has(value['outcome'] as DaemonDispatchProductionOutcome) ||
-    !boundedStoredText(attemptId, 240)) return null;
-  return JSON.stringify([ts, value['itemId'], value['repo'], value['outcome'], attemptId]);
+    !boundedStoredText(attemptId, 240) || !boundedStoredText(rawRepo, 500) ||
+    !isAbsolute(rawRepo)) return null;
+  const repos = [rawRepo];
+  const canonicalRepo = canonicalDispatchRepoIdentity(rawRepo);
+  if (canonicalRepo !== null && canonicalRepo !== rawRepo) repos.push(canonicalRepo);
+  return repos.map((repo) => JSON.stringify([
+    ts, value['itemId'], repo, value['outcome'], attemptId,
+  ]));
 }
 
 function parseDispatchProductionReceiptAuthority(

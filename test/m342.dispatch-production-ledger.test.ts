@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
@@ -817,6 +817,75 @@ describe('M342 dispatch production ledger', () => {
     expect(readDispatchProductionParents([
       target(accepted), target(nearMatch), target(unrelated),
     ])).toEqual(['found', 'degraded', 'degraded']);
+  });
+
+  it('production-copy probe scopes a noncanonical repo row to its raw and canonical identity', () => {
+    const healthy = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-production-copy-healthy',
+      runId: 'run-parent-production-copy-healthy',
+      trajectoryId: 'run:attempt-parent-production-copy-healthy',
+    }), { materializeLearningLabel: true });
+    const quarantined = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'parent-production-copy-noncanonical-repo',
+      runId: 'run-parent-production-copy-noncanonical-repo',
+      trajectoryId: 'run:attempt-parent-production-copy-noncanonical-repo',
+    }), { materializeLearningLabel: true });
+    const copiedProductionRow = { ...quarantined, repo: `${quarantined.repo}${sep}.` };
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-08.jsonl'),
+      `${JSON.stringify(healthy)}\n${JSON.stringify(copiedProductionRow)}\n`,
+      'utf8',
+    );
+    const target = (event: DispatchProductionEvent) => ({
+      ts: event.ts,
+      itemId: event.itemId,
+      repo: event.repo,
+      outcome: event.outcome,
+      attemptId: event.trajectoryId!,
+    });
+
+    expect(readDispatchProductionParents([target(healthy), target(quarantined)]))
+      .toEqual(['found', 'degraded']);
+  });
+
+  it('rejects future ordinary parent authority without poisoning an unrelated identity', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-07-21T12:00:00.000Z');
+    try {
+      const futureTs = new Date(Date.now() + 2 * 60_000).toISOString();
+      const siblingTs = new Date(Date.parse(futureTs) - 70_000).toISOString();
+      const future = sanitizeDispatchProductionEvent(makeEvent({
+        ts: futureTs,
+        itemId: 'parent-future-ordinary',
+        runId: 'run-parent-future-ordinary',
+        trajectoryId: 'run:attempt-parent-future-ordinary',
+      }), { materializeLearningLabel: true });
+      const healthy = sanitizeDispatchProductionEvent(makeEvent({
+        ts: siblingTs,
+        itemId: 'parent-near-clock-ordinary',
+        runId: 'run-parent-near-clock-ordinary',
+        trajectoryId: 'run:attempt-parent-near-clock-ordinary',
+      }), { materializeLearningLabel: true });
+      mkdirSync(dispatchProductionDir(), { recursive: true });
+      writeFileSync(
+        join(dispatchProductionDir(), `${future.ts.slice(0, 10)}.jsonl`),
+        `${JSON.stringify(healthy)}\n${JSON.stringify(future)}\n`,
+        'utf8',
+      );
+      const target = (event: DispatchProductionEvent) => ({
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      });
+
+      expect(readDispatchProductionParents([target(healthy), target(future)]))
+        .toEqual(['found', 'degraded']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('degrades parent authority when a matching partition has a torn tail', () => {
