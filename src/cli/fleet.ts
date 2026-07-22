@@ -533,9 +533,10 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Attempt coverage
   const attemptCoverage = s.attemptCoverage;
+  const learningMetrics = s.learningMetrics;
   lines.push('Attempt coverage:');
   if (!attemptCoverage) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     lines.push(`  attempts:  ${attemptCoverage.attempts} in ${formatProductionWindow(attemptCoverage.windowHours)}`);
     lines.push(
@@ -603,7 +604,7 @@ export function formatFleetStatus(s: FleetStatus): string {
   const trajectoryLearning = s.trajectoryLearning;
   lines.push('Trajectory learning:');
   if (!trajectoryLearning) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     const outcomes = trajectoryLearning.terminalOutcomes;
     lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
@@ -1089,6 +1090,21 @@ function formatPercent(rate: number): string {
 
 function formatCoverageMetric(metric: { count: number; rate: number }): string {
   return `${metric.count} (${formatPercent(metric.rate)})`;
+}
+
+function formatLearningMetricsAvailability(source: FleetStatus['learningMetrics']): string {
+  if (!source) return 'unavailable';
+  if (source.state === 'available') return 'unavailable';
+  const quality = source.sourceQuality;
+  if (source.reason === 'dispatch-source-missing') {
+    return 'withheld (dispatch denominator missing)';
+  }
+  const details = [
+    quality.invalidRows > 0 ? `${quality.invalidRows} invalid row(s)` : null,
+    quality.unreadableFiles > 0 ? `${quality.unreadableFiles} unreadable file(s)` : null,
+    quality.stopReasons.length > 0 ? `stopped: ${quality.stopReasons.join(', ')}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  return `withheld (dispatch denominator degraded${details.length > 0 ? `; ${details.join('; ')}` : ''})`;
 }
 
 function formatNullablePercent(rate: number | null | undefined): string {

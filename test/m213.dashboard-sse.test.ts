@@ -452,6 +452,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
     expect(src).toContain('function renderAttemptCoverageCard');
+    expect(src).toContain('function renderLearningMetricsUnavailableCard');
+    expect(src).toContain('function learningMetricsAvailabilityText');
     expect(src).toContain('function renderPhantomAgentReportCard');
     expect(src).toContain('function formatCountMap');
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
@@ -482,10 +484,12 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("return !source || (source.sourceState === 'healthy' && source.complete === true)");
     expect(src).toContain("['Source', dispatchProductionSourceText(sourceQuality)]");
     expect(src).toContain("renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card')");
+    expect(src).toContain("renderLearningMetricsUnavailableCard(f.learningMetrics, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain("['Diagnostic drain', diagnosticResliceDrainMetric(f.queue?.diagnosticResliceDrain) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
     expect(src).toContain('renderAttemptCoverageCard(attemptCoverage)');
+    expect(src).toContain('renderLearningMetricsUnavailableCard(learningMetrics)');
     expect(src).toContain('renderPhantomAgentReportCard(f.phantom');
     expect(src).toContain('renderPhantomAgentReportCard(d.fleet?.phantom');
     expect(src).toContain('delegationSafety');
@@ -511,6 +515,28 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function dispatchProductionWeakestBackend(backends)');
     expect(src).toContain('.filter((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
     expect(src).toContain('dispatchProductionDiagnosticRate(left) - dispatchProductionDiagnosticRate(right)');
+  });
+
+  it('withholds learning rates when the dispatch denominator is degraded or missing', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const start = src.indexOf('function learningMetricsAvailabilityText(source)');
+    const end = src.indexOf('\nfunction renderLearningMetricsUnavailableCard', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const format = new Function(
+      `${src.slice(start, end)}\nreturn learningMetricsAvailabilityText;`,
+    )() as (source: Record<string, unknown>) => string;
+
+    expect(format({
+      state: 'withheld', reason: 'dispatch-source-missing', sourceQuality: {},
+    })).toBe('withheld: dispatch denominator missing');
+    expect(format({
+      state: 'withheld', reason: 'dispatch-source-degraded',
+      sourceQuality: { invalidRows: 4, unreadableFiles: 1, stopReasons: ['row-limit'] },
+    })).toBe('withheld: dispatch denominator degraded; 4 invalid row(s); 1 unreadable file(s); stopped: row-limit');
   });
 
   it('app.js renders activity evidence without a misleading healthy zero', () => {

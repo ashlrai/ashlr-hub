@@ -4058,6 +4058,7 @@ describe('M342 dispatch production ledger', () => {
     const detailed = readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000, limit: 20 });
     expect(detailed.summary).toMatchObject({ events: 1 });
     expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
+    expect(detailed.events).toHaveLength(1);
     expect(readDispatchProductionYield({ windowMs: 60 * 60 * 1000, limit: 20 })).toMatchObject({ events: 1 });
     expect(readDispatchProductionEvents({ limit: 20 })).toHaveLength(1);
   });
