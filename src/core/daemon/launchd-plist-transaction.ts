@@ -25,6 +25,8 @@ export interface LaunchdPlistTransactionOptions {
   lockDir: string;
   unload: () => LaunchdCommandResult;
   load: () => LaunchdCommandResult;
+  /** Restore the activation state captured before installation. Defaults to load(). */
+  rollback?: () => LaunchdCommandResult;
   lockWaitMs?: number;
 }
 
@@ -317,7 +319,59 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       !prior,
       parent,
     );
-    options.unload();
+    const initialUnload = options.unload();
+    if (!initialUnload.ok) {
+      const unloadFailure = initialUnload.stderr.trim() || 'exit non-zero';
+      if (!prior) {
+        try {
+          unlinkIfOwned(options.plistPath, installed);
+        } catch (error) {
+          throw new Error(
+            `launchctl unload failed: ${unloadFailure}; first-install plist cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (options.rollback) {
+          const rollbackActivation = options.rollback();
+          if (!rollbackActivation.ok) {
+            throw new Error(
+              `launchctl unload failed: ${unloadFailure}; first-install plist was removed but activation rollback failed: ` +
+              `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
+            );
+          }
+          throw new Error(
+            `launchctl unload failed: ${unloadFailure}; first-install plist was removed and activation state restored`,
+          );
+        }
+        throw new Error(`launchctl unload failed: ${unloadFailure}; first-install plist was removed`);
+      }
+
+      let restored: fs.Stats;
+      try {
+        restored = atomicReplace(
+          options.plistPath,
+          prior.bytes,
+          prior.mode,
+          { dev: installed.dev, ino: installed.ino },
+          false,
+          parent,
+        );
+      } catch (error) {
+        throw new Error(
+          `launchctl unload failed: ${unloadFailure}; prior plist restore failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      assertOwnedTarget(options.plistPath, restored);
+      const rollbackActivation = (options.rollback ?? options.load)();
+      if (!rollbackActivation.ok) {
+        throw new Error(
+          `launchctl unload failed: ${unloadFailure}; prior plist was restored but activation rollback failed: ` +
+          `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+      throw new Error(
+        `launchctl unload failed: ${unloadFailure}; prior plist and activation state were restored from ${rollbackPath}`,
+      );
+    }
     // launchctl accepts only a pathname. These checks bind cooperative callers;
     // a hostile same-UID process is outside this boundary and can invoke launchctl directly.
     assertParentIdentity(options.plistPath, parent);
@@ -349,6 +403,18 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
             `launchctl load failed: ${loadFailure}; first-install plist cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+        if (options.rollback) {
+          const rollbackActivation = options.rollback();
+          if (!rollbackActivation.ok) {
+            throw new Error(
+              `launchctl load failed: ${loadFailure}; first-install plist was removed but activation rollback failed: ` +
+              `${rollbackActivation.stderr.trim() || 'exit non-zero'}`,
+            );
+          }
+          throw new Error(
+            `launchctl load failed: ${loadFailure}; first-install plist was removed and activation state restored`,
+          );
+        }
         throw new Error(`launchctl load failed: ${loadFailure}; first-install plist was removed`);
       }
 
@@ -373,15 +439,15 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       }
 
       assertOwnedTarget(options.plistPath, restored);
-      const rollbackLoad = options.load();
+      const rollbackLoad = (options.rollback ?? options.load)();
       if (!rollbackLoad.ok) {
         throw new Error(
-          `launchctl load failed: ${loadFailure}; prior plist was restored but rollback reload failed: ` +
+          `launchctl load failed: ${loadFailure}; prior plist was restored but activation rollback failed: ` +
           `${rollbackLoad.stderr.trim() || 'exit non-zero'}`,
         );
       }
       throw new Error(
-        `launchctl load failed: ${loadFailure}; prior plist was restored and reloaded from ${rollbackPath}`,
+        `launchctl load failed: ${loadFailure}; prior plist and activation state were restored from ${rollbackPath}`,
       );
     }
   } finally {
