@@ -18,6 +18,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Windows and authenticated custody remain explicitly withheld. Hostile bare
   repositories are byte-bounded before Git parsing; common-directory redirects,
   worktree-local/external config, and partial-clone/promisor settings are rejected.
+- **External custody statement verification preview (M447).** A verifier-only
+  Ed25519 protocol checks a retention-bounded statement against a caller-supplied
+  policy over the exact M446 capture tuple. Hub owns no signing or policy-approval
+  path, and successful verification authenticates neither custody nor live
+  storage; every M446 blocker and all execution authority remain withheld.
 
 - **v3 gate opened — Team Command Center spec.** `docs/SPEC-V3-TEAM.md`: the
   hand-written end-state spec for the team / multi-machine backbone (one team

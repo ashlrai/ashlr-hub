@@ -1100,12 +1100,22 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
       inspect(source);
     }
 
-    expect(references).toEqual([{
-      file: 'src/api/types.ts',
-      kind: 'export',
-      typeOnly: true,
-    }]);
-    expect([...new Set(literalReferences)]).toEqual(['src/api/types.ts']);
+    expect(references).toEqual([
+      {
+        file: 'src/api/types.ts',
+        kind: 'export',
+        typeOnly: true,
+      },
+      {
+        file: 'src/core/fleet/external-skill-custody-attestation.ts',
+        kind: 'import',
+        typeOnly: true,
+      },
+    ]);
+    expect([...new Set(literalReferences)]).toEqual([
+      'src/api/types.ts',
+      'src/core/fleet/external-skill-custody-attestation.ts',
+    ]);
   });
 
   it.runIf(process.platform !== 'win32')(
