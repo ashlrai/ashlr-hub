@@ -1433,7 +1433,15 @@ export interface FleetStatus {
   learningMetrics?: {
     state: 'available' | 'withheld';
     denominator: 'dispatch-production';
-    reason?: 'dispatch-source-missing' | 'dispatch-source-degraded';
+    reason?:
+      | 'dispatch-source-missing'
+      | 'dispatch-source-degraded'
+      | 'learning-snapshot-settling'
+      | 'learning-snapshot-unstable';
+    /** Exact upper timestamp bound shared by every joined learning source. */
+    settledThrough?: string;
+    /** Valid rows intentionally excluded because they are newer than settledThrough. */
+    excludedRows?: number;
     sourceQuality: DispatchProductionSourceQuality;
     dispatchProduction: FleetLearningMetricAvailability;
     attemptCoverage?: FleetLearningMetricAvailability;
@@ -1482,7 +1490,97 @@ export interface FleetStatus {
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Keep concurrently appended rows outside exact cross-source joins until settled. */
+const LEARNING_SNAPSHOT_SETTLE_MS = 2 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+const LEARNING_SNAPSHOT_TEXT_KEYS = new Set([
+  'argv',
+  'cmd',
+  'content',
+  'contents',
+  'detail',
+  'diff',
+  'env',
+  'fileContents',
+  'fullReasoning',
+  'promptContext',
+  'reason',
+  'stderr',
+  'stdout',
+  'summary',
+  'title',
+]);
+
+/**
+ * Produce a deterministic metadata-only projection for an in-memory stability
+ * digest. The digest is never returned or persisted.
+ */
+function learningSnapshotMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(learningSnapshotMetadata);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [
+        key,
+        LEARNING_SNAPSHOT_TEXT_KEYS.has(key)
+          ? `sha256:${createHash('sha256').update(JSON.stringify(entry) ?? 'undefined').digest('hex')}`
+          : learningSnapshotMetadata(entry),
+      ]),
+  );
+}
+
+function learningSnapshotDigest(source: unknown, rows: readonly unknown[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify(learningSnapshotMetadata({ source, rows })))
+    .digest('hex');
+}
+
+function learningSnapshotSourceQuality(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return { sourceState: 'degraded', complete: false };
+  const source = value as Record<string, unknown>;
+  return {
+    sourceState: source.sourceState,
+    sourcePresent: source.sourcePresent,
+    complete: source.complete,
+    stopReasons: source.stopReasons,
+    reasons: source.reasons,
+    invalidFiles: source.invalidFiles,
+    invalidRows: source.invalidRows,
+    conflictingEvents: source.conflictingEvents,
+    duplicateRows: source.duplicateRows,
+    supersededRows: source.supersededRows,
+    semanticRejectedRows: source.semanticRejectedRows,
+    unreadableFiles: source.unreadableFiles,
+    limitExceeded: source.limitExceeded,
+  };
+}
+
+function learningSnapshotTimestamp(...values: Array<string | undefined>): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const timestampMs = Date.parse(value);
+    if (Number.isFinite(timestampMs) && timestampMs > latestMs) {
+      latest = value;
+      latestMs = timestampMs;
+    }
+  }
+  return latest;
+}
+
+function settledLearningRows<T>(
+  rows: readonly T[],
+  cutoffMs: number,
+  timestamp: (row: T) => string | undefined,
+): T[] {
+  return rows.filter((row) => {
+    const timestampMs = Date.parse(timestamp(row) ?? '');
+    return Number.isFinite(timestampMs) && timestampMs <= cutoffMs;
+  });
+}
 
 function queueInventoryFreshness(
   observedAt: string | null,
@@ -2943,6 +3041,185 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional history/analytics surface only.
   }
+  const learningCutoffMs = Date.parse(generatedAt) - LEARNING_SNAPSHOT_SETTLE_MS;
+  let learningProposals = settledLearningRows(
+    allProposals,
+    learningCutoffMs,
+    (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+  );
+  let learningDispatchEvents = settledLearningRows(
+    dispatchLearningEvents ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningActions = settledLearningRows(
+    workspaceRead?.events ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningDecisions = settledLearningRows(
+    learningDecisionsRead?.decisions ?? [],
+    learningCutoffMs,
+    (decision) => decision.ts,
+  );
+  let learningJudgeTraces = settledLearningRows(
+    learningJudgeTracesRead?.traces ?? [],
+    learningCutoffMs,
+    (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+  );
+  let learningEvidencePacks = settledLearningRows(
+    learningEvidenceRead?.packs ?? [],
+    learningCutoffMs,
+    (pack) => pack.generatedAt,
+  );
+  let learningWorkedEvents = settledLearningRows(
+    workedLearningRead.ledger.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningPostMergeObservations = settledLearningRows(
+    learningPostMergeRead?.observations ?? [],
+    learningCutoffMs,
+    (observation) => observation.observedAt,
+  );
+  if (status.learningMetrics) {
+    const rawLearningRows =
+      allProposals.length +
+      (dispatchLearningEvents?.length ?? 0) +
+      (workspaceRead?.events.length ?? 0) +
+      (learningDecisionsRead?.decisions.length ?? 0) +
+      (learningJudgeTracesRead?.traces.length ?? 0) +
+      (learningEvidenceRead?.packs.length ?? 0) +
+      workedLearningRead.ledger.events.length +
+      (learningPostMergeRead?.observations.length ?? 0);
+    const settledLearningRowCount =
+      learningProposals.length +
+      learningDispatchEvents.length +
+      learningActions.length +
+      learningDecisions.length +
+      learningJudgeTraces.length +
+      learningEvidencePacks.length +
+      learningWorkedEvents.length +
+      learningPostMergeObservations.length;
+    status.learningMetrics = {
+      ...status.learningMetrics,
+      settledThrough: new Date(learningCutoffMs).toISOString(),
+      excludedRows: Math.max(0, rawLearningRows - settledLearningRowCount),
+    };
+    if ((dispatchLearningEvents?.length ?? 0) > 0 && learningDispatchEvents.length === 0) {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-settling',
+      };
+    }
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalReadAfter = listProposalsDetailed();
+      const dispatchReadAfter = readDispatchProductionYieldDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 1200,
+        limitPerDimension: 8,
+      });
+      const actionReadAfter = readAgentWorkspaceDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 5000,
+        limitPerDimension: 8,
+        recentLimit: 8,
+      });
+      const decisionReadAfter = readDecisionsDetailed();
+      const judgeTraceReadAfter = readJudgeTracesDetailed();
+      const evidenceReadAfter = (await import('../autonomy/evidence-pack.js'))
+        .readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+      const workedReadAfter = loadWorkedLedgerDetailed();
+      const postMergeReadAfter = readPostMergeObservations({ requireComplete: true });
+
+      const proposalRowsAfter = settledLearningRows(
+        proposalReadAfter.proposals,
+        learningCutoffMs,
+        (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+      );
+      const dispatchRowsAfter = settledLearningRows(
+        dispatchReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const actionRowsAfter = settledLearningRows(
+        actionReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const decisionRowsAfter = settledLearningRows(
+        decisionReadAfter.decisions,
+        learningCutoffMs,
+        (decision) => decision.ts,
+      );
+      const judgeTraceRowsAfter = settledLearningRows(
+        judgeTraceReadAfter.traces,
+        learningCutoffMs,
+        (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+      );
+      const evidenceRowsAfter = settledLearningRows(
+        evidenceReadAfter.packs,
+        learningCutoffMs,
+        (pack) => pack.generatedAt,
+      );
+      const workedRowsAfter = settledLearningRows(
+        workedReadAfter.ledger.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const postMergeRowsAfter = settledLearningRows(
+        postMergeReadAfter.observations,
+        learningCutoffMs,
+        (observation) => observation.observedAt,
+      );
+
+      const stable = [
+        learningSnapshotDigest(learningSnapshotSourceQuality(proposalSourceQuality), learningProposals) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(proposalReadAfter), proposalRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(status.dispatchProductionSource), learningDispatchEvents) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality), dispatchRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(workspaceRead?.sourceQuality), learningActions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(actionReadAfter.sourceQuality), actionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningDecisionsRead), learningDecisions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(decisionReadAfter), decisionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningJudgeTracesRead), learningJudgeTraces) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(judgeTraceReadAfter), judgeTraceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningEvidenceRead), learningEvidencePacks) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(evidenceReadAfter), evidenceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(workedLearningRead.sourceQuality), learningWorkedEvents) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(workedReadAfter.sourceQuality), workedRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningPostMergeRead), learningPostMergeObservations) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(postMergeReadAfter), postMergeRowsAfter),
+      ].every(Boolean);
+
+      if (stable) {
+        learningProposals = proposalRowsAfter;
+        learningDispatchEvents = dispatchRowsAfter;
+        learningActions = actionRowsAfter;
+        learningDecisions = decisionRowsAfter;
+        learningJudgeTraces = judgeTraceRowsAfter;
+        learningEvidencePacks = evidenceRowsAfter;
+        learningWorkedEvents = workedRowsAfter;
+        learningPostMergeObservations = postMergeRowsAfter;
+      } else {
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+      }
+    } catch {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+      };
+    }
+  }
   const workspaceSource = status.workspace?.sourceQuality;
   const dispatchSource = learningSourceAvailability('dispatch-production', status.dispatchProductionSource);
   const actionSource = learningSourceAvailability('agent-actions', workspaceSource);
@@ -2952,8 +3229,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const workedSource = learningSourceAvailability('worked', workedLearningRead.sourceQuality);
   const postMergeSource = learningSourceAvailability('post-merge', learningPostMergeRead);
   const judgeTraceSource = learningSourceAvailability('judge-traces', status.judgeTraceSource);
-  const proposalById = new Map(allProposals.map((proposal) => [proposal.id, proposal]));
-  const evidencePacks = learningEvidenceRead?.packs ?? [];
+  const proposalById = new Map(learningProposals.map((proposal) => [proposal.id, proposal]));
+  const evidencePacks = learningEvidencePacks;
   const evidenceByProposal = new Map(evidencePacks.map((pack) => [pack.proposal.id, pack]));
   const unavailablePostMerge: PostMergeObservationReadResult = {
     observations: [], sourceState: 'degraded', sourcePresent: true, complete: false,
@@ -2967,26 +3244,28 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       outcomeRecords = listOutcomeRecords({
         limit: 1000,
         deps: {
-          listProposals: () => allProposals,
-          readDecisions: () => learningDecisionsRead?.decisions ?? [],
-          readJudgeTraces: () => learningJudgeTracesRead?.traces ?? [],
+          listProposals: () => learningProposals,
+          readDecisions: () => learningDecisions,
+          readJudgeTraces: () => learningJudgeTraces,
           listAutonomyEvidencePacks: () => evidencePacks,
-          loadWorkedLedger: () => workedLearningRead.ledger,
-          readPostMergeObservations: () => learningPostMergeRead ?? unavailablePostMerge,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
+          readPostMergeObservations: () => learningPostMergeRead
+            ? { ...learningPostMergeRead, observations: learningPostMergeObservations }
+            : unavailablePostMerge,
         },
       });
       const attemptRecords = listAttemptRecords({
         windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
         limit: 500,
         deps: {
-          readDispatchProductionEvents: () => dispatchLearningEvents ?? [],
-          readAgentActions: () => workspaceRead?.events ?? [],
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
           listOutcomeRecords: () => outcomeRecords,
           loadProposal: (id) => proposalById.get(id) ?? null,
-          readDecisions: () => learningDecisionsRead?.decisions ?? [],
+          readDecisions: () => learningDecisions,
           listAutonomyEvidencePacks: () => evidencePacks,
           readAutonomyEvidencePack: (id) => evidenceByProposal.get(id) ?? null,
-          loadWorkedLedger: () => workedLearningRead.ledger,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
         },
         useDefaultReaders: false,
       });
@@ -3020,6 +3299,58 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     limit: Math.max(500 * 8, 400),
     maxFiles: 3,
   });
+  let learningSkillUseEvents = settledLearningRows(
+    skillUseSource.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  if (status.learningMetrics) {
+    status.learningMetrics.excludedRows =
+      (status.learningMetrics.excludedRows ?? 0) +
+      Math.max(0, skillUseSource.events.length - learningSkillUseEvents.length);
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const skillUseSourceAfter = readSkillUseEventsWithDiagnostics({
+        sinceMs: Date.parse(generatedAt) - RECENT_WINDOW_MS,
+        limit: Math.max(500 * 8, 400),
+        maxFiles: 3,
+      });
+      const skillRowsAfter = settledLearningRows(
+        skillUseSourceAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const skillQuality = {
+        sourceState: skillUseSource.sourceState,
+        sourcePresent: skillUseSource.sourcePresent,
+        eventState: skillUseSource.eventState,
+      };
+      const skillQualityAfter = {
+        sourceState: skillUseSourceAfter.sourceState,
+        sourcePresent: skillUseSourceAfter.sourcePresent,
+        eventState: skillUseSourceAfter.eventState,
+      };
+      if (learningSnapshotDigest(skillQuality, learningSkillUseEvents) ===
+          learningSnapshotDigest(skillQualityAfter, skillRowsAfter)) {
+        learningSkillUseEvents = skillRowsAfter;
+      } else {
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+        status.attemptCoverage = undefined;
+      }
+    } catch {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+      };
+      status.attemptCoverage = undefined;
+    }
+  }
   const skillSource = learningSourceAvailability('skill-use', {
     sourceState: skillUseSource.sourceState,
     complete: skillUseSource.sourceState === 'healthy',
@@ -3030,9 +3361,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         windowHours,
         limit: 500,
         deps: {
-          readDispatchProductionEvents: () => dispatchLearningEvents ?? [],
-          readAgentActions: () => workspaceRead?.events ?? [],
-          readSkillUseEvents: () => skillUseSource.events,
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
+          readSkillUseEvents: () => learningSkillUseEvents,
           listOutcomeRecords: () => outcomeRecords,
           loadProposal: (id) => proposalById.get(id) ?? null,
         },
