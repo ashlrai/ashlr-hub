@@ -357,9 +357,12 @@ function runCmd(args: string[]): { ok: boolean; stderr: string } {
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
+  const autostart = opts.autostart !== false;
 
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);
+    const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+    const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
     installLaunchdPlistTransaction({
       plistPath: def.filePath,
       trustedRoot: home,
@@ -367,6 +370,9 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       lockDir: path.join(home, '.ashlr', 'locks'),
       unload: () => runCmd(['launchctl', 'unload', def.filePath]),
       load: () => {
+        if (!autostart) return runCmd(['launchctl', 'disable', serviceTarget]);
+        const enabled = runCmd(['launchctl', 'enable', serviceTarget]);
+        if (!enabled.ok) return enabled;
         const result = runCmd(def.registerArgs);
         return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
       },
@@ -375,6 +381,11 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
     writeServiceFile(def.filePath, def.content);
     // daemon-reload first
     runCmd(['systemctl', '--user', 'daemon-reload']);
+    if (!autostart) {
+      runCmd(def.unregisterArgs);
+      clearServiceStatusCache();
+      return;
+    }
     const { ok, stderr } = runCmd(def.registerArgs);
     if (!ok) {
       // systemctl may be absent in containers / minimal environments
@@ -388,6 +399,11 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
     }
   } else if (platform === 'win32') {
     writeServiceFile(def.filePath, def.content);
+    if (!autostart) {
+      runCmd(def.unregisterArgs);
+      clearServiceStatusCache();
+      return;
+    }
     const { ok, stderr } = runCmd(def.registerArgs);
     if (!ok) {
       console.warn(
