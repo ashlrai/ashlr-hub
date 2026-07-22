@@ -39,6 +39,7 @@ vi.mock('node:fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
     copyFileSync: vi.fn(),
+    lstatSync: vi.fn(actual.lstatSync),
     renameSync: vi.fn(),
     unlinkSync: vi.fn(),
   };
@@ -81,13 +82,65 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
 
 function useSuccessfulLaunchdTransactionMock(): void {
   installLaunchdPlistTransactionMock.mockImplementation((options: {
-    unload: () => unknown;
+    unload: () => { ok: boolean; stderr: string };
     load: () => { ok: boolean; stderr: string };
   }) => {
-    options.unload();
+    const unloaded = options.unload();
+    if (!unloaded.ok) throw new Error(`launchctl unload failed: ${unloaded.stderr}`);
     const loaded = options.load();
     if (!loaded.ok) throw new Error(`launchctl load failed: ${loaded.stderr}`);
   });
+}
+
+function successfulServiceCommands() {
+  let launchdLoaded = true;
+  let launchdDisabled = false;
+  let systemdActive = false;
+  let systemdEnabled = false;
+  let windowsTaskExists = false;
+  return (cmd: string, args: string[]) => {
+    if (cmd === 'launchctl') {
+      if (args[0] === 'print-disabled') {
+        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${launchdDisabled} }`, stderr: '', error: undefined };
+      }
+      if (args[0] === 'print') {
+        return launchdLoaded
+          ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
+          : { status: 113, stdout: '', stderr: 'Could not find service', error: undefined };
+      }
+      if (args[0] === 'bootout') launchdLoaded = false;
+      if (args[0] === 'bootstrap') launchdLoaded = true;
+      if (args[0] === 'disable') launchdDisabled = true;
+      if (args[0] === 'enable') launchdDisabled = false;
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    }
+    if (cmd === 'systemctl') {
+      if (args.includes('enable')) { systemdEnabled = true; systemdActive = true; }
+      if (args.includes('disable')) { systemdEnabled = false; systemdActive = false; }
+      if (args.includes('is-active')) {
+        return systemdActive
+          ? { status: 0, stdout: 'active\n', stderr: '', error: undefined }
+          : { status: 3, stdout: 'inactive\n', stderr: '', error: undefined };
+      }
+      if (args.includes('is-enabled')) {
+        return systemdEnabled
+          ? { status: 0, stdout: 'enabled\n', stderr: '', error: undefined }
+          : { status: 1, stdout: 'disabled\n', stderr: '', error: undefined };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    }
+    if (cmd === 'schtasks') {
+      if (args.includes('/Create')) windowsTaskExists = true;
+      if (args.includes('/Delete')) windowsTaskExists = false;
+      if (args.includes('/Query')) {
+        return windowsTaskExists
+          ? { status: 0, stdout: 'AshlrDaemon', stderr: '', error: undefined }
+          : { status: 1, stdout: '', stderr: 'ERROR: The system cannot find the file specified.', error: undefined };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    }
+    return { status: 0, stdout: '', stderr: '', error: undefined };
+  };
 }
 
 describe('daemonServiceInstallOptions', () => {
@@ -198,17 +251,17 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain('/opt/homebrew/bin');
   });
 
-  it('registerArgs uses launchctl load', () => {
+  it('registerArgs uses launchctl bootstrap with an argv-only plist path', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.registerArgs[0]).toBe('launchctl');
-    expect(def.registerArgs[1]).toBe('load');
-    expect(def.registerArgs[2]).toBe(def.filePath);
+    expect(def.registerArgs[1]).toBe('bootstrap');
+    expect(def.registerArgs.at(-1)).toBe(def.filePath);
   });
 
-  it('unregisterArgs uses launchctl unload', () => {
+  it('unregisterArgs uses launchctl bootout', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.unregisterArgs[0]).toBe('launchctl');
-    expect(def.unregisterArgs[1]).toBe('unload');
+    expect(def.unregisterArgs[1]).toBe('bootout');
   });
 });
 
@@ -301,10 +354,10 @@ describe('generateServiceDefinition — linux (systemd)', () => {
 // ---------------------------------------------------------------------------
 
 describe('generateServiceDefinition — win32 (schtasks)', () => {
-  it('produces a file path in AppData/Roaming Startup folder', () => {
+  it('keeps the launcher outside the Windows Startup folder', () => {
     const def = generateServiceDefinition(baseOpts('win32'));
-    expect(def.filePath).toContain('AppData');
-    expect(def.filePath).toContain('Startup');
+    expect(def.filePath).toBe(path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.cmd'));
+    expect(def.filePath).not.toContain('Startup');
     expect(def.filePath.endsWith('ashlr-daemon.cmd')).toBe(true);
   });
 
@@ -326,14 +379,13 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     expect(def.registerArgs).toContain('ONLOGON');
   });
 
-  it('registerArgs TR contains node path + bin + daemon start', () => {
+  it('registerArgs TR invokes the launcher outside Startup', () => {
     const def = generateServiceDefinition(baseOpts('win32'));
     const trIdx = def.registerArgs.indexOf('/TR');
     expect(trIdx).toBeGreaterThan(-1);
     const tr = def.registerArgs[trIdx + 1];
-    expect(tr).toContain(FAKE_NODE);
-    expect(tr).toContain(FAKE_BIN);
-    expect(tr).toContain('daemon start');
+    expect(tr).toBe(`"${path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.cmd')}"`);
+    expect(tr).not.toContain('Startup');
   });
 
   it('unregisterArgs uses schtasks /Delete /TN AshlrDaemon', () => {
@@ -355,15 +407,15 @@ describe('install() — mocked spawnSync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useSuccessfulLaunchdTransactionMock();
-    spawnSyncMock.mockReturnValue({ status: 0, stdout: '', stderr: '', error: undefined });
+    spawnSyncMock.mockImplementation(successfulServiceCommands());
     existsSyncMock.mockReturnValue(false);
   });
 
-  it('darwin: calls launchctl unload then launchctl load', async () => {
+  it('darwin: bootouts the old job then bootstraps the replacement', async () => {
     await install(baseOpts('darwin'));
     const calls = spawnSyncMock.mock.calls.map((c: string[]) => c[0] + ' ' + (c[1] as string[]).join(' '));
-    const hasUnload = calls.some((c: string) => c.includes('launchctl') && c.includes('unload'));
-    const hasLoad = calls.some((c: string) => c.includes('launchctl') && c.includes('load'));
+    const hasUnload = calls.some((c: string) => c.includes('launchctl') && c.includes('bootout'));
+    const hasLoad = calls.some((c: string) => c.includes('launchctl') && c.includes('bootstrap'));
     expect(hasUnload).toBe(true);
     expect(hasLoad).toBe(true);
   });
@@ -375,10 +427,10 @@ describe('install() — mocked spawnSync', () => {
     expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('enable'))).toBe(true);
   });
 
-  it('darwin: launchctl load receives the plist file path', async () => {
+  it('darwin: launchctl bootstrap receives the domain and plist path', async () => {
     await install(baseOpts('darwin'));
     const loadCall = spawnSyncMock.mock.calls.find(
-      (c: [string, string[]]) => c[0] === 'launchctl' && (c[1] as string[]).includes('load'),
+      (c: [string, string[]]) => c[0] === 'launchctl' && (c[1] as string[]).includes('bootstrap'),
     );
     expect(loadCall).toBeDefined();
     const plistPath = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
@@ -389,20 +441,94 @@ describe('install() — mocked spawnSync', () => {
     await install({ ...baseOpts('darwin'), autostart: false });
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
 
-    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('unload'))).toBe(true);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('bootout'))).toBe(true);
     expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('disable'))).toBe(true);
-    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('load'))).toBe(false);
+    expect(calls.some(([cmd, args]) => cmd === 'launchctl' && args.includes('bootstrap'))).toBe(false);
+    expect(calls.filter(([cmd, args]) => cmd === 'launchctl' && args.includes('print')).at(-1)?.[1]).toContain('print');
   });
 
-  it('darwin: treats launchctl zero-exit error output as a load failure', async () => {
-    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
-      args.includes('load')
-        ? { status: 0, stdout: '', stderr: 'Load failed: 5: Input/output error', error: undefined }
-        : { status: 0, stdout: '', stderr: '', error: undefined });
+  it('darwin: accepts only an explicit absent result when bootout is idempotent', async () => {
+    let disabled = false;
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'print-disabled') {
+        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${disabled} }`, stderr: '', error: undefined };
+      }
+      if (args[0] === 'disable') {
+        disabled = true;
+        return { status: 0, stdout: '', stderr: '', error: undefined };
+      }
+      if (args[0] === 'bootout' || args[0] === 'print') {
+        return { status: 113, stdout: '', stderr: 'Could not find service', error: undefined };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    });
+
+    await expect(install({ ...baseOpts('darwin'), autostart: false })).resolves.toBeUndefined();
+  });
+
+  it('darwin: treats launchctl zero-exit error output as a bootstrap failure', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      args.includes('bootstrap')
+        ? { status: 0, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error', error: undefined }
+        : normal(cmd, args));
 
     await expect(install(baseOpts('darwin'))).rejects.toThrow(
-      'launchctl load failed: Load failed: 5: Input/output error',
+      'launchctl load failed: Bootstrap failed: 5: Input/output error',
     );
+  });
+
+  it('darwin: fails closed when bootout cannot prove the old job stopped', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      args.includes('bootout')
+        ? { status: 5, stdout: '', stderr: 'Boot-out failed: permission denied', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow('launchctl unload failed');
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('bootstrap'))).toBe(false);
+  });
+
+  it('darwin: rollback restores the prior loaded and disabled states exactly', async () => {
+    installLaunchdPlistTransactionMock.mockImplementation((options: {
+      unload: () => { ok: boolean; stderr: string };
+      load: () => { ok: boolean; stderr: string };
+      rollback: () => { ok: boolean; stderr: string };
+    }) => {
+      expect(options.unload().ok).toBe(true);
+      expect(options.load().ok).toBe(false);
+      expect(options.rollback().ok).toBe(true);
+      throw new Error('replacement activation failed; rollback complete');
+    });
+    let loaded = true;
+    let disabled = true;
+    let bootstrapCount = 0;
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'print') {
+        return loaded
+          ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
+          : { status: 113, stdout: '', stderr: 'Could not find service', error: undefined };
+      }
+      if (args[0] === 'print-disabled') {
+        return { status: 0, stdout: `{ "ai.ashlr.daemon" => ${disabled} }`, stderr: '', error: undefined };
+      }
+      if (args[0] === 'bootout') loaded = false;
+      if (args[0] === 'enable') disabled = false;
+      if (args[0] === 'disable') disabled = true;
+      if (args[0] === 'bootstrap') {
+        bootstrapCount++;
+        if (bootstrapCount === 1) {
+          return { status: 5, stdout: '', stderr: 'new plist rejected', error: undefined };
+        }
+        loaded = true;
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow('rollback complete');
+    expect(loaded).toBe(true);
+    expect(disabled).toBe(true);
+    expect(bootstrapCount).toBe(2);
   });
 
   it('linux: calls systemctl --user daemon-reload then enable --now', async () => {
@@ -414,9 +540,9 @@ describe('install() — mocked spawnSync', () => {
     expect(hasEnable).toBe(true);
   });
 
-  it('linux: does not throw when systemctl returns non-zero (best-effort)', async () => {
+  it('linux: fails closed when daemon-reload fails', async () => {
     spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'not found', error: undefined });
-    await expect(install(baseOpts('linux'))).resolves.not.toThrow();
+    await expect(install(baseOpts('linux'))).rejects.toThrow('daemon-reload failed: not found');
   });
 
   it('linux: autostart false disables an existing unit without enabling it', async () => {
@@ -427,6 +553,42 @@ describe('install() — mocked spawnSync', () => {
     expect(calls.some(([cmd, args]) => cmd === 'systemctl' && args.includes('enable'))).toBe(false);
   });
 
+  it('linux: fails closed when disable --now fails', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'systemctl' && args.includes('disable')
+        ? { status: 1, stdout: '', stderr: 'access denied', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install({ ...baseOpts('linux'), autostart: false })).rejects.toThrow(
+      'disable --now failed: access denied',
+    );
+  });
+
+  it('linux: rejects a false stopped postcondition', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'systemctl' && args.includes('is-active')
+        ? { status: 0, stdout: 'active\n', stderr: '', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install({ ...baseOpts('linux'), autostart: false })).rejects.toThrow(
+      'inactive-state verification failed',
+    );
+  });
+
+  it('linux: rejects a false disabled postcondition', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'systemctl' && args.includes('is-enabled')
+        ? { status: 0, stdout: 'enabled\n', stderr: '', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install({ ...baseOpts('linux'), autostart: false })).rejects.toThrow(
+      'disabled-state verification failed',
+    );
+  });
+
   it('win32: calls schtasks /Create', async () => {
     await install(baseOpts('win32'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
@@ -434,9 +596,9 @@ describe('install() — mocked spawnSync', () => {
     expect(hasCreate).toBe(true);
   });
 
-  it('win32: does not throw when schtasks returns non-zero (best-effort)', async () => {
+  it('win32: fails closed when task creation is denied', async () => {
     spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'access denied', error: undefined });
-    await expect(install(baseOpts('win32'))).resolves.not.toThrow();
+    await expect(install(baseOpts('win32'))).rejects.toThrow('schtasks /Create failed: access denied');
   });
 
   it('win32: autostart false deletes an existing task without creating one', async () => {
@@ -445,6 +607,83 @@ describe('install() — mocked spawnSync', () => {
 
     expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Delete'))).toBe(true);
     expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Create'))).toBe(false);
+    expect(calls.filter(([cmd]) => cmd === 'schtasks').map(([, args]) => args[0])).toEqual(['/End', '/Delete', '/Query']);
+  });
+
+  it('win32: refuses access-denied task deletion', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'schtasks' && args.includes('/Delete')
+        ? { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install({ ...baseOpts('win32'), autostart: false })).rejects.toThrow(
+      'schtasks /Delete failed: ERROR: Access is denied.',
+    );
+  });
+
+  it('win32: refuses access-denied task termination before deletion', async () => {
+    const normal = successfulServiceCommands();
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
+      cmd === 'schtasks' && args.includes('/End')
+        ? { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined }
+        : normal(cmd, args));
+
+    await expect(install({ ...baseOpts('win32'), autostart: false })).rejects.toThrow(
+      'schtasks /End failed: ERROR: Access is denied.',
+    );
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('/Delete'))).toBe(false);
+  });
+
+  it('win32: rejects a task that still exists after deletion', async () => {
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
+      args.includes('/Query')
+        ? { status: 0, stdout: 'AshlrDaemon', stderr: '', error: undefined }
+        : { status: 0, stdout: '', stderr: '', error: undefined });
+
+    await expect(install({ ...baseOpts('win32'), autostart: false })).rejects.toThrow(
+      'AshlrDaemon still exists',
+    );
+  });
+
+  it('win32: archives a safe legacy Startup launcher outside Startup', async () => {
+    const legacy = path.join(
+      FAKE_HOME,
+      'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
+      'ashlr-daemon.cmd',
+    );
+    existsSyncMock.mockImplementation((candidate: fs.PathLike) => candidate.toString() === legacy);
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockReturnValue({
+      isSymbolicLink: () => false,
+      isFile: () => true,
+      nlink: 1,
+      uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+    } as fs.Stats);
+
+    await install(baseOpts('win32'));
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      legacy,
+      path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.startup-legacy.cmd.disabled'),
+    );
+  });
+
+  it('win32: refuses to follow a symlinked legacy Startup launcher', async () => {
+    const legacy = path.join(
+      FAKE_HOME,
+      'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
+      'ashlr-daemon.cmd',
+    );
+    existsSyncMock.mockImplementation((candidate: fs.PathLike) => candidate.toString() === legacy);
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockReturnValue({
+      isSymbolicLink: () => true,
+      isFile: () => false,
+      nlink: 1,
+      uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+    } as fs.Stats);
+
+    await expect(install(baseOpts('win32'))).rejects.toThrow('unsafe legacy Windows launcher');
+    expect(fs.renameSync).not.toHaveBeenCalled();
   });
 });
 
@@ -452,7 +691,7 @@ describe('install() — transactional launchd plist', () => {
   it('delegates the daemon plist and private lock directory to the shared transaction', async () => {
     const home = '/tmp/ashlr-launchd-transaction';
     useSuccessfulLaunchdTransactionMock();
-    (cp.spawnSync as ReturnType<typeof vi.fn>).mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    (cp.spawnSync as ReturnType<typeof vi.fn>).mockImplementation(successfulServiceCommands());
 
     await install({ ...baseOpts('darwin'), homeDir: home });
 
@@ -462,6 +701,7 @@ describe('install() — transactional launchd plist', () => {
       content: expect.stringContaining('<string>ai.ashlr.daemon</string>'),
       unload: expect.any(Function),
       load: expect.any(Function),
+      rollback: expect.any(Function),
     }));
   });
 });
@@ -488,11 +728,13 @@ describe('uninstall() — mocked spawnSync', () => {
     });
   });
 
-  it('darwin: calls launchctl unload', async () => {
+  it('darwin: bootouts and verifies the launchd job is absent', async () => {
+    spawnSyncMock.mockImplementation(successfulServiceCommands());
     await uninstall(baseOpts('darwin'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
-    const hasUnload = calls.some((c) => c[0] === 'launchctl' && c[1].includes('unload'));
+    const hasUnload = calls.some((c) => c[0] === 'launchctl' && c[1].includes('bootout'));
     expect(hasUnload).toBe(true);
+    expect(calls.some((c) => c[0] === 'launchctl' && c[1].includes('print'))).toBe(true);
   });
 
   it('linux: calls systemctl --user disable --now', async () => {
@@ -511,15 +753,18 @@ describe('uninstall() — mocked spawnSync', () => {
 
   it('removes the service file when it exists', async () => {
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
+    spawnSyncMock.mockImplementation(successfulServiceCommands());
     await uninstall(baseOpts('darwin'));
     expect(unlinkMock).toHaveBeenCalled();
   });
 
   it('darwin: retains the service file after a false-zero unload failure', async () => {
     spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
-      args.includes('unload')
-        ? { status: 0, stdout: '', stderr: 'Unload failed: 5: Input/output error', error: undefined }
-        : { status: 0, stdout: '', stderr: '', error: undefined });
+      args.includes('bootout')
+        ? { status: 0, stdout: '', stderr: 'Boot-out failed: 5: Input/output error', error: undefined }
+        : args.includes('print')
+          ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
+          : { status: 0, stdout: '', stderr: '', error: undefined });
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
 
     await expect(uninstall(baseOpts('darwin'))).resolves.toBeUndefined();
