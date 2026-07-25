@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   evaluateSkillRoutingCalibration,
+  SKILL_ROUTING_CALIBRATION_POLICY_VERSION,
   type SkillRoutingCalibrationSnapshotV1,
   type SkillRoutingCaseV1,
   type SkillRoutingSkillV1,
@@ -76,7 +77,8 @@ function snapshot(overrides: Partial<SkillRoutingCalibrationSnapshotV1> = {}): S
   return {
     schemaVersion: 1,
     sourceRevision: 'revision-1',
-    routerPolicyVersion: 'router-v1',
+    routerPolicyVersion: SKILL_ROUTING_CALIBRATION_POLICY_VERSION,
+    projectionPolicyVersion: 'test-projection-v1',
     sourceState: 'healthy',
     complete: true,
     invalidRows: 0,
@@ -168,7 +170,8 @@ describe('M450 SkillRoutingCalibrationV1', () => {
   it('withholds when source revision or router policy changes between reads', () => {
     const first = snapshot();
     expect(evaluate(first, snapshot({ sourceRevision: 'revision-2' })).reason).toBe('snapshot-mutation');
-    expect(evaluate(first, snapshot({ routerPolicyVersion: 'router-v2' })).reason).toBe('snapshot-mutation');
+    expect(evaluate(first, snapshot({ projectionPolicyVersion: 'test-projection-v2' })).reason).toBe('snapshot-mutation');
+    expect(evaluate(first, snapshot({ routerPolicyVersion: 'other-router-v1' })).reason).toBe('invalid-input');
   });
 
   it('returns collecting rather than a healthy zero for an empty source', () => {
@@ -395,12 +398,16 @@ describe('M450 SkillRoutingCalibrationV1', () => {
   it('returns aggregate metadata only', () => {
     const result = evaluate();
     const encoded = JSON.stringify(result);
-    for (const privateValue of [SKILL_A, SKILL_B, TERM_A, TERM_B, 'revision-1', 'router-v1']) {
+    for (const privateValue of [
+      SKILL_A, SKILL_B, TERM_A, TERM_B, 'revision-1',
+      SKILL_ROUTING_CALIBRATION_POLICY_VERSION, 'test-projection-v1',
+    ]) {
       expect(encoded).not.toContain(privateValue);
     }
     for (const forbiddenKey of [
       'skillId', 'caseId', 'termId', 'digest', 'prompt', 'description', 'path', 'prose',
       'diff', 'stdout', 'stderr', 'argv', 'env', 'sourceRevision', 'routerPolicyVersion',
+      'projectionPolicyVersion',
     ]) {
       expect(Object.keys(result)).not.toContain(forbiddenKey);
       expect(encoded).not.toContain(`"${forbiddenKey}"`);

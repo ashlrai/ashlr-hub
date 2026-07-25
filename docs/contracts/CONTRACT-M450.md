@@ -12,7 +12,8 @@ The caller supplies an explicit canonical `asOf` timestamp and two independently
 
 Each snapshot contains only:
 
-- An immutable source revision and router policy version.
+- An immutable source revision, exact `m450-tfidf-v1` evaluated-router policy,
+  and a distinct version for the source projection that produced the vectors.
 - Complete source-quality counters and state.
 - Skills represented by opaque, source-keyed HMAC identifiers and sparse positive-integer term vectors.
 - Cases represented by opaque HMAC identifiers, an owner relationship, a canonical observation timestamp, and a sparse positive-integer term vector.
@@ -26,7 +27,23 @@ The runtime schema is exact. Unknown fields, empty vectors, duplicate identifier
 
 Both snapshots are independently validated, canonically ordered, and compared across all metadata. Ordering differences are harmless. Any semantic difference in source identity, policy identity, quality state, skills, cases, timestamps, or vector values yields `snapshot-mutation` and withholds the result.
 
+The router-policy field identifies M450's TF-IDF evaluator, not the active
+fleet retriever. The separate projection-policy field prevents a tokenizer or
+vectorizer change from hiding behind an unchanged evaluator version.
+
 The evaluator uses the explicit `asOf` value only. Cases observed after `asOf` are invalid. Cases newer than `asOf - 2 minutes` are excluded from calibration. An empty source or a source whose cases are all inside that settlement window returns `collecting`, never a healthy zero.
+
+The 5-positive/3-negative per-skill gate is descriptive corpus coverage, not a
+claim of independent sampling or statistical significance. Distinct case IDs
+may still represent correlated or repeated observations. A `ready` result means
+only that this submitted, settled corpus meets the deterministic fit thresholds.
+Any causal or generalization claim requires separately designed experiments
+with verifier-bound independent observation identities.
+
+The two snapshots must come from independent source reads. M450 can prove byte-
+level semantic stability between the submitted snapshots, but it cannot prove
+their custody or that the caller did not submit the same object twice. Receipt-
+bound read provenance is a later verification boundary.
 
 ## Calibration Math
 
