@@ -91,6 +91,11 @@ trial, execution, routing, learning, proposal, verification, or merge authority.
   prompts within or across skills, duplicate behavioral IDs or fixture references,
   empty behavioral oracles, unknown negative owners, oversized case
   arrays/text, and `top_k` above five.
+  One cross-skill reuse is intentional rather than ambiguous: exactly one
+  positive skill may own a prompt that one or more other skills reuse only as
+  negatives explicitly naming that positive skill as `owner`. Duplicate
+  positives, negative-only reuse, ownerless reuse, wrong owners, and a skill
+  excluding itself still fail closed.
 - Require each skill to declare when-to-use, process/workflow, and verification
   sections with substantive visible content. Headings inside fenced code or
   HTML comments and non-rendered raw HTML blocks do not count; tag/entity-only
@@ -118,6 +123,8 @@ trial, execution, routing, learning, proposal, verification, or merge authority.
 - no raw external text in reports
 - symlink, hardlink, malformed or duplicate-key contract, orphan case, duplicate, inflated
   `top_k`, lexical-zero, unavailable pack, and CLI usage behavior
+- owner-declared negative reuse of one positive trigger, with ownerless and
+  misowned variants rejected
 - stable JSON output and help/completion discoverability
 
 The pinned `addyosmani/agent-skills` snapshot at commit `fefc4075` is a runtime
