@@ -182,6 +182,11 @@ export type DispatchProductionBasis =
   | 'repair-lifecycle-outcome'
   | 'unknown';
 
+export type DispatchProductionLabelOrigin =
+  | 'stored-current'
+  | 'stored-legacy'
+  | 'derived-on-read';
+
 export interface DispatchProductionEvent {
   schemaVersion: 1;
   ts: string;
@@ -210,6 +215,8 @@ export interface DispatchProductionEvent {
   /** Scrubbed metadata-only hash of the dispatched work item's objective. */
   objectiveHash?: string;
   learningLabel?: ProductionAttemptLearningLabel;
+  /** Read-time provenance only; never persisted as part of the immutable event. */
+  labelOrigin?: DispatchProductionLabelOrigin;
   spentUsd: number;
   diffFiles?: number;
   diffLines?: number;
@@ -782,7 +789,7 @@ interface TreatmentReceiptAuthorityState {
   pendingCompaction: boolean;
 }
 
-function treatmentOutcomeReceiptDigest(
+function rawTreatmentOutcomeReceiptDigest(
   name: string,
   event: DispatchProductionEvent,
 ): string {
@@ -792,6 +799,37 @@ function treatmentOutcomeReceiptDigest(
     .update('\0', 'utf8')
     .update(JSON.stringify(event), 'utf8')
     .digest('hex');
+}
+
+function treatmentOutcomeReceiptDigest(
+  name: string,
+  event: DispatchProductionEvent,
+): string {
+  const storedLabel: unknown = event.learningLabel;
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(storedLabel);
+  const digestEvent = isPlainRecord(storedLabel) &&
+    storedLabel['classifierVersion'] === 'attempt-shape-v1' &&
+    normalizedLabel !== undefined
+    ? { ...event, learningLabel: normalizedLabel }
+    : event;
+  return rawTreatmentOutcomeReceiptDigest(name, digestEvent);
+}
+
+function treatmentOutcomeReceiptDigestMatchesExpected(
+  digest: string,
+  name: string,
+  expected: DispatchProductionEvent,
+): boolean {
+  if (digest === treatmentOutcomeReceiptDigest(name, expected)) return true;
+  if (expected.learningLabel === undefined) return false;
+  const legacyExpected = {
+    ...expected,
+    learningLabel: {
+      ...expected.learningLabel,
+      classifierVersion: 'attempt-shape-v1',
+    },
+  } as unknown as DispatchProductionEvent;
+  return digest === rawTreatmentOutcomeReceiptDigest(name, legacyExpected);
 }
 
 function emptyTreatmentRetentionCompactedDigest(): string {
@@ -1266,6 +1304,17 @@ function treatmentReceiptLockPath(): string {
   return join(treatmentOutcomeReceiptDir(), '.receipts.lock');
 }
 
+function treatmentReceiptEventMatchesExpected(
+  stored: DispatchProductionEvent,
+  expected: DispatchProductionEvent,
+): boolean {
+  if (JSON.stringify(stored) === JSON.stringify(expected)) return true;
+  if (storedLearningLabelOrigin(stored.learningLabel) !== 'stored-legacy') return false;
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(stored.learningLabel);
+  return normalizedLabel !== undefined &&
+    JSON.stringify({ ...stored, learningLabel: normalizedLabel }) === JSON.stringify(expected);
+}
+
 /** Verify an exact immutable terminal-outcome receipt without writing or repairing storage. */
 export function hasExactDispatchProductionTreatmentOutcomeReceipt(
   expected: DispatchProductionEvent,
@@ -1287,27 +1336,35 @@ export function hasExactDispatchProductionTreatmentOutcomeReceipt(
     const retired = tombstone ?? compacted;
     const path = join(treatmentOutcomeReceiptDir(), name);
     if (!existsSync(path)) {
-      if (retired) return retired.receiptDigest === wantedDigest;
+      if (retired) {
+        return treatmentOutcomeReceiptDigestMatchesExpected(
+          retired.receiptDigest, name, canonical,
+        );
+      }
       const retiredSource = retention?.schemaVersion === 1
         ? readRetiredTreatmentOutcomeSources(retention.droppedThrough).get(name)
         : undefined;
-      return retiredSource !== undefined && JSON.stringify(retiredSource) === JSON.stringify(canonical);
+      return retiredSource !== undefined &&
+        treatmentReceiptEventMatchesExpected(retiredSource, canonical);
     }
     const artifact = readTreatmentOutcomeReceiptArtifact(path, name);
     if (retired) {
-      return retired.receiptDigest === artifact.receiptDigest &&
-        retired.receiptDigest === wantedDigest;
+      return treatmentOutcomeReceiptDigestMatchesExpected(
+        retired.receiptDigest, name, canonical,
+      ) &&
+        artifact.receiptDigest === wantedDigest &&
+        treatmentReceiptEventMatchesExpected(artifact.event, canonical);
     }
     const retiredSource = retention?.schemaVersion === 1
       ? readRetiredTreatmentOutcomeSources(retention.droppedThrough).get(name)
       : undefined;
     if (retiredSource) {
-      return JSON.stringify(retiredSource) === JSON.stringify(canonical) &&
-        JSON.stringify(artifact.event) === JSON.stringify(canonical);
+      return treatmentReceiptEventMatchesExpected(retiredSource, canonical) &&
+        treatmentReceiptEventMatchesExpected(artifact.event, canonical);
     }
     if (retention && Date.parse(artifact.ts) <= Date.parse(retention.droppedThrough)) return false;
     return artifact.receiptDigest === wantedDigest &&
-      JSON.stringify(artifact.event) === JSON.stringify(canonical);
+      treatmentReceiptEventMatchesExpected(artifact.event, canonical);
   } catch {
     return false;
   }
@@ -1417,7 +1474,11 @@ function finiteNonNegative(value: unknown): number | undefined {
 
 export function sanitizeDispatchProductionEvent(
   event: DispatchProductionEvent,
-  opts: { materializeLearningLabel?: boolean; deriveLegacyRunOutcomeCausal?: boolean } = {},
+  opts: {
+    materializeLearningLabel?: boolean;
+    deriveLegacyRunOutcomeCausal?: boolean;
+    preserveMissingCausalAuthority?: boolean;
+  } = {},
 ): DispatchProductionEvent {
   const ts = eventTimestamp(event.ts);
   const machineId = boundedOptionalText(event.machineId, 120);
@@ -1559,7 +1620,7 @@ export function sanitizeDispatchProductionEvent(
           spentUsd: finiteNonNegative(event.spentUsd),
         })
       : {};
-  const causal = causalMetadata({
+  const causal: Partial<ReturnType<typeof causalMetadata>> = causalMetadata({
     ts,
     itemId,
     proposalId,
@@ -1568,11 +1629,20 @@ export function sanitizeDispatchProductionEvent(
     routeSnapshot: event.routeSnapshot ?? legacyCausal.routeSnapshot,
     runEventSummary: event.runEventSummary ?? legacyCausal.runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
-    learningSource: event.learningSource ?? 'daemon-dispatch',
-    labelBasis: event.labelBasis ?? 'dispatch-outcome',
+    learningSource: event.learningSource ??
+      (opts.preserveMissingCausalAuthority ? undefined : 'daemon-dispatch'),
+    labelBasis: event.labelBasis ??
+      (opts.preserveMissingCausalAuthority ? undefined : 'dispatch-outcome'),
     routerPolicyVersion,
     learningEpoch,
   });
+  if (opts.preserveMissingCausalAuthority) {
+    if (
+      routerPolicyVersion === undefined &&
+      event.routeSnapshot?.routerPolicyVersion === undefined
+    ) delete causal.routerPolicyVersion;
+    if (learningEpoch === undefined) delete causal.learningEpoch;
+  }
   const learningLabel = opts.materializeLearningLabel
     ? productionAttemptLearningLabelFromSignals({
         outcome,
@@ -3531,6 +3601,13 @@ function canonicalTreatmentOutcomeReceiptEvent(
   }
 }
 
+function treatmentOutcomeReceiptLine(text: string): string | null {
+  if (text.endsWith('\n')) {
+    return text.indexOf('\n') === text.length - 1 ? text.slice(0, -1) : null;
+  }
+  return text.length > 0 && !text.includes('\n') ? text : null;
+}
+
 function readTreatmentOutcomeReceiptArtifact(
   path: string,
   name: string,
@@ -3543,12 +3620,11 @@ function readTreatmentOutcomeReceiptArtifact(
     remainingBytes: MAX_TREATMENT_RECEIPT_BYTES,
     ...(batchAssurance ? { batchAssurance } : {}),
   });
-  if (!loaded.ok || !loaded.text.endsWith('\n') ||
-    loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+  const line = loaded.ok ? treatmentOutcomeReceiptLine(loaded.text) : null;
+  if (line === null) {
     throw new Error('invalid treatment outcome receipt');
   }
   if (!batchAssurance) inspectExactReceiptAuthorityFile(path);
-  const line = loaded.text.slice(0, -1);
   const parsed: unknown = JSON.parse(line);
   if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
     throw new Error('unbound treatment outcome receipt');
@@ -4429,6 +4505,57 @@ function legacyV1LearningLabelMatchesCanonicalEvent(
   if (normalized === undefined || canonical.learningLabel === undefined ||
     JSON.stringify(normalized) !== JSON.stringify(canonical.learningLabel)) return false;
   return JSON.stringify({ ...canonical, learningLabel: label }) === line;
+}
+
+function storedLearningLabelOrigin(value: unknown): DispatchProductionLabelOrigin {
+  if (value === undefined) return 'derived-on-read';
+  if (!isPlainRecord(value)) throw new Error('invalid stored learning label');
+  const normalized = sanitizeProductionAttemptLearningLabel(value);
+  if (normalized === undefined) throw new Error('invalid stored learning label');
+  if (value['classifierVersion'] === 'attempt-shape-v2' &&
+    JSON.stringify(value) === JSON.stringify(normalized)) return 'stored-current';
+  if (
+    value['classifierVersion'] === 'attempt-shape-v1' &&
+    hasOnlyKeys(value, new Set([
+      'schemaVersion', 'classifierVersion', 'authoritative', 'learningKind',
+      'policySuppressed', 'diagnosticNoProposal', 'diagnosticAttempt', 'attemptShape',
+    ])) &&
+    isPlainRecord(value['attemptShape']) &&
+    hasOnlyKeys(value['attemptShape'], new Set([
+      'backendNoDiff', 'captureOrGateBlocked', 'repairAttempts', 'policyDisabled',
+    ]))
+  ) return 'stored-legacy';
+  throw new Error('invalid stored learning label');
+}
+
+function withLearningLabelOrigin(
+  event: DispatchProductionEvent,
+  storedLabel: unknown,
+): DispatchProductionEvent {
+  const labelOrigin = storedLearningLabelOrigin(storedLabel);
+  if (labelOrigin !== 'derived-on-read') {
+    const normalized = sanitizeProductionAttemptLearningLabel(storedLabel);
+    const canonicalLabel = sanitizeDispatchProductionEvent(event, {
+      materializeLearningLabel: true,
+    }).learningLabel;
+    if (
+      normalized === undefined ||
+      canonicalLabel === undefined ||
+      JSON.stringify(normalized) !== JSON.stringify(canonicalLabel)
+    ) throw new Error('stored learning label does not match canonical attempt');
+  }
+  return {
+    ...event,
+    labelOrigin,
+  };
+}
+
+export function currentAuthoritativeDispatchProductionLearningLabel(
+  event: DispatchProductionEvent,
+): ProductionAttemptLearningLabel | undefined {
+  if (event.labelOrigin !== 'stored-current') return undefined;
+  const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+  return label?.authoritative ? label : undefined;
 }
 
 function storedDispatchProductionIdentities(
@@ -6402,10 +6529,10 @@ function mergeTreatmentOutcomeReceipts(
     result.rowsScanned++;
     try {
       inspectExactReceiptAuthorityFile(path);
-      if (!loaded.text.endsWith('\n') || loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+      const line = treatmentOutcomeReceiptLine(loaded.text);
+      if (line === null) {
         throw new Error('invalid receipt');
       }
-      const line = loaded.text.slice(0, -1);
       const parsed: unknown = JSON.parse(line);
       if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
         throw new Error('invalid receipt');
@@ -6433,7 +6560,7 @@ function mergeTreatmentOutcomeReceipts(
         throw new Error('restored retired treatment outcome receipt');
       }
       if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
-      receipts.set(name, event);
+      receipts.set(name, withLearningLabelOrigin(event, event.learningLabel));
     } catch {
       result.invalidRows++;
       result.complete = false;
@@ -6593,10 +6720,11 @@ export function readDispatchProductionEventsDetailed(
           stopTraversal = true;
           break;
         }
-        result.events.push(sanitizeDispatchProductionEvent(parsed, {
+        result.events.push(withLearningLabelOrigin(sanitizeDispatchProductionEvent(parsed, {
           deriveLegacyRunOutcomeCausal: true,
           materializeLearningLabel: true,
-        }));
+          preserveMissingCausalAuthority: true,
+        }), parsed.learningLabel));
       } catch {
         result.invalidRows++;
       }
@@ -6733,7 +6861,7 @@ function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boo
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, currentAuthoritativeDispatchProductionLearningLabel(event));
   return String(classification.kind) === 'cancelled';
 }
 
@@ -7057,7 +7185,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, currentAuthoritativeDispatchProductionLearningLabel(event));
   const cancelled = isCancelledDispatchProductionEvent(event);
   if (!cancelled && classification.diagnosticAttempt) bucket.diagnosticAttempts++;
   if (!cancelled && classification.kind === 'proposal-created') bucket.diagnosticProposalsCreated++;
@@ -7294,7 +7422,7 @@ export function summarizeDispatchProductionYield(
       itemId: event.itemId,
       title: event.title,
       source: event.source,
-    }, event.learningLabel);
+    }, currentAuthoritativeDispatchProductionLearningLabel(event));
     const cancelled = isCancelledDispatchProductionEvent(event);
     if (!cancelled && classification.diagnosticAttempt) diagnosticAttempts++;
     if (!cancelled && classification.kind === 'proposal-created') diagnosticProposalsCreated++;

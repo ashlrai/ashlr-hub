@@ -135,7 +135,7 @@ function evidence(proposalId = 'prop-1'): AutonomyEvidencePack {
 function learningLabel(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
-    classifierVersion: 'attempt-shape-v1',
+    classifierVersion: 'attempt-shape-v2',
     authoritative: true,
     learningKind: 'proposal-created',
     policySuppressed: false,
@@ -172,6 +172,7 @@ function causalDispatch(overrides: Partial<DispatchProductionEvent> = {}): Dispa
     routerPolicyVersion: ROUTER_POLICY_VERSION,
     learningEpoch: '2026-07-09',
     learningLabel: learningLabel(),
+    labelOrigin: 'stored-current',
   });
   return { ...base, ...overrides };
 }
@@ -251,7 +252,7 @@ describe('AttemptRecord coverage', () => {
             },
             learningLabel: {
               schemaVersion: 1,
-              classifierVersion: 'attempt-shape-v1',
+              classifierVersion: 'attempt-shape-v2',
               authoritative: true,
               learningKind: 'policy-suppressed',
               policySuppressed: true,
@@ -264,6 +265,7 @@ describe('AttemptRecord coverage', () => {
                 policyDisabled: 3,
               },
             },
+            labelOrigin: 'stored-current',
           }),
         ],
         readAgentActions: () => [],
@@ -303,6 +305,42 @@ describe('AttemptRecord coverage', () => {
         repairAttempts: 0,
         policyDisabled: 3,
       },
+    });
+  });
+
+  it('keeps stored legacy labels visible without granting current learning authority', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            learningLabel: {
+              ...learningLabel(),
+              classifierVersion: 'attempt-shape-v1',
+            },
+            labelOrigin: 'stored-legacy',
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records[0]).toMatchObject({
+      learningKind: 'proposal-created',
+      labelOrigin: 'stored-legacy',
+      labelAuthoritative: false,
+      causalCoverage: {
+        labelAuthoritative: false,
+        currentAuthoritativeLabel: false,
+      },
+    });
+    expect(summarizeAttemptCoverage(records).production).toMatchObject({
+      attempts: 1,
+      labelAuthoritativeAttempts: 0,
+      legacyUnversionedAttempts: 1,
     });
   });
 
@@ -784,25 +822,26 @@ describe('AttemptRecord coverage', () => {
       });
       expect(records[0]).toMatchObject({
         itemId: 'legacy-top-level',
-        labelAuthoritative: true,
+        labelAuthoritative: false,
+        labelOrigin: 'derived-on-read',
         learningKind: 'diagnostic-no-proposal',
         causalCoverage: {
           routeSnapshot: true,
           runEventSummary: true,
-          labelAuthoritative: true,
-          currentAuthoritativeLabel: true,
+          labelAuthoritative: false,
+          currentAuthoritativeLabel: false,
         },
       });
       expect(summary.causalCoverage).toMatchObject({
         routeSnapshot: { count: 1, rate: 1 },
         runEventSummary: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 1, rate: 1 },
-        currentAuthoritativeLabel: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+        currentAuthoritativeLabel: { count: 0, rate: 0 },
       });
       expect(summary.production).toMatchObject({
         attempts: 1,
-        labelAuthoritativeAttempts: 1,
-        legacyUnversionedAttempts: 0,
+        labelAuthoritativeAttempts: 0,
+        legacyUnversionedAttempts: 1,
       });
     } finally {
       if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
