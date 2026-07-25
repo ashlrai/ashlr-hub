@@ -23,6 +23,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as durability from '../src/core/util/durability.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -553,6 +554,26 @@ describe('installServeAgent', () => {
       .toThrow('unsafe launchd plist parent component');
   });
 
+  it('durably records each newly created service-directory entry', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const sync = vi.spyOn(durability, 'fsyncDirectory');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'durable-parents.plist');
+
+    installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: true, stderr: '' }),
+    });
+
+    const synced = sync.mock.calls.map(([directory]) => directory);
+    expect(synced).toContain(tmpHome);
+    expect(synced).toContain(path.join(tmpHome, 'Library'));
+    expect(synced).toContain(path.join(tmpHome, '.ashlr'));
+  });
+
   it('rolls back when final verification detects concurrent reactivation', async () => {
     const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
     const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'final-verification.plist');
@@ -580,6 +601,35 @@ describe('installServeAgent', () => {
       .some((name) => name.endsWith('.journal.json'))).toBe(false);
   });
 
+  it('rejects a service-file interloper installed during final verification', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'verification-interloper.plist');
+    const outside = path.join(tmpHome, 'verification-interloper-source.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+    fs.writeFileSync(outside, '<interloper/>', { mode: 0o600 });
+    let unloads = 0;
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => { unloads++; return { ok: true, stderr: '' }; },
+      load: () => ({ ok: true, stderr: '' }),
+      verify: () => {
+        fs.renameSync(outside, pp);
+        return { ok: true, stderr: '' };
+      },
+      rollback: () => ({ ok: true, stderr: '' }),
+    })).toThrow('service file changed during final verification');
+
+    expect(unloads).toBe(2);
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<interloper/>');
+    expect(fs.readdirSync(path.join(tmpHome, '.ashlr', 'locks'))
+      .some((name) => name.endsWith('.journal.json'))).toBe(true);
+  });
+
   it('does not restore disk state when the compensating unload fails', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
@@ -598,6 +648,83 @@ describe('installServeAgent', () => {
     expect(fs.existsSync(pp)).toBe(true);
     expect(fs.readdirSync(path.join(tmpHome, '.ashlr', 'locks'))
       .some((name) => name.endsWith('.journal.json'))).toBe(true);
+  });
+
+  it('rejects an interleaved recovery target before mutating service state', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'recovery-preflight.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      preflight: () => ({ ok: true, stderr: '', recoveryState: { active: true } }),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: true, stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'journal-prepared') throw new Error('simulated crash');
+      },
+    })).toThrow('simulated crash');
+
+    const interloper = `${pp}.interloper`;
+    fs.writeFileSync(interloper, '<interloper/>', { mode: 0o600 });
+    fs.renameSync(interloper, pp);
+    const unload = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      unload,
+      load: () => ({ ok: true, stderr: '' }),
+      recover: () => ({ ok: true, stderr: '' }),
+    })).toThrow('recovery rejected an interleaved plist');
+    expect(unload).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<interloper/>');
+  });
+
+  it('compensates an uncertain recovery stop while the original file remains intact', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'recovery-stop.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      preflight: () => ({ ok: true, stderr: '', recoveryState: { active: true } }),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: true, stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'journal-prepared') throw new Error('simulated crash');
+      },
+    })).toThrow('simulated crash');
+
+    const recover = vi.fn((state: unknown) => ({
+      ok: JSON.stringify(state) === JSON.stringify({ active: true }),
+      stderr: '',
+    }));
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      unload: () => ({ ok: false, stderr: 'stop outcome uncertain' }),
+      load: () => ({ ok: true, stderr: '' }),
+      recover,
+    })).toThrow('prior activation state was restored');
+
+    expect(recover).toHaveBeenCalledWith({ active: true });
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<prior/>');
+    expect(fs.readdirSync(lockDir).some((name) => name.endsWith('.journal.json'))).toBe(false);
   });
 
   it('refuses to load a plist replaced during the initial unload', async () => {
@@ -738,6 +865,39 @@ describe('installServeAgent', () => {
     expect(fs.readFileSync(pp, 'utf8')).toBe('outer');
   });
 
+  it('serializes cooperative service activation against installation', async () => {
+    const {
+      installLaunchdPlistTransaction,
+      withServiceFileTransactionLock,
+    } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'activation-lock.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    let activationError = '';
+
+    installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: 'installed',
+      lockDir,
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => {
+        try {
+          withServiceFileTransactionLock({
+            filePath: pp,
+            trustedRoot: tmpHome,
+            lockDir,
+            lockWaitMs: 20,
+          }, () => undefined);
+        } catch (error) {
+          activationError = error instanceof Error ? error.message : String(error);
+        }
+        return { ok: true, stderr: '' };
+      },
+    });
+
+    expect(activationError).toContain('could not acquire service-file transaction lock');
+  });
+
   it('does not remove an interleaved replacement it no longer owns', async () => {
     const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
     const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'ownership.plist');
@@ -826,6 +986,39 @@ describe('installServeAgent', () => {
     expect(rollbacks).toHaveLength(5);
     expect(fs.existsSync(`${pp}.rollback.hostile-directory-0`)).toBe(true);
     expect(fs.readFileSync(outside, 'utf8')).toBe('keep');
+  });
+
+  it('removes superseded rollback entries while retaining the five newest snapshots', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'bounded-rollbacks.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, 'current-0', { mode: 0o600 });
+    vi.useFakeTimers();
+
+    for (let index = 1; index <= 20; index++) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 6, 20, 0, 0, index)));
+      installLaunchdPlistTransaction({
+        plistPath: pp,
+        trustedRoot: tmpHome,
+        content: `current-${index}`,
+        lockDir,
+        unload: () => ({ ok: true, stderr: '' }),
+        load: () => ({ ok: true, stderr: '' }),
+      });
+    }
+
+    const rollbackContents = fs.readdirSync(path.dirname(pp))
+      .filter((name) => name.startsWith(`${path.basename(pp)}.rollback.`))
+      .map((name) => fs.readFileSync(path.join(path.dirname(pp), name), 'utf8'))
+      .sort();
+    expect(rollbackContents).toEqual([
+      'current-15',
+      'current-16',
+      'current-17',
+      'current-18',
+      'current-19',
+    ]);
   });
 });
 
