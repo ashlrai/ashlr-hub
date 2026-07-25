@@ -120,3 +120,11 @@ export type {
   ExternalSkillAuditTrustPolicy,
   ExternalSkillAuditTrustRoot,
 } from '../core/fleet/external-skill-audit-trust-roots.js';
+
+export type {
+  SkillRoutingCalibrationCollisionsV1,
+  SkillRoutingCalibrationReasonV1,
+  SkillRoutingCalibrationRoutingV1,
+  SkillRoutingCalibrationSampleV1,
+  SkillRoutingCalibrationV1,
+} from '../core/fleet/skill-routing-calibration.js';
