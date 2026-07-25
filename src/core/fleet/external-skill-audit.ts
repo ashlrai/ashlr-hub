@@ -42,6 +42,16 @@ const COLLISION_ERROR = 0.75;
 const MAX_AUDIT_REPORT_NODES = 65_536;
 const MAX_AUDIT_REPORT_ARRAY_ENTRIES = MAX_SKILLS * MAX_SKILLS;
 export const EXTERNAL_SKILL_AUDIT_REPORT_MAX_BYTES = 1024 * 1024;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  'byteLength',
+)?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  'buffer',
+)?.get;
+const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 const AUDIT_REPORT_KEYS = [
   'behavioral', 'bytesRead', 'caseFileCount', 'collisions', 'issues', 'mode',
   'packDigest', 'portablePackDigest', 'promotion', 'routing', 'schemaVersion',
@@ -798,6 +808,56 @@ function parseFrontmatter(source: string): { name: string; description: string }
     || /[\r\n\0]/.test(name + description)
   ) return null;
   return { name, description };
+}
+
+export interface ExternalSkillCandidateMetadataV1 {
+  name: string;
+  description: string;
+  contentHash: string;
+  descriptionHash: string;
+}
+
+/**
+ * Deterministically project the only external fields M456 may present to the
+ * shadow scoring kernel. This does not audit, admit, persist, or execute the
+ * supplied skill bytes.
+ */
+export function projectExternalSkillCandidateMetadata(
+  value: Uint8Array,
+): ExternalSkillCandidateMetadataV1 | null {
+  try {
+    if (!(value instanceof Uint8Array) ||
+      TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined ||
+      TYPED_ARRAY_BUFFER_GETTER === undefined) {
+      return null;
+    }
+    const byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []) as number;
+    const backingBuffer = Reflect.apply(
+      TYPED_ARRAY_BUFFER_GETTER,
+      value,
+      [],
+    ) as ArrayBufferLike;
+    if (byteLength === 0 ||
+      byteLength > MAX_FILE_BYTES ||
+      (typeof SharedArrayBuffer !== 'undefined' &&
+        backingBuffer instanceof SharedArrayBuffer)) {
+      return null;
+    }
+    const bytes = Buffer.alloc(byteLength);
+    Reflect.apply(TYPED_ARRAY_SET, bytes, [value]);
+    const source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (!Buffer.from(source, 'utf8').equals(bytes)) return null;
+    const frontmatter = parseFrontmatter(source);
+    if (frontmatter === null) return null;
+    return {
+      name: frontmatter.name,
+      description: frontmatter.description,
+      contentHash: sha256(bytes),
+      descriptionHash: sha256(frontmatter.description),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function sectionEvidence(source: string): ExternalSkillAuditEntry['sections'] {

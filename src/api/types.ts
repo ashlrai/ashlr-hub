@@ -140,3 +140,16 @@ export type {
   ExternalSkillMaturityStageV1,
   ExternalSkillMaturityStateV1,
 } from '../core/fleet/external-skill-maturity.js';
+
+export type {
+  EvaluateSkillRetrievalCalibrationInputV1,
+  SkillRetrievalCalibrationAuditBindingV1,
+  SkillRetrievalCalibrationAuditEvidenceV1,
+  SkillRetrievalCalibrationCandidateV1,
+  SkillRetrievalCalibrationCaseV1,
+  SkillRetrievalCalibrationProjectionV1,
+  SkillRetrievalCalibrationReasonV1,
+  SkillRetrievalCalibrationRoutingV1,
+  SkillRetrievalCalibrationSampleV1,
+  SkillRetrievalCalibrationSnapshotV1,
+} from '../core/fleet/skill-retrieval-calibration.js';
