@@ -43,8 +43,7 @@ function HasWriteAuthority(
 function RawDaclIsPresent(
   [System.Security.AccessControl.FileSystemSecurity]$security
 ) {
-  $binary = New-Object byte[] $security.GetSecurityDescriptorBinaryForm().Length
-  $security.GetSecurityDescriptorBinaryForm($binary, 0)
+  $binary = $security.GetSecurityDescriptorBinaryForm()
   $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($binary, 0)
   return $null -ne $raw.DiscretionaryAcl
 }
