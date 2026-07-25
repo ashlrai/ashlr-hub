@@ -554,6 +554,11 @@ describe('M451 authenticated external-skill audit receipt', () => {
         kind: 'import',
         typeOnly: false,
       },
+      {
+        file: 'src/core/fleet/skill-retrieval-calibration.ts',
+        kind: 'import',
+        typeOnly: false,
+      },
     ]);
   });
 });
