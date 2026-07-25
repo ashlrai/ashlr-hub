@@ -149,6 +149,8 @@ describe('Windows service-file authority protocol', () => {
     expect(script).toContain("SecurityIdentifier]::new('S-1-5-32-544')");
     expect(script).toContain('FileAttributes]::ReparsePoint');
     expect(script).toContain('GetAccessRules(');
+    expect(script).toContain('$binary = $security.GetSecurityDescriptorBinaryForm()');
+    expect(script).not.toContain('GetSecurityDescriptorBinaryForm().Length');
     expect(script).toContain('SetAccessRuleProtection($true, $false)');
     expect(script).toContain('FileSystemRights]::FullControl');
     expect(script).toContain(
