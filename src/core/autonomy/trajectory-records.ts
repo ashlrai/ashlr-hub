@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { readAgentActions, type AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
 import {
+  currentAuthoritativeDispatchProductionLearningLabel,
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
 } from '../fleet/dispatch-production-ledger.js';
@@ -760,7 +761,7 @@ function dispatchTerminalOutcome(event: DispatchProductionEvent): TrajectoryTerm
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, currentAuthoritativeDispatchProductionLearningLabel(event));
   if (classification.kind === 'cancelled') return 'cancelled';
   if (event.outcome === 'empty-diff' || event.outcome === 'proposal-disabled') return 'no-proposal';
   if (

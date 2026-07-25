@@ -219,6 +219,7 @@ function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}
     spentUsd: 0,
     reason: 'agent returned no diff',
     basis: 'run-proposal-outcome',
+    labelOrigin: 'stored-current',
     ...over,
   };
   if (event.routerPolicyVersion === undefined) event.routerPolicyVersion = ROUTER_POLICY_VERSION;
@@ -240,6 +241,7 @@ function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}
 function makeLegacyDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   const event = makeDispatchProductionEvent(over);
   delete event.learningLabel;
+  event.labelOrigin = 'derived-on-read';
   delete event.routerPolicyVersion;
   delete event.learningEpoch;
   return event;
@@ -891,6 +893,46 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('recent proposal yield');
   });
 
+  it('persisted unlabeled legacy rows remain visible but cannot reroute execution', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const events = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ].map((event, index) => ({ ...event, itemId: `repo:security:legacy-${index}` }));
+    recordDispatchProduction(events);
+    const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const legacyRows = readFileSync(ledger, 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => {
+        const row = JSON.parse(line) as Record<string, unknown>;
+        delete row['learningLabel'];
+        delete row['routerPolicyVersion'];
+        delete row['learningEpoch'];
+        delete row['routeSnapshot'];
+        delete row['runEventSummary'];
+        return JSON.stringify(row);
+      });
+    writeFileSync(ledger, `${legacyRows.join('\n')}\n`, 'utf8');
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
   it('low dispatch-production yield does not blindly reroute to an unknown alternative', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
@@ -1329,6 +1371,82 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
 
     expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
+  });
+
+  it('stored-legacy and derived labels remain observable but cannot steer learned routing', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const nonCurrent = [
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        labelOrigin: 'stored-legacy',
+      }),
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+        labelOrigin: 'derived-on-read',
+      }),
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'engine-failed',
+        proposalCreated: false,
+        labelOrigin: 'stored-legacy',
+      }),
+      ...comparativeCandidateEvents(alternate).map((event) => ({
+        ...event,
+        labelOrigin: 'stored-legacy' as const,
+      })),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: nonCurrent,
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('production routing ignores caller-injected stored-current provenance', async () => {
+    const previousNodeEnv = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'production';
+    try {
+      const cfg = withInstalledFrontierEngines(withIntelligence({
+        allowedBackends: ['builtin', 'claude', 'codex'],
+        minProposalYieldRate: 0.5,
+      }));
+      const item = makeItem({ source: 'security', effort: 5, score: 10 });
+      const base = routeBackend(item, cfg);
+      const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+      const injected = [
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+        ...comparativeCandidateEvents(alternate),
+      ];
+
+      const rec = await recommendRoute(item, cfg, {
+        estimate: makeEstimate(0.001, 10),
+        prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+        dispatchProductionEvents: injected,
+      });
+
+      expect(rec.backend).toBe(base.backend);
+      expect(rec.reason).not.toContain('recent proposal yield');
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previousNodeEnv;
+    }
   });
 
   it('proposal-disabled dispatch outcomes do not poison backend yield learning', async () => {

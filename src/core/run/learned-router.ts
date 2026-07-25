@@ -51,6 +51,7 @@ import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
 import { engineInstalled } from './engines.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
 import {
+  currentAuthoritativeDispatchProductionLearningLabel,
   readDispatchProductionEventsDetailed,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
@@ -58,10 +59,7 @@ import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
 } from '../learning/causal.js';
-import {
-  classifyProductionAttemptForLearningWithLabel,
-  sanitizeProductionAttemptLearningLabel,
-} from '../learning/attempt-shape.js';
+import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -307,8 +305,8 @@ function isCaptureMissingDispatchEvent(event: DispatchProductionEvent): boolean 
 }
 
 function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {
-  const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
-  if (!label?.authoritative) return false;
+  const label = currentAuthoritativeDispatchProductionLearningLabel(event);
+  if (!label) return false;
   if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;
   if (
     event.routeSnapshot?.routerPolicyVersion !== undefined &&
@@ -621,7 +619,13 @@ export async function recommendRoute(
   // tier and only fires with enough same-backend/source samples, so it is a
   // final same-tier nudge, not a safety authority. Lower-tier safety/cost
   // nudges above get priority.
-  const dispatchEvents = loadDispatchYieldEvents(intel, opts?.dispatchProductionEvents);
+  // Synthetic event overrides are a test seam, never a production authority
+  // source. Production routing must obtain provenance-marked events from the
+  // immutable ledger reader above.
+  const dispatchEvents = loadDispatchYieldEvents(
+    intel,
+    process.env.NODE_ENV === 'test' ? opts?.dispatchProductionEvents : undefined,
+  );
   const yieldPrior = dispatchYieldForBackend(dispatchEvents, base.backend, item.source);
   const minProposalYieldRate = clampRate(intel.minProposalYieldRate, 0.2);
   if (

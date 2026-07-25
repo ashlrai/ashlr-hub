@@ -822,6 +822,58 @@ describe('Trajectory records', () => {
     });
   });
 
+  it('does not let derived or originless labels rewrite terminal dispatch facts', () => {
+    const cancelledLabel = {
+      schemaVersion: 1 as const,
+      classifierVersion: 'attempt-shape-v2',
+      authoritative: true as const,
+      learningKind: 'cancelled' as const,
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: false,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 0,
+      },
+    };
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'item-derived-label',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId: 'run-derived-label',
+            trajectoryId: 'traj-derived-label',
+            reason: 'provider request failed',
+            learningLabel: cancelledLabel,
+            labelOrigin: 'derived-on-read',
+          }),
+          dispatch({
+            ts: TS1,
+            itemId: 'item-originless-label',
+            outcome: 'engine-failed',
+            proposalCreated: false,
+            proposalId: undefined,
+            runId: 'run-originless-label',
+            trajectoryId: 'traj-originless-label',
+            reason: 'provider request failed',
+            learningLabel: cancelledLabel,
+            labelOrigin: undefined,
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+      }),
+    });
+
+    expect(records.map((record) => record.terminalOutcome)).toEqual(['failed', 'failed']);
+  });
+
   it('lets every substantive joined terminal fact outrank cancellation', () => {
     const dispatchCases = [
       {
