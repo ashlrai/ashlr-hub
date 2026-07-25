@@ -12,6 +12,7 @@ import {
   type WindowsFileAuthorityMode,
 } from '../src/core/daemon/windows-file-authority.js';
 import { installLaunchdPlistTransaction } from '../src/core/daemon/launchd-plist-transaction.js';
+import { windowsPowerShellPath } from '../src/core/daemon/windows-task-scripts.js';
 
 const WINDOWS_OPTIONS = {
   anchorPath: 'C:\\Users\\mason',
@@ -66,6 +67,20 @@ afterEach(() => {
 });
 
 describe('Windows service-file authority protocol', () => {
+  it('resolves Windows PowerShell from canonical SystemRoot instead of hostile PATH', () => {
+    const executable = windowsPowerShellPath({
+      SystemRoot: String.raw`C:\Windows`,
+      WINDIR: String.raw`D:\UntrustedWindows`,
+      PATH: String.raw`C:\hostile-bin;C:\also-hostile`,
+    });
+
+    expect(executable).toBe(
+      String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+    );
+    expect(executable).not.toContain('hostile');
+    expect(executable).not.toContain('UntrustedWindows');
+  });
+
   it('uses a fixed executable and argv while carrying bounded paths in JSON stdin', () => {
     let observed: WindowsFileAuthorityInvocation | undefined;
     _setWindowsFileAuthorityTestControlForTest(
