@@ -1,4 +1,5 @@
 const PROTOCOL = 'skill-routing-calibration-v1' as const;
+export const SKILL_ROUTING_CALIBRATION_POLICY_VERSION = 'm450-tfidf-v1';
 const SETTLEMENT_WINDOW_MS = 2 * 60 * 1_000;
 const MAX_SKILLS = 256;
 const MAX_CASES = 10_000;
@@ -38,6 +39,7 @@ export interface SkillRoutingCalibrationSnapshotV1 {
   schemaVersion: 1;
   sourceRevision: string;
   routerPolicyVersion: string;
+  projectionPolicyVersion: string;
   sourceState: 'healthy' | 'degraded';
   complete: boolean;
   invalidRows: number;
@@ -141,6 +143,7 @@ interface NormalizedSnapshot {
   schemaVersion: 1;
   sourceRevision: string;
   routerPolicyVersion: string;
+  projectionPolicyVersion: string;
   sourceState: 'healthy' | 'degraded';
   complete: boolean;
   invalidRows: number;
@@ -156,7 +159,8 @@ type ValidationResult<T> =
   | { ok: false; reason: SkillRoutingCalibrationReasonV1 };
 
 const SNAPSHOT_KEYS = [
-  'schemaVersion', 'sourceRevision', 'routerPolicyVersion', 'sourceState', 'complete',
+  'schemaVersion', 'sourceRevision', 'routerPolicyVersion', 'projectionPolicyVersion',
+  'sourceState', 'complete',
   'invalidRows', 'duplicateRows', 'conflictingRows', 'limitExceeded', 'skills', 'cases',
 ] as const;
 const SKILL_KEYS = ['skillId', 'vector'] as const;
@@ -219,7 +223,9 @@ function normalizeSnapshot(value: unknown): ValidationResult<NormalizedSnapshot>
   if (value['schemaVersion'] !== 1 || typeof value['complete'] !== 'boolean' ||
     typeof value['limitExceeded'] !== 'boolean' || !Array.isArray(value['skills']) || !Array.isArray(value['cases']) ||
     typeof value['sourceRevision'] !== 'string' || !VERSION_RE.test(value['sourceRevision']) ||
-    typeof value['routerPolicyVersion'] !== 'string' || !VERSION_RE.test(value['routerPolicyVersion']) ||
+    value['routerPolicyVersion'] !== SKILL_ROUTING_CALIBRATION_POLICY_VERSION ||
+    typeof value['projectionPolicyVersion'] !== 'string' ||
+    !VERSION_RE.test(value['projectionPolicyVersion']) ||
     (value['sourceState'] !== 'healthy' && value['sourceState'] !== 'degraded') ||
     !nonNegativeInteger(value['invalidRows']) || !nonNegativeInteger(value['duplicateRows']) ||
     !nonNegativeInteger(value['conflictingRows'])) {
@@ -287,6 +293,7 @@ function normalizeSnapshot(value: unknown): ValidationResult<NormalizedSnapshot>
       schemaVersion: 1,
       sourceRevision: value['sourceRevision'],
       routerPolicyVersion: value['routerPolicyVersion'],
+      projectionPolicyVersion: value['projectionPolicyVersion'],
       sourceState: value['sourceState'],
       complete: value['complete'],
       invalidRows: value['invalidRows'],
