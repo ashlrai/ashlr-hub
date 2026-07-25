@@ -82,6 +82,7 @@ jobs:
               test/m455.external-skill-maturity.test.ts
               test/m456.skill-retrieval-calibration.test.ts
               test/m457.external-skill-artifact-firewall.test.ts
+              test/m460.policy-assignment-receipts.test.ts
           - os: windows-latest
             label: windows, portability overflow
             test_args: >-
@@ -106,6 +107,7 @@ jobs:
               test/m455.external-skill-maturity.test.ts
               test/m456.skill-retrieval-calibration.test.ts
               test/m457.external-skill-artifact-firewall.test.ts
+              test/m460.policy-assignment-receipts.test.ts
     runs-on: ${{ matrix.os }}
     env:
       ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}
