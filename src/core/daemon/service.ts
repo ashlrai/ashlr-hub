@@ -23,6 +23,7 @@ import {
   installLaunchdPlistTransaction,
   removeLaunchdPlistTransaction,
   withServiceFileTransactionLock,
+  type LaunchdInstallPhase,
 } from './launchd-plist-transaction.js';
 import { validateWindowsFileAuthority } from './windows-file-authority.js';
 import {
@@ -1175,6 +1176,30 @@ function restoreWindowsState(
 ): CommandResult {
   const legacy = restoreLegacyWindowsLauncher(home, path.dirname(def.filePath), state.legacyLauncher);
   if (!legacy.ok) return legacy;
+  if (state.present) {
+    try {
+      const current = readWindowsTaskSnapshot(def.filePath);
+      if (current.present) {
+        const exactDefinition = verifyWindowsState(
+          { ...state, state: current.state },
+          def.filePath,
+        );
+        if (!exactDefinition.ok) return exactDefinition;
+        const exactState = verifyWindowsState(state, def.filePath);
+        if (exactState.ok) return exactState;
+        if (
+          (state.state === 'running' || state.state === 'queued') &&
+          current.state === 'ready'
+        ) {
+          const started = runWindowsTask(def.filePath);
+          if (!started.ok) return started;
+        }
+        return verifyWindowsState(state, def.filePath);
+      }
+    } catch (error) {
+      return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+    }
+  }
   const task = applyWindowsState(def, state);
   if (task.ok && legacy.ok) return task;
   return {
@@ -1182,6 +1207,57 @@ function restoreWindowsState(
     stdout: '',
     stderr: [task.ok ? '' : task.stderr, legacy.ok ? '' : legacy.stderr].filter(Boolean).join('; '),
   };
+}
+
+function recoverWindowsTransactionUnload(
+  def: ServiceDefinition,
+  prior: WindowsActivationState,
+  desired: WindowsActivationState,
+  phase: LaunchdInstallPhase,
+): CommandResult {
+  try {
+    const current = readWindowsTaskSnapshot(def.filePath);
+    if (!current.present) {
+      if (prior.present && phase === 'prepared') {
+        return { ok: false, stdout: '', stderr: 'prior Task Scheduler task disappeared before recovery stop' };
+      }
+      return { ok: true, stdout: '', stderr: '' };
+    }
+
+    if (prior.present) {
+      const priorMatches = verifyWindowsState(
+        { ...prior, state: current.state },
+        def.filePath,
+      );
+      if (priorMatches.ok) return stopAndDeleteWindowsTask(prior, def.filePath);
+    }
+
+    if ((phase === 'activating' || phase === 'activated') && desired.present) {
+      const desiredMatches = verifyWindowsState(
+        { ...desired, state: current.state },
+        def.filePath,
+      );
+      if (!desiredMatches.ok) return desiredMatches;
+      return stopAndDeleteWindowsTask({
+        present: true,
+        state: current.state,
+        legacyLauncher: false,
+        taskXmlBase64: current.taskXmlBase64,
+        taskXmlSha256: current.taskXmlSha256,
+        taskSecurityDescriptorBase64: current.taskSecurityDescriptorBase64,
+        taskSecurityDescriptorSha256: current.taskSecurityDescriptorSha256,
+        taskSecurityScope: current.taskSecurityScope,
+      }, def.filePath);
+    }
+
+    return {
+      ok: false,
+      stdout: '',
+      stderr: `unexpected Task Scheduler task during install recovery phase ${phase}`,
+    };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,6 +1494,12 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
         if (!archived.ok) return archived;
         return stopAndDeleteWindowsTask(activation, def.filePath);
       },
+      recoverUnload: (state, phase) => {
+        const activation = parseWindowsRecoveryState(state);
+        return activation
+          ? recoverWindowsTransactionUnload(def, activation, desired, phase)
+          : { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+      },
       load: () => autostart
         ? applyWindowsState(def, desired)
         : verifyWindowsState(desired, def.filePath),
@@ -1456,97 +1538,254 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
 
 /**
  * Unload and remove the OS service registration.
- * Never throws — best-effort on each step.
+ * Fails closed when the manager and service file cannot be removed together.
  */
 export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
 
+  try {
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);
     const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
-    const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
-    try {
-      removeLaunchdPlistTransaction({
-        plistPath: def.filePath,
-        trustedRoot: home,
-        lockDir: path.join(home, '.ashlr', 'locks'),
-        unload: () => stopLaunchdService(serviceTarget),
-      });
-    } catch { /* uninstall remains best-effort */ }
-  } else {
+    const domainTarget = `gui/${uid}`;
+    const label = 'ai.ashlr.daemon';
+    const serviceTarget = `${domainTarget}/${label}`;
+    let priorActivation: { loaded: boolean; disabled: boolean } | undefined;
+    removeLaunchdPlistTransaction({
+      plistPath: def.filePath,
+      trustedRoot: home,
+      lockDir: path.join(home, '.ashlr', 'locks'),
+      preflight: ({ hasPrior }) => {
+        try {
+          const runtime = readLaunchdRuntimeState(serviceTarget);
+          if (runtime.loaded && !hasPrior) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: `refusing to remove loaded ${serviceTarget} without a trusted prior plist`,
+            };
+          }
+          priorActivation = {
+            loaded: runtime.loaded,
+            disabled: launchdDisabled(domainTarget, label),
+          };
+          return { ok: true, stdout: '', stderr: '', recoveryState: priorActivation };
+        } catch (error) {
+          return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      unload: () => stopLaunchdService(serviceTarget),
+      recover: (state) => {
+        const activation = parseLaunchdRecoveryState(state);
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'invalid persisted launchd activation state' };
+        }
+        return restoreLaunchdActivation(
+          domainTarget,
+          serviceTarget,
+          label,
+          def.filePath,
+          activation.loaded,
+          activation.disabled,
+        );
+      },
+      validateRecovery: (state) => parseLaunchdRecoveryState(state)
+        ? { ok: true, stdout: '', stderr: '' }
+        : { ok: false, stdout: '', stderr: 'invalid persisted launchd activation state' },
+      recoverAfterFailedRemove: () => priorActivation
+        ? restoreLaunchdActivation(
+            domainTarget,
+            serviceTarget,
+            label,
+            def.filePath,
+            priorActivation.loaded,
+            priorActivation.disabled,
+          )
+        : { ok: false, stdout: '', stderr: 'launchd pre-uninstall activation state is unavailable' },
+    });
+  } else if (platform === 'linux') {
     const home = resolveHome(opts.homeDir);
-    let priorSystemdActivation: SystemdActivationState | undefined;
-    try {
-      removeLaunchdPlistTransaction({
-        plistPath: def.filePath,
-        trustedRoot: home,
-        lockDir: path.join(home, '.ashlr', 'locks'),
-        unload: () => {
-          if (platform === 'win32') {
-            try {
-              const task = readWindowsTaskSnapshot(def.filePath);
-              if (!task.present) return { ok: true, stdout: '', stderr: '' };
-              return stopAndDeleteWindowsTask({
+    let priorActivation: SystemdActivationState | undefined;
+    removeLaunchdPlistTransaction({
+      plistPath: def.filePath,
+      trustedRoot: home,
+      lockDir: path.join(home, '.ashlr', 'locks'),
+      operationLabel: 'systemd',
+      preflight: ({ hasPrior }) => {
+        try {
+          const state = readSystemdActivationState();
+          if (state.present !== hasPrior) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'systemd manager and trusted service-file presence disagree',
+            };
+          }
+          if (state.present && state.fragmentPath !== def.filePath) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'systemd FragmentPath does not match the trusted service file',
+            };
+          }
+          priorActivation = state;
+          return { ok: true, stdout: '', stderr: '', recoveryState: state };
+        } catch (error) {
+          return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      unload: () => {
+        try {
+          const current = readSystemdActivationState();
+          if (!current.present) {
+            return fs.existsSync(def.filePath)
+              ? { ok: false, stdout: '', stderr: 'systemd manager does not own the trusted service file' }
+              : { ok: true, stdout: '', stderr: '' };
+          }
+          if (current.fragmentPath !== def.filePath) {
+            return { ok: false, stdout: '', stderr: 'systemd FragmentPath does not match the trusted service file' };
+          }
+          const disabled = runCmd(def.unregisterArgs);
+          if (!disabled.ok) return disabled;
+          return verifySystemdState({
+            present: true,
+            active: false,
+            enabled: false,
+            fragmentPath: def.filePath,
+          });
+        } catch (error) {
+          return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      afterRemove: () => {
+        const reloaded = runCmd(['systemctl', '--user', 'daemon-reload']);
+        return reloaded.ok
+          ? verifySystemdState({ present: false, active: false, enabled: false })
+          : reloaded;
+      },
+      recover: (state) => {
+        const activation = parseSystemdRecoveryState(state);
+        return activation
+          ? applySystemdState(activation)
+          : { ok: false, stdout: '', stderr: 'invalid persisted systemd activation state' };
+      },
+      validateRecovery: (state) => parseSystemdRecoveryState(state)
+        ? { ok: true, stdout: '', stderr: '' }
+        : { ok: false, stdout: '', stderr: 'invalid persisted systemd activation state' },
+      recoverAfterFailedRemove: () => priorActivation
+        ? applySystemdState(priorActivation)
+        : {
+            ok: false,
+            stdout: '',
+            stderr: 'systemd pre-uninstall activation state is unavailable',
+          },
+    });
+  } else if (platform === 'win32') {
+    const home = resolveHome(opts.homeDir);
+    let priorActivation: WindowsActivationState | undefined;
+    let persistedRecoveryActivation: WindowsActivationState | undefined;
+    removeLaunchdPlistTransaction({
+      plistPath: def.filePath,
+      trustedRoot: home,
+      lockDir: path.join(home, '.ashlr', 'locks'),
+      operationLabel: 'Task Scheduler',
+      preflight: ({ hasPrior }) => {
+        try {
+          const task = readWindowsTaskSnapshot(def.filePath);
+          if (task.present !== hasPrior) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'Task Scheduler manager and trusted launcher presence disagree',
+            };
+          }
+          priorActivation = task.present
+            ? {
                 present: true,
                 state: task.state,
-                legacyLauncher: false,
+                legacyLauncher: inspectLegacyWindowsLauncher(home, path.dirname(def.filePath)),
                 taskXmlBase64: task.taskXmlBase64,
                 taskXmlSha256: task.taskXmlSha256,
                 taskSecurityDescriptorBase64: task.taskSecurityDescriptorBase64,
                 taskSecurityDescriptorSha256: task.taskSecurityDescriptorSha256,
                 taskSecurityScope: task.taskSecurityScope,
-              }, def.filePath);
-            } catch (error) {
-              return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
-            }
-          }
-          try {
-            const current = readSystemdActivationState();
-            priorSystemdActivation = current;
-            if (!current.present) {
-              return fs.existsSync(def.filePath)
-                ? { ok: false, stdout: '', stderr: 'systemd manager does not own the trusted service file' }
-                : { ok: true, stdout: '', stderr: '' };
-            }
-            if (current.fragmentPath !== def.filePath) {
-              return { ok: false, stdout: '', stderr: 'systemd FragmentPath does not match the trusted service file' };
-            }
-            const disabled = runCmd(def.unregisterArgs);
-            if (!disabled.ok) return disabled;
-            return verifySystemdState({
-              present: true,
-              active: false,
-              enabled: false,
-              fragmentPath: def.filePath,
-            });
-          } catch (error) {
-            return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
-          }
-        },
-        ...(platform === 'linux'
-          ? {
-              afterRemove: () => {
-                const reloaded = runCmd(['systemctl', '--user', 'daemon-reload']);
-                return reloaded.ok
-                  ? verifySystemdState({ present: false, active: false, enabled: false })
-                  : reloaded;
-              },
-              recoverAfterFailedRemove: () => {
-                return priorSystemdActivation
-                  ? applySystemdState(priorSystemdActivation)
-                  : {
-                      ok: false,
-                      stdout: '',
-                      stderr: 'systemd pre-uninstall activation state is unavailable',
-                    };
-              },
-            }
-          : {}),
-      });
-    } catch { /* uninstall remains best-effort */ }
+              }
+            : {
+                present: false,
+                legacyLauncher: inspectLegacyWindowsLauncher(home, path.dirname(def.filePath)),
+              };
+          return { ok: true, stdout: '', stderr: '', recoveryState: priorActivation };
+        } catch (error) {
+          return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      unload: () => {
+        const activation = priorActivation ?? persistedRecoveryActivation;
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'Windows activation authority is unavailable' };
+        }
+        const authority = validateWindowsRecoveryLauncherState(
+          home,
+          path.dirname(def.filePath),
+          activation,
+        );
+        if (!authority.ok) return authority;
+        const archived = archiveLegacyWindowsLauncher(
+          home,
+          path.dirname(def.filePath),
+          activation.legacyLauncher,
+        );
+        if (!archived.ok) return archived;
+        return stopAndDeleteWindowsTask(activation, def.filePath);
+      },
+      recoverUnload: (state, phase) => {
+        const activation = parseWindowsRecoveryState(state);
+        return activation
+          ? recoverWindowsTransactionUnload(
+              def,
+              activation,
+              { present: false, legacyLauncher: false },
+              phase,
+            )
+          : { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+      },
+      afterRemove: () => {
+        const task = verifyWindowsState(
+          { present: false, legacyLauncher: false },
+          def.filePath,
+        );
+        if (!task.ok) return task;
+        return verifyLegacyWindowsLauncherAbsent(home, path.dirname(def.filePath));
+      },
+      recover: (state) => {
+        const activation = parseWindowsRecoveryState(state);
+        return activation
+          ? restoreWindowsState(def, home, activation)
+          : { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+      },
+      validateRecovery: (state) => {
+        const activation = parseWindowsRecoveryState(state);
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+        }
+        const authority = validateWindowsRecoveryLauncherState(
+          home,
+          path.dirname(def.filePath),
+          activation,
+        );
+        if (!authority.ok) return authority;
+        persistedRecoveryActivation = activation;
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      recoverAfterFailedRemove: () => priorActivation
+        ? restoreWindowsState(def, home, priorActivation)
+        : { ok: false, stdout: '', stderr: 'Windows pre-uninstall activation state is unavailable' },
+    });
   }
-  clearServiceStatusCache();
+  } finally {
+    clearServiceStatusCache();
+  }
 }
 
 /**

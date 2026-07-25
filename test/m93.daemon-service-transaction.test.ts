@@ -424,6 +424,59 @@ describe('daemon service rollback', () => {
 });
 
 describe('daemon service uninstall authority', () => {
+  it('restores launchd loaded and disabled state after a mutating false-zero bootout', async () => {
+    const options = {
+      platform: 'darwin' as const,
+      homeDir: home,
+      nodePath: process.execPath,
+      binPath: path.join(home, 'bin', 'ashlr'),
+    };
+    const def = generateServiceDefinition(options);
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'trusted-plist', { mode: 0o600 });
+    const original = fs.lstatSync(def.filePath);
+    let loaded = true;
+    let disabled = false;
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== 'launchctl') return result();
+      if (args[0] === 'print') {
+        return loaded
+          ? result(0, '{ "pid" = 123; }')
+          : result(113, '', 'Could not find service');
+      }
+      if (args[0] === 'print-disabled') {
+        return result(
+          0,
+          `disabled services = {\n\t"ai.ashlr.daemon" => ${disabled ? 'disabled' : 'enabled'}\n}\n`,
+        );
+      }
+      if (args[0] === 'bootout') {
+        loaded = false;
+        return result(0, '', 'Boot-out failed: 5: Input/output error');
+      }
+      if (args[0] === 'bootstrap') loaded = true;
+      if (args[0] === 'disable') disabled = true;
+      if (args[0] === 'enable') disabled = false;
+      return result();
+    });
+
+    await expect(uninstall(options)).rejects.toThrow(
+      'launchd unload failed: Boot-out failed: 5: Input/output error; ' +
+      'prior service file and manager state were restored',
+    );
+
+    const restored = fs.lstatSync(def.filePath);
+    expect({ dev: restored.dev, ino: restored.ino }).toEqual({
+      dev: original.dev,
+      ino: original.ino,
+    });
+    expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-plist');
+    expect({ loaded, disabled }).toEqual({ loaded: true, disabled: false });
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+  });
+
   it('restores the exact Linux activation state when final daemon-reload fails', async () => {
     const def = generateServiceDefinition(opts('linux'));
     fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
@@ -453,12 +506,55 @@ describe('daemon service uninstall authority', () => {
       return result();
     });
 
-    await expect(uninstall(opts('linux'))).resolves.toBeUndefined();
+    await expect(uninstall(opts('linux'))).rejects.toThrow(
+      'service removal finalization failed: reload denied; ' +
+      'prior service file and manager state were restored',
+    );
 
     expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-unit');
     expect(fs.statSync(def.filePath).mode & 0o777).toBe(0o600);
     expect(state).toEqual({ active: true, enabled: true });
     expect(reloads).toBe(2);
+  });
+
+  it('restores Linux activation when disable mutates state before verification fails', async () => {
+    const def = generateServiceDefinition(opts('linux'));
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'trusted-unit', { mode: 0o600 });
+    const state = { active: true, enabled: true };
+    let poisonPostDisableVerification = false;
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== 'systemctl') return result();
+      if (args.includes('is-active')) {
+        return state.active ? result(0, 'active\n') : result(3, 'inactive\n');
+      }
+      if (args.includes('is-enabled')) {
+        if (poisonPostDisableVerification) {
+          poisonPostDisableVerification = false;
+          return result(0, 'enabled\n');
+        }
+        return state.enabled ? result(0, 'enabled\n') : result(1, 'disabled\n');
+      }
+      if (args.includes('show')) return result(0, `${def.filePath}\n`);
+      if (args.includes('disable')) {
+        state.enabled = false;
+        state.active = false;
+        poisonPostDisableVerification = true;
+      }
+      if (args.includes('enable')) state.enabled = true;
+      if (args.includes('start')) state.active = true;
+      return result();
+    });
+
+    await expect(uninstall(opts('linux'))).rejects.toThrow(
+      'systemd unload failed: state=',
+    );
+
+    expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-unit');
+    expect(state).toEqual({ active: true, enabled: true });
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
   });
 
   it.each([
@@ -486,7 +582,9 @@ describe('daemon service uninstall authority', () => {
       return result();
     });
 
-    await expect(uninstall(opts('win32'))).resolves.toBeUndefined();
+    await expect(uninstall(opts('win32'))).rejects.toThrow(
+      'prior service file and manager state were restored',
+    );
 
     expect(snapshotRead).toBe(true);
     expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-launcher');
@@ -515,12 +613,53 @@ describe('daemon service uninstall authority', () => {
       return result();
     });
 
-    await expect(uninstall(opts('win32'))).resolves.toBeUndefined();
+    await expect(uninstall(opts('win32'))).rejects.toThrow(
+      'prior service file and manager state were restored',
+    );
 
     expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-launcher');
     expect(spawnSyncMock.mock.calls.some(([cmd, args]: [string, string[]]) =>
       isWindowsPowerShellCommand(cmd) &&
       args.join(' ').includes('$folder.DeleteTask($taskName,0)'))).toBe(true);
+  });
+
+  it('restarts an exact Windows task when stop succeeds before delete fails', async () => {
+    const def = generateServiceDefinition(opts('win32'));
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'trusted-launcher', { mode: 0o600 });
+    let taskState = '4';
+    let starts = 0;
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (!isWindowsPowerShellCommand(cmd)) return result();
+      const script = args.join(' ');
+      if (script.includes('$folder.DeleteTask($taskName,0)')) {
+        taskState = '3';
+        return result(1, '', 'Access is denied after stop');
+      }
+      if (script.includes('$registered.Run($null)')) {
+        starts++;
+        taskState = '4';
+        return result(0, 'started');
+      }
+      return result(
+        0,
+        script.includes('GetSecurityDescriptor(7)')
+          ? windowsTaskSnapshotFixture(taskState)
+          : taskState,
+      );
+    });
+
+    await expect(uninstall(opts('win32'))).rejects.toThrow(
+      'Task Scheduler unload failed: Access is denied after stop; ' +
+      'prior service file and manager state were restored',
+    );
+
+    expect(starts).toBe(1);
+    expect(taskState).toBe('4');
+    expect(fs.readFileSync(def.filePath, 'utf8')).toBe('trusted-launcher');
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
   });
 });
 

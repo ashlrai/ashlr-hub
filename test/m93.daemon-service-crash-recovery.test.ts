@@ -32,23 +32,45 @@ vi.mock('../src/core/daemon/launchd-plist-transaction.js', async (importOriginal
         if (checkpoint === crashControl.at) throw new Error(`simulated crash at ${checkpoint}`);
       },
     }),
+    removeLaunchdPlistTransaction: (
+      options: Parameters<typeof actual.removeLaunchdPlistTransaction>[0],
+    ) => actual.removeLaunchdPlistTransaction({
+      ...options,
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === crashControl.at) throw new Error(`simulated crash at ${checkpoint}`);
+      },
+    }),
   };
 });
 
 import * as cp from 'node:child_process';
-import { generateServiceDefinition, install } from '../src/core/daemon/service.js';
-import type { LaunchdInstallCheckpoint } from '../src/core/daemon/launchd-plist-transaction.js';
+import { generateServiceDefinition, install, uninstall } from '../src/core/daemon/service.js';
+import type {
+  LaunchdInstallCheckpoint,
+  LaunchdRemovalCheckpoint,
+} from '../src/core/daemon/launchd-plist-transaction.js';
 import { windowsPowerShellPath } from '../src/core/daemon/windows-task-scripts.js';
 
 const spawnSyncMock = cp.spawnSync as ReturnType<typeof vi.fn>;
 const checkpoints: LaunchdInstallCheckpoint[] = [
   'journal-prepared',
+  'journal-stopping',
   'service-stopped',
   'journal-stopped',
   'plist-replaced',
   'journal-replaced',
+  'journal-activating',
   'service-activated',
   'journal-activated',
+];
+const removalCheckpoints: LaunchdRemovalCheckpoint[] = [
+  'removal-journal-prepared',
+  'removal-service-stopped',
+  'removal-journal-stopped',
+  'removal-file-removed',
+  'removal-journal-removed',
+  'removal-manager-finalized',
+  'removal-journal-finalized',
 ];
 let home: string;
 
@@ -60,10 +82,10 @@ function result(status = 0, stdout = '', stderr = '') {
   return { status, stdout, stderr, error: undefined };
 }
 
-function windowsTaskSnapshotFixture(state: string): string {
+function windowsTaskSnapshotFixture(state: string, identity = 'prior-crash'): string {
   return JSON.stringify({
     state,
-    taskXmlBase64: Buffer.from('<Task version="1.4">prior-crash</Task>', 'utf8').toString('base64'),
+    taskXmlBase64: Buffer.from(`<Task version="1.4">${identity}</Task>`, 'utf8').toString('base64'),
     taskSecurityDescriptorBase64: Buffer.from('D:P(A;;FA;;;SY)', 'utf8').toString('base64'),
   });
 }
@@ -145,10 +167,11 @@ describe('platform service crash recovery', () => {
     let taskState: 'absent' | 'ready' = 'ready';
 
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (isWindowsPowerShellCommand(cmd)) {
-        if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
-          taskState = 'absent';
-          return result(0, 'deleted');
+        if (isWindowsPowerShellCommand(cmd)) {
+          if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+            if (taskState === 'absent') return result(1, '', 'task is absent');
+            taskState = 'absent';
+            return result(0, 'deleted');
         }
         if (args.join(' ').includes(".RegisterTask('AshlrDaemon'")) {
           taskState = 'ready';
@@ -191,6 +214,74 @@ describe('platform service crash recovery', () => {
     )).toBe('legacy');
     expect(fs.readFileSync(def.filePath, 'utf8')).toContain('daemon start');
     expect(fs.readdirSync(path.join(home, '.ashlr', 'locks')).filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+  });
+
+  it('removes an exact transaction-created Windows task before restoring an interrupted upgrade', async () => {
+    const options = {
+      platform: 'win32' as const,
+      homeDir: home,
+      nodePath: process.execPath,
+      binPath: path.join(home, 'bin', 'ashlr'),
+      autostart: true,
+    };
+    const def = generateServiceDefinition(options);
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'prior-launcher', { mode: 0o600 });
+    let task: 'absent' | 'prior' | 'replacement' = 'prior';
+    const events: string[] = [];
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (!isWindowsPowerShellCommand(cmd)) return result();
+      const script = args.join(' ');
+      if (script.includes('$folder.DeleteTask($taskName,0)')) {
+        if (task === 'absent') return result(1, '', 'task is absent');
+        events.push(`delete:${task}`);
+        task = 'absent';
+        return result(0, 'deleted');
+      }
+      if (script.includes('$folder.RegisterTaskDefinition($taskName,$definition')) {
+        if (task !== 'absent') return result(1, '', 'task already exists');
+        events.push('create:replacement');
+        task = 'replacement';
+        return result(0, 'created');
+      }
+      if (script.includes(".RegisterTask('AshlrDaemon'")) {
+        if (task !== 'absent') return result(1, '', 'task already exists');
+        events.push('restore:prior');
+        task = 'prior';
+        return result(0, 'restored');
+      }
+      return result(
+        0,
+        task === 'absent'
+          ? 'absent'
+          : (script.includes('GetSecurityDescriptor(7)')
+              ? windowsTaskSnapshotFixture('3', task)
+              : '3'),
+      );
+    });
+
+    crashControl.at = 'service-activated';
+    await expect(install(options)).rejects.toThrow('simulated crash at service-activated');
+    expect(task).toBe('replacement');
+
+    crashControl.at = null;
+    events.push('retry');
+    await install(options);
+
+    const retry = events.indexOf('retry');
+    const removedReplacement = events.indexOf('delete:replacement', retry + 1);
+    const restoredPrior = events.indexOf('restore:prior', removedReplacement + 1);
+    const removedPrior = events.indexOf('delete:prior', restoredPrior + 1);
+    const recreatedReplacement = events.indexOf('create:replacement', removedPrior + 1);
+    expect(removedReplacement).toBeGreaterThan(retry);
+    expect(restoredPrior).toBeGreaterThan(removedReplacement);
+    expect(removedPrior).toBeGreaterThan(restoredPrior);
+    expect(recreatedReplacement).toBeGreaterThan(removedPrior);
+    expect(task).toBe('replacement');
+    expect(fs.readFileSync(def.filePath, 'utf8')).toContain('daemon start');
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
   });
 
   it.each(['missing', 'duplicated', 'dangling'] as const)(
@@ -327,5 +418,416 @@ describe('platform service crash recovery', () => {
     expect(fs.readFileSync(def.filePath, 'utf8')).toBe('prior-launcher');
     expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
       .filter((name) => name.endsWith('.journal.json'))).toHaveLength(1);
+  });
+
+  it.each(removalCheckpoints)(
+    'restores persisted systemd state before resuming removal after %s',
+    async (checkpoint) => {
+      const options = {
+        platform: 'linux' as const,
+        homeDir: home,
+        nodePath: process.execPath,
+        binPath: path.join(home, 'bin', 'ashlr'),
+      };
+      const def = generateServiceDefinition(options);
+      fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(def.filePath, 'prior-unit', { mode: 0o600 });
+      const state = { present: true, active: true, enabled: true };
+      const events: string[] = [];
+
+      spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd !== 'systemctl') return result();
+        if (args.includes('daemon-reload')) {
+          state.present = fs.existsSync(def.filePath);
+          if (!state.present) {
+            state.active = false;
+            state.enabled = false;
+          }
+          return result();
+        }
+        if (args.includes('is-active')) {
+          return state.active ? result(0, 'active\n') : result(3, 'inactive\n');
+        }
+        if (args.includes('is-enabled')) {
+          if (!state.present) return result(1, 'not-found\n');
+          return state.enabled ? result(0, 'enabled\n') : result(1, 'disabled\n');
+        }
+        if (args.includes('show')) return result(0, `${def.filePath}\n`);
+        if (args.includes('disable')) {
+          events.push('disable');
+          state.enabled = false;
+        }
+        if (args.includes('enable')) {
+          events.push('enable');
+          state.enabled = true;
+        }
+        if (args.includes('stop') || args.includes('--now') && args.includes('disable')) {
+          state.active = false;
+        }
+        if (args.includes('start')) {
+          events.push('start');
+          state.active = true;
+        }
+        return result();
+      });
+
+      crashControl.at = checkpoint;
+      await expect(uninstall(options)).rejects.toThrow(`simulated crash at ${checkpoint}`);
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.removal.journal.json'))).toHaveLength(1);
+
+      crashControl.at = null;
+      events.push('retry');
+      await uninstall(options);
+
+      const retry = events.indexOf('retry');
+      const restored = events.indexOf('enable', retry + 1);
+      const removedAgain = events.indexOf('disable', retry + 1);
+      expect(restored).toBeGreaterThan(retry);
+      expect(events.indexOf('start', retry + 1)).toBeGreaterThan(restored);
+      expect(removedAgain).toBeGreaterThan(restored);
+      expect(fs.existsSync(def.filePath)).toBe(false);
+      expect(state).toEqual({ present: false, active: false, enabled: false });
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+    },
+  );
+
+  it.each([
+    'removal-recovery-restoring',
+    'removal-recovery-file-restored',
+    'removal-recovery-restored',
+    'removal-recovery-manager-restored',
+  ] as const)(
+    'resumes systemd removal after a second crash at %s',
+    async (recoveryCheckpoint) => {
+      const options = {
+        platform: 'linux' as const,
+        homeDir: home,
+        nodePath: process.execPath,
+        binPath: path.join(home, 'bin', 'ashlr'),
+      };
+      const def = generateServiceDefinition(options);
+      fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(def.filePath, 'prior-unit', { mode: 0o600 });
+      const state = { present: true, active: true, enabled: true };
+
+      spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd !== 'systemctl') return result();
+        if (args.includes('daemon-reload')) {
+          state.present = fs.existsSync(def.filePath);
+          if (!state.present) {
+            state.active = false;
+            state.enabled = false;
+          }
+          return result();
+        }
+        if (args.includes('is-active')) {
+          return state.active ? result(0, 'active\n') : result(3, 'inactive\n');
+        }
+        if (args.includes('is-enabled')) {
+          if (!state.present) return result(1, 'not-found\n');
+          return state.enabled ? result(0, 'enabled\n') : result(1, 'disabled\n');
+        }
+        if (args.includes('show')) return result(0, `${def.filePath}\n`);
+        if (args.includes('disable')) {
+          state.enabled = false;
+          state.active = false;
+        }
+        if (args.includes('enable')) state.enabled = true;
+        if (args.includes('start')) state.active = true;
+        return result();
+      });
+
+      crashControl.at = 'removal-file-removed';
+      await expect(uninstall(options)).rejects.toThrow('simulated crash at removal-file-removed');
+      expect(fs.existsSync(def.filePath)).toBe(false);
+
+      crashControl.at = recoveryCheckpoint;
+      await expect(uninstall(options)).rejects.toThrow(`simulated crash at ${recoveryCheckpoint}`);
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.removal.journal.json'))).toHaveLength(1);
+
+      crashControl.at = null;
+      await uninstall(options);
+
+      expect(fs.existsSync(def.filePath)).toBe(false);
+      expect(state).toEqual({ present: false, active: false, enabled: false });
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+    },
+  );
+
+  it.each(removalCheckpoints)(
+    'restores persisted Windows task state before resuming removal after %s',
+    async (checkpoint) => {
+      const options = {
+        platform: 'win32' as const,
+        homeDir: home,
+        nodePath: process.execPath,
+        binPath: path.join(home, 'bin', 'ashlr'),
+      };
+      const def = generateServiceDefinition(options);
+      fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(def.filePath, 'prior-launcher', { mode: 0o600 });
+      let taskState: 'absent' | 'ready' = 'ready';
+
+      spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+        if (!isWindowsPowerShellCommand(cmd)) return result();
+        const script = args.join(' ');
+        if (script.includes('$folder.DeleteTask($taskName,0)')) {
+          taskState = 'absent';
+          return result(0, 'deleted');
+        }
+        if (script.includes(".RegisterTask('AshlrDaemon'")) {
+          taskState = 'ready';
+          return result(0, 'restored');
+        }
+        return result(
+          0,
+          taskState === 'ready'
+            ? (script.includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('3') : '3')
+            : 'absent',
+        );
+      });
+
+      crashControl.at = checkpoint;
+      await expect(uninstall(options)).rejects.toThrow(`simulated crash at ${checkpoint}`);
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.removal.journal.json'))).toHaveLength(1);
+
+      crashControl.at = null;
+      await uninstall(options);
+
+      expect(fs.existsSync(def.filePath)).toBe(false);
+      expect(taskState).toBe('absent');
+      expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+        .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['disabled', '1', '1', 0],
+    ['ready', '3', '3', 0],
+    ['queued', '2', '4', 1],
+    ['running', '4', '4', 1],
+  ] as const)(
+    'restores the exact %s Windows runtime state before retrying removal',
+    async (_label, initialToken, restoredToken, expectedStarts) => {
+      const options = {
+        platform: 'win32' as const,
+        homeDir: home,
+        nodePath: process.execPath,
+        binPath: path.join(home, 'bin', 'ashlr'),
+      };
+      const def = generateServiceDefinition(options);
+      fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(def.filePath, 'prior-launcher', { mode: 0o600 });
+      let taskToken: 'absent' | '1' | '2' | '3' | '4' = initialToken;
+      const events: string[] = [];
+
+      spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+        if (!isWindowsPowerShellCommand(cmd)) return result();
+        const script = args.join(' ');
+        if (script.includes('$folder.DeleteTask($taskName,0)')) {
+          events.push('delete');
+          taskToken = 'absent';
+          return result(0, 'deleted');
+        }
+        if (script.includes(".RegisterTask('AshlrDaemon'")) {
+          events.push('restore');
+          taskToken = initialToken === '1' ? '1' : '3';
+          return result(0, 'restored');
+        }
+        if (script.includes('$registered.Run($null)')) {
+          events.push('run');
+          taskToken = '4';
+          return result(0, 'started');
+        }
+        return result(
+          0,
+          taskToken === 'absent'
+            ? 'absent'
+            : (script.includes('GetSecurityDescriptor(7)')
+                ? windowsTaskSnapshotFixture(taskToken)
+                : taskToken),
+        );
+      });
+
+      crashControl.at = 'removal-file-removed';
+      await expect(uninstall(options)).rejects.toThrow('simulated crash at removal-file-removed');
+      expect(taskToken).toBe('absent');
+
+      crashControl.at = null;
+      events.push('retry');
+      await uninstall(options);
+
+      const retry = events.indexOf('retry');
+      const restore = events.indexOf('restore', retry + 1);
+      const finalDelete = events.lastIndexOf('delete');
+      expect(restore).toBeGreaterThan(retry);
+      expect(finalDelete).toBeGreaterThan(restore);
+      expect(events.slice(retry + 1, finalDelete).filter((event) => event === 'run'))
+        .toHaveLength(expectedStarts);
+      expect(restoredToken === '4' ? events.includes('run') : !events.includes('run')).toBe(true);
+      expect(taskToken).toBe('absent');
+      expect(fs.existsSync(def.filePath)).toBe(false);
+    },
+  );
+
+  it('reuses an exact restored Windows task after crashing before journal deletion', async () => {
+    const options = {
+      platform: 'win32' as const,
+      homeDir: home,
+      nodePath: process.execPath,
+      binPath: path.join(home, 'bin', 'ashlr'),
+    };
+    const def = generateServiceDefinition(options);
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'prior-launcher', { mode: 0o600 });
+    let taskState: 'absent' | 'ready' = 'ready';
+    let registrations = 0;
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (!isWindowsPowerShellCommand(cmd)) return result();
+      const script = args.join(' ');
+      if (script.includes('$folder.DeleteTask($taskName,0)')) {
+        taskState = 'absent';
+        return result(0, 'deleted');
+      }
+      if (script.includes(".RegisterTask('AshlrDaemon'")) {
+        registrations += 1;
+        taskState = 'ready';
+        return result(0, 'restored');
+      }
+      return result(
+        0,
+        taskState === 'ready'
+          ? (script.includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('3') : '3')
+          : 'absent',
+      );
+    });
+
+    crashControl.at = 'removal-file-removed';
+    await expect(uninstall(options)).rejects.toThrow('simulated crash at removal-file-removed');
+    expect(taskState).toBe('absent');
+
+    crashControl.at = 'removal-recovery-manager-restored';
+    await expect(uninstall(options)).rejects.toThrow(
+      'simulated crash at removal-recovery-manager-restored',
+    );
+    expect(taskState).toBe('ready');
+    expect(registrations).toBe(1);
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.removal.journal.json'))).toHaveLength(1);
+
+    crashControl.at = null;
+    await uninstall(options);
+
+    expect(registrations).toBe(1);
+    expect(taskState).toBe('absent');
+    expect(fs.existsSync(def.filePath)).toBe(false);
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+  });
+
+  it('does not rerun an exact queued Windows task while recovering a prepared removal', async () => {
+    const options = {
+      platform: 'win32' as const,
+      homeDir: home,
+      nodePath: process.execPath,
+      binPath: path.join(home, 'bin', 'ashlr'),
+    };
+    const def = generateServiceDefinition(options);
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'prior-launcher', { mode: 0o600 });
+    let taskState: 'absent' | 'queued' = 'queued';
+    let runs = 0;
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (!isWindowsPowerShellCommand(cmd)) return result();
+      const script = args.join(' ');
+      if (script.includes('$folder.DeleteTask($taskName,0)')) {
+        taskState = 'absent';
+        return result(0, 'deleted');
+      }
+      if (script.includes('$registered.Run($null)')) {
+        runs += 1;
+        return result(1, '', 'queued task cannot be rerun');
+      }
+      return result(
+        0,
+        taskState === 'queued'
+          ? (script.includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('2') : '2')
+          : 'absent',
+      );
+    });
+
+    crashControl.at = 'removal-journal-prepared';
+    await expect(uninstall(options)).rejects.toThrow(
+      'simulated crash at removal-journal-prepared',
+    );
+    expect(taskState).toBe('queued');
+
+    crashControl.at = null;
+    await uninstall(options);
+
+    expect(runs).toBe(0);
+    expect(taskState).toBe('absent');
+    expect(fs.existsSync(def.filePath)).toBe(false);
+  });
+
+  it('reconciles an interrupted install before uninstalling the trusted systemd unit', async () => {
+    const options = {
+      platform: 'linux' as const,
+      homeDir: home,
+      nodePath: process.execPath,
+      binPath: path.join(home, 'bin', 'ashlr'),
+      autostart: false,
+    };
+    const def = generateServiceDefinition(options);
+    fs.mkdirSync(path.dirname(def.filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(def.filePath, 'prior-unit', { mode: 0o600 });
+    const state = { present: true, active: true, enabled: true };
+
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== 'systemctl') return result();
+      if (args.includes('daemon-reload')) {
+        state.present = fs.existsSync(def.filePath);
+        if (!state.present) {
+          state.active = false;
+          state.enabled = false;
+        }
+        return result();
+      }
+      if (args.includes('is-active')) {
+        return state.active ? result(0, 'active\n') : result(3, 'inactive\n');
+      }
+      if (args.includes('is-enabled')) {
+        if (!state.present) return result(1, 'not-found\n');
+        return state.enabled ? result(0, 'enabled\n') : result(1, 'disabled\n');
+      }
+      if (args.includes('show')) return result(0, `${def.filePath}\n`);
+      if (args.includes('disable')) state.enabled = false;
+      if (args.includes('enable')) state.enabled = true;
+      if (args.includes('stop') || args.includes('--now') && args.includes('disable')) {
+        state.active = false;
+      }
+      if (args.includes('start')) state.active = true;
+      return result();
+    });
+
+    crashControl.at = 'journal-stopped';
+    await expect(install(options)).rejects.toThrow('simulated crash at journal-stopped');
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toHaveLength(1);
+
+    crashControl.at = null;
+    await uninstall(options);
+
+    expect(fs.existsSync(def.filePath)).toBe(false);
+    expect(state).toEqual({ present: false, active: false, enabled: false });
+    expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
+      .filter((name) => name.endsWith('.journal.json'))).toEqual([]);
   });
 });

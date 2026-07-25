@@ -48,14 +48,29 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A runCmd mock that always returns ok:true */
+/** A stateful launchctl mock with optional command-specific overrides. */
 function mockRunCmd(overrides: Record<string, { ok: boolean; stderr: string; stdout: string }> = {}) {
+  let loaded: boolean | undefined;
   return vi.fn((...args: unknown[]) => {
     const argv = args[0] as string[];
     const key = argv.join(' ');
     for (const [pattern, result] of Object.entries(overrides)) {
-      if (key.includes(pattern)) return result;
+      if (key.includes(pattern)) {
+        if (result.ok && argv[1] === 'load') loaded = true;
+        if ((result.ok || /not found|not loaded|no such process/i.test(result.stderr)) && argv[1] === 'unload') {
+          loaded = false;
+        }
+        return result;
+      }
     }
+    if (argv[0] === 'launchctl' && argv[1] === 'list') {
+      loaded ??= fs.existsSync(path.join(tmpHome, 'Library', 'LaunchAgents', 'ai.ashlr.serve.plist'));
+      return loaded
+        ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+        : { ok: false, stderr: 'Could not find service', stdout: '' };
+    }
+    if (argv[0] === 'launchctl' && argv[1] === 'load') loaded = true;
+    if (argv[0] === 'launchctl' && argv[1] === 'unload') loaded = false;
     return { ok: true, stderr: '', stdout: '' };
   });
 }
@@ -67,10 +82,12 @@ function mockOpenBrowser() {
 
 const launchdCrashCheckpoints = [
   'journal-prepared',
+  'journal-stopping',
   'service-stopped',
   'journal-stopped',
   'plist-replaced',
   'journal-replaced',
+  'journal-activating',
   'service-activated',
   'journal-activated',
 ] as const;
@@ -197,12 +214,12 @@ describe('installServeAgent', () => {
     expect(fs.existsSync(path.join(tmpHome, '.ashlr'))).toBe(true);
   });
 
-  it('calls launchctl unload then launchctl load', async () => {
+  it('avoids a redundant unload before loading a fresh serve agent', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
-    const rc = vi.fn((_args: string[]) => ({ ok: true, stderr: '', stdout: '' }));
+    const rc = mockRunCmd();
     installServeAgent({ homeDir: tmpHome, _runCmd: rc as Parameters<typeof installServeAgent>[0]['_runCmd'] });
     const calls = rc.mock.calls;
-    expect(calls.some(([args]) => args[0] === 'launchctl' && args[1] === 'unload')).toBe(true);
+    expect(calls.some(([args]) => args[0] === 'launchctl' && args[1] === 'unload')).toBe(false);
     const load = calls.find(([args]) => args[0] === 'launchctl' && args[1] === 'load');
     expect(load?.[0][2]).toBe(plistPath(tmpHome));
   });
@@ -255,11 +272,19 @@ describe('installServeAgent', () => {
     fs.writeFileSync(pp, prior);
     const calls: string[][] = [];
     let loadCount = 0;
+    let loaded = true;
     const rc = vi.fn((args: string[]) => {
       calls.push(args);
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'unload') loaded = false;
       if (args[1] === 'load' && loadCount++ === 0) {
         return { ok: false, stderr: 'new definition rejected', stdout: '' };
       }
+      if (args[1] === 'load') loaded = true;
       return { ok: true, stderr: '', stdout: '' };
     });
 
@@ -267,8 +292,39 @@ describe('installServeAgent', () => {
       'prior plist and activation state were restored',
     );
     expect(fs.readFileSync(pp)).toEqual(prior);
-    expect(calls.map((args) => args[1])).toEqual(['unload', 'load', 'unload', 'load']);
+    expect(calls.filter((args) => args[1] === 'unload')).toHaveLength(1);
+    expect(calls.filter((args) => args[1] === 'load')).toHaveLength(2);
     expect(fs.readdirSync(path.dirname(pp)).some((file) => file.includes('.tmp'))).toBe(false);
+  });
+
+  it('does not start a prior serve agent that was stopped before a failed upgrade', async () => {
+    const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
+    const pp = plistPath(tmpHome);
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<old/>', { mode: 0o600 });
+    let loaded = false;
+    let loads = 0;
+    const rc = vi.fn((args: string[]) => {
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'load') {
+        loads += 1;
+        return { ok: false, stderr: 'replacement rejected', stdout: '' };
+      }
+      if (args[1] === 'unload') loaded = false;
+      return { ok: true, stderr: '', stdout: '' };
+    });
+
+    expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
+      'prior plist and activation state were restored',
+    );
+
+    expect(loads).toBe(1);
+    expect(loaded).toBe(false);
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<old/>');
   });
 
   it('removes the replacement when loading a fresh install fails', async () => {
@@ -282,7 +338,7 @@ describe('installServeAgent', () => {
       'launchctl load failed: permission denied; first-install plist was removed',
     );
     expect(fs.existsSync(pp)).toBe(false);
-    expect(rc).toHaveBeenCalledTimes(3);
+    expect(rc.mock.calls.filter(([args]) => args[1] === 'load')).toHaveLength(1);
   });
 
   it('restores activation state after a fresh install fails', async () => {
@@ -421,8 +477,17 @@ describe('installServeAgent', () => {
     fs.mkdirSync(path.dirname(pp), { recursive: true });
     fs.writeFileSync(pp, '<old/>', 'utf8');
     let loadCount = 0;
+    let loaded = true;
     const rc = vi.fn((args: string[]) => {
-      if (args[1] !== 'load') return { ok: true, stderr: '', stdout: '' };
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'unload') {
+        loaded = false;
+        return { ok: true, stderr: '', stdout: '' };
+      }
       loadCount++;
       return loadCount === 1
         ? { ok: false, stderr: 'new load failed', stdout: '' }
@@ -490,9 +555,20 @@ describe('installServeAgent', () => {
     fs.writeFileSync(pp, prior, { mode: 0o640 });
     fs.chmodSync(pp, 0o640);
     let loads = 0;
-    const rc = vi.fn((args: string[]) => args[1] === 'load' && loads++ === 0
-      ? { ok: false, stderr: 'rejected', stdout: '' }
-      : { ok: true, stderr: '', stdout: '' });
+    let loaded = true;
+    const rc = vi.fn((args: string[]) => {
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'unload') loaded = false;
+      if (args[1] === 'load' && loads++ === 0) {
+        return { ok: false, stderr: 'rejected', stdout: '' };
+      }
+      if (args[1] === 'load') loaded = true;
+      return { ok: true, stderr: '', stdout: '' };
+    });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow('activation state were restored');
     expect(fs.readFileSync(pp)).toEqual(prior);
@@ -633,10 +709,18 @@ describe('installServeAgent', () => {
   it('does not restore disk state when the compensating unload fails', async () => {
     const { installServeAgent, plistPath } = await import('../src/cli/dashboard.js');
     const pp = plistPath(tmpHome);
-    let unloads = 0;
+    let loaded = false;
     const rc = vi.fn((args: string[]) => {
-      if (args[1] === 'load') return { ok: false, stderr: 'load rejected', stdout: '' };
-      if (args[1] === 'unload' && unloads++ > 0) {
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'load') {
+        loaded = true;
+        return { ok: false, stderr: 'load rejected', stdout: '' };
+      }
+      if (args[1] === 'unload') {
         return { ok: false, stderr: 'job still active', stdout: '' };
       }
       return { ok: true, stderr: '', stdout: '' };
@@ -770,12 +854,20 @@ describe('installServeAgent', () => {
     fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
     fs.writeFileSync(outside, 'MALICIOUS');
     let loads = 0;
+    let loaded = true;
     const rc = vi.fn((args: string[]) => {
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
       if (args[1] === 'unload') {
         fs.unlinkSync(pp);
         fs.symlinkSync(outside, pp);
+        loaded = false;
       } else if (args[1] === 'load') {
         loads++;
+        loaded = true;
       }
       return { ok: true, stderr: '', stdout: '' };
     });
@@ -793,19 +885,27 @@ describe('installServeAgent', () => {
     const outside = path.join(tmpHome, 'malicious-after-load.plist');
     fs.writeFileSync(outside, 'MALICIOUS');
     const calls: string[] = [];
+    let loaded = false;
     const rc = vi.fn((args: string[]) => {
       calls.push(args[1]!);
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
       if (args[1] === 'load') {
         fs.unlinkSync(pp);
         fs.symlinkSync(outside, pp);
+        loaded = true;
       }
+      if (args[1] === 'unload') loaded = false;
       return { ok: true, stderr: '', stdout: '' };
     });
 
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
       'active plist changed during launchctl load',
     );
-    expect(calls).toEqual(['unload', 'load', 'unload']);
+    expect(calls.filter((command) => command !== 'list')).toEqual(['load', 'unload']);
     expect(fs.readFileSync(outside, 'utf8')).toBe('MALICIOUS');
   });
 
@@ -1012,6 +1112,7 @@ describe('installServeAgent', () => {
         calls.push(`finalize:${fs.existsSync(pp) ? 'present' : 'absent'}`);
         return { ok: true, stdout: '', stderr: '' };
       },
+      recoverAfterFailedRemove: () => ({ ok: true, stdout: '', stderr: '' }),
     });
 
     expect(calls).toEqual(['unload', 'finalize:absent']);
@@ -1038,7 +1139,7 @@ describe('installServeAgent', () => {
       },
     })).toThrow(
       'service removal finalization failed: manager reload denied; ' +
-      'service file restored; manager state restored',
+      'prior service file and manager state were restored',
     );
 
     expect(calls).toEqual(['prior-service']);
@@ -1066,10 +1167,210 @@ describe('installServeAgent', () => {
       }),
     })).toThrow(
       'service removal finalization failed: manager reload denied; ' +
-      'service file restored; manager recovery failed: manager recovery denied',
+      'removal recovery failed: launchd removal recovery could not restore manager state: ' +
+      'manager recovery denied',
     );
 
     expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+  });
+
+  it('retries manager recovery after adopting the restored service-file identity', async () => {
+    const { removeLaunchdPlistTransaction } =
+      await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'remove-recovery-retry.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    let finalizations = 0;
+    let recoveries = 0;
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'prior-service', { mode: 0o600 });
+
+    const remove = () => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir,
+      unload: () => ({ ok: true, stdout: '', stderr: '' }),
+      afterRemove: () => ++finalizations === 1
+        ? { ok: false, stdout: '', stderr: 'transient finalization failure' }
+        : { ok: true, stdout: '', stderr: '' },
+      recoverAfterFailedRemove: () => ++recoveries === 1
+        ? { ok: false, stdout: '', stderr: 'transient manager recovery failure' }
+        : { ok: true, stdout: '', stderr: '' },
+    });
+
+    expect(remove).toThrow(
+      'service removal finalization failed: transient finalization failure; ' +
+      'removal recovery failed: launchd removal recovery could not restore manager state: ' +
+      'transient manager recovery failure',
+    );
+    expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+    expect(fs.readdirSync(lockDir).filter((name) => name.endsWith('.removal.journal.json')))
+      .toHaveLength(1);
+
+    expect(remove).not.toThrow();
+    expect(recoveries).toBe(2);
+    expect(fs.existsSync(pp)).toBe(false);
+    expect(fs.readdirSync(lockDir).filter((name) => name.endsWith('.journal.json'))).toEqual([]);
+  });
+
+  it.each([
+    ['malformed JSON', (_bytes: Buffer) => Buffer.from('{not-json\n'), 'invalid launchd removal transaction journal JSON'],
+    [
+      'snapshot digest mismatch',
+      (bytes: Buffer) => {
+        const value = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+        value.priorSha256 = '0'.repeat(64);
+        return Buffer.from(`${JSON.stringify(value)}\n`);
+      },
+      'launchd removal transaction journal prior snapshot digest mismatch',
+    ],
+    [
+      'invalid recovery state',
+      (bytes: Buffer) => {
+        const value = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+        value.recoveryState = { token: 'invalid' };
+        return Buffer.from(`${JSON.stringify(value)}\n`);
+      },
+      'launchd removal recovery rejected persisted activation state',
+    ],
+  ] as const)(
+    'rejects a %s removal journal before manager or service-file mutation',
+    async (_case, mutate, expectedError) => {
+      const { removeLaunchdPlistTransaction } =
+        await import('../src/core/daemon/launchd-plist-transaction.js');
+      const pp = path.join(tmpHome, 'Library', 'LaunchAgents', `remove-corrupt-${_case}.plist`);
+      const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+      const calls: string[] = [];
+      fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(pp, 'prior-service', { mode: 0o600 });
+
+      expect(() => removeLaunchdPlistTransaction({
+        plistPath: pp,
+        trustedRoot: tmpHome,
+        lockDir,
+        preflight: () => ({
+          ok: true,
+          stdout: '',
+          stderr: '',
+          recoveryState: { token: 'valid' },
+        }),
+        unload: () => ({ ok: true, stdout: '', stderr: '' }),
+        recover: () => ({ ok: true, stdout: '', stderr: '' }),
+        validateRecovery: (state) => (
+          (state as { token?: string } | undefined)?.token === 'valid'
+            ? { ok: true, stdout: '', stderr: '' }
+            : { ok: false, stdout: '', stderr: 'invalid recovery token' }
+        ),
+        checkpointHook: (checkpoint) => {
+          if (checkpoint === 'removal-journal-prepared') throw new Error('simulated crash');
+        },
+      })).toThrow('simulated crash');
+
+      const journalName = fs.readdirSync(lockDir)
+        .find((name) => name.endsWith('.removal.journal.json'));
+      expect(journalName).toBeDefined();
+      const journalPath = path.join(lockDir, journalName!);
+      const corrupted = mutate(fs.readFileSync(journalPath));
+      fs.writeFileSync(journalPath, corrupted, { mode: 0o600 });
+      const before = fs.readFileSync(journalPath);
+
+      expect(() => removeLaunchdPlistTransaction({
+        plistPath: pp,
+        trustedRoot: tmpHome,
+        lockDir,
+        preflight: () => {
+          calls.push('preflight');
+          return { ok: true, stdout: '', stderr: '', recoveryState: { token: 'valid' } };
+        },
+        unload: () => {
+          calls.push('unload');
+          return { ok: true, stdout: '', stderr: '' };
+        },
+        recover: () => {
+          calls.push('recover');
+          return { ok: true, stdout: '', stderr: '' };
+        },
+        validateRecovery: (state) => (
+          (state as { token?: string } | undefined)?.token === 'valid'
+            ? { ok: true, stdout: '', stderr: '' }
+            : { ok: false, stdout: '', stderr: 'invalid recovery token' }
+        ),
+      })).toThrow(expectedError);
+
+      expect(calls).toEqual([]);
+      expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+      expect(fs.readFileSync(journalPath).equals(before)).toBe(true);
+    },
+  );
+
+  it('rejects conflicting install and removal journals without consuming either', async () => {
+    const {
+      installLaunchdPlistTransaction,
+      removeLaunchdPlistTransaction,
+    } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'conflicting-journals.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    const alternateLockDir = path.join(tmpHome, '.ashlr', 'alternate-locks');
+    const calls: string[] = [];
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'prior-service', { mode: 0o600 });
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: 'replacement',
+      lockDir,
+      unload: () => ({ ok: true, stdout: '', stderr: '' }),
+      load: () => ({ ok: true, stdout: '', stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'journal-prepared') throw new Error('simulated install crash');
+      },
+    })).toThrow('simulated install crash');
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir: alternateLockDir,
+      unload: () => ({ ok: true, stdout: '', stderr: '' }),
+      recoverAfterFailedRemove: () => ({ ok: true, stdout: '', stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'removal-journal-prepared') throw new Error('simulated removal crash');
+      },
+    })).toThrow('simulated removal crash');
+
+    const removalName = fs.readdirSync(alternateLockDir)
+      .find((name) => name.endsWith('.removal.journal.json'));
+    expect(removalName).toBeDefined();
+    const targetRemovalPath = path.join(lockDir, removalName!);
+    fs.copyFileSync(path.join(alternateLockDir, removalName!), targetRemovalPath);
+    fs.chmodSync(targetRemovalPath, 0o600);
+    const before = new Map(
+      fs.readdirSync(lockDir)
+        .filter((name) => name.endsWith('.journal.json'))
+        .map((name) => [name, fs.readFileSync(path.join(lockDir, name))]),
+    );
+
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir,
+      preflight: () => {
+        calls.push('preflight');
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      unload: () => {
+        calls.push('unload');
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      recover: () => {
+        calls.push('recover');
+        return { ok: true, stdout: '', stderr: '' };
+      },
+    })).toThrow('conflicting install and removal transaction journals');
+
+    expect(calls).toEqual([]);
+    expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+    for (const [name, bytes] of before) {
+      expect(fs.readFileSync(path.join(lockDir, name)).equals(bytes)).toBe(true);
+    }
   });
 
   it('does not recover manager state for an interleaved replacement after unload', async () => {
@@ -1096,8 +1397,8 @@ describe('installServeAgent', () => {
       },
     })).toThrow(
       'active plist changed during removal: ' +
-      `${pp}; service file recovery failed: ` +
-      'service file identity or bytes changed during failed removal',
+      `${pp}; removal recovery failed: ` +
+      'launchd removal recovery rejected an interleaved service file',
     );
 
     expect(fs.readFileSync(pp, 'utf8')).toBe('interleaved');
@@ -1188,10 +1489,13 @@ describe('servePlistNeedsUpgrade', () => {
 
 describe('uninstallServeAgent', () => {
   it('calls launchctl unload', async () => {
-    const { uninstallServeAgent } = await import('../src/cli/dashboard.js');
-    const calls: string[][] = [];
-    const rc = vi.fn((args: string[]) => { calls.push(args); return { ok: true, stderr: '', stdout: '' }; });
+    const { uninstallServeAgent, plistPath } = await import('../src/cli/dashboard.js');
+    const rc = mockRunCmd();
+    const pp = plistPath(tmpHome);
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, 'content', { mode: 0o600 });
     uninstallServeAgent({ homeDir: tmpHome, _runCmd: rc as Parameters<typeof uninstallServeAgent>[0]['_runCmd'] });
+    const calls = rc.mock.calls.map(([args]) => args);
     expect(calls.some(a => a[0] === 'launchctl' && a[1] === 'unload')).toBe(true);
   });
 
@@ -1207,8 +1511,91 @@ describe('uninstallServeAgent', () => {
 
   it('does not throw when plist does not exist', async () => {
     const { uninstallServeAgent } = await import('../src/cli/dashboard.js');
-    const rc = mockRunCmd();
+    const absent = { ok: false, stderr: 'Could not find service', stdout: '' };
+    const rc = mockRunCmd({
+      'launchctl list': absent,
+      'launchctl unload': absent,
+    });
     expect(() => uninstallServeAgent({ homeDir: tmpHome, _runCmd: rc })).not.toThrow();
+  });
+
+  it('does not start a serve agent that was stopped before uninstall', async () => {
+    const { uninstallServeAgent, plistPath } = await import('../src/cli/dashboard.js');
+    const pp = plistPath(tmpHome);
+    const calls: string[][] = [];
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, 'content', { mode: 0o600 });
+    const rc = vi.fn((args: string[]) => {
+      calls.push(args);
+      if (args[1] === 'list' || args[1] === 'unload') {
+        return { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      return { ok: true, stderr: '', stdout: '' };
+    });
+
+    uninstallServeAgent({
+      homeDir: tmpHome,
+      _runCmd: rc as Parameters<typeof uninstallServeAgent>[0]['_runCmd'],
+    });
+
+    expect(calls.some((args) => args[1] === 'load')).toBe(false);
+    expect(fs.existsSync(pp)).toBe(false);
+  });
+
+  it('reuses an already-loaded serve agent while recovering a prepared removal journal', async () => {
+    const { uninstallServeAgent, plistPath } = await import('../src/cli/dashboard.js');
+    const { removeLaunchdPlistTransaction } = await import(
+      '../src/core/daemon/launchd-plist-transaction.js'
+    );
+    const pp = plistPath(tmpHome);
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, 'content', { mode: 0o600 });
+
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir,
+      preflight: () => ({
+        ok: true,
+        stderr: '',
+        recoveryState: { loaded: true },
+      }),
+      unload: () => ({ ok: true, stderr: '' }),
+      recover: () => ({ ok: true, stderr: '' }),
+      validateRecovery: () => ({ ok: true, stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'removal-journal-prepared') {
+          throw new Error('simulated crash after prepared removal');
+        }
+      },
+    })).toThrow('simulated crash after prepared removal');
+
+    let loaded = true;
+    let loads = 0;
+    const rc = vi.fn((args: string[]) => {
+      if (args[1] === 'list') {
+        return loaded
+          ? { ok: true, stderr: '', stdout: '{ service = loaded; }' }
+          : { ok: false, stderr: 'Could not find service', stdout: '' };
+      }
+      if (args[1] === 'load') {
+        loads += 1;
+        loaded = true;
+      }
+      if (args[1] === 'unload') loaded = false;
+      return { ok: true, stderr: '', stdout: '' };
+    });
+
+    uninstallServeAgent({
+      homeDir: tmpHome,
+      _runCmd: rc as Parameters<typeof uninstallServeAgent>[0]['_runCmd'],
+    });
+
+    expect(loads).toBe(0);
+    expect(loaded).toBe(false);
+    expect(fs.existsSync(pp)).toBe(false);
+    expect(fs.readdirSync(lockDir).filter((name) => name.endsWith('.journal.json'))).toEqual([]);
   });
 
   it('retains the plist when launchctl cannot confirm unload', async () => {
@@ -1225,7 +1612,8 @@ describe('uninstallServeAgent', () => {
     });
 
     expect(() => uninstallServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow(
-      'launchctl unload failed: Unload failed: 5: Input/output error; plist retained',
+      'launchd unload failed: Unload failed: 5: Input/output error; ' +
+      'prior service file and manager state were restored',
     );
     expect(fs.readFileSync(pp, 'utf8')).toBe('content');
   });
@@ -1364,8 +1752,10 @@ describe('cmdDashboard --stop (macOS, mocked)', () => {
     if (process.platform !== 'darwin') return;
 
     const dashboard = await import('../src/cli/dashboard.js');
-    const calls: string[][] = [];
-    const rc = vi.fn((args: string[]) => { calls.push(args); return { ok: true, stderr: '', stdout: '' }; });
+    const rc = mockRunCmd();
+    const pp = dashboard.plistPath(tmpHome);
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, 'content', { mode: 0o600 });
 
     const origLog = console.log;
     console.log = () => {};
@@ -1379,6 +1769,7 @@ describe('cmdDashboard --stop (macOS, mocked)', () => {
     }
 
     expect(code).toBe(0);
+    const calls = rc.mock.calls.map(([args]) => args);
     expect(calls.some(a => a[0] === 'launchctl' && a[1] === 'unload')).toBe(true);
   });
 });
