@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { fsyncDirectory } from '../util/durability.js';
 
 const PRIVATE_FILE_MODE = 0o600;
 const ROLLBACK_RETENTION = 5;
@@ -70,6 +71,13 @@ export interface LaunchdPlistRemovalOptions {
   trustedRoot: string;
   lockDir: string;
   unload: () => LaunchdCommandResult;
+  lockWaitMs?: number;
+}
+
+export interface ServiceFileTransactionLockOptions {
+  filePath: string;
+  trustedRoot: string;
+  lockDir: string;
   lockWaitMs?: number;
 }
 
@@ -205,7 +213,7 @@ function atomicReplace(
     ) {
       throw new Error(`atomic replacement ownership check failed for ${filePath}`);
     }
-    fsyncParent(filePath);
+    fsyncParent(filePath, expectedParent);
     return installed;
   } finally {
     try {
@@ -227,7 +235,7 @@ function replaceBackup(
   try {
     assertParentIdentity(plistPath, expectedParent);
     fs.renameSync(temporary, backupPath);
-    fsyncParent(backupPath);
+    fsyncParent(backupPath, expectedParent);
   } finally {
     try {
       const remaining = fs.lstatSync(temporary);
@@ -254,6 +262,7 @@ function retainRecentRollbacks(
     .filter((entry) => entry.stat.isFile() && !entry.stat.isSymbolicLink() && entry.stat.nlink === 1 && owned(entry.stat))
     .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs || right.filePath.localeCompare(left.filePath));
 
+  let removed = false;
   for (const entry of usable.slice(ROLLBACK_RETENTION)) {
     assertParentIdentity(plistPath, expectedParent);
     let fd: number | undefined;
@@ -264,13 +273,13 @@ function retainRecentRollbacks(
           opened.dev !== entry.stat.dev || opened.ino !== entry.stat.ino) {
         throw new Error(`rollback artifact changed during retention: ${entry.filePath}`);
       }
-      fs.ftruncateSync(fd, 0);
-      fs.fchmodSync(fd, PRIVATE_FILE_MODE);
-      fs.fsyncSync(fd);
+      unlinkIfOwned(entry.filePath, opened);
+      removed = true;
     } finally {
       if (fd !== undefined) fs.closeSync(fd);
     }
   }
+  if (removed) fsyncParent(plistPath, expectedParent);
 }
 
 function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
@@ -288,7 +297,12 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
 
   let current = root;
   for (const component of relative.split(path.sep).slice(0, -1)) {
-    current = path.join(current, component);
+    const parentPath = current;
+    const parent = fs.lstatSync(parentPath);
+    if (!trustedDirectory(parent)) {
+      throw new Error(`unsafe launchd plist parent component ${parentPath}`);
+    }
+    current = path.join(parentPath, component);
     try {
       const stat = fs.lstatSync(current);
       if (!trustedDirectory(stat)) {
@@ -301,6 +315,9 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
       if (!trustedDirectory(created)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
+      fsyncDirectory(parentPath, {
+        expectedIdentity: { dev: BigInt(parent.dev), ino: BigInt(parent.ino) },
+      });
     }
   }
   return fs.lstatSync(path.dirname(target));
@@ -331,6 +348,34 @@ function lockReleaseFailure(lock: { path: string; dev: number; ino: number }): s
   return undefined;
 }
 
+export function withServiceFileTransactionLock<T>(
+  options: ServiceFileTransactionLockOptions,
+  action: () => T,
+): T {
+  ensureTrustedParent(options.trustedRoot, options.filePath);
+  const transactionLockPath = lockPath(options.lockDir, options.filePath);
+  ensureTrustedParent(options.trustedRoot, transactionLockPath);
+  const lock = acquireLocalStoreLock(transactionLockPath, options.lockWaitMs ?? 2_000);
+  if (!lock) throw new Error(`could not acquire service-file transaction lock for ${options.filePath}`);
+
+  let result: T | undefined;
+  let actionFailure: unknown;
+  let actionFailed = false;
+  let releaseFailure: string | undefined;
+  try {
+    result = action();
+  } catch (error) {
+    actionFailed = true;
+    actionFailure = error;
+  } finally {
+    releaseLocalStoreLock(lock);
+    releaseFailure = lockReleaseFailure(lock);
+  }
+  if (actionFailed) throw actionFailure;
+  if (releaseFailure) throw new Error(releaseFailure);
+  return result as T;
+}
+
 function digest(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -340,13 +385,13 @@ function journalPath(lockDir: string, plistPath: string): string {
   return path.join(lockDir, `launchd-plist-${key}.journal.json`);
 }
 
-function fsyncParent(filePath: string): void {
-  const fd = fs.openSync(path.dirname(filePath), fs.constants.O_RDONLY);
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
+function fsyncParent(
+  filePath: string,
+  expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+): void {
+  fsyncDirectory(path.dirname(filePath), expectedParent
+    ? { expectedIdentity: { dev: BigInt(expectedParent.dev), ino: BigInt(expectedParent.ino) } }
+    : {});
 }
 
 function parseJournal(bytes: Buffer, expectedPlistPath: string): LaunchdInstallJournal {
@@ -435,16 +480,62 @@ function restoreInterruptedTransaction(
   parent: Pick<fs.Stats, 'dev' | 'ino'>,
   filePath: string,
   pending: { journal: LaunchdInstallJournal; stat: fs.Stats },
+  validateBeforeUnload = true,
 ): void {
   const operation = options.operationLabel ?? 'launchd';
+  const beforeStop = validateBeforeUnload ? readSnapshot(options.plistPath) : undefined;
+  const beforeStopSha = beforeStop ? digest(beforeStop.bytes) : undefined;
+  if (validateBeforeUnload && pending.journal.hadPrior) {
+    if (
+      !beforeStop ||
+      (beforeStopSha !== pending.journal.priorSha256 &&
+        beforeStopSha !== pending.journal.replacementSha256)
+    ) {
+      throw new Error('launchd transaction recovery rejected an interleaved plist');
+    }
+  } else if (validateBeforeUnload && beforeStop && beforeStopSha !== pending.journal.replacementSha256) {
+    throw new Error('launchd transaction recovery rejected an interleaved first-install plist');
+  }
+
   const stopped = options.unload();
   if (!stopped.ok) {
+    const originalDiskStateIntact = pending.journal.hadPrior
+      ? beforeStopSha === pending.journal.priorSha256
+      : beforeStop === undefined;
+    if (originalDiskStateIntact) {
+      const activation = restoreActivationAfterUncertainStop(options, pending.journal);
+      if (activation?.ok) {
+        removeJournal(filePath, pending.stat);
+        throw new Error(
+          `${operation} transaction recovery could not stop active service: ` +
+          `${stopped.stderr.trim() || 'exit non-zero'}; prior activation state was restored`,
+        );
+      }
+      if (activation) {
+        throw new Error(
+          `${operation} transaction recovery could not stop active service: ` +
+          `${stopped.stderr.trim() || 'exit non-zero'}; activation recovery failed: ` +
+          `${activation.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+    }
     throw new Error(
       `${operation} transaction recovery could not stop active service: ${stopped.stderr.trim() || 'exit non-zero'}`,
     );
   }
 
   const current = readSnapshot(options.plistPath);
+  if (validateBeforeUnload && (
+    (beforeStop === undefined && current !== undefined) ||
+    (beforeStop !== undefined && (
+      current === undefined ||
+      current.dev !== beforeStop.dev ||
+      current.ino !== beforeStop.ino ||
+      digest(current.bytes) !== beforeStopSha
+    ))
+  )) {
+    throw new Error('launchd transaction recovery rejected a service file changed while stopping');
+  }
   const currentSha = current ? digest(current.bytes) : undefined;
   if (pending.journal.hadPrior) {
     const priorBytes = Buffer.from(pending.journal.priorBytesBase64!, 'base64');
@@ -556,7 +647,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
         throw new Error(`${failure}; recovery rejected an interleaved journal`);
       }
       try {
-        restoreInterruptedTransaction(options, parent, pendingJournalPath, onDisk);
+        restoreInterruptedTransaction(options, parent, pendingJournalPath, onDisk, false);
       } catch (error) {
         throw new Error(
           `${failure}; recovery failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -576,6 +667,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       const rollbackPath = artifactPath(options.plistPath, 'rollback');
       assertParentIdentity(options.plistPath, parent);
       writeExclusive(rollbackPath, prior.bytes, prior.mode);
+      fsyncParent(rollbackPath, parent);
       retainRecentRollbacks(options.plistPath, parent);
     }
 
@@ -638,6 +730,14 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
           `service final verification failed: ${verified.stderr.trim() || 'exit non-zero'}`,
         );
       }
+    }
+    try {
+      assertParentIdentity(options.plistPath, parent);
+      assertOwnedTarget(options.plistPath, installed);
+    } catch (error) {
+      recoverAndThrow(
+        `service file changed during final verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     removeJournal(pendingJournalPath, journalStat);
   } finally {
