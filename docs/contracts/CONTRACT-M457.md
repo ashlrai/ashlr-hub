@@ -42,6 +42,7 @@ The fixed bounds are:
 
 - 24 MiB per bundle read and 16 KiB per marker read;
 - 2,048 bundle entries;
+- 128 projected skill entries;
 - 256 KiB per non-directory artifact and 16 MiB total artifact bytes;
 - 4,096 UTF-8 bytes per path, 255 UTF-8 bytes per path segment, and depth 12;
 - canonical JSON depth 8 and 32,768 visited JSON nodes; and
@@ -161,7 +162,8 @@ always win. For example, an executable `skills/<slug>/SKILL.md` is an
 `executable-surface`, and a symlink at that path is a `symlink`.
 
 Any `unknown` artifact makes classification incomplete and withholds the
-result. The classifier never guesses a safe class for an unrecognized path.
+result. No skill bytes are projected while an unknown artifact is present.
+The classifier never guesses a safe class for an unrecognized path.
 
 ## Metadata-Only Projection
 
@@ -175,7 +177,8 @@ frontmatter metadata projector. The projected metadata name must be a canonical
 lowercase hyphenated slug and exactly match the path slug. Invalid frontmatter,
 invalid metadata, or a name/path mismatch increments `invalidArtifacts`,
 sets `projectionDigest` to null, and withholds the result as
-`projection-invalid`.
+`projection-invalid`. More than 128 skill entries also withholds projection;
+the caller cannot raise this ceiling.
 
 For each valid eligible entry, M457 hashes only the projected name, projected
 content hash, projected description hash, and artifact byte length under an
