@@ -408,7 +408,7 @@ export function withServiceFileTransactionLock<T>(
   let actionFailed = false;
   let releaseFailure: string | undefined;
   try {
-    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot, 'harden');
     result = action();
   } catch (error) {
     actionFailed = true;
@@ -666,7 +666,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
 
   let releaseFailure: string | undefined;
   try {
-    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot, 'harden');
     const interrupted = readJournal(pendingJournalPath, options.plistPath, options.trustedRoot);
     if (interrupted) {
       restoreInterruptedTransaction(options, parent, pendingJournalPath, interrupted);
@@ -836,7 +836,7 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
   if (!lock) throw new Error(`could not acquire launchd plist transaction lock for ${options.plistPath}`);
   let releaseFailure: string | undefined;
   try {
-    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot, 'harden');
     const prior = readSnapshot(options.plistPath, options.trustedRoot);
     const unloaded = options.unload();
     if (!unloaded.ok) {
