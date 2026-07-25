@@ -153,3 +153,10 @@ export type {
   SkillRetrievalCalibrationSampleV1,
   SkillRetrievalCalibrationSnapshotV1,
 } from '../core/fleet/skill-retrieval-calibration.js';
+
+export type {
+  ExternalSkillArtifactClassV1,
+  ExternalSkillArtifactClassCountV1,
+  ExternalSkillArtifactFirewallReasonV1,
+  ExternalSkillArtifactFirewallResultV1,
+} from '../core/fleet/external-skill-artifact-firewall.js';
