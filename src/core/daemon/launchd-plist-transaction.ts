@@ -14,15 +14,42 @@ const ROLLBACK_RETENTION = 5;
 const JOURNAL_SCHEMA_VERSION = 1;
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 
-export type LaunchdInstallPhase = 'prepared' | 'stopped' | 'replaced' | 'activated';
+export type LaunchdInstallPhase =
+  | 'prepared'
+  | 'stopping'
+  | 'stopped'
+  | 'replaced'
+  | 'activating'
+  | 'activated';
 export type LaunchdInstallCheckpoint =
   | 'journal-prepared'
+  | 'journal-stopping'
   | 'service-stopped'
   | 'journal-stopped'
   | 'plist-replaced'
   | 'journal-replaced'
+  | 'journal-activating'
   | 'service-activated'
   | 'journal-activated';
+export type LaunchdRemovalPhase =
+  | 'prepared'
+  | 'stopped'
+  | 'removed'
+  | 'finalized'
+  | 'restoring'
+  | 'restored';
+export type LaunchdRemovalCheckpoint =
+  | 'removal-journal-prepared'
+  | 'removal-service-stopped'
+  | 'removal-journal-stopped'
+  | 'removal-file-removed'
+  | 'removal-journal-removed'
+  | 'removal-manager-finalized'
+  | 'removal-journal-finalized'
+  | 'removal-recovery-restoring'
+  | 'removal-recovery-file-restored'
+  | 'removal-recovery-restored'
+  | 'removal-recovery-manager-restored';
 
 export interface LaunchdCommandResult {
   ok: boolean;
@@ -49,6 +76,31 @@ interface LaunchdInstallJournal {
   recoveryState?: unknown;
 }
 
+interface LaunchdRemovalJournal {
+  schemaVersion: 1;
+  plistPath: string;
+  phase: LaunchdRemovalPhase;
+  hadPrior: boolean;
+  priorBytesBase64?: string;
+  priorMode?: number;
+  priorSha256?: string;
+  priorDev?: number;
+  priorIno?: number;
+  recoveryState?: unknown;
+}
+
+interface LaunchdTransactionRecoveryOptions {
+  plistPath: string;
+  trustedRoot: string;
+  operationLabel?: string;
+  unload: () => LaunchdCommandResult;
+  recoverUnload?: (state: unknown, phase: LaunchdInstallPhase) => LaunchdCommandResult;
+  load?: () => LaunchdCommandResult;
+  rollback?: () => LaunchdCommandResult;
+  recover?: (state: unknown) => LaunchdCommandResult;
+  validateRecovery?: (state: unknown) => LaunchdCommandResult;
+}
+
 export interface LaunchdPlistTransactionOptions {
   plistPath: string;
   trustedRoot: string;
@@ -59,6 +111,8 @@ export interface LaunchdPlistTransactionOptions {
   /** Validate external activation state after the plist snapshot and before any write. */
   preflight?: (state: { hasPrior: boolean }) => LaunchdCommandResult;
   unload: () => LaunchdCommandResult;
+  /** Reconcile manager state according to a persisted interrupted-install phase. */
+  recoverUnload?: (state: unknown, phase: LaunchdInstallPhase) => LaunchdCommandResult;
   load: () => LaunchdCommandResult;
   /** Recheck the requested external state at the final durable boundary. */
   verify?: () => LaunchdCommandResult;
@@ -69,7 +123,7 @@ export interface LaunchdPlistTransactionOptions {
   /** Reject invalid persisted activation state before the external service is stopped. */
   validateRecovery?: (state: unknown) => LaunchdCommandResult;
   /** Test-only crash injection at each transaction boundary. */
-  checkpointHook?: (checkpoint: LaunchdInstallCheckpoint) => void;
+  checkpointHook?: (checkpoint: LaunchdInstallCheckpoint | LaunchdRemovalCheckpoint) => void;
   lockWaitMs?: number;
 }
 
@@ -77,11 +131,27 @@ export interface LaunchdPlistRemovalOptions {
   plistPath: string;
   trustedRoot: string;
   lockDir: string;
+  /** Stable diagnostic label; defaults to launchd for compatibility. */
+  operationLabel?: string;
+  /** Capture exact manager state before removal mutates it. */
+  preflight?: (state: { hasPrior: boolean }) => LaunchdCommandResult;
   unload: () => LaunchdCommandResult;
+  /** Reconcile manager state according to a persisted interrupted-install phase. */
+  recoverUnload?: (state: unknown, phase: LaunchdInstallPhase) => LaunchdCommandResult;
+  /** Restore a prior install journal when no persisted recovery callback exists. */
+  load?: () => LaunchdCommandResult;
+  /** Restore the activation state captured before an interrupted install. */
+  rollback?: () => LaunchdCommandResult;
+  /** Restore persisted activation state after an interrupted install or removal. */
+  recover?: (state: unknown) => LaunchdCommandResult;
+  /** Reject invalid persisted activation state before manager or disk mutation. */
+  validateRecovery?: (state: unknown) => LaunchdCommandResult;
   /** Reconcile and verify the manager after the service file is durably absent. */
   afterRemove?: () => LaunchdCommandResult;
   /** Restore the prior manager state after any post-unload failure restores the prior file. */
   recoverAfterFailedRemove?: () => LaunchdCommandResult;
+  /** Test-only crash injection at each durable removal boundary. */
+  checkpointHook?: (checkpoint: LaunchdRemovalCheckpoint) => void;
   lockWaitMs?: number;
 }
 
@@ -433,6 +503,11 @@ function journalPath(lockDir: string, plistPath: string): string {
   return path.join(lockDir, `launchd-plist-${key}.journal.json`);
 }
 
+function removalJournalPath(lockDir: string, plistPath: string): string {
+  const key = createHash('sha256').update(plistPath).digest('hex').slice(0, 24);
+  return path.join(lockDir, `launchd-plist-${key}.removal.journal.json`);
+}
+
 function fsyncParent(
   filePath: string,
   expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
@@ -454,7 +529,14 @@ function parseJournal(bytes: Buffer, expectedPlistPath: string): LaunchdInstallJ
     throw new Error('invalid launchd transaction journal: expected object');
   }
   const value = parsed as Record<string, unknown>;
-  const phases: LaunchdInstallPhase[] = ['prepared', 'stopped', 'replaced', 'activated'];
+  const phases: LaunchdInstallPhase[] = [
+    'prepared',
+    'stopping',
+    'stopped',
+    'replaced',
+    'activating',
+    'activated',
+  ];
   if (value.schemaVersion !== JOURNAL_SCHEMA_VERSION || value.plistPath !== expectedPlistPath ||
       typeof value.hadPrior !== 'boolean' || typeof value.replacementSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(value.replacementSha256) ||
@@ -474,6 +556,69 @@ function parseJournal(bytes: Buffer, expectedPlistPath: string): LaunchdInstallJ
     throw new Error('invalid launchd transaction journal: unexpected prior snapshot');
   }
   return value as unknown as LaunchdInstallJournal;
+}
+
+function parseRemovalJournal(bytes: Buffer, expectedPlistPath: string): LaunchdRemovalJournal {
+  if (bytes.length > MAX_JOURNAL_BYTES) {
+    throw new Error('launchd removal transaction journal exceeds size limit');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch (error) {
+    throw new Error(
+      `invalid launchd removal transaction journal JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('invalid launchd removal transaction journal: expected object');
+  }
+  const value = parsed as Record<string, unknown>;
+  const phases: LaunchdRemovalPhase[] = [
+    'prepared',
+    'stopped',
+    'removed',
+    'finalized',
+    'restoring',
+    'restored',
+  ];
+  if (
+    value.schemaVersion !== JOURNAL_SCHEMA_VERSION ||
+    value.plistPath !== expectedPlistPath ||
+    typeof value.hadPrior !== 'boolean' ||
+    typeof value.phase !== 'string' ||
+    !phases.includes(value.phase as LaunchdRemovalPhase)
+  ) {
+    throw new Error('invalid launchd removal transaction journal fields');
+  }
+  if (value.hadPrior) {
+    if (
+      typeof value.priorBytesBase64 !== 'string' ||
+      typeof value.priorSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(value.priorSha256) ||
+      !Number.isInteger(value.priorMode) ||
+      !Number.isSafeInteger(value.priorDev) ||
+      !Number.isSafeInteger(value.priorIno)
+    ) {
+      throw new Error('invalid launchd removal transaction journal prior snapshot');
+    }
+    const priorBytes = Buffer.from(value.priorBytesBase64, 'base64');
+    if (
+      priorBytes.toString('base64') !== value.priorBytesBase64 ||
+      digest(priorBytes) !== value.priorSha256
+    ) {
+      throw new Error('launchd removal transaction journal prior snapshot digest mismatch');
+    }
+  } else if (
+    value.priorBytesBase64 !== undefined ||
+    value.priorSha256 !== undefined ||
+    value.priorMode !== undefined ||
+    value.priorDev !== undefined ||
+    value.priorIno !== undefined
+  ) {
+    throw new Error('invalid launchd removal transaction journal: unexpected prior snapshot');
+  }
+  return value as unknown as LaunchdRemovalJournal;
 }
 
 function readJournal(filePath: string, expectedPlistPath: string, trustedRoot?: string): {
@@ -503,6 +648,38 @@ function readJournal(filePath: string, expectedPlistPath: string, trustedRoot?: 
   }
 }
 
+function readRemovalJournal(filePath: string, expectedPlistPath: string, trustedRoot?: string): {
+  journal: LaunchdRemovalJournal;
+  stat: fs.Stats;
+} | undefined {
+  const before = validateRegularTarget(filePath, 'launchd removal transaction journal', trustedRoot);
+  if (!before) return undefined;
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const opened = fs.fstatSync(fd);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size > MAX_JOURNAL_BYTES
+    ) {
+      throw new Error(`unsafe launchd removal transaction journal at ${filePath}`);
+    }
+    const bytes = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) throw new Error(`short read from launchd removal transaction journal ${filePath}`);
+      offset += count;
+    }
+    return { journal: parseRemovalJournal(bytes, expectedPlistPath), stat: opened };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 function writeJournal(
   filePath: string,
   journal: LaunchdInstallJournal,
@@ -527,13 +704,37 @@ function writeJournal(
   return written;
 }
 
+function writeRemovalJournal(
+  filePath: string,
+  journal: LaunchdRemovalJournal,
+  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  expected?: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot?: string,
+): fs.Stats {
+  const bytes = Buffer.from(`${JSON.stringify(journal)}\n`, 'utf8');
+  if (bytes.length > MAX_JOURNAL_BYTES) {
+    throw new Error('launchd removal transaction journal exceeds size limit');
+  }
+  const written = atomicReplace(
+    filePath,
+    bytes,
+    PRIVATE_FILE_MODE,
+    expected,
+    !expected,
+    parent,
+    trustedRoot,
+  );
+  fsyncParent(filePath);
+  return written;
+}
+
 function removeJournal(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
   unlinkIfOwned(filePath, expected);
   fsyncParent(filePath);
 }
 
 function restoreInterruptedTransaction(
-  options: LaunchdPlistTransactionOptions,
+  options: LaunchdTransactionRecoveryOptions,
   parent: Pick<fs.Stats, 'dev' | 'ino'>,
   filePath: string,
   pending: { journal: LaunchdInstallJournal; stat: fs.Stats },
@@ -565,7 +766,9 @@ function restoreInterruptedTransaction(
     }
   }
 
-  const stopped = options.unload();
+  const stopped = options.recoverUnload
+    ? options.recoverUnload(pending.journal.recoveryState, pending.journal.phase)
+    : options.unload();
   if (!stopped.ok) {
     const originalDiskStateIntact = pending.journal.hadPrior
       ? beforeStopSha === pending.journal.priorSha256
@@ -632,8 +835,11 @@ function restoreInterruptedTransaction(
   const activation = options.recover
     ? options.recover(pending.journal.recoveryState)
     : pending.journal.hadPrior
-      ? (options.rollback ?? options.load)()
+      ? (options.rollback ?? options.load)?.()
       : options.rollback?.();
+  if (pending.journal.hadPrior && !activation) {
+    throw new Error(`${operation} transaction recovery has no activation recovery callback`);
+  }
   if (activation && !activation.ok) {
     throw new Error(
       `${operation} transaction recovery could not restore activation: ${activation.stderr.trim() || 'exit non-zero'}`,
@@ -643,14 +849,110 @@ function restoreInterruptedTransaction(
 }
 
 function restoreActivationAfterUncertainStop(
-  options: LaunchdPlistTransactionOptions,
+  options: LaunchdTransactionRecoveryOptions,
   journal: LaunchdInstallJournal,
 ): LaunchdCommandResult | undefined {
   return options.recover
     ? options.recover(journal.recoveryState)
     : journal.hadPrior
-      ? (options.rollback ?? options.load)()
+      ? (options.rollback ?? options.load)?.()
       : options.rollback?.();
+}
+
+function restoreInterruptedRemoval(
+  options: LaunchdPlistRemovalOptions | LaunchdPlistTransactionOptions,
+  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  filePath: string,
+  pending: { journal: LaunchdRemovalJournal; stat: fs.Stats },
+): void {
+  const operation = options.operationLabel ?? 'launchd';
+  const journalParent = ensureTrustedParent(options.trustedRoot, filePath);
+  let journal = pending.journal;
+  let journalStat = pending.stat;
+  const persistRestoration = (
+    phase: 'restoring' | 'restored',
+    restored?: Pick<fs.Stats, 'dev' | 'ino'>,
+  ): void => {
+    journal = {
+      ...journal,
+      phase,
+      ...(restored ? { priorDev: restored.dev, priorIno: restored.ino } : {}),
+    };
+    journalStat = writeRemovalJournal(
+      filePath,
+      journal,
+      journalParent,
+      journalStat,
+      options.trustedRoot,
+    );
+  };
+  if (options.validateRecovery) {
+    const validation = options.validateRecovery(journal.recoveryState);
+    if (!validation.ok) {
+      throw new Error(
+        `${operation} removal recovery rejected persisted activation state: ` +
+        `${validation.stderr.trim() || 'invalid recovery state'}`,
+      );
+    }
+  }
+
+  assertParentIdentity(options.plistPath, parent);
+  const current = readSnapshot(options.plistPath, options.trustedRoot);
+  if (journal.hadPrior) {
+    if (current) {
+      const bytesMatch = digest(current.bytes) === journal.priorSha256;
+      const identityMatches =
+        current.dev === journal.priorDev &&
+        current.ino === journal.priorIno;
+      if (!bytesMatch || (!identityMatches && journal.phase !== 'restoring')) {
+        throw new Error(`${operation} removal recovery rejected an interleaved service file`);
+      }
+      if (journal.phase === 'restoring') {
+        persistRestoration('restored', current);
+        options.checkpointHook?.('removal-recovery-restored');
+      }
+    } else {
+      if (journal.phase !== 'restoring') {
+        persistRestoration('restoring');
+        options.checkpointHook?.('removal-recovery-restoring');
+      }
+      const priorBytes = Buffer.from(journal.priorBytesBase64!, 'base64');
+      const restored = atomicReplace(
+        options.plistPath,
+        priorBytes,
+        journal.priorMode ?? PRIVATE_FILE_MODE,
+        undefined,
+        true,
+        parent,
+        options.trustedRoot,
+      );
+      options.checkpointHook?.('removal-recovery-file-restored');
+      persistRestoration('restored', restored);
+      options.checkpointHook?.('removal-recovery-restored');
+    }
+  } else if (current) {
+    throw new Error(`${operation} removal recovery rejected an interleaved service file`);
+  }
+
+  const recovered = options.recover
+    ? options.recover(journal.recoveryState)
+    : 'recoverAfterFailedRemove' in options
+      ? (options.recoverAfterFailedRemove?.() ??
+        (journal.hadPrior ? options.load?.() : { ok: true, stderr: '' }))
+      : journal.hadPrior
+        ? options.load?.()
+        : { ok: true, stderr: '' };
+  if (!recovered) {
+    throw new Error(`${operation} removal recovery has no manager recovery callback`);
+  }
+  if (!recovered.ok) {
+    throw new Error(
+      `${operation} removal recovery could not restore manager state: ` +
+      `${recovered.stderr.trim() || 'exit non-zero'}`,
+    );
+  }
+  options.checkpointHook?.('removal-recovery-manager-restored');
+  removeJournal(filePath, journalStat);
 }
 
 export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionOptions): void {
@@ -663,6 +965,8 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
   ensureTrustedParent(options.trustedRoot, transactionLockPath);
   const pendingJournalPath = journalPath(options.lockDir, options.plistPath);
   const journalParent = ensureTrustedParent(options.trustedRoot, pendingJournalPath);
+  const pendingRemovalPath = removalJournalPath(options.lockDir, options.plistPath);
+  ensureTrustedParent(options.trustedRoot, pendingRemovalPath);
   const lock = acquireLocalStoreLock(transactionLockPath, options.lockWaitMs ?? 2_000);
   if (!lock) throw new Error(`could not acquire ${transactionFileLabel} transaction lock for ${options.plistPath}`);
 
@@ -670,6 +974,17 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
   try {
     assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot, 'harden');
     const interrupted = readJournal(pendingJournalPath, options.plistPath, options.trustedRoot);
+    const interruptedRemoval = readRemovalJournal(
+      pendingRemovalPath,
+      options.plistPath,
+      options.trustedRoot,
+    );
+    if (interrupted && interruptedRemoval) {
+      throw new Error('conflicting install and removal transaction journals');
+    }
+    if (interruptedRemoval) {
+      restoreInterruptedRemoval(options, parent, pendingRemovalPath, interruptedRemoval);
+    }
     if (interrupted) {
       restoreInterruptedTransaction(options, parent, pendingJournalPath, interrupted);
     }
@@ -754,6 +1069,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       retainRecentRollbacks(options.plistPath, parent, options.trustedRoot);
     }
 
+    advance('stopping');
     const initialUnload = options.unload();
     if (!initialUnload.ok) {
       const unloadFailure = initialUnload.stderr.trim() || 'exit non-zero';
@@ -792,6 +1108,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
     // a hostile same-UID process is outside this boundary and can invoke launchctl directly.
     assertParentIdentity(options.plistPath, parent);
     assertOwnedTarget(options.plistPath, installed, options.trustedRoot);
+    advance('activating');
     const loaded = options.load();
     try {
       assertParentIdentity(options.plistPath, parent);
@@ -832,21 +1149,118 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
 }
 
 export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOptions): void {
+  const operation = options.operationLabel ?? 'launchd';
   const parent = ensureTrustedParent(options.trustedRoot, options.plistPath);
   const transactionLockPath = lockPath(options.lockDir, options.plistPath);
   ensureTrustedParent(options.trustedRoot, transactionLockPath);
+  const pendingInstallPath = journalPath(options.lockDir, options.plistPath);
+  ensureTrustedParent(options.trustedRoot, pendingInstallPath);
+  const pendingRemovalPath = removalJournalPath(options.lockDir, options.plistPath);
+  const removalJournalParent = ensureTrustedParent(options.trustedRoot, pendingRemovalPath);
   const lock = acquireLocalStoreLock(transactionLockPath, options.lockWaitMs ?? 2_000);
   if (!lock) throw new Error(`could not acquire launchd plist transaction lock for ${options.plistPath}`);
   let releaseFailure: string | undefined;
   try {
     assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot, 'harden');
+    const interruptedInstall = readJournal(
+      pendingInstallPath,
+      options.plistPath,
+      options.trustedRoot,
+    );
+    const interruptedRemoval = readRemovalJournal(
+      pendingRemovalPath,
+      options.plistPath,
+      options.trustedRoot,
+    );
+    if (interruptedInstall && interruptedRemoval) {
+      throw new Error('conflicting install and removal transaction journals');
+    }
+    if (interruptedInstall) {
+      restoreInterruptedTransaction(options, parent, pendingInstallPath, interruptedInstall);
+    }
+    if (interruptedRemoval) {
+      restoreInterruptedRemoval(options, parent, pendingRemovalPath, interruptedRemoval);
+    }
+
     const prior = readSnapshot(options.plistPath, options.trustedRoot);
+    let recoveryState: unknown;
+    if (options.preflight) {
+      const preflight = options.preflight({ hasPrior: !!prior });
+      if (!preflight.ok) {
+        throw new Error(
+          `${operation} removal preflight failed: ${preflight.stderr.trim() || 'exit non-zero'}`,
+        );
+      }
+      recoveryState = preflight.recoveryState;
+    }
+    if (!options.recover && !options.recoverAfterFailedRemove && !(prior && options.load)) {
+      throw new Error(`${operation} removal requires a durable manager recovery callback`);
+    }
+
+    let journal: LaunchdRemovalJournal = {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      plistPath: options.plistPath,
+      phase: 'prepared',
+      hadPrior: !!prior,
+      ...(prior
+        ? {
+            priorBytesBase64: prior.bytes.toString('base64'),
+            priorMode: prior.mode,
+            priorSha256: digest(prior.bytes),
+            priorDev: prior.dev,
+            priorIno: prior.ino,
+          }
+        : {}),
+      ...(recoveryState === undefined ? {} : { recoveryState }),
+    };
+    let journalStat = writeRemovalJournal(
+      pendingRemovalPath,
+      journal,
+      removalJournalParent,
+      undefined,
+      options.trustedRoot,
+    );
+    options.checkpointHook?.('removal-journal-prepared');
+
+    const advance = (phase: LaunchdRemovalPhase): void => {
+      journal = { ...journal, phase };
+      journalStat = writeRemovalJournal(
+        pendingRemovalPath,
+        journal,
+        removalJournalParent,
+        journalStat,
+        options.trustedRoot,
+      );
+      options.checkpointHook?.(`removal-journal-${phase}` as LaunchdRemovalCheckpoint);
+    };
+    const recoverAndThrow = (failure: string): never => {
+      const onDisk = readRemovalJournal(
+        pendingRemovalPath,
+        options.plistPath,
+        options.trustedRoot,
+      );
+      if (!onDisk || onDisk.stat.dev !== journalStat.dev || onDisk.stat.ino !== journalStat.ino) {
+        throw new Error(`${failure}; recovery rejected an interleaved removal journal`);
+      }
+      try {
+        restoreInterruptedRemoval(options, parent, pendingRemovalPath, onDisk);
+      } catch (error) {
+        throw new Error(
+          `${failure}; removal recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw new Error(`${failure}; prior service file and manager state were restored`);
+    };
+
     const unloaded = options.unload();
     if (!unloaded.ok) {
-      throw new Error(
-        `launchctl unload failed: ${unloaded.stderr.trim() || 'exit non-zero'}; plist retained`,
+      recoverAndThrow(
+        `${operation} unload failed: ${unloaded.stderr.trim() || 'exit non-zero'}`,
       );
     }
+    options.checkpointHook?.('removal-service-stopped');
+    advance('stopped');
+
     try {
       assertParentIdentity(options.plistPath, parent);
       if (prior) {
@@ -862,6 +1276,14 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
         fs.unlinkSync(options.plistPath);
         fsyncParent(options.plistPath);
       }
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      recoverAndThrow(failure);
+    }
+    options.checkpointHook?.('removal-file-removed');
+    advance('removed');
+
+    try {
       if (options.afterRemove) {
         const finalized = options.afterRemove();
         if (!finalized.ok) {
@@ -872,63 +1294,11 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
       }
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
-      try {
-        assertParentIdentity(options.plistPath, parent);
-        const current = readSnapshot(options.plistPath, options.trustedRoot);
-        if (prior) {
-          if (!current) {
-            atomicReplace(
-              options.plistPath,
-              prior.bytes,
-              prior.mode,
-              undefined,
-              true,
-              parent,
-              options.trustedRoot,
-            );
-            fsyncParent(options.plistPath);
-          } else if (
-            current.dev !== prior.dev ||
-            current.ino !== prior.ino ||
-            !current.bytes.equals(prior.bytes)
-          ) {
-            throw new Error('service file identity or bytes changed during failed removal');
-          }
-        } else if (current) {
-          throw new Error('service file appeared during failed removal');
-        }
-      } catch (recoveryError) {
-        throw new Error(
-          `${failure}; service file recovery failed: ` +
-          `${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-        );
-      }
-
-      let managerRestored = false;
-      if (options.recoverAfterFailedRemove) {
-        let recovered: LaunchdCommandResult;
-        try {
-          recovered = options.recoverAfterFailedRemove();
-        } catch (recoveryError) {
-          throw new Error(
-            `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}; ` +
-            `manager recovery failed: ` +
-            `${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-          );
-        }
-        if (!recovered.ok) {
-          throw new Error(
-            `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}; ` +
-            `manager recovery failed: ${recovered.stderr.trim() || 'exit non-zero'}`,
-          );
-        }
-        managerRestored = true;
-      }
-      throw new Error(
-        `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}` +
-        `${managerRestored ? '; manager state restored' : ''}`,
-      );
+      recoverAndThrow(failure);
     }
+    options.checkpointHook?.('removal-manager-finalized');
+    advance('finalized');
+    removeJournal(pendingRemovalPath, journalStat);
   } finally {
     releaseLocalStoreLock(lock);
     releaseFailure = lockReleaseFailure(lock);

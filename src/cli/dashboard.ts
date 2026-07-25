@@ -176,6 +176,43 @@ export function runCmd(args: string[]): RunResult {
   }
 }
 
+function launchdServiceAbsent(result: RunResult): boolean {
+  return !result.ok &&
+    /(?:could not find (?:specified )?service|service .* not found|no such process|not loaded)/i
+      .test(`${result.stdout}\n${result.stderr}`);
+}
+
+function restoreServeActivation(
+  exec: typeof runCmd,
+  pp: string,
+  loaded: boolean,
+): RunResult {
+  const before = exec(['launchctl', 'list', PLIST_LABEL]);
+  const beforeLoaded = before.ok;
+  if (!before.ok && !launchdServiceAbsent(before)) return before;
+  if (beforeLoaded === loaded) return { ok: true, stdout: '', stderr: '' };
+
+  const result = exec(['launchctl', loaded ? 'load' : 'unload', pp]);
+  const commandResult = loaded
+    ? { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) }
+    : launchdServiceAbsent(result)
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+  if (!commandResult.ok) return commandResult;
+
+  const after = exec(['launchctl', 'list', PLIST_LABEL]);
+  const afterLoaded = after.ok;
+  if (!after.ok && !launchdServiceAbsent(after)) return after;
+  if (afterLoaded !== loaded) {
+    return {
+      ok: false,
+      stdout: after.stdout,
+      stderr: `launchctl did not reach expected ${loaded ? 'loaded' : 'unloaded'} state`,
+    };
+  }
+  return { ok: true, stdout: after.stdout, stderr: '' };
+}
+
 /**
  * Open URL in the default browser — detached so the CLI doesn't wait.
  * Exported for mocking in tests.
@@ -256,16 +293,58 @@ export function installServeAgent(opts: {
   }
 
   const content = generateServePlist(opts);
+  let priorLoaded: boolean | undefined;
   installLaunchdPlistTransaction({
     plistPath: pp,
     trustedRoot: home,
     content,
     lockDir: path.join(home, '.ashlr', 'locks'),
-    unload: () => exec(['launchctl', 'unload', pp]),
-    load: () => {
-      const result = exec(['launchctl', 'load', pp]);
-      return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
+    preflight: ({ hasPrior }) => {
+      const listed = exec(['launchctl', 'list', PLIST_LABEL]);
+      if (!listed.ok && !launchdServiceAbsent(listed)) return listed;
+      priorLoaded = listed.ok;
+      if (priorLoaded && !hasPrior) {
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'refusing to replace loaded serve agent without a trusted prior plist',
+        };
+      }
+      return {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        recoveryState: { loaded: priorLoaded },
+      };
     },
+    unload: () => restoreServeActivation(exec, pp, false),
+    load: () => restoreServeActivation(exec, pp, true),
+    verify: () => restoreServeActivation(exec, pp, true),
+    rollback: () => priorLoaded === undefined
+      ? { ok: false, stdout: '', stderr: 'serve activation preflight state is unavailable' }
+      : restoreServeActivation(exec, pp, priorLoaded),
+    recoverUnload: () => restoreServeActivation(exec, pp, false),
+    recover: (state) => {
+      if (
+        !state ||
+        typeof state !== 'object' ||
+        Array.isArray(state) ||
+        typeof (state as { loaded?: unknown }).loaded !== 'boolean' ||
+        Object.keys(state).some((key) => key !== 'loaded')
+      ) {
+        return { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' };
+      }
+      return restoreServeActivation(exec, pp, (state as { loaded: boolean }).loaded);
+    },
+    validateRecovery: (state) => (
+      state &&
+      typeof state === 'object' &&
+      !Array.isArray(state) &&
+      typeof (state as { loaded?: unknown }).loaded === 'boolean' &&
+      Object.keys(state).every((key) => key === 'loaded')
+    )
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' },
   });
 }
 
@@ -293,14 +372,56 @@ export function uninstallServeAgent(opts: {
   const exec = opts._runCmd ?? runCmd;
   const home = opts.homeDir ?? os.homedir();
   const pp = plistPath(opts.homeDir);
+  let priorLoaded: boolean | undefined;
   removeLaunchdPlistTransaction({
     plistPath: pp,
     trustedRoot: home,
     lockDir: path.join(home, '.ashlr', 'locks'),
-    unload: () => {
-      const result = exec(['launchctl', 'unload', pp]);
-      return { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+    preflight: ({ hasPrior }) => {
+      const listed = exec(['launchctl', 'list', PLIST_LABEL]);
+      if (!listed.ok && !launchdServiceAbsent(listed)) return listed;
+      priorLoaded = listed.ok;
+      if (priorLoaded && !hasPrior) {
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'refusing to remove loaded serve agent without a trusted prior plist',
+        };
+      }
+      return {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        recoveryState: { loaded: priorLoaded },
+      };
     },
+    unload: () => restoreServeActivation(exec, pp, false),
+    afterRemove: () => restoreServeActivation(exec, pp, false),
+    load: () => restoreServeActivation(exec, pp, true),
+    recover: (state) => {
+      if (
+        !state ||
+        typeof state !== 'object' ||
+        Array.isArray(state) ||
+        typeof (state as { loaded?: unknown }).loaded !== 'boolean' ||
+        Object.keys(state).some((key) => key !== 'loaded')
+      ) {
+        return { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' };
+      }
+      return restoreServeActivation(exec, pp, (state as { loaded: boolean }).loaded);
+    },
+    validateRecovery: (state) => (
+      state &&
+      typeof state === 'object' &&
+      !Array.isArray(state) &&
+      typeof (state as { loaded?: unknown }).loaded === 'boolean' &&
+      Object.keys(state).every((key) => key === 'loaded')
+    )
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' },
+    recoverAfterFailedRemove: () => priorLoaded === undefined
+      ? { ok: false, stdout: '', stderr: 'serve activation preflight state is unavailable' }
+      : restoreServeActivation(exec, pp, priorLoaded),
   });
 }
 
