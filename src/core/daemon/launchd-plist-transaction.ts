@@ -66,6 +66,8 @@ export interface LaunchdPlistTransactionOptions {
   rollback?: () => LaunchdCommandResult;
   /** Restore activation state persisted by preflight after an interrupted process restarts. */
   recover?: (state: unknown) => LaunchdCommandResult;
+  /** Reject invalid persisted activation state before the external service is stopped. */
+  validateRecovery?: (state: unknown) => LaunchdCommandResult;
   /** Test-only crash injection at each transaction boundary. */
   checkpointHook?: (checkpoint: LaunchdInstallCheckpoint) => void;
   lockWaitMs?: number;
@@ -76,6 +78,10 @@ export interface LaunchdPlistRemovalOptions {
   trustedRoot: string;
   lockDir: string;
   unload: () => LaunchdCommandResult;
+  /** Reconcile and verify the manager after the service file is durably absent. */
+  afterRemove?: () => LaunchdCommandResult;
+  /** Restore the prior manager state after any post-unload failure restores the prior file. */
+  recoverAfterFailedRemove?: () => LaunchdCommandResult;
   lockWaitMs?: number;
 }
 
@@ -547,6 +553,15 @@ function restoreInterruptedTransaction(
   } else if (validateBeforeUnload && beforeStop && beforeStopSha !== pending.journal.replacementSha256) {
     throw new Error('launchd transaction recovery rejected an interleaved first-install plist');
   }
+  if (options.validateRecovery) {
+    const validation = options.validateRecovery(pending.journal.recoveryState);
+    if (!validation.ok) {
+      throw new Error(
+        `${operation} transaction recovery rejected persisted activation state: ` +
+        `${validation.stderr.trim() || 'invalid recovery state'}`,
+      );
+    }
+  }
 
   const stopped = options.unload();
   if (!stopped.ok) {
@@ -829,18 +844,87 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
         `launchctl unload failed: ${unloaded.stderr.trim() || 'exit non-zero'}; plist retained`,
       );
     }
-    assertParentIdentity(options.plistPath, parent);
-    if (prior) {
-      const current = validateRegularTarget(
-        options.plistPath,
-        'active plist',
-        options.trustedRoot,
-      );
-      if (!current || current.dev !== prior.dev || current.ino !== prior.ino) {
-        throw new Error(`active plist changed during removal: ${options.plistPath}`);
+    try {
+      assertParentIdentity(options.plistPath, parent);
+      if (prior) {
+        const current = readSnapshot(options.plistPath, options.trustedRoot);
+        if (
+          !current ||
+          current.dev !== prior.dev ||
+          current.ino !== prior.ino ||
+          !current.bytes.equals(prior.bytes)
+        ) {
+          throw new Error(`active plist changed during removal: ${options.plistPath}`);
+        }
+        fs.unlinkSync(options.plistPath);
+        fsyncParent(options.plistPath);
       }
-      fs.unlinkSync(options.plistPath);
-      fsyncParent(options.plistPath);
+      if (options.afterRemove) {
+        const finalized = options.afterRemove();
+        if (!finalized.ok) {
+          throw new Error(
+            `service removal finalization failed: ${finalized.stderr.trim() || 'exit non-zero'}`,
+          );
+        }
+      }
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      try {
+        assertParentIdentity(options.plistPath, parent);
+        const current = readSnapshot(options.plistPath, options.trustedRoot);
+        if (prior) {
+          if (!current) {
+            atomicReplace(
+              options.plistPath,
+              prior.bytes,
+              prior.mode,
+              undefined,
+              true,
+              parent,
+              options.trustedRoot,
+            );
+            fsyncParent(options.plistPath);
+          } else if (
+            current.dev !== prior.dev ||
+            current.ino !== prior.ino ||
+            !current.bytes.equals(prior.bytes)
+          ) {
+            throw new Error('service file identity or bytes changed during failed removal');
+          }
+        } else if (current) {
+          throw new Error('service file appeared during failed removal');
+        }
+      } catch (recoveryError) {
+        throw new Error(
+          `${failure}; service file recovery failed: ` +
+          `${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+        );
+      }
+
+      let managerRestored = false;
+      if (options.recoverAfterFailedRemove) {
+        let recovered: LaunchdCommandResult;
+        try {
+          recovered = options.recoverAfterFailedRemove();
+        } catch (recoveryError) {
+          throw new Error(
+            `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}; ` +
+            `manager recovery failed: ` +
+            `${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+          );
+        }
+        if (!recovered.ok) {
+          throw new Error(
+            `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}; ` +
+            `manager recovery failed: ${recovered.stderr.trim() || 'exit non-zero'}`,
+          );
+        }
+        managerRestored = true;
+      }
+      throw new Error(
+        `${failure}; ${prior ? 'service file restored' : 'no prior service file existed'}` +
+        `${managerRestored ? '; manager state restored' : ''}`,
+      );
     }
   } finally {
     releaseLocalStoreLock(lock);

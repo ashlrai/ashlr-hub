@@ -688,6 +688,41 @@ describe('installServeAgent', () => {
     expect(fs.readFileSync(pp, 'utf8')).toBe('<interloper/>');
   });
 
+  it('validates persisted activation state before unloading an interrupted service', async () => {
+    const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'recovery-state.plist');
+    const lockDir = path.join(tmpHome, '.ashlr', 'locks');
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    fs.writeFileSync(pp, '<prior/>', { mode: 0o600 });
+
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      preflight: () => ({ ok: true, stderr: '', recoveryState: { active: true } }),
+      unload: () => ({ ok: true, stderr: '' }),
+      load: () => ({ ok: true, stderr: '' }),
+      checkpointHook: (checkpoint) => {
+        if (checkpoint === 'journal-prepared') throw new Error('simulated crash');
+      },
+    })).toThrow('simulated crash');
+
+    const unload = vi.fn(() => ({ ok: true, stderr: '' }));
+    expect(() => installLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      content: '<replacement/>',
+      lockDir,
+      unload,
+      load: () => ({ ok: true, stderr: '' }),
+      recover: () => ({ ok: true, stderr: '' }),
+      validateRecovery: () => ({ ok: false, stderr: 'invalid persisted state' }),
+    })).toThrow('recovery rejected persisted activation state: invalid persisted state');
+    expect(unload).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pp, 'utf8')).toBe('<prior/>');
+  });
+
   it('compensates an uncertain recovery stop while the original file remains intact', async () => {
     const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
     const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'recovery-stop.plist');
@@ -955,6 +990,118 @@ describe('installServeAgent', () => {
 
     expect(removalError).toContain('could not acquire launchd plist transaction lock');
     expect(fs.readFileSync(pp, 'utf8')).toBe('installed');
+  });
+
+  it('finalizes service removal only after the service file is durably absent', async () => {
+    const { removeLaunchdPlistTransaction } =
+      await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'remove-finalize.plist');
+    const calls: string[] = [];
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'installed', { mode: 0o600 });
+
+    removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => {
+        calls.push('unload');
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      afterRemove: () => {
+        calls.push(`finalize:${fs.existsSync(pp) ? 'present' : 'absent'}`);
+        return { ok: true, stdout: '', stderr: '' };
+      },
+    });
+
+    expect(calls).toEqual(['unload', 'finalize:absent']);
+    expect(fs.existsSync(pp)).toBe(false);
+  });
+
+  it('restores service bytes with private permissions and reconciles the manager when finalization fails', async () => {
+    const { removeLaunchdPlistTransaction } =
+      await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'remove-rollback.plist');
+    const calls: string[] = [];
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'prior-service', { mode: 0o640 });
+
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stdout: '', stderr: '' }),
+      afterRemove: () => ({ ok: false, stdout: '', stderr: 'manager reload denied' }),
+      recoverAfterFailedRemove: () => {
+        calls.push(fs.readFileSync(pp, 'utf8'));
+        return { ok: true, stdout: '', stderr: '' };
+      },
+    })).toThrow(
+      'service removal finalization failed: manager reload denied; ' +
+      'service file restored; manager state restored',
+    );
+
+    expect(calls).toEqual(['prior-service']);
+    expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+    expect(fs.statSync(pp).mode & 0o777).toBe(0o600);
+  });
+
+  it('reports manager recovery failure after restoring a removed service file', async () => {
+    const { removeLaunchdPlistTransaction } =
+      await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'remove-recovery-failure.plist');
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'prior-service', { mode: 0o600 });
+
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => ({ ok: true, stdout: '', stderr: '' }),
+      afterRemove: () => ({ ok: false, stdout: '', stderr: 'manager reload denied' }),
+      recoverAfterFailedRemove: () => ({
+        ok: false,
+        stdout: '',
+        stderr: 'manager recovery denied',
+      }),
+    })).toThrow(
+      'service removal finalization failed: manager reload denied; ' +
+      'service file restored; manager recovery failed: manager recovery denied',
+    );
+
+    expect(fs.readFileSync(pp, 'utf8')).toBe('prior-service');
+  });
+
+  it('does not recover manager state for an interleaved replacement after unload', async () => {
+    const { removeLaunchdPlistTransaction } =
+      await import('../src/core/daemon/launchd-plist-transaction.js');
+    const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'remove-interleaved.plist');
+    let managerRecoveryCalled = false;
+    fs.mkdirSync(path.dirname(pp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pp, 'prior-service', { mode: 0o600 });
+
+    expect(() => removeLaunchdPlistTransaction({
+      plistPath: pp,
+      trustedRoot: tmpHome,
+      lockDir: path.join(tmpHome, '.ashlr', 'locks'),
+      unload: () => {
+        const interloper = `${pp}.interloper`;
+        fs.writeFileSync(interloper, 'interleaved', { mode: 0o600 });
+        fs.renameSync(interloper, pp);
+        return { ok: true, stdout: '', stderr: '' };
+      },
+      recoverAfterFailedRemove: () => {
+        managerRecoveryCalled = true;
+        return { ok: true, stdout: '', stderr: '' };
+      },
+    })).toThrow(
+      'active plist changed during removal: ' +
+      `${pp}; service file recovery failed: ` +
+      'service file identity or bytes changed during failed removal',
+    );
+
+    expect(fs.readFileSync(pp, 'utf8')).toBe('interleaved');
+    expect(managerRecoveryCalled).toBe(false);
   });
 
   it('caps rollback retention at five without following rollback symlinks', async () => {

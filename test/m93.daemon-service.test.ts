@@ -21,6 +21,8 @@ import * as fs from 'node:fs';
 
 const installLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const removeLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
+const withServiceFileTransactionLockMock = vi.hoisted(() =>
+  vi.fn((_options: unknown, action: () => unknown) => action()));
 
 // ---------------------------------------------------------------------------
 // We import the module AFTER setting up vi.mock so spawnSync is interceptable
@@ -51,6 +53,11 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('../src/core/daemon/launchd-plist-transaction.js', () => ({
   installLaunchdPlistTransaction: installLaunchdPlistTransactionMock,
   removeLaunchdPlistTransaction: removeLaunchdPlistTransactionMock,
+  withServiceFileTransactionLock: withServiceFileTransactionLockMock,
+}));
+
+vi.mock('../src/core/util/durability.js', () => ({
+  fsyncDirectory: vi.fn(),
 }));
 
 import * as cp from 'node:child_process';
@@ -62,6 +69,14 @@ import {
   serviceStatus,
 } from '../src/core/daemon/service.js';
 import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
+import {
+  buildWindowsTaskCreateScript,
+  buildWindowsTaskRestoreScript,
+  buildWindowsTaskRunScript,
+  buildWindowsTaskSnapshotScript,
+  buildWindowsTaskStopDeleteScript,
+  windowsPowerShellPath,
+} from '../src/core/daemon/windows-task-scripts.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,6 +85,10 @@ import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.j
 const FAKE_HOME = '/tmp/ashlr-test-home';
 const FAKE_NODE = '/usr/local/bin/node';
 const FAKE_BIN = '/home/user/ashlr-hub/bin/ashlr';
+
+function isWindowsPowerShellCommand(command: string): boolean {
+  return command === windowsPowerShellPath();
+}
 
 function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
   return {
@@ -116,6 +135,14 @@ function launchctlPrintDisabledFixture(disabled: boolean): string {
   ].join('\n');
 }
 
+function windowsTaskSnapshotFixture(state: string): string {
+  return JSON.stringify({
+    state,
+    taskXmlBase64: Buffer.from('<Task version="1.4">prior</Task>', 'utf8').toString('base64'),
+    taskSecurityDescriptorBase64: Buffer.from('D:P(A;;FA;;;SY)', 'utf8').toString('base64'),
+  });
+}
+
 function successfulServiceCommands() {
   let launchdLoaded = true;
   let launchdDisabled = false;
@@ -160,12 +187,42 @@ function successfulServiceCommands() {
           ? { status: 0, stdout: 'enabled\n', stderr: '', error: undefined }
           : { status: 1, stdout: 'disabled\n', stderr: '', error: undefined };
       }
+      if (args.includes('show')) {
+        return {
+          status: 0,
+          stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+          stderr: '',
+          error: undefined,
+        };
+      }
       return { status: 0, stdout: '', stderr: '', error: undefined };
     }
-    if (cmd === 'powershell.exe') {
+    if (isWindowsPowerShellCommand(cmd)) {
+      if (args.join(' ').includes('$folder.RegisterTaskDefinition($taskName,$definition')) {
+        windowsTaskExists = true;
+        windowsTaskState = '3';
+        return { status: 0, stdout: 'created', stderr: '', error: undefined };
+      }
+      if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+        windowsTaskExists = false;
+        return { status: 0, stdout: 'deleted', stderr: '', error: undefined };
+      }
+      if (args.join(' ').includes('$registered.Run($null)')) {
+        windowsTaskState = '4';
+        return { status: 0, stdout: 'started', stderr: '', error: undefined };
+      }
+      if (args.join(' ').includes(".RegisterTask('AshlrDaemon'")) {
+        windowsTaskExists = true;
+        windowsTaskState = '3';
+        return { status: 0, stdout: 'restored', stderr: '', error: undefined };
+      }
       return {
         status: 0,
-        stdout: windowsTaskExists ? windowsTaskState : 'absent',
+        stdout: windowsTaskExists
+          ? (args.join(' ').includes('GetSecurityDescriptor(7)')
+              ? windowsTaskSnapshotFixture(windowsTaskState)
+              : windowsTaskState)
+          : 'absent',
         stderr: '',
         error: undefined,
       };
@@ -203,6 +260,51 @@ describe('daemonServiceInstallOptions', () => {
       intervalMs: 45_000,
       parallel: 3,
     });
+  });
+});
+
+describe('strict Windows Task Scheduler scripts', () => {
+  const taskName = 'AshlrM93Integration-deadbeef';
+
+  it('creates a non-overwriting, unlimited, single-instance task with a protected DACL', () => {
+    const script = buildWindowsTaskCreateScript(taskName);
+
+    expect(script).toContain("$trigger.ExecutionTimeLimit='PT0S'");
+    expect(script).toContain("$settings.ExecutionTimeLimit='PT0S'");
+    expect(script).toContain('$settings.MultipleInstances=2');
+    expect(script).toContain('$settings.AllowDemandStart=$true');
+    expect(script).toContain('$settings.DisallowStartIfOnBatteries=$false');
+    expect(script).toContain('$settings.StopIfGoingOnBatteries=$false');
+    expect(script).toContain('$flags=2 -bor 16 -bor 32');
+    expect(script).toContain('D:P(A;;FA;;;SY)(A;;FA;;;BA)');
+    expect(script).not.toContain('/F');
+  });
+
+  it('applies exact XML and DACL admission to every task lifecycle operation', () => {
+    const scripts = [
+      buildWindowsTaskCreateScript(taskName),
+      buildWindowsTaskSnapshotScript(taskName),
+      buildWindowsTaskRestoreScript(taskName),
+      buildWindowsTaskStopDeleteScript(taskName),
+      buildWindowsTaskRunScript(taskName),
+    ];
+
+    for (const script of scripts) {
+      expect(script).toContain('Assert-AshlrTaskXml $definition');
+      expect(script).toContain('Assert-AshlrTaskSecurityDescriptor');
+      expect(script).toContain("task multiple-instance policy is not IgnoreNew");
+      expect(script).toContain("task execution limit is not unlimited");
+      expect(script).toContain("untrusted identity can modify the task");
+      expect(script).not.toContain('/Task/Principals/Principal/RequiredPrivileges');
+      expect(script).not.toContain('/Task/Principals/Principal/ProcessTokenSidType');
+    }
+  });
+
+  it('rejects task names outside production and the disposable native-test namespace', () => {
+    expect(() => buildWindowsTaskCreateScript('AshlrDaemon')).not.toThrow();
+    expect(() => buildWindowsTaskCreateScript('OtherTask')).toThrow(
+      'unsupported Task Scheduler task name',
+    );
   });
 });
 
@@ -416,6 +518,8 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     expect(def.registerArgs).toContain('/Create');
     expect(def.registerArgs).toContain('AshlrDaemon');
     expect(def.registerArgs).toContain('ONLOGON');
+    expect(def.registerArgs).toContain('/IT');
+    expect(def.registerArgs).not.toContain('/F');
   });
 
   it('registerArgs TR invokes the launcher outside Startup', () => {
@@ -448,6 +552,20 @@ describe('install() — mocked spawnSync', () => {
     useSuccessfulLaunchdTransactionMock();
     spawnSyncMock.mockImplementation(successfulServiceCommands());
     existsSyncMock.mockReturnValue(false);
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) => {
+      const value = candidate.toString();
+      if (value.endsWith('ashlr-daemon.cmd') || value.endsWith('ashlr-daemon.startup-legacy.cmd.disabled')) {
+        throw Object.assign(new Error(`ENOENT: ${value}`), { code: 'ENOENT' });
+      }
+      return {
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+        mode: 0o700,
+        dev: 1,
+        ino: 1,
+        uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+      } as fs.Stats;
+    });
   });
 
   it('darwin: bootouts the old job then bootstraps the replacement', async () => {
@@ -771,42 +889,84 @@ describe('install() — mocked spawnSync', () => {
     );
   });
 
-  it('win32: calls schtasks /Create', async () => {
+  it('win32: creates the strict Task Scheduler definition through PowerShell', async () => {
     await install(baseOpts('win32'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
-    const hasCreate = calls.some((c) => c[0] === 'schtasks' && c[1].includes('/Create'));
+    const hasCreate = calls.some(([cmd, args]) =>
+      isWindowsPowerShellCommand(cmd) &&
+      args.join(' ').includes('$folder.RegisterTaskDefinition($taskName,$definition'));
     expect(hasCreate).toBe(true);
+  });
+
+  it('win32: ignores hostile PATH when selecting Windows PowerShell', async () => {
+    const originalPath = process.env.PATH;
+    process.env.PATH = String.raw`C:\hostile-path`;
+    try {
+      await install(baseOpts('win32'));
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+
+    const powershellCalls = (spawnSyncMock.mock.calls as [string, string[]][])
+      .filter(([, args]) => args.includes('-NoProfile') && args.includes('-Command'));
+    expect(powershellCalls.length).toBeGreaterThan(0);
+    expect(powershellCalls.every(([command]) =>
+      isWindowsPowerShellCommand(command))).toBe(true);
+    expect(powershellCalls.some(([command]) => command === 'powershell.exe')).toBe(false);
   });
 
   it('win32: fails closed when task creation is denied', async () => {
     const normal = successfulServiceCommands();
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) =>
-      cmd === 'schtasks' && args.includes('/Create')
+      isWindowsPowerShellCommand(cmd) &&
+      args.join(' ').includes('$folder.RegisterTaskDefinition($taskName,$definition')
         ? { status: 1, stdout: '', stderr: 'access denied', error: undefined }
         : normal(cmd, args));
     await expect(install(baseOpts('win32'))).rejects.toThrow('Task Scheduler transaction activation failed: access denied');
   });
 
-  it('win32: autostart false deletes an existing task without creating one', async () => {
+  it('win32: autostart false deletes an authority-bound task without creating one', async () => {
     let exists = true;
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === 'powershell.exe') return { status: 0, stdout: exists ? '3' : 'absent', stderr: '', error: undefined };
-      if (cmd === 'schtasks' && args.includes('/Delete')) exists = false;
+      if (isWindowsPowerShellCommand(cmd)) {
+        if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+          exists = false;
+          return { status: 0, stdout: 'deleted', stderr: '', error: undefined };
+        }
+        return {
+          status: 0,
+          stdout: exists
+            ? (args.join(' ').includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('3') : '3')
+            : 'absent',
+          stderr: '',
+          error: undefined,
+        };
+      }
       return { status: 0, stdout: '', stderr: '', error: undefined };
     });
     await install({ ...baseOpts('win32'), autostart: false });
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
 
-    expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Delete'))).toBe(true);
+    expect(calls.some(([cmd, args]) =>
+      isWindowsPowerShellCommand(cmd) &&
+      args.join(' ').includes('$folder.DeleteTask($taskName,0)'))).toBe(true);
     expect(calls.some(([cmd, args]) => cmd === 'schtasks' && args.includes('/Create'))).toBe(false);
-    expect(calls.filter(([cmd]) => cmd === 'schtasks').map(([, args]) => args[0])).toEqual(['/Delete']);
+    expect(calls.filter(([cmd]) => cmd === 'schtasks')).toEqual([]);
   });
 
-  it('win32: refuses access-denied task deletion', async () => {
+  it('win32: refuses access-denied authority-bound task deletion', async () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === 'powershell.exe') return { status: 0, stdout: '3', stderr: '', error: undefined };
-      if (cmd === 'schtasks' && args.includes('/Delete')) {
-        return { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined };
+      if (isWindowsPowerShellCommand(cmd)) {
+        if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+          return { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined };
+        }
+        return {
+          status: 0,
+          stdout: args.join(' ').includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('3') : '3',
+          stderr: '',
+          error: undefined,
+        };
       }
       return { status: 0, stdout: '', stderr: '', error: undefined };
     });
@@ -816,11 +976,18 @@ describe('install() — mocked spawnSync', () => {
     );
   });
 
-  it('win32: refuses access-denied task termination before deletion', async () => {
+  it('win32: refuses authority-bound stop/delete script failure', async () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === 'powershell.exe') return { status: 0, stdout: '4', stderr: '', error: undefined };
-      if (cmd === 'schtasks' && args.includes('/End')) {
-        return { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined };
+      if (isWindowsPowerShellCommand(cmd)) {
+        if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+          return { status: 1, stdout: '', stderr: 'ERROR: Access is denied.', error: undefined };
+        }
+        return {
+          status: 0,
+          stdout: args.join(' ').includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('4') : '4',
+          stderr: '',
+          error: undefined,
+        };
       }
       return { status: 0, stdout: '', stderr: '', error: undefined };
     });
@@ -828,17 +995,28 @@ describe('install() — mocked spawnSync', () => {
     await expect(install({ ...baseOpts('win32'), autostart: false })).rejects.toThrow(
       'Task Scheduler transaction unload failed: ERROR: Access is denied.',
     );
-    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) => args.includes('/Delete'))).toBe(false);
+    expect(spawnSyncMock.mock.calls.some(([cmd, args]: [string, string[]]) =>
+      cmd === 'schtasks' && args.includes('/Delete'))).toBe(false);
   });
 
-  it('win32: rejects a task that still exists after deletion', async () => {
-    spawnSyncMock.mockImplementation((cmd: string) =>
-      cmd === 'powershell.exe'
-        ? { status: 0, stdout: '3', stderr: '', error: undefined }
-        : { status: 0, stdout: '', stderr: '', error: undefined });
+  it('win32: rejects noncanonical success from authority-bound deletion', async () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (!isWindowsPowerShellCommand(cmd)) {
+        return { status: 0, stdout: '', stderr: '', error: undefined };
+      }
+      if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+        return { status: 0, stdout: '', stderr: '', error: undefined };
+      }
+      return {
+        status: 0,
+        stdout: args.join(' ').includes('GetSecurityDescriptor(7)') ? windowsTaskSnapshotFixture('3') : '3',
+        stderr: '',
+        error: undefined,
+      };
+    });
 
     await expect(install({ ...baseOpts('win32'), autostart: false })).rejects.toThrow(
-      'Task Scheduler deletion verification found AshlrDaemon still registered',
+      'Task Scheduler authority-bound removal failed',
     );
   });
 
@@ -848,27 +1026,44 @@ describe('install() — mocked spawnSync', () => {
       'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
       'ashlr-daemon.cmd',
     );
-    existsSyncMock.mockImplementation((candidate: fs.PathLike) => candidate.toString() === legacy);
-    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) =>
-      candidate.toString() === legacy
-        ? {
+    const archivedPath = path.join(
+      FAKE_HOME,
+      '.ashlr',
+      'services',
+      'ashlr-daemon.startup-legacy.cmd.disabled',
+    );
+    let archived = false;
+    (fs.renameSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      archived = true;
+    });
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) => {
+      const value = candidate.toString();
+      if ((value === legacy && !archived) || (value === archivedPath && archived)) {
+        return {
             isSymbolicLink: () => false,
             isFile: () => true,
             nlink: 1,
             uid: typeof process.getuid === 'function' ? process.getuid() : 0,
-          } as fs.Stats
-        : {
-            isSymbolicLink: () => false,
-            isDirectory: () => true,
-            mode: 0o700,
-            uid: typeof process.getuid === 'function' ? process.getuid() : 0,
-          } as fs.Stats);
+          } as fs.Stats;
+      }
+      if (value === legacy || value === archivedPath) {
+        throw Object.assign(new Error(`ENOENT: ${value}`), { code: 'ENOENT' });
+      }
+      return {
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+        mode: 0o700,
+        dev: 1,
+        ino: 1,
+        uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+      } as fs.Stats;
+    });
 
     await install(baseOpts('win32'));
 
     expect(fs.renameSync).toHaveBeenCalledWith(
       legacy,
-      path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.startup-legacy.cmd.disabled'),
+      archivedPath,
     );
   });
 
@@ -878,9 +1073,17 @@ describe('install() — mocked spawnSync', () => {
       'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
       'ashlr-daemon.cmd',
     );
+    const archived = path.join(
+      FAKE_HOME,
+      '.ashlr', 'services', 'ashlr-daemon.startup-legacy.cmd.disabled',
+    );
     existsSyncMock.mockImplementation((candidate: fs.PathLike) => candidate.toString() === legacy);
-    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) =>
-      candidate.toString() === legacy
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) => {
+      const value = candidate.toString();
+      if (value === archived) {
+        throw Object.assign(new Error(`ENOENT: ${value}`), { code: 'ENOENT' });
+      }
+      return value === legacy
         ? {
             isSymbolicLink: () => true,
             isFile: () => false,
@@ -891,8 +1094,11 @@ describe('install() — mocked spawnSync', () => {
             isSymbolicLink: () => false,
             isDirectory: () => true,
             mode: 0o700,
+            dev: 1,
+            ino: 1,
             uid: typeof process.getuid === 'function' ? process.getuid() : 0,
-          } as fs.Stats);
+          } as fs.Stats;
+    });
 
     await expect(install(baseOpts('win32'))).rejects.toThrow('unsafe legacy Windows launcher');
     expect(fs.renameSync).not.toHaveBeenCalled();
@@ -950,16 +1156,93 @@ describe('uninstall() — mocked spawnSync', () => {
   });
 
   it('linux: calls systemctl --user disable --now', async () => {
+    spawnSyncMock.mockImplementation(successfulServiceCommands());
     await uninstall(baseOpts('linux'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
     const hasDisable = calls.some((c) => c[0] === 'systemctl' && c[1].includes('disable'));
     expect(hasDisable).toBe(true);
+    expect(removeLaunchdPlistTransactionMock).toHaveBeenCalledWith({
+      plistPath: path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service'),
+      trustedRoot: FAKE_HOME,
+      lockDir: path.join(FAKE_HOME, '.ashlr', 'locks'),
+      unload: expect.any(Function),
+      afterRemove: expect.any(Function),
+      recoverAfterFailedRemove: expect.any(Function),
+    });
   });
 
-  it('win32: calls schtasks /Delete /TN AshlrDaemon', async () => {
+  it('linux: reloads and verifies both removed and restored manager states', async () => {
+    let managerPresent = true;
+    let reloadState: 'removed' | 'restored' = 'removed';
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== 'systemctl') {
+        return { status: 0, stdout: '', stderr: '', error: undefined };
+      }
+      if (args.includes('daemon-reload')) {
+        managerPresent = reloadState === 'restored';
+        return { status: 0, stdout: '', stderr: '', error: undefined };
+      }
+      if (args.includes('is-active')) {
+        return { status: 3, stdout: 'inactive\n', stderr: '', error: undefined };
+      }
+      if (args.includes('is-enabled')) {
+        return managerPresent
+          ? { status: 1, stdout: 'disabled\n', stderr: '', error: undefined }
+          : { status: 1, stdout: 'not-found\n', stderr: '', error: undefined };
+      }
+      if (args.includes('show')) {
+        return {
+          status: 0,
+          stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+          stderr: '',
+          error: undefined,
+        };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    });
+
+    await uninstall(baseOpts('linux'));
+    const callbacks = removeLaunchdPlistTransactionMock.mock.calls[0]![0] as {
+      afterRemove: () => { ok: boolean };
+      recoverAfterFailedRemove: () => { ok: boolean };
+    };
+
+    expect(callbacks.afterRemove()).toMatchObject({ ok: true });
+    reloadState = 'restored';
+    expect(callbacks.recoverAfterFailedRemove()).toMatchObject({ ok: true });
+  });
+
+  it('win32: calls the authority-bound Task Scheduler delete script', async () => {
+    let present = true;
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (isWindowsPowerShellCommand(cmd)) {
+        if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
+          present = false;
+          return {
+            status: 0,
+            stdout: 'deleted',
+            stderr: '',
+            error: undefined,
+          };
+        }
+        return {
+          status: 0,
+          stdout: present
+            ? (args.join(' ').includes('GetSecurityDescriptor(7)')
+                ? windowsTaskSnapshotFixture('3')
+                : '3')
+            : 'absent',
+          stderr: '',
+          error: undefined,
+        };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    });
     await uninstall(baseOpts('win32'));
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
-    const hasDelete = calls.some((c) => c[0] === 'schtasks' && c[1].includes('/Delete'));
+    const hasDelete = calls.some(([cmd, args]) =>
+      isWindowsPowerShellCommand(cmd) &&
+      args.join(' ').includes('$folder.DeleteTask($taskName,0)'));
     expect(hasDelete).toBe(true);
   });
 
@@ -980,6 +1263,18 @@ describe('uninstall() — mocked spawnSync', () => {
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
 
     await expect(uninstall(baseOpts('darwin'))).resolves.toBeUndefined();
+    expect(unlinkMock).not.toHaveBeenCalled();
+  });
+
+  it('linux: does not unregister or unlink when the lifecycle lock is unavailable', async () => {
+    removeLaunchdPlistTransactionMock.mockImplementationOnce(() => {
+      throw new Error('lock unavailable');
+    });
+    const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
+
+    await expect(uninstall(baseOpts('linux'))).resolves.toBeUndefined();
+
+    expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(unlinkMock).not.toHaveBeenCalled();
   });
 });
@@ -1110,14 +1405,38 @@ describe('serviceStatus() — mocked OS query output', () => {
 describe('ensureRunning() — mocked OS activation', () => {
   const spawnSyncMock = cp.spawnSync as ReturnType<typeof vi.fn>;
   const existsSyncMock = fs.existsSync as ReturnType<typeof vi.fn>;
+  const lstatSyncMock = fs.lstatSync as ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    spawnSyncMock.mockReset();
+    existsSyncMock.mockReset();
     existsSyncMock.mockReturnValue(true);
+    withServiceFileTransactionLockMock.mockReset();
+    withServiceFileTransactionLockMock.mockImplementation(
+      (_options: unknown, action: () => unknown) => action(),
+    );
+    lstatSyncMock.mockImplementation((filePath: fs.PathLike) => {
+      const isLauncher = String(filePath).endsWith('ashlr-daemon.cmd');
+      return {
+        dev: 1,
+        ino: isLauncher ? 2 : 1,
+        uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+        mode: isLauncher ? 0o100600 : 0o40700,
+        nlink: 1,
+        isSymbolicLink: () => false,
+        isFile: () => isLauncher,
+        isDirectory: () => !isLauncher,
+      } as fs.Stats;
+    });
   });
 
   it('darwin: kickstarts an installed launchd job that has no PID', async () => {
     spawnSyncMock
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stderr: '',
+      })
       .mockReturnValueOnce({
         status: 0,
         stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
@@ -1133,6 +1452,11 @@ describe('ensureRunning() — mocked OS activation', () => {
     const status = await ensureRunning(baseOpts('darwin'));
 
     expect(status.running).toBe(true);
+    expect(withServiceFileTransactionLockMock).toHaveBeenCalledWith({
+      filePath: path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'),
+      trustedRoot: FAKE_HOME,
+      lockDir: path.join(FAKE_HOME, '.ashlr', 'locks'),
+    }, expect.any(Function));
     expect(spawnSyncMock).toHaveBeenCalledWith(
       'launchctl',
       ['kickstart', '-k', expect.stringMatching(/^gui\/\d+\/ai\.ashlr\.daemon$/)],
@@ -1153,9 +1477,38 @@ describe('ensureRunning() — mocked OS activation', () => {
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
+  it('darwin: locked recheck suppresses activation when another caller started the job', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stderr: '',
+      })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+        stderr: '',
+      });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) =>
+      args.includes('kickstart'))).toBe(false);
+  });
+
   it('linux: starts an inactive installed user unit', async () => {
     spawnSyncMock
       .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 1, stdout: 'disabled\n', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+        stderr: '',
+      })
       .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
       .mockReturnValueOnce({ status: 0, stdout: 'active\n', stderr: '' });
 
@@ -1172,17 +1525,32 @@ describe('ensureRunning() — mocked OS activation', () => {
   it('win32: runs an installed scheduled task when stopped', async () => {
     spawnSyncMock
       .mockReturnValueOnce({ status: 0, stdout: '3', stderr: '' })
-      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '3', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: 'started',
+        stderr: '',
+      })
       .mockReturnValueOnce({ status: 0, stdout: '4', stderr: '' });
 
     const status = await ensureRunning(baseOpts('win32'));
 
     expect(status.running).toBe(true);
-    expect(spawnSyncMock).toHaveBeenCalledWith(
-      'schtasks',
-      ['/Run', '/TN', 'AshlrDaemon'],
-      expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
+    const runIndex = spawnSyncMock.mock.calls.findIndex(
+      ([cmd, args]: [string, string[]]) =>
+        isWindowsPowerShellCommand(cmd) &&
+        args.join(' ').includes('$registered.Run($null)'),
     );
+    expect(runIndex).toBe(2);
+    const runCall = spawnSyncMock.mock.calls[runIndex] as [
+      string,
+      string[],
+      { input?: string },
+    ];
+    const launcherPath = path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.cmd');
+    expect(runCall[1].join(' ')).toContain('Assert-AshlrTaskDefinition');
+    expect(runCall[1].join(' ')).not.toContain(launcherPath);
+    expect(runCall[2].input).toBe(JSON.stringify({ expectedLauncherPath: launcherPath }));
   });
 
   it('win32: treats malformed state as unknown and does not mutate it', async () => {

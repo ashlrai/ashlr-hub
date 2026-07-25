@@ -168,3 +168,30 @@ jobs:
           ./node_modules/.bin/ashlr help > /dev/null
           node -e "import('@ashlr/hub/types').then(() => console.log('exports map ok'))"
           node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"
+
+  windows-service-authority:
+    name: Windows service authority (Server 2022)
+    runs-on: windows-2022
+    env:
+      ASHLR_VITEST_TEST_TIMEOUT_MS: "30000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test native Windows service authority (hermetic)
+        run: >-
+          npm run test:ci --
+          test/m93.windows-file-authority.test.ts
+          test/m93.daemon-service-windows-integration.test.ts
