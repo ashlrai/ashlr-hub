@@ -202,6 +202,16 @@ function sha256Base64(value: string): string {
   return createHash('sha256').update(Buffer.from(value, 'base64')).digest('hex');
 }
 
+function replaceTaskXmlValue(
+  taskXmlBase64: string,
+  expected: string,
+  replacement: string,
+): string {
+  const taskXml = Buffer.from(taskXmlBase64, 'base64').toString('utf8');
+  expect(taskXml.split(expected)).toHaveLength(2);
+  return Buffer.from(taskXml.replace(expected, replacement), 'utf8').toString('base64');
+}
+
 function runPowerShellInput(script: string, input: Record<string, string>) {
   if (script.length >= MAX_POWERSHELL_SCRIPT_CHARACTERS) {
     throw new Error('PowerShell script must contain fewer than 30000 characters');
@@ -316,6 +326,32 @@ describe.skipIf(process.platform !== 'win32')(
           throw commandFailure('production authority-bound deletion', deleted);
         }
         expect(deleted.stdout).toBe('deleted');
+
+        for (const [expected, replacement] of [
+          ['<Duration>PT10M</Duration>', '<Duration>PT11M</Duration>'],
+          ['<WaitTimeout>PT1H</WaitTimeout>', '<WaitTimeout>PT2H</WaitTimeout>'],
+        ]) {
+          const rejected = runPowerShellInput(
+            buildWindowsTaskRestoreScript(taskName),
+            {
+              expectedLauncherPath: launcherPath,
+              taskXmlBase64: replaceTaskXmlValue(
+                before.taskXmlBase64,
+                expected,
+                replacement,
+              ),
+              taskSecurityDescriptorBase64: before.taskSecurityDescriptorBase64,
+            },
+          );
+          expect(rejected.status).not.toBe(0);
+          expect(rejected.error).toBeUndefined();
+          const stillAbsent = runPowerShellInput(
+            buildWindowsTaskSnapshotScript(taskName),
+            { expectedLauncherPath: launcherPath },
+          );
+          expect(stillAbsent.status).toBe(0);
+          expect(stillAbsent.stdout).toBe('absent');
+        }
 
         const restored = runPowerShellInput(
           buildWindowsTaskRestoreScript(taskName),
