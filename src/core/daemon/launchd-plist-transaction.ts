@@ -240,6 +240,7 @@ function atomicReplace(
   const temporary = artifactPath(filePath, 'tmp');
   const created = writeExclusive(temporary, bytes, mode);
   try {
+    if (trustedRoot) assertWindowsFileAuthority(temporary, 'file', trustedRoot, 'harden');
     if (expectedParent) assertParentIdentity(filePath, expectedParent);
     if (expected || requireMissing) assertExpectedTarget(filePath, expected, trustedRoot);
     fs.renameSync(temporary, filePath);
@@ -271,6 +272,7 @@ function replaceBackup(
   const temporary = artifactPath(plistPath, 'backup');
   const created = writeExclusive(temporary, prior.bytes, prior.mode);
   try {
+    assertWindowsFileAuthority(temporary, 'file', trustedRoot, 'harden');
     assertParentIdentity(plistPath, expectedParent);
     fs.renameSync(temporary, backupPath);
     fsyncParent(backupPath, expectedParent);
@@ -747,6 +749,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       const rollbackPath = artifactPath(options.plistPath, 'rollback');
       assertParentIdentity(options.plistPath, parent);
       writeExclusive(rollbackPath, prior.bytes, prior.mode);
+      assertWindowsFileAuthority(rollbackPath, 'file', options.trustedRoot, 'harden');
       fsyncParent(rollbackPath, parent);
       retainRecentRollbacks(options.plistPath, parent, options.trustedRoot);
     }
