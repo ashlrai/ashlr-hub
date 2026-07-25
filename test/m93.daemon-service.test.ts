@@ -275,6 +275,8 @@ describe('strict Windows Task Scheduler scripts', () => {
     expect(script).toContain('$settings.AllowDemandStart=$true');
     expect(script).toContain('$settings.DisallowStartIfOnBatteries=$false');
     expect(script).toContain('$settings.StopIfGoingOnBatteries=$false');
+    expect(script).toContain("$settings.IdleSettings.IdleDuration='PT10M'");
+    expect(script).toContain("$settings.IdleSettings.WaitTimeout='PT1H'");
     expect(script).toContain('$flags=2 -bor 16 -bor 32');
     expect(script).toContain('D:P(A;;FA;;;SY)(A;;FA;;;BA)');
     expect(script).not.toContain('/F');
@@ -294,6 +296,7 @@ describe('strict Windows Task Scheduler scripts', () => {
       expect(script).toContain('Assert-AshlrTaskSecurityDescriptor');
       expect(script).toContain("task multiple-instance policy is not IgnoreNew");
       expect(script).toContain("task execution limit is not unlimited");
+      expect(script).toContain("task idle defaults are not exact");
       expect(script).toContain("untrusted identity can modify the task");
       expect(script).not.toContain('/Task/Principals/Principal/RequiredPrivileges');
       expect(script).not.toContain('/Task/Principals/Principal/ProcessTokenSidType');
