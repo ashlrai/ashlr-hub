@@ -144,9 +144,7 @@ describe('Windows service-file authority protocol', () => {
     )).toEqual({ ok: true, reason: 'hardened-path' });
 
     const script = Buffer.from(observed!.args.at(-1)!, 'base64').toString('utf16le');
-    expect(script).toContain('WindowsIdentity]::GetCurrent()');
-    expect(script).toContain('$current = $identity.User');
-    expect(script).toContain('$tokenOwner = $identity.Owner');
+    expect(script).toContain('WindowsIdentity]::GetCurrent().User');
     expect(script).toContain("SecurityIdentifier]::new('S-1-5-18')");
     expect(script).toContain("SecurityIdentifier]::new('S-1-5-32-544')");
     expect(script).toContain('FileAttributes]::ReparsePoint');
@@ -166,10 +164,7 @@ describe('Windows service-file authority protocol', () => {
       "$request.mode -eq 'harden' -and",
     );
     expect(script).toContain(
-      '$itemOwner -ne $tokenOwner.Value -or',
-    );
-    expect(script).toContain(
-      '$trustedSids -notcontains $tokenOwner.Value',
+      '@($current.Value, $administrators.Value) -notcontains $itemOwner',
     );
     expect(script).toContain(
       "$request.mode -eq 'harden' -and $itemOwner -ne $current.Value",
