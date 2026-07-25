@@ -126,7 +126,9 @@ try {
     Finish $false 'wrong-kind'
   }
 
-  $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $current = $identity.User
+  $tokenOwner = $identity.Owner
   $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
   $administrators =
     [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
@@ -167,7 +169,17 @@ try {
   $itemOwner = $itemAcl.GetOwner(
     [System.Security.Principal.SecurityIdentifier]
   ).Value
-  if ($itemOwner -ne $current.Value) { Finish $false 'wrong-owner' }
+  if ($request.mode -eq 'validate' -and $itemOwner -ne $current.Value) {
+    Finish $false 'wrong-owner'
+  }
+  if ($request.mode -eq 'harden' -and $itemOwner -ne $current.Value -and
+    ($itemOwner -ne $tokenOwner.Value -or
+      $trustedSids -notcontains $tokenOwner.Value)) {
+    Finish $false 'wrong-owner'
+  }
+  if ($request.mode -eq 'harden' -and $itemOwner -ne $current.Value) {
+    AssertSafeRules $itemAcl $trustedSids 'untrusted-item-write'
+  }
 
   if ($request.mode -eq 'validate') {
     AssertSafeRules $itemAcl $trustedSids 'untrusted-item-write'

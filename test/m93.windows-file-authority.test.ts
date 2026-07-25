@@ -144,7 +144,9 @@ describe('Windows service-file authority protocol', () => {
     )).toEqual({ ok: true, reason: 'hardened-path' });
 
     const script = Buffer.from(observed!.args.at(-1)!, 'base64').toString('utf16le');
-    expect(script).toContain('WindowsIdentity]::GetCurrent().User');
+    expect(script).toContain('WindowsIdentity]::GetCurrent()');
+    expect(script).toContain('$current = $identity.User');
+    expect(script).toContain('$tokenOwner = $identity.Owner');
     expect(script).toContain("SecurityIdentifier]::new('S-1-5-18')");
     expect(script).toContain("SecurityIdentifier]::new('S-1-5-32-544')");
     expect(script).toContain('FileAttributes]::ReparsePoint');
@@ -156,6 +158,21 @@ describe('Windows service-file authority protocol', () => {
     );
     expect(script).toContain(
       "AssertSafeRules $ancestorAcl $trustedSids 'untrusted-ancestor-write'",
+    );
+    expect(script).toContain(
+      "$request.mode -eq 'validate' -and $itemOwner -ne $current.Value",
+    );
+    expect(script).toContain(
+      "$request.mode -eq 'harden' -and",
+    );
+    expect(script).toContain(
+      '$itemOwner -ne $tokenOwner.Value -or',
+    );
+    expect(script).toContain(
+      '$trustedSids -notcontains $tokenOwner.Value',
+    );
+    expect(script).toContain(
+      "$request.mode -eq 'harden' -and $itemOwner -ne $current.Value",
     );
     expect(script).not.toContain('Write-Host');
     expect(script).not.toContain('C:\\Users\\mason');
