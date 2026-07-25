@@ -255,15 +255,34 @@ export async function cmdDemo(
       // Real sandboxed PROPOSAL-ONLY swarm — tick imports no apply/push/PR/deploy
       // primitive (H1/H4 grep-guarded); the most it can do is emit a PENDING
       // proposal. NEVER applies.
-      await tick(cfg, { dryRun: false });
+      const tickResult = await tick(cfg, { dryRun: false });
+      if (tickResult.reason === 'activation-refused') {
+        step(
+          'tick',
+          'Daemon tick refused',
+          'live demo execution requires a one-use proposal activation permit',
+        );
+        if (asJson) {
+          console.log(JSON.stringify({
+            ok: false,
+            liveModel: true,
+            error: 'activation-refused',
+            steps,
+          }, null, 2));
+        } else {
+          console.error(red('demo: live daemon tick refused by the activation gate'));
+        }
+        return 1;
+      }
       step(
         'tick',
         'Daemon tick (LIVE swarm)',
         `local model reachable (${lm.up ? 'lmstudio' : 'ollama'}) → sandboxed PROPOSAL-ONLY swarm`,
       );
     } else {
-      // Deterministic no-model path: dry-run tick (touches nothing) + a stub
-      // PENDING proposal so the human still sees the inbox half of the chain.
+      // Deterministic no-model path: dry-run tick (no proposal or outward
+      // action) + a stub PENDING proposal so the human still sees the inbox
+      // half of the chain. The daemon may still record simulation metadata.
       await tick(cfg, { dryRun: true });
       const seedTitle = titles[0] ?? 'demo: address the seeded TODO';
       createProposal({

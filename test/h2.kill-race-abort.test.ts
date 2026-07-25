@@ -50,7 +50,16 @@ import { writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
 
 import { tick } from '../src/core/daemon/loop.js';
 import { runSwarm } from '../src/core/swarm/runner.js';

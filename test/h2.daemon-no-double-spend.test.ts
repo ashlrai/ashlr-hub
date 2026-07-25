@@ -70,6 +70,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // runSwarm mock — declared BEFORE the lazy daemon import so loop.ts binds to the
 // mock, not the real swarm runner (DETERMINISM: no model subprocess ever spawns).

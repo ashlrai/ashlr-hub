@@ -19,6 +19,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
 import { readFileSync } from 'node:fs';
 import type { AshlrConfig, Proposal, WorkItem } from '../src/core/types.js';
 import { generatedRepairGenerationId } from '../src/core/fleet/generated-repair-lifecycle.js';

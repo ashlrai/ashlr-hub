@@ -96,6 +96,11 @@ import {
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
+import {
+  consumeDaemonActivationPermit,
+  isDaemonActivationCapability,
+  type DaemonActivationCapability,
+} from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
@@ -1043,6 +1048,7 @@ type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; 
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
 interface TickOptions {
   dryRun: boolean;
+  activationCapability?: DaemonActivationCapability;
   drain?: DaemonDrainMode;
   drainLimit?: number;
   signal?: AbortSignal;
@@ -3108,6 +3114,26 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
+  const activationAccepted =
+    !opts.dryRun && isDaemonActivationCapability(opts.activationCapability);
+  if (!opts.dryRun && !activationAccepted) {
+    persistAudit({
+      action: 'daemon:activation-refused',
+      repo: null,
+      sandboxId: null,
+      summary: 'live tick refused: proposal-only activation capability missing or invalid',
+      result: 'refused',
+    });
+    return {
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'activation-refused',
+    };
+  }
+  const proposalOnlyActivation =
+    activationAccepted && opts.activationCapability !== undefined;
   let ownershipLost = false;
   const stillOwnsTick = (): boolean => {
     if (!opts.ownerLock) return true;
@@ -3173,7 +3199,7 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
-  const startupTreatmentFlush = !opts.dryRun && !stopRequested()
+  const startupTreatmentFlush = !opts.dryRun && !proposalOnlyActivation && !stopRequested()
     ? flushPendingRepairTreatmentOutcomes()
     : { complete: true, publicationFailed: false };
   let repairTreatmentWitnessPersistenceFailed = !startupTreatmentFlush.complete;
@@ -3265,7 +3291,12 @@ export async function tick(
   const runAutoMergeMaintenancePass = async (
     ownershipAlreadyFenced = false,
   ): Promise<AutoMergePassResult | null> => {
-    if (directionPlan?.runAutoMergeMaintenance === false || opts.dryRun || stopRequested()) return null;
+    if (
+      proposalOnlyActivation ||
+      directionPlan?.runAutoMergeMaintenance === false ||
+      opts.dryRun ||
+      stopRequested()
+    ) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
     try {
@@ -3284,7 +3315,12 @@ export async function tick(
   let remoteHandoffReconcileResult: RemoteHandoffReconcileResult | null = null;
   let remoteHandoff: DaemonTick['remoteHandoff'] | undefined;
   const runRemoteHandoffReconciliation = (): RemoteHandoffReconcileResult | null => {
-    if (opts.dryRun || stopRequested() || remoteHandoffReconcileResult !== null) return remoteHandoffReconcileResult;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      remoteHandoffReconcileResult !== null
+    ) return remoteHandoffReconcileResult;
     try {
       remoteHandoffReconcileResult = reconcileRemoteHandoffs();
       const summary = remoteHandoffTickSummary(remoteHandoffReconcileResult);
@@ -3316,6 +3352,7 @@ export async function tick(
   let producerMaintenanceSkippedByCadence = false;
   let producerMaintenanceNextAfter: string | undefined;
   const generatedRepairDispatchEnabled =
+    !proposalOnlyActivation &&
     (liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
     liveCfg.fleet?.sharedQueue?.mode !== 'filesystem';
   const blockedRepairKeys = new Set<string>();
@@ -3327,6 +3364,25 @@ export async function tick(
   let diagnosticResliceParentsResolved = 0;
   let diagnosticResliceParentsMissing = 0;
   const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => {
+    if (proposalOnlyActivation) {
+      const ordinarySources = new Set<WorkItem['source']>([
+        'issue',
+        'todo',
+        'test',
+        'dep',
+        'doc',
+        'security',
+        'plugin',
+        'lint',
+        'goal',
+        'hygiene',
+      ]);
+      return items.filter((item) =>
+        ordinarySources.has(item.source) &&
+        !item.tags.includes('proposal-repair') &&
+        !item.tags.includes('self-heal') &&
+        !item.tags.includes('generative'));
+    }
     const winnersByRoot = new Map<string, WorkItem>();
     for (const item of items) {
       if (!item.tags.includes('proposal-repair')) {
@@ -3543,7 +3599,7 @@ export async function tick(
     return false;
   };
   const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
-    if (opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
+    if (proposalOnlyActivation || opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
     try {
       if (targetRepos && targetRepos.length > 0) {
@@ -3557,7 +3613,12 @@ export async function tick(
     }
   };
   const runProposalRepairMaintenance = async (): Promise<ProposalRepairWorkResult | null> => {
-    if (opts.dryRun || stopRequested() || proposalRepairMaintenanceRan) return proposalRepairMaintenanceResult;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      proposalRepairMaintenanceRan
+    ) return proposalRepairMaintenanceResult;
     if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] === false) return null;
     proposalRepairMaintenanceRan = true;
     try {
@@ -3596,7 +3657,13 @@ export async function tick(
     }
   };
   const runInventMaintenance = async (): Promise<boolean> => {
-    if (opts.dryRun || stopRequested() || inventMaintenanceRan || skipInventAfterSelfHealRefill) return false;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      inventMaintenanceRan ||
+      skipInventAfterSelfHealRefill
+    ) return false;
     if (directionPlan?.forceLocalOnly === true) return false;
     if ((liveCfg.foundry as Record<string, unknown>)?.generative !== true) return false;
     inventMaintenanceRan = true;
@@ -3609,7 +3676,7 @@ export async function tick(
     }
   };
   const runAncillaryMaintenance = async (): Promise<void> => {
-    if (opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
+    if (proposalOnlyActivation || opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
     ancillaryMaintenanceRan = true;
 
     // M187: Counterfactual replay — low-cadence judge calibration.
@@ -4451,7 +4518,7 @@ export async function tick(
     : drainMode
       ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
       : backlogItems;
-  const rawSelectCount = daemonQueueSelectionLimit({
+  const configuredSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
     backlogItems: selectionItems.length,
@@ -4459,6 +4526,9 @@ export async function tick(
     availableSlots: availableSlotsForSelection,
     minPerItemUsd: MIN_PER_ITEM_USD,
   });
+  const rawSelectCount = proposalOnlyActivation
+    ? Math.min(1, configuredSelectCount)
+    : configuredSelectCount;
   const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
   const selectCount = !automaticDrain && typeof drainLimit === 'number'
     ? Math.min(rawSelectCount, drainLimit)
@@ -5746,8 +5816,9 @@ export async function tick(
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
-        const bestOfN: number =
-          typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
+        const bestOfN: number = proposalOnlyActivation
+          ? 1
+          : typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
           ((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
             ? Math.floor((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
             : 1;
@@ -6819,7 +6890,7 @@ export async function tick(
 
   const ownershipLostBeforeLifecycleWitnessWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeLifecycleWitnessWrites) return ownershipLostBeforeLifecycleWitnessWrites;
-  if (repairTreatmentOutcomeWitnesses.length > 0) {
+  if (!proposalOnlyActivation && repairTreatmentOutcomeWitnesses.length > 0) {
     for (const witness of repairTreatmentOutcomeWitnesses) {
       if (
         !witness.repairGenerationId ||
@@ -6837,7 +6908,7 @@ export async function tick(
   }
   const ownershipLostBeforeTreatmentFlush = postDispatchOwnershipLost();
   if (ownershipLostBeforeTreatmentFlush) return ownershipLostBeforeTreatmentFlush;
-  if (!stopRequested()) {
+  if (!proposalOnlyActivation && !stopRequested()) {
     const finalTreatmentFlush = flushPendingRepairTreatmentOutcomes();
     if (!finalTreatmentFlush.complete) repairTreatmentWitnessPersistenceFailed = true;
     if (finalTreatmentFlush.complete) {
@@ -7028,7 +7099,7 @@ export async function tick(
   // the LATEST state immediately before writing, touching ONLY lastPulseExportAt,
   // so it cannot clobber a concurrent tick's todaySpentUsd / itemsProcessed /
   // ticks accounting.
-  if (!stopRequested() && cfg.pulse?.enabled) {
+  if (!proposalOnlyActivation && !stopRequested() && cfg.pulse?.enabled) {
     trackDaemonTickEffect(
       tickRecord,
       runLegacyPulseExport(cfg, tickRecord, {
@@ -7042,7 +7113,7 @@ export async function tick(
 
   // M214: fire-and-forget tick-cost emit to Pulse OTLP — additive, never throws, no control-flow change.
   // Lazy-imported (mirrors the pulse-sync pattern) so loop.ts's static grep-guards stay intact.
-  if (!stopRequested()) {
+  if (!proposalOnlyActivation && !stopRequested()) {
     trackDaemonTickEffect(
       tickRecord,
       import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
@@ -7060,7 +7131,7 @@ export async function tick(
   // cfg.comms.director is absent/false — byte-identical to absent).
   // SAFETY: director is READ-ONLY god-view access in M257. No goal mutations,
   // no merge/push/apply, no bypass of any safety gate.
-  if (!stopRequested()) void (() => {
+  if (!proposalOnlyActivation && !stopRequested()) void (() => {
     try {
       const directorEnabled =
         (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
@@ -7197,12 +7268,15 @@ export async function runDaemon(
   cfg: AshlrConfig,
   opts: DaemonRunOptions,
 ): Promise<DaemonState> {
+  const refusedState = (reason: string): DaemonState => ({
+    ...loadDaemonState(),
+    startRefusal: reason,
+  });
   // -------------------------------------------------------------------------
   // RE-ENTRANCY GUARD — must be the very first check.
   // -------------------------------------------------------------------------
   if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
-    // Refuse silently — do not start; return current state unchanged.
-    return loadDaemonState();
+    return refusedState('daemon-reentrancy-guard');
   }
 
   const lockAttempt = acquireDaemonLock();
@@ -7214,7 +7288,7 @@ export async function runDaemon(
       summary: `daemon start refused: singleton lock busy${lockAttempt.owner ? ` (pid ${lockAttempt.owner.pid})` : ''}`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState('daemon-singleton-lock-busy');
   }
   const daemonLock = lockAttempt.lock;
 
@@ -7228,7 +7302,7 @@ export async function runDaemon(
       summary: `daemon start refused: daemon state ${startLoadedState.reason} (${startLoadedState.error})`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState(`daemon-state-${startLoadedState.reason}`);
   }
   let state = startLoadedState.state;
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
@@ -7242,7 +7316,28 @@ export async function runDaemon(
         summary: `daemon start refused: persisted resident pid ${state.pid} is still live or cannot be disproved`,
         result: 'refused',
       });
-      return loadDaemonState();
+      return refusedState('persisted-resident-owner-not-stale');
+    }
+  }
+
+  const activation = consumeDaemonActivationPermit(cfg, opts);
+  if (!activation.authorized) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:activation-refused',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: ${activation.reason}`,
+      result: 'refused',
+    });
+    return refusedState(activation.reason);
+  }
+
+  if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
+    const takeoverProof = staleResidentProof(state);
+    if (!takeoverProof) {
+      releaseDaemonLock(daemonLock);
+      return refusedState('persisted-resident-owner-not-stale');
     }
     audit({
       action: 'daemon:stale-state-recovered',
@@ -7256,7 +7351,7 @@ export async function runDaemon(
     const recovered = saveResidentDaemonState(daemonLock, state);
     if (!recovered.ok) {
       releaseDaemonLock(daemonLock);
-      return loadDaemonState();
+      return refusedState('stale-resident-state-recovery-failed');
     }
   }
 
@@ -7269,7 +7364,8 @@ export async function runDaemon(
   const prevInDaemon = process.env['ASHLR_IN_DAEMON'];
   process.env['ASHLR_IN_DAEMON'] = '1';
 
-  const dcfg = resolveCfg(cfg);
+  const activationCfg = activation.configSnapshot ?? cfg;
+  const dcfg = resolveCfg(activationCfg);
 
   // -------------------------------------------------------------------------
   // Mark daemon as running.
@@ -7290,7 +7386,7 @@ export async function runDaemon(
       summary: `daemon start refused: failed to persist running state (${startSave.error})`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState('daemon-running-state-persistence-failed');
   }
   const daemonStartedAt = state.startedAt;
   const daemonActivityInstanceId = randomUUID();
@@ -7377,7 +7473,9 @@ export async function runDaemon(
     result: 'ok',
   });
 
-  if (!opts.dryRun) reconcilePreparedGeneratedRepairReservations();
+  if (!opts.dryRun && !activation.capability) {
+    reconcilePreparedGeneratedRepairReservations();
+  }
 
   // -------------------------------------------------------------------------
   // H5 CHANGE 1 — WIRE THE ORPHAN SWEEP (crash-leftover reclaim).
@@ -7418,6 +7516,14 @@ export async function runDaemon(
     } catch {
       // Best-effort: a preview failure must never crash daemon start.
     }
+  } else if (activation.capability) {
+    audit({
+      action: 'daemon:start',
+      repo: null,
+      sandboxId: null,
+      summary: 'proposal-only activation: orphan sweep disabled',
+      result: 'ok',
+    });
   } else if (killSwitchOn()) {
     requestShutdown();
     audit({
@@ -7449,26 +7555,32 @@ export async function runDaemon(
 
   try {
     if (opts.once) {
-      // Single-tick mode — reload full config so a manual tick picks up disk changes.
-      const liveCfg = reloadLiveConfigForDaemon(cfg);
+      // A permit is bound to the exact supplied config snapshot. Other manual
+      // one-shot runs retain the established live-reload behavior.
+      const liveCfg = activation.capability ? activationCfg : reloadLiveConfigForDaemon(cfg);
       if (killSwitchOn()) requestShutdown();
       if (!shutdown.signal.aborted && ownsDaemonLock()) {
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
+          ...(activation.capability ? { activationCapability: activation.capability } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
         });
-        await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+        if (!activation.capability) {
+          await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+        }
         if (!shutdown.signal.aborted && ownsDaemonLock()) {
-          recordContextRollupAfterTick(
-            tickResult,
-            opts,
-            reloadLiveConfigForDaemon(liveCfg),
-          );
+          if (!activation.capability) {
+            recordContextRollupAfterTick(
+              tickResult,
+              opts,
+              reloadLiveConfigForDaemon(liveCfg),
+            );
+          }
         }
         if (!shutdown.signal.aborted) transitionActivity('idle');
       }

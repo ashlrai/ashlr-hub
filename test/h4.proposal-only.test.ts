@@ -25,6 +25,15 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // buildBacklog MOCKED so tick() has discoverable work regardless of which
 // scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).

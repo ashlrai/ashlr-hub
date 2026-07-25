@@ -119,10 +119,14 @@ async function importPendingCount(): Promise<PendingCountFn | null> {
   }
 }
 
-async function importConfig(): Promise<LoadConfigFn | null> {
+async function importConfig(readOnly = false, strict = false): Promise<LoadConfigFn | null> {
   try {
-    const mod = (await import('../core/config.js')) as { loadConfig: LoadConfigFn };
-    return mod.loadConfig;
+    const mod = (await import('../core/config.js')) as {
+      loadConfig: LoadConfigFn;
+      loadConfigReadOnly: LoadConfigFn;
+      loadConfigReadOnlyStrict: LoadConfigFn;
+    };
+    return strict ? mod.loadConfigReadOnlyStrict : readOnly ? mod.loadConfigReadOnly : mod.loadConfig;
   } catch {
     return null;
   }
@@ -304,7 +308,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     return 1;
   }
 
-  const loadConfig = await importConfig();
+  const loadConfig = await importConfig(true, true);
   if (!loadConfig) {
     console.error(col.red('error: ') + 'daemon requires src/core/config.ts.');
     return 1;
@@ -354,6 +358,11 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     ...(flags.drain ? { drain: flags.drain } : {}),
     ...(flags.limit ? { drainLimit: flags.limit } : {}),
   });
+
+  if (finalState.startRefusal) {
+    console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
+    return 1;
+  }
 
   // Summarize the most-recent tick (if any) for human feedback.
   const lastTick = finalState.ticks[finalState.ticks.length - 1];

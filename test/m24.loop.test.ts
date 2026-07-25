@@ -69,6 +69,15 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — after mocks and HOME isolation
 // ---------------------------------------------------------------------------

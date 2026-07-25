@@ -42,6 +42,8 @@ export interface ConductorCycleSummary {
   daemonFallback: boolean;
   /** True when the kill-switch was on; all work was skipped. */
   killSwitchTripped: boolean;
+  /** True when live conductor authority is intentionally unavailable. */
+  activationRefused?: boolean;
   /**
    * Per-goal activity for rich UI display: [{goalId, objective, fractionDone,
    * milestoneTitle, proposalFiled}]. Only populated for goals where work was
@@ -99,6 +101,14 @@ export async function runConductor(
     killSwitchTripped: false,
     goalActivity: [],
   };
+
+  if (!opts.dryRun) {
+    const { liveConductorActivationAuthorized } = await import('../daemon/activation-permit.js');
+    if (!liveConductorActivationAuthorized()) {
+      summary.activationRefused = true;
+      return summary;
+    }
+  }
 
   // All dependencies loaded lazily so vi.mock() intercepts them in tests.
   const { killSwitchOn, listEnrolled } = await import('../sandbox/policy.js');

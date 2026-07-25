@@ -29,7 +29,11 @@ const moduleLoads = vi.hoisted(() => ({
 
 vi.mock('../src/core/config.js', () => {
   moduleLoads.config++;
-  return { loadConfig: effects.loadConfig };
+  return {
+    loadConfig: effects.loadConfig,
+    loadConfigReadOnly: effects.loadConfig,
+    loadConfigReadOnlyStrict: effects.loadConfig,
+  };
 });
 
 vi.mock('../src/core/daemon/loop.js', () => {
@@ -277,5 +281,31 @@ describe('daemon valid flags remain supported', () => {
       }),
       { once: true, dryRun: true, drain: 'diagnostic-reslices', drainLimit: 4 },
     );
+  });
+
+  it('returns nonzero and surfaces a structured activation refusal', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      startRefusal: 'activation trust roots unavailable',
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'daemon start refused: activation trust roots unavailable',
+    );
+  });
+
+  it('refuses start before the daemon loop when strict config loading fails', async () => {
+    effects.loadConfig.mockImplementationOnce(() => {
+      throw new Error('config is not valid JSON');
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Failed to load config: config is not valid JSON');
+    expect(effects.runDaemon).not.toHaveBeenCalled();
   });
 });
