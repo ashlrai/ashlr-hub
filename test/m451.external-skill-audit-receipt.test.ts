@@ -460,20 +460,31 @@ describe('M451 authenticated external-skill audit receipt', () => {
     )).reason).toBe(reason);
   });
 
-  it('has no runtime import path from src into the verifier-only module', () => {
+  it('allows only the dedicated M455 verifier edge and type-only package surface', () => {
     const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
     const sourceRoot = join(repositoryRoot, 'src');
     const references: Array<{ file: string; kind: string; typeOnly: boolean }> = [];
-    const target = /(?:^|\/)external-skill-audit-receipt\.js$/;
+    const target = /(?:^|\/)external-skill-audit-receipt\.js(?:[?#].*)?$/;
     const sourceFiles = (directory: string): string[] => readdirSync(directory, {
       withFileTypes: true,
     }).flatMap((entry) => {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) return sourceFiles(path);
-      return entry.isFile() && /\.(?:ts|tsx|mts|cts)$/.test(entry.name) ? [path] : [];
+      return entry.isFile() && /\.(?:[cm]?[jt]sx?)$/.test(entry.name) ? [path] : [];
     });
-    const moduleText = (node: ts.Expression | undefined): string | null =>
-      node && ts.isStringLiteralLike(node) ? node.text : null;
+    const moduleText = (node: ts.Expression | undefined): string | null => {
+      if (node === undefined) return null;
+      if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+        return node.text;
+      }
+      if (ts.isParenthesizedExpression(node)) return moduleText(node.expression);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        const left = moduleText(node.left);
+        const right = moduleText(node.right);
+        return left === null || right === null ? null : left + right;
+      }
+      return null;
+    };
     const importIsTypeOnly = (node: ts.ImportDeclaration): boolean => {
       const clause = node.importClause;
       if (!clause) return false;
@@ -519,10 +530,10 @@ describe('M451 authenticated external-skill audit receipt', () => {
           const specifier = moduleText(node.arguments[0]);
           const dynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
           const requireCall = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-          if ((dynamicImport || requireCall) && target.test(specifier ?? '')) {
+          if (target.test(specifier ?? '')) {
             references.push({
               file: relative(repositoryRoot, path).replaceAll('\\', '/'),
-              kind: dynamicImport ? 'dynamic-import' : 'require',
+              kind: dynamicImport ? 'dynamic-import' : requireCall ? 'require' : 'literal-call',
               typeOnly: false,
             });
           }
@@ -532,10 +543,17 @@ describe('M451 authenticated external-skill audit receipt', () => {
       inspect(source);
     }
 
-    expect(references).toEqual([{
-      file: 'src/api/types.ts',
-      kind: 'export',
-      typeOnly: true,
-    }]);
+    expect(references).toEqual([
+      {
+        file: 'src/api/types.ts',
+        kind: 'export',
+        typeOnly: true,
+      },
+      {
+        file: 'src/core/fleet/external-skill-maturity.ts',
+        kind: 'import',
+        typeOnly: false,
+      },
+    ]);
   });
 });

@@ -128,3 +128,15 @@ export type {
   ExternalSkillAuditTrustPolicy,
   ExternalSkillAuditTrustRoot,
 } from '../core/fleet/external-skill-audit-trust-roots.js';
+
+export type {
+  ExternalSkillMaturityAuditEvidenceV1,
+  ExternalSkillMaturityAuditSignalV1,
+  ExternalSkillMaturityBlockerV1,
+  ExternalSkillMaturityProjectionInputV1,
+  ExternalSkillMaturityProjectionV1,
+  ExternalSkillMaturityRoutingEvidenceV1,
+  ExternalSkillMaturityRoutingSignalV1,
+  ExternalSkillMaturityStageV1,
+  ExternalSkillMaturityStateV1,
+} from '../core/fleet/external-skill-maturity.js';
