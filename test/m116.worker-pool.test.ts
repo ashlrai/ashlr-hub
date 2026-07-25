@@ -45,6 +45,15 @@ let tmpRepo: string;
 // Mocks — declared before lazy imports (same pattern as m85 / m106 / m113)
 // ---------------------------------------------------------------------------
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 const mockRunSwarm = vi.fn();
 vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),

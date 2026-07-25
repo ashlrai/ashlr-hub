@@ -27,6 +27,10 @@ import { tmpdir } from 'node:os';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { TaskSpec } from '../src/core/simple-conductor.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation — must happen before any module resolves homedir()
 // ---------------------------------------------------------------------------

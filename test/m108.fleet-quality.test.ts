@@ -21,6 +21,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ============================================================================
 // ── Mock child_process BEFORE scanner imports (vitest hoists vi.mock) ────────
 // ============================================================================
