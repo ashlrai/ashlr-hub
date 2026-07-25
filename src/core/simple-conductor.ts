@@ -62,6 +62,7 @@ export interface SimpleConductorResult {
   merged: number;
   errors: Array<{ taskId: string; error: string }>;
   killSwitchTripped: boolean;
+  activationRefused?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +117,14 @@ export async function runSimpleConductor(
     errors: [],
     killSwitchTripped: false,
   };
+
+  if (!opts.dryRun) {
+    const { liveConductorActivationAuthorized } = await import('./daemon/activation-permit.js');
+    if (!liveConductorActivationAuthorized()) {
+      result.activationRefused = true;
+      return result;
+    }
+  }
 
   // 1. Kill-switch check.
   const { killSwitchOn } = await import('./sandbox/policy.js');

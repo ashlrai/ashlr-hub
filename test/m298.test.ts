@@ -31,6 +31,10 @@ import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 import { evaluateMergeAuthority } from '../src/core/inbox/merge.js';
 import type { Proposal } from '../src/core/types.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------

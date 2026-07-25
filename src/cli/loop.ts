@@ -42,8 +42,17 @@ export async function cmdLoop(args: string[]): Promise<number> {
   const allowCloud = args.includes('--allow-cloud');
   const once = !watch; // default: one tick — never silently hang the terminal.
 
-  const { loadConfig } = await import('../core/config.js');
-  const cfg = loadConfig();
+  const { loadConfigReadOnlyStrict } = await import('../core/config.js');
+  let cfg;
+  try {
+    cfg = loadConfigReadOnlyStrict();
+  } catch (error) {
+    console.error(
+      col.red('error: ') +
+        `loop activation refused: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return 1;
+  }
 
   console.log('');
   console.log(col.bold('  ashlr loop') + col.dim(' — goal-aware conductor'));
@@ -114,7 +123,13 @@ export async function cmdLoop(args: string[]): Promise<number> {
     const sc = await runSimpleConductor(cfg, { once, dryRun, allowCloud });
 
     console.log('');
-    if (sc.killSwitchTripped) {
+    if (sc.activationRefused) {
+      console.error(
+        col.red('  live conductor refused') +
+        col.dim(' — M461 authorizes only one-item proposal daemon runs.'),
+      );
+      return 1;
+    } else if (sc.killSwitchTripped) {
       console.log(col.yellow('  kill-switch on — no work dispatched (rm ~/.ashlr/KILL to resume)'));
     } else if (dryRun) {
       console.log(col.dim(`  dry-run · ${sc.tasksAttempted} task(s) would dispatch`));
@@ -142,7 +157,13 @@ export async function cmdLoop(args: string[]): Promise<number> {
   console.log('');
 
   // Display conductor cycle summary.
-  if (summary.killSwitchTripped) {
+  if (summary.activationRefused) {
+    console.error(
+      col.red('  live conductor refused') +
+      col.dim(' — M461 authorizes only one-item proposal daemon runs.'),
+    );
+    return 1;
+  } else if (summary.killSwitchTripped) {
     console.log(col.yellow('  kill-switch on — no work dispatched (rm ~/.ashlr/KILL to resume)'));
   } else if (summary.daemonFallback) {
     console.log(col.dim('  backlog mode (no active goals) — any proposals await review in `ashlr inbox`.'));

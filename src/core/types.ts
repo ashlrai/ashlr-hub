@@ -4440,6 +4440,8 @@ export interface DaemonTick {
  * METADATA ONLY — no secrets, no diffs. Mutating this NEVER mutates a user repo.
  */
 export interface DaemonState {
+  /** Ephemeral startup refusal returned to the caller; never persisted. */
+  startRefusal?: string;
   /** Whether the daemon loop is currently running. */
   running: boolean;
   /** OS pid of the running daemon process, or null when not running. */

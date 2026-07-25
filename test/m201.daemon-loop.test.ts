@@ -102,6 +102,15 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
 // ---------------------------------------------------------------------------
@@ -9241,7 +9250,10 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     try {
       const result = await runDaemon(cfgBuiltin(), { once: true, dryRun: false });
 
-      expect(result).toEqual(persisted);
+      expect(result).toEqual({
+        ...persisted,
+        startRefusal: 'persisted-resident-owner-not-stale',
+      });
       expect(loadDaemonState()).toEqual(persisted);
       expect(mockBuildBacklog).not.toHaveBeenCalled();
       expect(readAudit().some((entry) =>

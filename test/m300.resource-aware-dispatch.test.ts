@@ -29,6 +29,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig, TaskSpec } from '../src/core/types.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------

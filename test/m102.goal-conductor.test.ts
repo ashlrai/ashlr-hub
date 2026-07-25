@@ -18,6 +18,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Goal, Milestone, SwarmRun } from '../src/core/types.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ============================================================================
 // ── Module mocks — declared BEFORE any imports of the modules under test ─────
 // ============================================================================
