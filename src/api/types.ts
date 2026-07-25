@@ -128,3 +128,15 @@ export type {
   SkillRoutingCalibrationSampleV1,
   SkillRoutingCalibrationV1,
 } from '../core/fleet/skill-routing-calibration.js';
+
+export type {
+  ExternalSkillMaturityAuditEvidenceV1,
+  ExternalSkillMaturityAuditSignalV1,
+  ExternalSkillMaturityBlockerV1,
+  ExternalSkillMaturityProjectionInputV1,
+  ExternalSkillMaturityProjectionV1,
+  ExternalSkillMaturityRoutingEvidenceV1,
+  ExternalSkillMaturityRoutingSignalV1,
+  ExternalSkillMaturityStageV1,
+  ExternalSkillMaturityStateV1,
+} from '../core/fleet/external-skill-maturity.js';

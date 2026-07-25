@@ -29,8 +29,10 @@ verdict, report object, path, source bytes, or signature-verification result.
 Extra fields fail closed.
 
 The function is verifier-only and is not exported from the package runtime.
-An AST import firewall permits only curated type exports from `src/api/types.ts`;
-adding a CLI, daemon, API, or other runtime consumer requires a later contract.
+A statically resolvable AST import firewall permits curated type exports from
+`src/api/types.ts` and the dedicated M455 observation-only verifier composition
+edge. Adding a CLI, daemon, API, or other runtime consumer requires a later
+contract.
 
 M444 owns `canonicalExternalSkillAuditReportBytes()`. It validates the bounded
 report schema and emits sorted-key, minified UTF-8. M451 rejects any byte-level

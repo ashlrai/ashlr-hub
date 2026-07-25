@@ -143,6 +143,7 @@ describe('M30 CI workflow', () => {
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
     const observerSchedulerTest = 'test/m367.daemon-observer-scheduler.test.ts';
+    const externalSkillMaturityTest = 'test/m455.external-skill-maturity.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -185,6 +186,7 @@ describe('M30 CI workflow', () => {
         'test/m315.remote-handoff-truth.test.ts',
         'test/m372.test-ci-watchdog.test.ts',
         'test/m423.control-plane-lock-order.test.ts',
+        externalSkillMaturityTest,
       ],
       [
         'test/m220.anticlog-verdict-feedback.test.ts',
@@ -206,6 +208,7 @@ describe('M30 CI workflow', () => {
       'test/m392.queue-lease-epochs.test.ts',
       terminalRetentionTest,
       observerSchedulerTest,
+      externalSkillMaturityTest,
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
@@ -417,6 +420,7 @@ describe('M30 CI workflow', () => {
     expect([...duplicateFiles].sort()).toEqual([
       terminalRetentionTest,
       observerSchedulerTest,
+      externalSkillMaturityTest,
       'test/m426.sandbox-reservation-identity.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
