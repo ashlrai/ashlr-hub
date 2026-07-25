@@ -1143,9 +1143,14 @@ describe('uninstall() — mocked spawnSync', () => {
     spawnSyncMock.mockReturnValue({ status: 0, stdout: '', stderr: '', error: undefined });
     existsSyncMock.mockReturnValue(true);
     removeLaunchdPlistTransactionMock.mockImplementation((options: {
+      preflight?: (state: { hasPrior: boolean }) => { ok: boolean; stderr?: string };
       unload: () => { ok: boolean };
       plistPath: string;
     }) => {
+      const preflight = options.preflight?.({ hasPrior: true });
+      if (preflight && !preflight.ok) {
+        throw new Error(preflight.stderr || 'preflight failed');
+      }
       const unloaded = options.unload();
       if (!unloaded.ok) throw new Error('unload failed; plist retained');
       fs.unlinkSync(options.plistPath);
@@ -1167,14 +1172,17 @@ describe('uninstall() — mocked spawnSync', () => {
     const calls = spawnSyncMock.mock.calls as [string, string[]][];
     const hasDisable = calls.some((c) => c[0] === 'systemctl' && c[1].includes('disable'));
     expect(hasDisable).toBe(true);
-    expect(removeLaunchdPlistTransactionMock).toHaveBeenCalledWith({
+    expect(removeLaunchdPlistTransactionMock).toHaveBeenCalledWith(expect.objectContaining({
       plistPath: path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service'),
       trustedRoot: FAKE_HOME,
       lockDir: path.join(FAKE_HOME, '.ashlr', 'locks'),
       unload: expect.any(Function),
       afterRemove: expect.any(Function),
       recoverAfterFailedRemove: expect.any(Function),
-    });
+      preflight: expect.any(Function),
+      recover: expect.any(Function),
+      validateRecovery: expect.any(Function),
+    }));
   });
 
   it('linux: reloads and verifies both removed and restored manager states', async () => {
@@ -1220,6 +1228,17 @@ describe('uninstall() — mocked spawnSync', () => {
 
   it('win32: calls the authority-bound Task Scheduler delete script', async () => {
     let present = true;
+    const lstatSyncMock = fs.lstatSync as ReturnType<typeof vi.fn>;
+    const priorLstat = lstatSyncMock.getMockImplementation();
+    lstatSyncMock.mockImplementation((candidate: fs.PathLike) => {
+      const value = String(candidate);
+      if (value.includes(`${path.sep}Startup${path.sep}`) || value.endsWith('.disabled')) {
+        const error = new Error('missing') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      }
+      return priorLstat!(candidate);
+    });
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (isWindowsPowerShellCommand(cmd)) {
         if (args.join(' ').includes('$folder.DeleteTask($taskName,0)')) {
@@ -1261,14 +1280,21 @@ describe('uninstall() — mocked spawnSync', () => {
 
   it('darwin: retains the service file after a false-zero unload failure', async () => {
     spawnSyncMock.mockImplementation((_cmd: string, args: string[]) =>
-      args.includes('bootout')
+      args.includes('print-disabled')
+        ? {
+            status: 0,
+            stdout: launchctlPrintDisabledFixture(false),
+            stderr: '',
+            error: undefined,
+          }
+        : args.includes('bootout')
         ? { status: 0, stdout: '', stderr: 'Boot-out failed: 5: Input/output error', error: undefined }
         : args.includes('print')
           ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
           : { status: 0, stdout: '', stderr: '', error: undefined });
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
 
-    await expect(uninstall(baseOpts('darwin'))).resolves.toBeUndefined();
+    await expect(uninstall(baseOpts('darwin'))).rejects.toThrow('unload failed; plist retained');
     expect(unlinkMock).not.toHaveBeenCalled();
   });
 
@@ -1278,7 +1304,7 @@ describe('uninstall() — mocked spawnSync', () => {
     });
     const unlinkMock = fs.unlinkSync as ReturnType<typeof vi.fn>;
 
-    await expect(uninstall(baseOpts('linux'))).resolves.toBeUndefined();
+    await expect(uninstall(baseOpts('linux'))).rejects.toThrow('lock unavailable');
 
     expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(unlinkMock).not.toHaveBeenCalled();
