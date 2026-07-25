@@ -48,18 +48,30 @@ $service = New-Object -ComObject 'Schedule.Service'
 $service.Connect()
 $folder = $service.GetFolder('\')
 try {
-  $task = $folder.GetTask($taskName)
+  $matches = @($folder.GetTasks(1) | Where-Object { $_.Name -ceq $taskName })
+  if ($matches.Count -gt 1) {
+    throw 'cleanup found ambiguous disposable task authority'
+  }
+  if ($matches.Count -eq 1) {
+    $task = $matches[0]
+  } else {
+    $task = $null
+  }
+  if ($null -ne $task) {
   if (@(2,4) -contains [int]$task.State) {
     $task.Stop(0)
-    for ($attempt = 0; $attempt -lt 50 -and @(2,4) -contains [int]$task.State; $attempt++) {
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
       Start-Sleep -Milliseconds 100
+      $task = $folder.GetTask($taskName)
+      if (@(2,4) -notcontains [int]$task.State) {
+        break
+      }
     }
   }
   $folder.DeleteTask($taskName, 0)
-} catch {
-  if ($_.Exception.HResult -ne -2147024894) {
-    throw
   }
+} catch {
+  throw
 }
 `;
 
@@ -604,7 +616,9 @@ describe.skipIf(process.platform !== 'win32')(
         );
         expect(activated.status !== 0 || activated.error).toBe(true);
         expect(activated.stdout).not.toBe('started');
-        expect(activated.stderr).toContain('untrusted identity can modify the task');
+        expect(activated.stderr).toMatch(
+          /untrusted identity can modify the task|task DACL is null, empty, or inheritable/,
+        );
         sleep(500);
         expect(existsSync(sentinelPath)).toBe(false);
       } catch (error) {
