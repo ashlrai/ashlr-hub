@@ -10,6 +10,7 @@ import type { SkillCard } from '../src/core/types.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
   inspectVerifiedSkillCorpus,
+  rankSkillRetrievalCandidates,
   SKILL_RETRIEVAL_POLICY_VERSION,
   selectVerifiedSkills,
 } from '../src/core/fleet/skill-retrieval.js';
@@ -64,6 +65,104 @@ function card(overrides: Partial<SkillCard> = {}): SkillCard {
 }
 
 describe('M356 verified skill retrieval', () => {
+  it('shares one deterministic metadata-only scoring kernel with offline calibration', () => {
+    const candidates = [
+      {
+        candidateId: 'b'.repeat(64),
+        name: 'Documentation workflow',
+        summary: 'Update markdown documentation.',
+        tags: ['docs'],
+        taskKinds: ['documentation'],
+        commandKinds: ['lint'],
+      },
+      {
+        candidateId: 'a'.repeat(64),
+        name: 'Dependency security repair',
+        summary: 'Audit vulnerable dependencies and run security tests.',
+        tags: ['security', 'dependencies'],
+        taskKinds: ['dependency-repair'],
+        commandKinds: ['test'],
+      },
+    ];
+    const query = { title: 'Repair a security dependency', tags: ['security'] };
+
+    expect(rankSkillRetrievalCandidates(candidates, query)).toEqual([
+      {
+        candidateId: 'a'.repeat(64),
+        rank: 1,
+        score: 0.944444,
+        matchedFields: ['taskKinds', 'tags', 'name', 'summary'],
+      },
+    ]);
+    expect(JSON.stringify(rankSkillRetrievalCandidates(candidates, query)))
+      .not.toContain('Dependency security repair');
+  });
+
+  it('fails closed on malformed, duplicate, tainted, and accessor scoring candidates', () => {
+    const valid = {
+      candidateId: 'a'.repeat(64),
+      name: 'Security repair',
+      summary: 'Run dependency tests.',
+      tags: ['security'],
+      taskKinds: ['dependency-repair'],
+      commandKinds: ['test'],
+    };
+    const accessor = Object.defineProperty({ ...valid }, 'name', {
+      enumerable: true,
+      get() {
+        return 'Security repair';
+      },
+    });
+    const unknown = { ...valid, eligible: true };
+    const symbol = { ...valid, [Symbol('authority')]: true };
+    const sparse = new Array(1) as unknown[];
+
+    expect(rankSkillRetrievalCandidates([valid, valid], { title: 'security' })).toEqual([]);
+    expect(rankSkillRetrievalCandidates([{ ...valid, candidateId: '' }], { title: 'security' }))
+      .toEqual([]);
+    expect(rankSkillRetrievalCandidates([{ ...valid, summary: 'RAW_PROMPT_FIELD_CANARY' }],
+      { title: 'security' })).toEqual([]);
+    expect(rankSkillRetrievalCandidates([accessor], { title: 'security' })).toEqual([]);
+    expect(rankSkillRetrievalCandidates([unknown], { title: 'security' })).toEqual([]);
+    expect(rankSkillRetrievalCandidates([symbol], { title: 'security' })).toEqual([]);
+    expect(rankSkillRetrievalCandidates(sparse, { title: 'security' })).toEqual([]);
+  });
+
+  it('preserves bounded runtime IDs and reads each query field once', () => {
+    const reads = { title: 0 };
+    const query = Object.defineProperty({}, 'title', {
+      enumerable: true,
+      get() {
+        reads.title += 1;
+        return 'security';
+      },
+    });
+    const candidates = ['skill/security', 'Security workflow'].map((candidateId) => ({
+      candidateId,
+      name: 'Security repair',
+      summary: '',
+      tags: [],
+      taskKinds: [],
+      commandKinds: [],
+    }));
+
+    expect(rankSkillRetrievalCandidates(candidates, query)).toEqual([
+      {
+        candidateId: 'Security workflow',
+        rank: 1,
+        score: 0.666667,
+        matchedFields: ['name'],
+      },
+      {
+        candidateId: 'skill/security',
+        rank: 2,
+        score: 0.666667,
+        matchedFields: ['name'],
+      },
+    ]);
+    expect(reads.title).toBe(1);
+  });
+
   it('does not treat a generic attestation over release metadata as release authority', () => {
     const { contentHash: _contentHash, attestation: _attestation, ...unsigned } = card();
     const signed = attestSkillCard(unsigned);
