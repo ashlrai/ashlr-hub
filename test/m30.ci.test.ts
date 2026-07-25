@@ -211,6 +211,10 @@ describe('M30 CI workflow', () => {
       'test/m426.sandbox-reservation-identity.test.ts',
       'test/h7.rollback.test.ts',
     ];
+    const windowsServiceAuthorityFiles = [
+      'test/m93.windows-file-authority.test.ts',
+      'test/m93.daemon-service-windows-integration.test.ts',
+    ];
     const nativePathIdentityFiles = [
       'test/h1.fixture.test.ts',
       'test/h4.sandbox-enrollment-kill.test.ts',
@@ -384,6 +388,7 @@ describe('M30 CI workflow', () => {
       ...expectedMacosFiles,
       ...nativeAliasFiles,
       ...nativePathIdentityFiles,
+      ...windowsServiceAuthorityFiles,
     ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
@@ -433,6 +438,9 @@ describe('M30 CI workflow', () => {
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
+    expect(ciYml).toContain('windows-service-authority:');
+    expect(ciYml).toContain('runs-on: windows-2022');
+    for (const file of windowsServiceAuthorityFiles) expect(ciYml).toContain(file);
     expect(ciYml).toContain("if: matrix.label == 'windows, portability 1/3'");
     for (const file of nativePathIdentityFiles) expect(ciYml).toContain(file);
     const nativePathStep = ciYml.match(

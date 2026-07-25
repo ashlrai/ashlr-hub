@@ -5,7 +5,7 @@
  * Supports macOS (launchd), Linux (systemd --user), and Windows (schtasks).
  *
  * DESIGN CONTRACT:
- *  - install() / uninstall() are the ONLY side-effectful entry points.
+ *  - install(), uninstall(), and ensureRunning() are side-effectful entry points.
  *  - generateServiceDefinition() / buildRegisterCommand() / buildUnregisterCommand()
  *    are pure and fully testable with a mocked process.platform.
  *  - serviceStatus() queries the OS but never throws.
@@ -15,9 +15,24 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildToolPath } from '../run/tool-path.js';
-import { installLaunchdPlistTransaction, removeLaunchdPlistTransaction } from './launchd-plist-transaction.js';
+import { fsyncDirectory } from '../util/durability.js';
+import {
+  installLaunchdPlistTransaction,
+  removeLaunchdPlistTransaction,
+  withServiceFileTransactionLock,
+} from './launchd-plist-transaction.js';
+import { validateWindowsFileAuthority } from './windows-file-authority.js';
+import {
+  WINDOWS_TASK_CREATE_SCRIPT,
+  WINDOWS_TASK_RESTORE_SCRIPT,
+  WINDOWS_TASK_RUN_SCRIPT,
+  WINDOWS_TASK_SNAPSHOT_SCRIPT,
+  WINDOWS_TASK_STOP_DELETE_SCRIPT,
+  windowsPowerShellPath,
+} from './windows-task-scripts.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -293,7 +308,7 @@ function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
     '/TR', `"${cmdPath}"`,
     '/SC', 'ONLOGON',
     '/RL', 'LIMITED',
-    '/F',  // force overwrite if exists
+    '/IT',
   ];
 
   const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
@@ -320,11 +335,15 @@ interface CommandResult {
   stderr: string;
 }
 
-function runCmd(args: string[]): CommandResult {
+function runCmd(args: string[], input?: string): CommandResult {
   const [cmd, ...rest] = args;
   if (!cmd) return { ok: false, stdout: '', stderr: 'empty command' };
   try {
-    const result = spawnSync(cmd, rest, { encoding: 'utf8', timeout: 15_000 });
+    const result = spawnSync(cmd, rest, {
+      encoding: 'utf8',
+      timeout: 15_000,
+      ...(input === undefined ? {} : { input }),
+    });
     const ok = result.status === 0 && !result.error;
     return {
       ok,
@@ -484,6 +503,7 @@ interface SystemdActivationState {
   present: boolean;
   active: boolean;
   enabled: boolean;
+  fragmentPath?: string;
 }
 
 function readSystemdActivationState(): SystemdActivationState {
@@ -500,7 +520,20 @@ function readSystemdActivationState(): SystemdActivationState {
   const isMissing = !enabled.ok && enabledToken === 'not-found';
   if (!isEnabled && !isDisabled && !isMissing) throw commandError('systemd enabled-state query', enabled);
   if (isMissing && isActive) throw new Error('systemd reported an active unit with no registered definition');
-  return { present: !isMissing, active: isActive, enabled: isEnabled };
+  if (isMissing) return { present: false, active: false, enabled: false };
+  const fragment = runCmd([
+    'systemctl',
+    '--user',
+    'show',
+    'ashlr-daemon',
+    '--property=FragmentPath',
+    '--value',
+  ]);
+  const fragmentPath = fragment.stdout.trim();
+  if (!fragment.ok || !path.isAbsolute(fragmentPath) || fragmentPath !== fragment.stdout.replace(/\r?\n$/, '')) {
+    throw commandError('systemd FragmentPath query', fragment);
+  }
+  return { present: true, active: isActive, enabled: isEnabled, fragmentPath };
 }
 
 function parseSystemdRecoveryState(state: unknown): SystemdActivationState | undefined {
@@ -509,15 +542,29 @@ function parseSystemdRecoveryState(state: unknown): SystemdActivationState | und
   if (typeof value.present !== 'boolean' || typeof value.active !== 'boolean' || typeof value.enabled !== 'boolean') {
     return undefined;
   }
-  if (Object.keys(value).some((key) => !['present', 'active', 'enabled'].includes(key))) return undefined;
+  if (Object.keys(value).some((key) => !['present', 'active', 'enabled', 'fragmentPath'].includes(key))) return undefined;
   if (!value.present && (value.active || value.enabled)) return undefined;
-  return { present: value.present, active: value.active, enabled: value.enabled };
+  if (!value.present) {
+    return value.fragmentPath === undefined
+      ? { present: false, active: false, enabled: false }
+      : undefined;
+  }
+  if (typeof value.fragmentPath !== 'string' || !path.isAbsolute(value.fragmentPath)) return undefined;
+  return {
+    present: true,
+    active: value.active,
+    enabled: value.enabled,
+    fragmentPath: value.fragmentPath,
+  };
 }
 
 function verifySystemdState(expected: SystemdActivationState): CommandResult {
   try {
     const actual = readSystemdActivationState();
-    return actual.present === expected.present && actual.active === expected.active && actual.enabled === expected.enabled
+    return actual.present === expected.present &&
+      actual.active === expected.active &&
+      actual.enabled === expected.enabled &&
+      actual.fragmentPath === expected.fragmentPath
       ? { ok: true, stdout: '', stderr: '' }
       : { ok: false, stdout: '', stderr: `state=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}` };
   } catch (error) {
@@ -538,11 +585,20 @@ function applySystemdState(expected: SystemdActivationState): CommandResult {
 }
 
 type WindowsTaskState = 'disabled' | 'queued' | 'ready' | 'running';
+type WindowsTaskSecurityScope = 'owner-group-dacl';
+const MAX_WINDOWS_TASK_XML_BYTES = 256 * 1024;
+const MAX_WINDOWS_TASK_SECURITY_DESCRIPTOR_BYTES = 64 * 1024;
+const WINDOWS_TASK_SECURITY_SCOPE: WindowsTaskSecurityScope = 'owner-group-dacl';
 
 interface WindowsActivationState {
   present: boolean;
   state?: WindowsTaskState;
   legacyLauncher: boolean;
+  taskXmlBase64?: string;
+  taskXmlSha256?: string;
+  taskSecurityDescriptorBase64?: string;
+  taskSecurityDescriptorSha256?: string;
+  taskSecurityScope?: WindowsTaskSecurityScope;
 }
 
 const WINDOWS_TASK_STATE_SCRIPT = [
@@ -555,7 +611,7 @@ const WINDOWS_TASK_STATE_SCRIPT = [
 
 function readWindowsTaskState(): { present: false } | { present: true; state: WindowsTaskState } {
   const result = runCmd([
-    'powershell.exe',
+    windowsPowerShellPath(),
     '-NoLogo',
     '-NoProfile',
     '-NonInteractive',
@@ -565,82 +621,351 @@ function readWindowsTaskState(): { present: false } | { present: true; state: Wi
   if (!result.ok) throw commandError('PowerShell Task Scheduler state query', result);
   const token = result.stdout.trim();
   if (token === 'absent') return { present: false };
-  const states: Record<string, WindowsTaskState> = {
+  const state = windowsTaskStateFromToken(token);
+  if (!state) throw new Error(`PowerShell Task Scheduler state query returned unknown state ${JSON.stringify(token)}`);
+  return { present: true, state };
+}
+
+function windowsTaskStateFromToken(token: string): WindowsTaskState | undefined {
+  return ({
     '1': 'disabled',
     '2': 'queued',
     '3': 'ready',
     '4': 'running',
+  } as const)[token];
+}
+
+function decodeCanonicalBase64(
+  value: unknown,
+  maxBytes: number,
+  label: string,
+): { base64: string; sha256: string } {
+  if (typeof value !== 'string' || value.length === 0 || value.length > Math.ceil(maxBytes / 3) * 4) {
+    throw new Error(`invalid ${label}`);
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length === 0 || bytes.length > maxBytes || bytes.toString('base64') !== value) {
+    throw new Error(`invalid ${label}`);
+  }
+  return {
+    base64: value,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
   };
-  const state = states[token];
-  if (!state) throw new Error(`PowerShell Task Scheduler state query returned unknown state ${JSON.stringify(token)}`);
-  return { present: true, state };
+}
+
+function readWindowsTaskSnapshot(expectedLauncherPath: string):
+  | { present: false }
+  | {
+      present: true;
+      state: WindowsTaskState;
+      taskXmlBase64: string;
+      taskXmlSha256: string;
+      taskSecurityDescriptorBase64: string;
+      taskSecurityDescriptorSha256: string;
+      taskSecurityScope: WindowsTaskSecurityScope;
+    } {
+  if (!path.isAbsolute(expectedLauncherPath)) {
+    throw new Error('expected Task Scheduler launcher path must be absolute');
+  }
+  const result = runCmd([
+    windowsPowerShellPath(),
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    WINDOWS_TASK_SNAPSHOT_SCRIPT,
+  ], JSON.stringify({ expectedLauncherPath }));
+  if (!result.ok) {
+    throw new Error(`PowerShell Task Scheduler snapshot failed: ${result.stderr.trim() || 'exit non-zero'}`);
+  }
+  if (result.stdout === 'absent') return { present: false };
+  if (Buffer.byteLength(result.stdout, 'utf8') > (
+    MAX_WINDOWS_TASK_XML_BYTES + MAX_WINDOWS_TASK_SECURITY_DESCRIPTOR_BYTES
+  ) * 2) {
+    throw new Error('PowerShell Task Scheduler snapshot exceeded output limit');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    throw new Error('PowerShell Task Scheduler snapshot returned invalid JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('PowerShell Task Scheduler snapshot returned invalid shape');
+  }
+  const value = parsed as Record<string, unknown>;
+  if (
+    Object.keys(value).join(',') !==
+      'state,taskXmlBase64,taskSecurityDescriptorBase64' ||
+    typeof value.state !== 'string'
+  ) {
+    throw new Error('PowerShell Task Scheduler snapshot returned invalid shape');
+  }
+  const state = windowsTaskStateFromToken(value.state);
+  if (!state || result.stdout !== JSON.stringify({
+    state: value.state,
+    taskXmlBase64: value.taskXmlBase64,
+    taskSecurityDescriptorBase64: value.taskSecurityDescriptorBase64,
+  })) {
+    throw new Error('PowerShell Task Scheduler snapshot returned noncanonical output');
+  }
+  const xml = decodeCanonicalBase64(
+    value.taskXmlBase64,
+    MAX_WINDOWS_TASK_XML_BYTES,
+    'Task Scheduler XML snapshot',
+  );
+  const security = decodeCanonicalBase64(
+    value.taskSecurityDescriptorBase64,
+    MAX_WINDOWS_TASK_SECURITY_DESCRIPTOR_BYTES,
+    'Task Scheduler security descriptor snapshot',
+  );
+  return {
+    present: true,
+    state,
+    taskXmlBase64: xml.base64,
+    taskXmlSha256: xml.sha256,
+    taskSecurityDescriptorBase64: security.base64,
+    taskSecurityDescriptorSha256: security.sha256,
+    taskSecurityScope: WINDOWS_TASK_SECURITY_SCOPE,
+  };
 }
 
 function parseWindowsRecoveryState(state: unknown): WindowsActivationState | undefined {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined;
   const value = state as Record<string, unknown>;
   if (typeof value.present !== 'boolean' || typeof value.legacyLauncher !== 'boolean') return undefined;
-  if (Object.keys(value).some((key) => !['present', 'state', 'legacyLauncher'].includes(key))) return undefined;
+  const keys = Object.keys(value).join(',');
   if (!value.present) {
-    return value.state === undefined ? { present: false, legacyLauncher: value.legacyLauncher } : undefined;
+    if (keys !== 'present,legacyLauncher') return undefined;
+    return value.state === undefined &&
+      value.taskXmlBase64 === undefined &&
+      value.taskXmlSha256 === undefined &&
+      value.taskSecurityDescriptorBase64 === undefined &&
+      value.taskSecurityDescriptorSha256 === undefined
+      ? { present: false, legacyLauncher: value.legacyLauncher }
+      : undefined;
   }
+  if (
+    keys !==
+    'present,state,legacyLauncher,taskXmlBase64,taskXmlSha256,' +
+      'taskSecurityDescriptorBase64,taskSecurityDescriptorSha256,taskSecurityScope'
+  ) return undefined;
   if (!['disabled', 'queued', 'ready', 'running'].includes(String(value.state))) return undefined;
-  return { present: true, state: value.state as WindowsTaskState, legacyLauncher: value.legacyLauncher };
+  if (
+    typeof value.taskXmlSha256 !== 'string' ||
+    typeof value.taskSecurityDescriptorSha256 !== 'string' ||
+    value.taskSecurityScope !== WINDOWS_TASK_SECURITY_SCOPE
+  ) return undefined;
+  try {
+    const xml = decodeCanonicalBase64(
+      value.taskXmlBase64,
+      MAX_WINDOWS_TASK_XML_BYTES,
+      'persisted Task Scheduler XML snapshot',
+    );
+    const security = decodeCanonicalBase64(
+      value.taskSecurityDescriptorBase64,
+      MAX_WINDOWS_TASK_SECURITY_DESCRIPTOR_BYTES,
+      'persisted Task Scheduler security descriptor snapshot',
+    );
+    if (
+      xml.sha256 !== value.taskXmlSha256 ||
+      security.sha256 !== value.taskSecurityDescriptorSha256
+    ) return undefined;
+    return {
+      present: true,
+      state: value.state as WindowsTaskState,
+      legacyLauncher: value.legacyLauncher,
+      taskXmlBase64: xml.base64,
+      taskXmlSha256: xml.sha256,
+      taskSecurityDescriptorBase64: security.base64,
+      taskSecurityDescriptorSha256: security.sha256,
+      taskSecurityScope: WINDOWS_TASK_SECURITY_SCOPE,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
-function stopAndDeleteWindowsTask(): CommandResult {
+function stopAndDeleteWindowsTask(
+  expected: WindowsActivationState,
+  expectedLauncherPath: string,
+): CommandResult {
   try {
-    const before = readWindowsTaskState();
-    if (!before.present) return { ok: true, stdout: '', stderr: '' };
-    if (before.state === 'running' || before.state === 'queued') {
-      const ended = runCmd(['schtasks', '/End', '/TN', 'AshlrDaemon']);
-      if (!ended.ok) return ended;
-      const stopped = readWindowsTaskState();
-      if (!stopped.present || (stopped.state !== 'ready' && stopped.state !== 'disabled')) {
-        return { ok: false, stdout: '', stderr: 'Task Scheduler could not prove AshlrDaemon stopped before deletion' };
-      }
+    if (!expected.present) {
+      return readWindowsTaskState().present
+        ? { ok: false, stdout: '', stderr: 'unexpected AshlrDaemon task exists before removal' }
+        : { ok: true, stdout: '', stderr: '' };
     }
-    const deleted = runCmd(['schtasks', '/Delete', '/TN', 'AshlrDaemon', '/F']);
-    if (!deleted.ok) return deleted;
-    return readWindowsTaskState().present
-      ? { ok: false, stdout: '', stderr: 'Task Scheduler deletion verification found AshlrDaemon still registered' }
-      : { ok: true, stdout: '', stderr: '' };
+    if (
+      !expected.taskXmlSha256 ||
+      !expected.taskSecurityDescriptorSha256 ||
+      expected.taskSecurityScope !== WINDOWS_TASK_SECURITY_SCOPE
+    ) {
+      return { ok: false, stdout: '', stderr: 'exact Task Scheduler removal authority is unavailable' };
+    }
+    const deleted = runCmd([
+      windowsPowerShellPath(),
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      WINDOWS_TASK_STOP_DELETE_SCRIPT,
+    ], JSON.stringify({
+      expectedLauncherPath,
+      taskSecurityDescriptorSha256: expected.taskSecurityDescriptorSha256,
+      taskXmlSha256: expected.taskXmlSha256,
+    }));
+    return deleted.ok && deleted.stdout === 'deleted'
+      ? { ok: true, stdout: '', stderr: '' }
+      : {
+          ok: false,
+          stdout: '',
+          stderr: deleted.stderr.trim() || 'Task Scheduler authority-bound removal failed',
+        };
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
 }
 
-function verifyWindowsState(expected: WindowsActivationState): CommandResult {
+function runWindowsTask(expectedLauncherPath: string): CommandResult {
   try {
-    const actual = readWindowsTaskState();
+    if (!path.isAbsolute(expectedLauncherPath)) {
+      return { ok: false, stdout: '', stderr: 'expected Task Scheduler launcher path must be absolute' };
+    }
+    const started = runCmd([
+      windowsPowerShellPath(),
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      WINDOWS_TASK_RUN_SCRIPT,
+    ], JSON.stringify({ expectedLauncherPath }));
+    return started.ok && started.stdout === 'started'
+      ? { ok: true, stdout: '', stderr: '' }
+      : {
+          ok: false,
+          stdout: '',
+          stderr: started.stderr.trim() || 'Task Scheduler authority-bound activation failed',
+        };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function verifyWindowsState(
+  expected: WindowsActivationState,
+  expectedLauncherPath: string,
+): CommandResult {
+  try {
+    const expectedHasSnapshot = expected.present && expected.taskXmlBase64 !== undefined;
+    const actual = expected.present
+      ? readWindowsTaskSnapshot(expectedLauncherPath)
+      : readWindowsTaskState();
     if (!expected.present) {
       return !actual.present
         ? { ok: true, stdout: '', stderr: '' }
         : { ok: false, stdout: '', stderr: `Task Scheduler state=${actual.state}; expected absent` };
     }
     if (!actual.present) return { ok: false, stdout: '', stderr: 'Task Scheduler task is absent' };
-    const activeMatches = (expected.state === 'running' || expected.state === 'queued') &&
-      (actual.state === 'running' || actual.state === 'queued');
-    return actual.state === expected.state || activeMatches
-      ? { ok: true, stdout: '', stderr: '' }
-      : { ok: false, stdout: '', stderr: `Task Scheduler state=${actual.state}; expected ${expected.state}` };
+    const activeMatches = expected.state === 'queued' && actual.state === 'running';
+    if (actual.state !== expected.state && !activeMatches) {
+      return { ok: false, stdout: '', stderr: `Task Scheduler state=${actual.state}; expected ${expected.state}` };
+    }
+    if (expectedHasSnapshot) {
+      const snapshot = actual as Extract<ReturnType<typeof readWindowsTaskSnapshot>, { present: true }>;
+      if (
+        snapshot.taskXmlBase64 !== expected.taskXmlBase64 ||
+        snapshot.taskXmlSha256 !== expected.taskXmlSha256 ||
+        snapshot.taskSecurityDescriptorBase64 !== expected.taskSecurityDescriptorBase64 ||
+        snapshot.taskSecurityDescriptorSha256 !== expected.taskSecurityDescriptorSha256 ||
+        snapshot.taskSecurityScope !== expected.taskSecurityScope
+      ) {
+        return { ok: false, stdout: '', stderr: 'Task Scheduler definition snapshot mismatch' };
+      }
+    }
+    return { ok: true, stdout: '', stderr: '' };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function restoreWindowsTaskDefinition(
+  expected: WindowsActivationState,
+  expectedLauncherPath: string,
+): CommandResult {
+  if (
+    !expected.present ||
+    !expected.taskXmlBase64 ||
+    !expected.taskXmlSha256 ||
+    !expected.taskSecurityDescriptorBase64 ||
+    !expected.taskSecurityDescriptorSha256 ||
+    expected.taskSecurityScope !== WINDOWS_TASK_SECURITY_SCOPE
+  ) {
+    return { ok: false, stdout: '', stderr: 'exact prior Task Scheduler definition is unavailable' };
+  }
+  try {
+    const parsed = parseWindowsRecoveryState(expected);
+    if (!parsed?.present) {
+      return { ok: false, stdout: '', stderr: 'exact prior Task Scheduler definition is invalid' };
+    }
+    const restored = runCmd([
+      windowsPowerShellPath(),
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      WINDOWS_TASK_RESTORE_SCRIPT,
+    ], JSON.stringify({
+      expectedLauncherPath,
+      taskXmlBase64: parsed.taskXmlBase64,
+      taskSecurityDescriptorBase64: parsed.taskSecurityDescriptorBase64,
+    }));
+    if (!restored.ok || restored.stdout !== 'restored') {
+      return {
+        ok: false,
+        stdout: '',
+        stderr: restored.stderr.trim() || 'Task Scheduler exact definition restore failed',
+      };
+    }
+    if (expected.state === 'running' || expected.state === 'queued') {
+      const started = runWindowsTask(expectedLauncherPath);
+      if (!started.ok) return started;
+    }
+    return verifyWindowsState(parsed, expectedLauncherPath);
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
 }
 
 function applyWindowsState(def: ServiceDefinition, expected: WindowsActivationState): CommandResult {
-  if (!expected.present) return verifyWindowsState(expected);
-  const created = runCmd(def.registerArgs);
-  if (!created.ok) return created;
+  if (!expected.present) return verifyWindowsState(expected, def.filePath);
+  if (expected.taskXmlBase64 !== undefined) {
+    return restoreWindowsTaskDefinition(expected, def.filePath);
+  }
+  const created = runCmd([
+    windowsPowerShellPath(),
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    WINDOWS_TASK_CREATE_SCRIPT,
+  ], JSON.stringify({ expectedLauncherPath: def.filePath }));
+  if (!created.ok || created.stdout !== 'created') {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: created.stderr.trim() || 'Task Scheduler strict definition creation failed',
+    };
+  }
   if (expected.state === 'disabled') {
     const disabled = runCmd(['schtasks', '/Change', '/TN', 'AshlrDaemon', '/DISABLE']);
     if (!disabled.ok) return disabled;
   } else if (expected.state === 'running' || expected.state === 'queued') {
-    const started = runCmd(['schtasks', '/Run', '/TN', 'AshlrDaemon']);
+    const started = runWindowsTask(def.filePath);
     if (!started.ok) return started;
   }
-  return verifyWindowsState(expected);
+  return verifyWindowsState(expected, def.filePath);
 }
 
 function legacyWindowsLauncherPaths(home: string, destinationDir: string): { legacy: string; archived: string } {
@@ -652,7 +977,16 @@ function legacyWindowsLauncherPaths(home: string, destinationDir: string): { leg
   return { legacy, archived: path.join(destinationDir, 'ashlr-daemon.startup-legacy.cmd.disabled') };
 }
 
-function assertSafePathParents(rootPath: string, filePath: string, label: string): void {
+function lstatOptional(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+function safePathParentsExist(rootPath: string, filePath: string, label: string): boolean {
   const root = path.resolve(rootPath);
   const target = path.resolve(filePath);
   const relative = path.relative(root, target);
@@ -661,46 +995,78 @@ function assertSafePathParents(rootPath: string, filePath: string, label: string
   }
   let current = root;
   for (const component of relative.split(path.sep).slice(0, -1)) {
-    const stat = fs.lstatSync(current);
-    const owned = typeof process.getuid !== 'function' || stat.uid === process.getuid();
-    const safeMode = process.platform === 'win32' || (stat.mode & 0o022) === 0;
-    if (stat.isSymbolicLink() || !stat.isDirectory() || !owned || !safeMode) {
-      throw new Error(`unsafe ${label} parent component ${current}`);
-    }
+    const stat = lstatOptional(current);
+    if (!stat) return false;
+    validateSafePathParent(root, current, stat, label);
     current = path.join(current, component);
   }
-  const parent = fs.lstatSync(current);
-  const owned = typeof process.getuid !== 'function' || parent.uid === process.getuid();
-  const safeMode = process.platform === 'win32' || (parent.mode & 0o022) === 0;
-  if (parent.isSymbolicLink() || !parent.isDirectory() || !owned || !safeMode) {
+  const parent = lstatOptional(current);
+  if (!parent) return false;
+  validateSafePathParent(root, current, parent, label);
+  return true;
+}
+
+function validateSafePathParent(
+  root: string,
+  current: string,
+  stat: fs.Stats,
+  label: string,
+): void {
+  const owned = typeof process.getuid !== 'function' || stat.uid === process.getuid();
+  const safeMode = process.platform === 'win32' || (stat.mode & 0o022) === 0;
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !owned || !safeMode) {
     throw new Error(`unsafe ${label} parent component ${current}`);
   }
-}
-
-function fsyncDirectoryFor(filePath: string): void {
-  const fd = fs.openSync(path.dirname(filePath), fs.constants.O_RDONLY);
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
+  if (process.platform === 'win32') {
+    const authority = validateWindowsFileAuthority(current, 'directory', { anchorPath: root });
+    if (!authority.ok) throw new Error(`unsafe ${label} parent authority: ${authority.reason}`);
   }
 }
 
-function validateLegacyWindowsLauncher(filePath: string, label: string): void {
+function assertSafePathParents(rootPath: string, filePath: string, label: string): void {
+  if (!safePathParentsExist(rootPath, filePath, label)) {
+    throw new Error(`${label} parent path is missing`);
+  }
+}
+
+function inspectSafePathLeaf(
+  rootPath: string,
+  filePath: string,
+  label: string,
+): fs.Stats | undefined {
+  return safePathParentsExist(rootPath, filePath, label)
+    ? lstatOptional(filePath)
+    : undefined;
+}
+
+function fsyncDirectoryFor(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
+  fsyncDirectory(path.dirname(filePath), {
+    expectedIdentity: {
+      dev: BigInt(expected.dev),
+      ino: BigInt(expected.ino),
+    },
+  });
+}
+
+function validateLegacyWindowsLauncher(home: string, filePath: string, label: string): void {
   const stat = fs.lstatSync(filePath);
   const owned = typeof process.getuid !== 'function' || stat.uid === process.getuid();
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || !owned) {
     throw new Error(`unsafe ${label}: expected a regular, singly-linked owned file at ${filePath}`);
   }
+  if (process.platform === 'win32') {
+    const authority = validateWindowsFileAuthority(filePath, 'file', { anchorPath: home });
+    if (!authority.ok) throw new Error(`unsafe ${label} authority: ${authority.reason}`);
+  }
 }
 
 function inspectLegacyWindowsLauncher(home: string, destinationDir: string): boolean {
   const { legacy, archived } = legacyWindowsLauncherPaths(home, destinationDir);
-  if (!fs.existsSync(legacy)) return false;
-  assertSafePathParents(home, legacy, 'legacy Windows launcher');
-  assertSafePathParents(home, archived, 'legacy Windows launcher archive');
-  validateLegacyWindowsLauncher(legacy, 'legacy Windows launcher');
-  if (fs.existsSync(archived)) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
+  const legacyStat = inspectSafePathLeaf(home, legacy, 'legacy Windows launcher');
+  const archivedStat = inspectSafePathLeaf(home, archived, 'legacy Windows launcher archive');
+  if (archivedStat) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
+  if (!legacyStat) return false;
+  validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
   return true;
 }
 
@@ -708,18 +1074,23 @@ function archiveLegacyWindowsLauncher(home: string, destinationDir: string, expe
   try {
     if (!expected) return { ok: true, stdout: '', stderr: '' };
     const { legacy, archived } = legacyWindowsLauncherPaths(home, destinationDir);
-    if (fs.existsSync(legacy)) {
-      assertSafePathParents(home, legacy, 'legacy Windows launcher');
-      assertSafePathParents(home, archived, 'legacy Windows launcher archive');
-      validateLegacyWindowsLauncher(legacy, 'legacy Windows launcher');
-      if (fs.existsSync(archived)) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
+    const legacyStat = inspectSafePathLeaf(home, legacy, 'legacy Windows launcher');
+    const archivedStat = inspectSafePathLeaf(home, archived, 'legacy Windows launcher archive');
+    if (legacyStat) {
+      if (!safePathParentsExist(home, archived, 'legacy Windows launcher archive')) {
+        throw new Error('legacy Windows launcher archive parent path is missing');
+      }
+      validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
+      if (archivedStat) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
+      const legacyParent = fs.lstatSync(path.dirname(legacy));
+      const archivedParent = fs.lstatSync(path.dirname(archived));
       fs.renameSync(legacy, archived);
-      fsyncDirectoryFor(legacy);
-      fsyncDirectoryFor(archived);
+      fsyncDirectoryFor(legacy, legacyParent);
+      fsyncDirectoryFor(archived, archivedParent);
       return { ok: true, stdout: '', stderr: '' };
     }
-    if (!fs.existsSync(archived)) throw new Error('legacy Windows launcher disappeared during transaction');
-    validateLegacyWindowsLauncher(archived, 'archived legacy Windows launcher');
+    if (!archivedStat) throw new Error('legacy Windows launcher disappeared during transaction');
+    validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
     return { ok: true, stdout: '', stderr: '' };
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
@@ -728,20 +1099,69 @@ function archiveLegacyWindowsLauncher(home: string, destinationDir: string, expe
 
 function restoreLegacyWindowsLauncher(home: string, destinationDir: string, expected: boolean): CommandResult {
   try {
-    if (!expected) return { ok: true, stdout: '', stderr: '' };
+    if (!expected) return verifyLegacyWindowsLauncherAbsent(home, destinationDir);
     const { legacy, archived } = legacyWindowsLauncherPaths(home, destinationDir);
-    if (fs.existsSync(legacy)) {
-      assertSafePathParents(home, legacy, 'legacy Windows launcher');
-      validateLegacyWindowsLauncher(legacy, 'legacy Windows launcher');
-      if (fs.existsSync(archived)) throw new Error('both legacy Windows launcher paths exist during recovery');
+    const legacyStat = inspectSafePathLeaf(home, legacy, 'legacy Windows launcher');
+    const archivedStat = inspectSafePathLeaf(home, archived, 'archived legacy Windows launcher');
+    if (legacyStat) {
+      validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
+      if (archivedStat) throw new Error('both legacy Windows launcher paths exist during recovery');
       return { ok: true, stdout: '', stderr: '' };
     }
-    assertSafePathParents(home, archived, 'archived legacy Windows launcher');
+    if (!archivedStat) throw new Error('archived legacy Windows launcher is missing during recovery');
     assertSafePathParents(home, legacy, 'legacy Windows launcher');
-    validateLegacyWindowsLauncher(archived, 'archived legacy Windows launcher');
+    validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
+    const archivedParent = fs.lstatSync(path.dirname(archived));
+    const legacyParent = fs.lstatSync(path.dirname(legacy));
     fs.renameSync(archived, legacy);
-    fsyncDirectoryFor(archived);
-    fsyncDirectoryFor(legacy);
+    fsyncDirectoryFor(archived, archivedParent);
+    fsyncDirectoryFor(legacy, legacyParent);
+    return { ok: true, stdout: '', stderr: '' };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function verifyLegacyWindowsLauncherAbsent(home: string, destinationDir: string): CommandResult {
+  try {
+    const { legacy, archived } = legacyWindowsLauncherPaths(home, destinationDir);
+    const legacyStat = inspectSafePathLeaf(home, legacy, 'legacy Windows launcher');
+    const archivedStat = inspectSafePathLeaf(home, archived, 'legacy Windows launcher archive');
+    if (legacyStat) {
+      return { ok: false, stdout: '', stderr: 'legacy Windows Startup launcher remains present' };
+    }
+    if (archivedStat) {
+      validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
+    }
+    return { ok: true, stdout: '', stderr: '' };
+  } catch (error) {
+    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function validateWindowsRecoveryLauncherState(
+  home: string,
+  destinationDir: string,
+  state: WindowsActivationState,
+): CommandResult {
+  try {
+    const { legacy, archived } = legacyWindowsLauncherPaths(home, destinationDir);
+    const legacyStat = inspectSafePathLeaf(home, legacy, 'legacy Windows launcher');
+    const archivedStat = inspectSafePathLeaf(home, archived, 'archived legacy Windows launcher');
+    if (!state.legacyLauncher) {
+      if (legacyStat || archivedStat) {
+        throw new Error('unexpected legacy Windows launcher exists during recovery');
+      }
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (Boolean(legacyStat) === Boolean(archivedStat)) {
+      throw new Error('recovery requires exactly one trusted legacy Windows launcher');
+    }
+    if (legacyStat) {
+      validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
+    } else {
+      validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
+    }
     return { ok: true, stdout: '', stderr: '' };
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
@@ -753,8 +1173,9 @@ function restoreWindowsState(
   home: string,
   state: WindowsActivationState,
 ): CommandResult {
-  const task = applyWindowsState(def, state);
   const legacy = restoreLegacyWindowsLauncher(home, path.dirname(def.filePath), state.legacyLauncher);
+  if (!legacy.ok) return legacy;
+  const task = applyWindowsState(def, state);
   if (task.ok && legacy.ok) return task;
   return {
     ok: false,
@@ -860,11 +1281,19 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
           activation.disabled,
         );
       },
+      validateRecovery: (state) => parseLaunchdRecoveryState(state)
+        ? { ok: true, stdout: '', stderr: '' }
+        : { ok: false, stdout: '', stderr: 'invalid persisted launchd activation state' },
     });
   } else if (platform === 'linux') {
     const home = resolveHome(opts.homeDir);
     let priorActivation: SystemdActivationState | undefined;
-    const desired = { present: true, active: autostart, enabled: autostart };
+    const desired = {
+      present: true,
+      active: autostart,
+      enabled: autostart,
+      fragmentPath: def.filePath,
+    };
     installLaunchdPlistTransaction({
       plistPath: def.filePath,
       trustedRoot: home,
@@ -874,8 +1303,19 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       preflight: ({ hasPrior }) => {
         try {
           const state = readSystemdActivationState();
-          if (state.present && !hasPrior) {
-            return { ok: false, stdout: '', stderr: 'refusing to replace registered systemd unit without a trusted prior file' };
+          if (state.present !== hasPrior) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'systemd manager and trusted service-file presence disagree',
+            };
+          }
+          if (state.present && state.fragmentPath !== def.filePath) {
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'systemd FragmentPath does not match the trusted service file',
+            };
           }
           priorActivation = state;
           return { ok: true, stdout: '', stderr: '', recoveryState: state };
@@ -889,7 +1329,12 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
           if (!current.present) return { ok: true, stdout: '', stderr: '' };
           const disabled = runCmd(['systemctl', '--user', 'disable', '--now', 'ashlr-daemon']);
           if (!disabled.ok) return disabled;
-          return verifySystemdState({ present: true, active: false, enabled: false });
+          return verifySystemdState({
+            present: true,
+            active: false,
+            enabled: false,
+            fragmentPath: current.fragmentPath,
+          });
         } catch (error) {
           return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
         }
@@ -911,10 +1356,14 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
           ? applySystemdState(activation)
           : { ok: false, stdout: '', stderr: 'invalid persisted systemd activation state' };
       },
+      validateRecovery: (state) => parseSystemdRecoveryState(state)
+        ? { ok: true, stdout: '', stderr: '' }
+        : { ok: false, stdout: '', stderr: 'invalid persisted systemd activation state' },
     });
   } else if (platform === 'win32') {
     const home = resolveHome(opts.homeDir);
     let priorActivation: WindowsActivationState | undefined;
+    let persistedRecoveryActivation: WindowsActivationState | undefined;
     const desired: WindowsActivationState = autostart
       ? { present: true, state: 'ready', legacyLauncher: false }
       : { present: false, legacyLauncher: false };
@@ -926,28 +1375,57 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       operationLabel: 'Task Scheduler',
       preflight: ({ hasPrior }) => {
         try {
-          const task = readWindowsTaskState();
+          const task = readWindowsTaskSnapshot(def.filePath);
           if (task.present && !hasPrior) {
             return { ok: false, stdout: '', stderr: 'refusing to replace registered AshlrDaemon task without a trusted prior launcher' };
           }
-          priorActivation = {
-            ...task,
-            legacyLauncher: inspectLegacyWindowsLauncher(home, path.dirname(def.filePath)),
-          };
+          priorActivation = task.present
+            ? {
+                present: true,
+                state: task.state,
+                legacyLauncher: inspectLegacyWindowsLauncher(home, path.dirname(def.filePath)),
+                taskXmlBase64: task.taskXmlBase64,
+                taskXmlSha256: task.taskXmlSha256,
+                taskSecurityDescriptorBase64: task.taskSecurityDescriptorBase64,
+                taskSecurityDescriptorSha256: task.taskSecurityDescriptorSha256,
+                taskSecurityScope: task.taskSecurityScope,
+              }
+            : {
+                present: false,
+                legacyLauncher: inspectLegacyWindowsLauncher(home, path.dirname(def.filePath)),
+              };
           return { ok: true, stdout: '', stderr: '', recoveryState: priorActivation };
         } catch (error) {
           return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
         }
       },
       unload: () => {
-        const { legacy, archived: archive } = legacyWindowsLauncherPaths(home, path.dirname(def.filePath));
-        const shouldArchive = priorActivation?.legacyLauncher ?? (fs.existsSync(legacy) || fs.existsSync(archive));
-        const archived = archiveLegacyWindowsLauncher(home, path.dirname(def.filePath), shouldArchive);
+        const activation = priorActivation ?? persistedRecoveryActivation;
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'Windows activation authority is unavailable' };
+        }
+        const authority = validateWindowsRecoveryLauncherState(
+          home,
+          path.dirname(def.filePath),
+          activation,
+        );
+        if (!authority.ok) return authority;
+        const archived = archiveLegacyWindowsLauncher(
+          home,
+          path.dirname(def.filePath),
+          activation.legacyLauncher,
+        );
         if (!archived.ok) return archived;
-        return stopAndDeleteWindowsTask();
+        return stopAndDeleteWindowsTask(activation, def.filePath);
       },
-      load: () => autostart ? applyWindowsState(def, desired) : verifyWindowsState(desired),
-      verify: () => verifyWindowsState(desired),
+      load: () => autostart
+        ? applyWindowsState(def, desired)
+        : verifyWindowsState(desired, def.filePath),
+      verify: () => {
+        const task = verifyWindowsState(desired, def.filePath);
+        if (!task.ok) return task;
+        return verifyLegacyWindowsLauncherAbsent(home, path.dirname(def.filePath));
+      },
       rollback: () => priorActivation
         ? restoreWindowsState(def, home, priorActivation)
         : { ok: false, stdout: '', stderr: 'Windows activation preflight state is unavailable' },
@@ -956,6 +1434,20 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
         return activation
           ? restoreWindowsState(def, home, activation)
           : { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+      },
+      validateRecovery: (state) => {
+        const activation = parseWindowsRecoveryState(state);
+        if (!activation) {
+          return { ok: false, stdout: '', stderr: 'invalid persisted Windows activation state' };
+        }
+        const authority = validateWindowsRecoveryLauncherState(
+          home,
+          path.dirname(def.filePath),
+          activation,
+        );
+        if (!authority.ok) return authority;
+        persistedRecoveryActivation = activation;
+        return { ok: true, stdout: '', stderr: '' };
       },
     });
   }
@@ -983,8 +1475,76 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
       });
     } catch { /* uninstall remains best-effort */ }
   } else {
-    runCmd(def.unregisterArgs);
-    if (fs.existsSync(def.filePath)) fs.unlinkSync(def.filePath);
+    const home = resolveHome(opts.homeDir);
+    let priorSystemdActivation: SystemdActivationState | undefined;
+    try {
+      removeLaunchdPlistTransaction({
+        plistPath: def.filePath,
+        trustedRoot: home,
+        lockDir: path.join(home, '.ashlr', 'locks'),
+        unload: () => {
+          if (platform === 'win32') {
+            try {
+              const task = readWindowsTaskSnapshot(def.filePath);
+              if (!task.present) return { ok: true, stdout: '', stderr: '' };
+              return stopAndDeleteWindowsTask({
+                present: true,
+                state: task.state,
+                legacyLauncher: false,
+                taskXmlBase64: task.taskXmlBase64,
+                taskXmlSha256: task.taskXmlSha256,
+                taskSecurityDescriptorBase64: task.taskSecurityDescriptorBase64,
+                taskSecurityDescriptorSha256: task.taskSecurityDescriptorSha256,
+                taskSecurityScope: task.taskSecurityScope,
+              }, def.filePath);
+            } catch (error) {
+              return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+            }
+          }
+          try {
+            const current = readSystemdActivationState();
+            priorSystemdActivation = current;
+            if (!current.present) {
+              return fs.existsSync(def.filePath)
+                ? { ok: false, stdout: '', stderr: 'systemd manager does not own the trusted service file' }
+                : { ok: true, stdout: '', stderr: '' };
+            }
+            if (current.fragmentPath !== def.filePath) {
+              return { ok: false, stdout: '', stderr: 'systemd FragmentPath does not match the trusted service file' };
+            }
+            const disabled = runCmd(def.unregisterArgs);
+            if (!disabled.ok) return disabled;
+            return verifySystemdState({
+              present: true,
+              active: false,
+              enabled: false,
+              fragmentPath: def.filePath,
+            });
+          } catch (error) {
+            return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
+          }
+        },
+        ...(platform === 'linux'
+          ? {
+              afterRemove: () => {
+                const reloaded = runCmd(['systemctl', '--user', 'daemon-reload']);
+                return reloaded.ok
+                  ? verifySystemdState({ present: false, active: false, enabled: false })
+                  : reloaded;
+              },
+              recoverAfterFailedRemove: () => {
+                return priorSystemdActivation
+                  ? applySystemdState(priorSystemdActivation)
+                  : {
+                      ok: false,
+                      stdout: '',
+                      stderr: 'systemd pre-uninstall activation state is unavailable',
+                    };
+              },
+            }
+          : {}),
+      });
+    } catch { /* uninstall remains best-effort */ }
   }
   clearServiceStatusCache();
 }
@@ -1002,17 +1562,41 @@ export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<S
 
   const platform = (opts.platform ?? process.platform) as Platform;
   if (platform === 'win32' && before.runtimeState !== 'ready') return before;
-  if (platform === 'darwin') {
-    const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
-    runCmd(['launchctl', 'kickstart', '-k', `gui/${uid}/ai.ashlr.daemon`]);
-  } else if (platform === 'linux') {
-    runCmd(['systemctl', '--user', 'start', 'ashlr-daemon']);
-  } else if (platform === 'win32') {
-    runCmd(['schtasks', '/Run', '/TN', 'AshlrDaemon']);
-  }
+  const home = resolveHome(opts.homeDir);
+  const def = generateServiceDefinition(opts);
+  return withServiceFileTransactionLock({
+    filePath: def.filePath,
+    trustedRoot: home,
+    lockDir: path.join(home, '.ashlr', 'locks'),
+  }, () => {
+    const locked = serviceStatus(opts);
+    if (!locked.installed || locked.running) return locked;
+    if (platform === 'win32' && locked.runtimeState !== 'ready') return locked;
+    if (platform === 'darwin') {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+      runCmd(['launchctl', 'kickstart', '-k', `gui/${uid}/ai.ashlr.daemon`]);
+    } else if (platform === 'linux') {
+      try {
+        const state = readSystemdActivationState();
+        if (!state.present || state.fragmentPath !== def.filePath || state.active) return locked;
+      } catch {
+        return locked;
+      }
+      runCmd(['systemctl', '--user', 'start', 'ashlr-daemon']);
+    } else if (platform === 'win32') {
+      try {
+        assertSafePathParents(home, def.filePath, 'Windows service launcher');
+        validateLegacyWindowsLauncher(home, def.filePath, 'Windows service launcher');
+        const started = runWindowsTask(def.filePath);
+        if (!started.ok) return locked;
+      } catch {
+        return locked;
+      }
+    }
 
-  clearServiceStatusCache();
-  return serviceStatus(opts);
+    clearServiceStatusCache();
+    return serviceStatus(opts);
+  });
 }
 
 /**
