@@ -330,6 +330,7 @@ describe.skipIf(process.platform !== 'win32')(
         for (const [expected, replacement] of [
           ['<Duration>PT10M</Duration>', '<Duration>PT11M</Duration>'],
           ['<WaitTimeout>PT1H</WaitTimeout>', '<WaitTimeout>PT2H</WaitTimeout>'],
+          ['G:SYD:P', 'G:BAD:P'],
         ]) {
           const rejected = runPowerShellInput(
             buildWindowsTaskRestoreScript(taskName),

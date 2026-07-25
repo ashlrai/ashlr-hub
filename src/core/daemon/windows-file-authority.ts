@@ -126,9 +126,7 @@ try {
     Finish $false 'wrong-kind'
   }
 
-  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-  $current = $identity.User
-  $tokenOwner = $identity.Owner
+  $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
   $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
   $administrators =
     [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
@@ -172,9 +170,8 @@ try {
   if ($request.mode -eq 'validate' -and $itemOwner -ne $current.Value) {
     Finish $false 'wrong-owner'
   }
-  if ($request.mode -eq 'harden' -and $itemOwner -ne $current.Value -and
-    ($itemOwner -ne $tokenOwner.Value -or
-      $trustedSids -notcontains $tokenOwner.Value)) {
+  if ($request.mode -eq 'harden' -and
+    @($current.Value, $administrators.Value) -notcontains $itemOwner) {
     Finish $false 'wrong-owner'
   }
   if ($request.mode -eq 'harden' -and $itemOwner -ne $current.Value) {
