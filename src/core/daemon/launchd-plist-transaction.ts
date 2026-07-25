@@ -3,6 +3,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { fsyncDirectory } from '../util/durability.js';
+import {
+  hardenWindowsFileAuthority,
+  validateWindowsFileAuthority,
+  type WindowsFileAuthorityKind,
+} from './windows-file-authority.js';
 
 const PRIVATE_FILE_MODE = 0o600;
 const ROLLBACK_RETENTION = 5;
@@ -94,12 +99,32 @@ function missing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
-function validateRegularTarget(filePath: string, label: string): fs.Stats | undefined {
+function assertWindowsFileAuthority(
+  filePath: string,
+  kind: WindowsFileAuthorityKind,
+  trustedRoot: string,
+  mode: 'validate' | 'harden' = 'validate',
+): void {
+  if (process.platform !== 'win32') return;
+  const result = mode === 'harden'
+    ? hardenWindowsFileAuthority(filePath, kind, { anchorPath: trustedRoot })
+    : validateWindowsFileAuthority(filePath, kind, { anchorPath: trustedRoot });
+  if (!result.ok) {
+    throw new Error(`unsafe Windows ${kind} authority: ${result.reason}`);
+  }
+}
+
+function validateRegularTarget(
+  filePath: string,
+  label: string,
+  trustedRoot?: string,
+): fs.Stats | undefined {
   try {
     const stat = fs.lstatSync(filePath);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || !owned(stat)) {
       throw new Error(`unsafe ${label}: expected a regular, singly-linked file at ${filePath}`);
     }
+    if (trustedRoot) assertWindowsFileAuthority(filePath, 'file', trustedRoot);
     return stat;
   } catch (error) {
     if (missing(error)) return undefined;
@@ -107,8 +132,8 @@ function validateRegularTarget(filePath: string, label: string): fs.Stats | unde
   }
 }
 
-function readSnapshot(filePath: string): PlistSnapshot | undefined {
-  const before = validateRegularTarget(filePath, 'active plist');
+function readSnapshot(filePath: string, trustedRoot?: string): PlistSnapshot | undefined {
+  const before = validateRegularTarget(filePath, 'active plist', trustedRoot);
   if (!before) return undefined;
 
   let fd: number | undefined;
@@ -171,8 +196,12 @@ function unlinkIfOwned(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>
   fs.unlinkSync(filePath);
 }
 
-function assertOwnedTarget(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
-  const current = validateRegularTarget(filePath, 'installed plist');
+function assertOwnedTarget(
+  filePath: string,
+  expected: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot?: string,
+): void {
+  const current = validateRegularTarget(filePath, 'installed plist', trustedRoot);
   if (!current || current.dev !== expected.dev || current.ino !== expected.ino) {
     throw new Error(`transaction no longer owns ${filePath}`);
   }
@@ -181,8 +210,9 @@ function assertOwnedTarget(filePath: string, expected: Pick<fs.Stats, 'dev' | 'i
 function assertExpectedTarget(
   filePath: string,
   expected: Pick<PlistSnapshot, 'dev' | 'ino'> | undefined,
+  trustedRoot?: string,
 ): void {
-  const current = validateRegularTarget(filePath, 'active plist');
+  const current = validateRegularTarget(filePath, 'active plist', trustedRoot);
   if (!expected) {
     if (current) throw new Error(`active plist appeared during transaction: ${filePath}`);
     return;
@@ -199,12 +229,13 @@ function atomicReplace(
   expected?: Pick<PlistSnapshot, 'dev' | 'ino'>,
   requireMissing = false,
   expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot?: string,
 ): fs.Stats {
   const temporary = artifactPath(filePath, 'tmp');
   const created = writeExclusive(temporary, bytes, mode);
   try {
     if (expectedParent) assertParentIdentity(filePath, expectedParent);
-    if (expected || requireMissing) assertExpectedTarget(filePath, expected);
+    if (expected || requireMissing) assertExpectedTarget(filePath, expected, trustedRoot);
     fs.renameSync(temporary, filePath);
     const installed = fs.lstatSync(filePath);
     if (
@@ -227,9 +258,10 @@ function replaceBackup(
   plistPath: string,
   prior: PlistSnapshot,
   expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot: string,
 ): void {
   const backupPath = `${plistPath}.bak`;
-  validateRegularTarget(backupPath, 'plist backup');
+  validateRegularTarget(backupPath, 'plist backup', trustedRoot);
   const temporary = artifactPath(plistPath, 'backup');
   const created = writeExclusive(temporary, prior.bytes, prior.mode);
   try {
@@ -247,6 +279,7 @@ function replaceBackup(
 function retainRecentRollbacks(
   plistPath: string,
   expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot: string,
 ): void {
   const dir = path.dirname(plistPath);
   const prefix = `${path.basename(plistPath)}.rollback.`;
@@ -256,6 +289,9 @@ function retainRecentRollbacks(
     .map((name) => {
       const filePath = path.join(dir, name);
       const stat = fs.lstatSync(filePath);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        assertWindowsFileAuthority(filePath, 'file', trustedRoot);
+      }
       return { filePath, stat };
     })
   const usable = entries
@@ -294,6 +330,7 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
   if (!trustedDirectory(rootStat)) {
     throw new Error(`unsafe launchd trusted root ${root}`);
   }
+  assertWindowsFileAuthority(root, 'directory', root);
 
   let current = root;
   for (const component of relative.split(path.sep).slice(0, -1)) {
@@ -308,6 +345,7 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
       if (!trustedDirectory(stat)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
+      assertWindowsFileAuthority(current, 'directory', root);
     } catch (error) {
       if (!missing(error)) throw error;
       fs.mkdirSync(current, { mode: 0o700 });
@@ -315,6 +353,7 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
       if (!trustedDirectory(created)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
+      assertWindowsFileAuthority(current, 'directory', root, 'harden');
       fsyncDirectory(parentPath, {
         expectedIdentity: { dev: BigInt(parent.dev), ino: BigInt(parent.ino) },
       });
@@ -363,6 +402,7 @@ export function withServiceFileTransactionLock<T>(
   let actionFailed = false;
   let releaseFailure: string | undefined;
   try {
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
     result = action();
   } catch (error) {
     actionFailed = true;
@@ -428,11 +468,11 @@ function parseJournal(bytes: Buffer, expectedPlistPath: string): LaunchdInstallJ
   return value as unknown as LaunchdInstallJournal;
 }
 
-function readJournal(filePath: string, expectedPlistPath: string): {
+function readJournal(filePath: string, expectedPlistPath: string, trustedRoot?: string): {
   journal: LaunchdInstallJournal;
   stat: fs.Stats;
 } | undefined {
-  const before = validateRegularTarget(filePath, 'launchd transaction journal');
+  const before = validateRegularTarget(filePath, 'launchd transaction journal', trustedRoot);
   if (!before) return undefined;
   let fd: number | undefined;
   try {
@@ -460,12 +500,21 @@ function writeJournal(
   journal: LaunchdInstallJournal,
   parent: Pick<fs.Stats, 'dev' | 'ino'>,
   expected?: Pick<fs.Stats, 'dev' | 'ino'>,
+  trustedRoot?: string,
 ): fs.Stats {
   const bytes = Buffer.from(`${JSON.stringify(journal)}\n`, 'utf8');
   if (bytes.length > MAX_JOURNAL_BYTES) {
     throw new Error('launchd transaction journal exceeds size limit');
   }
-  const written = atomicReplace(filePath, bytes, PRIVATE_FILE_MODE, expected, !expected, parent);
+  const written = atomicReplace(
+    filePath,
+    bytes,
+    PRIVATE_FILE_MODE,
+    expected,
+    !expected,
+    parent,
+    trustedRoot,
+  );
   fsyncParent(filePath);
   return written;
 }
@@ -483,7 +532,9 @@ function restoreInterruptedTransaction(
   validateBeforeUnload = true,
 ): void {
   const operation = options.operationLabel ?? 'launchd';
-  const beforeStop = validateBeforeUnload ? readSnapshot(options.plistPath) : undefined;
+  const beforeStop = validateBeforeUnload
+    ? readSnapshot(options.plistPath, options.trustedRoot)
+    : undefined;
   const beforeStopSha = beforeStop ? digest(beforeStop.bytes) : undefined;
   if (validateBeforeUnload && pending.journal.hadPrior) {
     if (
@@ -524,7 +575,7 @@ function restoreInterruptedTransaction(
     );
   }
 
-  const current = readSnapshot(options.plistPath);
+  const current = readSnapshot(options.plistPath, options.trustedRoot);
   if (validateBeforeUnload && (
     (beforeStop === undefined && current !== undefined) ||
     (beforeStop !== undefined && (
@@ -550,6 +601,7 @@ function restoreInterruptedTransaction(
         current,
         false,
         parent,
+        options.trustedRoot,
       );
     }
   } else if (current) {
@@ -599,13 +651,14 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
 
   let releaseFailure: string | undefined;
   try {
-    const interrupted = readJournal(pendingJournalPath, options.plistPath);
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
+    const interrupted = readJournal(pendingJournalPath, options.plistPath, options.trustedRoot);
     if (interrupted) {
       restoreInterruptedTransaction(options, parent, pendingJournalPath, interrupted);
     }
 
-    const prior = readSnapshot(options.plistPath);
-    validateRegularTarget(`${options.plistPath}.bak`, 'plist backup');
+    const prior = readSnapshot(options.plistPath, options.trustedRoot);
+    validateRegularTarget(`${options.plistPath}.bak`, 'plist backup', options.trustedRoot);
     let recoveryState: unknown;
     if (options.preflight) {
       const preflight = options.preflight({ hasPrior: !!prior });
@@ -633,16 +686,28 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
       replacementSha256: digest(replacementBytes),
       ...(recoveryState === undefined ? {} : { recoveryState }),
     };
-    let journalStat = writeJournal(pendingJournalPath, journal, journalParent);
+    let journalStat = writeJournal(
+      pendingJournalPath,
+      journal,
+      journalParent,
+      undefined,
+      options.trustedRoot,
+    );
     options.checkpointHook?.('journal-prepared');
 
     const advance = (phase: LaunchdInstallPhase): void => {
       journal = { ...journal, phase };
-      journalStat = writeJournal(pendingJournalPath, journal, journalParent, journalStat);
+      journalStat = writeJournal(
+        pendingJournalPath,
+        journal,
+        journalParent,
+        journalStat,
+        options.trustedRoot,
+      );
       options.checkpointHook?.(`journal-${phase}` as LaunchdInstallCheckpoint);
     };
     const recoverAndThrow = (failure: string): never => {
-      const onDisk = readJournal(pendingJournalPath, options.plistPath);
+      const onDisk = readJournal(pendingJournalPath, options.plistPath, options.trustedRoot);
       if (!onDisk || onDisk.stat.dev !== journalStat.dev || onDisk.stat.ino !== journalStat.ino) {
         throw new Error(`${failure}; recovery rejected an interleaved journal`);
       }
@@ -663,12 +728,12 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
 
     if (prior) {
       assertParentIdentity(options.plistPath, parent);
-      replaceBackup(options.plistPath, prior, parent);
+      replaceBackup(options.plistPath, prior, parent, options.trustedRoot);
       const rollbackPath = artifactPath(options.plistPath, 'rollback');
       assertParentIdentity(options.plistPath, parent);
       writeExclusive(rollbackPath, prior.bytes, prior.mode);
       fsyncParent(rollbackPath, parent);
-      retainRecentRollbacks(options.plistPath, parent);
+      retainRecentRollbacks(options.plistPath, parent, options.trustedRoot);
     }
 
     const initialUnload = options.unload();
@@ -696,6 +761,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
           prior,
           !prior,
           parent,
+          options.trustedRoot,
         );
       } catch (error) {
         return recoverAndThrow(`launchd plist replacement failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -707,11 +773,11 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
     // launchctl accepts only a pathname. These checks bind cooperative callers;
     // a hostile same-UID process is outside this boundary and can invoke launchctl directly.
     assertParentIdentity(options.plistPath, parent);
-    assertOwnedTarget(options.plistPath, installed);
+    assertOwnedTarget(options.plistPath, installed, options.trustedRoot);
     const loaded = options.load();
     try {
       assertParentIdentity(options.plistPath, parent);
-      assertOwnedTarget(options.plistPath, installed);
+      assertOwnedTarget(options.plistPath, installed, options.trustedRoot);
     } catch (error) {
       recoverAndThrow(
         `active plist changed during launchctl load: ${error instanceof Error ? error.message : String(error)}`,
@@ -733,7 +799,7 @@ export function installLaunchdPlistTransaction(options: LaunchdPlistTransactionO
     }
     try {
       assertParentIdentity(options.plistPath, parent);
-      assertOwnedTarget(options.plistPath, installed);
+      assertOwnedTarget(options.plistPath, installed, options.trustedRoot);
     } catch (error) {
       recoverAndThrow(
         `service file changed during final verification: ${error instanceof Error ? error.message : String(error)}`,
@@ -755,7 +821,8 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
   if (!lock) throw new Error(`could not acquire launchd plist transaction lock for ${options.plistPath}`);
   let releaseFailure: string | undefined;
   try {
-    const prior = readSnapshot(options.plistPath);
+    assertWindowsFileAuthority(lock.path, 'file', options.trustedRoot);
+    const prior = readSnapshot(options.plistPath, options.trustedRoot);
     const unloaded = options.unload();
     if (!unloaded.ok) {
       throw new Error(
@@ -764,7 +831,11 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
     }
     assertParentIdentity(options.plistPath, parent);
     if (prior) {
-      const current = validateRegularTarget(options.plistPath, 'active plist');
+      const current = validateRegularTarget(
+        options.plistPath,
+        'active plist',
+        options.trustedRoot,
+      );
       if (!current || current.dev !== prior.dev || current.ino !== prior.ino) {
         throw new Error(`active plist changed during removal: ${options.plistPath}`);
       }
