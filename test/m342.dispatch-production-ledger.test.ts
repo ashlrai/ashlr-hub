@@ -107,6 +107,7 @@ import {
   type DispatchProductionEvent,
   type DispatchProductionAttemptProofTarget,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { sanitizeProductionAttemptLearningLabel } from '../src/core/learning/attempt-shape.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairLifecycleAttemptHash,
@@ -174,6 +175,23 @@ interface TestTreatmentRetentionState {
 }
 
 function treatmentReceiptDigestForTest(
+  name: string,
+  event: DispatchProductionEvent,
+): string {
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+  const digestEvent = event.learningLabel?.classifierVersion === 'attempt-shape-v1' &&
+    normalizedLabel !== undefined
+    ? { ...event, learningLabel: normalizedLabel }
+    : event;
+  return createHash('sha256')
+    .update(TEST_TREATMENT_RECEIPT_DIGEST_DOMAIN, 'utf8')
+    .update(name, 'utf8')
+    .update('\0', 'utf8')
+    .update(JSON.stringify(digestEvent), 'utf8')
+    .digest('hex');
+}
+
+function rawTreatmentReceiptDigestForTest(
   name: string,
   event: DispatchProductionEvent,
 ): string {
@@ -3709,6 +3727,7 @@ describe('M342 dispatch production ledger', () => {
       } as never,
       rawPrompt: rawPromptCanary,
       rawDiff: rawDiffCanary,
+      labelOrigin: 'derived-on-read',
     } as never));
 
     const event = readDispatchProductionEvents({ limit: 1 })[0];
@@ -3727,9 +3746,11 @@ describe('M342 dispatch production ledger', () => {
         policyDisabled: 2,
       },
     });
+    expect(event?.labelOrigin).toBe('stored-current');
 
     const raw = readFileSync(join(dispatchProductionDir(), '2026-07-08.jsonl'), 'utf8');
     expect(raw).toContain('"learningLabel"');
+    expect(raw).not.toContain('"labelOrigin"');
     expect(raw).toContain('"authoritative":true');
     expect(raw).toContain('"routerPolicyVersion":"fleet-router-v1"');
     expect(raw).toContain('"learningEpoch":"2026-07-08"');
@@ -3769,6 +3790,9 @@ describe('M342 dispatch production ledger', () => {
       diagnosticNoProposal: true,
       attemptShape: { backendNoDiff: 1 },
     });
+    expect(event?.labelOrigin).toBe('derived-on-read');
+    expect(event?.routerPolicyVersion).toBeUndefined();
+    expect(event?.learningEpoch).toBeUndefined();
     expect(summary).toMatchObject({
       attempts: 1,
       attemptShape: { backendNoDiff: 1 },
@@ -3777,6 +3801,38 @@ describe('M342 dispatch production ledger', () => {
     expect(raw).not.toContain('"routeSnapshot"');
     expect(raw).not.toContain('"runEventSummary"');
     expect(raw).not.toContain('"learningLabel"');
+  });
+
+  it('degrades instead of disguising an explicit invalid stored label as read-derived', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    const invalid = {
+      ...makeEvent({ itemId: 'invalid-stored-label' }),
+      learningLabel: {
+        schemaVersion: 1,
+        classifierVersion: 'attempt-shape-v2',
+        authoritative: true,
+        learningKind: 'diagnostic-no-proposal',
+        policySuppressed: false,
+        diagnosticNoProposal: true,
+        diagnosticAttempt: true,
+        attemptShape: {
+          backendNoDiff: 1,
+          captureOrGateBlocked: 0,
+          repairAttempts: 0,
+          policyDisabled: 0,
+        },
+        unexpectedAuthority: true,
+      },
+    };
+    writeFileSync(join(dir, '2026-07-08.jsonl'), `${JSON.stringify(invalid)}\n`, 'utf8');
+
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
   });
 
   it('uses a valid durable learning label for attempt-shape aggregation when raw signals disagree', () => {
@@ -3805,6 +3861,7 @@ describe('M342 dispatch production ledger', () => {
           policyDisabled: 7,
         },
       },
+      labelOrigin: 'stored-current',
     });
 
     const summary = summarizeDispatchProductionYield([event]);
@@ -5555,11 +5612,113 @@ describe('M342 dispatch production ledger', () => {
 
     const read = readDispatchProductionEventsDetailed();
 
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
     expect(read).toMatchObject({
       sourceState: 'healthy', complete: true, invalidRows: 0,
-      events: [{ learningLabel: { classifierVersion: 'attempt-shape-v1' } }],
+      events: [{
+        learningLabel: { classifierVersion: 'attempt-shape-v1' },
+        labelOrigin: 'stored-legacy',
+      }],
     });
     expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+  });
+
+  it('accepts one canonical legacy receipt line without rewriting a missing terminal newline', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const stored = readFileSync(receiptPath, 'utf8').slice(0, -1);
+    writeFileSync(receiptPath, stored, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      invalidRows: 0,
+      events: [{ labelOrigin: 'stored-current' }],
+    });
+    expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+  });
+
+  it('retains exact v1 receipt authority after tombstoning and compact-marker rotation', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    const canonical = sanitizeDispatchProductionEvent(witness, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptDir = join(dispatchProductionDir(), 'repair-treatment-outcomes');
+    const name = `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`;
+    const receiptPath = join(receiptDir, name);
+    const legacy = {
+      ...canonical,
+      learningLabel: {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+      },
+    } as DispatchProductionEvent;
+    writeFileSync(receiptPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    const legacyDigest = rawTreatmentReceiptDigestForTest(name, legacy);
+    const retentionPath = join(receiptDir, '.retention.json');
+    const protocolPath = join(receiptDir, '.protocol.json');
+    const tombstoned: TestTreatmentRetentionState = {
+      schemaVersion: 3,
+      droppedThrough: witness.ts,
+      retirementEpoch: 1,
+      previousRetentionDigest: null,
+      compactedDigest: emptyTreatmentCompactedDigestForTest(),
+      compactedCount: 0,
+      tombstones: [{ name, receiptDigest: legacyDigest }],
+    };
+    writeFileSync(retentionPath, `${JSON.stringify(tombstoned)}\n`, { mode: 0o600 });
+    writeFileSync(protocolPath, `${JSON.stringify({
+      schemaVersion: 1,
+      retirementEpoch: 1,
+      retentionDigest: treatmentRetentionDigestForTest(tombstoned),
+    })}\n`, { mode: 0o600 });
+    rmSync(receiptPath);
+    protectWindowsFixtureTree(receiptDir);
+
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt({
+      ...witness,
+      routeReason: 'different tombstoned semantics',
+    })).toBe(false);
+
+    const compactedDir = join(receiptDir, '.retired-exact');
+    mkdirSync(compactedDir, { mode: 0o700 });
+    writeFileSync(join(compactedDir, name), `${JSON.stringify({
+      schemaVersion: 1,
+      name,
+      receiptDigest: legacyDigest,
+    })}\n`, { mode: 0o600 });
+    const compacted: TestTreatmentRetentionState = {
+      schemaVersion: 3,
+      droppedThrough: witness.ts,
+      retirementEpoch: 2,
+      previousRetentionDigest: treatmentRetentionDigestForTest(tombstoned),
+      compactedDigest: compactedTreatmentDigestForTest(
+        emptyTreatmentCompactedDigestForTest(),
+        [{ name, receiptDigest: legacyDigest }],
+      ),
+      compactedCount: 1,
+      tombstones: [],
+    };
+    writeFileSync(retentionPath, `${JSON.stringify(compacted)}\n`, { mode: 0o600 });
+    writeFileSync(protocolPath, `${JSON.stringify({
+      schemaVersion: 1,
+      retirementEpoch: 2,
+      retentionDigest: treatmentRetentionDigestForTest(compacted),
+    })}\n`, { mode: 0o600 });
+    protectWindowsFixtureTree(receiptDir);
+
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt(witness)).toBe(true);
+    expect(hasExactDispatchProductionTreatmentOutcomeReceipt({
+      ...witness,
+      routeReason: 'different compacted semantics',
+    })).toBe(false);
   });
 
   it('rejects attempt-shape-v1 treatment receipts with any different label semantics', () => {
