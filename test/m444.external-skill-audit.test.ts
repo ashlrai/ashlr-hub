@@ -175,12 +175,13 @@ describe('external skill-pack quarantine audit', () => {
 
   it('pins the complete routing policy manifest identity', () => {
     expect(EXTERNAL_SKILL_AUDIT_POLICY_DIGEST)
-      .toBe('5d4b4af74034d3d935b7aea8b719cd771013c06ad783dc21ad9571163d29acab');
+      .toBe('b1353f227d80c2d86321d629a08904294ddb7984254f47cd32ee241dc43f9ce5');
     const source = readFileSync(join(
       process.cwd(), 'src/core/fleet/external-skill-audit.ts',
     ), 'utf8');
     expect(source).toContain('stopWords: [...STOP_WORDS].sort(asciiCompare)');
     expect(source).toContain('stemSuffixes: [...STEM_SUFFIXES]');
+    expect(source).toContain("crossSkillReuse: 'single-positive-owned-negatives-v1'");
     expect(source).toContain('for (const suffix of STEM_SUFFIXES)');
     expect(source).toContain("algorithmRevision: AUDIT_ALGORITHM_REVISION");
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
@@ -582,6 +583,189 @@ describe('external skill-pack quarantine audit', () => {
 
     expect(report.trialReady).toBe(false);
     expect(report.issues.filter((entry) => entry.code === 'duplicate-cross-skill-trigger')).toHaveLength(2);
+  });
+
+  it('allows a negative trigger to reuse its declared owner positive prompt', () => {
+    const root = validPack();
+    const testingFile = join(root, 'evals', 'cases', 'test-driven-development.json');
+    const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+    const testing = JSON.parse(readFileSync(testingFile, 'utf8')) as {
+      trigger: { negative: Array<{ prompt: string; owner?: string }> };
+    };
+    const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+      trigger: { positive: Array<{ prompt: string }> };
+    };
+    testing.trigger.negative[0] = {
+      prompt: docs.trigger.positive[0]!.prompt,
+      owner: 'documentation-writing',
+    };
+    writeFileSync(testingFile, JSON.stringify(testing));
+
+    const report = auditExternalSkillPack(root);
+
+    expect(report.issues).not.toContainEqual(
+      expect.objectContaining({ code: 'duplicate-cross-skill-trigger' }),
+    );
+    expect(report.skills.find((skill) => skill.name === 'test-driven-development')?.routing)
+      .toMatchObject({ negativePassed: 2 });
+  });
+
+  it('rejects reused positive prompts when the negative owner is missing or wrong', () => {
+    for (const owner of [undefined, 'test-driven-development'] as const) {
+      const root = validPack();
+      const testingFile = join(root, 'evals', 'cases', 'test-driven-development.json');
+      const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+      const testing = JSON.parse(readFileSync(testingFile, 'utf8')) as {
+        trigger: { negative: Array<{ prompt: string; owner?: string }> };
+      };
+      const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+        trigger: { positive: Array<{ prompt: string }> };
+      };
+      testing.trigger.negative[0] = {
+        prompt: docs.trigger.positive[0]!.prompt,
+        ...(owner === undefined ? {} : { owner }),
+      };
+      writeFileSync(testingFile, JSON.stringify(testing));
+
+      expect(auditExternalSkillPack(root).issues).toContainEqual(
+        expect.objectContaining({
+          code: 'duplicate-cross-skill-trigger',
+          skill: 'test-driven-development',
+        }),
+      );
+    }
+  });
+
+  it('allows one positive owner with multiple declared negative consumers', () => {
+    const root = validPack();
+    writeSkill(
+      root,
+      'review-work',
+      'Guides review evidence workflows. Use when reviewing bounded work.',
+      'test-driven-development',
+      'review',
+    );
+    const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+    const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+      trigger: { positive: Array<{ prompt: string }> };
+    };
+    for (const skill of ['test-driven-development', 'review-work']) {
+      const caseFile = join(root, 'evals', 'cases', `${skill}.json`);
+      const contract = JSON.parse(readFileSync(caseFile, 'utf8')) as {
+        trigger: { negative: Array<{ prompt: string; owner?: string }> };
+      };
+      contract.trigger.negative = skill === 'review-work'
+        ? [
+          {
+            prompt: docs.trigger.positive[0]!.prompt,
+            owner: 'documentation-writing',
+          },
+          {
+            prompt: 'testing regression workflow review',
+            owner: 'test-driven-development',
+          },
+        ]
+        : [
+          {
+            prompt: docs.trigger.positive[0]!.prompt,
+            owner: 'documentation-writing',
+          },
+          contract.trigger.negative[1]!,
+        ];
+      writeFileSync(caseFile, JSON.stringify(contract));
+    }
+
+    expect(auditExternalSkillPack(root).issues).not.toContainEqual(
+      expect.objectContaining({ code: 'duplicate-cross-skill-trigger' }),
+    );
+  });
+
+  it('allows normalized-equivalent owned negative prompts', () => {
+    const root = validPack();
+    const testingFile = join(root, 'evals', 'cases', 'test-driven-development.json');
+    const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+    const testing = JSON.parse(readFileSync(testingFile, 'utf8')) as {
+      trigger: { negative: Array<{ prompt: string; owner?: string }> };
+    };
+    const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+      trigger: { positive: Array<{ prompt: string }> };
+    };
+    docs.trigger.positive[0]!.prompt = 'café documentation workflow';
+    testing.trigger.negative[0] = {
+      prompt: 'cafe\u0301 workflow documentation',
+      owner: 'documentation-writing',
+    };
+    writeFileSync(docsFile, JSON.stringify(docs));
+    writeFileSync(testingFile, JSON.stringify(testing));
+
+    expect(auditExternalSkillPack(root).issues).not.toContainEqual(
+      expect.objectContaining({ code: 'duplicate-cross-skill-trigger' }),
+    );
+  });
+
+  it('rejects duplicate positives even with an apparently owned negative', () => {
+    const root = validPack();
+    writeSkill(
+      root,
+      'review-work',
+      'Guides review evidence workflows. Use when reviewing bounded work.',
+      'test-driven-development',
+      'review',
+    );
+    const testingFile = join(root, 'evals', 'cases', 'test-driven-development.json');
+    const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+    const reviewFile = join(root, 'evals', 'cases', 'review-work.json');
+    const testing = JSON.parse(readFileSync(testingFile, 'utf8')) as {
+      trigger: { negative: Array<{ prompt: string; owner?: string }> };
+    };
+    const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+      trigger: { positive: Array<{ prompt: string }> };
+    };
+    const review = JSON.parse(readFileSync(reviewFile, 'utf8')) as {
+      trigger: { positive: Array<{ prompt: string }> };
+    };
+    review.trigger.positive[0]!.prompt = docs.trigger.positive[0]!.prompt;
+    testing.trigger.negative[0] = {
+      prompt: docs.trigger.positive[0]!.prompt,
+      owner: 'documentation-writing',
+    };
+    writeFileSync(reviewFile, JSON.stringify(review));
+    writeFileSync(testingFile, JSON.stringify(testing));
+
+    expect(auditExternalSkillPack(root).issues).toContainEqual(
+      expect.objectContaining({ code: 'duplicate-cross-skill-trigger' }),
+    );
+  });
+
+  it('rejects negative-only reuse and explicit self-exclusion', () => {
+    for (const mode of ['negative-only', 'self-exclusion'] as const) {
+      const root = validPack();
+      const testingFile = join(root, 'evals', 'cases', 'test-driven-development.json');
+      const docsFile = join(root, 'evals', 'cases', 'documentation-writing.json');
+      const testing = JSON.parse(readFileSync(testingFile, 'utf8')) as {
+        trigger: { negative: Array<{ prompt: string; owner?: string }> };
+      };
+      const docs = JSON.parse(readFileSync(docsFile, 'utf8')) as {
+        trigger: { negative: Array<{ prompt: string; owner?: string }> };
+      };
+      const sharedPrompt = 'shared contrast workflow';
+      testing.trigger.negative[0] = {
+        prompt: sharedPrompt,
+        owner: mode === 'self-exclusion'
+          ? 'test-driven-development'
+          : 'documentation-writing',
+      };
+      docs.trigger.negative[0] = {
+        prompt: sharedPrompt,
+        owner: 'test-driven-development',
+      };
+      writeFileSync(testingFile, JSON.stringify(testing));
+      writeFileSync(docsFile, JSON.stringify(docs));
+
+      expect(auditExternalSkillPack(root).issues).toContainEqual(
+        expect.objectContaining({ code: 'duplicate-cross-skill-trigger' }),
+      );
+    }
   });
 
   it('does not let alphabetical ties satisfy ownerless negative triggers', () => {

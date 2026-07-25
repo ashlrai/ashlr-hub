@@ -48,7 +48,7 @@ const AUDIT_REPORT_KEYS = [
   'skillCount', 'skills', 'structural', 'trialReady',
 ] as const;
 const AUDIT_POLICY_DOMAIN = 'ashlr:external-skill-audit-policy:v1\0';
-const AUDIT_ALGORITHM_REVISION = 'm444-external-skill-audit-2026-07-22.1';
+const AUDIT_ALGORITHM_REVISION = 'm444-external-skill-audit-2026-07-24.2';
 const AUDIT_ISSUE_CODES = new Set<ExternalSkillAuditIssueCode>([
   'invalid-eval-file',
   'incomplete-eval-contract',
@@ -442,6 +442,7 @@ export const EXTERNAL_SKILL_AUDIT_POLICY_DIGEST = createHash('sha256')
       collisionWarning: COLLISION_WARNING,
       collisionError: COLLISION_ERROR,
       nameTokenWeight: 2,
+      crossSkillReuse: 'single-positive-owned-negatives-v1',
     },
     limits: {
       skills: MAX_SKILLS,
@@ -1505,18 +1506,42 @@ export function auditExternalSkillPack(packPath: string): ExternalSkillAuditRepo
     }
   }
 
-  const triggerOwners = new Map<string, Set<string>>();
+  interface CrossSkillTriggerUse {
+    skill: string;
+    kind: 'positive' | 'negative';
+    owner?: string;
+  }
+  const triggerUses = new Map<string, CrossSkillTriggerUse[]>();
   for (const [skill, contract] of cases) {
-    for (const trigger of [...contract.positive, ...contract.negative]) {
+    for (const trigger of contract.positive) {
       const key = normalizePromptKey(trigger.prompt);
-      const owners = triggerOwners.get(key) ?? new Set<string>();
-      owners.add(skill);
-      triggerOwners.set(key, owners);
+      const uses = triggerUses.get(key) ?? [];
+      uses.push({ skill, kind: 'positive' });
+      triggerUses.set(key, uses);
+    }
+    for (const trigger of contract.negative) {
+      const key = normalizePromptKey(trigger.prompt);
+      const uses = triggerUses.get(key) ?? [];
+      uses.push({
+        skill,
+        kind: 'negative',
+        ...(trigger.owner === undefined ? {} : { owner: trigger.owner }),
+      });
+      triggerUses.set(key, uses);
     }
   }
-  for (const owners of triggerOwners.values()) {
-    if (owners.size < 2) continue;
-    for (const skill of owners) {
+  for (const uses of triggerUses.values()) {
+    const skills = new Set(uses.map((use) => use.skill));
+    if (skills.size < 2) continue;
+    const positives = uses.filter((use) => use.kind === 'positive');
+    const declaredOwner = positives.length === 1 ? positives[0]!.skill : null;
+    const isOwnedContrast = declaredOwner !== null && uses.every((use) => (
+      use.kind === 'positive'
+        ? use.skill === declaredOwner
+        : use.owner === declaredOwner && use.skill !== declaredOwner
+    ));
+    if (isOwnedContrast) continue;
+    for (const skill of skills) {
       const contract = cases.get(skill);
       if (contract) contract.valid = false;
       issue(state, 'error', 'duplicate-cross-skill-trigger', skill);
