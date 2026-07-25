@@ -145,6 +145,8 @@ describe('M30 CI workflow', () => {
     const observerSchedulerTest = 'test/m367.daemon-observer-scheduler.test.ts';
     const externalSkillMaturityTest = 'test/m455.external-skill-maturity.test.ts';
     const skillRetrievalCalibrationTest = 'test/m456.skill-retrieval-calibration.test.ts';
+    const externalSkillArtifactFirewallTest =
+      'test/m457.external-skill-artifact-firewall.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -189,6 +191,7 @@ describe('M30 CI workflow', () => {
         'test/m423.control-plane-lock-order.test.ts',
         externalSkillMaturityTest,
         skillRetrievalCalibrationTest,
+        externalSkillArtifactFirewallTest,
       ],
       [
         'test/m220.anticlog-verdict-feedback.test.ts',
@@ -212,6 +215,7 @@ describe('M30 CI workflow', () => {
       observerSchedulerTest,
       externalSkillMaturityTest,
       skillRetrievalCalibrationTest,
+      externalSkillArtifactFirewallTest,
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
@@ -425,6 +429,7 @@ describe('M30 CI workflow', () => {
       observerSchedulerTest,
       externalSkillMaturityTest,
       skillRetrievalCalibrationTest,
+      externalSkillArtifactFirewallTest,
       'test/m426.sandbox-reservation-identity.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
