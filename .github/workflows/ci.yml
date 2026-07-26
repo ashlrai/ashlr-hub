@@ -99,14 +99,17 @@ jobs:
               test/activation-readiness-windows.test.ts
           - os: macos-latest
             label: macos, queue and launchd authority
+            native_launchd: "1"
             test_args: >-
               test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
               test/m395.effect-terminal-retention.test.ts
               test/m367.daemon-observer-scheduler.test.ts
               test/m93.daemon-service.test.ts
+              test/m93.daemon-service-launchd-integration.test.ts
     runs-on: ${{ matrix.os }}
     env:
       ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}
+      ASHLR_RUN_NATIVE_LAUNCHD_TEST: ${{ matrix.native_launchd || '0' }}
 
     steps:
       - name: Checkout
@@ -136,6 +139,10 @@ jobs:
         # serially in independent checkouts so they cannot share mutable state.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
         run: npm run test:ci -- ${{ matrix.test_args }}
+
+      - name: Clean disposable native launchd fixture
+        if: always() && matrix.os == 'macos-latest'
+        run: node scripts/cleanup-launchd-test.mjs
 
       - name: Test native alias authority (hermetic)
         if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'
