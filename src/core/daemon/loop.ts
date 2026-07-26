@@ -4684,6 +4684,12 @@ export async function tick(
   }
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
   if (!stillOwnsTick()) {
+    try {
+      const claimedIds = workedSet.map((item) => item.id);
+      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+    } catch {
+      // Exact shared claims expire safely if best-effort shutdown release fails.
+    }
     return ownershipLostTick({ ts: now, itemsConsidered: selected.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
   recordQueueSelectionAgentAction({
@@ -4870,9 +4876,17 @@ export async function tick(
   };
   try {
   const initiallyRenewed = startLeaseRenewer();
-  if (workedSetIds.length > 0 && initiallyRenewed.length === 0) {
+  const expectedClaimIds = new Set(workedSetIds);
+  const renewedClaimIds = new Set(initiallyRenewed);
+  const exactInitialFence =
+    expectedClaimIds.size === workedSetIds.length &&
+    renewedClaimIds.size === initiallyRenewed.length &&
+    expectedClaimIds.size === renewedClaimIds.size &&
+    [...expectedClaimIds].every((itemId) => renewedClaimIds.has(itemId));
+  if (workedSetIds.length > 0 && !exactInitialFence) {
+    stopLeaseRenewer();
     try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
-    return persistenceRefusal('tick refused: shared queue claim authority unavailable after selection');
+    return persistenceRefusal('tick refused: exact shared queue claim authority unavailable after selection');
   }
 
   // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
@@ -7104,6 +7118,11 @@ export async function tick(
   } finally {
     releaseGeneratedRepairReservations();
     stopLeaseRenewer();
+    try {
+      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+    } catch {
+      // Only still-claimed generations are releasable; executing ambiguity remains durable.
+    }
   }
 }
 
