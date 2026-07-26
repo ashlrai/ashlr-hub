@@ -150,7 +150,7 @@ describe('M30 CI workflow', () => {
     const policyAssignmentReceiptsTest =
       'test/m460.policy-assignment-receipts.test.ts';
     const claimedBatchAdmissionTest =
-      'test/m461.claimed-batch-admission.test.ts';
+      'test/m463.claimed-batch-admission.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
