@@ -400,6 +400,12 @@ function connectSSE() {
         if (state.activeView === 'control') loadControl();
       } catch {}
     });
+    es.addEventListener('daemon-observation', (e) => {
+      try {
+        state.daemon = JSON.parse(e.data);
+        if (state.activeView === 'daemon') renderDaemon();
+      } catch {}
+    });
     // M90: fleet-activity liveness ping — update tick indicator + refresh if on view
     es.addEventListener('fleet-activity-ping', (e) => {
       try {
@@ -2191,7 +2197,7 @@ function buildInboxDetail(p) {
 async function loadDaemon() {
   showLoading('daemon');
   try {
-    state.daemon = await apiFetch('/api/daemon');
+    state.daemon = await apiFetch('/api/daemon-observation');
     renderDaemon();
   } catch (err) {
     showError('daemon', err.message);
@@ -2221,30 +2227,34 @@ function renderDaemon() {
   }
 
   const card = el('div', { cls: 'daemon-card card' });
+  const daemonState = fleetDaemonState(d);
+  const isRunning = daemonState === 'running';
 
   // Running indicator
   const runningDot = el('span', {
-    cls: d.running ? 'daemon-dot daemon-dot--running' : 'daemon-dot',
-    title: d.running ? 'Running' : 'Stopped',
+    cls: isRunning ? 'daemon-dot daemon-dot--running' : 'daemon-dot',
+    title: isRunning ? 'Running' : daemonState === 'unknown' ? 'Unknown' : 'Stopped',
   });
   const statusRow = el('div', { cls: 'daemon-card__status' },
     runningDot,
-    el('span', { cls: d.running ? 'daemon-status--on' : 'daemon-status--off' },
-      d.running ? 'Running' : 'Stopped')
+    el('span', { cls: isRunning ? 'daemon-status--on' : 'daemon-status--off' },
+      isRunning ? 'Running' : daemonState === 'unknown' ? 'Unknown' : 'Stopped')
   );
   card.appendChild(statusRow);
 
   // Info grid
   const pairs = [
     ['Last tick', d.lastTickAt ? fmtRelative(d.lastTickAt) : '—'],
-    ['Today spend', d.todaySpentUsd != null ? `$${d.todaySpentUsd.toFixed(4)}` : '—'],
+    ['Today spend', daemonState !== 'unknown' && d.todaySpentUsd != null
+      ? `$${d.todaySpentUsd.toFixed(4)}`
+      : '—'],
     ['Spend cap', d.spendCapUsd != null ? `$${d.spendCapUsd.toFixed(2)}` : '—'],
     ['Pending proposals', d.pendingProposals ?? state.inboxBadge ?? '—'],
   ];
   card.appendChild(infoGrid(pairs));
 
   // Spend vs cap mini bar
-  if (d.spendCapUsd != null && d.todaySpentUsd != null) {
+  if (daemonState !== 'unknown' && d.spendCapUsd != null && d.todaySpentUsd != null) {
     const pct = Math.min(100, (d.todaySpentUsd / d.spendCapUsd) * 100);
     const level = pct >= 90 ? 'var(--status-failed)' : pct >= 70 ? 'var(--status-aborted)' : 'var(--status-done)';
     const track = el('div', { cls: 'daemon-spend-track' });
@@ -3975,7 +3985,8 @@ function renderControl() {
   // ── 1. Fleet Pulse (hero) ──────────────────────────────────────────────
   const fleet = d.fleet ?? d.daemon ?? {};
   const daemon = d.daemon ?? {};
-  const fleetDaemon = d.fleet?.daemon ?? fleet.daemon ?? daemon;
+  const daemonObservation = d.daemonObservation ?? daemon;
+  const fleetDaemon = d.fleet?.daemon ?? fleet.daemon ?? daemonObservation;
   const queue  = d.fleet?.queue ?? fleet.queue ?? {};
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
@@ -4026,22 +4037,25 @@ function renderControl() {
         : daemonState === 'unknown'
           ? 'Daemon state unknown'
           : 'Daemon stopped'),
-    daemon.pid ? el('span', { cls: 'ctrl-pid' }, `PID ${daemon.pid}`) : null
+    daemonObservation.pid
+      ? el('span', { cls: 'ctrl-pid' }, `PID ${daemonObservation.pid}`)
+      : null
   );
   heroPulse.appendChild(daemonStatusEl);
 
-  if (fleetDaemon.lastTickAt ?? daemon.lastTickAt) {
-    heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(fleetDaemon.lastTickAt ?? daemon.lastTickAt)}`));
+  if (fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt) {
+    heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt)}`));
   }
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
   const sharedQueue = queue.shared;
+  const controlDaemonState = fleetDaemonState(daemonObservation);
   heroMetrics.appendChild(controlMetric(
     'Spend today',
-    daemonState === 'unknown'
+    daemonState === 'unknown' || controlDaemonState === 'unknown'
       ? '—'
-      : daemon.todaySpentUsd != null
-        ? `$${daemon.todaySpentUsd.toFixed(4)}`
+      : daemonObservation.todaySpentUsd != null
+        ? `$${daemonObservation.todaySpentUsd.toFixed(4)}`
         : '—',
     '#fbbf24'
   ));
@@ -4601,16 +4615,22 @@ function renderControl() {
   section.appendChild(secCard);
 
   // ── 8. Activity log ───────────────────────────────────────────────────
+  const logsSourceHealthy = d.logsSourceQuality?.sourceState === 'healthy'
+    && d.logsSourceQuality?.complete === true;
   const logs = Array.isArray(d.logs) ? [...d.logs].reverse() : [];
 
   const logsCard = el('div', { cls: 'ctrl-card card' });
   logsCard.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Activity Log'),
-    el('span', { cls: 'card-subtitle' }, `${logs.length} recent entries`)
+    el('span', { cls: 'card-subtitle' }, logsSourceHealthy
+      ? `${logs.length} recent entries`
+      : 'History unavailable')
   ));
   const logsBody = el('div', { cls: 'ctrl-log-body' });
 
-  if (logs.length === 0) {
+  if (!logsSourceHealthy) {
+    logsBody.appendChild(el('p', { cls: 'hint' }, 'Daemon history unavailable; inspect daemon state source quality.'));
+  } else if (logs.length === 0) {
     logsBody.appendChild(el('p', { cls: 'hint' }, 'No recent activity.'));
   } else {
     for (const entry of logs.slice(0, 50)) {
@@ -4941,8 +4961,11 @@ function renderFleetActivity() {
     el('span', { cls: 'card-subtitle' }, 'Newest first')
   ));
   const ticksBody = el('div', { cls: 'fa-ticks fa-card-body' });
+  const ticksSourceHealthy = fleetActivitySourceHealthy(d.recentTicksSourceQuality);
   const ticks = Array.isArray(d.recentTicks) ? d.recentTicks : [];
-  if (ticks.length === 0) {
+  if (!ticksSourceHealthy) {
+    ticksBody.appendChild(el('p', { cls: 'hint' }, 'Daemon tick history unavailable; inspect daemon state source quality.'));
+  } else if (ticks.length === 0) {
     ticksBody.appendChild(el('p', { cls: 'hint' }, 'No daemon ticks yet — is the daemon running?'));
   } else {
     for (const t of ticks) {
@@ -5347,7 +5370,7 @@ function fdRenderReadinessRail(snap) {
 }
 
 function fdRenderStatusPanel(snap) {
-  const daemon = snap.daemon ?? {};
+  const daemon = snap.daemonObservation ?? snap.daemon ?? {};
   const fleetDaemon = snap.fleet?.daemon ?? snap.control?.fleet?.daemon ?? daemon;
   const fleetSnapshot = snap.fleet ?? snap.control?.fleet ?? null;
   const daemonState = fleetDaemonState(fleetDaemon);
@@ -5398,7 +5421,12 @@ function fdRenderStatusPanel(snap) {
   grid.appendChild(mkMeta('Spend today', spend));
   grid.appendChild(mkMeta('Pending proposals', String(pendingCount),
     pendingCount > 0 ? 'fd-meta-val--warn' : null));
-  grid.appendChild(mkMeta('Items processed', String(daemon.itemsProcessed ?? 0)));
+  grid.appendChild(mkMeta(
+    'Items processed',
+    daemonState === 'unknown' || daemon.itemsProcessed == null
+      ? '—'
+      : String(daemon.itemsProcessed),
+  ));
   if (sharedQueue) {
     grid.appendChild(mkMeta('Shared queue', sharedQueueMetric(sharedQueue),
       !sharedQueue.authorityReady || !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 ||
@@ -5445,11 +5473,15 @@ function fdRenderStatusPanel(snap) {
 }
 
 function fdRenderRunningPanel(snap) {
-  const daemon = snap.daemon ?? {};
+  const daemon = snap.daemonObservation ?? snap.daemon ?? {};
+  const fleetDaemon = snap.fleet?.daemon ?? snap.control?.fleet?.daemon ?? daemon;
+  const daemonState = fleetDaemonState(fleetDaemon);
   const inbox = snap.inbox ?? {};
   const pendingCount = daemon.pendingProposals ?? inbox.pending ?? 0;
   const recentRuns = Array.isArray(snap.runs) ? snap.runs.slice(0, 5) : [];
-  const itemsProcessed = daemon.itemsProcessed ?? 0;
+  const itemsProcessed = daemonState === 'unknown' || daemon.itemsProcessed == null
+    ? '—'
+    : daemon.itemsProcessed;
 
   const body = el('div', { cls: 'fd-panel__body' });
 

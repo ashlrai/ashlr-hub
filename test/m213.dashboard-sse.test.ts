@@ -71,6 +71,9 @@ const FIXTURE_DAEMON_STATE = {
   todayDate: new Date().toISOString().slice(0, 10),
 };
 const FIXTURE_FRONTIER_USAGE = { generatedAt: new Date().toISOString(), engines: [] };
+const daemonStateMocks = vi.hoisted(() => ({
+  loadDaemonStateStrict: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Module mocks (hoisted before dynamic imports)
@@ -97,11 +100,24 @@ vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn(() => null),
   setStatus: vi.fn(),
 }));
-vi.mock('../src/core/daemon/state.js', () => ({ loadDaemonState: vi.fn(() => FIXTURE_DAEMON_STATE) }));
+vi.mock('../src/core/daemon/state.js', () => daemonStateMocks);
 vi.mock('../src/core/usage/frontier-usage.js', () => ({
   getFrontierUsageSync: vi.fn(() => FIXTURE_FRONTIER_USAGE),
 }));
-vi.mock('../src/core/fleet/status.js', () => ({ buildFleetStatus: vi.fn(async () => ({})) }));
+vi.mock('../src/core/fleet/status.js', () => ({
+  buildFleetStatus: vi.fn(async () => ({})),
+  readFleetDaemonStatus: vi.fn(async () => ({
+    daemon: {
+      running: false,
+      sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+      pid: null,
+      startedAt: null,
+      lastTickAt: null,
+      todaySpentUsd: 0,
+    },
+    recentTicks: [],
+  })),
+}));
 vi.mock('../src/core/sandbox/policy.js', () => ({ listEnrolled: vi.fn(() => []) }));
 vi.mock('../src/core/goals/store.js', () => ({ listGoals: vi.fn(() => []) }));
 vi.mock('../src/core/goals/advance.js', () => ({
@@ -120,13 +136,28 @@ vi.mock('../src/core/dashboard.js', () => ({
     pulse: null,
     genome: [],
     inbox: { pending: 0 },
-    daemon: null,
+    daemonObservation: {
+      runtimeState: 'stopped',
+      sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+      running: false,
+      pid: null,
+      startedAt: null,
+      lastTickAt: null,
+      todayDate: null,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      ticks: [],
+      pendingProposals: 0,
+    },
     fleet: null,
     frontierUsage: null,
   })),
 }));
 vi.mock('../src/core/web/control.js', () => ({
-  buildControlSnapshot: vi.fn(async () => ({})),
+  buildControlSnapshot: vi.fn(async () => ({
+    logs: [],
+    logsSourceQuality: { sourceState: 'healthy', complete: true, reason: 'missing' },
+  })),
   buildFleetActivity: vi.fn(async () => ({})),
 }));
 
@@ -208,6 +239,12 @@ import { buildSnapshot } from '../src/core/dashboard.js';
 
 const BASE_CTX = { token: 'test-token', allowDispatch: false } as const;
 
+daemonStateMocks.loadDaemonStateStrict.mockReturnValue({
+  ok: true,
+  state: FIXTURE_DAEMON_STATE,
+  fresh: false,
+});
+
 /**
  * Open an SSE connection and drain the initial emitUpdate() async work.
  *
@@ -232,6 +269,14 @@ async function openSseAndDrainInitial(
   return { req, res };
 }
 
+function ssePayload(chunks: string[], event: string): Record<string, unknown> {
+  const frame = chunks.join('').split('\n\n').find((entry) => entry.startsWith(`event: ${event}\n`));
+  expect(frame).toBeDefined();
+  const data = frame!.split('\n').find((line) => line.startsWith('data: '));
+  expect(data).toBeDefined();
+  return JSON.parse(data!.slice('data: '.length)) as Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -240,6 +285,12 @@ describe('M213 Dashboard SSE — /api/events', () => {
   afterEach(() => {
     drainSseConnections();
     vi.useRealTimers();
+    daemonStateMocks.loadDaemonStateStrict.mockReset();
+    daemonStateMocks.loadDaemonStateStrict.mockReturnValue({
+      ok: true,
+      state: FIXTURE_DAEMON_STATE,
+      fresh: false,
+    });
   });
 
   // ── 1. handleApi routes /api/events ──────────────────────────────────────
@@ -364,6 +415,233 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(res._chunks().join('')).toContain('event: fleet-activity-ping\n');
   });
 
+  it('emits degraded daemon and activity observations without stopped or zero claims', async () => {
+    const { readFleetDaemonStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(readFleetDaemonStatus).mockResolvedValueOnce({
+      daemon: {
+        running: false,
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'unreadable' },
+        pid: null,
+        startedAt: null,
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      recentTicks: [],
+    } as any);
+    vi.mocked(buildSnapshot).mockResolvedValueOnce({
+      generatedAt: new Date().toISOString(),
+      daemonObservation: {
+        runtimeState: 'unknown',
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'unreadable' },
+        running: null,
+        pid: null,
+        startedAt: null,
+        lastTickAt: null,
+        todayDate: null,
+        todaySpentUsd: null,
+        itemsProcessed: null,
+        ticks: null,
+        pendingProposals: 0,
+      },
+    } as any);
+    const { res } = await openSseAndDrainInitial();
+
+    expect(ssePayload(res._chunks(), 'daemon-observation')).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      ticks: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unreadable',
+      },
+    });
+    expect(ssePayload(res._chunks(), 'fleet-activity-observation')).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      lastTickAt: null,
+      tickCount: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unreadable',
+      },
+    });
+    expect(ssePayload(res._chunks(), 'daemon')).toMatchObject({
+      running: false,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      ticks: [],
+    });
+    expect(ssePayload(res._chunks(), 'fleet-activity-ping')).toEqual({
+      running: false,
+      lastTickAt: null,
+      tickCount: 0,
+    });
+  });
+
+  it('returns an explicit unknown daemon observation from its additive endpoint', async () => {
+    const { readFleetDaemonStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(readFleetDaemonStatus).mockResolvedValueOnce({
+      daemon: {
+        running: false,
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'malformed' },
+        pid: null,
+        startedAt: null,
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      recentTicks: [],
+    } as any);
+    const res = makeJsonRes();
+    const handled = await handleApi(
+      makeReq('/api/daemon-observation'),
+      res,
+      makeConfig() as any,
+      BASE_CTX,
+    );
+
+    expect(handled).toBe(true);
+    expect(res._status()).toBe(200);
+    expect(res._body()).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      ticks: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'malformed',
+      },
+    });
+  });
+
+  it('keeps GET /api/daemon and legacy SSE events shape-compatible when authority is unknown', async () => {
+    const { readFleetDaemonStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(readFleetDaemonStatus).mockResolvedValueOnce({
+      daemon: {
+        running: false,
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'inconsistent' },
+        pid: null,
+        startedAt: null,
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      recentTicks: [],
+    } as any);
+    const res = makeJsonRes();
+    await handleApi(makeReq('/api/daemon'), res, makeConfig() as any, BASE_CTX);
+
+    expect(res._body()).toEqual({
+      running: false,
+      pid: null,
+      startedAt: null,
+      lastTickAt: null,
+      todayDate: null,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      ticks: [],
+    });
+  });
+
+  it('replaces cached daemon health with fresh provenance without changing the legacy shape', async () => {
+    const { readFleetDaemonStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(readFleetDaemonStatus).mockClear();
+    vi.mocked(readFleetDaemonStatus).mockResolvedValueOnce({
+      daemon: {
+        running: false,
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'unreadable' },
+        pid: null,
+        startedAt: null,
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      recentTicks: [],
+    } as any);
+    const staleSnapshot = {
+      generatedAt: new Date().toISOString(),
+      inbox: { pending: 2 },
+      daemon: { running: true, todaySpentUsd: 4.2, pendingProposals: 2 },
+      daemonObservation: {
+        observedAt: '2026-07-25T00:00:00.000Z',
+        runtimeState: 'running',
+        sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+        running: true,
+        pid: 42,
+        startedAt: '2026-07-25T00:00:00.000Z',
+        lastTickAt: '2026-07-25T00:01:00.000Z',
+        todayDate: '2026-07-25',
+        todaySpentUsd: 4.2,
+        itemsProcessed: 9,
+        ticks: [],
+        pendingProposals: 2,
+      },
+    } as any;
+    let resolveSnapshot!: (value: typeof staleSnapshot) => void;
+    vi.mocked(buildSnapshot).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const res = makeJsonRes();
+    const pending = handleApi(makeReq('/api/snapshot'), res, makeConfig() as any, BASE_CTX);
+    await Promise.resolve();
+    expect(readFleetDaemonStatus).not.toHaveBeenCalled();
+    resolveSnapshot(staleSnapshot);
+    await pending;
+    expect(readFleetDaemonStatus).toHaveBeenCalledTimes(1);
+
+    const body = res._body() as Record<string, unknown>;
+    expect(body['daemonObservation']).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      sourceQuality: { sourceState: 'degraded', complete: false, reason: 'unreadable' },
+    });
+    expect(body['daemon']).toEqual({
+      running: false,
+      todaySpentUsd: 0,
+      pendingProposals: 2,
+    });
+  });
+
+  it('keeps GET /api/logs array-compatible and exposes degraded provenance additively', async () => {
+    const control = await import('../src/core/web/control.js');
+    const degradedLogs = {
+      logs: null,
+      logsSourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unreadable',
+      },
+    } as any;
+    vi.mocked(control.buildControlSnapshot)
+      .mockResolvedValueOnce(degradedLogs)
+      .mockResolvedValueOnce(degradedLogs);
+    const res = makeJsonRes();
+
+    await handleApi(makeReq('/api/logs'), res, makeConfig() as any, BASE_CTX);
+    expect(res._body()).toEqual([]);
+
+    const observationRes = makeJsonRes();
+    await handleApi(
+      makeReq('/api/logs-observation'),
+      observationRes,
+      makeConfig() as any,
+      BASE_CTX,
+    );
+    expect(observationRes._body()).toEqual({
+      entries: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unreadable',
+      },
+    });
+  });
+
   // ── 8. drainSseConnections closes all connections ─────────────────────────
 
   it('drainSseConnections() ends the SSE response', async () => {
@@ -415,6 +693,16 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(snapshotHandlerMatch).not.toBeNull();
     expect(snapshotHandlerMatch![0]).toContain('clearInterval');
     expect(snapshotHandlerMatch![0]).toContain('fleetDashboardInterval');
+  });
+
+  it('app.js consumes additive daemon provenance while retaining legacy SSE compatibility', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain("es.addEventListener('daemon'");
+    expect(src).toContain("es.addEventListener('daemon-observation'");
+    expect(src).toContain("apiFetch('/api/daemon-observation')");
   });
 
   // ── 12. app.js: SSE error handler restores polling fallback ──────────────

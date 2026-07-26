@@ -17,7 +17,7 @@
  *   GET /api/genome[?q=...]    -> recall(q, cfg) | loadGenome(cfg)
  *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
  *   GET /api/autonomy/evidence -> list autonomy evidence packs (metadata only)
- *   GET /api/daemon            -> loadDaemonState() (read-only; M24; no control endpoint)
+ *   GET /api/daemon            -> strict provenance-bearing daemon observation
  *   GET /api/events            -> Server-Sent Events stream
  *
  * Mutating routes (ONLY when ctx.allowDispatch === true + token header):
@@ -61,8 +61,8 @@ function canonForCompare(p: string): string {
   return out.toLowerCase();
 }
 
-import type { AshlrConfig, DashboardSnapshot } from '../types.js';
-import { buildSnapshot } from '../dashboard.js';
+import type { AshlrConfig, DaemonState } from '../types.js';
+import { buildSnapshot, type DashboardSnapshotWithSourceQuality } from '../dashboard.js';
 import { loadEffectiveConfigSnapshot } from '../effective-config.js';
 import { listRuns, loadRun, runGoal } from '../run/orchestrator.js';
 import { listSwarms, loadSwarm } from '../swarm/store.js';
@@ -70,11 +70,13 @@ import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
-// M24: read-only daemon state endpoint.
-import { loadDaemonState } from '../daemon/state.js';
+import {
+  readPublicDaemonObservation,
+  type PublicDaemonObservation,
+} from '../daemon/public-observation.js';
 import { serviceStatus } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
-import { buildFleetStatus } from '../fleet/status.js';
+import { buildFleetStatus, readFleetDaemonStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
 // M90: Fleet-Activity panel.
@@ -153,14 +155,14 @@ let sseHistoryProjection: SseHistoryProjection | null = null;
 const SNAPSHOT_CACHE_MS = 5_000;
 
 interface SnapshotCacheEntry {
-  value: DashboardSnapshot | null;
+  value: DashboardSnapshotWithSourceQuality | null;
   expiresAt: number;
-  inFlight: Promise<DashboardSnapshot> | null;
+  inFlight: Promise<DashboardSnapshotWithSourceQuality> | null;
 }
 
 const snapshotCache = new WeakMap<AshlrConfig, SnapshotCacheEntry>();
 
-function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot> {
+function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshotWithSourceQuality> {
   const now = Date.now();
   let entry = snapshotCache.get(cfg);
   if (!entry) {
@@ -178,6 +180,55 @@ function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot> {
     entry!.inFlight = null;
   });
   return entry.inFlight;
+}
+
+function legacyDaemonProjection(
+  observation: PublicDaemonObservation,
+): DaemonState {
+  return {
+    running: observation.running === true,
+    pid: observation.pid,
+    startedAt: observation.startedAt,
+    lastTickAt: observation.lastTickAt,
+    todayDate: observation.todayDate,
+    todaySpentUsd: observation.todaySpentUsd ?? 0,
+    itemsProcessed: observation.itemsProcessed ?? 0,
+    ticks: observation.ticks ?? [],
+    ...(observation.automaticDrainOrdinaryTurnDue !== undefined
+      ? { automaticDrainOrdinaryTurnDue: observation.automaticDrainOrdinaryTurnDue }
+      : {}),
+    ...(observation.lastPulseExportAt !== undefined
+      ? { lastPulseExportAt: observation.lastPulseExportAt }
+      : {}),
+  };
+}
+
+async function readFreshDaemonObservation(): Promise<PublicDaemonObservation> {
+  try {
+    const read = await readFleetDaemonStatus();
+    return readPublicDaemonObservation(read.daemon);
+  } catch {
+    return readPublicDaemonObservation(undefined);
+  }
+}
+
+function withFreshDaemonObservation(
+  snapshot: DashboardSnapshotWithSourceQuality,
+  observation: PublicDaemonObservation,
+): DashboardSnapshotWithSourceQuality {
+  const pendingProposals = snapshot.inbox?.pending ?? 0;
+  return {
+    ...snapshot,
+    daemon: {
+      running: observation.running === true,
+      todaySpentUsd: observation.todaySpentUsd ?? 0,
+      pendingProposals,
+    },
+    daemonObservation: {
+      ...observation,
+      pendingProposals,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -446,26 +497,37 @@ function handleSseEvents(
           })),
         });
       } catch { /* inbox slice is best-effort */ }
+      let snap: DashboardSnapshotWithSourceQuality | null = null;
       try {
-        sendNamed('daemon', loadDaemonState());
-      } catch { /* daemon slice is best-effort */ }
+        snap = await buildCachedSnapshot(cfg);
+      } catch {
+        // Keep the event stream alive with explicit unavailable provenance.
+      }
+      const daemon = await readFreshDaemonObservation();
+      sendNamed('daemon', legacyDaemonProjection(daemon));
+      sendNamed('daemon-observation', daemon);
       // M90: fleet-activity liveness pulse — carry daemon tick count so the
       // Fleet Activity tab can update its "last tick" indicator in real-time
       // without a full /api/fleet-activity poll.
-      try {
-        const ds = loadDaemonState();
-        const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
-        sendNamed('fleet-activity-ping', {
-          running: ds.running,
-          lastTickAt: ds.lastTickAt,
-          tickCount: ticks.length,
-        });
-      } catch { /* fleet-activity ping is best-effort */ }
+      sendNamed('fleet-activity-ping', {
+        running: daemon.running === true,
+        lastTickAt: daemon.lastTickAt,
+        tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : 0,
+      });
+      sendNamed('fleet-activity-observation', {
+        runtimeState: daemon.runtimeState,
+        sourceQuality: daemon.sourceQuality,
+        running: daemon.running,
+        lastTickAt: daemon.lastTickAt,
+        tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : null,
+      });
       // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
-      try {
-        const snap = await buildCachedSnapshot(cfg);
-        sendNamed('snapshot', { ...snap, dispatchEnabled: allowDispatch });
-      } catch { /* snapshot is best-effort */ }
+      if (snap) {
+        sendNamed('snapshot', {
+          ...withFreshDaemonObservation(snap, daemon),
+          dispatchEnabled: allowDispatch,
+        });
+      }
     } finally {
       updateInFlight = false;
     }
@@ -630,9 +692,15 @@ export async function handleApi(
     // ── GET /api/snapshot ───────────────────────────────────────────────────
     if (path === '/api/snapshot' && method === 'GET') {
       const snapshot = await buildCachedSnapshot(cfg);
+      // Read authority after the potentially slow snapshot build so the
+      // serialized daemon verdict is the final observation in this response.
+      const daemonObservation = await readFreshDaemonObservation();
       // M32: additive field so the frontend can show (not guess) whether the
       // dispatch/approve surfaces exist on this server instance.
-      sendJson(res, 200, { ...snapshot, dispatchEnabled: ctx.allowDispatch });
+      sendJson(res, 200, {
+        ...withFreshDaemonObservation(snapshot, daemonObservation),
+        dispatchEnabled: ctx.allowDispatch,
+      });
       return true;
     }
 
@@ -852,13 +920,15 @@ export async function handleApi(
     }
 
     // ── GET /api/daemon ─────────────────────────────────────────────────────
-    // M24: read-only daemon state. No control endpoint — start/stop is CLI-only.
-    // loadDaemonState() never throws; returns zeroed state when not yet
-    // initialised (daemon/state.ts absent at runtime => caught below and 500'd,
-    // but the import is soft-guarded in state.ts itself).
+    // M24: legacy read-only daemon state. Keep the established response shape;
+    // first-party and autonomous consumers use /api/daemon-observation.
     if (path === '/api/daemon' && method === 'GET') {
-      const ds = loadDaemonState();
-      sendJson(res, 200, ds);
+      sendJson(res, 200, legacyDaemonProjection(await readFreshDaemonObservation()));
+      return true;
+    }
+
+    if (path === '/api/daemon-observation' && method === 'GET') {
+      sendJson(res, 200, await readFreshDaemonObservation());
       return true;
     }
 
@@ -1070,7 +1140,25 @@ export async function handleApi(
         ? Math.min(Number(rawTail), 200)
         : 50;
       const snapshot = await buildControlSnapshot(cfg);
-      sendJson(res, 200, snapshot.logs.slice(0, tail));
+      sendJson(res, 200, (snapshot.logs ?? []).slice(0, tail));
+      return true;
+    }
+
+    // Additive provenance-bearing log contract. The legacy /api/logs route
+    // remains an array for existing clients.
+    if (path === '/api/logs-observation' && method === 'GET') {
+      const rawTail = getQueryParam(req.url ?? '', 'tail');
+      const tail = rawTail !== undefined && /^\d+$/.test(rawTail)
+        ? Math.min(Number(rawTail), 200)
+        : 50;
+      const snapshot = await buildControlSnapshot(cfg);
+      sendJson(res, 200, {
+        entries: snapshot.logsSourceQuality.sourceState === 'healthy' &&
+          snapshot.logsSourceQuality.complete
+          ? snapshot.logs.slice(0, tail)
+          : null,
+        sourceQuality: snapshot.logsSourceQuality,
+      });
       return true;
     }
 
@@ -1223,24 +1311,37 @@ export async function handleApi(
     // Read-only; same no-auth class as /api/daemon and /api/fleet.
     // Never throws; each section degrades independently.
     if (path === '/api/fleet-state' && method === 'GET') {
-      const { loadDaemonState } = await import('../daemon/state.js');
       const { buildFleetDigest } = await import('../fleet/digest.js');
       const { computeQualityMetrics } = await import('../fleet/quality-metrics.js');
       const { buildOversightSnapshot } = await import('../fleet/oversight-export.js');
 
       // daemon + digest (parallel)
-      let daemonSection: unknown = null;
+      const daemon = await readFreshDaemonObservation();
+      let daemonSection: unknown = {
+        runtimeState: daemon.runtimeState,
+        sourceQuality: daemon.sourceQuality,
+        running: daemon.running,
+        pid: daemon.pid,
+        startedAt: daemon.startedAt,
+        lastTickAt: daemon.lastTickAt,
+        todaySpentUsd: daemon.todaySpentUsd,
+        itemsProcessed: daemon.itemsProcessed,
+        recentTicks: daemon.ticks === null ? null : daemon.ticks.slice(-20),
+        pendingProposals: null,
+        digest: null,
+      };
       try {
-        const ds = loadDaemonState();
         const digest = await buildFleetDigest('7d');
         daemonSection = {
-          running: ds.running,
-          pid: ds.pid,
-          startedAt: ds.startedAt,
-          lastTickAt: ds.lastTickAt,
-          todaySpentUsd: ds.todaySpentUsd,
-          itemsProcessed: ds.itemsProcessed,
-          recentTicks: Array.isArray(ds.ticks) ? ds.ticks.slice(-20) : [],
+          runtimeState: daemon.runtimeState,
+          sourceQuality: daemon.sourceQuality,
+          running: daemon.running,
+          pid: daemon.pid,
+          startedAt: daemon.startedAt,
+          lastTickAt: daemon.lastTickAt,
+          todaySpentUsd: daemon.todaySpentUsd,
+          itemsProcessed: daemon.itemsProcessed,
+          recentTicks: daemon.ticks === null ? null : daemon.ticks.slice(-20),
           pendingProposals: digest.totalPending,
           digest: {
             totalProposed: digest.totalProposed,

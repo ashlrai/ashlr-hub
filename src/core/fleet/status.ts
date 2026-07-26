@@ -1305,6 +1305,7 @@ export interface FleetStatus {
       complete: boolean;
       reason: 'healthy' | 'missing' | 'malformed' | 'unreadable' | 'inconsistent' | 'unavailable';
     };
+    pid?: number | null;
     startedAt?: string | null;
     lastTickAt: string | null;
     lockHeartbeatAt?: string | null;
@@ -1837,18 +1838,13 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
   }
 }
 
-/**
- * Build a read-only snapshot of the fleet. Async because the backlog scan is
- * async. NEVER throws — each source is independently guarded.
- */
-export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
-  const generatedAt = new Date().toISOString();
-  let queueSnapshotAt: string | null = null;
-  let queueAuthorityObservedAt: string | null = null;
-  let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
-  let queueSourceDetail = 'backlog snapshot has not been read yet';
+export interface FleetDaemonStatusRead {
+  daemon: FleetStatus['daemon'];
+  recentTicks: DaemonTick[];
+}
 
-  // ── daemon ────────────────────────────────────────────────────────────────
+/** Read daemon ledger, lock, and activity as one fail-closed observation. */
+export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
   let daemon: FleetStatus['daemon'] = {
     running: false,
     sourceQuality: {
@@ -1860,7 +1856,6 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     lastTickAt: null,
     todaySpentUsd: 0,
   };
-  // Recent ticks are reused for merge counting below.
   let recentTicks: DaemonTick[] = [];
   try {
     const { loadDaemonStateStrict, readDaemonLockOwner } = await import('../daemon/state.js');
@@ -1908,6 +1903,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
           ? daemonState.fresh ? 'missing' : 'healthy'
           : 'inconsistent',
       },
+      pid: ds.pid ?? null,
       startedAt,
       lastTickAt,
       ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
@@ -1931,6 +1927,25 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // leave fallback
   }
+  return { daemon, recentTicks };
+}
+
+/**
+ * Build a read-only snapshot of the fleet. Async because the backlog scan is
+ * async. NEVER throws — each source is independently guarded.
+ */
+export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
+  const generatedAt = new Date().toISOString();
+  let queueSnapshotAt: string | null = null;
+  let queueAuthorityObservedAt: string | null = null;
+  let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
+  let queueSourceDetail = 'backlog snapshot has not been read yet';
+
+  // ── daemon ────────────────────────────────────────────────────────────────
+  const daemonRead = await readFleetDaemonStatus();
+  const daemon = daemonRead.daemon;
+  // Recent ticks are reused for merge counting below.
+  const recentTicks = daemonRead.recentTicks;
   try {
     const { inspectDaemonActivationPermit } = await import('../daemon/activation-permit.js');
     daemon.activation = inspectDaemonActivationPermit(cfg, {
