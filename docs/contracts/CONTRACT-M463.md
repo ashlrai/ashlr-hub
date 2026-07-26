@@ -1,17 +1,17 @@
-# M461 Claimed-Batch Admission Contract
+# M463 Claimed-Batch Admission Contract
 
 Status: pure codec and private-store proving slice implemented; daemon wiring
 and operational authority are not active
 
 ## Purpose
 
-M461 defines the evidence boundary for a future claimed-batch admission
+M463 defines the evidence boundary for a future claimed-batch admission
 receipt. The receipt may record that one non-empty batch of work items was
 observed after every claimed lease passed an exact-set fence and before
 dispatch routing, policy assignment, attempt creation, spend reservation, or
 execution.
 
-The protocol identifier is `claimed-batch-admission-v1`. M461 is an
+The protocol identifier is `claimed-batch-admission-v1`. M463 is an
 observation-only prerequisite for later assignment reconciliation. It does not
 select work, renew or release leases, choose a route, authorize execution,
 establish a learning label, or change fleet behavior.
@@ -109,7 +109,7 @@ an assignment was made, persisted before execution, or matched the behavior
 policy. Assignment completeness remains false until a later reconciler proves
 exact set equality against independently read assignment receipts.
 
-No M461 field may be reinterpreted as campaign closure, a causal denominator,
+No M463 field may be reinterpreted as campaign closure, a causal denominator,
 randomization evidence, exposure evidence, outcome completeness, or permission
 to train, route, promote, merge, deploy, or execute.
 
@@ -192,12 +192,12 @@ authority.
 Independent verification requires a separate signing principal, public-key
 verification, descriptor-relative storage operations, a source-native
 monotonic watermark, and an exclusive close barrier. None of those properties
-is claimed by M461.
+is claimed by M463.
 
-M461 readers and receipts must have no routing, backend-selection, dispatch,
+M463 readers and receipts must have no routing, backend-selection, dispatch,
 proposal, verification, merge, automerge, ship, deployment, readiness,
 command-rail, CLI, web, dashboard, or learned-policy consumer. A later
-assignment reconciler may read M461 only to report private evidence quality;
+assignment reconciler may read M463 only to report private evidence quality;
 it may not authorize work.
 
 An authority-bearing successor requires one queue transaction that revalidates
@@ -207,7 +207,7 @@ cannot substitute for it.
 
 ## Activation Gate
 
-The codec, store, contract, and CI registration do not activate M461.
+The codec, store, contract, and CI registration do not activate M463.
 Authority-bearing daemon wiring of this protocol is permanently prohibited.
 Even observation-only collection remains prohibited until:
 
