@@ -125,6 +125,7 @@ describe('M30 CI workflow', () => {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
     expect(ciYml).toContain('label: windows, portability overflow');
+    expect(ciYml).not.toContain('label: macos, queue and launchd authority');
     expect(ciYml).toContain("if: matrix.label == 'ubuntu, authority 1/3'");
 
     const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
@@ -141,6 +142,12 @@ describe('M30 CI workflow', () => {
       entry.includes('label: windows, portability overflow')) ?? '';
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
+    const jobNameTemplate =
+      ciYml.match(/^ {4}name: (CI \(Node 22, \$\{\{ matrix\.label \}\}\))$/m)?.[1] ?? '';
+    const macosLabel = macosEntry.match(/^ {12}label: (.+)$/m)?.[1] ?? '';
+    expect(jobNameTemplate.replace('${{ matrix.label }}', macosLabel)).toBe(
+      'CI (Node 22, macos, shared queue authority)',
+    );
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
     const observerSchedulerTest = 'test/m367.daemon-observer-scheduler.test.ts';
     const expectedWindowsPartitions = [
