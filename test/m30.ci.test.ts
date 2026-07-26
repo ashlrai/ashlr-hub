@@ -210,6 +210,7 @@ describe('M30 CI workflow', () => {
       terminalRetentionTest,
       observerSchedulerTest,
       'test/m93.daemon-service.test.ts',
+      'test/m93.daemon-service-launchd-integration.test.ts',
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
@@ -410,6 +411,17 @@ describe('M30 CI workflow', () => {
       /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
     ) ?? [];
     expect([...macosDeclaredFiles].sort()).toEqual([...expectedMacosFiles].sort());
+    expect(macosEntry).toContain('native_launchd: "1"');
+    expect(ciYml.match(/native_launchd: "1"/g)).toHaveLength(1);
+    expect(ciYml).toContain(
+      "ASHLR_RUN_NATIVE_LAUNCHD_TEST: ${{ matrix.native_launchd || '0' }}",
+    );
+    expect(ciYml).toContain('if: always() && matrix.os == \'macos-latest\'');
+    expect(ciYml).toContain('run: node scripts/cleanup-launchd-test.mjs');
+    expect(existsSync(resolve(repoRoot, 'scripts/cleanup-launchd-test.mjs'))).toBe(true);
+    for (const entry of nativeMatrixEntries.filter((entry) => entry !== macosEntry)) {
+      expect(entry).not.toContain('native_launchd:');
+    }
 
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
