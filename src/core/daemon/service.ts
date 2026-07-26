@@ -130,6 +130,11 @@ export interface ServiceDefinition {
   unregisterArgs: string[];
   /** How to unload (may differ from unregister on some platforms). */
   unloadArgs?: string[];
+  /** Exact native launchd command expected from a loaded generated plist. */
+  launchdRuntime?: {
+    program: string;
+    arguments: string[];
+  };
 }
 
 export function generateServiceDefinition(opts: ServiceInstallOptions = {}): ServiceDefinition {
@@ -191,18 +196,20 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   // daemon alive through idle + system sleep while on AC power (lid-closed use).
   // caffeinate's `-i` flag prevents idle sleep; `-s` prevents system sleep on AC.
   // On battery, macOS may still sleep — the user must keep the Mac plugged in.
-  const programArgs = o.keepAwake
-    ? [
-        '\t\t<string>caffeinate</string>',
-        '\t\t<string>-i</string>',
-        '\t\t<string>-s</string>',
-        `\t\t<string>${o.nodePath}</string>`,
-        `\t\t<string>${o.binPath}</string>`,
-      ]
-    : [
-        `\t\t<string>${o.nodePath}</string>`,
-        `\t\t<string>${o.binPath}</string>`,
-      ];
+  const runtimeArguments = o.keepAwake
+    ? ['caffeinate', '-i', '-s', o.nodePath, o.binPath]
+    : [o.nodePath, o.binPath];
+  runtimeArguments.push(
+    'daemon',
+    'start',
+    '--budget',
+    String(o.budget),
+    '--interval',
+    String(o.intervalMs),
+    '--parallel',
+    String(o.parallel),
+  );
+  const programArgs = runtimeArguments.map((argument) => `\t\t<string>${argument}</string>`);
 
   const content = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -215,14 +222,6 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
 \t<key>ProgramArguments</key>
 \t<array>
 ${programArgs.join('\n')}
-\t\t<string>daemon</string>
-\t\t<string>start</string>
-\t\t<string>--budget</string>
-\t\t<string>${o.budget}</string>
-\t\t<string>--interval</string>
-\t\t<string>${o.intervalMs}</string>
-\t\t<string>--parallel</string>
-\t\t<string>${o.parallel}</string>
 \t</array>
 \t<key>EnvironmentVariables</key>
 \t<dict>
@@ -253,6 +252,10 @@ ${programArgs.join('\n')}
     content,
     registerArgs: ['launchctl', 'bootstrap', domainTarget, plistPath],
     unregisterArgs: ['launchctl', 'bootout', serviceTarget],
+    launchdRuntime: {
+      program: runtimeArguments[0]!,
+      arguments: runtimeArguments,
+    },
   };
 }
 
@@ -336,13 +339,13 @@ interface CommandResult {
   stderr: string;
 }
 
-function runCmd(args: string[], input?: string): CommandResult {
+function runCmd(args: string[], input?: string, timeoutMs = 15_000): CommandResult {
   const [cmd, ...rest] = args;
   if (!cmd) return { ok: false, stdout: '', stderr: 'empty command' };
   try {
     const result = spawnSync(cmd, rest, {
       encoding: 'utf8',
-      timeout: 15_000,
+      timeout: timeoutMs,
       ...(input === undefined ? {} : { input }),
     });
     const ok = result.status === 0 && !result.error;
@@ -374,9 +377,102 @@ interface LaunchdRuntimeState {
   pid?: number;
 }
 
-function readLaunchdRuntimeState(serviceTarget: string): LaunchdRuntimeState {
-  const result = runCmd(['launchctl', 'print', serviceTarget]);
+interface LaunchdRuntimeReadOptions {
+  expectedPath?: string;
+  expectedProgram?: string;
+  expectedArguments?: readonly string[];
+  timeoutMs?: number;
+}
+
+function exactLaunchdPrintRuntime(
+  output: string,
+  serviceTarget: string,
+  expectedPath: string,
+  expectedProgram: string,
+  expectedArguments: readonly string[],
+): LaunchdRuntimeState | null {
+  const lines = output.trimEnd().split(/\r?\n/);
+  if (lines[0] !== `${serviceTarget} = {` || lines.at(-1)?.trim() !== '}') return null;
+
+  const values = (field: string): string[] => {
+    const prefix = `\t${field} = `;
+    return lines
+      .filter((line) => line.startsWith(prefix))
+      .map((line) => line.slice(prefix.length).trim());
+  };
+  const paths = values('path');
+  const programs = values('program');
+  const states = values('state');
+  const pids = values('pid');
+  const argumentsBlocks = lines
+    .map((line, index) => line === '\targuments = {' ? index : -1)
+    .filter((index) => index >= 0);
+  if (argumentsBlocks.length !== 1) return null;
+  const argumentsStart = argumentsBlocks[0]!;
+  const argumentsEnd = argumentsStart < 0
+    ? -1
+    : lines.indexOf('\t}', argumentsStart + 1);
+  if (argumentsStart < 0 || argumentsEnd < 0) return null;
+  const launchdArguments = lines.slice(argumentsStart + 1, argumentsEnd);
+  if (launchdArguments.some((line) => !line.startsWith('\t\t'))) return null;
+  const parsedArguments = launchdArguments.map((line) => line.slice(2));
+  if (
+    paths.length !== 1
+    || paths[0] !== expectedPath
+    || programs.length !== 1
+    || programs[0] !== expectedProgram
+    || JSON.stringify(parsedArguments) !== JSON.stringify(expectedArguments)
+    || states.length !== 1
+    || pids.length > 1
+  ) {
+    return null;
+  }
+
+  const state = states[0];
+  const pid = pids[0] && /^\d+$/.test(pids[0]) ? Number(pids[0]) : undefined;
+  if (pids.length === 1 && (!pid || !Number.isSafeInteger(pid))) return null;
+  if (state === 'running') return pid ? { loaded: true, pid } : null;
+  if (!new Set(['waiting', 'not running', 'exited', 'stopped']).has(state) || pid !== undefined) {
+    return null;
+  }
+  return { loaded: true };
+}
+
+function readLaunchdRuntimeState(
+  serviceTarget: string,
+  options: LaunchdRuntimeReadOptions = {},
+): LaunchdRuntimeState {
+  const result = runCmd(
+    ['launchctl', 'print', serviceTarget],
+    undefined,
+    options.timeoutMs ?? 15_000,
+  );
   if (result.ok) {
+    const strictContractRequested = options.expectedPath !== undefined
+      || options.expectedProgram !== undefined
+      || options.expectedArguments !== undefined;
+    if (strictContractRequested) {
+      if (
+        options.expectedPath === undefined
+        || options.expectedProgram === undefined
+        || options.expectedArguments === undefined
+      ) {
+        throw new Error(`launchctl print ${serviceTarget} strict contract is incomplete`);
+      }
+      const exact = result.stderr.trim() === ''
+        ? exactLaunchdPrintRuntime(
+            result.stdout,
+            serviceTarget,
+            options.expectedPath,
+            options.expectedProgram,
+            options.expectedArguments,
+          )
+        : null;
+      if (!exact) {
+        throw new Error(`launchctl print ${serviceTarget} returned an unrecognized native state`);
+      }
+      return exact;
+    }
     const pidMatch = result.stdout.match(/(?:^|\s)"?pid"?\s*=\s*(\d+)/im);
     const pid = pidMatch?.[1] ? Number(pidMatch[1]) : undefined;
     return { loaded: true, ...(pid && pid > 0 ? { pid } : {}) };
@@ -1801,6 +1897,7 @@ export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<S
 
   const platform = (opts.platform ?? process.platform) as Platform;
   if (platform === 'win32' && before.runtimeState !== 'ready') return before;
+  if (platform === 'darwin' && before.runtimeState !== 'ready') return before;
   const home = resolveHome(opts.homeDir);
   const def = generateServiceDefinition(opts);
   return withServiceFileTransactionLock({
@@ -1811,9 +1908,11 @@ export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<S
     const locked = serviceStatus(opts);
     if (!locked.installed || locked.running) return locked;
     if (platform === 'win32' && locked.runtimeState !== 'ready') return locked;
+    if (platform === 'darwin' && locked.runtimeState !== 'ready') return locked;
     if (platform === 'darwin') {
       const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
-      runCmd(['launchctl', 'kickstart', '-k', `gui/${uid}/ai.ashlr.daemon`]);
+      const started = runCmd(['launchctl', 'kickstart', `gui/${uid}/ai.ashlr.daemon`]);
+      if (!started.ok || started.stderr.trim() !== '') return locked;
     } else if (platform === 'linux') {
       try {
         const state = readSystemdActivationState();
@@ -1848,7 +1947,7 @@ export function serviceStatus(opts: ServiceInstallOptions = {}): ServiceStatusRe
   const installed = fs.existsSync(def.filePath);
 
   if (platform === 'darwin') {
-    return queryLaunchd(def.filePath, installed);
+    return queryLaunchd(def, installed);
   } else if (platform === 'linux') {
     return querySystemd(def.filePath, installed);
   } else if (platform === 'win32') {
@@ -1884,15 +1983,37 @@ export function serviceStatusCached(
   return status;
 }
 
-function queryLaunchd(filePath: string, installed: boolean): ServiceStatusResult {
+function queryLaunchd(definition: ServiceDefinition, installed: boolean): ServiceStatusResult {
+  const filePath = definition.filePath;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+  const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
   try {
-    const result = spawnSync('launchctl', ['list', 'ai.ashlr.daemon'], { encoding: 'utf8', timeout: 5_000 });
-    const pidMatch = result.stdout.match(/"PID"\s*=\s*(\d+)/);
-    const pid = pidMatch ? Number(pidMatch[1]) : 0;
-    const running = result.status === 0 && Number.isFinite(pid) && pid > 0;
-    return { installed, running, platformSpec: 'launchd', serviceFilePath: filePath };
+    if (!definition.launchdRuntime) throw new Error('launchd runtime contract is unavailable');
+    const runtime = readLaunchdRuntimeState(serviceTarget, {
+      expectedPath: filePath,
+      expectedProgram: definition.launchdRuntime.program,
+      expectedArguments: definition.launchdRuntime.arguments,
+      timeoutMs: 5_000,
+    });
+    return {
+      installed,
+      running: runtime.pid !== undefined,
+      runtimeState: runtime.pid !== undefined
+        ? 'running'
+        : runtime.loaded
+          ? 'ready'
+          : 'stopped',
+      platformSpec: 'launchd',
+      serviceFilePath: filePath,
+    };
   } catch {
-    return { installed, running: false, platformSpec: 'launchd', serviceFilePath: filePath };
+    return {
+      installed,
+      running: false,
+      runtimeState: 'unknown',
+      platformSpec: 'launchd',
+      serviceFilePath: filePath,
+    };
   }
 }
 

@@ -209,6 +209,7 @@ describe('M30 CI workflow', () => {
       'test/m392.queue-lease-epochs.test.ts',
       terminalRetentionTest,
       observerSchedulerTest,
+      'test/m93.daemon-service.test.ts',
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
