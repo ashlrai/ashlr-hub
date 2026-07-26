@@ -23,6 +23,8 @@ import {
   daemonActivationPermitPath,
   daemonActivationReleaseTreeBinding,
   daemonActivationReceiptPath,
+  inspectDaemonActivationPermit,
+  inspectDaemonActivationPermitForVerification,
   isDaemonActivationCapability,
   signDaemonActivationPermit,
   verifyDaemonActivationPermit,
@@ -35,13 +37,29 @@ import {
   releaseLocalStoreLock,
 } from '../src/core/fleet/local-store-lock.js';
 
-const originalHome = process.env['HOME'];
+const originalHomeEnvironment = {
+  HOME: process.env['HOME'],
+  USERPROFILE: process.env['USERPROFILE'],
+  ASHLR_HOME: process.env['ASHLR_HOME'],
+};
 const homes: string[] = [];
+
+function restoreHomeEnvironment(): void {
+  for (const [key, value] of Object.entries(originalHomeEnvironment)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
 
 function isolateHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'ashlr-m461-'));
   homes.push(home);
   process.env['HOME'] = home;
+  process.env['USERPROFILE'] = home;
+  process.env['ASHLR_HOME'] = join(home, '.ashlr');
   return home;
 }
 
@@ -132,11 +150,54 @@ function installPermit(envelope: DaemonActivationPermitEnvelope): string {
 }
 
 afterEach(() => {
-  process.env['HOME'] = originalHome;
+  restoreHomeEnvironment();
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
 
 describe('M461 bounded daemon activation permit', () => {
+  it('isolates activation files and exactly restores every home variable', () => {
+    const home = isolateHome();
+
+    expect(daemonActivationPermitPath()).toBe(
+      join(home, '.ashlr', 'control', 'daemon-activation-permit.json'),
+    );
+    expect(daemonActivationReceiptPath('1'.repeat(32))).toBe(
+      join(home, '.ashlr', 'control', 'activation-receipts', `${'1'.repeat(32)}.json`),
+    );
+
+    restoreHomeEnvironment();
+    expect(process.env['HOME']).toBe(originalHomeEnvironment.HOME);
+    expect(process.env['USERPROFILE']).toBe(originalHomeEnvironment.USERPROFILE);
+    expect(process.env['ASHLR_HOME']).toBe(originalHomeEnvironment.ASHLR_HOME);
+  });
+
+  it('refuses activation inspection on Windows even with an injected trust root', () => {
+    isolateHome();
+    const cfg = config('windows');
+    const key = keys();
+    const result = inspectDaemonActivationPermitForVerification(
+      cfg,
+      { once: true, dryRun: false },
+      {
+        trustRoots: [key.root],
+        context: context(cfg),
+        platform: 'win32',
+      },
+    );
+
+    expect(result).toMatchObject({
+      authority: 'observation-only',
+      state: 'blocked',
+      commandEligible: false,
+      trustRootCount: 1,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'activation-permit-v1-unsupported-on-windows',
+    });
+    expect(existsSync(daemonActivationPermitPath())).toBe(false);
+  });
+
   it('requires no permit and creates no capability for a once dry run', () => {
     const home = isolateHome();
     const result = consumeDaemonActivationPermit(config(), { once: true, dryRun: true });
@@ -174,8 +235,55 @@ describe('M461 bounded daemon activation permit', () => {
       required: true,
       reason: 'no-trusted-activation-roots',
     });
+    expect(inspectDaemonActivationPermit(config(), { once: true, dryRun: false })).toEqual({
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'healthy',
+      state: 'blocked',
+      commandEligible: false,
+      requestedShape: 'proposal-once',
+      trustRootCount: 0,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'no-trusted-activation-roots',
+    });
+    expect(existsSync(join(process.env['HOME']!, '.ashlr'))).toBe(false);
     expect(isDaemonActivationCapability(forged)).toBe(false);
     expect(isDaemonActivationCapability(Object.freeze(forged))).toBe(false);
+  });
+
+  it('inspects an exact candidate without consuming or minting authority', () => {
+    isolateHome();
+    const cfg = config('inspect');
+    const runtime = context(cfg);
+    const permit = signedPermit(cfg, runtime);
+    const permitPath = installPermit(permit.envelope);
+    const before = readFileSync(permitPath, 'utf8');
+
+    const result = inspectDaemonActivationPermitForVerification(
+      cfg,
+      { once: true, dryRun: false },
+      { trustRoots: [permit.root], context: runtime },
+    );
+
+    expect(result).toEqual({
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'healthy',
+      state: 'ready',
+      commandEligible: true,
+      requestedShape: 'proposal-once',
+      trustRootCount: 1,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'valid-proposal-once-permit',
+    });
+    expect(readFileSync(permitPath, 'utf8')).toBe(before);
+    expect(existsSync(daemonActivationReceiptPath('1'.repeat(32)))).toBe(false);
   });
 
   it('signs deterministic canonical payload bytes with Ed25519', () => {
@@ -402,6 +510,17 @@ describe('M461 bounded daemon activation permit', () => {
     );
 
     expect(result.reason).toBe('noncanonical-permit-encoding');
+    expect(inspectDaemonActivationPermitForVerification(
+      cfg,
+      { once: true, dryRun: false },
+      { trustRoots: [permit.root], context: runtime },
+    )).toMatchObject({
+      authority: 'observation-only',
+      sourceState: 'degraded',
+      state: 'degraded',
+      commandEligible: false,
+      reason: 'noncanonical-permit-encoding',
+    });
     expect(existsSync(permitPath)).toBe(true);
   });
 
@@ -429,6 +548,16 @@ describe('M461 bounded daemon activation permit', () => {
     });
     expect(existsSync(permitPath)).toBe(true);
     expect(existsSync(daemonActivationReceiptPath('1'.repeat(32)))).toBe(true);
+    expect(inspectDaemonActivationPermitForVerification(
+      cfg,
+      { once: true, dryRun: false },
+      { trustRoots: [permit.root], context: runtime },
+    )).toMatchObject({
+      authority: 'observation-only',
+      state: 'blocked',
+      commandEligible: false,
+      reason: 'activation-permit-already-consumed',
+    });
 
     const retry = consumeDaemonActivationPermitForVerification(
       cfg,

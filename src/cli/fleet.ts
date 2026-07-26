@@ -32,7 +32,6 @@ import type { AshlrConfig } from '../core/types.js';
 import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
 import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
-import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
@@ -92,6 +91,16 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   if (s.daemon.lockHeartbeatAt) {
     lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
+  }
+  if (s.daemon.activation) {
+    lines.push(
+      `  activation:    ${s.daemon.activation.state} (${s.daemon.activation.reason}; ` +
+        `${s.daemon.activation.authority})`,
+    );
+    lines.push(
+      `  start scope:   proposal-once=${s.daemon.activation.commandEligible ? 'eligible' : 'blocked'}, ` +
+        'resident=false, install=false, repair=false',
+    );
   }
   lines.push(`  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`);
   lines.push('');
@@ -1618,7 +1627,6 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function setKillSwitch(on: boolean): Promise<number> {
-  let serviceState: string | null = null;
   try {
     const { setKill } = await import('../core/sandbox/policy.js');
     const result = setKill(on);
@@ -1644,23 +1652,6 @@ async function setKillSwitch(on: boolean): Promise<number> {
     return 1;
   }
 
-  if (!on) {
-    try {
-      const cfg = await loadCfg();
-      if (cfg) {
-        const { ensureRunning } = await import('../core/daemon/service.js');
-        const service = await ensureRunning(daemonServiceInstallOptions(cfg, { autostart: true }));
-        serviceState = service.installed
-          ? service.running
-            ? `${service.platformSpec} running`
-            : `${service.platformSpec} installed but stopped`
-          : 'service not installed';
-      }
-    } catch {
-      serviceState = null;
-    }
-  }
-
   console.log('');
   if (on) {
     console.log(green('  ✓ fleet paused') + dim(' — kill switch engaged.'));
@@ -1669,7 +1660,7 @@ async function setKillSwitch(on: boolean): Promise<number> {
   } else {
     console.log(green('  ✓ fleet resumed') + dim(' — kill switch released.'));
     console.log(dim('  The daemon may dispatch again on its next tick (if running).'));
-    if (serviceState) console.log(dim(`  daemon service: ${serviceState}`));
+    console.log(dim('  Daemon activation remains separate and requires exact activation authority.'));
   }
   console.log('');
   return 0;

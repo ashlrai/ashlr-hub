@@ -75,6 +75,7 @@ import {
 } from './skill-retrieval.js';
 import { readSkillCardCorpus, readSkillUseEventsWithDiagnostics } from './skill-records.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
+import type { DaemonActivationReadiness } from '../daemon/activation-permit.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
@@ -1317,6 +1318,7 @@ export interface FleetStatus {
       ownerMatches: boolean;
     };
     todaySpentUsd: number;
+    activation?: DaemonActivationReadiness;
   };
   backends: FleetBackendStatus[];
   queue: {
@@ -1877,6 +1879,28 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     recentTicks = Array.isArray(ds.ticks) ? ds.ticks : [];
   } catch {
     // leave fallback
+  }
+  try {
+    const { inspectDaemonActivationPermit } = await import('../daemon/activation-permit.js');
+    daemon.activation = inspectDaemonActivationPermit(cfg, {
+      once: true,
+      dryRun: false,
+    });
+  } catch {
+    daemon.activation = {
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'degraded',
+      state: 'degraded',
+      commandEligible: false,
+      requestedShape: 'proposal-once',
+      trustRootCount: 0,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'activation-readiness-unavailable',
+    };
   }
   const diagnosticResliceDrain = buildDiagnosticResliceDrainStatus(recentTicks);
   const activeWork = await buildActiveWorkStatus();
@@ -3923,7 +3947,9 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     const reason = status.killed
       ? 'kill switch is engaged'
       : !status.daemon.running
-        ? 'daemon is stopped'
+        ? status.daemon.activation?.commandEligible === true
+          ? 'daemon is stopped with one exact proposal activation eligible'
+          : `daemon activation is blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`
         : firstGuardBlock?.detail ?? 'guard is blocking';
     return {
       phase: 'control-blocked',
@@ -4091,10 +4117,11 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     add({
       id: 'resume-fleet',
       priority: 'critical',
-      label: 'Resume fleet',
-      detail: 'The global kill switch is engaged, so no autonomous dispatch can run.',
+      label: 'Clear kill switch',
+      detail:
+        'The global kill switch is engaged. Clearing it does not authorize or start the daemon.',
       commands: [
-        nextActionCommand('Resume fleet', ['ashlr', 'fleet', 'resume'], 'control-plane', {
+        nextActionCommand('Clear kill switch', ['ashlr', 'fleet', 'resume'], 'control-plane', {
           endpointMethod: 'POST',
           endpointPath: '/api/fleet/resume',
           tokenRequired: true,
@@ -4104,20 +4131,36 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   if (!status.daemon.running) {
-    add({
-      id: 'start-daemon',
-      priority: 'critical',
-      label: 'Start daemon',
-      detail: 'The daemon is stopped; the fleet cannot drain backlog or proposals.',
-      commands: [
-        nextActionCommand('Start daemon', ['ashlr', 'daemon', 'start'], 'autonomous-dispatch'),
-        nextActionCommand('Repair service', ['ashlr', 'daemon', 'install'], 'control-plane', {
-          endpointMethod: 'POST',
-          endpointPath: '/api/daemon/service/repair',
-          tokenRequired: true,
-        }),
-      ],
-    });
+    const activation = status.daemon.activation;
+    if (activation?.commandEligible === true) {
+      add({
+        id: 'start-daemon',
+        priority: 'critical',
+        label: 'Start one proposal cycle',
+        detail:
+          'A runtime-bound one-use proposal permit is currently valid; daemon start will revalidate and consume it.',
+        commands: [
+          nextActionCommand(
+            'Start one proposal cycle',
+            ['ashlr', 'daemon', 'start', '--once'],
+            'autonomous-dispatch',
+            { note: 'Snapshot-only recommendation; daemon start owns final authority and consumption.' },
+          ),
+        ],
+      });
+    } else {
+      add({
+        id: 'inspect-daemon-activation',
+        priority: 'critical',
+        label: 'Inspect daemon activation authority',
+        detail:
+          `The daemon is stopped and no exact one-shot proposal activation is currently eligible ` +
+          `(${activation?.reason ?? 'activation-readiness-unavailable'}).`,
+        commands: [
+          nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
+        ],
+      });
+    }
   }
 
   const firstGuardBlock = status.guardHealth?.blocks?.[0];
@@ -4176,11 +4219,13 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     add({
       id: 'reconcile-host-prs',
       priority: 'high',
-      label: 'Reconcile host PRs',
-      detail: `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation.`,
+      label: 'Inspect host PR reconciliation',
+      detail:
+        `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation. ` +
+        'Daemon activation remains governed by the separate one-shot action.',
       commands: [
-        nextActionCommand('Run reconciliation pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
         nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
       ],
     });
   }
@@ -4234,10 +4279,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'drain-ready-auto-merges',
         priority: 'high',
         label: 'Drain ready auto-merges',
-        detail: `${readiness.authorityReady} pending proposal(s) have complete read-only authority evidence.`,
+        detail:
+          `${readiness.authorityReady} pending proposal(s) have complete read-only authority evidence. ` +
+          'The running daemon owns scheduling; monitor the evidence without starting a second process.',
         commands: [
-          nextActionCommand('Run auto-merge pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
           nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -4266,10 +4313,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'verify-pending-proposals',
         priority: 'high',
         label: 'Verify pending proposals',
-        detail: `${readiness.needsVerification} proposal(s) need verification before judge or merge spend.`,
+        detail:
+          `${readiness.needsVerification} proposal(s) need verification before judge or merge spend. ` +
+          'The running daemon owns scheduling; monitor verification without starting a second process.',
         commands: [
-          nextActionCommand('Run verify pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
           nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -4278,10 +4327,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'repair-verification-failures',
         priority: 'high',
         label: 'Drain failed proposals',
-        detail: `${readiness.knownVerificationFailed} proposal(s) have permanent verification blockers; run merge maintenance to reject or drain them.`,
+        detail:
+          `${readiness.knownVerificationFailed} proposal(s) have permanent verification blockers. ` +
+          'The running daemon owns maintenance scheduling; inspect the failures without starting a second process.',
         commands: [
           nextActionCommand('Inspect failed proposals', ['ashlr', 'inbox', '--json'], 'read-only'),
-          nextActionCommand('Run merge maintenance', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -5078,7 +5129,9 @@ function shipReadinessSources(
   const daemonObservedAt = status.daemon.lockHeartbeatAt ?? status.daemon.lastTickAt;
   const daemonDetail = status.daemon.running
     ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
-    : 'daemon is stopped';
+    : status.daemon.activation?.commandEligible === true
+      ? 'daemon is stopped; one exact proposal activation is snapshot-eligible'
+      : `daemon is stopped; activation blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`;
   const daemonSource = readinessSource(
     'daemon',
     'Daemon',
@@ -5299,10 +5352,20 @@ function chooseReadinessBlocker(
     );
   }
   if (!status.daemon.running) {
+    if (status.daemon.activation?.commandEligible !== true) {
+      return readinessBlocker(
+        'daemon-activation-blocked',
+        'Daemon activation blocked',
+        `The daemon is stopped and no exact one-shot proposal activation is currently eligible ` +
+          `(${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'}).`,
+        'critical',
+        'daemon',
+      );
+    }
     return readinessBlocker(
       'daemon-stopped',
       'Daemon stopped',
-      'The daemon is stopped; no autonomous dispatch or merge drain can run.',
+      'The daemon is stopped; an exact one-shot proposal activation is eligible but must be revalidated at execution.',
       'critical',
       'daemon',
     );
@@ -5650,8 +5713,9 @@ function missionDirective(
   effectiveness: FleetAutonomyEffectivenessStatus | null,
 ): string {
   if (action?.id === 'repair-enrollment-registry') return 'Repair enrollment authority';
-  if (status.killed) return 'Resume the fleet';
-  if (!status.daemon.running) return 'Start the daemon';
+  if (status.killed) return 'Clear the kill switch';
+  if (action?.id === 'inspect-daemon-activation') return 'Inspect daemon activation authority';
+  if (!status.daemon.running) return 'Start one proposal cycle';
   if (status.guardHealth?.blocked) return 'Repair the guard block';
 
   switch (action?.id) {
