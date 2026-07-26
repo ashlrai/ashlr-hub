@@ -28,6 +28,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { policyAssignmentUnitId } from './policy-assignment-identity.js';
 
 const PROTOCOL = 'policy-assignment-receipt-v1' as const;
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -328,17 +329,17 @@ function createWithKey(
           actions.some((action) => action.actionId !== input.reportedSelectedActionId &&
             action.probabilityNumerator !== 0)))) return null;
 
-    const assignmentUnitId = hmacTuple(key, 'ashlr:policy-assignment-unit:v1', [
+    const assignmentUnitId = policyAssignmentUnitId(key, {
       repo,
-      input.workItemId,
-      input.workSource,
-      input.workItemGenerationId,
-      input.objectiveHash,
-      input.campaignDigest,
-      input.eligibilityPopulationDigest,
-      input.policyVersion,
-      input.learningEpoch,
-    ]);
+      workItemId: input.workItemId,
+      workSource: input.workSource,
+      workItemGenerationId: input.workItemGenerationId,
+      objectiveHash: input.objectiveHash,
+      campaignDigest: input.campaignDigest,
+      eligibilityPopulationDigest: input.eligibilityPopulationDigest,
+      policyVersion: input.policyVersion,
+      learningEpoch: input.learningEpoch,
+    });
     const contextStratumDigest = hmacTuple(key, 'ashlr:policy-assignment-context-stratum:v1', [
       input.campaignDigest,
       input.eligibilityPopulationDigest,
