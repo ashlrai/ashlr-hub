@@ -15,6 +15,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import {
@@ -309,6 +311,57 @@ describe('GET /api/fleet-state', () => {
     const routing = payload['routing'] as { recent: unknown[]; modelSplit: Record<string, number> };
     expect(Array.isArray(routing.recent)).toBe(true);
     expect(typeof routing.modelSplit).toBe('object');
+  });
+
+  it('withholds daemon spend, counters, and history when the daemon ledger is malformed', async () => {
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    writeFileSync(join(fx.ashlrDir, 'daemon.json'), 'not-json', 'utf8');
+    const { res, body } = makeRes();
+
+    await handleApi(makeReq(), res, makeCfg(), { token: 'test', allowDispatch: false });
+
+    const payload = body() as Record<string, unknown>;
+    expect(payload['daemon']).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      recentTicks: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'malformed',
+      },
+    });
+  });
+
+  it('withholds daemon values when the daemon ledger path is unsafe', async () => {
+    if (process.platform === 'win32') {
+      expect(process.platform).toBe('win32');
+      return;
+    }
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    const external = join(fx.home, 'external-daemon.json');
+    writeFileSync(external, '{}', 'utf8');
+    symlinkSync(external, join(fx.ashlrDir, 'daemon.json'));
+    const { res, body } = makeRes();
+
+    await handleApi(makeReq(), res, makeCfg(), { token: 'test', allowDispatch: false });
+
+    expect(body()).toMatchObject({
+      daemon: {
+        runtimeState: 'unknown',
+        running: null,
+        todaySpentUsd: null,
+        itemsProcessed: null,
+        recentTicks: null,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reason: 'unreadable',
+        },
+      },
+    });
   });
 
   it('does not require auth token (read-only endpoint)', async () => {

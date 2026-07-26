@@ -104,6 +104,7 @@ describe('buildFleetActivity — shape on empty state', () => {
     expect(snap).toHaveProperty('subscriptionUsage');
     expect(snap).toHaveProperty('cooldownCount');
     expect(snap).toHaveProperty('recentTicks');
+    expect(snap).toHaveProperty('recentTicksSourceQuality');
   });
 
   it('ts is a valid ISO string', async () => {
@@ -206,6 +207,11 @@ describe('buildFleetActivity — never throws', () => {
     // No daemon.json written — should degrade to empty ticks
     const snap = await buildFleetActivity(baseConfig());
     expect(snap.recentTicks).toEqual([]);
+    expect(snap.recentTicksSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      reason: 'missing',
+    });
   });
 });
 
