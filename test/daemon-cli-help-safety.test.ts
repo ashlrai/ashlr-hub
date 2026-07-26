@@ -8,6 +8,7 @@ const effects = vi.hoisted(() => ({
   runDaemon: vi.fn(),
   stopDaemon: vi.fn(),
   loadDaemonState: vi.fn(),
+  loadDaemonStateStrict: vi.fn(),
   pendingCount: vi.fn(),
   diagnoseGuardHealth: vi.fn(),
   install: vi.fn(),
@@ -43,7 +44,10 @@ vi.mock('../src/core/daemon/loop.js', () => {
 
 vi.mock('../src/core/daemon/state.js', () => {
   moduleLoads.state++;
-  return { loadDaemonState: effects.loadDaemonState };
+  return {
+    loadDaemonState: effects.loadDaemonState,
+    loadDaemonStateStrict: effects.loadDaemonStateStrict,
+  };
 });
 
 vi.mock('../src/core/inbox/store.js', () => {
@@ -151,6 +155,7 @@ beforeEach(async () => {
   effects.loadConfig.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
   effects.runDaemon.mockResolvedValue(daemonState);
   effects.loadDaemonState.mockReturnValue(daemonState);
+  effects.loadDaemonStateStrict.mockReturnValue({ ok: true, state: daemonState, fresh: false });
   effects.pendingCount.mockReturnValue(0);
   effects.diagnoseGuardHealth.mockReturnValue({
     generatedAt: '2026-07-21T00:00:00.000Z',
@@ -246,7 +251,8 @@ describe('daemon valid flags remain supported', () => {
 
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ running: false, pendingProposals: 0 });
-    expect(effects.loadDaemonState).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonStateStrict).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonState).not.toHaveBeenCalled();
   });
 
   it('preserves service-status --json', async () => {

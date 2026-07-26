@@ -231,6 +231,20 @@ function fleetPauseResumeButton(isPaused, size = '') {
   return btn;
 }
 
+function fleetKillState(fleet) {
+  return fleet?.killSwitch?.state ?? (fleet?.killed === true ? 'active' : 'unknown');
+}
+
+function fleetDaemonState(daemon) {
+  if (daemon?.sourceQuality?.sourceState !== 'healthy') return 'unknown';
+  return daemon?.running === true ? 'running' : 'stopped';
+}
+
+function fleetControlButton(fleet, size = '') {
+  const state = fleetKillState(fleet);
+  return state === 'unknown' ? null : fleetPauseResumeButton(state === 'active', size);
+}
+
 // Show a brief toast notification. Uses #toast-region if present (see index.html).
 function showToast(msg) {
   try {
@@ -3548,7 +3562,7 @@ function renderFleet() {
       el('h1', { cls: 'view-title' }, 'Fleet'),
       el('span', { cls: 'view-subtitle' }, 'Control plane & observability')
     ),
-    f ? fleetPauseResumeButton(f.killed, 'btn-sm') : null
+    f ? fleetControlButton(f, 'btn-sm') : null
   ));
 
   if (!f) {
@@ -3561,7 +3575,13 @@ function renderFleet() {
   }
 
   // Paused / killed banner
-  if (f.killed) {
+  const killState = fleetKillState(f);
+  if (killState === 'unknown') {
+    section.appendChild(el('div', { cls: 'fleet-banner fleet-banner--paused' },
+      el('strong', {}, 'Fleet state unknown'),
+      el('span', {}, ' — kill switch authority cannot be inspected; autonomous work remains paused.')
+    ));
+  } else if (killState === 'active') {
     section.appendChild(el('div', { cls: 'fleet-banner fleet-banner--paused' },
       el('strong', {}, 'Fleet paused'),
       el('span', {}, ' — the kill switch is engaged.'),
@@ -3574,10 +3594,14 @@ function renderFleet() {
   const sharedQueue = f.queue?.shared;
   const activeWork = f.queue?.activeWork;
   const summaryRows = [
-    ['Daemon', f.daemon.running ? 'running' : 'stopped'],
+    ['Daemon', fleetDaemonState(f.daemon)],
     ['Activity', daemonActivityDisplay(f.daemon)],
     ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
-    ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
+    ['Spend today', fleetDaemonState(f.daemon) === 'unknown'
+      ? '—'
+      : f.daemon.todaySpentUsd != null
+        ? `$${f.daemon.todaySpentUsd.toFixed(4)}`
+        : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Eligible queue', queueEligibilityMetric(f.queue) ?? '—'],
     ['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—'],
@@ -3958,20 +3982,34 @@ function renderControl() {
   const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
   const direction = d.fleet?.autonomyDirection ?? fleet.autonomyDirection ?? null;
   const activeDirectionMode = daemon.activeDirectionMode ?? null;
-  const isRunning = fleetDaemon.running ?? daemon.running ?? false;
-  const isKilled  = d.fleet?.killed ?? false;
+  const daemonState = fleetDaemonState(fleetDaemon);
+  const isRunning = daemonState === 'running';
+  const killState = fleetKillState(d.fleet);
+  const isKilled = killState === 'active';
   const service = daemon.service ?? {};
-  const serviceLabel = service.running ? 'running' : service.installed ? 'installed' : 'missing';
+  const serviceUnknown = service.runtimeState === 'unknown';
+  const serviceLabel = serviceUnknown
+    ? 'unknown'
+    : service.running
+      ? 'running'
+      : service.installed
+        ? 'installed'
+        : 'missing';
 
   section.appendChild(el('div', { cls: 'view-header' },
     el('div', {},
       el('h1', { cls: 'view-title' }, 'Mission Control'),
       el('span', { cls: 'view-subtitle' }, `Updated ${fmtRelative(d.ts)}`)
     ),
-    fleetPauseResumeButton(isKilled, 'btn-sm')
+    fleetControlButton(d.fleet, 'btn-sm')
   ));
 
-  if (isKilled) {
+  if (killState === 'unknown') {
+    section.appendChild(el('div', { cls: 'ctrl-banner ctrl-banner--paused' },
+      el('strong', {}, 'Fleet state unknown'),
+      el('span', {}, ' — kill switch authority cannot be inspected.')
+    ));
+  } else if (isKilled) {
     section.appendChild(el('div', { cls: 'ctrl-banner ctrl-banner--paused' },
       el('strong', {}, 'Fleet paused'),
       el('span', {}, ' — kill switch engaged.'),
@@ -3983,7 +4021,11 @@ function renderControl() {
   const daemonStatusEl = el('div', { cls: 'ctrl-daemon-status' },
     el('span', { cls: `ctrl-live-dot${isRunning ? ' running' : ''}`, title: isRunning ? 'Running' : 'Stopped' }),
     el('span', { cls: `ctrl-daemon-label${isRunning ? ' running' : ''}` },
-      isRunning ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}` : 'Daemon stopped'),
+      isRunning
+        ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}`
+        : daemonState === 'unknown'
+          ? 'Daemon state unknown'
+          : 'Daemon stopped'),
     daemon.pid ? el('span', { cls: 'ctrl-pid' }, `PID ${daemon.pid}`) : null
   );
   heroPulse.appendChild(daemonStatusEl);
@@ -3994,7 +4036,15 @@ function renderControl() {
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
   const sharedQueue = queue.shared;
-  heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
+  heroMetrics.appendChild(controlMetric(
+    'Spend today',
+    daemonState === 'unknown'
+      ? '—'
+      : daemon.todaySpentUsd != null
+        ? `$${daemon.todaySpentUsd.toFixed(4)}`
+        : '—',
+    '#fbbf24'
+  ));
   heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
   heroMetrics.appendChild(controlMetric('Eligible', queue.eligibleBacklogItems ?? queue.backlogItems ?? '—', '#38bdf8'));
   if (queue.generatedWork) {
@@ -4135,8 +4185,16 @@ function renderControl() {
   }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
-  heroMetrics.appendChild(controlMetric('OS Service', serviceLabel, service.running ? '#4ade80' : service.installed ? '#fbbf24' : '#f87171'));
-  heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
+  heroMetrics.appendChild(controlMetric(
+    'OS Service',
+    serviceLabel,
+    serviceUnknown ? '#f87171' : service.running ? '#4ade80' : service.installed ? '#fbbf24' : '#f87171'
+  ));
+  heroMetrics.appendChild(controlMetric(
+    'Kill switch',
+    killState === 'unknown' ? 'UNKNOWN' : isKilled ? 'ENGAGED' : 'off',
+    killState === 'inactive' ? '#64748b' : '#f87171'
+  ));
   heroPulse.appendChild(heroMetrics);
   section.appendChild(heroPulse);
 
@@ -4147,8 +4205,14 @@ function renderControl() {
   ));
   const serviceBody = el('div', { cls: 'card-body' });
   serviceBody.appendChild(el('div', { cls: 'ctrl-service-row' },
-    el('span', { cls: `ctrl-health-dot ${service.running ? 'up' : 'down'}`, title: service.running ? 'Running' : 'Stopped' }),
-    el('span', { cls: 'ctrl-service-status' }, `${service.installed ? 'installed' : 'not installed'} · ${service.running ? 'running' : 'stopped'}`),
+    el('span', {
+      cls: `ctrl-health-dot ${service.running && !serviceUnknown ? 'up' : 'down'}`,
+      title: serviceUnknown ? 'Unknown' : service.running ? 'Running' : 'Stopped',
+    }),
+    el('span', { cls: 'ctrl-service-status' },
+      serviceUnknown
+        ? 'service runtime unknown'
+        : `${service.installed ? 'installed' : 'not installed'} · ${service.running ? 'running' : 'stopped'}`),
     service.serviceFilePath ? el('span', { cls: 'ctrl-service-path', title: service.serviceFilePath }, service.serviceFilePath) : null
   ));
   if (service.errorLog) {
@@ -5285,8 +5349,11 @@ function fdRenderReadinessRail(snap) {
 function fdRenderStatusPanel(snap) {
   const daemon = snap.daemon ?? {};
   const fleetDaemon = snap.fleet?.daemon ?? snap.control?.fleet?.daemon ?? daemon;
-  const isRunning = fleetDaemon.running === true;
-  const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
+  const fleetSnapshot = snap.fleet ?? snap.control?.fleet ?? null;
+  const daemonState = fleetDaemonState(fleetDaemon);
+  const isRunning = daemonState === 'running';
+  const killState = fleetKillState(fleetSnapshot);
+  const isKilled = killState === 'active';
   const queue = snap.fleet?.queue ?? snap.control?.fleet?.queue ?? {};
   const sharedQueue = queue.shared ?? null;
   const activeWork = queue.activeWork ?? null;
@@ -5301,12 +5368,20 @@ function fdRenderStatusPanel(snap) {
   const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });
   const label = el('span', {
     cls: isRunning ? 'fd-daemon-label fd-daemon-label--running' : 'fd-daemon-label fd-daemon-label--stopped',
-  }, isRunning ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}` : 'Daemon stopped');
+  }, isRunning
+    ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}`
+    : daemonState === 'unknown'
+      ? 'Daemon state unknown'
+      : 'Daemon stopped');
   body.appendChild(el('div', { cls: 'fd-status-row' }, dot, label));
 
   // Meta grid
   const lastTick = fleetDaemon.lastTickAt ? fmtRelative(fleetDaemon.lastTickAt) : '—';
-  const spend = daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—';
+  const spend = daemonState === 'unknown'
+    ? '—'
+    : daemon.todaySpentUsd != null
+      ? `$${daemon.todaySpentUsd.toFixed(4)}`
+      : '—';
   const pendingCount = daemon.pendingProposals ?? snap.inbox?.pending ?? 0;
 
   const grid = el('div', { cls: 'fd-meta-grid' });
@@ -5355,7 +5430,11 @@ function fdRenderStatusPanel(snap) {
   if (leaseBoard) body.appendChild(leaseBoard);
 
   // Kill-switch banner
-  if (isKilled) {
+  if (killState === 'unknown') {
+    body.appendChild(el('div', { cls: 'fd-kill-banner' },
+      'Kill switch authority unknown — fleet remains paused.'
+    ));
+  } else if (isKilled) {
     body.appendChild(el('div', { cls: 'fd-kill-banner' },
       'Kill switch engaged — fleet paused.',
       fleetPauseResumeButton(true, 'btn-sm')
@@ -6179,7 +6258,7 @@ function renderFleetDashboard() {
 
   const snap = state.fleetDashboard;
   const section = el('section', { cls: 'view-section' });
-  const isKilled = snap?.fleet?.killed ?? snap?.control?.fleet?.killed ?? false;
+  const fleetSnapshot = snap?.fleet ?? snap?.control?.fleet ?? null;
 
   // Header row with title, last-updated, and settings button
   const settingsBtn = el('button', { cls: 'fd-settings-btn', type: 'button', 'aria-label': 'Dashboard settings' });
@@ -6194,7 +6273,7 @@ function renderFleetDashboard() {
     ),
     el('div', { cls: 'fd-header-right' },
       el('span', { cls: 'fd-hidden-hint', id: 'fd-hidden-hint', style: 'display:none' }, ''),
-      snap ? fleetPauseResumeButton(isKilled, 'btn-sm') : null,
+      snap ? fleetControlButton(fleetSnapshot, 'btn-sm') : null,
       settingsBtn
     )
   ));

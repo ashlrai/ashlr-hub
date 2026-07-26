@@ -1300,6 +1300,11 @@ export interface FleetStatus {
   buildIdentity?: BuildIdentity;
   daemon: {
     running: boolean;
+    sourceQuality?: {
+      sourceState: 'healthy' | 'degraded';
+      complete: boolean;
+      reason: 'healthy' | 'missing' | 'malformed' | 'unreadable' | 'inconsistent' | 'unavailable';
+    };
     startedAt?: string | null;
     lastTickAt: string | null;
     lockHeartbeatAt?: string | null;
@@ -1433,11 +1438,27 @@ export interface FleetStatus {
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
+  /** Exact observation of kill-switch authority. Legacy `killed` stays restrictive. */
+  killSwitch?: {
+    state: 'active' | 'inactive' | 'unknown';
+    sourceState: 'healthy' | 'degraded';
+    reason: 'present' | 'missing' | 'uninspectable' | 'unsafe' | 'unavailable';
+  };
 }
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function processExists(pid: number | null | undefined): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
 
 function queueInventoryFreshness(
   observedAt: string | null,
@@ -1830,6 +1851,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── daemon ────────────────────────────────────────────────────────────────
   let daemon: FleetStatus['daemon'] = {
     running: false,
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'unavailable',
+    },
     startedAt: null,
     lastTickAt: null,
     todaySpentUsd: 0,
@@ -1837,9 +1863,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // Recent ticks are reused for merge counting below.
   let recentTicks: DaemonTick[] = [];
   try {
-    const { loadDaemonState, readDaemonLockOwner } = await import('../daemon/state.js');
+    const { loadDaemonStateStrict, readDaemonLockOwner } = await import('../daemon/state.js');
     const { readDaemonActivity } = await import('../daemon/activity.js');
-    const ds = loadDaemonState();
+    const daemonState = loadDaemonStateStrict();
+    if (!daemonState.ok) {
+      daemon.sourceQuality = {
+        sourceState: 'degraded',
+        complete: false,
+        reason: daemonState.reason,
+      };
+      throw new Error(`daemon-state-${daemonState.reason}`);
+    }
+    const ds = daemonState.state;
     const startedAt = ds.startedAt ?? null;
     const lastTickAt = ds.lastTickAt ?? null;
     const lockOwner = readDaemonLockOwner();
@@ -1852,11 +1887,27 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       activity.daemonStartedAt === startedAt;
     const activityHealthy = ownerMatches && activityRead.sourceState === 'healthy' &&
       activityRead.freshness === 'fresh' && activityRead.ownerState === 'alive';
+    const lockOwnerAlive = processExists(lockOwner?.pid);
+    const liveLockContradiction = lockOwnerAlive && (
+      daemonState.fresh ||
+      ds.running !== true ||
+      lockOwner?.pid !== ds.pid
+    );
+    const stateConsistent =
+      activityRead.sourceState !== 'degraded' &&
+      !liveLockContradiction;
     const tickInProgress = activityHealthy && activity?.phase === 'tick';
     const childActivity = activityHealthy && activity?.phase === 'post-tick' &&
       typeof activity.activeChildren === 'number' && activity.activeChildren > 0;
     daemon = {
       running: ds.running === true,
+      sourceQuality: {
+        sourceState: stateConsistent ? 'healthy' : 'degraded',
+        complete: stateConsistent,
+        reason: stateConsistent
+          ? daemonState.fresh ? 'missing' : 'healthy'
+          : 'inconsistent',
+      },
       startedAt,
       lastTickAt,
       ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
@@ -2354,12 +2405,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   // ── kill switch ───────────────────────────────────────────────────────────
-  let killed = false;
+  let killed = true;
+  let killSwitch: NonNullable<FleetStatus['killSwitch']> = {
+    state: 'unknown',
+    sourceState: 'degraded',
+    reason: 'unavailable',
+  };
   try {
-    const { killSwitchOn } = await import('../sandbox/policy.js');
-    killed = killSwitchOn() === true;
+    const { readKillSwitch } = await import('../sandbox/policy.js');
+    const read = readKillSwitch();
+    killSwitch = {
+      state: read.state,
+      sourceState: read.sourceState,
+      reason: read.reason,
+    };
+    killed = read.state !== 'inactive';
   } catch {
-    killed = false;
+    // Restrictive fallback: unobservable authority remains paused.
   }
 
   // ── guard health / state repair UX ──────────────────────────────────────
@@ -2368,7 +2430,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const { diagnoseGuardHealth } = await import('../daemon/guard-health.js');
     guardHealth = diagnoseGuardHealth();
   } catch {
-    guardHealth = undefined;
+    guardHealth = {
+      generatedAt,
+      blocked: true,
+      blocks: [],
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reasons: ['guard-health-unavailable'],
+      },
+    };
   }
 
   // ── autonomy evidence packs ──────────────────────────────────────────────
@@ -2597,6 +2668,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     ...(goalFocus !== undefined ? { goalFocus } : {}),
     ...(laneLocks !== undefined ? { laneLocks } : {}),
     killed,
+    killSwitch,
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
@@ -3942,6 +4014,22 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
+  if (status.killSwitch?.state === 'unknown' ||
+      status.daemon.sourceQuality?.sourceState !== 'healthy' ||
+      status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    const reason = status.killSwitch?.state === 'unknown'
+      ? 'kill switch source is uninspectable'
+      : status.daemon.sourceQuality?.sourceState !== 'healthy'
+        ? `daemon state source is degraded (${status.daemon.sourceQuality?.reason ?? 'unavailable'})`
+        : 'guard health source is degraded';
+    return {
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      summary: `Autonomy is control-blocked: ${reason}.`,
+      counts,
+    };
+  }
   const firstGuardBlock = status.guardHealth?.blocks?.[0];
   if (status.killed || !status.daemon.running || firstGuardBlock) {
     const reason = status.killed
@@ -4108,6 +4196,50 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       commands: [
         nextActionCommand('Inspect enrollment', ['ashlr', 'enroll', 'list', '--json'], 'read-only'),
         nextActionCommand('Run preflight', ['ashlr', 'preflight', '--json'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
+  if (status.killSwitch?.state === 'unknown') {
+    add({
+      id: 'inspect-kill-switch-source',
+      priority: 'critical',
+      label: 'Inspect kill switch source',
+      detail: 'Kill switch authority is uninspectable; the fleet remains paused until exact state is proven.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
+  if (status.daemon.sourceQuality?.sourceState !== 'healthy') {
+    add({
+      id: 'inspect-daemon-state-source',
+      priority: 'critical',
+      label: 'Inspect daemon state source',
+      detail:
+        `Daemon state is ${status.daemon.sourceQuality?.reason ?? 'unavailable'}; ` +
+          'stopped/running state and spend are withheld.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
+  if (status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    add({
+      id: 'inspect-guard-health-source',
+      priority: 'critical',
+      label: 'Inspect guard health source',
+      detail: 'Guard health is incomplete; autonomous work remains paused until all guard sources are readable.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
       ],
     });
     return actions;
@@ -5127,7 +5259,10 @@ function shipReadinessSources(
   inputs: AutonomousShipReadinessInputs,
 ): FleetReadinessSourceHealth[] {
   const daemonObservedAt = status.daemon.lockHeartbeatAt ?? status.daemon.lastTickAt;
-  const daemonDetail = status.daemon.running
+  const daemonSourceDegraded = status.daemon.sourceQuality?.sourceState !== 'healthy';
+  const daemonDetail = daemonSourceDegraded
+    ? `daemon state source is degraded (${status.daemon.sourceQuality?.reason ?? 'unavailable'})`
+    : status.daemon.running
     ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
     : status.daemon.activation?.commandEligible === true
       ? 'daemon is stopped; one exact proposal activation is snapshot-eligible'
@@ -5135,7 +5270,7 @@ function shipReadinessSources(
   const daemonSource = readinessSource(
     'daemon',
     'Daemon',
-    status.daemon.running ? 'healthy' : 'blocked',
+    daemonSourceDegraded ? 'unknown' : status.daemon.running ? 'healthy' : 'blocked',
     daemonObservedAt,
     READINESS_DAEMON_STALE_MS,
     daemonDetail,
@@ -5146,13 +5281,23 @@ function shipReadinessSources(
     ? readinessSource(
         'guard',
         'Guard Health',
-        guardHealth.blocks.length > 0 ? 'blocked' : 'healthy',
+        guardHealth.sourceQuality?.sourceState !== 'healthy'
+          ? 'degraded'
+          : guardHealth.blocks.length > 0
+            ? 'blocked'
+            : 'healthy',
         guardHealth.generatedAt,
         READINESS_STATUS_STALE_MS,
-      guardHealth.blocks.length > 0
+      guardHealth.sourceQuality?.sourceState !== 'healthy'
+        ? `guard health source is degraded (${guardHealth.sourceQuality?.reasons.join(', ') || 'incomplete'})`
+        : guardHealth.blocks.length > 0
         ? guardHealth.blocks[0]?.detail ?? 'guard health is blocking autonomous work'
         : 'guard health is clear',
-      { empty: guardHealth.blocks.length === 0, sourcePresent: true },
+      {
+        empty: guardHealth.blocks.length === 0,
+        sourcePresent: true,
+        sourceDegraded: guardHealth.sourceQuality?.sourceState !== 'healthy',
+      },
       )
     : readinessSource(
         'guard',
@@ -5342,6 +5487,15 @@ function chooseReadinessBlocker(
       'queue',
     );
   }
+  if (status.killSwitch?.state === 'unknown') {
+    return readinessBlocker(
+      'kill-switch-source-unknown',
+      'Kill switch source unknown',
+      'The global kill switch cannot be inspected, so autonomous shipping remains paused.',
+      'critical',
+      'fleet',
+    );
+  }
   if (status.killed) {
     return readinessBlocker(
       'kill-switch',
@@ -5349,6 +5503,16 @@ function chooseReadinessBlocker(
       'The global kill switch is engaged, so autonomous shipping is paused.',
       'critical',
       'fleet',
+    );
+  }
+  if (status.daemon.sourceQuality?.sourceState !== 'healthy') {
+    return readinessBlocker(
+      'daemon-source-degraded',
+      'Daemon state source degraded',
+      `Daemon state is ${status.daemon.sourceQuality?.reason ?? 'unavailable'}; ` +
+        'running state and spend cannot be trusted.',
+      'critical',
+      'daemon',
     );
   }
   if (!status.daemon.running) {
@@ -5371,6 +5535,15 @@ function chooseReadinessBlocker(
     );
   }
   const guardBlock = status.guardHealth?.blocks?.[0];
+  if (status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    return readinessBlocker(
+      'guard-source-degraded',
+      'Guard health source degraded',
+      'Guard health is incomplete, so autonomous shipping remains paused.',
+      'critical',
+      'guard',
+    );
+  }
   if (guardBlock) {
     return readinessBlocker('guard-block', 'Guard block', guardBlock.detail, 'critical', 'guard');
   }
@@ -5713,6 +5886,9 @@ function missionDirective(
   effectiveness: FleetAutonomyEffectivenessStatus | null,
 ): string {
   if (action?.id === 'repair-enrollment-registry') return 'Repair enrollment authority';
+  if (action?.id === 'inspect-kill-switch-source') return 'Inspect kill switch authority';
+  if (action?.id === 'inspect-daemon-state-source') return 'Inspect daemon state';
+  if (action?.id === 'inspect-guard-health-source') return 'Inspect guard health';
   if (status.killed) return 'Clear the kill switch';
   if (action?.id === 'inspect-daemon-activation') return 'Inspect daemon activation authority';
   if (!status.daemon.running) return 'Start one proposal cycle';

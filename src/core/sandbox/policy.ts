@@ -262,6 +262,21 @@ export interface PolicyMutationResult {
   reason: string;
 }
 
+export type KillSwitchReadResult =
+  | {
+      state: 'active' | 'inactive';
+      sourceState: 'healthy';
+      reason: 'present' | 'missing';
+      path: string;
+    }
+  | {
+      state: 'unknown';
+      sourceState: 'degraded';
+      reason: 'uninspectable' | 'unsafe';
+      path: string;
+      errorCode: string | null;
+    };
+
 /** A non-mutating view of enrollment authority at the instant it was read. */
 export type EnrollmentRegistrySnapshot =
   | {
@@ -1494,17 +1509,44 @@ function removeKillSentinel(): { ok: boolean; changed: boolean; reason: string }
 }
 
 /**
- * Returns true when the global kill switch is active.
- * Backed by the presence of ~/.ashlr/KILL.
+ * Read the global kill-switch source without collapsing inspection failures
+ * into either a clear or engaged observation.
+ */
+export function readKillSwitch(): KillSwitchReadResult {
+  let path = '';
+  try {
+    path = killSwitchPath();
+    const stat = lstatSync(path);
+    if (!safeAuthorityFile(stat)) {
+      return {
+        state: 'unknown',
+        sourceState: 'degraded',
+        reason: 'unsafe',
+        path,
+        errorCode: null,
+      };
+    }
+    return { state: 'active', sourceState: 'healthy', reason: 'present', path };
+  } catch (error) {
+    if (missingPath(error)) {
+      return { state: 'inactive', sourceState: 'healthy', reason: 'missing', path };
+    }
+    return {
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'uninspectable',
+      path,
+      errorCode: (error as NodeJS.ErrnoException).code ?? null,
+    };
+  }
+}
+
+/**
+ * Returns true unless the kill-switch sentinel is proven absent.
+ * This restrictive projection preserves mutation authority for legacy callers.
  */
 export function killSwitchOn(): boolean {
-  try {
-    lstatSync(killSwitchPath());
-    return true;
-  } catch (error) {
-    // Any state other than a proven absence is restrictive.
-    return !missingPath(error);
-  }
+  return readKillSwitch().state !== 'inactive';
 }
 
 /**

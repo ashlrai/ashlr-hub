@@ -58,7 +58,13 @@ function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
  */
 export function formatFleetStatus(s: FleetStatus): string {
   const lines: string[] = [];
-  const pausedTag = s.killed ? '  [PAUSED — kill switch engaged]' : '';
+  const killUnknown = s.killSwitch?.state === 'unknown';
+  const daemonUnknown = s.daemon.sourceQuality?.sourceState !== 'healthy';
+  const pausedTag = killUnknown
+    ? '  [PAUSED — kill switch unknown]'
+    : s.killed
+      ? '  [PAUSED — kill switch engaged]'
+      : '';
 
   lines.push('Fleet status' + pausedTag);
   if (s.buildIdentity) {
@@ -74,7 +80,15 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push('');
 
   // Daemon
-  lines.push(`Daemon:    ${s.daemon.running ? 'running' : 'stopped'}`);
+  lines.push(`Daemon:    ${daemonUnknown ? 'unknown' : s.daemon.running ? 'running' : 'stopped'}`);
+  if (s.daemon.sourceQuality) {
+    lines.push(
+      `  state source:  ${s.daemon.sourceQuality.sourceState} (${s.daemon.sourceQuality.reason})`,
+    );
+  }
+  if (s.killSwitch) {
+    lines.push(`Kill switch: ${s.killSwitch.state} (${s.killSwitch.sourceState})`);
+  }
   if (s.daemon.startedAt) {
     lines.push(`  started:       ${s.daemon.startedAt}`);
   }
@@ -102,7 +116,11 @@ export function formatFleetStatus(s: FleetStatus): string {
         'resident=false, install=false, repair=false',
     );
   }
-  lines.push(`  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`);
+  lines.push(
+    daemonUnknown
+      ? '  spend today:   unknown'
+      : `  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`,
+  );
   lines.push('');
 
   // Mission brief
@@ -830,7 +848,11 @@ export function formatFleetStatus(s: FleetStatus): string {
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');
-  if (!guardHealth || guardHealth.blocks.length === 0) {
+  if (!guardHealth || guardHealth.sourceQuality?.sourceState !== 'healthy') {
+    lines.push(
+      `  unknown: ${guardHealth?.sourceQuality?.reasons.join(', ') || 'source unavailable'}`,
+    );
+  } else if (guardHealth.blocks.length === 0) {
     lines.push('  ok');
   } else {
     lines.push(`  blocked: ${guardHealth.blocks.length} block(s)`);
@@ -1555,7 +1577,14 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
   // One-line health header.
   const fs = fleetStatus;
   if (fs) {
-    const state = fs.daemon.running ? (fs.killed ? 'PAUSED' : 'running') : 'idle';
+    const sourceUnknown =
+      fs.killSwitch?.state === 'unknown' ||
+      fs.daemon.sourceQuality?.sourceState !== 'healthy';
+    const state = sourceUnknown
+      ? 'UNKNOWN'
+      : fs.daemon.running
+        ? (fs.killed ? 'PAUSED' : 'running')
+        : 'idle';
     const activitySummary = daemonActivitySummary(fs.daemon);
     const header = [
       `fleet: ${state}`,
@@ -1573,11 +1602,11 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
           ? fs.workspace.eventCount
           : fs.workspace.sourceQuality?.sourceState === 'missing' ? 'missing' : 'degraded'}`
         : null,
-      `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
+      sourceUnknown ? 'spent today unknown' : `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       activitySummary,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');
-    if (fs.killed) {
+    if (sourceUnknown || fs.killed) {
       console.log('  ' + yellow(bold(header)));
     } else if (fs.daemon.running && activitySummary && !activitySummary.includes('unavailable') &&
       !activitySummary.includes('stale') && !activitySummary.includes('future')) {

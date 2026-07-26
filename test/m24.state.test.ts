@@ -247,6 +247,35 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
     expect(forgiving.todaySpentUsd).toBe(0);
     expect(forgiving.itemsProcessed).toBe(0);
   });
+
+  it('rejects symlinked, directory, and hard-linked daemon state authority', () => {
+    if (process.platform === 'win32') return;
+    const p = daemonStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const external = path.join(tmpHome, 'external-daemon.json');
+    fs.writeFileSync(external, JSON.stringify(zeroedState()), 'utf8');
+
+    fs.symlinkSync(external, p);
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'unreadable' });
+    fs.unlinkSync(p);
+
+    fs.mkdirSync(p);
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'unreadable' });
+    fs.rmdirSync(p);
+
+    fs.linkSync(external, p);
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'unreadable' });
+  });
+
+  it('rejects group-writable daemon state authority', () => {
+    if (process.platform === 'win32') return;
+    const p = daemonStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(zeroedState()), { mode: 0o660 });
+    fs.chmodSync(p, 0o660);
+
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'unreadable' });
+  });
 });
 
 // ===========================================================================

@@ -8021,7 +8021,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
   it('renders all sections and flags the paused banner when killed', () => {
     const out = formatFleetStatus({
       generatedAt: '2026-06-17T00:00:00.000Z',
-      daemon: { running: true, lastTickAt: '2026-06-17T00:00:00.000Z', todaySpentUsd: 1.2345 },
+      daemon: {
+        running: true,
+        sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+        lastTickAt: '2026-06-17T00:00:00.000Z',
+        todaySpentUsd: 1.2345,
+      },
       backends: [
         {
           backend: 'builtin',
@@ -8476,6 +8481,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         },
       },
       killed: true,
+      killSwitch: { state: 'active', sourceState: 'healthy', reason: 'present' },
+      guardHealth: {
+        generatedAt: '2026-06-17T00:02:00.000Z',
+        blocked: false,
+        blocks: [],
+        sourceQuality: { sourceState: 'healthy', complete: true, reasons: [] },
+      },
     });
 
     expect(out).toContain('Fleet status');

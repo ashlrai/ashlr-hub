@@ -13,13 +13,18 @@
  */
 
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
@@ -185,6 +190,19 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
   return reconcileDaemonState(state);
 }
 
+function ownedByCurrentUser(stat: Stats): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+function safeDaemonStateFile(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && Number(stat.nlink) === 1 &&
+    ownedByCurrentUser(stat) && (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+function sameFile(left: Stats, right: Stats): boolean {
+  return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
+}
+
 // ---------------------------------------------------------------------------
 // Load
 // ---------------------------------------------------------------------------
@@ -212,9 +230,39 @@ export function loadDaemonState(): DaemonState {
  */
 export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
   const p = daemonStatePath();
-  if (!existsSync(p)) return { ok: true, state: freshState(), fresh: true };
+  let named: Stats;
   try {
-    const raw = readFileSync(p, 'utf8');
+    named = lstatSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: true, state: freshState(), fresh: true };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, path: p, reason: 'unreadable', error: msg };
+  }
+  if (!safeDaemonStateFile(named)) {
+    return { ok: false, path: p, reason: 'unreadable', error: 'daemon state path is unsafe' };
+  }
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(p, fsConstants.O_RDONLY | noFollow);
+    const opened = fstatSync(fd);
+    if (!safeDaemonStateFile(opened) || !sameFile(named, opened)) {
+      return { ok: false, path: p, reason: 'unreadable', error: 'daemon state identity changed' };
+    }
+    const raw = readFileSync(fd, 'utf8');
+    const after = fstatSync(fd);
+    if (!safeDaemonStateFile(after) || !sameFile(opened, after) ||
+        opened.size !== after.size || opened.mtimeMs !== after.mtimeMs ||
+        opened.ctimeMs !== after.ctimeMs) {
+      return {
+        ok: false,
+        path: p,
+        reason: 'unreadable',
+        error: 'daemon state changed while being read',
+      };
+    }
     const state = parseDaemonState(raw, { strict: true });
     if (!state) {
       return { ok: false, path: p, reason: 'malformed', error: 'daemon state is not a JSON object' };
@@ -226,6 +274,14 @@ export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
       ? 'malformed'
       : 'unreadable';
     return { ok: false, path: p, reason, error: msg };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best-effort close after the read result is already known.
+      }
+    }
   }
 }
 

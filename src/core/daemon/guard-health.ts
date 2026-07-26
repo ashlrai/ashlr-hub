@@ -9,7 +9,7 @@ import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { evidenceDir } from '../autonomy/evidence-pack.js';
-import { killSwitchOn, killSwitchPath } from '../sandbox/policy.js';
+import { readKillSwitch } from '../sandbox/policy.js';
 import { daemonLockPath, loadDaemonStateStrict, readDaemonLockOwner, readDaemonSpendGuard } from './state.js';
 
 export type GuardHealthBlockId =
@@ -19,6 +19,7 @@ export type GuardHealthBlockId =
   | 'daemon-spend-guard-stale-live-owner'
   | 'daemon-spend-guard-malformed'
   | 'kill-switch'
+  | 'kill-switch-uninspectable'
   | 'autonomy-evidence-unwritable';
 
 export interface GuardHealthBlock {
@@ -32,6 +33,11 @@ export interface GuardHealthDiagnosis {
   generatedAt: string;
   blocked: boolean;
   blocks: GuardHealthBlock[];
+  sourceQuality?: {
+    sourceState: 'healthy' | 'degraded';
+    complete: boolean;
+    reasons: string[];
+  };
 }
 
 function shellQuote(value: string): string {
@@ -123,6 +129,11 @@ function fallbackDiagnosis(generatedAt: string, err: unknown): GuardHealthDiagno
         repairCommands: ['ashlr doctor'],
       },
     ],
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['diagnosis-failed'],
+    },
   };
 }
 
@@ -133,9 +144,11 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
   const generatedAt = new Date().toISOString();
   try {
     const blocks: GuardHealthBlock[] = [];
+    const sourceReasons: string[] = [];
 
     const daemonState = loadDaemonStateStrict();
     if (!daemonState.ok) {
+      sourceReasons.push(`daemon-state-${daemonState.reason}`);
       blocks.push({
         id: 'daemon-state-malformed',
         detail: `daemon state is ${daemonState.reason}: ${daemonState.error}`,
@@ -205,12 +218,21 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
       }
     }
 
-    if (killSwitchOn()) {
+    const killSwitch = readKillSwitch();
+    if (killSwitch.state === 'active') {
       blocks.push({
         id: 'kill-switch',
         detail: 'global kill switch is engaged; autonomous dispatch is paused',
-        path: killSwitchPath(),
+        path: killSwitch.path,
         repairCommands: ['ashlr fleet resume'],
+      });
+    } else if (killSwitch.state === 'unknown') {
+      sourceReasons.push('kill-switch-uninspectable');
+      blocks.push({
+        id: 'kill-switch-uninspectable',
+        detail: 'global kill switch state cannot be inspected; autonomous dispatch remains paused',
+        path: killSwitch.path,
+        repairCommands: ['ashlr daemon status', 'ashlr doctor'],
       });
     }
 
@@ -229,6 +251,11 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
       generatedAt,
       blocked: blocks.length > 0,
       blocks,
+      sourceQuality: {
+        sourceState: sourceReasons.length > 0 ? 'degraded' : 'healthy',
+        complete: sourceReasons.length === 0,
+        reasons: sourceReasons.slice(0, 8),
+      },
     };
   } catch (err) {
     return fallbackDiagnosis(generatedAt, err);
