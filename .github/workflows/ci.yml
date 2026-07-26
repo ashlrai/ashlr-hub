@@ -98,7 +98,7 @@ jobs:
               test/activation-readiness-package.test.ts
               test/activation-readiness-windows.test.ts
           - os: macos-latest
-            label: macos, queue and launchd authority
+            label: macos, shared queue authority
             native_launchd: "1"
             test_args: >-
               test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
