@@ -324,10 +324,31 @@ describe('M197 observability — control.ts buildControlSnapshot', () => {
     const result = await buildControlSnapshot(minimalCfg());
 
     expect(result).toBeDefined();
-    // Fallback fleet shape
+    // A failed authority read must remain restrictive and visibly degraded.
     expect(result.fleet).toMatchObject({
       backends: [],
-      killed: false,
+      killed: true,
+      daemon: {
+        running: false,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reason: 'unavailable',
+        },
+      },
+      guardHealth: {
+        blocked: true,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['fleet-status-unavailable'],
+        },
+      },
+      killSwitch: {
+        state: 'unknown',
+        sourceState: 'degraded',
+        reason: 'unavailable',
+      },
     });
 
     expect(warnSpy).toHaveBeenCalledWith(
