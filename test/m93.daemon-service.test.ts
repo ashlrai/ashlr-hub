@@ -370,6 +370,28 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain('<string>1</string>');
   });
 
+  it('binds keepAwake launchd authority to caffeinate and the complete argv', () => {
+    const def = generateServiceDefinition({ ...baseOpts('darwin'), keepAwake: true });
+    expect(def.launchdRuntime).toEqual({
+      program: 'caffeinate',
+      arguments: [
+        'caffeinate',
+        '-i',
+        '-s',
+        FAKE_NODE,
+        FAKE_BIN,
+        'daemon',
+        'start',
+        '--budget',
+        '5',
+        '--interval',
+        '1800000',
+        '--parallel',
+        '1',
+      ],
+    });
+  });
+
   it('plist contains log paths under CONFIG_DIR', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     const configDir = path.join(FAKE_HOME, '.ashlr');
@@ -1645,6 +1667,20 @@ describe('ensureRunning() — mocked OS activation', () => {
       response: {
         status: 0,
         stdout: launchdPrint('waiting', { extra: ['\tstate = running'] }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'duplicate native arguments block',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting', {
+          extra: [
+            '\targuments = {',
+            ...launchdArguments.map((argument) => `\t\t${argument}`),
+            '\t}',
+          ],
+        }),
         stderr: '',
       },
     },

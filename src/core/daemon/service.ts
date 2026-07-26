@@ -372,7 +372,7 @@ function launchdAbsent(result: CommandResult): boolean {
   return !result.ok && /(?:could not find (?:specified )?service|service .* not found|no such process|not loaded)/i.test(output);
 }
 
-interface LaunchdRuntimeState {
+export interface LaunchdRuntimeState {
   loaded: boolean;
   pid?: number;
 }
@@ -384,7 +384,7 @@ interface LaunchdRuntimeReadOptions {
   timeoutMs?: number;
 }
 
-function exactLaunchdPrintRuntime(
+export function parseExactLaunchdPrintRuntime(
   output: string,
   serviceTarget: string,
   expectedPath: string,
@@ -460,7 +460,7 @@ function readLaunchdRuntimeState(
         throw new Error(`launchctl print ${serviceTarget} strict contract is incomplete`);
       }
       const exact = result.stderr.trim() === ''
-        ? exactLaunchdPrintRuntime(
+        ? parseExactLaunchdPrintRuntime(
             result.stdout,
             serviceTarget,
             options.expectedPath,
