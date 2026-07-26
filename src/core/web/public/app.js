@@ -200,7 +200,11 @@ async function toggleFleetPaused(targetPaused) {
       if (state.control) state.control.fleet = result.fleet;
       if (state.fleetDashboard) state.fleetDashboard.fleet = result.fleet;
     }
-    showToast(targetPaused ? 'Fleet paused.' : 'Fleet resumed.');
+    showToast(
+      targetPaused
+        ? 'Fleet paused.'
+        : 'Kill switch cleared. Daemon activation remains separate.'
+    );
     if (state.activeView === 'fleet') {
       renderFleet();
       await loadFleet();
@@ -216,34 +220,13 @@ async function toggleFleetPaused(targetPaused) {
   }
 }
 
-async function repairDaemonService() {
-  const token = getToken();
-  if (!token) {
-    showToast('No session token — click the gear icon to set it.');
-    return;
-  }
-  try {
-    const result = await apiPost('/api/daemon/service/repair', token);
-    if (state.control && result.service) {
-      state.control.daemon = Object.assign({}, state.control.daemon ?? {}, { service: result.service });
-    }
-    showToast(result.service?.running ? 'Daemon service repaired and running.' : 'Daemon service repair completed.');
-    if (state.activeView === 'control') {
-      renderControl();
-      await loadControl();
-    }
-  } catch (err) {
-    showToast(`Service repair failed: ${err.message}`);
-  }
-}
-
 function fleetPauseResumeButton(isPaused, size = '') {
   const targetPaused = !isPaused;
   const btn = el('button', {
     cls: `btn ${targetPaused ? 'btn-danger' : 'btn-secondary'}${size ? ` ${size}` : ''}`,
     type: 'button',
     title: targetPaused ? 'Engage kill switch' : 'Clear kill switch',
-  }, targetPaused ? 'Pause fleet' : 'Resume fleet');
+  }, targetPaused ? 'Pause fleet' : 'Clear kill switch');
   btn.addEventListener('click', () => { void toggleFleetPaused(targetPaused); });
   return btn;
 }
@@ -2217,7 +2200,7 @@ function renderDaemon() {
   if (!d) {
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'Daemon state unavailable.'),
-      el('p', { cls: 'hint' }, 'Start the daemon with `ashlr daemon start`.')
+      el('p', { cls: 'hint' }, 'Inspect Fleet Status for activation authority.')
     ));
     main.appendChild(section);
     return;
@@ -3959,7 +3942,7 @@ function renderControl() {
     ));
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'Control data unavailable.'),
-      el('p', { cls: 'hint' }, 'Ensure the daemon is running and the server serves /api/control.')
+      el('p', { cls: 'hint' }, 'Daemon activation may be blocked; inspect Fleet Status.')
     ));
     main.appendChild(section);
     return;
@@ -4166,15 +4149,7 @@ function renderControl() {
   serviceBody.appendChild(el('div', { cls: 'ctrl-service-row' },
     el('span', { cls: `ctrl-health-dot ${service.running ? 'up' : 'down'}`, title: service.running ? 'Running' : 'Stopped' }),
     el('span', { cls: 'ctrl-service-status' }, `${service.installed ? 'installed' : 'not installed'} · ${service.running ? 'running' : 'stopped'}`),
-    service.serviceFilePath ? el('span', { cls: 'ctrl-service-path', title: service.serviceFilePath }, service.serviceFilePath) : null,
-    getToken()
-      ? el('button', {
-          cls: 'btn btn-secondary btn-sm',
-          type: 'button',
-          title: 'Repair daemon service',
-          onClick: () => { void repairDaemonService(); },
-        }, 'Repair')
-      : null
+    service.serviceFilePath ? el('span', { cls: 'ctrl-service-path', title: service.serviceFilePath }, service.serviceFilePath) : null
   ));
   if (service.errorLog) {
     serviceBody.appendChild(el('div', { cls: 'ctrl-service-error' }, service.errorLog));
@@ -4662,7 +4637,7 @@ function renderFleetActivity() {
   if (!d) {
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'Fleet activity unavailable.'),
-      el('p', { cls: 'hint' }, 'Ensure the daemon is running.')
+      el('p', { cls: 'hint' }, 'Daemon activation may be blocked; inspect Fleet Status.')
     ));
     main.appendChild(section);
     window.scrollTo(0, _scrollY);
