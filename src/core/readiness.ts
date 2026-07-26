@@ -8,7 +8,7 @@
  *
  * H7 ABSOLUTE RULES (proven by test/h7.*):
  *  - READ-ONLY: composes only read-only primitives — probeEndpoint (local GET,
- *    never throws), readEnrollmentRegistry, killSwitchOn, loadDaemonState (H5
+ *    never throws), readEnrollmentRegistry, readKillSwitch, loadDaemonState (H5
  *    self-heal), listSandboxes. It MUTATES NOTHING and adds NO outward capability.
  *  - The `~/.ashlr` writeable probe uses only ownership/ACL/access metadata. It
  *    never creates the authority directory or a probe file and never removes state.
@@ -39,9 +39,10 @@ import { dirname, join } from 'node:path';
 import type { AshlrConfig } from './types.js';
 import { probeEndpoint } from './providers.js';
 import {
-  killSwitchOn,
+  readKillSwitch,
   readEnrollmentRegistry,
   type EnrollmentRegistrySnapshot,
+  type KillSwitchReadResult,
 } from './sandbox/policy.js';
 import { loadDaemonState, daemonStatePath } from './daemon/state.js';
 import { listSandboxes, ORPHAN_STALE_MS } from './sandbox/worktree.js';
@@ -252,12 +253,25 @@ export function readEnrollmentState(): EnrollmentState {
   }
 }
 
-/** READ-ONLY kill-switch snapshot: { on } via killSwitchOn(). Never throws. */
-export function readKillState(): { on: boolean } {
+export type ReadinessKillState = KillSwitchReadResult & {
+  /** Restrictive compatibility projection: true unless inactivity is proven. */
+  on: boolean;
+};
+
+/** READ-ONLY kill-switch snapshot with source quality. Never throws. */
+export function readKillState(): ReadinessKillState {
   try {
-    return { on: killSwitchOn() };
+    const result = readKillSwitch();
+    return { ...result, on: result.state !== 'inactive' };
   } catch {
-    return { on: false };
+    return {
+      on: true,
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'uninspectable',
+      path: join(ashlrDir(), 'KILL'),
+      errorCode: null,
+    };
   }
 }
 
@@ -529,10 +543,17 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     }
   }
 
-  // -- kill-switch (on => warning: nothing will run) --------------------------
+  // -- kill-switch (unknown blocks; active warns; proven inactive is healthy) --
   {
-    const { on } = readKillState();
-    if (on) {
+    const kill = readKillState();
+    if (kill.sourceState === 'degraded') {
+      blockers.push({
+        id: 'kill-switch',
+        severity: 'blocker',
+        detail: `kill switch source degraded: ${kill.reason}`,
+        fix: 'Repair the KILL authority path before running autonomy.',
+      });
+    } else if (kill.on) {
       warnings.push({
         id: 'kill-switch',
         severity: 'warning',
