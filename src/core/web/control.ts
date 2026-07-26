@@ -25,7 +25,7 @@ import {
 } from '../fleet/status.js';
 import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
-import { loadDaemonState } from '../daemon/state.js';
+import { loadDaemonState, loadDaemonStateStrict } from '../daemon/state.js';
 import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 import { loadBacklog } from '../portfolio/backlog.js';
@@ -62,6 +62,11 @@ export interface ControlModels {
 
 export interface ControlDaemon {
   running: boolean;
+  sourceQuality: {
+    sourceState: 'healthy' | 'degraded';
+    complete: boolean;
+    reason: 'healthy' | 'missing' | 'malformed' | 'unreadable' | 'unavailable';
+  };
   pid: number | null;
   lastTickAt: string | null;
   todaySpentUsd: number;
@@ -207,9 +212,16 @@ async function buildModels(cfg: AshlrConfig): Promise<ControlModels> {
 }
 
 /** Safe fallback for the daemon section. */
-function fallbackDaemon(): ControlDaemon {
+function fallbackDaemon(
+  reason: ControlDaemon['sourceQuality']['reason'] = 'unavailable',
+): ControlDaemon {
   return {
     running: false,
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reason,
+    },
     pid: null,
     lastTickAt: null,
     todaySpentUsd: 0,
@@ -221,6 +233,7 @@ function fallbackDaemon(): ControlDaemon {
     service: {
       installed: false,
       running: false,
+      runtimeState: 'unknown',
       platformSpec: 'unknown',
     },
   };
@@ -228,12 +241,19 @@ function fallbackDaemon(): ControlDaemon {
 
 function buildDaemon(cfg: AshlrConfig): ControlDaemon {
   try {
-    const ds = loadDaemonState();
+    const daemonState = loadDaemonStateStrict();
+    if (!daemonState.ok) return fallbackDaemon(daemonState.reason);
+    const ds = daemonState.state;
     const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
     const activeDirectionTick = [...ticks].reverse().find((tick) => tick.directionMode);
     const service = serviceStatusCached(daemonServiceInstallOptions(cfg), 15_000);
     return {
       running: ds.running === true,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reason: daemonState.fresh ? 'missing' : 'healthy',
+      },
       pid: typeof ds.pid === 'number' ? ds.pid : null,
       lastTickAt: ds.lastTickAt ?? null,
       todaySpentUsd: typeof ds.todaySpentUsd === 'number' ? ds.todaySpentUsd : 0,
@@ -841,13 +861,37 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
       console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
       return {
         generatedAt: ts,
-        daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+        daemon: {
+          running: false,
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reason: 'unavailable',
+          },
+          lastTickAt: null,
+          todaySpentUsd: 0,
+        },
         backends: [],
         queue: { backlogItems: 0 },
         proposals: { pending: 0, frontierPending: 0, applied: 0 },
         merges: { recent: 0 },
         autonomyControlMode: resolveAutonomyControlMode(cfg),
-        killed: false,
+        guardHealth: {
+          generatedAt: ts,
+          blocked: true,
+          blocks: [],
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reasons: ['fleet-status-unavailable'],
+          },
+        },
+        killed: true,
+        killSwitch: {
+          state: 'unknown',
+          sourceState: 'degraded',
+          reason: 'unavailable',
+        },
       };
     }),
   ]);

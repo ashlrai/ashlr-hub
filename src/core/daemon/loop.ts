@@ -60,6 +60,7 @@ import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import {
   killSwitchOn,
+  readKillSwitch,
   setKill,
   canonicalEnrollmentPath,
   recoverEnrollmentRegistry,
@@ -1504,6 +1505,7 @@ function buildTickFleetStatus(
   }
 
   const proposalAuthority = tickProposalAuthority(proposalSourceQuality);
+  const killSwitch = readKillSwitch();
 
   const recentTicks = Array.isArray(state.ticks) ? state.ticks : [];
   let reportedByTicks = 0;
@@ -1516,6 +1518,11 @@ function buildTickFleetStatus(
     generatedAt: new Date().toISOString(),
     daemon: {
       running: state.running === true,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reason: 'healthy',
+      },
       lastTickAt: state.lastTickAt ?? null,
       todaySpentUsd: typeof state.todaySpentUsd === 'number' ? state.todaySpentUsd : 0,
     },
@@ -1536,7 +1543,12 @@ function buildTickFleetStatus(
     merges: { recent: recentMerges, reportedByTicks, sourceQuality: proposalSourceQuality },
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
-    killed: false,
+    killed: killSwitch.state !== 'inactive',
+    killSwitch: {
+      state: killSwitch.state,
+      sourceState: killSwitch.sourceState,
+      reason: killSwitch.reason,
+    },
   };
 }
 

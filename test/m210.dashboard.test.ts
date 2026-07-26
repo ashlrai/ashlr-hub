@@ -581,6 +581,23 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");
   });
 
+  it('renders degraded control sources as unknown without mutation controls', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain("if (daemon?.sourceQuality?.sourceState !== 'healthy') return 'unknown'");
+    expect(appSource).toContain(
+      "return fleet?.killSwitch?.state ?? (fleet?.killed === true ? 'active' : 'unknown')",
+    );
+    expect(appSource).toContain("return state === 'unknown' ? null : fleetPauseResumeButton");
+    expect(appSource).toContain('kill switch authority cannot be inspected');
+    expect(appSource).toContain("'Daemon state unknown'");
+    expect(appSource).toContain("killState === 'unknown' ? 'UNKNOWN'");
+    expect(appSource).toContain("daemonState === 'unknown'");
+  });
+
   it('renders cancellations explicitly and excludes them from diagnostic yield', () => {
     const appSource = readFileSync(
       fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
