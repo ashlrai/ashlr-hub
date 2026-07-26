@@ -969,14 +969,23 @@ function checkDaemonState(): DoctorCheck {
  * Probe: kill switch (H7).
  * id: 'kill-switch'
  *
- * READ-ONLY via readKillState() → killSwitchOn(). PASS when OFF; WARN when ON
- * (autonomy is paused — nothing will run, which a user may or may not intend).
- * Mutates nothing. Never throws.
+ * READ-ONLY via readKillState(). PASS when inactivity is proven; WARN when
+ * active; FAIL when the authority source is unknown/degraded. Mutates nothing.
+ * Never throws.
  */
 function checkKillSwitch(): DoctorCheck {
   try {
-    const { on } = readKillState();
-    if (on) {
+    const kill = readKillState();
+    if (kill.sourceState === 'degraded') {
+      return check(
+        'kill-switch',
+        'Kill switch',
+        'fail',
+        `Kill switch source degraded: ${kill.reason}`,
+        'Repair the KILL authority path before running autonomy.',
+      );
+    }
+    if (kill.on) {
       return check(
         'kill-switch',
         'Kill switch',
@@ -987,7 +996,13 @@ function checkKillSwitch(): DoctorCheck {
     }
     return check('kill-switch', 'Kill switch', 'pass', 'Kill switch is OFF');
   } catch (err) {
-    return check('kill-switch', 'Kill switch', 'pass', `kill state unreadable: ${String(err)}`);
+    return check(
+      'kill-switch',
+      'Kill switch',
+      'fail',
+      `Kill switch source unreadable: ${String(err)}`,
+      'Repair the KILL authority path before running autonomy.',
+    );
   }
 }
 
