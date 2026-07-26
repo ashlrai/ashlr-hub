@@ -187,8 +187,11 @@ describe('M30 CI workflow', () => {
         'test/m423.control-plane-lock-order.test.ts',
       ],
       [
+        'test/activation-readiness-package.test.ts',
+        'test/activation-readiness-windows.test.ts',
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
+        'test/m299.web-fleet-control.test.ts',
         observerSchedulerTest,
         'test/m379.private-storage.test.ts',
         'test/m385.cutoff-checkpoint-scheduler.test.ts',
