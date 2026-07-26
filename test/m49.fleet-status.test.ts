@@ -67,6 +67,7 @@ import {
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import { writeDaemonActivity } from '../src/core/daemon/activity.js';
+import * as activationPermit from '../src/core/daemon/activation-permit.js';
 import { loadQueuedAutonomyItemsDetailed } from '../src/core/portfolio/queued-autonomy.js';
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
@@ -786,7 +787,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'blocked',
       confidence: 'low',
-      topBlocker: { id: 'daemon-stopped' },
+      topBlocker: { id: 'daemon-activation-blocked' },
       sourceSummary: expect.objectContaining({
         blocked: expect.any(Number),
         unknown: expect.any(Number),
@@ -795,10 +796,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.sourceSummary.healthy)
       .toBeLessThan(s.autonomousShipReadiness?.sources.length ?? 0);
     expect(s.missionBrief).toMatchObject({
-      directive: 'Start the daemon',
+      directive: 'Inspect daemon activation authority',
       confidence: 'low',
-      blocker: { id: 'daemon-stopped' },
-      action: { id: 'start-daemon' },
+      blocker: { id: 'daemon-activation-blocked' },
+      action: { id: 'inspect-daemon-activation' },
       evidence: {
         readinessVerdict: 'blocked',
         effectivenessPhase: 'control-blocked',
@@ -807,19 +808,40 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         preflightReady: 0,
       },
     });
-    expect(s.missionBrief?.whyNow).toContain('daemon is stopped');
-    const startDaemon = s.nextActions?.find((action) => action.id === 'start-daemon');
-    expect(startDaemon?.commands?.[0]).toMatchObject({
-      label: 'Start daemon',
-      argv: ['ashlr', 'daemon', 'start'],
-      shell: 'ashlr daemon start',
-      safety: 'autonomous-dispatch',
+    expect(s.daemon.activation).toMatchObject({
+      authority: 'observation-only',
+      state: 'blocked',
+      commandEligible: false,
+      trustRootCount: 0,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'no-trusted-activation-roots',
     });
-    expect(startDaemon?.commands?.[1]).toMatchObject({
-      endpointPath: '/api/daemon/service/repair',
-      tokenRequired: true,
-      safety: 'control-plane',
-    });
+    expect(s.missionBrief?.whyNow).toContain('no-trusted-activation-roots');
+    const inspectActivation = s.nextActions?.find(
+      (action) => action.id === 'inspect-daemon-activation',
+    );
+    expect(inspectActivation?.commands).toEqual([
+      expect.objectContaining({
+        label: 'Inspect daemon status',
+        argv: ['ashlr', 'daemon', 'status'],
+        shell: 'ashlr daemon status',
+        safety: 'read-only',
+      }),
+    ]);
+    expect(s.nextActions?.find((action) => action.id === 'start-daemon')).toBeUndefined();
+    const blockedActivationCommands = s.nextActions?.flatMap((action) => action.commands ?? []) ?? [];
+    expect(blockedActivationCommands.length).toBeGreaterThan(0);
+    expect(inspectActivation?.commands?.every((command) => command.safety === 'read-only')).toBe(true);
+    expect(blockedActivationCommands.some((command) =>
+      command.argv.slice(0, 3).join(' ') === 'ashlr daemon start'
+      || command.argv.join(' ') === 'ashlr daemon install'
+      || command.endpointPath === '/api/daemon/service/repair'
+    )).toBe(false);
+    expect(formatFleetStatus(s)).toContain(
+      'activation:    blocked (no-trusted-activation-roots; observation-only)',
+    );
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -848,6 +870,48 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('keeps host reconciliation read-only when stopped activation is blocked', async () => {
+    const cfg = baseConfig();
+    const awaitingHost = createProposal(
+      {
+        repo: join(tmpHome, 'repo-awaiting-host'),
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Awaiting host merge while activation is blocked',
+        summary: 'The host reconciliation action must not create activation authority.',
+        diff: docsDiff('awaiting-host-blocked-activation'),
+      },
+      cfg,
+    );
+    setStatus(awaitingHost.id, 'awaiting-host-merge');
+
+    const status = await buildFleetStatus(cfg);
+    const reconcile = status.nextActions?.find((action) => action.id === 'reconcile-host-prs');
+
+    expect(status.daemon).toMatchObject({
+      running: false,
+      activation: {
+        commandEligible: false,
+        reason: 'no-trusted-activation-roots',
+      },
+    });
+    expect(status.nextActions?.find((action) => action.id === 'inspect-daemon-activation'))
+      .toBeDefined();
+    expect(reconcile).toMatchObject({
+      label: 'Inspect host PR reconciliation',
+      commands: [
+        { argv: ['ashlr', 'inbox', '--json'], safety: 'read-only' },
+        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
+      ],
+    });
+    expect(status.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+      || command.argv.join(' ') === 'ashlr daemon start'
+      || command.argv.join(' ') === 'ashlr daemon install'
+      || command.endpointPath === '/api/daemon/service/repair'
+    )).toBe(false);
   });
 
   it('derives recent landed work once from authenticated proposal evidence, never tick aggregates', async () => {
@@ -883,6 +947,56 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         },
       });
     });
+  });
+
+  it('recommends only an exact one-shot start for a snapshot-valid activation candidate', async () => {
+    const inspection = vi.spyOn(activationPermit, 'inspectDaemonActivationPermit').mockReturnValue({
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'healthy',
+      state: 'ready',
+      commandEligible: true,
+      requestedShape: 'proposal-once',
+      trustRootCount: 1,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'valid-proposal-once-permit',
+    });
+
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      const start = status.nextActions?.find((action) => action.id === 'start-daemon');
+
+      expect(status.daemon.activation).toMatchObject({
+        authority: 'observation-only',
+        state: 'ready',
+        commandEligible: true,
+      });
+      expect(start).toMatchObject({
+        label: 'Start one proposal cycle',
+        commands: [{
+          label: 'Start one proposal cycle',
+          argv: ['ashlr', 'daemon', 'start', '--once'],
+          shell: 'ashlr daemon start --once',
+          safety: 'autonomous-dispatch',
+        }],
+      });
+      expect(start?.commands).toHaveLength(1);
+      expect(status.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+        command.argv.join(' ') === 'ashlr daemon start'
+        || command.argv.join(' ') === 'ashlr daemon install'
+        || command.endpointPath === '/api/daemon/service/repair'
+      )).toBe(false);
+      expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('daemon-stopped');
+      expect(status.missionBrief).toMatchObject({
+        directive: 'Start one proposal cycle',
+        action: { id: 'start-daemon' },
+      });
+    } finally {
+      inspection.mockRestore();
+    }
   });
 
   it('surfaces degraded proposal truth instead of presenting a healthy landed zero', async () => {
@@ -4778,13 +4892,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const failureAction = s.nextActions?.find((action) => action.id === 'repair-verification-failures');
     expect(failureAction).toMatchObject({
       label: 'Drain failed proposals',
-      commands: expect.arrayContaining([
+      commands: [
         expect.objectContaining({
-          label: 'Run merge maintenance',
-          argv: ['ashlr', 'daemon', 'start', '--once'],
+          label: 'Inspect failed proposals',
+          argv: ['ashlr', 'inbox', '--json'],
+          safety: 'read-only',
         }),
-      ]),
+        expect.objectContaining({
+          label: 'Inspect fleet status',
+          argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+      ],
     });
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+    )).toBe(false);
     expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
       id: 'verification-failed',
     });
@@ -5966,7 +6089,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     const actionIds = s.nextActions?.map((a) => a.id) ?? [];
-    expect(actionIds).toContain('start-daemon');
+    expect(actionIds).toContain('inspect-daemon-activation');
+    expect(actionIds).not.toContain('start-daemon');
     expect(actionIds).not.toContain('drain-ready-auto-merges');
     expect(actionIds).not.toContain('verify-pending-proposals');
     expect(actionIds).not.toContain('repair-verification-failures');
@@ -6071,6 +6195,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',
     });
+    const mergeDrainAction = s.nextActions?.find(
+      (action) => action.id === 'drain-ready-auto-merges',
+    );
+    expect(mergeDrainAction?.commands).toEqual([
+      expect.objectContaining({
+        argv: ['ashlr', 'inbox', '--json'],
+        safety: 'read-only',
+      }),
+      expect.objectContaining({
+        argv: ['ashlr', 'fleet', 'status', '--json'],
+        safety: 'read-only',
+      }),
+    ]);
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+    )).toBe(false);
     expect(s.missionBrief).toMatchObject({
       directive: 'Drain ready auto-merges',
       confidence: 'high',

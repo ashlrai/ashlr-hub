@@ -80,6 +80,21 @@ export interface DaemonActivationPermitResult {
   configSnapshot?: AshlrConfig;
 }
 
+export interface DaemonActivationReadiness {
+  schemaVersion: 1;
+  policyVersion: typeof POLICY_VERSION;
+  authority: 'observation-only';
+  sourceState: 'healthy' | 'degraded';
+  state: 'ready' | 'blocked' | 'degraded';
+  commandEligible: boolean;
+  requestedShape: 'proposal-once';
+  trustRootCount: number;
+  residentAuthorized: false;
+  installAuthorized: false;
+  repairAuthorized: false;
+  reason: string;
+}
+
 export interface DaemonActivationTrustRoot {
   keyId: string;
   publicKeyPem: string;
@@ -152,6 +167,12 @@ export interface DaemonActivationPermitTestConsumerOptions {
   trustRoots: readonly DaemonActivationTrustRoot[];
   context: DaemonActivationRuntimeContext;
   afterReceiptPersisted?: () => void;
+}
+
+export interface DaemonActivationPermitTestInspectionOptions {
+  trustRoots: readonly DaemonActivationTrustRoot[];
+  context: DaemonActivationRuntimeContext;
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -855,6 +876,157 @@ function daemonActivationNonceReceiptPath(nonceDigest: string): string {
   );
 }
 
+function activationReadiness(
+  state: DaemonActivationReadiness['state'],
+  reason: string,
+  trustRootCount: number,
+): DaemonActivationReadiness {
+  return {
+    schemaVersion: 1,
+    policyVersion: POLICY_VERSION,
+    authority: 'observation-only',
+    sourceState: state === 'degraded' ? 'degraded' : 'healthy',
+    state,
+    commandEligible: state === 'ready',
+    requestedShape: 'proposal-once',
+    trustRootCount,
+    residentAuthorized: false,
+    installAuthorized: false,
+    repairAuthorized: false,
+    reason,
+  };
+}
+
+function pathEntryPresent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function inspectPinnedActivationPermit(
+  pinned: PinnedPermitFile,
+  permitPath: string,
+  cfg: AshlrConfig,
+  trustRoots: readonly DaemonActivationTrustRoot[],
+  suppliedContext: DaemonActivationRuntimeContext | undefined,
+): DaemonActivationReadiness {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(pinned.text) as unknown;
+  } catch {
+    return activationReadiness('degraded', 'invalid-permit-json', trustRoots.length);
+  }
+  if (`${canonicalizeDaemonActivationValue(envelope)}\n` !== pinned.text) {
+    return activationReadiness('degraded', 'noncanonical-permit-encoding', trustRoots.length);
+  }
+  const parsed = parseEnvelope(envelope);
+  if (!parsed) {
+    return activationReadiness('degraded', 'invalid-permit-schema', trustRoots.length);
+  }
+
+  let configSnapshot: AshlrConfig;
+  try {
+    configSnapshot = strictConfigSnapshot(cfg);
+  } catch {
+    return activationReadiness('degraded', 'activation-config-not-strict-json', trustRoots.length);
+  }
+  const context = suppliedContext ?? collectRuntimeContext(configSnapshot);
+  if (context.configDigest !== daemonActivationConfigDigest(configSnapshot)) {
+    return activationReadiness('blocked', 'runtime-config-digest-mismatch', trustRoots.length);
+  }
+  const verification = verifyDaemonActivationPermit(parsed, context, trustRoots);
+  if (!verification.ok || !verification.permitId) {
+    return activationReadiness('blocked', verification.reason, trustRoots.length);
+  }
+
+  const nonceDigest = sha256(parsed.payload.nonce);
+  if (
+    pathEntryPresent(daemonActivationReceiptPath(verification.permitId))
+    || pathEntryPresent(daemonActivationNonceReceiptPath(nonceDigest))
+  ) {
+    return activationReadiness('blocked', 'activation-permit-already-consumed', trustRoots.length);
+  }
+
+  const openedAfterInspection = fstatSync(pinned.fd, { bigint: true });
+  const namedAfterInspection = lstatSync(permitPath, { bigint: true });
+  if (!sameFileSnapshot(pinned.stat, openedAfterInspection)
+    || !sameFileSnapshot(openedAfterInspection, namedAfterInspection)) {
+    return activationReadiness('degraded', 'activation-permit-changed-during-inspection', trustRoots.length);
+  }
+  return activationReadiness('ready', 'valid-proposal-once-permit', trustRoots.length);
+}
+
+function inspectWithAuthority(
+  cfg: AshlrConfig,
+  opts: DaemonActivationOptions,
+  trustRoots: readonly DaemonActivationTrustRoot[],
+  suppliedContext: DaemonActivationRuntimeContext | undefined,
+  platform: NodeJS.Platform = process.platform,
+): DaemonActivationReadiness {
+  if (!needsPermit(opts)) {
+    return activationReadiness(
+      'ready',
+      'dry-run-once-does-not-require-activation-permit',
+      trustRoots.length,
+    );
+  }
+  if (!supportedProposalOnceShape(opts)) {
+    return activationReadiness(
+      'blocked',
+      'activation-permit-cannot-authorize-requested-start-shape',
+      trustRoots.length,
+    );
+  }
+  if (trustRoots.length === 0) {
+    return activationReadiness('blocked', 'no-trusted-activation-roots', 0);
+  }
+  if (platform === 'win32') {
+    return activationReadiness(
+      'blocked',
+      'activation-permit-v1-unsupported-on-windows',
+      trustRoots.length,
+    );
+  }
+
+  const permitPath = daemonActivationPermitPath();
+  let pinned: PinnedPermitFile | undefined;
+  let result: DaemonActivationReadiness;
+  try {
+    pinned = openPinnedPermit(permitPath, resolve(homedir()));
+    result = inspectPinnedActivationPermit(
+      pinned,
+      permitPath,
+      cfg,
+      trustRoots,
+      suppliedContext,
+    );
+  } catch (error) {
+    result = activationReadiness(
+      (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'blocked' : 'degraded',
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'activation-permit-missing'
+        : 'activation-permit-inspection-failed',
+      trustRoots.length,
+    );
+  }
+  if (pinned) {
+    try {
+      closeSync(pinned.fd);
+    } catch {
+      return activationReadiness(
+        'degraded',
+        'activation-permit-close-failed',
+        trustRoots.length,
+      );
+    }
+  }
+  return result;
+}
+
 function needsPermit(opts: DaemonActivationOptions): boolean {
   return !(opts.once === true && opts.dryRun === true);
 }
@@ -1098,6 +1270,37 @@ export function consumeDaemonActivationPermit(
     undefined,
     undefined,
     true,
+  );
+}
+
+/**
+ * Read-only advisory inspection. A ready result is never authority: daemon
+ * start must still reopen, revalidate, durably consume, and mint a capability.
+ */
+export function inspectDaemonActivationPermit(
+  cfg: AshlrConfig,
+  opts: DaemonActivationOptions,
+): DaemonActivationReadiness {
+  return inspectWithAuthority(
+    cfg,
+    opts,
+    DAEMON_ACTIVATION_TRUST_ROOTS,
+    undefined,
+  );
+}
+
+/** Test-only inspection with injected roots/context; it cannot mint authority. */
+export function inspectDaemonActivationPermitForVerification(
+  cfg: AshlrConfig,
+  opts: DaemonActivationOptions,
+  options: DaemonActivationPermitTestInspectionOptions,
+): DaemonActivationReadiness {
+  return inspectWithAuthority(
+    cfg,
+    opts,
+    options.trustRoots,
+    options.context,
+    options.platform,
   );
 }
 

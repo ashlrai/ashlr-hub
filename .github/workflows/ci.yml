@@ -94,6 +94,9 @@ jobs:
               test/m419.remote-handoff-intent.test.ts
               test/m420.remote-handoff-recovery.test.ts
               test/m421.legacy-pulse-quiescence.test.ts
+              test/m299.web-fleet-control.test.ts
+              test/activation-readiness-package.test.ts
+              test/activation-readiness-windows.test.ts
           - os: macos-latest
             label: macos, shared queue authority
             test_args: >-

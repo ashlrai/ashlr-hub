@@ -12,6 +12,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const serviceMocks = vi.hoisted(() => ({
   ensureRunning: vi.fn(),
@@ -27,6 +29,7 @@ vi.mock('../src/core/daemon/service.js', () => ({
 }));
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
+import { cmdFleet } from '../src/cli/fleet.js';
 import { startServer } from '../src/core/web/server.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import type { WebServerOptions } from '../src/core/types.js';
@@ -98,6 +101,38 @@ function request(
 }
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+describe('daemon dashboard activation guidance', () => {
+  it('does not instruct a resident daemon start when state is unavailable', () => {
+    const source = readFileSync(join(process.cwd(), 'src/core/web/public/app.js'), 'utf8');
+
+    expect(source).toContain('Inspect Fleet Status for activation authority.');
+    expect(source).not.toContain('Start the daemon with `ashlr daemon start`.');
+    expect(source).not.toContain("apiPost('/api/daemon/service/repair'");
+    expect(source).not.toContain('Repair daemon service');
+  });
+
+  it('keeps CLI resume limited to the kill switch', async () => {
+    setKill(true);
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...parts: unknown[]) => {
+      output.push(parts.map(String).join(' '));
+    });
+
+    try {
+      await expect(cmdFleet(['resume'])).resolves.toBe(0);
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(killSwitchOn()).toBe(false);
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+    expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
+    expect(output.join('\n')).toContain(
+      'Daemon activation remains separate and requires exact activation authority.',
+    );
+  });
+});
 
 describe('POST /api/fleet/pause|resume', () => {
   it('returns 404 when dispatch controls are disabled', async () => {
@@ -183,7 +218,7 @@ describe('POST /api/fleet/pause|resume', () => {
       .toContain(pausedFleet.backends?.[0]?.resource?.availability);
     expect(typeof pausedFleet.autonomyDirection?.mode).toBe('string');
     expect(typeof pausedFleet.autonomyDirection?.resources).toBe('object');
-    expect(pausedFleet.missionBrief?.directive).toBe('Resume the fleet');
+    expect(pausedFleet.missionBrief?.directive).toBe('Clear the kill switch');
     expect(pausedFleet.missionBrief?.evidence?.readinessVerdict).toBe('blocked');
     expect(typeof pausedFleet.missionBrief?.whyNow).toBe('string');
 
@@ -198,18 +233,24 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(killSwitchOn()).toBe(false);
     const resumedBody = JSON.parse(resumed.body) as {
       ok: boolean;
-      service?: { installed: boolean; running: boolean };
+      service: { installed: boolean; running: boolean };
+      activation?: {
+        authority: string;
+        commandEligible: boolean;
+        repairAuthorized: boolean;
+      };
       fleet: { killed: boolean; buildIdentity?: unknown };
     };
     expect(resumedBody.fleet.killed).toBe(false);
     expect(resumedBody.fleet.buildIdentity).toEqual(pausedBody.fleet.buildIdentity);
     expect(resumedBody.service).toMatchObject({ installed: true, running: true });
-    expect(serviceMocks.ensureRunning).toHaveBeenCalledWith({
-      budget: 1,
-      intervalMs: 100,
-      parallel: 2,
-      autostart: true,
+    expect(resumedBody.activation).toMatchObject({
+      authority: 'observation-only',
+      commandEligible: false,
+      repairAuthorized: false,
     });
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+    expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
 
     const fleetResumed = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetResumed.statusCode).toBe(200);
@@ -293,7 +334,7 @@ describe('GET/POST /api/daemon/service', () => {
     expect(serviceMocks.install).not.toHaveBeenCalled();
   });
 
-  it('repairs the daemon service using config-derived daemon settings', async () => {
+  it('fails daemon service repair closed without distinct signed repair authority', async () => {
     serviceMocks.serviceStatus.mockReturnValueOnce({
       installed: true,
       running: true,
@@ -319,27 +360,29 @@ describe('GET/POST /api/daemon/service', () => {
       '{}',
     );
 
-    expect(res.statusCode).toBe(200);
-    expect(serviceMocks.install).toHaveBeenCalledWith({
-      budget: 7,
-      intervalMs: 900_000,
-      parallel: 3,
-      autostart: true,
-    });
-    expect(serviceMocks.ensureRunning).toHaveBeenCalledWith({
-      budget: 7,
-      intervalMs: 900_000,
-      parallel: 3,
-      autostart: true,
-    });
+    expect(res.statusCode).toBe(409);
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+    expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
     const body = JSON.parse(res.body) as {
       ok: boolean;
       action: string;
+      error: string;
       service: { installed: boolean; running: boolean };
+      activation?: {
+        authority: string;
+        installAuthorized: boolean;
+        repairAuthorized: boolean;
+      };
     };
-    expect(body.ok).toBe(true);
+    expect(body.ok).toBe(false);
     expect(body.action).toBe('repair');
+    expect(body.error).toContain('distinct signed repair authority');
     expect(body.service.installed).toBe(true);
     expect(body.service.running).toBe(true);
+    expect(body.activation).toMatchObject({
+      authority: 'observation-only',
+      installAuthorized: false,
+      repairAuthorized: false,
+    });
   });
 });

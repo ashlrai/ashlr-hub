@@ -25,7 +25,7 @@
  *   POST /api/open             -> openInEditor/openInFinder for an enrolled repo path (M100)
  *   POST /api/fleet/pause      -> engage the fleet kill switch
  *   POST /api/fleet/resume     -> clear the fleet kill switch
- *   POST /api/daemon/service/repair -> reinstall/reload daemon OS service
+ *   POST /api/daemon/service/repair -> fail closed pending signed repair authority
  *
  * SECURITY:
  *  - Never throws (500 on internal error).
@@ -72,7 +72,7 @@ import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 // M24: read-only daemon state endpoint.
 import { loadDaemonState } from '../daemon/state.js';
-import { ensureRunning as ensureDaemonServiceRunning, install as installDaemonService, serviceStatus } from '../daemon/service.js';
+import { serviceStatus } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import { buildFleetStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
@@ -872,9 +872,9 @@ export async function handleApi(
     }
 
     // ── POST /api/daemon/service/repair ────────────────────────────────────
-    // Operator recovery: reinstall/reload the OS service using the same config-
-    // derived service definition as `ashlr daemon install`, then return current
-    // service health. Hidden unless --allow-dispatch and token-gated.
+    // The web mutation token is not daemon install/repair authority. Keep the
+    // legacy route fail-closed until a distinct signed, scoped repair contract
+    // exists, while returning read-only state to help the operator diagnose it.
     if (path === '/api/daemon/service/repair' && method === 'POST') {
       if (!ctx.allowDispatch) {
         sendJson(res, 404, { error: 'not found' });
@@ -884,16 +884,15 @@ export async function handleApi(
         return true;
       }
 
-      try {
-        const opts = daemonServiceInstallOptions(cfg, { autostart: true });
-        await installDaemonService(opts);
-        const service = await ensureDaemonServiceRunning(opts);
-        sendJson(res, 200, { ok: true, action: 'repair', service });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const service = serviceStatus(daemonServiceInstallOptions(cfg, { autostart: true }));
-        sendJson(res, 500, { ok: false, action: 'repair', error: msg, service });
-      }
+      const fleet = await buildFleetStatus(cfg);
+      const service = serviceStatus(daemonServiceInstallOptions(cfg));
+      sendJson(res, 409, {
+        ok: false,
+        action: 'repair',
+        error: 'daemon service repair requires distinct signed repair authority',
+        service,
+        activation: fleet.daemon.activation,
+      });
       return true;
     }
 
@@ -933,20 +932,14 @@ export async function handleApi(
         });
         return true;
       }
-      let service: ReturnType<typeof serviceStatus> | undefined;
-      if (!paused) {
-        try {
-          service = await ensureDaemonServiceRunning(daemonServiceInstallOptions(cfg, { autostart: true }));
-        } catch {
-          service = undefined;
-        }
-      }
       const fleet = await buildFleetStatus(cfg);
+      const service = serviceStatus(daemonServiceInstallOptions(cfg));
       sendJson(res, 200, {
         ok: true,
         action: paused ? 'pause' : 'resume',
         ...(mutation ? { mutation } : {}),
-        ...(service ? { service } : {}),
+        service,
+        activation: fleet.daemon.activation,
         fleet,
       });
       return true;
