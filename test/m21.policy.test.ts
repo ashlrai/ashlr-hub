@@ -101,6 +101,81 @@ describe('M21 policy — default enrollment empty', () => {
   it('killSwitchOn() returns false on a fresh HOME (no KILL file)', async () => {
     const p = await policy();
     expect(p.killSwitchOn()).toBe(false);
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'inactive',
+      sourceState: 'healthy',
+      reason: 'missing',
+    });
+  });
+
+  it('reports an active sentinel with a healthy source', async () => {
+    const p = await policy();
+    expect(p.setKill(true).ok).toBe(true);
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'active',
+      sourceState: 'healthy',
+      reason: 'present',
+    });
+  });
+
+  it('reports an uninspectable sentinel source as unknown and remains restrictive', async () => {
+    const p = await policy();
+    fs.writeFileSync(isolatedAshlrDir(), 'not a directory', 'utf8');
+
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'uninspectable',
+      errorCode: 'ENOTDIR',
+    });
+    expect(p.killSwitchOn()).toBe(true);
+  });
+
+  it('reports unsafe sentinel objects as unknown and remains restrictive', async () => {
+    if (process.platform === 'win32') return;
+    const p = await policy();
+    fs.mkdirSync(isolatedAshlrDir(), { recursive: true });
+
+    fs.mkdirSync(isolatedKillPath());
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'unsafe',
+    });
+    fs.rmSync(isolatedKillPath(), { recursive: true });
+
+    const target = path.join(tmpHome, 'kill-target');
+    fs.writeFileSync(target, 'active', 'utf8');
+    fs.symlinkSync(target, isolatedKillPath());
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'unsafe',
+    });
+    fs.unlinkSync(isolatedKillPath());
+
+    fs.linkSync(target, isolatedKillPath());
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'unsafe',
+    });
+    expect(p.killSwitchOn()).toBe(true);
+  });
+
+  it('does not trust a group-writable kill sentinel', async () => {
+    if (process.platform === 'win32') return;
+    const p = await policy();
+    fs.mkdirSync(isolatedAshlrDir(), { recursive: true });
+    fs.writeFileSync(isolatedKillPath(), 'active', { mode: 0o660 });
+    fs.chmodSync(isolatedKillPath(), 0o660);
+
+    expect(p.readKillSwitch()).toMatchObject({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'unsafe',
+    });
+    expect(p.killSwitchOn()).toBe(true);
   });
 });
 
