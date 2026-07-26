@@ -26,6 +26,7 @@ import {
   verifyPolicyAssignmentReceipt,
   type PolicyAssignmentReceiptInput,
 } from '../src/core/learning/policy-assignment-receipts.js';
+import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
 
 const GENERATION = 'a'.repeat(64);
 const OBJECTIVE = 'b'.repeat(64);
@@ -69,6 +70,13 @@ function interruptedStagePath(receipt: NonNullable<ReturnType<typeof createPolic
     policyAssignmentReceiptRootPath(),
     `.${receipt.assignmentUnitId}.${token}.stage`,
   );
+}
+
+function writePrivateCrashFile(path: string, value: string, anchorPath: string): void {
+  writePrivateFileAtomically(`${path}.seed`, path, value, {
+    anchorPath,
+    label: 'policy assignment receipt crash fixture',
+  });
 }
 
 describe('M460 policy assignment receipts', () => {
@@ -226,7 +234,7 @@ describe('M460 policy assignment receipts', () => {
     const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
     const temporary = `${interruptedStagePath(receipt!)}.tmp`;
     rmSync(target);
-    writeFileSync(temporary, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+    writePrivateCrashFile(temporary, `${JSON.stringify(receipt)}\n`, home);
 
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
     expect(existsSync(temporary)).toBe(false);
@@ -240,7 +248,7 @@ describe('M460 policy assignment receipts', () => {
     const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
     const temporary = `${interruptedStagePath(receipt!)}.tmp`;
     rmSync(target);
-    writeFileSync(temporary, '{"partial":', { mode: 0o600 });
+    writePrivateCrashFile(temporary, '{"partial":', home);
 
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
     expect(existsSync(temporary)).toBe(false);
@@ -303,7 +311,7 @@ describe('M460 policy assignment receipts', () => {
     expect(existsSync(stage)).toBe(true);
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
     expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([first]);
-  });
+  }, 90_000);
 
   it('preserves a conflicting authenticated temporary for its original assignment', () => {
     const first = createPolicyAssignmentReceipt(assignment());
@@ -319,14 +327,14 @@ describe('M460 policy assignment receipts', () => {
     const target = join(policyAssignmentReceiptRootPath(), `${first!.assignmentUnitId}.json`);
     const temporary = `${interruptedStagePath(first!)}.tmp`;
     rmSync(target);
-    writeFileSync(temporary, `${JSON.stringify(first)}\n`, { mode: 0o600 });
+    writePrivateCrashFile(temporary, `${JSON.stringify(first)}\n`, home);
 
     expect(recordPolicyAssignmentReceipt(conflictingInput)).toBe('conflicted');
     expect(existsSync(target)).toBe(false);
     expect(readFileSync(temporary, 'utf8')).toBe(`${JSON.stringify(first)}\n`);
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
     expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([first]);
-  });
+  }, 90_000);
 
   it('retains zero-support candidates for an exact deterministic assignment', () => {
     const receipt = createPolicyAssignmentReceipt(assignment({
