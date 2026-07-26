@@ -551,9 +551,47 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       const renewalHandle = intervalSpy.mock.results.find((result) => result.type === 'return')?.value;
       expect(renewalHandle).toBeDefined();
       expect(clearIntervalSpy).toHaveBeenCalledWith(renewalHandle);
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
     } finally {
       intervalSpy.mockRestore();
       clearIntervalSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses and releases the whole batch when the initial fence is partial', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-partial-fence-'));
+    const fenceSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'fence')
+      .mockImplementation((itemIds) => itemIds.slice(0, 1));
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [
+        makeItem('partial-fence-1', tmpRepo, { score: 3 }),
+        makeItem('partial-fence-2', tmpRepo, { score: 2 }),
+      ];
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(mockRouteBackend).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
+    } finally {
+      fenceSpy.mockRestore();
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
   });
