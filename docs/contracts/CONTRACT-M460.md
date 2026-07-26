@@ -63,6 +63,17 @@ correctly, or that persistence preceded execution.
   and modes.
 - Publication uses an exclusive private stage, file fsync, a no-clobber hard
   link, stage removal, and directory fsync while holding the local-store lock.
+- If the writer crashes around the hard-link boundary, a later writer may
+  finish only the stage whose filename carries the domain-separated host-keyed
+  transaction-slot token for that assignment unit. The authenticated content
+  in the slot determines replay versus conflict, so a different assignment
+  cannot publish around a stranded stage. A stage without its target may be
+  published; a two-link stage/target pair may have only the stage name removed.
+  A complete canonical private temporary resumes stage publication; a private
+  partial temporary at that exact transaction path is discarded and recreated.
+  Conflicting content, unauthenticated stage aliases, unknown extra links,
+  unsafe storage, or changed directory identity fail closed. Readers never
+  perform this recovery.
 - The first receipt for an assignment unit wins. Exact repeats are replays;
   different assignments for the same unit are conflicts.
 - Readers never create locks or repair keys. They pin one existing provenance
@@ -73,3 +84,14 @@ correctly, or that persistence preceded execution.
 - Missing sources are missing and incomplete. Any integrity, key, race, option,
   or bound failure is degraded and incomplete. `requireComplete` withholds all
   partial rows. `denominatorComplete` remains false in every state.
+
+## Threat Boundary
+
+M460 uses a host-shared symmetric provenance key and pathname-based Node.js
+filesystem operations. It provides integrity and crash recovery for
+cooperating Ashlr processes under the same user account. It is not an
+independent verifier, does not resist a malicious same-user process that can
+read the key or race filesystem pathnames, and provides no rollback-resistant
+historical authority. Independent verifier claims require a separate signing
+principal, public-key verification, descriptor-relative storage operations,
+and a monotonic external anchor.

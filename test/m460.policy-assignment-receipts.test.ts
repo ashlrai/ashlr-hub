@@ -1,6 +1,7 @@
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,11 +9,15 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import {
+  loadExistingProvenanceKey,
+  loadOrCreateKey,
+} from '../src/core/foundry/provenance.js';
 import {
   createPolicyAssignmentReceipt,
   policyAssignmentReceiptRootPath,
@@ -51,6 +56,19 @@ function assignment(overrides: Partial<PolicyAssignmentReceiptInput> = {}): Poli
     reportedSelectedActionId: 'local-coder',
     ...overrides,
   };
+}
+
+function interruptedStagePath(receipt: NonNullable<ReturnType<typeof createPolicyAssignmentReceipt>>): string {
+  const key = loadExistingProvenanceKey();
+  expect(key).not.toBeNull();
+  const token = createHmac('sha256', key!).update(JSON.stringify([
+    'ashlr:policy-assignment-publication-stage:v1',
+    receipt.assignmentUnitId,
+  ]), 'utf8').digest('hex');
+  return join(
+    policyAssignmentReceiptRootPath(),
+    `.${receipt.assignmentUnitId}.${token}.stage`,
+  );
 }
 
 describe('M460 policy assignment receipts', () => {
@@ -160,6 +178,154 @@ describe('M460 policy assignment receipts', () => {
       limitExceeded: false,
     });
     expect(result.receipts).toHaveLength(1);
+  });
+
+  it('recovers the exact authenticated hard-link pair left by an interrupted publication', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const stage = interruptedStagePath(receipt!);
+    linkSync(target, stage);
+
+    expect(readPolicyAssignmentReceipts({ requireComplete: true })).toMatchObject({
+      receipts: [],
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['invalid-file'],
+    });
+    expect(existsSync(stage)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(existsSync(stage)).toBe(false);
+    expect(readPolicyAssignmentReceipts({ requireComplete: true })).toMatchObject({
+      receipts: [receipt],
+      sourceState: 'healthy',
+      complete: true,
+    });
+  });
+
+  it('finishes an authenticated stage left before target publication', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const stage = interruptedStagePath(receipt!);
+    linkSync(target, stage);
+    rmSync(target);
+
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(existsSync(stage)).toBe(false);
+    expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([receipt]);
+  });
+
+  it('resumes a complete authenticated temporary left before stage publication', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const temporary = `${interruptedStagePath(receipt!)}.tmp`;
+    rmSync(target);
+    writeFileSync(temporary, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(existsSync(temporary)).toBe(false);
+    expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([receipt]);
+  });
+
+  it('replaces a private partial temporary from an interrupted write', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const temporary = `${interruptedStagePath(receipt!)}.tmp`;
+    rmSync(target);
+    writeFileSync(temporary, '{"partial":', { mode: 0o600 });
+
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(existsSync(temporary)).toBe(false);
+    expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([receipt]);
+  });
+
+  it('refuses recovery when the interrupted inode has an unknown third link', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const stage = interruptedStagePath(receipt!);
+    const unknown = join(policyAssignmentReceiptRootPath(), '.unknown-link');
+    linkSync(target, stage);
+    linkSync(target, unknown);
+
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('failed');
+    expect(existsSync(stage)).toBe(true);
+    expect(existsSync(unknown)).toBe(true);
+  });
+
+  it('preserves an unauthenticated stage-shaped hardlink', () => {
+    const receipt = createPolicyAssignmentReceipt(assignment());
+    expect(receipt).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
+    const untrustedStage = join(
+      policyAssignmentReceiptRootPath(),
+      `.${receipt!.assignmentUnitId}.${'0'.repeat(64)}.stage`,
+    );
+    linkSync(target, untrustedStage);
+
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('failed');
+    expect(existsSync(untrustedStage)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it('does not publish a conflicting receipt around a stranded authenticated stage', () => {
+    const first = createPolicyAssignmentReceipt(assignment());
+    const conflictingInput = assignment({
+      reportedProbabilityDenominator: 2,
+      reportedEligibleActions: [
+        { actionId: 'codex', actionDefinitionDigest: CODEX_ACTION, probabilityNumerator: 1 },
+        { actionId: 'local-coder', actionDefinitionDigest: LOCAL_ACTION, probabilityNumerator: 1 },
+      ],
+    });
+    const conflicting = createPolicyAssignmentReceipt(conflictingInput);
+    expect(first).not.toBeNull();
+    expect(conflicting).not.toBeNull();
+    expect(conflicting!.assignmentUnitId).toBe(first!.assignmentUnitId);
+    expect(conflicting!.assignmentDigest).not.toBe(first!.assignmentDigest);
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${first!.assignmentUnitId}.json`);
+    const stage = interruptedStagePath(first!);
+    linkSync(target, stage);
+    rmSync(target);
+
+    expect(recordPolicyAssignmentReceipt(conflictingInput)).toBe('conflicted');
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(stage)).toBe(true);
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([first]);
+  });
+
+  it('preserves a conflicting authenticated temporary for its original assignment', () => {
+    const first = createPolicyAssignmentReceipt(assignment());
+    const conflictingInput = assignment({
+      reportedProbabilityDenominator: 2,
+      reportedEligibleActions: [
+        { actionId: 'codex', actionDefinitionDigest: CODEX_ACTION, probabilityNumerator: 1 },
+        { actionId: 'local-coder', actionDefinitionDigest: LOCAL_ACTION, probabilityNumerator: 1 },
+      ],
+    });
+    expect(first).not.toBeNull();
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    const target = join(policyAssignmentReceiptRootPath(), `${first!.assignmentUnitId}.json`);
+    const temporary = `${interruptedStagePath(first!)}.tmp`;
+    rmSync(target);
+    writeFileSync(temporary, `${JSON.stringify(first)}\n`, { mode: 0o600 });
+
+    expect(recordPolicyAssignmentReceipt(conflictingInput)).toBe('conflicted');
+    expect(existsSync(target)).toBe(false);
+    expect(readFileSync(temporary, 'utf8')).toBe(`${JSON.stringify(first)}\n`);
+    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    expect(readPolicyAssignmentReceipts({ requireComplete: true }).receipts).toEqual([first]);
   });
 
   it('retains zero-support candidates for an exact deterministic assignment', () => {

@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -12,6 +12,7 @@ import {
   opendirSync,
   readSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   type Stats,
 } from 'node:fs';
@@ -534,7 +535,11 @@ function privateDirectory(stat: Stats): boolean {
 }
 
 function privateFile(stat: Stats): boolean {
-  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
+  return privateFileWithLinks(stat, 1);
+}
+
+function privateFileWithLinks(stat: Stats, expectedLinks: number): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === expectedLinks &&
     (typeof process.getuid !== 'function' || stat.uid === process.getuid()) &&
     (process.platform === 'win32' || (stat.mode & 0o777) === 0o600);
 }
@@ -601,17 +606,24 @@ function receiptPath(unitId: string): string {
   return join(receiptRoot(), `${unitId}.json`);
 }
 
-function readReceiptFile(path: string, key: Buffer, anchorPath: string): PolicyAssignmentReceiptV1 | null {
+function readReceiptFile(
+  path: string,
+  key: Buffer,
+  anchorPath: string,
+  expectedLinks = 1,
+): PolicyAssignmentReceiptV1 | null {
   let fd: number | undefined;
   try {
     const assurance = assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath });
     if (!assurance.ok) return null;
     const before = lstatSync(path);
-    if (!privateFile(before) || before.size < 2 || before.size > MAX_RECEIPT_BYTES) return null;
+    if (!privateFileWithLinks(before, expectedLinks) ||
+      before.size < 2 || before.size > MAX_RECEIPT_BYTES) return null;
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
     fd = openSync(path, fsConstants.O_RDONLY | noFollow);
     const opened = fstatSync(fd);
-    if (!privateFile(opened) || opened.dev !== before.dev || opened.ino !== before.ino ||
+    if (!privateFileWithLinks(opened, expectedLinks) ||
+      opened.dev !== before.dev || opened.ino !== before.ino ||
       opened.size !== before.size) return null;
     const bytes = Buffer.alloc(opened.size);
     let offset = 0;
@@ -621,10 +633,12 @@ function readReceiptFile(path: string, key: Buffer, anchorPath: string): PolicyA
       offset += read;
     }
     const after = fstatSync(fd);
-    if (!privateFile(after) || after.dev !== opened.dev || after.ino !== opened.ino ||
+    if (!privateFileWithLinks(after, expectedLinks) ||
+      after.dev !== opened.dev || after.ino !== opened.ino ||
       after.size !== opened.size) return null;
     const namedAfter = lstatSync(path);
-    if (!privateFile(namedAfter) || namedAfter.dev !== opened.dev || namedAfter.ino !== opened.ino ||
+    if (!privateFileWithLinks(namedAfter, expectedLinks) ||
+      namedAfter.dev !== opened.dev || namedAfter.ino !== opened.ino ||
       namedAfter.size !== opened.size) return null;
     const finalAssurance = assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath });
     if (!finalAssurance.ok) return null;
@@ -647,14 +661,113 @@ function sameIdentity(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function publicationStageToken(key: Buffer, receipt: PolicyAssignmentReceiptV1): string {
+  return hmacTuple(key, 'ashlr:policy-assignment-publication-stage:v1', [
+    receipt.assignmentUnitId,
+  ]);
+}
+
+function publicationStagePath(
+  directories: ReceiptDirectories,
+  receipt: PolicyAssignmentReceiptV1,
+  key: Buffer,
+): string {
+  return join(
+    directories.receipts,
+    `.${receipt.assignmentUnitId}.${publicationStageToken(key, receipt)}.stage`,
+  );
+}
+
+/**
+ * Complete only the exact publication interrupted around the hard-link
+ * boundary. Recovery runs under the writer lock and mutates only the
+ * host-keyed transaction slot for the expected assignment unit.
+ */
+function recoverInterruptedPublication(
+  directories: ReceiptDirectories,
+  target: string,
+  expected: PolicyAssignmentReceiptV1,
+  key: Buffer,
+): 'none' | 'recovered' | 'conflicted' | 'failed' {
+  try {
+    verifyDirectories(directories);
+    const stage = publicationStagePath(directories, expected, key);
+    const temporary = `${stage}.tmp`;
+    if (existsSync(temporary)) {
+      if (existsSync(stage)) return 'failed';
+      const temporaryIdentity = lstatSync(temporary);
+      if (!privateFile(temporaryIdentity)) return 'failed';
+      const temporaryReceipt = readReceiptFile(temporary, key, directories.home);
+      if (temporaryReceipt) {
+        if (temporaryReceipt.assignmentUnitId !== expected.assignmentUnitId ||
+          !safeDigestEqual(temporaryReceipt.assignmentDigest, expected.assignmentDigest) ||
+          !safeDigestEqual(temporaryReceipt.attestation, expected.attestation)) return 'conflicted';
+        renameSync(temporary, stage);
+        const installedStage = lstatSync(stage);
+        if (!privateFile(installedStage) ||
+          !sameIdentity(installedStage, temporaryIdentity)) return 'failed';
+        fsyncDirectory(directories.receipts);
+      } else {
+        const installedTemporary = lstatSync(temporary);
+        if (!privateFile(installedTemporary) ||
+          !sameIdentity(installedTemporary, temporaryIdentity)) return 'failed';
+        unlinkSync(temporary);
+        fsyncDirectory(directories.receipts);
+      }
+    }
+    if (!existsSync(stage)) return 'none';
+    const targetPresent = existsSync(target);
+    const expectedLinks = targetPresent ? 2 : 1;
+    const stagedIdentity = lstatSync(stage);
+    if (!privateFileWithLinks(stagedIdentity, expectedLinks)) return 'failed';
+    if (targetPresent) {
+      const targetIdentity = lstatSync(target);
+      if (!privateFileWithLinks(targetIdentity, 2) ||
+        !sameIdentity(stagedIdentity, targetIdentity)) return 'failed';
+    }
+    const staged = readReceiptFile(stage, key, directories.home, expectedLinks);
+    if (!staged || staged.assignmentUnitId !== expected.assignmentUnitId) return 'failed';
+    if (!safeDigestEqual(staged.assignmentDigest, expected.assignmentDigest) ||
+      !safeDigestEqual(staged.attestation, expected.attestation)) return 'conflicted';
+
+    if (!targetPresent) {
+      linkSync(stage, target);
+      const targetIdentity = lstatSync(target);
+      const linkedStage = lstatSync(stage);
+      if (!privateFileWithLinks(targetIdentity, 2) ||
+        !privateFileWithLinks(linkedStage, 2) ||
+        !sameIdentity(linkedStage, stagedIdentity) ||
+        !sameIdentity(targetIdentity, linkedStage)) return 'failed';
+      fsyncDirectory(directories.receipts);
+    }
+    const exactStage = lstatSync(stage);
+    const exactTarget = lstatSync(target);
+    if (!privateFileWithLinks(exactStage, 2) ||
+      !privateFileWithLinks(exactTarget, 2) ||
+      !sameIdentity(exactStage, stagedIdentity) ||
+      !sameIdentity(exactStage, exactTarget)) return 'failed';
+    unlinkSync(stage);
+    fsyncDirectory(directories.receipts);
+    verifyDirectories(directories);
+    const recovered = readReceiptFile(target, key, directories.home);
+    return recovered &&
+      safeDigestEqual(recovered.assignmentDigest, expected.assignmentDigest) &&
+      safeDigestEqual(recovered.attestation, expected.attestation)
+      ? 'recovered'
+      : 'failed';
+  } catch {
+    return 'failed';
+  }
+}
+
 function publishReceiptWithoutClobber(
   directories: ReceiptDirectories,
   target: string,
   serialized: string,
-  assignmentUnitId: string,
+  receipt: PolicyAssignmentReceiptV1,
+  key: Buffer,
 ): 'published' | 'exists' {
-  const nonce = randomUUID();
-  const stage = join(directories.receipts, `.${assignmentUnitId}.${nonce}.stage`);
+  const stage = publicationStagePath(directories, receipt, key);
   const temporary = `${stage}.tmp`;
   let stagedIdentity: Stats | undefined;
   try {
@@ -725,6 +838,10 @@ export function recordPolicyAssignmentReceipt(
   try {
     verifyDirectories(directories);
     const target = receiptPath(receipt.assignmentUnitId);
+    const recovery = recoverInterruptedPublication(directories, target, receipt, key);
+    if (recovery === 'recovered') return 'recorded';
+    if (recovery === 'conflicted') return 'conflicted';
+    if (recovery === 'failed') return 'failed';
     if (existsSync(target)) {
       const existing = readReceiptFile(target, key, directories.home);
       if (!existing) return 'failed';
@@ -739,7 +856,8 @@ export function recordPolicyAssignmentReceipt(
       directories,
       target,
       serialized,
-      receipt.assignmentUnitId,
+      receipt,
+      key,
     );
     if (publication === 'exists') {
       const existing = readReceiptFile(target, key, directories.home);
