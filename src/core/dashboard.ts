@@ -61,11 +61,11 @@ import { pendingCount as inboxPendingCount } from './inbox/store.js';
 // static import here would crash them at module-load before any try/catch runs.
 // Each call below is wrapped in its own try/catch and degrades to its empty/
 // zeroed default; NO new disk scan is introduced, the M13 index roll-up stands.
-// M24: load daemon state for snapshot — bounded, never-throws
-// Import is a lazy dynamic require so the module resolves only at runtime;
-// if core/daemon/state.ts is absent (e.g. earlier milestone) it degrades to
-// undefined via the try/catch below.
-import { loadDaemonState } from './daemon/state.js';
+// M24: consistency-aware daemon observation — bounded, never-throws.
+import {
+  readPublicDaemonObservation,
+  type PublicDaemonObservation,
+} from './daemon/public-observation.js';
 import { getFrontierUsageSync } from './usage/frontier-usage.js';
 import type { FrontierUsage } from './usage/frontier-usage.js';
 import type { ProductionSummary, IntelligenceSummary } from './types.js';
@@ -86,10 +86,15 @@ export interface DashboardIntelligenceSummary extends IntelligenceSummary {
   decisionSourceQuality: DecisionSourceQuality;
 }
 
+export interface DashboardDaemonObservation extends PublicDaemonObservation {
+  pendingProposals: number;
+}
+
 export type DashboardSnapshotWithSourceQuality = Omit<
   DashboardSnapshot,
   'production' | 'intelligence'
 > & {
+  daemonObservation: DashboardDaemonObservation;
   production?: DashboardProductionSummary;
   intelligence?: DashboardIntelligenceSummary;
 };
@@ -867,20 +872,9 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
 
 
   // ── Daemon roll-up (M24) ─────────────────────────────────────────────────
-  // loadDaemonState() is bounded, synchronous, never-throws — returns a
-  // fresh zeroed state on missing/corrupt file. We wrap defensively anyway.
+  // Missing state is a proven fresh/stopped observation. Broken or unsafe
+  // evidence remains unknown so consumers cannot infer stopped or zero spend.
   // We reuse inboxPendingCount() already computed above for pendingProposals.
-  let daemonRunning = false;
-  let daemonSpentUsd = 0;
-
-  try {
-    const ds = loadDaemonState();
-    daemonRunning = ds.running;
-    daemonSpentUsd = ds.todaySpentUsd;
-  } catch {
-    // Degrade to zeroed fields — daemon not yet initialised.
-  }
-
   // ── Fleet control-plane roll-up (OPTIONAL) ───────────────────────────────
   // Lazily imported so dashboard.ts stays tolerant of fleet-source failures.
   // This feeds Fleet Dashboard with the same read-only queue/backend/merge
@@ -892,6 +886,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   } catch {
     fleet = undefined;
   }
+  const daemonObservation = readPublicDaemonObservation(fleet?.daemon);
 
   // ── M194 frontier usage roll-up ──────────────────────────────────────────
   // getFrontierUsageSync reads the quota ledger + codex session files +
@@ -979,10 +974,16 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     inbox: {
       pending: inboxPending,
     },
-    // M24: daemon status — READ-ONLY surface; absent == not running / no spend.
+    // Compatibility-only legacy projection. New consumers must use
+    // daemonObservation before interpreting stopped or zero values.
     daemon: {
-      running: daemonRunning,
-      todaySpentUsd: daemonSpentUsd,
+      running: daemonObservation.running ?? false,
+      todaySpentUsd: daemonObservation.todaySpentUsd ?? 0,
+      pendingProposals: inboxPending,
+    },
+    // M24: authoritative provenance-bearing daemon observation.
+    daemonObservation: {
+      ...daemonObservation,
       pendingProposals: inboxPending,
     },
     ...(fleet !== undefined ? { fleet } : {}),
