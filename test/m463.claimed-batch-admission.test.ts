@@ -126,7 +126,7 @@ function admittedReceipt(value: ClaimedBatchAdmissionInput): ClaimedBatchAdmissi
   return result.receipt!;
 }
 
-describe.runIf(process.platform !== 'win32')('M461 claimed-batch admission', () => {
+describe.runIf(process.platform !== 'win32')('M463 claimed-batch admission', () => {
   let home: string;
   let repo: string;
 
@@ -783,7 +783,7 @@ describe.runIf(process.platform !== 'win32')('M461 claimed-batch admission', () 
   });
 });
 
-describe.runIf(process.platform === 'win32')('M461 Windows refusal', () => {
+describe.runIf(process.platform === 'win32')('M463 Windows refusal', () => {
   let home: string;
   let repo: string;
 
