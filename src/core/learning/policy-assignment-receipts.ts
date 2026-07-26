@@ -664,7 +664,7 @@ function sameIdentity(left: Stats, right: Stats): boolean {
 function publicationStageToken(key: Buffer, receipt: PolicyAssignmentReceiptV1): string {
   return hmacTuple(key, 'ashlr:policy-assignment-publication-stage:v1', [
     receipt.assignmentUnitId,
-  ]);
+  ]).slice(0, 32);
 }
 
 function publicationStagePath(
