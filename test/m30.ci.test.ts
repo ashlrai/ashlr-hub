@@ -156,6 +156,8 @@ describe('M30 CI workflow', () => {
       'test/m457.external-skill-artifact-firewall.test.ts';
     const policyAssignmentReceiptsTest =
       'test/m460.policy-assignment-receipts.test.ts';
+    const claimedBatchAdmissionTest =
+      'test/m461.claimed-batch-admission.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -202,6 +204,7 @@ describe('M30 CI workflow', () => {
         skillRetrievalCalibrationTest,
         externalSkillArtifactFirewallTest,
         policyAssignmentReceiptsTest,
+        claimedBatchAdmissionTest,
       ],
       [
         'test/activation-readiness-package.test.ts',
@@ -232,6 +235,7 @@ describe('M30 CI workflow', () => {
       skillRetrievalCalibrationTest,
       externalSkillArtifactFirewallTest,
       policyAssignmentReceiptsTest,
+      claimedBatchAdmissionTest,
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
@@ -463,6 +467,7 @@ describe('M30 CI workflow', () => {
       skillRetrievalCalibrationTest,
       externalSkillArtifactFirewallTest,
       policyAssignmentReceiptsTest,
+      claimedBatchAdmissionTest,
       'test/m426.sandbox-reservation-identity.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
