@@ -376,7 +376,7 @@ describe('M349 secret safety invariants', () => {
           basis: 'run-proposal-outcome',
           learningLabel: {
             schemaVersion: 1,
-            classifierVersion: 'attempt-shape-v1',
+            classifierVersion: 'attempt-shape-v2',
             authoritative: true,
             learningKind: 'proposal-created',
             policySuppressed: false,
@@ -396,6 +396,7 @@ describe('M349 secret safety invariants', () => {
             rawFileContents,
             rawArgv,
           } as never,
+          labelOrigin: 'stored-current',
           runEventSummary: {
             runId: 'run-m349-attempt',
             status: 'done',
@@ -498,6 +499,8 @@ describe('M349 secret safety invariants', () => {
     });
     expect(records[0]).toMatchObject({
       learningKind: 'proposal-created',
+      labelOrigin: 'stored-current',
+      labelAuthoritative: true,
       diagnosticAttempt: true,
       diagnosticNoProposal: false,
       policySuppressed: false,
