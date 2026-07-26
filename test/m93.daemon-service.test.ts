@@ -324,6 +324,21 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.filePath).toBe(
       path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'),
     );
+    expect(def.launchdRuntime).toEqual({
+      program: FAKE_NODE,
+      arguments: [
+        FAKE_NODE,
+        FAKE_BIN,
+        'daemon',
+        'start',
+        '--budget',
+        '5',
+        '--interval',
+        '1800000',
+        '--parallel',
+        '1',
+      ],
+    });
   });
 
   it('plist content is well-formed XML with correct Label', () => {
@@ -1318,54 +1333,75 @@ describe('uninstall() — mocked spawnSync', () => {
 describe('serviceStatus() — mocked OS query output', () => {
   const spawnSyncMock = cp.spawnSync as ReturnType<typeof vi.fn>;
   const existsSyncMock = fs.existsSync as ReturnType<typeof vi.fn>;
+  const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
+  const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
+  const launchdArguments = [
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    '--interval', '1800000', '--parallel', '1',
+  ];
+  const launchdPrint = (state: string, pid?: number): string => `${[
+    `${launchdTarget} = {`,
+    `\tpath = ${launchdPlist}`,
+    `\tstate = ${state}`,
+    `\tprogram = ${FAKE_NODE}`,
+    '\targuments = {',
+    ...launchdArguments.map((argument) => `\t\t${argument}`),
+    '\t}',
+    ...(pid === undefined ? [] : [`\tpid = ${pid}`]),
+    '}',
+  ].join('\n')}\n`;
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('darwin: running=true when launchctl list returns PID', () => {
+  it('darwin: running=true for an exact native running state and PID', () => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({
       status: 0,
-      stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+      stdout: launchdPrint('running', 12345),
       stderr: '',
     });
     const s = serviceStatus(baseOpts('darwin'));
     expect(s.installed).toBe(true);
     expect(s.running).toBe(true);
+    expect(s.runtimeState).toBe('running');
     expect(s.platformSpec).toBe('launchd');
   });
 
-  it('darwin: running=false when launchctl list shows PID = 0', () => {
+  it('darwin: runtime is unknown when native running state has PID zero', () => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({
       status: 0,
-      stdout: '{\n\t"PID" = 0;\n}',
+      stdout: launchdPrint('running', 0),
       stderr: '',
     });
     const s = serviceStatus(baseOpts('darwin'));
     expect(s.running).toBe(false);
+    expect(s.runtimeState).toBe('unknown');
     expect(s.platformSpec).toBe('launchd');
   });
 
-  it('darwin: running=false when launchctl list has no PID after a clean exit', () => {
+  it('darwin: exact loaded waiting state is ready without being running', () => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({
       status: 0,
-      stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+      stdout: launchdPrint('waiting'),
       stderr: '',
     });
     const s = serviceStatus(baseOpts('darwin'));
     expect(s.running).toBe(false);
+    expect(s.runtimeState).toBe('ready');
     expect(s.platformSpec).toBe('launchd');
   });
 
-  it('darwin: running=false when launchctl exits non-zero', () => {
+  it('darwin: proven absent launchd job is stopped', () => {
     existsSyncMock.mockReturnValue(false);
     spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'Could not find service' });
     const s = serviceStatus(baseOpts('darwin'));
     expect(s.running).toBe(false);
     expect(s.installed).toBe(false);
+    expect(s.runtimeState).toBe('stopped');
   });
 
   it('linux: running=true when systemctl is-active returns "active"', () => {
@@ -1438,6 +1474,33 @@ describe('ensureRunning() — mocked OS activation', () => {
   const spawnSyncMock = cp.spawnSync as ReturnType<typeof vi.fn>;
   const existsSyncMock = fs.existsSync as ReturnType<typeof vi.fn>;
   const lstatSyncMock = fs.lstatSync as ReturnType<typeof vi.fn>;
+  const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
+  const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
+  const launchdArguments = [
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    '--interval', '1800000', '--parallel', '1',
+  ];
+  const launchdPrint = (
+    state: 'running' | 'waiting' | 'not running' | 'exited' | 'stopped',
+    options: {
+      path?: string;
+      program?: string;
+      arguments?: string[];
+      pid?: number;
+      extra?: string[];
+    } = {},
+  ): string => `${[
+    `${launchdTarget} = {`,
+    `\tpath = ${options.path ?? launchdPlist}`,
+    `\tstate = ${state}`,
+    `\tprogram = ${options.program ?? FAKE_NODE}`,
+    '\targuments = {',
+    ...(options.arguments ?? launchdArguments).map((argument) => `\t\t${argument}`),
+    '\t}',
+    ...(options.pid === undefined ? [] : [`\tpid = ${options.pid}`]),
+    ...(options.extra ?? []),
+    '}',
+  ].join('\n')}\n`;
 
   beforeEach(() => {
     spawnSyncMock.mockReset();
@@ -1466,18 +1529,18 @@ describe('ensureRunning() — mocked OS activation', () => {
     spawnSyncMock
       .mockReturnValueOnce({
         status: 0,
-        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stdout: launchdPrint('waiting'),
         stderr: '',
       })
       .mockReturnValueOnce({
         status: 0,
-        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stdout: launchdPrint('waiting'),
         stderr: '',
       })
       .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
       .mockReturnValueOnce({
         status: 0,
-        stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+        stdout: launchdPrint('running', { pid: 12345 }),
         stderr: '',
       });
 
@@ -1491,7 +1554,7 @@ describe('ensureRunning() — mocked OS activation', () => {
     }, expect.any(Function));
     expect(spawnSyncMock).toHaveBeenCalledWith(
       'launchctl',
-      ['kickstart', '-k', expect.stringMatching(/^gui\/\d+\/ai\.ashlr\.daemon$/)],
+      ['kickstart', expect.stringMatching(/^gui\/\d+\/ai\.ashlr\.daemon$/)],
       expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
     );
   });
@@ -1499,7 +1562,7 @@ describe('ensureRunning() — mocked OS activation', () => {
   it('darwin: does not kickstart when launchd already has a PID', async () => {
     spawnSyncMock.mockReturnValueOnce({
       status: 0,
-      stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+      stdout: launchdPrint('running', { pid: 12345 }),
       stderr: '',
     });
 
@@ -1513,12 +1576,12 @@ describe('ensureRunning() — mocked OS activation', () => {
     spawnSyncMock
       .mockReturnValueOnce({
         status: 0,
-        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stdout: launchdPrint('waiting'),
         stderr: '',
       })
       .mockReturnValueOnce({
         status: 0,
-        stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+        stdout: launchdPrint('running', { pid: 12345 }),
         stderr: '',
       });
 
@@ -1528,6 +1591,140 @@ describe('ensureRunning() — mocked OS activation', () => {
     expect(spawnSyncMock).toHaveBeenCalledTimes(2);
     expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) =>
       args.includes('kickstart'))).toBe(false);
+  });
+
+  it.each([
+    {
+      name: 'access denial',
+      response: { status: 1, stdout: '', stderr: 'Operation not permitted' },
+    },
+    {
+      name: 'process error',
+      response: { status: null, stdout: '', stderr: '', error: new Error('spawn timeout') },
+    },
+    {
+      name: 'malformed success output',
+      response: { status: 0, stdout: 'unexpected output', stderr: '' },
+    },
+    {
+      name: 'familiar but invalid native state',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting').replace('state = waiting', 'state = garbage'),
+        stderr: '',
+      },
+    },
+    {
+      name: 'wrong plist authority',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting', { path: '/tmp/replaced.plist' }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'wrong cached program',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting', { program: '/tmp/replaced-node' }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'wrong cached arguments',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting', {
+          arguments: [FAKE_NODE, '/tmp/replaced-bin', 'daemon', 'start'],
+        }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'duplicate native state',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting', { extra: ['\tstate = running'] }),
+        stderr: '',
+      },
+    },
+    {
+      name: 'contradictory success stderr',
+      response: {
+        status: 0,
+        stdout: launchdPrint('waiting'),
+        stderr: 'Operation not permitted',
+      },
+    },
+    {
+      name: 'zero running PID',
+      response: {
+        status: 0,
+        stdout: launchdPrint('running', { pid: 0 }),
+        stderr: '',
+      },
+    },
+  ])('darwin: treats $name as unknown and never kickstarts', async ({ response }) => {
+    spawnSyncMock.mockReturnValueOnce(response);
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status).toMatchObject({ running: false, runtimeState: 'unknown' });
+    expect(withServiceFileTransactionLockMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) =>
+      args.includes('kickstart'))).toBe(false);
+  });
+
+  it('darwin: treats an ambiguous locked recheck as unknown and never kickstarts', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: launchdPrint('waiting'),
+        stderr: '',
+      })
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '',
+        stderr: 'Operation not permitted',
+      });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status).toMatchObject({ running: false, runtimeState: 'unknown' });
+    expect(withServiceFileTransactionLockMock).toHaveBeenCalledOnce();
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+    expect(spawnSyncMock.mock.calls.some(([, args]: [string, string[]]) =>
+      args.includes('kickstart'))).toBe(false);
+  });
+
+  it('darwin: keeps a failed non-forcing kickstart fail-closed', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ status: 0, stdout: launchdPrint('waiting'), stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: launchdPrint('waiting'), stderr: '' })
+      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'service changed state' });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status).toMatchObject({ running: false, runtimeState: 'ready' });
+    expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+    const kickstart = spawnSyncMock.mock.calls[2] as [string, string[]];
+    expect(kickstart[1]).toEqual(['kickstart', launchdTarget]);
+    expect(kickstart[1]).not.toContain('-k');
+  });
+
+  it('darwin: withholds malformed post-kickstart state without retrying', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ status: 0, stdout: launchdPrint('waiting'), stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: launchdPrint('waiting'), stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: 'truncated', stderr: '' });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status).toMatchObject({ running: false, runtimeState: 'unknown' });
+    expect(spawnSyncMock).toHaveBeenCalledTimes(4);
+    expect(spawnSyncMock.mock.calls.filter(([, args]: [string, string[]]) =>
+      args.includes('kickstart'))).toHaveLength(1);
   });
 
   it('linux: starts an inactive installed user unit', async () => {
