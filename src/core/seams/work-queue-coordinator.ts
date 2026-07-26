@@ -33,7 +33,7 @@ import { SharedStore } from '../fleet/shared-store.js';
 import type { QueueClaimCooldownPolicy, QueueClaimRef } from '../fleet/shared-store.js';
 import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { hostname } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
   id: 'workQueueCoordinator' as const,
@@ -41,6 +41,27 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
   delegatesTo: 'core/fleet/worked-ledger.ts + core/fleet/shared-store.ts',
   summary: 'Work-item claim/skip coordination (LOCAL = per-machine; SHARED = multi-machine filesystem lease).',
 };
+
+export interface QueueClaimGeneration {
+  readonly itemId: string;
+  readonly generationId: string;
+}
+
+export interface ClaimedWorkItem {
+  readonly item: WorkItem;
+  readonly claim: QueueClaimGeneration;
+}
+
+function queueClaimGenerationId(ref: QueueClaimRef): string {
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:queue-claim-generation:v1',
+    ref.queueId,
+    ref.itemId,
+    ref.machineId,
+    ref.ownerToken,
+    ref.epoch,
+  ]), 'utf8').digest('hex');
+}
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -62,15 +83,35 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
  */
 export interface WorkQueueCoordinator {
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[];
+  claimItemsWithGenerations(
+    candidates: WorkItem[],
+    count: number,
+    machineId: string,
+  ): ClaimedWorkItem[];
   claimItemsByLane(
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
     machineId: string,
     cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[];
+  claimItemsByLaneWithGenerations(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    machineId: string,
+    cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
+  ): ClaimedWorkItem[];
   renew(itemIds: string[], machineId: string): string[];
   /** Return every item whose current claim still authorizes this coordinator. */
   fence(itemIds: string[], machineId: string): string[];
+  /** Fence only the exact claim generations supplied by the selection call. */
+  fenceClaimGenerations(
+    expected: readonly QueueClaimGeneration[],
+    machineId: string,
+  ): QueueClaimGeneration[];
+  /** Release only exact claimed generations; executing generations are retained. */
+  releaseClaimGenerations(expected: readonly QueueClaimGeneration[], machineId: string): void;
+  /** Cross the pre-effect boundary for one exact selected generation. */
+  beginClaimGenerationExecution(expected: QueueClaimGeneration, machineId: string): boolean;
   beginExecution(itemId: string, machineId: string): boolean;
   /** Clear an exact executing claim after a terminal result with no cooldown. */
   settleClaim(claimItemId: string, machineId: string): boolean;
@@ -97,19 +138,57 @@ export interface WorkQueueCoordinator {
  *    (daemon loop) for cooldown — but shouldSkip is also provided for seam parity.
  *  - shouldSkip: delegates to the LOCAL per-machine worked-ledger.
  *  - recordOutcome: writes to the LOCAL per-machine worked-ledger.
- *  - release: no-op (single machine never needs to un-claim).
+ *  - release: clears only the in-memory evidence generation; there is no
+ *    cross-machine claim to mutate.
  *
  * ZERO behavior change vs. today.
  */
 export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
-  claimItems(candidates: WorkItem[], count: number, _machineId: string): WorkItem[] {
-    return candidates.slice(0, count);
+  private readonly claimGenerations = new Map<string, {
+    machineId: string;
+    generationId: string;
+    phase: 'claimed' | 'executing';
+  }>();
+
+  private retainClaimGenerations(items: WorkItem[], machineId: string): WorkItem[] {
+    for (const item of items) {
+      if (this.claimGenerations.has(item.id)) continue;
+      this.claimGenerations.set(item.id, {
+        machineId,
+        generationId: createHash('sha256').update(JSON.stringify([
+          'ashlr:local-queue-claim-generation:v1',
+          item.id,
+          machineId,
+          randomUUID(),
+        ]), 'utf8').digest('hex'),
+        phase: 'claimed',
+      });
+    }
+    return items;
+  }
+
+  claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
+    return this.retainClaimGenerations(candidates.slice(0, count), machineId);
+  }
+
+  claimItemsWithGenerations(
+    candidates: WorkItem[],
+    count: number,
+    machineId: string,
+  ): ClaimedWorkItem[] {
+    const items = this.claimItems(candidates, count, machineId);
+    return items.flatMap((item) => {
+      const claim = this.claimGenerations.get(item.id);
+      return claim?.machineId === machineId
+        ? [{ item, claim: { itemId: item.id, generationId: claim.generationId } }]
+        : [];
+    });
   }
 
   claimItemsByLane(
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
-    _machineId: string,
+    machineId: string,
     _cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
   ): WorkItem[] {
     const claimed: WorkItem[] = [];
@@ -125,11 +204,30 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
       }
       if (claimed.length >= count) break;
     }
-    return claimed;
+    return this.retainClaimGenerations(claimed, machineId);
   }
 
-  release(_itemIds: string[], _machineId: string): void {
-    // Single machine — no cross-machine claim to release.
+  claimItemsByLaneWithGenerations(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    machineId: string,
+    cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
+  ): ClaimedWorkItem[] {
+    const items = this.claimItemsByLane(lanes, count, machineId, cooldownPolicies);
+    return items.flatMap((item) => {
+      const claim = this.claimGenerations.get(item.id);
+      return claim?.machineId === machineId
+        ? [{ item, claim: { itemId: item.id, generationId: claim.generationId } }]
+        : [];
+    });
+  }
+
+  release(itemIds: string[], machineId: string): void {
+    for (const itemId of itemIds) {
+      if (this.claimGenerations.get(itemId)?.machineId === machineId) {
+        this.claimGenerations.delete(itemId);
+      }
+    }
   }
 
   renew(_itemIds: string[], _machineId: string): string[] {
@@ -141,25 +239,74 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     return [...itemIds];
   }
 
-  beginExecution(_itemId: string, _machineId: string): boolean {
+  fenceClaimGenerations(
+    expected: readonly QueueClaimGeneration[],
+    machineId: string,
+  ): QueueClaimGeneration[] {
+    return expected.flatMap((claim) => {
+      const generation = this.claimGenerations.get(claim.itemId);
+      return generation?.machineId === machineId &&
+        generation.phase === 'claimed' &&
+        generation.generationId === claim.generationId
+        ? [claim]
+        : [];
+    });
+  }
+
+  releaseClaimGenerations(
+    expected: readonly QueueClaimGeneration[],
+    machineId: string,
+  ): void {
+    for (const claim of expected) {
+      const generation = this.claimGenerations.get(claim.itemId);
+      if (
+        generation?.machineId === machineId &&
+        generation.phase === 'claimed' &&
+        generation.generationId === claim.generationId
+      ) this.claimGenerations.delete(claim.itemId);
+    }
+  }
+
+  beginClaimGenerationExecution(expected: QueueClaimGeneration, machineId: string): boolean {
+    const generation = this.claimGenerations.get(expected.itemId);
+    if (
+      generation?.machineId !== machineId ||
+      generation.phase !== 'claimed' ||
+      generation.generationId !== expected.generationId
+    ) return false;
+    generation.phase = 'executing';
     return true;
   }
 
-  settleClaim(_claimItemId: string, _machineId: string): boolean {
+  beginExecution(itemId: string, machineId: string): boolean {
+    const generation = this.claimGenerations.get(itemId);
+    if (!generation) return true;
+    return this.beginClaimGenerationExecution({
+      itemId,
+      generationId: generation.generationId,
+    }, machineId);
+  }
+
+  settleClaim(claimItemId: string, machineId: string): boolean {
+    this.release([claimItemId], machineId);
     return true;
   }
 
-  recordOutcome(itemId: string, outcome: WorkedOutcome, _machineId: string): boolean {
-    return localRecord(itemId, outcome);
+  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean {
+    const recorded = localRecord(itemId, outcome);
+    if (recorded) this.release([itemId], machineId);
+    return recorded;
   }
 
   recordClaimOutcome(
     _claimItemId: string,
     workedItemId: string,
     outcome: WorkedOutcome,
-    _machineId: string,
+    machineId: string,
   ): boolean {
-    return localRecord(workedItemId, outcome);
+    const recorded = localRecord(workedItemId, outcome);
+    if (recorded) this.release([_claimItemId], machineId);
+    return recorded;
   }
 
   shouldSkip(itemId: string, cooldownMs: number): boolean {
@@ -229,6 +376,20 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return candidates.filter((item) => claimedSet.has(item.id));
   }
 
+  claimItemsWithGenerations(
+    candidates: WorkItem[],
+    count: number,
+    machineId: string,
+  ): ClaimedWorkItem[] {
+    const items = this.claimItems(candidates, count, machineId);
+    return items.flatMap((item) => {
+      const ref = this.claims.get(item.id);
+      return ref?.machineId === machineId
+        ? [{ item, claim: { itemId: item.id, generationId: queueClaimGenerationId(ref) } }]
+        : [];
+    });
+  }
+
   claimItemsByLane(
     lanes: Array<{ candidates: WorkItem[]; limit: number }>,
     count: number,
@@ -254,6 +415,26 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return claimedIds.flatMap((id) => {
       const item = byId.get(id);
       return item ? [item] : [];
+    });
+  }
+
+  claimItemsByLaneWithGenerations(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    machineId: string,
+    cooldownPolicies?: ReadonlyMap<string, QueueClaimCooldownPolicy>,
+  ): ClaimedWorkItem[] {
+    const items = this.claimItemsByLane(
+      lanes,
+      count,
+      machineId,
+      cooldownPolicies,
+    );
+    return items.flatMap((item) => {
+      const ref = this.claims.get(item.id);
+      return ref?.machineId === machineId
+        ? [{ item, claim: { itemId: item.id, generationId: queueClaimGenerationId(ref) } }]
+        : [];
     });
   }
 
@@ -289,23 +470,89 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return this.renew(itemIds, machineId);
   }
 
-  beginExecution(itemId: string, machineId: string): boolean {
+  fenceClaimGenerations(
+    expected: readonly QueueClaimGeneration[],
+    machineId: string,
+  ): QueueClaimGeneration[] {
+    const refs = expected.flatMap((claim) => {
+      const ref = this.claims.get(claim.itemId);
+      return ref?.machineId === machineId &&
+        ref.phase === 'claimed' &&
+        queueClaimGenerationId(ref) === claim.generationId
+        ? [ref]
+        : [];
+    });
+    const renewed = this.store.renewClaims(refs);
+    const renewedIds = new Set(renewed.map((ref) => ref.itemId));
+    const validated = this.store.validateClaims(
+      refs.filter((ref) => !renewedIds.has(ref.itemId)),
+    ).filter((ref) => ref.phase === 'claimed');
+    const authoritative = [...renewed, ...validated];
+    for (const ref of authoritative) this.claims.set(ref.itemId, ref);
+    return authoritative.map((ref) => ({
+      itemId: ref.itemId,
+      generationId: queueClaimGenerationId(ref),
+    }));
+  }
+
+  releaseClaimGenerations(
+    expected: readonly QueueClaimGeneration[],
+    machineId: string,
+  ): void {
+    if (!this.authorityEnabled) return;
+    const refs = expected.flatMap((claim) => {
+      const ref = this.claims.get(claim.itemId);
+      return ref?.machineId === machineId &&
+        ref.phase === 'claimed' &&
+        queueClaimGenerationId(ref) === claim.generationId
+        ? [ref]
+        : [];
+    });
+    for (const itemId of this.store.releaseClaims(refs)) {
+      this.claims.delete(itemId);
+      this.claimWorkedItemIds.delete(itemId);
+    }
+  }
+
+  beginClaimGenerationExecution(
+    expected: QueueClaimGeneration,
+    machineId: string,
+  ): boolean {
     if (!this.authorityEnabled) return false;
-    let ref = this.claims.get(itemId);
-    if (!ref || ref.machineId !== machineId) return false;
+    let ref = this.claims.get(expected.itemId);
+    if (
+      !ref ||
+      ref.machineId !== machineId ||
+      ref.phase !== 'claimed' ||
+      queueClaimGenerationId(ref) !== expected.generationId
+    ) return false;
     const deadline = this.mutationDeadline();
     for (;;) {
       const result = this.store.beginClaimExecutionResult(ref);
       if (result.status === 'success') {
-        this.claims.set(itemId, result.value);
+        this.claims.set(expected.itemId, result.value);
         return true;
       }
       if (result.status === 'authority-lost' || Date.now() >= deadline) return false;
       const refreshed = this.refreshClaim(ref);
-      if (!refreshed) return false;
+      if (
+        !refreshed ||
+        refreshed.phase !== 'claimed' ||
+        queueClaimGenerationId(refreshed) !== expected.generationId
+      ) return false;
       ref = refreshed;
-      this.claims.set(itemId, ref);
+      this.claims.set(expected.itemId, ref);
     }
+  }
+
+  beginExecution(itemId: string, machineId: string): boolean {
+    const ref = this.claims.get(itemId);
+    return ref?.machineId === machineId
+      ? this.beginClaimGenerationExecution({
+          itemId,
+          generationId: queueClaimGenerationId(ref),
+        }, machineId)
+      : false;
   }
 
   settleClaim(claimItemId: string, machineId: string): boolean {

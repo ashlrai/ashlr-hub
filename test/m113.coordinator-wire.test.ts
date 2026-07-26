@@ -303,6 +303,29 @@ describe('LocalWorkQueueCoordinator unit', () => {
     const coord = new LocalWorkQueueCoordinator();
     expect(() => coord.release(['a', 'b'], 'machine-x')).not.toThrow();
   });
+
+  it('retains one opaque generation per local claim and rotates after release', () => {
+    const coord = new LocalWorkQueueCoordinator();
+    const candidate = makeItem('generation-local', tmpRepo);
+    const selected = coord.claimItemsWithGenerations([candidate], 1, 'machine-x');
+    const first = coord.fenceClaimGenerations([selected[0]!.claim], 'machine-x');
+    const replay = coord.fenceClaimGenerations([selected[0]!.claim], 'machine-x');
+
+    expect(first).toEqual(replay);
+    expect(first[0]?.generationId).toMatch(/^[a-f0-9]{64}$/);
+    expect(coord.claimItemsWithGenerations([candidate], 1, 'machine-x')[0]?.claim)
+      .toEqual(selected[0]?.claim);
+    coord.releaseClaimGenerations([selected[0]!.claim], 'machine-x');
+    expect(coord.fenceClaimGenerations([selected[0]!.claim], 'machine-x')).toEqual([]);
+
+    const next = coord.claimItemsWithGenerations([candidate], 1, 'machine-x');
+    expect(next[0]?.claim.generationId)
+      .not.toBe(first[0]?.generationId);
+    expect(coord.beginClaimGenerationExecution(next[0]!.claim, 'machine-x')).toBe(true);
+    expect(coord.fenceClaimGenerations([next[0]!.claim], 'machine-x')).toEqual([]);
+    coord.releaseClaimGenerations([next[0]!.claim], 'machine-x');
+    expect(coord.settleClaim(candidate.id, 'machine-x')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -542,9 +565,47 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       const renewalHandle = intervalSpy.mock.results.find((result) => result.type === 'return')?.value;
       expect(renewalHandle).toBeDefined();
       expect(clearIntervalSpy).toHaveBeenCalledWith(renewalHandle);
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
     } finally {
       intervalSpy.mockRestore();
       clearIntervalSpy.mockRestore();
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses and releases the whole batch when the initial fence is partial', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-partial-fence-'));
+    const fenceSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'fence')
+      .mockImplementation((itemIds) => itemIds.slice(0, 1));
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+            trustedCoherentStorage: true,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [
+        makeItem('partial-fence-1', tmpRepo, { score: 3 }),
+        makeItem('partial-fence-2', tmpRepo, { score: 2 }),
+      ];
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(mockRouteBackend).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
+    } finally {
+      fenceSpy.mockRestore();
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
   });
@@ -773,6 +834,36 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       // Now B can claim it
       const claimedByBAfterRelease = coordB.claimItems(items, 1, 'B');
       expect(claimedByBAfterRelease.map(i => i.id)).toContain('job-x');
+    } finally {
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps shared claim generation stable across renewals and rotates after reclaim', () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-generation-'));
+    try {
+      const leaseMs = 5 * 60 * 1000;
+      const storeA = new SharedStore(sharedDir, leaseMs);
+      const storeB = new SharedStore(sharedDir, leaseMs);
+      const coordA = new SharedWorkQueueCoordinator(storeA, 'A', leaseMs, true);
+      const coordB = new SharedWorkQueueCoordinator(storeB, 'B', leaseMs, true);
+      const candidate = makeItem('generation-shared', tmpRepo);
+
+      const selected = coordA.claimItemsWithGenerations([candidate], 1, 'A');
+      expect(selected).toHaveLength(1);
+      const first = coordA.fenceClaimGenerations([selected[0]!.claim], 'A');
+      const renewed = coordA.fenceClaimGenerations([selected[0]!.claim], 'A');
+      expect(first).toEqual(renewed);
+      expect(first[0]?.generationId).toMatch(/^[a-f0-9]{64}$/);
+
+      coordA.releaseClaimGenerations([selected[0]!.claim], 'A');
+      const reclaimedSelection = coordB.claimItemsWithGenerations([candidate], 1, 'B');
+      expect(reclaimedSelection).toHaveLength(1);
+      const reclaimed = coordB.fenceClaimGenerations([reclaimedSelection[0]!.claim], 'B');
+      expect(reclaimed[0]?.generationId).not.toBe(first[0]?.generationId);
+      expect(coordA.fenceClaimGenerations([selected[0]!.claim], 'A')).toEqual([]);
+      coordA.releaseClaimGenerations([selected[0]!.claim], 'A');
+      expect(coordB.fenceClaimGenerations([reclaimedSelection[0]!.claim], 'B')).toHaveLength(1);
     } finally {
       fs.rmSync(sharedDir, { recursive: true, force: true });
     }
