@@ -64,7 +64,7 @@ function interruptedStagePath(receipt: NonNullable<ReturnType<typeof createPolic
   const token = createHmac('sha256', key!).update(JSON.stringify([
     'ashlr:policy-assignment-publication-stage:v1',
     receipt.assignmentUnitId,
-  ]), 'utf8').digest('hex');
+  ]), 'utf8').digest('hex').slice(0, 32);
   return join(
     policyAssignmentReceiptRootPath(),
     `.${receipt.assignmentUnitId}.${token}.stage`,
