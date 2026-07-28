@@ -240,6 +240,18 @@ function fleetDaemonState(daemon) {
   return daemon?.running === true ? 'running' : 'stopped';
 }
 
+function daemonServiceActivity(service) {
+  if (service?.running === true) return 'running';
+  if (
+    service?.platformSpec === 'schtasks' &&
+    (service?.runtimeState === 'running' || service?.runtimeState === 'queued')
+  ) {
+    return 'scheduler-active-unverified';
+  }
+  if (service?.runtimeState === 'unknown') return 'unknown';
+  return 'inactive';
+}
+
 function fleetControlButton(fleet, size = '') {
   const state = fleetKillState(fleet);
   return state === 'unknown' ? null : fleetPauseResumeButton(state === 'active', size);
@@ -3998,14 +4010,20 @@ function renderControl() {
   const killState = fleetKillState(d.fleet);
   const isKilled = killState === 'active';
   const service = daemon.service ?? {};
-  const serviceUnknown = service.runtimeState === 'unknown';
-  const serviceLabel = serviceUnknown
-    ? 'unknown'
-    : service.running
-      ? 'running'
-      : service.installed
-        ? 'installed'
-        : 'missing';
+  const serviceActivity = daemonServiceActivity(service);
+  const serviceUnknown = serviceActivity === 'unknown';
+  const serviceSchedulerActive = serviceActivity === 'scheduler-active-unverified';
+  const daemonSchedulerObserved =
+    !isRunning && daemonState !== 'unknown' && serviceSchedulerActive;
+  const serviceLabel = serviceActivity === 'running'
+    ? 'running'
+    : serviceSchedulerActive
+      ? 'scheduler active'
+      : serviceUnknown
+        ? 'unknown'
+        : service.installed
+          ? 'installed'
+          : 'missing';
 
   section.appendChild(el('div', { cls: 'view-header' },
     el('div', {},
@@ -4030,13 +4048,24 @@ function renderControl() {
 
   const heroPulse = el('div', { cls: 'ctrl-hero' });
   const daemonStatusEl = el('div', { cls: 'ctrl-daemon-status' },
-    el('span', { cls: `ctrl-live-dot${isRunning ? ' running' : ''}`, title: isRunning ? 'Running' : 'Stopped' }),
+    el('span', {
+      cls: `ctrl-live-dot${isRunning ? ' running' : daemonSchedulerObserved ? ' observed' : ''}`,
+      title: isRunning
+        ? 'Running'
+        : daemonState === 'unknown'
+          ? 'Unknown'
+          : daemonSchedulerObserved
+            ? 'Scheduler active; daemon liveness unverified'
+            : 'Stopped',
+    }),
     el('span', { cls: `ctrl-daemon-label${isRunning ? ' running' : ''}` },
       isRunning
         ? `Daemon running · ${daemonActivityDisplay(fleetDaemon)}`
         : daemonState === 'unknown'
           ? 'Daemon state unknown'
-          : 'Daemon stopped'),
+          : daemonSchedulerObserved
+            ? `Daemon liveness unverified · scheduler ${service.runtimeState}`
+            : 'Daemon stopped'),
     daemonObservation.pid
       ? el('span', { cls: 'ctrl-pid' }, `PID ${daemonObservation.pid}`)
       : null
@@ -4202,7 +4231,13 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric(
     'OS Service',
     serviceLabel,
-    serviceUnknown ? '#f87171' : service.running ? '#4ade80' : service.installed ? '#fbbf24' : '#f87171'
+    serviceUnknown
+      ? '#f87171'
+      : serviceActivity === 'running'
+        ? '#4ade80'
+        : serviceSchedulerActive || service.installed
+          ? '#fbbf24'
+          : '#f87171'
   ));
   heroMetrics.appendChild(controlMetric(
     'Kill switch',
@@ -4220,13 +4255,25 @@ function renderControl() {
   const serviceBody = el('div', { cls: 'card-body' });
   serviceBody.appendChild(el('div', { cls: 'ctrl-service-row' },
     el('span', {
-      cls: `ctrl-health-dot ${service.running && !serviceUnknown ? 'up' : 'down'}`,
-      title: serviceUnknown ? 'Unknown' : service.running ? 'Running' : 'Stopped',
+      cls: `ctrl-health-dot ${
+        serviceActivity === 'running' ? 'up' : serviceSchedulerActive ? 'observed' : 'down'
+      }`,
+      title: serviceUnknown
+        ? 'Unknown'
+        : serviceSchedulerActive
+          ? 'Scheduler active; daemon liveness unverified'
+          : serviceActivity === 'running'
+            ? 'Running'
+            : 'Stopped',
     }),
     el('span', { cls: 'ctrl-service-status' },
       serviceUnknown
         ? 'service runtime unknown'
-        : `${service.installed ? 'installed' : 'not installed'} · ${service.running ? 'running' : 'stopped'}`),
+        : serviceSchedulerActive
+          ? `installed · scheduler ${service.runtimeState} · daemon liveness unverified`
+          : `${service.installed ? 'installed' : 'not installed'} · ${
+              serviceActivity === 'running' ? 'running' : 'stopped'
+            }`),
     service.serviceFilePath ? el('span', { cls: 'ctrl-service-path', title: service.serviceFilePath }, service.serviceFilePath) : null
   ));
   if (service.errorLog) {
