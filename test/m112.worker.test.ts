@@ -298,6 +298,29 @@ describe('M112 — cmdWorker status', () => {
     expect(output).toMatch(/launchd/i);
   });
 
+  it.each(['running', 'queued'] as const)(
+    'reports scheduler %s without claiming daemon liveness',
+    async (runtimeState) => {
+      mockServiceStatus.mockReturnValue({
+        installed: true,
+        running: false,
+        runtimeState,
+        platformSpec: 'schtasks' as const,
+        serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+      });
+
+      const { cmdWorker } = await importWorker();
+      const { lines } = captureConsole();
+
+      const exit = await cmdWorker(['status']);
+
+      expect(exit).toBe(0);
+      const output = lines.join('\n');
+      expect(output).toContain('scheduler active; daemon liveness unverified');
+      expect(output).not.toContain('installed but not running');
+    },
+  );
+
   it('reports "standalone" when no sharedQueue configured', async () => {
     fakeConfig = { roots: [], version: 1, user: { name: 'Bot' } };
 

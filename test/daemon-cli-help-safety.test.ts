@@ -259,8 +259,65 @@ describe('daemon valid flags remain supported', () => {
     const result = await capture(['service-status', '--json']);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject(serviceStatus);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ...serviceStatus,
+      activity: 'inactive',
+    });
     expect(effects.serviceStatus).toHaveBeenCalledOnce();
+  });
+
+  it.each(['running', 'queued'] as const)(
+    'reports scheduler %s without claiming the daemon is running or stopped',
+    async (runtimeState) => {
+      effects.serviceStatus.mockReturnValue({
+        installed: true,
+        running: false,
+        runtimeState,
+        platformSpec: 'schtasks',
+        serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+      });
+
+      const result = await capture(['service-status']);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`unverified (scheduler ${runtimeState})`);
+      expect(result.stdout).not.toContain('running:    no');
+    },
+  );
+
+  it('includes the bounded scheduler activity distinction in JSON status', async () => {
+    effects.serviceStatus.mockReturnValue({
+      installed: true,
+      running: false,
+      runtimeState: 'queued',
+      platformSpec: 'schtasks',
+      serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+    });
+
+    const result = await capture(['service-status', '--json']);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      running: false,
+      runtimeState: 'queued',
+      activity: 'scheduler-active-unverified',
+    });
+  });
+
+  it('reports scheduler activity after autostart without calling it stopped', async () => {
+    effects.ensureRunning.mockResolvedValue({
+      installed: true,
+      running: false,
+      runtimeState: 'running',
+      platformSpec: 'schtasks',
+      serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+    });
+
+    const result = await capture(['install']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('scheduler active; daemon liveness unverified');
+    expect(result.stdout).not.toContain('installed but stopped');
   });
 
   it('preserves all start flags and config overrides', async () => {

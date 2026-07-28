@@ -16,6 +16,7 @@ import { loadConfig, saveConfig } from '../core/config.js';
 import { setupWizard } from '../core/onboard.js';
 import { enroll, listEnrolled } from '../core/sandbox/policy.js';
 import { install as installService, serviceStatus } from '../core/daemon/service.js';
+import { serviceActivity } from '../core/daemon/service-activity.js';
 
 // ─── colour helpers (TTY-aware, same as setup.ts) ────────────────────────────
 
@@ -170,7 +171,7 @@ async function cmdWorkerSetup(args: string[]): Promise<number> {
 
 async function cmdWorkerStatus(_args: string[]): Promise<number> {
   const colors = makeColors(isTty());
-  const { bold, green, red, dim, cyan } = colors;
+  const { bold, green, yellow, red, dim, cyan } = colors;
 
   const cfg    = loadConfig();
   const name   = cfg.user?.name ?? dim('(not set)');
@@ -179,9 +180,14 @@ async function cmdWorkerStatus(_args: string[]): Promise<number> {
   const fleet  = ((cfg as unknown as Record<string, unknown>).fleet) as Record<string, unknown> | undefined;
 
   const svc = serviceStatus();
+  const activity = serviceActivity(svc);
 
-  const runningLabel = svc.running
+  const runningLabel = activity === 'running'
     ? green('running')
+    : activity === 'scheduler-active-unverified'
+    ? yellow('scheduler active; daemon liveness unverified')
+    : activity === 'unknown'
+    ? yellow('runtime unknown')
     : svc.installed
     ? red('installed but not running')
     : red('not installed');

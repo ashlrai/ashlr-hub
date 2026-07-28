@@ -28,6 +28,7 @@ import { makeColors } from './ui.js';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
+import { serviceActivity } from '../core/daemon/service-activity.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
 type DaemonSubcommand = 'start' | 'stop' | 'status' | 'install' | 'uninstall' | 'service-status';
@@ -665,8 +666,19 @@ async function cmdDaemonInstall(autostart: boolean): Promise<number> {
     console.log(col.dim(`  service file: ${status.serviceFilePath}`));
   }
   if (autostart) {
+    const activity = serviceActivity(status);
     console.log(col.dim('  auto-start on login: enabled'));
-    console.log(col.dim(`  service state: ${status.running ? 'running' : 'installed but stopped'}`));
+    console.log(col.dim(
+      `  service state: ${
+        activity === 'running'
+          ? 'running'
+          : activity === 'scheduler-active-unverified'
+            ? 'scheduler active; daemon liveness unverified'
+            : activity === 'unknown'
+              ? 'runtime unknown'
+              : 'installed but stopped'
+      }`,
+    ));
   }
   console.log(col.dim('  Use `ashlr daemon service-status` to verify the OS service state.'));
   console.log('');
@@ -715,9 +727,10 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   }
 
   const status = svcMod.serviceStatus({});
+  const activity = serviceActivity(status);
 
   if (jsonMode) {
-    console.log(JSON.stringify(status, null, 2));
+    console.log(JSON.stringify({ ...status, activity }, null, 2));
     return 0;
   }
 
@@ -728,11 +741,13 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   console.log('  ' + col.bold('installed:  ') + (status.installed ? col.green('yes') : col.dim('no')));
   console.log(
     '  ' + col.bold('running:    ') +
-      (status.runtimeState === 'unknown'
+      (activity === 'unknown'
         ? col.yellow('unknown')
-        : status.running
+        : activity === 'running'
           ? col.green('yes')
-          : col.dim('no')),
+          : activity === 'scheduler-active-unverified'
+            ? col.yellow(`unverified (scheduler ${status.runtimeState})`)
+            : col.dim('no')),
   );
   if (status.serviceFilePath) {
     console.log('  ' + col.bold('file:       ') + col.dim(status.serviceFilePath));
