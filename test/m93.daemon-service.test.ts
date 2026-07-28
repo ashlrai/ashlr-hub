@@ -1454,14 +1454,30 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.platformSpec).toBe('schtasks');
   });
 
-  it('win32: Running is parsed as the exact active runtime state', () => {
+  it('win32: Running preserves scheduler activity without claiming daemon liveness', () => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: '4',
       stderr: '',
     });
-    expect(serviceStatus(baseOpts('win32')).running).toBe(true);
+    expect(serviceStatus(baseOpts('win32'))).toMatchObject({
+      running: false,
+      runtimeState: 'running',
+    });
+  });
+
+  it('win32: Queued preserves scheduler activity without claiming daemon liveness', () => {
+    existsSyncMock.mockReturnValue(true);
+    spawnSyncMock.mockReturnValue({
+      status: 0,
+      stdout: '2',
+      stderr: '',
+    });
+    expect(serviceStatus(baseOpts('win32'))).toMatchObject({
+      running: false,
+      runtimeState: 'queued',
+    });
   });
 
   it.each(['0', 'Running', '3\n4', '', '5'])('win32: malformed or unknown authority is distinct (%s)', (stdout) => {
@@ -1800,7 +1816,7 @@ describe('ensureRunning() — mocked OS activation', () => {
 
     const status = await ensureRunning(baseOpts('win32'));
 
-    expect(status.running).toBe(true);
+    expect(status).toMatchObject({ running: false, runtimeState: 'running' });
     const runIndex = spawnSyncMock.mock.calls.findIndex(
       ([cmd, args]: [string, string[]]) =>
         isWindowsPowerShellCommand(cmd) &&
@@ -1835,7 +1851,19 @@ describe('ensureRunning() — mocked OS activation', () => {
     });
 
     const status = await ensureRunning(baseOpts('win32'));
-    expect(status.running).toBe(true);
+    expect(status).toMatchObject({ running: false, runtimeState: 'running' });
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('win32: does not run an already Queued scheduled task', async () => {
+    spawnSyncMock.mockReturnValueOnce({
+      status: 0,
+      stdout: '2',
+      stderr: '',
+    });
+
+    const status = await ensureRunning(baseOpts('win32'));
+    expect(status).toMatchObject({ running: false, runtimeState: 'queued' });
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 

@@ -598,6 +598,34 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(appSource).toContain("daemonState === 'unknown'");
   });
 
+  it('renders Windows scheduler activity without claiming daemon liveness or a stopped service', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+    const stylesSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/styles.css', import.meta.url)),
+      'utf8',
+    );
+    const activityHelper = appSource.match(
+      /function daemonServiceActivity\(service\) \{[\s\S]*?\n\}/,
+    )?.[0];
+
+    expect(activityHelper).toBeDefined();
+    expect(activityHelper).toContain("service?.platformSpec === 'schtasks'");
+    expect(activityHelper).toContain("service?.runtimeState === 'running'");
+    expect(activityHelper).toContain("service?.runtimeState === 'queued'");
+    expect(activityHelper).toContain("return 'scheduler-active-unverified'");
+    expect(appSource).toContain("'scheduler active'");
+    expect(appSource).toContain("'Scheduler active; daemon liveness unverified'");
+    expect(appSource).toContain('Daemon liveness unverified · scheduler');
+    expect(appSource).toContain('daemon liveness unverified');
+    expect(appSource).toContain("daemonSchedulerObserved ? ' observed' : ''");
+    expect(appSource).toContain("serviceSchedulerActive ? 'observed' : 'down'");
+    expect(stylesSource).toContain('.ctrl-live-dot.observed');
+    expect(stylesSource).toContain('.ctrl-health-dot.observed');
+  });
+
   it('renders cancellations explicitly and excludes them from diagnostic yield', () => {
     const appSource = readFileSync(
       fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),

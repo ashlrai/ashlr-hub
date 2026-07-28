@@ -2036,8 +2036,13 @@ function querySchtasks(filePath: string, installed: boolean): ServiceStatusResul
     if (!task.present) {
       return { installed, running: false, runtimeState: 'stopped', platformSpec: 'schtasks', serviceFilePath: filePath };
     }
-    const running = task.state === 'running' || task.state === 'queued';
-    return { installed, running, runtimeState: task.state, platformSpec: 'schtasks', serviceFilePath: filePath };
+    return {
+      installed,
+      running: false,
+      runtimeState: task.state,
+      platformSpec: 'schtasks',
+      serviceFilePath: filePath,
+    };
   } catch {
     return { installed, running: false, runtimeState: 'unknown', platformSpec: 'schtasks', serviceFilePath: filePath };
   }
