@@ -13,14 +13,26 @@ import {
   type PostMergeObservation,
   type PostMergeObservationReadResult,
 } from '../fleet/post-merge-observations.js';
-import { listProposals, loadProposal } from '../inbox/store.js';
+import {
+  listProposals,
+  listProposalsDetailed,
+  loadProposal,
+  type ProposalSourceQuality,
+  type ProposalsReadResult,
+} from '../inbox/store.js';
+import { realizedMergeOf } from '../inbox/realized-merge.js';
 import type { JudgeTrace } from '../fleet/judge-trace.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
 import type { WorkedEvent } from '../fleet/worked-ledger.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import type { RacingStats } from '../fleet/model-racing.js';
 import { racingStats } from '../fleet/model-racing.js';
-import { readDecisions, type DecisionSourceQuality } from '../fleet/decisions-ledger.js';
+import {
+  readDecisions,
+  readDecisionsDetailed,
+  type DecisionSourceQuality,
+  type DecisionsReadResult,
+} from '../fleet/decisions-ledger.js';
 import {
   agentSemanticProposalSubjectRef,
   agentSemanticModelFamily,
@@ -29,11 +41,13 @@ import {
 import type {
   AutonomyEvidencePack,
   AutonomyEvidencePackList,
+  AutonomyEvidencePacksReadResult,
   AutonomyEvidenceSourceQuality,
 } from './evidence-pack.js';
 import {
   evidencePackMatchesLiveProposal,
   listAutonomyEvidencePacks,
+  readAutonomyEvidencePacksDetailed,
 } from './evidence-pack.js';
 
 const MAX_JOINED_EVENTS_PER_RECORD = 20;
@@ -63,6 +77,8 @@ export interface OutcomeRecordProposal {
   labelBasis?: Proposal['labelBasis'];
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  realizedMergeSource?: 'local-default-branch' | 'github-host';
+  realizedMergeAt?: string;
 }
 
 export interface OutcomeRecordDecision {
@@ -148,6 +164,29 @@ export interface OutcomeRecordReadDeps {
   readPostMergeObservations?: typeof readPostMergeObservations;
 }
 
+export interface OutcomeRecordDetailedReadDeps extends OutcomeRecordReadDeps {
+  listProposalsDetailed?: () => ProposalsReadResult;
+  readDecisionsDetailed?: () => DecisionsReadResult;
+  readAutonomyEvidencePacksDetailed?: (limit?: number) => AutonomyEvidencePacksReadResult;
+}
+
+export interface OutcomeRecordSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  sources: {
+    proposals: ProposalSourceQuality;
+    decisions: DecisionSourceQuality;
+    evidence: AutonomyEvidenceSourceQuality;
+    postMerge: Omit<PostMergeObservationReadResult, 'observations'>;
+  };
+}
+
+export interface OutcomeRecordsDetailedResult {
+  records: OutcomeRecord[];
+  sourceQuality: OutcomeRecordSourceQuality;
+}
+
 export interface ReadyEvidenceOutcomeRecordDeps {
   listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   loadProposal?: (id: string) => Proposal | null;
@@ -201,6 +240,7 @@ function byNewestTs<T>(readTs: (value: T) => string | undefined): (a: T, b: T) =
 }
 
 function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
+  const realizedMerge = realizedMergeOf(proposal);
   return {
     id: proposal.id,
     repo: proposal.repo,
@@ -226,6 +266,12 @@ function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
     ...(proposal.labelBasis ? { labelBasis: proposal.labelBasis } : {}),
     ...(proposal.routerPolicyVersion ? { routerPolicyVersion: proposal.routerPolicyVersion } : {}),
     ...(proposal.learningEpoch ? { learningEpoch: proposal.learningEpoch } : {}),
+    ...(realizedMerge ? {
+      realizedMergeSource: realizedMerge.source,
+      realizedMergeAt: realizedMerge.source === 'github-host'
+        ? realizedMerge.mergedAt
+        : realizedMerge.observedAt,
+    } : {}),
   };
 }
 
@@ -437,6 +483,233 @@ export function listOutcomeRecords(
   } catch {
     return [];
   }
+}
+
+function failedProposalSource(): ProposalSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+  };
+}
+
+function failedDecisionSource(): DecisionSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 1,
+  };
+}
+
+function failedEvidenceSource(): AutonomyEvidenceSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+    limitExceeded: false,
+  };
+}
+
+function failedPostMergeSource(): PostMergeObservationReadResult {
+  return {
+    observations: [],
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesRead: 0,
+    bytesRead: 0,
+    physicalRows: 0,
+    invalidRows: 0,
+    conflictingEvents: 0,
+    duplicateRows: 0,
+    supersededRows: 0,
+    limitExceeded: false,
+  };
+}
+
+function healthyInjectedProposalSource(proposals: Proposal[]): ProposalsReadResult {
+  return {
+    proposals,
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: proposals.length,
+    filesRead: proposals.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };
+}
+
+function healthyInjectedDecisionSource(decisions: DecisionEntry[]): DecisionsReadResult {
+  return {
+    decisions,
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    stopReasons: [],
+    filesRead: decisions.length > 0 ? 1 : 0,
+    bytesRead: 0,
+    rowsScanned: decisions.length,
+    invalidRows: 0,
+    unreadableFiles: 0,
+  };
+}
+
+function healthyInjectedEvidenceSource(packs: AutonomyEvidencePack[]): AutonomyEvidencePacksReadResult {
+  return {
+    packs,
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    filesRead: packs.length,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+  };
+}
+
+function sourceStateOf(
+  sources: Array<{ sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }>,
+): OutcomeRecordSourceQuality['sourceState'] {
+  if (sources.some((source) => source.sourceState === 'degraded' || !source.complete)) return 'degraded';
+  if (sources.some((source) => source.sourceState === 'missing')) return 'missing';
+  return 'healthy';
+}
+
+/**
+ * Read the outcome graph with explicit, compositional source quality.
+ *
+ * This is an observation-only projection. It performs no writes and its
+ * compatibility wrapper remains `listOutcomeRecords()`.
+ */
+export function listOutcomeRecordsDetailed(
+  opts?: { limit?: number; deps?: OutcomeRecordDetailedReadDeps },
+): OutcomeRecordsDetailedResult {
+  const deps = opts?.deps ?? {};
+  const cap = boundedLimit(opts?.limit);
+
+  let proposalRead: ProposalsReadResult;
+  try {
+    if (deps.listProposalsDetailed) {
+      proposalRead = deps.listProposalsDetailed();
+    } else if (deps.listProposals) {
+      const proposals = deps.listProposals();
+      const quality = (proposals as Proposal[] & { sourceQuality?: ProposalSourceQuality }).sourceQuality;
+      proposalRead = quality
+        ? { proposals, ...quality }
+        : healthyInjectedProposalSource(proposals);
+    } else {
+      proposalRead = listProposalsDetailed();
+    }
+  } catch {
+    proposalRead = { proposals: [], ...failedProposalSource() };
+  }
+
+  let decisionRead: DecisionsReadResult;
+  try {
+    if (deps.readDecisionsDetailed) {
+      decisionRead = deps.readDecisionsDetailed();
+    } else if (deps.readDecisions) {
+      const decisions = deps.readDecisions();
+      const quality = (decisions as DecisionEntry[] & { sourceQuality?: DecisionSourceQuality }).sourceQuality;
+      decisionRead = quality
+        ? { decisions, ...quality }
+        : healthyInjectedDecisionSource(decisions);
+    } else {
+      decisionRead = readDecisionsDetailed();
+    }
+  } catch {
+    decisionRead = { decisions: [], ...failedDecisionSource() };
+  }
+
+  let evidenceRead: AutonomyEvidencePacksReadResult;
+  try {
+    if (deps.readAutonomyEvidencePacksDetailed) {
+      evidenceRead = deps.readAutonomyEvidencePacksDetailed(Math.max(cap * 4, 200));
+    } else if (deps.listAutonomyEvidencePacks) {
+      const packs = deps.listAutonomyEvidencePacks(Math.max(cap * 4, 200));
+      const quality = (packs as AutonomyEvidencePackList).sourceQuality;
+      evidenceRead = quality
+        ? { packs, ...quality }
+        : healthyInjectedEvidenceSource(packs);
+    } else {
+      evidenceRead = readAutonomyEvidencePacksDetailed(Math.max(cap * 4, 200));
+    }
+  } catch {
+    evidenceRead = { packs: [], ...failedEvidenceSource() };
+  }
+
+  let postMergeRead: PostMergeObservationReadResult;
+  try {
+    postMergeRead = (deps.readPostMergeObservations ?? readPostMergeObservations)({
+      requireComplete: false,
+    });
+  } catch {
+    postMergeRead = failedPostMergeSource();
+  }
+
+  const decisions = [...decisionRead.decisions];
+  Object.defineProperty(decisions, 'sourceQuality', {
+    value: (({ decisions: _decisions, ...quality }) => quality)(decisionRead),
+    enumerable: false,
+  });
+  const evidence = [...evidenceRead.packs] as AutonomyEvidencePackList;
+  Object.defineProperty(evidence, 'sourceQuality', {
+    value: (({ packs: _packs, ...quality }) => quality)(evidenceRead),
+    enumerable: false,
+  });
+
+  const records = listOutcomeRecords({
+    limit: cap,
+    deps: {
+      ...deps,
+      listProposals: () => proposalRead.proposals,
+      readDecisions: () => decisions,
+      listAutonomyEvidencePacks: () => evidence,
+      readPostMergeObservations: () => postMergeRead,
+    },
+  });
+  const postMergeSource = (({ observations: _observations, ...quality }) => quality)(postMergeRead);
+  const sources = {
+    proposals: (({ proposals: _proposals, ...quality }) => quality)(proposalRead),
+    decisions: (({ decisions: _decisions, ...quality }) => quality)(decisionRead),
+    evidence: (({ packs: _packs, ...quality }) => quality)(evidenceRead),
+    postMerge: postMergeSource,
+  };
+  const sourceList = Object.values(sources);
+  const sourceState = sourceStateOf(sourceList);
+  const sourceQuality: OutcomeRecordSourceQuality = {
+    sourceState,
+    sourcePresent: sourceList.every((source) => source.sourcePresent),
+    complete: sourceState === 'healthy' && sourceList.every((source) => source.complete),
+    sources,
+  };
+  Object.defineProperty(records, 'sourceQuality', {
+    value: sourceQuality,
+    enumerable: false,
+  });
+
+  return { records, sourceQuality };
 }
 
 /**
