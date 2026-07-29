@@ -1582,6 +1582,27 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const missing = { sourceQuality: { sourceState: 'missing', complete: true } };
     expect(helpers.workspaceSourceText!(missing)).toBe('missing');
     expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
+
+    const legacy = { eventCount: 0, proposalEvents: 0 };
+    expect(helpers.workspaceSourceText!(legacy)).toBe('unknown');
+    expect(helpers.workspaceReadText!(legacy)).toBe('—');
+    expect(helpers.workspaceObservedValue!(legacy, 0)).toBe('unavailable');
+    expect(helpers.workspaceObservedValue!(legacy, '0%', true)).toBe('unavailable');
+    expect(src).toContain('const sourceKnown = Boolean(workspace.sourceQuality)');
+    expect(src).toContain("['Latest', sourceKnown ? workspace.latestAt ? fmtRelative(workspace.latestAt) : '—' : 'unavailable']");
+  });
+
+  it('app.js exposes observation-only canary promotion readiness without activation controls', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+
+    expect(src).toContain('function renderAutoMergeCanaryPromotionReadinessCard');
+    expect(src).toContain("'Canary Promotion Readiness'");
+    expect(src).toContain("['Activation', 'disabled']");
+    expect(src).toContain('f.autoMergeCanaryPromotionReadiness');
+    expect(src).toContain('fleet.autoMergeCanaryPromotionReadiness ?? null');
+    expect(src).toContain("fdMetricPill(\n          'Canary promotion'");
+    expect(src).not.toContain('activateAutoMergeCanaryPromotion');
   });
 
   it('app.js withholds Fleet Activity proposal metrics without complete source evidence', () => {

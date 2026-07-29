@@ -532,12 +532,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     const policySuppressed = workspace.policySuppressedEvents ?? 0;
     const source = workspace.sourceQuality;
     lines.push(`  window:    ${formatProductionWindow(workspace.windowHours)}`);
+    lines.push(`  source:    ${formatWorkspaceSource(source)}`);
     if (source) {
-      lines.push(`  source:    ${formatWorkspaceSource(source)}`);
       if (source.stopReasons.length > 0) lines.push(`  stopped:   ${source.stopReasons.join(', ')}`);
     }
     lines.push(`  events:    ${formatWorkspaceObserved(workspace, workspace.eventCount ?? 0)}`);
-    lines.push(`  latest:    ${workspace.latestAt ?? '—'}`);
+    lines.push(`  latest:    ${source ? workspace.latestAt ?? '—' : 'unavailable'}`);
     lines.push(`  machines:  ${formatWorkspaceObserved(workspace, activeMachines.length > 0 ? activeMachines.join(', ') : '—')}`);
     lines.push(
       `  outcomes:  proposals ${formatWorkspaceObserved(workspace, workspace.proposalEvents ?? 0)}, ` +
@@ -548,13 +548,13 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (workspace.diagnosticProposalRate !== undefined) {
       lines.push(`  learning:  diagnostic proposal rate ${formatWorkspaceRate(workspace, workspace.diagnosticProposalRate)}`);
     }
-    if (attention.length > 0) {
+    if (source && attention.length > 0) {
       lines.push(`  attention: ${attention.slice(0, 4).map(formatWorkspaceAttention).join('; ')}`);
     }
-    if (byAction.length > 0) {
+    if (source && byAction.length > 0) {
       lines.push(`  actions:   ${byAction.slice(0, 4).map(formatWorkspaceCount).join(', ')}`);
     }
-    if (recentActions.length > 0) {
+    if (source && recentActions.length > 0) {
       const action = recentActions[0]!;
       lines.push(`  recent:    ${action.kind}/${action.outcome}: ${compactResourceReason(action.summary)}`);
     }
@@ -855,6 +855,20 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(
       '  authority:  policy=false, merge=false, rollback=false, deploy=false',
     );
+  }
+  lines.push('');
+
+  const promotion = s.autoMergeCanaryPromotionReadiness;
+  lines.push('Auto-merge canary promotion readiness (observation only):');
+  if (!promotion) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  verdict:    ${promotion.verdict}`);
+    lines.push(`  observed:   ${promotion.observedAt ?? 'invalid'}`);
+    lines.push(`  evidence:   ${promotion.evidenceReady ? 'complete' : 'incomplete'}`);
+    lines.push(`  top block:  ${promotion.primaryBlocker.code}`);
+    lines.push(`  blockers:   ${promotion.blockers.map((entry) => entry.code).join(', ') || 'none'}`);
+    lines.push('  authority:  activation=false');
   }
   lines.push('');
 
@@ -1310,10 +1324,11 @@ type WorkspaceSource = NonNullable<NonNullable<FleetStatus['workspace']>['source
 
 function workspaceSourceHealthy(workspace: NonNullable<FleetStatus['workspace']>): boolean {
   const source = workspace.sourceQuality;
-  return source === undefined || (source.sourceState === 'healthy' && source.complete);
+  return source?.sourceState === 'healthy' && source.complete;
 }
 
-function formatWorkspaceSource(source: WorkspaceSource): string {
+function formatWorkspaceSource(source: WorkspaceSource | undefined): string {
+  if (!source) return 'unknown';
   if (source.sourceState === 'missing') return 'missing';
   return `${source.sourceState}${source.complete ? '' : ' (partial)'}; ` +
     `files ${source.filesRead}, bytes ${source.bytesRead}, rows ${source.rowsScanned}, ` +
@@ -1325,7 +1340,8 @@ function formatWorkspaceObserved(
   value: string | number,
 ): string {
   if (workspaceSourceHealthy(workspace)) return String(value);
-  return workspace.sourceQuality?.sourceState === 'missing' ? 'unavailable' : `${value} observed (partial)`;
+  if (!workspace.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
+  return `${value} observed (partial)`;
 }
 
 function formatWorkspaceRate(
@@ -1333,7 +1349,8 @@ function formatWorkspaceRate(
   rate: number | null,
 ): string {
   if (workspaceSourceHealthy(workspace)) return formatNullablePercent(rate);
-  return workspace.sourceQuality?.sourceState === 'missing' ? 'unavailable' : 'partial';
+  if (!workspace.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
+  return 'partial';
 }
 
 function formatAttemptActionCoverage(attempt: NonNullable<FleetStatus['attemptCoverage']>): string {
@@ -1671,7 +1688,8 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
       fs.workspace
         ? `workspace ${workspaceSourceHealthy(fs.workspace)
           ? fs.workspace.eventCount
-          : fs.workspace.sourceQuality?.sourceState === 'missing' ? 'missing' : 'degraded'}`
+          : !fs.workspace.sourceQuality ? 'unknown'
+            : fs.workspace.sourceQuality.sourceState === 'missing' ? 'missing' : 'degraded'}`
         : null,
       sourceUnknown ? 'spent today unknown' : `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       activitySummary,

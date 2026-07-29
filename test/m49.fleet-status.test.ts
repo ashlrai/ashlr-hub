@@ -21,6 +21,7 @@ import {
   buildRepairHandoffRolloutStatus,
   repairHandoffProjectionTick,
   buildSkillCorpusReadiness,
+  projectPostMergeComposite,
   type FleetStatus,
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
@@ -75,6 +76,8 @@ import * as activationPermit from '../src/core/daemon/activation-permit.js';
 import { loadQueuedAutonomyItemsDetailed } from '../src/core/portfolio/queued-autonomy.js';
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
+import type { PostMergeObservationReadResult } from '../src/core/fleet/post-merge-observations.js';
+import type { PostMergeStabilityReadResult } from '../src/core/fleet/post-merge-stability.js';
 
 function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -754,12 +757,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourcePresent: false,
       complete: true,
     });
-    expect(s.postMergeCohort).toMatchObject({
-      policyEligible: false,
-      denominatorComplete: false,
-      adverseObservations: 0,
-      stability: { completeCohorts: 0, releasedWitnesses: 0 },
+    expect(s.postMergeSource).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: false,
     });
+    expect(s.postMergeCohort).toBeUndefined();
     expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'post-merge',
     )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational' });
@@ -8861,6 +8864,93 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('confidence: medium');
     expect(out).toContain('resources:  constrained (1 constrained, 0 depleted)');
     expect(out).toContain('budget:     near');
+  });
+
+  it('withholds composite post-merge metrics when either required source is missing', () => {
+    const adverse: PostMergeObservationReadResult = {
+      observations: [],
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 32,
+      physicalRows: 0,
+      invalidRows: 0,
+      conflictingEvents: 0,
+      duplicateRows: 0,
+      supersededRows: 0,
+      limitExceeded: false,
+    };
+    const stability: PostMergeStabilityReadResult = {
+      witnesses: [],
+      manifests: [],
+      cohortSummary: {
+        completeCohorts: 0,
+        releasedWitnesses: 0,
+        distinctRepoDigests: 0,
+      },
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+      stopReasons: [],
+      filesRead: 0,
+      bytesRead: 0,
+      physicalRows: 0,
+      invalidRows: 0,
+      oversizedRows: 0,
+      orphanWitnesses: 0,
+      incompleteManifests: 0,
+      conflictingCohorts: 0,
+      duplicateRows: 0,
+      releasedCohorts: 0,
+      limitExceeded: false,
+    };
+
+    const adverseOnly = projectPostMergeComposite(adverse, stability);
+    expect(adverseOnly).toMatchObject({
+      source: {
+        sourceState: 'degraded',
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['stability-source-missing'],
+      },
+    });
+    expect(adverseOnly.cohort).toBeUndefined();
+
+    const stabilityOnly = projectPostMergeComposite(
+      { ...adverse, sourceState: 'missing', sourcePresent: false, complete: true, filesRead: 0, bytesRead: 0 },
+      { ...stability, sourceState: 'healthy', sourcePresent: true, complete: true, filesRead: 1, bytesRead: 32 },
+    );
+    expect(stabilityOnly).toMatchObject({
+      source: {
+        sourceState: 'degraded',
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['adverse-source-missing'],
+      },
+    });
+    expect(stabilityOnly.cohort).toBeUndefined();
+  });
+
+  it('renders omitted workspace provenance as unknown and withholds zero aggregates', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.workspace).toBeDefined();
+    status.workspace = { ...status.workspace!, sourceQuality: undefined };
+
+    const out = formatFleetStatus(status);
+
+    expect(out).toContain('Global workspace:');
+    expect(out).toContain('source:    unknown');
+    expect(out).toContain('events:    unavailable');
+    expect(out).toContain('machines:  unavailable');
+    expect(out).not.toContain('events:    0\n');
+    expect(out).toContain('Auto-merge canary promotion readiness (observation only):');
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      authority: 'observation-only',
+      verdict: 'blocked',
+      activationPermitted: false,
+    });
   });
 
   it('omits the paused banner when not killed', () => {

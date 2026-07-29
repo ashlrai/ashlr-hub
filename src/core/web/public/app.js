@@ -2712,7 +2712,7 @@ function dispatchProductionSourceHealthy(source) {
 
 function workspaceSourceHealthy(workspace) {
   const source = workspace?.sourceQuality;
-  return !source || (source.sourceState === 'healthy' && source.complete === true);
+  return source?.sourceState === 'healthy' && source.complete === true;
 }
 
 function workspaceSourceText(workspace) {
@@ -2733,7 +2733,7 @@ function workspaceReadText(workspace) {
 
 function workspaceObservedValue(workspace, value, rate = false) {
   if (workspaceSourceHealthy(workspace)) return value;
-  if (workspace?.sourceQuality?.sourceState === 'missing') return 'unavailable';
+  if (!workspace?.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
   return rate ? 'partial' : `${value} observed (partial)`;
 }
 
@@ -2865,6 +2865,7 @@ function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = '
 
 function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   if (!workspace) return null;
+  const sourceKnown = Boolean(workspace.sourceQuality);
   const eventCount = workspace.eventCount ?? 0;
   const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
   const policySuppressed = workspace.policySuppressedEvents ?? 0;
@@ -2882,7 +2883,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   body.appendChild(infoGrid([
     ['Source', workspaceSourceText(workspace)],
     ['Read', workspaceReadText(workspace)],
-    ['Latest', workspace.latestAt ? fmtRelative(workspace.latestAt) : '—'],
+    ['Latest', sourceKnown ? workspace.latestAt ? fmtRelative(workspace.latestAt) : '—' : 'unavailable'],
     ['Machines', workspaceObservedValue(workspace, Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0)],
     ['Proposals', workspaceObservedValue(workspace, workspace.proposalEvents ?? 0)],
     ['No-proposal', workspaceObservedValue(workspace, diagnosticNoProposal)],
@@ -2892,7 +2893,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
     ['Action entropy', workspaceObservedValue(workspace, workspace.entropy?.action ?? 0)],
   ]));
 
-  const attention = Array.isArray(workspace.attention) ? workspace.attention.slice(0, 5) : [];
+  const attention = sourceKnown && Array.isArray(workspace.attention) ? workspace.attention.slice(0, 5) : [];
   if (attention.length > 0) {
     const list = el('div', { cls: 'ctrl-backend-list' });
     for (const topic of attention) {
@@ -2905,7 +2906,7 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
     body.appendChild(list);
   }
 
-  const recent = Array.isArray(workspace.recentActions) ? workspace.recentActions[0] : null;
+  const recent = sourceKnown && Array.isArray(workspace.recentActions) ? workspace.recentActions[0] : null;
   if (recent) {
     body.appendChild(el('p', { cls: 'hint' },
       `${recent.kind}/${recent.outcome}: ${compactFleetReason(recent.summary ?? recent.action ?? 'recent action')}`
@@ -3560,6 +3561,34 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
   return card;
 }
 
+function renderAutoMergeCanaryPromotionReadinessCard(readiness, cls = 'ctrl-card card') {
+  if (!readiness) return null;
+  const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
+  const primary = readiness.primaryBlocker ?? null;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Canary Promotion Readiness'),
+    el('span', {
+      cls: 'card-subtitle',
+      style: `color:${readiness.verdict === 'evidence-ready' ? '#4ade80' : '#f87171'}`,
+    }, `${readiness.verdict ?? 'blocked'} · observation only`)
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Verdict', readiness.verdict ?? 'blocked'],
+    ['Observed', readiness.observedAt ? fmtRelative(readiness.observedAt) : 'invalid'],
+    ['Evidence ready', readiness.evidenceReady === true ? 'yes' : 'no'],
+    ['Activation', 'disabled'],
+    ['Blockers', blockers.length],
+    ['Primary blocker', primary?.code ?? 'enforcement-unsupported'],
+  ]));
+  if (primary?.detail) {
+    body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(primary.detail)));
+  }
+  card.appendChild(body);
+  return card;
+}
+
 function evidenceSourceSummary(source) {
   const role = source?.evidenceRole ?? 'evidence';
   const quality = source?.evidenceQuality ?? null;
@@ -3723,6 +3752,12 @@ function renderFleet() {
 
   const readinessCard = renderAutonomousShipReadinessCard(f.autonomousShipReadiness, 'fleet-card card');
   if (readinessCard) section.appendChild(readinessCard);
+
+  const promotionCard = renderAutoMergeCanaryPromotionReadinessCard(
+    f.autoMergeCanaryPromotionReadiness,
+    'fleet-card card'
+  );
+  if (promotionCard) section.appendChild(promotionCard);
 
   const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
   if (effectivenessCard) section.appendChild(effectivenessCard);
@@ -4428,6 +4463,11 @@ function renderControl() {
 
   const missionReadinessCard = renderAutonomousShipReadinessCard(shipReadiness);
   if (missionReadinessCard) section.appendChild(missionReadinessCard);
+
+  const missionPromotionCard = renderAutoMergeCanaryPromotionReadinessCard(
+    d.fleet?.autoMergeCanaryPromotionReadiness ?? fleet.autoMergeCanaryPromotionReadiness ?? null
+  );
+  if (missionPromotionCard) section.appendChild(missionPromotionCard);
 
   const cutoffCheckpointCard = renderCutoffCheckpointCard(
     d.fleet?.cutoffCheckpoints ?? fleet.cutoffCheckpoints ?? null
@@ -5559,6 +5599,7 @@ function fdRenderReadinessRail(snap) {
   const drainMetric = diagnosticResliceDrainMetric(queue.diagnosticResliceDrain);
   const learningSnapshotFresh = fleetSnapshotLearningFresh(snap);
   const repairRecovery = learningSnapshotFresh ? fleetRepairRecoveryMetric(fleet) : null;
+  const promotion = fleet?.autoMergeCanaryPromotionReadiness ?? null;
   const isRepairRecoveryActive = fleetRepairRecoveryActive(readiness, missionBrief);
   const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
   const loop = isRepairRecoveryActive ? 'repair recovery -> learning' : effectiveness?.phase ?? 'unknown';
@@ -5584,6 +5625,13 @@ function fdRenderReadinessRail(snap) {
     repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
     drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
+    promotion
+      ? fdMetricPill(
+          'Canary promotion',
+          promotion.verdict ?? 'blocked',
+          promotion.primaryBlocker?.detail ?? promotion.primaryBlocker?.code ?? 'observation only'
+        )
+      : null,
     fdMetricPill('Yield', learningSnapshotFresh
       ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
       : 'withheld (stale snapshot)')

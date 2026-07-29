@@ -145,6 +145,7 @@ import {
   postMergeStabilityRepoDigest,
   readPostMergeStability,
   type PostMergeStabilityCohortSummary,
+  type PostMergeStabilityReadResult,
 } from './post-merge-stability.js';
 import {
   readDetachedPostMergeVerificationCohorts,
@@ -163,6 +164,11 @@ import {
   type AutoMergeCanaryShadowCountersV1,
   type AutoMergeCanaryShadowEvidenceV1,
 } from './automerge-canary-store.js';
+import {
+  evaluateAutoMergeCanaryPromotionReadiness,
+  type AutoMergeCanaryPromotionReadiness,
+  type AutoMergeCanaryPromotionReadinessInput,
+} from './automerge-canary-promotion-readiness.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -518,6 +524,11 @@ export interface FleetDetachedPostMergeVerificationReadiness {
   latestObservedAt: string | null;
   passRate: number | null;
   summary: DetachedPostMergeVerificationSummary;
+}
+
+export interface FleetPostMergeCompositeProjection {
+  source: FleetReadinessEvidenceQuality;
+  cohort?: NonNullable<FleetStatus['postMergeCohort']>;
 }
 
 export interface FleetReadinessSourceQuality {
@@ -1319,6 +1330,96 @@ function degradedAutoMergeCanaryStatus(): FleetAutoMergeCanaryStatus {
   };
 }
 
+export function buildAutoMergeCanaryPromotionReadiness(
+  status: FleetStatus,
+  cfg: AshlrConfig,
+  read: AutoMergeCanaryReadResult,
+  observedAtMs: number,
+): AutoMergeCanaryPromotionReadiness {
+  const state = read.sourceState === 'healthy' ? read.state : null;
+  const counters = state?.shadowCounters;
+  const remote = status.autoMergeReadiness?.remoteProtection;
+  const coverage = status.queue.repos?.executionProfiles;
+  const registryDegraded = status.queue.repos?.registry?.state === 'degraded';
+  const detached = status.detachedPostMergeVerificationReadiness;
+  const detachedSource = status.detachedPostMergeVerificationSource;
+  const detachedComplete = detachedSource?.sourceState === 'healthy' &&
+    detachedSource.complete === true &&
+    detached !== undefined &&
+    detached.summary.cohorts > 0 &&
+    detached.summary.denominatorCompleteCohorts === detached.summary.cohorts &&
+    detached.summary.conclusiveCompleteCohorts === detached.summary.cohorts;
+  const autoMerge = cfg.foundry?.autoMerge;
+  const input: AutoMergeCanaryPromotionReadinessInput = {
+    observedAtMs,
+    canary: {
+      sourceState: read.sourceState,
+      active: read.active === true && state?.mode === 'shadow',
+      state: state?.state ?? (read.status === 'critical' ? 'critical' : 'inactive'),
+      observationCompletedAt: state?.observation.completedAt ?? null,
+      attempts: counters?.attempts ?? 0,
+      eligible: counters?.eligible ?? 0,
+      rejected: counters?.rejected ?? 0,
+      requiredAttempts: 1,
+      requiredEligible: 1,
+      // No current configuration field binds a minimum promotion sample.
+      requirementsBound: false,
+      bindingMismatches: counters?.bindingMismatches ?? 0,
+      inspectionErrors: counters?.inspectionErrors ?? 0,
+    },
+    remoteProtection: {
+      configured: remote?.configured === 'exact'
+        ? 'exact'
+        : remote?.configured === 'missing' || remote === undefined ? 'missing' : 'partial',
+      live: remote?.live === 'protected' || remote?.live === 'unprotected'
+        ? remote.live
+        : 'unavailable',
+      coverage: remote?.coverage === 'complete'
+        ? 'complete'
+        : remote?.coverage === 'partial' ? 'partial' : 'none',
+      observedAt: remote?.observedAt ?? null,
+    },
+    verification: {
+      sourceState: registryDegraded ? 'degraded' : coverage ? 'healthy' : 'missing',
+      enrolledRepos: status.queue.repos?.enrolled ?? 0,
+      mergeGradeRepos: coverage?.reposWithExplicitMergeContracts ?? 0,
+      noCommandRepos: coverage?.reposMissingVerifyCommands ?? 0,
+    },
+    // Current Fleet Status has no release-scoped signing or rollback authority
+    // source. Missing evidence must remain explicit rather than inferred.
+    evidenceSigning: {
+      sourceState: 'missing',
+      signed: false,
+      writable: false,
+      expiresAt: null,
+    },
+    release: {
+      sourceState: 'missing',
+      signatureVerified: false,
+      manifestComplete: false,
+      artifactBound: false,
+      serviceInvocationBound: false,
+      configurationBound: false,
+      expiresAt: null,
+      rollbackBound: false,
+    },
+    postMerge: {
+      sourceState: detachedSource?.sourceState ?? 'missing',
+      complete: detachedComplete,
+      denominatorComplete: detachedComplete,
+      releasedCohorts: detached?.summary.conclusiveCompleteCohorts ?? 0,
+      adverseObservations: (detached?.summary.fail ?? 0) + (detached?.summary.unknown ?? 0),
+      latestCompletedAt: detached?.latestObservedAt ?? null,
+    },
+    policy: {
+      allowSelfMerge: autoMerge?.allowSelfMerge === true,
+      allowWithoutVerification: autoMerge?.allowWithoutVerification === true,
+      localMergeFallback: autoMerge?.enabled === true && autoMerge.pushToRemote !== true,
+    },
+  };
+  return evaluateAutoMergeCanaryPromotionReadiness(input);
+}
+
 export type FleetLearningSourceName =
   | 'dispatch-production'
   | 'agent-actions'
@@ -1432,6 +1533,8 @@ export interface FleetStatus {
   autoMergeReadiness?: FleetAutoMergeReadinessStatus;
   /** Observation-only shadow canary state; never consumed by fleet policy. */
   autoMergeCanary?: FleetAutoMergeCanaryStatus;
+  /** Observation-only explanation of future canary promotion prerequisites. */
+  autoMergeCanaryPromotionReadiness?: AutoMergeCanaryPromotionReadiness;
   /** Read-only resource-aware autonomous operating recommendation. */
   autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
@@ -2093,6 +2196,57 @@ function withholdTrajectoryMetrics(
           }),
         }
       : {}),
+  };
+}
+
+export function projectPostMergeComposite(
+  adverse: PostMergeObservationReadResult,
+  stability: PostMergeStabilityReadResult,
+): FleetPostMergeCompositeProjection {
+  const bothMissing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
+  const complete = adverse.sourceState === 'healthy' && adverse.complete &&
+    stability.sourceState === 'healthy' && stability.complete;
+  const source: FleetReadinessEvidenceQuality = {
+    sourceState: complete ? 'healthy' : bothMissing ? 'missing' : 'degraded',
+    sourcePresent: adverse.sourcePresent || stability.sourcePresent,
+    complete,
+    stopReasons: [...new Set([
+      ...adverse.stopReasons,
+      ...stability.stopReasons,
+      ...(adverse.sourceState === 'missing' ? ['adverse-source-missing'] : []),
+      ...(stability.sourceState === 'missing' ? ['stability-source-missing'] : []),
+    ])],
+    filesRead: adverse.filesRead + stability.filesRead,
+    bytesRead: adverse.bytesRead + stability.bytesRead,
+    rowsScanned: adverse.physicalRows + stability.physicalRows,
+    invalidRows: adverse.invalidRows + stability.invalidRows,
+    unreadableFiles: 0,
+  };
+  if (!complete) return { source };
+
+  const adverseMembers = new Set(adverse.observations.flatMap((row) => {
+    const digest = postMergeStabilityRepoDigest(row.repo);
+    return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
+  }));
+  const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
+    row.repoDigest, row.proposalId, row.mergeCommit,
+  ])));
+  const effectiveSummary: PostMergeStabilityCohortSummary = {
+    completeCohorts: new Set(effectiveStability.map((row) => row.cohortId)).size,
+    releasedWitnesses: effectiveStability.length,
+    distinctRepoDigests: new Set(effectiveStability.map((row) => row.repoDigest)).size,
+    ...(effectiveStability.length > 0
+      ? { latestCompletedAt: effectiveStability.map((row) => row.stableAt).sort().at(-1) }
+      : {}),
+  };
+  return {
+    source,
+    cohort: {
+      policyEligible: false,
+      denominatorComplete: false,
+      adverseObservations: adverse.observations.length,
+      stability: effectiveSummary,
+    },
   };
 }
 
@@ -3104,44 +3258,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const adverse = readPostMergeObservations({ requireComplete: true });
     learningPostMergeRead = adverse;
     const stability = readPostMergeStability({ requireComplete: true });
-    const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
-      !adverse.complete || !stability.complete;
-    const missing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
-    const adverseMembers = new Set(adverse.observations.flatMap((row) => {
-      const digest = postMergeStabilityRepoDigest(row.repo);
-      return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
-    }));
-    const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
-      row.repoDigest, row.proposalId, row.mergeCommit,
-    ])));
-    const effectiveSummary: PostMergeStabilityCohortSummary = {
-      completeCohorts: new Set(effectiveStability.map((row) => row.cohortId)).size,
-      releasedWitnesses: effectiveStability.length,
-      distinctRepoDigests: new Set(effectiveStability.map((row) => row.repoDigest)).size,
-      ...(effectiveStability.length > 0
-        ? { latestCompletedAt: effectiveStability.map((row) => row.stableAt).sort().at(-1) }
-        : {}),
-    };
-    status.postMergeSource = {
-      sourceState: degraded ? 'degraded' : missing ? 'missing' : 'healthy',
-      sourcePresent: adverse.sourcePresent || stability.sourcePresent,
-      complete: !degraded,
-      stopReasons: [...new Set([...adverse.stopReasons, ...stability.stopReasons])],
-      filesRead: adverse.filesRead + stability.filesRead,
-      bytesRead: adverse.bytesRead + stability.bytesRead,
-      rowsScanned: adverse.physicalRows + stability.physicalRows,
-      invalidRows: adverse.invalidRows + stability.invalidRows,
-      unreadableFiles: 0,
-    };
-    status.postMergeCohort = {
-      policyEligible: false,
-      // Stable batches do not yet bind the complete eligible denominator.
-      denominatorComplete: false,
-      adverseObservations: adverse.observations.length,
-      // Signed adverse evidence monotonically supersedes an overlapping
-      // positive witness in the public observational summary.
-      stability: effectiveSummary,
-    };
+    const projection = projectPostMergeComposite(adverse, stability);
+    status.postMergeSource = projection.source;
+    if (projection.cohort) status.postMergeCohort = projection.cohort;
   } catch {
     status.postMergeSource = {
       sourceState: 'degraded', sourcePresent: true, complete: false,
@@ -3677,9 +3796,46 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   status.cutoffCheckpoints = readFleetCutoffCheckpointStatus(generatedAt);
   try {
     const { automergeCanaryStatus } = await import('./automerge-canary-store.js');
-    status.autoMergeCanary = projectAutoMergeCanaryStatus(automergeCanaryStatus());
+    const canaryRead = automergeCanaryStatus();
+    status.autoMergeCanary = projectAutoMergeCanaryStatus(canaryRead);
+    status.autoMergeCanaryPromotionReadiness = buildAutoMergeCanaryPromotionReadiness(
+      status,
+      cfg,
+      canaryRead,
+      Date.parse(generatedAt),
+    );
   } catch {
     status.autoMergeCanary = degradedAutoMergeCanaryStatus();
+    status.autoMergeCanaryPromotionReadiness = evaluateAutoMergeCanaryPromotionReadiness({
+      observedAtMs: Date.parse(generatedAt),
+      canary: {
+        sourceState: 'degraded', active: false, state: 'critical',
+        observationCompletedAt: null, attempts: 0, eligible: 0, rejected: 0,
+        requiredAttempts: 1, requiredEligible: 1, requirementsBound: false,
+        bindingMismatches: 0, inspectionErrors: 1,
+      },
+      remoteProtection: {
+        configured: 'missing', live: 'unavailable', coverage: 'none', observedAt: null,
+      },
+      verification: {
+        sourceState: 'degraded', enrolledRepos: 0, mergeGradeRepos: 0, noCommandRepos: 0,
+      },
+      evidenceSigning: {
+        sourceState: 'missing', signed: false, writable: false, expiresAt: null,
+      },
+      release: {
+        sourceState: 'missing', signatureVerified: false, manifestComplete: false,
+        artifactBound: false, serviceInvocationBound: false, configurationBound: false,
+        expiresAt: null, rollbackBound: false,
+      },
+      postMerge: {
+        sourceState: 'degraded', complete: false, denominatorComplete: false,
+        releasedCohorts: 0, adverseObservations: 0, latestCompletedAt: null,
+      },
+      policy: {
+        allowSelfMerge: true, allowWithoutVerification: true, localMergeFallback: true,
+      },
+    });
   }
 
   return status;

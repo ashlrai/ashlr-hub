@@ -661,6 +661,20 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(appSource).toContain('dispatchProductionDiagnosticRate(dispatchProduction)');
   });
 
+  it('renders canary promotion as observation-only status in Fleet and Mission Control', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain('function renderAutoMergeCanaryPromotionReadinessCard');
+    expect(appSource).toContain("'Canary Promotion Readiness'");
+    expect(appSource).toContain("['Activation', 'disabled']");
+    expect(appSource).toContain('f.autoMergeCanaryPromotionReadiness');
+    expect(appSource).toContain('d.fleet?.autoMergeCanaryPromotionReadiness');
+    expect(appSource).not.toContain('onClick: () => activateAutoMergeCanary');
+  });
+
   it('preserves explicit zero diagnostic attempts without inventing a weakest backend', () => {
     const appSource = readFileSync(
       fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
