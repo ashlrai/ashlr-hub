@@ -2152,9 +2152,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       pendingItems: 0,
       repairControlBlockedItems: 1,
       repairLifecycleUnavailableItems: 1,
+      sources: {
+        cachedBacklog: {
+          visibleItems: 2,
+          actionableItems: 1,
+        },
+      },
     });
     expect(status.queue.next?.map((item) => item.id)).toEqual([ordinary.id]);
     expect(status.queue.generatedRepairRoutes).toBeUndefined();
+    expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue')).toMatchObject({
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
   });
 
   it('fails closed for an untrusted repair-shaped queue row', async () => {
@@ -2219,6 +2229,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       repairControlBlockedItems: 1,
       repairTerminalItems: 1,
       repairQuarantinedItems: 1,
+      sources: {
+        cachedBacklog: {
+          visibleItems: 1,
+          actionableItems: 0,
+          detail: '0/1 persisted backlog item(s) are daemon-eligible',
+        },
+      },
     });
     expect(status.queue.next).toBeUndefined();
     expect(status.queue.generatedRepairRoutes).toBeUndefined();
@@ -2226,6 +2243,68 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       id: 'inspect-repair-lifecycle-control',
     }));
     expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('repair-lifecycle-control-blocked');
+  });
+
+  it('keeps terminal queued repairs visible without hiding unrelated claimable work', async () => {
+    const repo = join(tmpHome, 'repo');
+    const terminal = makeTrustedDiagnosticResliceItem(repo, 'dddddddddddd');
+    const ordinary = makeBacklogItem(
+      repo,
+      'repo:invent:ordinary-next-to-terminal',
+      'Ordinary queued work',
+      8,
+      'invent',
+      ['generative'],
+    );
+    recordDiagnosticEmpty(
+      terminal,
+      'attempt-42345678-1234-4123-8123-123456789abc',
+      'local-coder',
+      1,
+    );
+    expect(recordDiagnosticEmpty(
+      terminal,
+      'attempt-52345678-1234-4123-8123-123456789abc',
+      'kimi',
+      2,
+    )).toMatchObject({ disposition: 'quarantined' });
+    writeBacklogSnapshot(tmpHome, repo, [], '2026-07-01T00:00:00.000Z');
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'self-heal-queue.json'),
+      JSON.stringify([terminal, ordinary]),
+      'utf8',
+    );
+    writeRunningDaemon(tmpHome);
+
+    const status = await buildFleetStatus(withRoutableFrontierAndMid());
+
+    expect(status.queue).toMatchObject({
+      backlogItems: 2,
+      eligibleBacklogItems: 1,
+      repairControlBlockedItems: 1,
+      repairTerminalItems: 1,
+      repairQuarantinedItems: 1,
+      sources: {
+        cachedBacklog: {
+          freshness: 'stale',
+          visibleItems: 0,
+          actionableItems: 0,
+        },
+        queuedAutonomy: {
+          sourceState: 'complete',
+          freshness: 'fresh',
+          visibleItems: 2,
+          actionableItems: 1,
+          detail: '1/2 queued autonomy item(s) are daemon-eligible',
+        },
+      },
+    });
+    expect(status.queue.next?.map((item) => item.id)).toEqual([ordinary.id]);
+    expect(generatedRepairDispatchState(terminal)).toMatchObject({
+      state: 'terminal',
+      dispatchable: false,
+      disposition: 'quarantined',
+    });
   });
 
   it('does not suggest building backlog when visible items already have pending proposals', async () => {
