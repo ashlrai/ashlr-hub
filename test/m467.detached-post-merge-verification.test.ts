@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -85,8 +86,11 @@ function cohort(
   };
 }
 
-function recordPath(cohortId = 'cohort-2026-07-28-a'): string {
-  return join(detachedPostMergeVerificationStorePath(), 'records', `${cohortId}.json`);
+function recordPath(): string {
+  const records = join(detachedPostMergeVerificationStorePath(), 'records');
+  const files = readdirSync(records).filter((name) => name.endsWith('.json'));
+  if (files.length !== 1) throw new Error(`expected one cohort record, found ${files.length}`);
+  return join(records, files[0]!);
 }
 
 describe('M467 detached post-merge verification cohorts', () => {
@@ -150,7 +154,18 @@ describe('M467 detached post-merge verification cohorts', () => {
   it('persists metadata only and pseudonymizes the repository path', () => {
     key();
     const secret = 'github_pat_never-persist';
-    const supplied = Object.assign(member('1'), {
+    const sensitiveBranch = 'customer-acme-incident-42';
+    const sensitiveProposal = 'proposal-customer-acme';
+    const sensitiveRun = 'run-customer-acme';
+    const sensitiveTrajectory = 'trajectory-customer-acme';
+    const sensitiveWorkItem = 'work-customer-acme';
+    const supplied = Object.assign(member('1', {
+      baseBranch: sensitiveBranch,
+      proposalId: sensitiveProposal,
+      runId: sensitiveRun,
+      trajectoryId: sensitiveTrajectory,
+      workItemId: sensitiveWorkItem,
+    }), {
       prompt: secret,
       diff: secret,
       stdout: secret,
@@ -167,10 +182,25 @@ describe('M467 detached post-merge verification cohorts', () => {
     const raw = readFileSync(recordPath(), 'utf8');
     for (const forbidden of [
       '"repo"', 'prompt', 'diff', 'stdout', 'stderr', 'output', 'env',
-      'files', secret, home,
+      'files', secret, home, sensitiveBranch, sensitiveProposal, sensitiveRun,
+      sensitiveTrajectory, sensitiveWorkItem, 'cohort-2026-07-28-a',
     ]) {
       expect(raw).not.toContain(forbidden);
     }
+    const persisted = JSON.parse(raw) as {
+      cohortId: string;
+      members: Array<{
+        proposalId: string;
+        baseBranch: string;
+        runId: string;
+        trajectoryId: string;
+        workItemId: string;
+      }>;
+    };
+    expect(persisted.cohortId).toMatch(/^[a-f0-9]{64}$/);
+    expect(Object.values(persisted.members[0]!)).toEqual(
+      expect.arrayContaining(Array(5).fill(expect.stringMatching(/^[a-f0-9]{64}$/))),
+    );
   });
 
   it('converts stale, missing, degraded, and infrastructure results to unknown', () => {

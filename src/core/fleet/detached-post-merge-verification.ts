@@ -62,7 +62,9 @@ export interface DetachedPostMergeVerificationMember {
   memberId: string;
   /** HMAC of the canonical absolute repository path; the path is never persisted. */
   repoDigest: string;
+  /** Domain-separated HMAC of the caller-supplied proposal identifier. */
   proposalId: string;
+  /** Domain-separated HMAC of the branch name; branch text is never persisted. */
   baseBranch: string;
   baseHead: string;
   candidateHead: string;
@@ -77,6 +79,7 @@ export interface DetachedPostMergeVerificationMember {
   terminal: DetachedPostMergeTerminal;
   failureCategory: VerifyFailureCategory | null;
   unknownReason: DetachedPostMergeUnknownReason | null;
+  /** Domain-separated HMAC pseudonyms; caller-supplied causal text is never persisted. */
   runId: string | null;
   trajectoryId: string | null;
   workItemId: string | null;
@@ -324,8 +327,16 @@ function buildMember(
   const repoDigest = hmac(key, 'ashlr:detached-post-merge-verification:repo:v1', repo);
   const identity = {
     repoDigest,
-    proposalId,
-    baseBranch,
+    proposalId: hmac(
+      key,
+      'ashlr:detached-post-merge-verification:proposal:v1',
+      proposalId,
+    ),
+    baseBranch: hmac(
+      key,
+      'ashlr:detached-post-merge-verification:base-branch:v1',
+      baseBranch,
+    ),
     baseHead: input.baseHead,
     candidateHead: input.candidateHead,
     mergeCommit: input.mergeCommit,
@@ -344,9 +355,15 @@ function buildMember(
     terminal,
     failureCategory,
     unknownReason,
-    runId,
-    trajectoryId,
-    workItemId,
+    runId: runId === null
+      ? null
+      : hmac(key, 'ashlr:detached-post-merge-verification:run:v1', runId),
+    trajectoryId: trajectoryId === null
+      ? null
+      : hmac(key, 'ashlr:detached-post-merge-verification:trajectory:v1', trajectoryId),
+    workItemId: workItemId === null
+      ? null
+      : hmac(key, 'ashlr:detached-post-merge-verification:work-item:v1', workItemId),
   };
   return {
     ...unsigned,
@@ -360,8 +377,8 @@ function validMember(value: unknown, observedAt: string): value is DetachedPostM
   if (!exactKeys(member, MEMBER_KEYS) ||
     !SHA256_RE.test(String(member['memberId'] ?? '')) ||
     !SHA256_RE.test(String(member['repoDigest'] ?? '')) ||
-    !canonicalCausalId(member['proposalId']) ||
-    !canonicalBranch(member['baseBranch']) ||
+    !SHA256_RE.test(String(member['proposalId'] ?? '')) ||
+    !SHA256_RE.test(String(member['baseBranch'] ?? '')) ||
     !GIT_SHA_RE.test(String(member['baseHead'] ?? '')) ||
     !GIT_SHA_RE.test(String(member['candidateHead'] ?? '')) ||
     !GIT_SHA_RE.test(String(member['mergeCommit'] ?? '')) ||
@@ -373,7 +390,7 @@ function validMember(value: unknown, observedAt: string): value is DetachedPostM
 
   const typed = member as unknown as DetachedPostMergeVerificationMember;
   const optionalIds = [typed.runId, typed.trajectoryId, typed.workItemId];
-  if (optionalIds.some((id) => id !== null && canonicalCausalId(id) === null)) return false;
+  if (optionalIds.some((id) => id !== null && !SHA256_RE.test(id))) return false;
   if (typed.verifiedHead !== null && !GIT_SHA_RE.test(typed.verifiedHead)) return false;
   if (typed.verifiedAt !== null && canonicalTimestamp(typed.verifiedAt) === null) return false;
   if (typed.workspaceClean !== null && typed.workspaceClean !== true) return false;
@@ -440,7 +457,7 @@ function parseCohort(
     row['recordType'] !== 'detached-post-merge-verification-cohort' ||
     row['authority'] !== 'observation-only' || row['policyEligible'] !== false ||
     row['mergePermitted'] !== false || row['rollbackPermitted'] !== false ||
-    row['deployPermitted'] !== false || !COHORT_ID_RE.test(String(row['cohortId'] ?? '')) ||
+    row['deployPermitted'] !== false || !SHA256_RE.test(String(row['cohortId'] ?? '')) ||
     canonicalTimestamp(row['observedAt']) === null ||
     !Number.isSafeInteger(row['expectedMemberCount']) ||
     Number(row['expectedMemberCount']) < 1 ||
@@ -494,7 +511,7 @@ function codec(key: Buffer): ImmutablePrivateRecordCodec<DetachedPostMergeVerifi
     recordId: (record) => record.cohortId,
     recordFileName: (record) => `${record.cohortId}.json`,
     isRecordFileName: (fileName) =>
-      fileName.endsWith('.json') && COHORT_ID_RE.test(fileName.slice(0, -5)),
+      fileName.endsWith('.json') && SHA256_RE.test(fileName.slice(0, -5)),
     stageToken: (record) => record.cohortDigest,
     equivalent: (left, right) => sameDigest(left.cohortDigest, right.cohortDigest),
     compare: (left, right) =>
@@ -570,7 +587,11 @@ export function buildDetachedPostMergeVerificationCohort(
       mergePermitted: false,
       rollbackPermitted: false,
       deployPermitted: false,
-      cohortId: input.cohortId,
+      cohortId: hmac(
+        key,
+        'ashlr:detached-post-merge-verification:cohort-id:v1',
+        input.cohortId,
+      ),
       observedAt,
       expectedMemberCount: input.expectedMemberCount,
       memberCount: members.length,
