@@ -168,7 +168,7 @@ import { setKill } from '../src/core/sandbox/policy.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const NOW_ISO = new Date(Date.now() - 60_000).toISOString();
+const NOW_ISO = '2026-06-29T12:00:00.000Z';
 
 function makeProposal(id: string, over?: Partial<Proposal>): Proposal {
   return {
@@ -220,6 +220,8 @@ function shipVerdict(proposalId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(NOW_ISO));
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m274-test-'));
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
@@ -246,6 +248,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   rmSync(tmpHome, { recursive: true, force: true });
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
