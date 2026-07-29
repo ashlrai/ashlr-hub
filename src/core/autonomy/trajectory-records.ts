@@ -57,6 +57,11 @@ import {
   agentSemanticModelFamily,
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
+import {
+  agentWorkTransitionBoundSubjectRef,
+  sanitizeAgentWorkTransitions,
+  type AgentWorkTransitionV1,
+} from '../learning/agent-work-transitions.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
@@ -107,6 +112,7 @@ export interface TrajectoryTimelineEvent {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   semanticEvents?: OutcomeRecordDecision['semanticEvents'];
+  workTransitions?: AgentWorkTransitionV1[];
   evidence?: {
     target: string;
     trustBasis: string;
@@ -899,7 +905,11 @@ function findOrCreateRecord(
 }
 
 function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimelineEvent): void {
-  const { semanticEvents: candidateSemanticEvents, ...metadata } = event;
+  const {
+    semanticEvents: candidateSemanticEvents,
+    workTransitions: candidateWorkTransitions,
+    ...metadata
+  } = event;
   const semanticSubjectRef = agentSemanticBoundSubjectRef(candidateSemanticEvents, {
     proposalId: event.proposalId,
     runId: event.runId,
@@ -912,9 +922,19 @@ function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimeline
         agentSemanticModelFamily(event.model ?? event.backend),
       )
     : undefined;
+  const workTransitionSubjectRef = agentWorkTransitionBoundSubjectRef(candidateWorkTransitions, {
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+  });
+  const workTransitions = workTransitionSubjectRef
+    ? sanitizeAgentWorkTransitions(candidateWorkTransitions, workTransitionSubjectRef)
+    : undefined;
   const sanitized = {
     ...sanitizeMetadata(metadata),
     ...(semanticEvents ? { semanticEvents: semanticEvents.map((semanticEvent) => ({ ...semanticEvent })) } : {}),
+    ...(workTransitions
+      ? { workTransitions: workTransitions.map((transition) => ({ ...transition })) }
+      : {}),
   } as TrajectoryTimelineEvent;
   record.timeline.push(sanitized);
   record.startedAt = firstTime(record.startedAt, sanitized.ts);
@@ -1066,6 +1086,11 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const agentActionSourceQuality = (actions as typeof actions & {
     sourceQuality?: AgentActionSourceQuality;
   }).sourceQuality;
+  const workTransitionSourceUsable = agentActionSourceQuality === undefined || (
+    agentActionSourceQuality.sourceState === 'healthy' &&
+    agentActionSourceQuality.complete &&
+    (agentActionSourceQuality.workTransitionRejectedRows ?? 0) === 0
+  );
   const skillUses = safeArray(() =>
     (deps.readSkillUseEvents ?? readSkillUseEvents)({
       sinceMs,
@@ -1361,6 +1386,9 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       routerPolicyVersion: action.routerPolicyVersion,
       learningEpoch: action.learningEpoch,
       ...(action.semanticEvents ? { semanticEvents: action.semanticEvents } : {}),
+      ...(action.workTransitions && workTransitionSourceUsable
+        ? { workTransitions: action.workTransitions }
+        : {}),
     });
   };
 

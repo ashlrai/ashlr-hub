@@ -2470,7 +2470,23 @@ async function runGoalInternal(
               if (cancelled()) {
                 lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
               }
-              recordSandboxedRunAgentAction({ engine: engineId, engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: lastApiR.state.engineTier ?? 'mid', runId: lastApiR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: lastApiR.proposalId, outcome: lastApiR.proposalOutcome, status: lastApiR.state.status, usage: lastApiR.state.usage, durationMs: runDurationMs(lastApiR.state), actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {}, contextSummary: lastApiR.state.runEventSummary?.contextSummary });
+              recordSandboxedRunAgentAction({
+                engine: engineId,
+                engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`,
+                tier: lastApiR.state.engineTier ?? 'mid',
+                runId: lastApiR.state.id,
+                sourceRepo: cwd,
+                workItemId: opts.workItemId,
+                workSource: opts.workSource,
+                proposalId: lastApiR.proposalId,
+                outcome: lastApiR.proposalOutcome,
+                status: lastApiR.state.status,
+                usage: lastApiR.state.usage,
+                startedAt: lastApiR.state.createdAt,
+                durationMs: runDurationMs(lastApiR.state),
+                actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {},
+                contextSummary: lastApiR.state.runEventSummary?.contextSummary,
+              });
               emit(sink, {
                 kind: 'log',
                 text: lastApiR.proposalId
@@ -2771,7 +2787,23 @@ async function runGoalInternal(
               ? `[TITRR: ${titrrAnnotation}]\n${finalR.state.result}`
               : `[TITRR: ${titrrAnnotation}]`;
           }
-          recordSandboxedRunAgentAction({ engine: engineId, engineModel: finalR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: finalR.state.engineTier ?? 'mid', runId: finalR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: finalR.proposalId, outcome: finalR.proposalOutcome, status: finalR.state.status, usage: finalR.state.usage, durationMs: runDurationMs(finalR.state), actionCounts: actionCountsForProposalCapture(finalR.state) ?? {}, contextSummary: finalR.state.runEventSummary?.contextSummary });
+          recordSandboxedRunAgentAction({
+            engine: engineId,
+            engineModel: finalR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`,
+            tier: finalR.state.engineTier ?? 'mid',
+            runId: finalR.state.id,
+            sourceRepo: cwd,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            proposalId: finalR.proposalId,
+            outcome: finalR.proposalOutcome,
+            status: finalR.state.status,
+            usage: finalR.state.usage,
+            startedAt: finalR.state.createdAt,
+            durationMs: runDurationMs(finalR.state),
+            actionCounts: actionCountsForProposalCapture(finalR.state) ?? {},
+            contextSummary: finalR.state.runEventSummary?.contextSummary,
+          });
 
           emit(sink, {
             kind: finalR.state.status === 'done' ? 'task-done' : 'log',

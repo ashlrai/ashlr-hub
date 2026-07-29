@@ -22,6 +22,10 @@ import {
   agentSemanticSubjectRef,
   defineAgentSemanticEvents,
 } from '../src/core/learning/agent-semantic-events.js';
+import {
+  agentWorkTransitionSubjectRef,
+  defineAgentWorkTransitions,
+} from '../src/core/learning/agent-work-transitions.js';
 
 const TS0 = '2026-07-09T12:00:00.000Z';
 const TS1 = '2026-07-09T12:01:00.000Z';
@@ -1844,6 +1848,131 @@ describe('Trajectory records', () => {
     expect(record?.runId).toBe(runId);
     expect(record?.timeline).toHaveLength(1);
     expect(record?.timeline[0]?.semanticEvents).toEqual(semanticEvents);
+  });
+
+  it('joins action-carried work transitions on the existing causal timeline row', () => {
+    const runId = 'run-work-transition-action';
+    const workTransitions = defineAgentWorkTransitions(
+      agentWorkTransitionSubjectRef('run', runId),
+      [
+        { phase: 'orient', transition: 'enter', trigger: 'initial', observedAt: TS0 },
+        { phase: 'repair', transition: 'replan', trigger: 'empty-diff', observedAt: TS4 },
+      ],
+    );
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          actor: 'agent',
+          kind: 'maintenance',
+          outcome: 'no-proposal',
+          action: 'sandboxed-engine:run',
+          proposalId: undefined,
+          runId,
+          trajectoryId: `run:${runId}`,
+          workTransitions,
+        })],
+      }),
+    });
+
+    const actionEvent = record?.timeline.find((event) => event.kind === 'agent-action');
+    expect(actionEvent?.workTransitions).toEqual(workTransitions);
+    expect(record?.runId).toBe(runId);
+    const forbiddenKeys = new Set([
+      'prompt', 'rationale', 'toolArgs', 'toolResults', 'diff', 'stdout', 'stderr',
+      'env', 'fileContents', 'path', 'rawSummary',
+    ]);
+    expect(actionEvent?.workTransitions?.every((transition) =>
+      Object.keys(transition).every((key) => !forbiddenKeys.has(key)))).toBe(true);
+    expect(JSON.stringify(actionEvent?.workTransitions)).not.toContain('RAW_');
+  });
+
+  it('withholds action-carried work transitions when the action source is degraded', () => {
+    const runId = 'run-work-transition-degraded';
+    const workTransitions = defineAgentWorkTransitions(
+      agentWorkTransitionSubjectRef('run', runId),
+      [{ phase: 'orient', transition: 'enter', trigger: 'initial', observedAt: TS4 }],
+    );
+    const actions = [action({
+      actor: 'agent',
+      proposalId: undefined,
+      runId,
+      trajectoryId: `run:${runId}`,
+      workTransitions,
+    })];
+    Object.defineProperty(actions, 'sourceQuality', {
+      value: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 1, bytesRead: 100,
+        rowsScanned: 2, invalidRows: 1, unreadableFiles: 0,
+      },
+      enumerable: false,
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => actions,
+      }),
+    });
+
+    expect(record?.timeline[0]?.workTransitions).toBeUndefined();
+    expect(record?.agentActionSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+  });
+
+  it('withholds all work transitions when a sibling transition row was rejected', () => {
+    const runId = 'run-work-transition-rejected-sibling';
+    const workTransitions = defineAgentWorkTransitions(
+      agentWorkTransitionSubjectRef('run', runId),
+      [{ phase: 'orient', transition: 'enter', trigger: 'initial', observedAt: TS4 }],
+    );
+    const actions = [
+      action({
+        actor: 'agent',
+        proposalId: undefined,
+        runId,
+        trajectoryId: `run:${runId}`,
+        workTransitions,
+      }),
+      action({
+        ts: TS3,
+        actor: 'agent',
+        proposalId: undefined,
+        runId: 'run-work-transition-rejected',
+        trajectoryId: 'run:run-work-transition-rejected',
+        workTransitionsState: 'rejected',
+      }),
+    ];
+    Object.defineProperty(actions, 'sourceQuality', {
+      value: {
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesRead: 1, bytesRead: 200,
+        rowsScanned: 2, invalidRows: 0, workTransitionRejectedRows: 1, unreadableFiles: 0,
+      },
+      enumerable: false,
+    });
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => actions,
+      }),
+    });
+
+    expect(records.flatMap((record) => record.timeline)).toHaveLength(2);
+    expect(records.flatMap((record) => record.timeline)
+      .every((event) => event.workTransitions === undefined)).toBe(true);
+    expect(records.every((record) => record.agentActionSourceQuality?.sourceState === 'healthy')).toBe(true);
+    expect(records.every((record) => record.agentActionSourceQuality?.complete === true)).toBe(true);
+    expect(records.every((record) =>
+      record.agentActionSourceQuality?.workTransitionRejectedRows === 1)).toBe(true);
   });
 
   it('drops action semantics not bound to any carrier identity', () => {
