@@ -25,8 +25,30 @@ import {
   workItemCoverageKey,
 } from '../fleet/proposal-matching.js';
 import { withSelfHealQueueLock } from '../fleet/self-heal.js';
+import {
+  generatedRepairGenerationId,
+  generatedRepairGenerationIds,
+  readGeneratedRepairLifecycle,
+  readGeneratedRepairTerminalOutcome,
+} from '../fleet/generated-repair-lifecycle.js';
+import {
+  acquireLocalStoreLock,
+  ownsLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../fleet/local-store-lock.js';
+import { isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import { sanitizeSourceBaseDigest } from '../fleet/source-base-digest.js';
 import { isStrictWorkItem } from './queued-autonomy.js';
+
+const MAX_RETIREMENT_BACKLOG_ITEMS = 10_000;
+let terminalRepairRetirementRaceHookForTest: (() => void) | undefined;
+
+/** Deterministic lock/source race seam; production callers must never set this. */
+export function _setTerminalRepairRetirementRaceHookForTest(
+  hook: (() => void) | undefined,
+): void {
+  terminalRepairRetirementRaceHookForTest = hook;
+}
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -268,10 +290,11 @@ export function enqueueBacklogItemsDetailed(items: WorkItem[]): { ok: boolean; e
   }
 }
 
-function persistBacklogUnlocked(backlog: Backlog): void {
+function persistBacklogUnlocked(backlog: Backlog, canPersist: () => boolean = () => true): void {
   if (!backlog.items.every(isStrictWorkItem)) {
     throw new Error('refusing to persist backlog with invalid WorkItem rows');
   }
+  if (!canPersist()) throw new Error('backlog persistence authority lost');
   const p = backlogPath();
   const dir = join(homedir(), '.ashlr');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -279,12 +302,220 @@ function persistBacklogUnlocked(backlog: Backlog): void {
   let renamed = false;
   try {
     writeFileSync(tmp, JSON.stringify(backlog, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    if (!canPersist()) throw new Error('backlog persistence authority lost');
     renameSync(tmp, p);
     renamed = true;
   } finally {
     if (!renamed) {
       try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
     }
+  }
+}
+
+export type TerminalRepairBacklogRetirementReason =
+  | 'retired'
+  | 'no-backlog'
+  | 'no-terminal-projections'
+  | 'mutation-lock-unavailable'
+  | 'mutation-lock-lost'
+  | 'backlog-unavailable'
+  | 'backlog-changed'
+  | 'generation-identity-unavailable'
+  | 'lifecycle-evidence-unavailable'
+  | 'lifecycle-evidence-changed'
+  | 'persistence-failed';
+
+export interface TerminalRepairBacklogRetirementResult {
+  sourceState: 'complete' | 'unavailable';
+  scanned: number;
+  repairProjections: number;
+  terminalProjections: number;
+  retired: number;
+  changed: boolean;
+  reason: TerminalRepairBacklogRetirementReason;
+}
+
+interface TerminalRepairProjectionInspection {
+  terminalIndexes: Set<number>;
+  terminalBindings: string[];
+  repairProjections: number;
+  unavailableReason?: 'generation-identity-unavailable' | 'lifecycle-evidence-unavailable';
+}
+
+function retirementResult(
+  reason: TerminalRepairBacklogRetirementReason,
+  values: Partial<Omit<TerminalRepairBacklogRetirementResult, 'reason'>> = {},
+): TerminalRepairBacklogRetirementResult {
+  const sourceState = reason === 'retired' || reason === 'no-backlog' || reason === 'no-terminal-projections'
+    ? 'complete'
+    : 'unavailable';
+  return {
+    sourceState,
+    scanned: values.scanned ?? 0,
+    repairProjections: values.repairProjections ?? 0,
+    terminalProjections: values.terminalProjections ?? 0,
+    retired: values.retired ?? 0,
+    changed: values.changed ?? false,
+    reason,
+  };
+}
+
+function completeBacklogForRetirement(): Backlog | null | undefined {
+  if (!existsSync(backlogPath())) return null;
+  const backlog = loadBacklog();
+  if (
+    !backlog ||
+    backlog.items.length > MAX_RETIREMENT_BACKLOG_ITEMS ||
+    !backlog.items.every(isStrictWorkItem) ||
+    !Number.isFinite(Date.parse(backlog.generatedAt)) ||
+    !backlog.repos.every((repo) => {
+      try {
+        return typeof repo === 'string' && resolve(repo) === repo;
+      } catch {
+        return false;
+      }
+    })
+  ) return undefined;
+  return backlog;
+}
+
+function inspectTerminalRepairProjections(
+  backlog: Backlog,
+): TerminalRepairProjectionInspection {
+  const terminalIndexes = new Set<number>();
+  const terminalBindings: string[] = [];
+  let repairProjections = 0;
+
+  for (let index = 0; index < backlog.items.length; index++) {
+    const item = backlog.items[index]!;
+    if (!item.tags.includes('proposal-repair')) continue;
+    repairProjections++;
+    if (!isTrustedGeneratedRepairItem(item)) {
+      return {
+        terminalIndexes,
+        terminalBindings,
+        repairProjections,
+        unavailableReason: 'generation-identity-unavailable',
+      };
+    }
+    const generationId = generatedRepairGenerationId(item);
+    const generationIds = generatedRepairGenerationIds(item);
+    if (
+      generationId === null ||
+      generationIds.length !== 1 ||
+      generationIds[0] !== generationId ||
+      (item.repairGenerationId !== undefined && item.repairGenerationId !== generationId)
+    ) {
+      return {
+        terminalIndexes,
+        terminalBindings,
+        repairProjections,
+        unavailableReason: 'generation-identity-unavailable',
+      };
+    }
+    const lifecycle = readGeneratedRepairLifecycle(item);
+    if (!lifecycle.available) {
+      return {
+        terminalIndexes,
+        terminalBindings,
+        repairProjections,
+        unavailableReason: 'lifecycle-evidence-unavailable',
+      };
+    }
+    if (lifecycle.disposition === 'active') continue;
+    const terminal = readGeneratedRepairTerminalOutcome(generationId);
+    if (
+      !terminal ||
+      terminal.generationId !== generationId ||
+      terminal.disposition !== lifecycle.disposition
+    ) {
+      return {
+        terminalIndexes,
+        terminalBindings,
+        repairProjections,
+        unavailableReason: 'lifecycle-evidence-unavailable',
+      };
+    }
+    terminalIndexes.add(index);
+    terminalBindings.push(JSON.stringify([
+      index,
+      resolve(item.repo),
+      item.id,
+      generationId,
+      lifecycle.disposition,
+      terminal.attemptHash,
+    ]));
+  }
+
+  return { terminalIndexes, terminalBindings, repairProjections };
+}
+
+/**
+ * Remove only exact, durably terminal generated-repair rows from the persisted
+ * backlog projection. This is an owner-side primitive and is intentionally not
+ * wired into daemon startup or tick execution.
+ */
+export function retireTerminalRepairBacklogProjections(): TerminalRepairBacklogRetirementResult {
+  const lock = acquireLocalStoreLock(join(homedir(), '.ashlr', '.self-heal-queue.lock'));
+  if (!lock) return retirementResult('mutation-lock-unavailable');
+  try {
+    if (!ownsLocalStoreLock(lock)) return retirementResult('mutation-lock-lost');
+    const backlog = completeBacklogForRetirement();
+    if (backlog === null) return retirementResult('no-backlog');
+    if (backlog === undefined) return retirementResult('backlog-unavailable');
+    const initialBytes = JSON.stringify(backlog);
+    const initial = inspectTerminalRepairProjections(backlog);
+    const common = {
+      scanned: backlog.items.length,
+      repairProjections: initial.repairProjections,
+      terminalProjections: initial.terminalIndexes.size,
+    };
+    if (initial.unavailableReason) {
+      return retirementResult(initial.unavailableReason, common);
+    }
+    if (initial.terminalIndexes.size === 0) {
+      return retirementResult('no-terminal-projections', common);
+    }
+
+    try {
+      terminalRepairRetirementRaceHookForTest?.();
+    } catch {
+      return retirementResult('lifecycle-evidence-changed', common);
+    }
+    if (!ownsLocalStoreLock(lock)) return retirementResult('mutation-lock-lost', common);
+    const current = completeBacklogForRetirement();
+    if (current === null || current === undefined || JSON.stringify(current) !== initialBytes) {
+      return retirementResult('backlog-changed', common);
+    }
+    const confirmed = inspectTerminalRepairProjections(current);
+    if (confirmed.unavailableReason) {
+      return retirementResult(confirmed.unavailableReason, {
+        ...common,
+        repairProjections: confirmed.repairProjections,
+        terminalProjections: confirmed.terminalIndexes.size,
+      });
+    }
+    if (JSON.stringify(confirmed.terminalBindings) !== JSON.stringify(initial.terminalBindings)) {
+      return retirementResult('lifecycle-evidence-changed', common);
+    }
+    if (!ownsLocalStoreLock(lock)) return retirementResult('mutation-lock-lost', common);
+
+    const items = current.items.filter((_item, index) => !confirmed.terminalIndexes.has(index));
+    try {
+      persistBacklogUnlocked({ ...current, items }, () => ownsLocalStoreLock(lock));
+    } catch {
+      return retirementResult(
+        ownsLocalStoreLock(lock) ? 'persistence-failed' : 'mutation-lock-lost',
+        common,
+      );
+    }
+    return retirementResult('retired', {
+      ...common,
+      retired: confirmed.terminalIndexes.size,
+      changed: true,
+    });
+  } finally {
+    releaseLocalStoreLock(lock);
   }
 }
 

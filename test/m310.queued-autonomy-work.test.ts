@@ -13,7 +13,11 @@ import {
 import { dirname, join } from 'node:path';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
-import { buildBacklog } from '../src/core/portfolio/backlog.js';
+import {
+  _setTerminalRepairRetirementRaceHookForTest,
+  buildBacklog,
+  retireTerminalRepairBacklogProjections,
+} from '../src/core/portfolio/backlog.js';
 import {
   loadQueuedAutonomyItems,
   loadQueuedAutonomyItemsDetailed,
@@ -97,6 +101,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  _setTerminalRepairRetirementRaceHookForTest(undefined);
   fx.cleanup();
 });
 
@@ -1607,6 +1612,240 @@ describe('queued autonomy work scanner', () => {
     });
     expect(remaining.map((candidate) => candidate.id)).toEqual(['ordinary-invent']);
     expect(remainingBacklog.items.map((candidate) => candidate.id)).toEqual(['ordinary-invent']);
+  });
+
+  it('retires only exact terminal backlog projections and is idempotent', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:stale-terminal-backlog',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      backend: 'builtin',
+      tier: 'mid',
+      runId: 'run-source-stale-terminal',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir)).find((candidate) =>
+      candidate.tags.includes('dispatch-no-diff-reslice'),
+    )!;
+    const ordinary = item(repo.dir, 'ordinary-preserved-by-terminal-retirement');
+    recordDiagnosticEmpty(repair, 'attempt-32345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    expect(recordDiagnosticEmpty(
+      repair,
+      'attempt-42345678-1234-4123-8123-123456789abc',
+      'kimi',
+      2,
+    )).toMatchObject({ disposition: 'exhausted' });
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [ordinary, repair],
+    });
+    const lifecycleBefore = readFileSync(generatedRepairLifecyclePath());
+    const queueBefore = readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toEqual({
+      sourceState: 'complete',
+      scanned: 2,
+      repairProjections: 1,
+      terminalProjections: 1,
+      retired: 1,
+      changed: true,
+      reason: 'retired',
+    });
+    expect(retireTerminalRepairBacklogProjections()).toEqual({
+      sourceState: 'complete',
+      scanned: 1,
+      repairProjections: 0,
+      terminalProjections: 0,
+      retired: 0,
+      changed: false,
+      reason: 'no-terminal-projections',
+    });
+    const persisted = JSON.parse(readFileSync(join(fx.ashlrDir, 'backlog.json'), 'utf8')) as {
+      items: WorkItem[];
+    };
+    expect(persisted.items.map((candidate) => candidate.id)).toEqual([ordinary.id]);
+    expect(readFileSync(generatedRepairLifecyclePath())).toEqual(lifecycleBefore);
+    expect(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'))).toEqual(queueBefore);
+  });
+
+  it('preserves active repairs and unrelated backlog work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:active-backlog-generation',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-active-backlog',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir)).find((candidate) =>
+      candidate.tags.includes('dispatch-no-diff-reslice'),
+    )!;
+    const ordinary = item(repo.dir, 'ordinary-next-to-active-repair');
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [ordinary, repair],
+    });
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'complete',
+      scanned: 2,
+      repairProjections: 1,
+      terminalProjections: 0,
+      retired: 0,
+      changed: false,
+      reason: 'no-terminal-projections',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
+  });
+
+  it('withholds retirement when lifecycle evidence is corrupt', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:corrupt-retirement-evidence',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-corrupt-retirement',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordDiagnosticEmpty(repair, 'attempt-52345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-62345678-1234-4123-8123-123456789abc', 'kimi', 2);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    writeFileSync(generatedRepairLifecyclePath(), '{corrupt', 'utf8');
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'lifecycle-evidence-unavailable',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
+  });
+
+  it('withholds retirement when exact lifecycle records conflict', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:conflicting-retirement-evidence',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-conflicting-retirement',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordDiagnosticEmpty(repair, 'attempt-b2345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-c2345678-1234-4123-8123-123456789abc', 'kimi', 2);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    const ledgerPath = generatedRepairLifecyclePath();
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as {
+      schemaVersion: number;
+      records: Array<Record<string, unknown>>;
+    };
+    ledger.records.push({
+      ...ledger.records[0],
+      disposition: 'retired',
+      updatedAt: new Date().toISOString(),
+    });
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), 'utf8');
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'lifecycle-evidence-unavailable',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
+  });
+
+  it('withholds retirement for a stale generation identity', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:stale-generation-identity',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-stale-generation',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordDiagnosticEmpty(repair, 'attempt-72345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-82345678-1234-4123-8123-123456789abc', 'kimi', 2);
+    const stale = { ...repair, repairGenerationId: 'f'.repeat(64) };
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [stale],
+    });
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'generation-identity-unavailable',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
+  });
+
+  it('withholds retirement when the owner loses the mutation lock', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:retirement-lock-loss',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-retirement-lock-loss',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordDiagnosticEmpty(repair, 'attempt-92345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-a2345678-1234-4123-8123-123456789abc', 'kimi', 2);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+    _setTerminalRepairRetirementRaceHookForTest(() => {
+      rmSync(join(fx.ashlrDir, '.self-heal-queue.lock'), { force: true });
+    });
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'mutation-lock-lost',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
   });
 
   it('prunes objective-saturated queue projections while retaining lifecycle evidence', async () => {
