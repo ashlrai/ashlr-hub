@@ -381,8 +381,21 @@ describe('M468 detached post-merge runner', () => {
       passRate: 1,
       summary: { cohorts: 1, pass: 1, fail: 0, unknown: 0 },
     });
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      authority: 'observation-only',
+      verdict: 'blocked',
+      activationPermitted: false,
+    });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).not.toContain(
+      'post-merge-source-unhealthy',
+    );
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).not.toContain(
+      'post-merge-cohort-insufficient',
+    );
     expect(formatted).toContain('Detached post-merge verification (observation only):');
+    expect(formatted).toContain('Auto-merge canary promotion readiness (observation only):');
     expect(formatted).toContain('authority:  policy=false, merge=false, rollback=false, deploy=false');
+    expect(formatted).toContain('authority:  activation=false');
     expect(JSON.stringify(status.detachedPostMergeVerificationReadiness)).not.toContain(sensitive);
   });
 });
