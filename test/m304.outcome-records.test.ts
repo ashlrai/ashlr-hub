@@ -19,6 +19,8 @@ import {
 import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import { buildRequiredVerificationManifest } from '../src/core/run/verification-manifest.js';
+import type { VerifyCommand } from '../src/core/run/verify-commands.js';
 import {
   agentSemanticSubjectRef,
   defineAgentSemanticEvents,
@@ -30,6 +32,17 @@ import type { DecisionEntry, Proposal } from '../src/core/types.js';
 
 const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const TEST_DIFF_HASH = hashDiff(TEST_DIFF);
+const TEST_VERIFY_COMMANDS: VerifyCommand[] = [{
+  id: 'merge-test',
+  kind: 'test',
+  cmd: ['npm', 'test'],
+  cwd: '.',
+  timeoutMs: 120_000,
+  required: true,
+  profiles: ['merge'],
+}];
+const TEST_VERIFIER_MANIFEST =
+  buildRequiredVerificationManifest('/repos/alpha', TEST_VERIFY_COMMANDS)!;
 const SEMANTIC_PROPOSAL_ID = 'prop-m304abc1-000001-bbbbbbbbbbbbbbbbbbbbbbbb';
 const DEGRADED_PROPOSAL_ID = 'prop-m304abc1-000002-cccccccccccccccccccccccc';
 const originalHome = process.env.HOME;
@@ -118,6 +131,8 @@ function legacyEvidence(proposalId: string, generatedAt: string): AutonomyEviden
       passed: true,
       detail: 'tests passed',
       commandKinds: ['test'],
+      requiredManifestDigest: TEST_VERIFIER_MANIFEST.digest,
+      requiredCommandCount: TEST_VERIFIER_MANIFEST.commandCount,
       baseBranch: 'main',
       baseHead: 'a'.repeat(40),
       diffHash: TEST_DIFF_HASH,
@@ -403,6 +418,7 @@ describe('m302 listOutcomeRecords', () => {
               engineTier: 'frontier',
               verifyResult: {
                 passed: true,
+                ran: structuredClone(TEST_VERIFY_COMMANDS),
                 baseBranch: 'main',
                 baseHead: 'a'.repeat(40),
                 diffHash: TEST_DIFF_HASH,
@@ -447,6 +463,7 @@ describe('m302 listOutcomeRecords', () => {
       engineTier: 'frontier',
       verifyResult: {
         passed: true,
+        ran: structuredClone(TEST_VERIFY_COMMANDS),
         baseBranch: 'main',
         baseHead: 'a'.repeat(40),
         diffHash: TEST_DIFF_HASH,
@@ -477,6 +494,7 @@ describe('m302 listOutcomeRecords', () => {
       diffHash: TEST_DIFF_HASH,
       verifyResult: {
         passed: true,
+        ran: structuredClone(TEST_VERIFY_COMMANDS),
         baseBranch: 'main',
         baseHead: 'a'.repeat(40),
         diffHash: TEST_DIFF_HASH,

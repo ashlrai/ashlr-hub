@@ -81,7 +81,10 @@ import {
   hashDiff,
   provenanceKeyPath,
   sealedEvidencePackDigestV3,
+  signEvidencePackPayloadV3,
 } from '../src/core/foundry/provenance.js';
+import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
+import { buildRequiredVerificationManifest } from '../src/core/run/verification-manifest.js';
 import type { Proposal } from '../src/core/types.js';
 import {
   PRIVATE_STORAGE_TEST_CONTROL,
@@ -139,6 +142,15 @@ function diff(): string {
 }
 
 const TEST_DIFF_HASH = hashDiff(diff());
+const TEST_VERIFIER_MANIFEST = buildRequiredVerificationManifest('/tmp/repo', [{
+  id: 'merge-test',
+  kind: 'test',
+  cmd: ['npm', 'test'],
+  cwd: '.',
+  timeoutMs: 120_000,
+  required: true,
+  profiles: ['merge'],
+}])!;
 
 function proposal(id = 'prop-m430'): Proposal {
   return {
@@ -170,6 +182,8 @@ function input(id = 'prop-m430') {
       passed: true,
       detail: 'focused checks passed',
       commandKinds: ['test', 'typecheck'],
+      requiredManifestDigest: TEST_VERIFIER_MANIFEST.digest,
+      requiredCommandCount: TEST_VERIFIER_MANIFEST.commandCount,
       baseBranch: 'main',
       baseHead: 'b'.repeat(40),
       diffHash: TEST_DIFF_HASH,
@@ -451,6 +465,53 @@ describe('M430 v3 tamper and schema rejection', () => {
       policyHash: 'e'.repeat(64),
     };
     expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
+  });
+
+  it('keeps legacy signed packs observable but never authoritative without a verifier manifest', () => {
+    const historical = legacy('prop-historical-no-manifest');
+    historical.trustBasis = 'evidence';
+    if (historical.evidenceOutcome) historical.evidenceOutcome.trustBasis = 'evidence';
+    historical.gates.remoteProtection = {
+      ok: true,
+      live: true,
+      detail: 'historical protected remote fixture',
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead: 'b'.repeat(40),
+      observedAt: '2026-07-16T12:01:30.000Z',
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: 'e'.repeat(64),
+    };
+    if (historical.evidenceOutcome) {
+      historical.evidenceOutcome.gateCount = Object.values(historical.gates).length;
+    }
+    delete historical.verification.requiredManifestDigest;
+    delete historical.verification.requiredCommandCount;
+    const payload = { ...historical, version: 3 as const };
+    const signedPayload = signEvidencePackPayloadV3(payload);
+    expect(signedPayload).not.toBeNull();
+    const signedWithoutSeal = { ...payload, ...signedPayload };
+    const historicalPack = {
+      ...signedWithoutSeal,
+      sealedPackDigest: sealedEvidencePackDigestV3(signedWithoutSeal)!,
+    } as SignedAutonomyEvidencePackV3;
+
+    const verification = verifyAutonomyEvidencePackV3(historicalPack);
+    expect(verification.ok, verification.reason).toBe(true);
+    expect(evaluateAutonomyPolicy(historicalPack, {
+      version: 1,
+      foundry: { autoMerge: { enabled: true, trustBasis: 'evidence' } },
+    } as never)).toMatchObject({
+      tier: 'T0',
+      action: 'escalate-human',
+      allowed: false,
+    });
+    expect(persistAutonomyEvidencePack(historicalPack)).toBe(true);
+    expect(readAutonomyEvidencePack(historicalPack.proposal.id)?.version).toBe(3);
   });
 
   it('derives the signed builder diff hash and refuses stored hash disagreement', () => {

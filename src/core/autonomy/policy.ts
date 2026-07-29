@@ -8,6 +8,7 @@
 
 import type { AshlrConfig } from '../types.js';
 import {
+  hasRequiredVerifierManifestBinding,
   isLiveRemoteProtectionEvidence,
   type AutonomyEvidencePack,
 } from './evidence-pack.js';
@@ -137,6 +138,9 @@ export function evaluateAutonomyPolicy(
       }
       if (!Array.isArray(pack.verification.commandKinds) || pack.verification.commandKinds.length === 0) {
         return refuse('evidence main merge requires at least one real verification command');
+      }
+      if (!hasRequiredVerifierManifestBinding(pack)) {
+        return refuse('evidence main merge requires a signed required verifier manifest digest');
       }
       if (!hasBaseBoundVerificationMetadata(pack)) {
         return refuse('evidence main merge requires base-bound verification metadata');
