@@ -15,6 +15,11 @@ import {
   type HostMergeRevocationIdentityV1,
   type HostMergeRevocationWriteResult,
 } from '../src/core/autonomy/host-merge-revocation-protocol.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
@@ -23,8 +28,38 @@ const PROTOCOL_MODULE_URL = new URL(
   '../src/core/autonomy/host-merge-revocation-protocol.ts',
   import.meta.url,
 ).href;
+const PRIVATE_STORAGE_MODULE_URL = new URL(
+  '../src/core/util/private-storage.ts',
+  import.meta.url,
+).href;
 const CHILD_SOURCE = String.raw`
   import { transitionHostMergeRevocation } from ${JSON.stringify(PROTOCOL_MODULE_URL)};
+  import {
+    PRIVATE_STORAGE_TEST_CONTROL,
+    _setPrivateStorageTestControlForTest,
+  } from ${JSON.stringify(PRIVATE_STORAGE_MODULE_URL)};
+
+  if (process.platform === 'win32') {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: (invocation) => {
+        const request = JSON.parse(invocation.input);
+        const reason = request.operation === 'assure-private-paths'
+          ? 'owned-safe-paths'
+          : request.mode === 'inspect-owned'
+            ? 'owned-safe-path'
+            : 'exact-private-dacl';
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            nonce: request.nonce,
+            operation: request.operation,
+            ok: true,
+            reason,
+          }),
+        };
+      },
+    });
+  }
 
   const input = JSON.parse(process.env.TRANSITION_INPUT);
   input.now = new Date(input.now);
@@ -39,6 +74,27 @@ const CHILD_SOURCE = String.raw`
 `;
 let home: string;
 const children = new Set<ChildProcess>();
+const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
+  const request = JSON.parse(invocation.input) as {
+    nonce: string;
+    operation: string;
+    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
+  };
+  const reason = request.operation === 'assure-private-paths'
+    ? 'owned-safe-paths'
+    : request.mode === 'inspect-owned'
+      ? 'owned-safe-path'
+      : 'exact-private-dacl';
+  return {
+    status: 0,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok: true,
+      reason,
+    }),
+  };
+};
 
 function restore(name: 'HOME' | 'USERPROFILE', value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -106,6 +162,7 @@ function spawnTransition(
         HOME: home,
         USERPROFILE: home,
         TRANSITION_INPUT: JSON.stringify(input),
+        VITEST: 'true',
       },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     },
@@ -154,20 +211,28 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m466-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  _setPrivateStorageTestControlForTest(
+    PRIVATE_STORAGE_TEST_CONTROL,
+    process.platform === 'win32' ? { runner: semanticPrivateStorageRunner } : undefined,
+  );
   loadOrCreateKey();
 });
 
 afterEach(async () => {
-  const active = [...children];
-  for (const child of active) child.kill();
-  await Promise.all(active.map((child) => new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) resolve();
-    else child.once('exit', () => resolve());
-  })));
-  children.clear();
-  fs.rmSync(home, { recursive: true, force: true });
-  restore('HOME', originalHome);
-  restore('USERPROFILE', originalUserProfile);
+  try {
+    const active = [...children];
+    for (const child of active) child.kill();
+    await Promise.all(active.map((child) => new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) resolve();
+      else child.once('exit', () => resolve());
+    })));
+    children.clear();
+    fs.rmSync(home, { recursive: true, force: true });
+  } finally {
+    restore('HOME', originalHome);
+    restore('USERPROFILE', originalUserProfile);
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  }
 });
 
 describe('M466 durable host merge cancellation and revocation protocol foundation', () => {
@@ -532,8 +597,10 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
     const root = path.dirname(hostMergeRevocationStatePath(exactIdentity)!);
     if (process.platform !== 'win32') fs.chmodSync(root, 0o777);
     else fs.rmSync(root, { recursive: true, force: true });
+    // Windows has no POSIX mode corruption analogue; deleting the store is a
+    // distinct fail-closed missing state, not a degraded existing directory.
     expect(readHostMergeRevocationState(exactIdentity)).toMatchObject({
-      state: 'degraded',
+      state: process.platform === 'win32' ? 'missing' : 'degraded',
     });
   });
 
