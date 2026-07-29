@@ -147,6 +147,10 @@ import {
   type PostMergeStabilityCohortSummary,
 } from './post-merge-stability.js';
 import {
+  readDetachedPostMergeVerificationCohorts,
+  type DetachedPostMergeVerificationSummary,
+} from './detached-post-merge-verification.js';
+import {
   readFleetCutoffCheckpointStatus,
   type FleetCutoffCheckpointStatus,
 } from './cutoff-observation-status.js';
@@ -501,6 +505,19 @@ export interface FleetReadinessEvidenceQuality {
   rowsScanned: number;
   invalidRows: number;
   unreadableFiles: number;
+}
+
+export interface FleetDetachedPostMergeVerificationReadiness {
+  version: 1;
+  authority: 'observation-only';
+  policyEligible: false;
+  mergePermitted: false;
+  rollbackPermitted: false;
+  deployPermitted: false;
+  state: 'missing' | 'degraded' | 'awaiting-observations' | 'incomplete' | 'conclusive';
+  latestObservedAt: string | null;
+  passRate: number | null;
+  summary: DetachedPostMergeVerificationSummary;
 }
 
 export interface FleetReadinessSourceQuality {
@@ -1473,6 +1490,10 @@ export interface FleetStatus {
     adverseObservations: number;
     stability: PostMergeStabilityCohortSummary;
   };
+  /** Authenticated metadata from detached post-merge verification runners. */
+  detachedPostMergeVerificationSource?: FleetReadinessEvidenceQuality;
+  /** Read-only detached cohort quality. It is excluded from policy authority. */
+  detachedPostMergeVerificationReadiness?: FleetDetachedPostMergeVerificationReadiness;
   /** Authenticated checkpoint availability. Excluded from readiness and policy inputs. */
   cutoffCheckpoints?: FleetCutoffCheckpointStatus;
   /** Effective applicability for optional evidence producers. */
@@ -3126,6 +3147,71 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       sourceState: 'degraded', sourcePresent: true, complete: false,
       stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
       invalidRows: 0, unreadableFiles: 1,
+    };
+  }
+  try {
+    const detached = readDetachedPostMergeVerificationCohorts({ requireComplete: true });
+    status.detachedPostMergeVerificationSource = {
+      sourceState: detached.sourceState,
+      sourcePresent: detached.sourcePresent,
+      complete: detached.complete,
+      stopReasons: detached.stopReasons,
+      filesRead: detached.filesRead,
+      bytesRead: detached.bytesRead,
+      rowsScanned: detached.filesRead,
+      invalidRows: detached.invalidFiles,
+      unreadableFiles: detached.stopReasons.includes('io-error') ? 1 : 0,
+    };
+    const conclusiveMembers = detached.summary.pass + detached.summary.fail;
+    const state: FleetDetachedPostMergeVerificationReadiness['state'] =
+      detached.sourceState === 'missing'
+        ? 'missing'
+        : detached.sourceState === 'degraded' || !detached.complete
+          ? 'degraded'
+          : detached.summary.cohorts === 0
+            ? 'awaiting-observations'
+            : detached.summary.denominatorCompleteCohorts !== detached.summary.cohorts ||
+                detached.summary.conclusiveCompleteCohorts !== detached.summary.cohorts
+              ? 'incomplete'
+              : 'conclusive';
+    status.detachedPostMergeVerificationReadiness = {
+      version: 1,
+      authority: 'observation-only',
+      policyEligible: false,
+      mergePermitted: false,
+      rollbackPermitted: false,
+      deployPermitted: false,
+      state,
+      latestObservedAt: detached.cohorts.map((cohort) => cohort.observedAt).sort().at(-1) ?? null,
+      passRate: conclusiveMembers > 0 ? detached.summary.pass / conclusiveMembers : null,
+      summary: detached.summary,
+    };
+  } catch {
+    status.detachedPostMergeVerificationSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+    status.detachedPostMergeVerificationReadiness = {
+      version: 1,
+      authority: 'observation-only',
+      policyEligible: false,
+      mergePermitted: false,
+      rollbackPermitted: false,
+      deployPermitted: false,
+      state: 'degraded',
+      latestObservedAt: null,
+      passRate: null,
+      summary: {
+        cohorts: 0,
+        denominatorCompleteCohorts: 0,
+        conclusiveCompleteCohorts: 0,
+        expectedMembers: 0,
+        observedMembers: 0,
+        pass: 0,
+        fail: 0,
+        unknown: 0,
+      },
     };
   }
   let workedLearningRead: WorkedLedgerReadResult;
