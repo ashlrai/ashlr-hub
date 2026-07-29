@@ -3566,6 +3566,32 @@ interface TreatmentOutcomeReceiptArtifact extends TreatmentReceiptTombstone {
   ts: string;
 }
 
+function withLegacyRunTrajectoryAlias(
+  canonical: DispatchProductionEvent,
+  value: Record<string, unknown>,
+): DispatchProductionEvent | null {
+  if (
+    typeof value['runId'] !== 'string' ||
+    typeof value['trajectoryId'] !== 'string' ||
+    value['trajectoryId'] !== `run:${value['runId']}` ||
+    generatedRepairLifecycleAttemptHash(value['runId']) !== value['repairTreatmentAttemptHash'] ||
+    canonical.runId !== value['runId'] ||
+    canonical.trajectoryId !== undefined
+  ) return null;
+  const entries: Array<[string, unknown]> = [];
+  let inserted = false;
+  for (const [key, entryValue] of Object.entries(canonical)) {
+    entries.push([key, entryValue]);
+    if (key === 'runId') {
+      entries.push(['trajectoryId', value['trajectoryId']]);
+      inserted = true;
+    }
+  }
+  return inserted
+    ? Object.fromEntries(entries) as unknown as DispatchProductionEvent
+    : null;
+}
+
 function canonicalTreatmentOutcomeReceiptEvent(
   value: unknown,
   line: string,
@@ -3587,15 +3613,25 @@ function canonicalTreatmentOutcomeReceiptEvent(
       canonicalInput,
       { materializeLearningLabel: true },
     );
-    if (JSON.stringify(canonical) === line) return true;
-    if (canonical.learningLabel === undefined) return false;
-    return JSON.stringify({
-      ...canonical,
-      learningLabel: {
-        ...canonical.learningLabel,
-        classifierVersion: 'attempt-shape-v1',
-      },
-    }) === line;
+    const candidates = [
+      canonical,
+      ...(hashUsesRunId
+        ? [withLegacyRunTrajectoryAlias(canonical, value)].filter(
+          (candidate): candidate is DispatchProductionEvent => candidate !== null,
+        )
+        : []),
+    ];
+    return candidates.some((candidate) => {
+      if (JSON.stringify(candidate) === line) return true;
+      if (candidate.learningLabel === undefined) return false;
+      return JSON.stringify({
+        ...candidate,
+        learningLabel: {
+          ...candidate.learningLabel,
+          classifierVersion: 'attempt-shape-v1',
+        },
+      }) === line;
+    });
   } catch {
     return false;
   }
@@ -4528,6 +4564,53 @@ function storedLearningLabelOrigin(value: unknown): DispatchProductionLabelOrigi
   throw new Error('invalid stored learning label');
 }
 
+function legacyV1GeneratedRepairLabelMatchesCurrent(
+  event: DispatchProductionEvent,
+  storedLabel: unknown,
+  normalized: ProductionAttemptLearningLabel,
+  canonical: ProductionAttemptLearningLabel,
+): boolean {
+  if (
+    !isPlainRecord(storedLabel) ||
+    storedLabel['classifierVersion'] !== 'attempt-shape-v1' ||
+    !legacyGeneratedRepairIdentityMatchesFactory(event) ||
+    normalized.attemptShape.repairAttempts !== 0 ||
+    canonical.attemptShape.repairAttempts !== 1
+  ) return false;
+  return JSON.stringify({
+    ...normalized,
+    attemptShape: { ...normalized.attemptShape, repairAttempts: 1 },
+  }) === JSON.stringify(canonical);
+}
+
+function legacyGeneratedRepairIdentityMatchesFactory(event: DispatchProductionEvent): boolean {
+  if (event.source !== 'self') return false;
+  const repoName = basename(event.repo);
+  const recipes = [
+    {
+      titlePrefix: `Repair dispatch capture failure for ${repoName} item `,
+      itemPrefix: `${repoName}:proposal-repair-capture:`,
+      domain: 'dispatch-capture-gate-repair',
+    },
+    {
+      titlePrefix: `Reslice no-diff dispatch for ${repoName} item `,
+      itemPrefix: `${repoName}:proposal-repair-nodiff:`,
+      domain: 'dispatch-no-diff-reslice',
+    },
+  ] as const;
+  for (const recipe of recipes) {
+    if (!event.title.startsWith(recipe.titlePrefix)) continue;
+    const parentItemId = event.title.slice(recipe.titlePrefix.length);
+    if (!boundedStoredText(parentItemId, 120)) return false;
+    const hash = createHash('sha1')
+      .update(`${event.repo}\0${parentItemId}\0${recipe.domain}`)
+      .digest('hex')
+      .slice(0, 12);
+    return event.itemId === `${recipe.itemPrefix}${hash}`;
+  }
+  return false;
+}
+
 function withLearningLabelOrigin(
   event: DispatchProductionEvent,
   storedLabel: unknown,
@@ -4541,7 +4624,15 @@ function withLearningLabelOrigin(
     if (
       normalized === undefined ||
       canonicalLabel === undefined ||
-      JSON.stringify(normalized) !== JSON.stringify(canonicalLabel)
+      (
+        JSON.stringify(normalized) !== JSON.stringify(canonicalLabel) &&
+        !legacyV1GeneratedRepairLabelMatchesCurrent(
+          event,
+          storedLabel,
+          normalized,
+          canonicalLabel,
+        )
+      )
     ) throw new Error('stored learning label does not match canonical attempt');
   }
   return {
