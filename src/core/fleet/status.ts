@@ -1516,6 +1516,8 @@ function processExists(pid: number | null | undefined): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
+}
+
 const LEARNING_SNAPSHOT_TEXT_KEYS = new Set([
   'argv',
   'cmd',
