@@ -168,7 +168,7 @@ import { setKill } from '../src/core/sandbox/policy.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const NOW_ISO = '2026-06-29T12:00:00.000Z';
+const NOW_ISO = new Date(Date.now() - 60_000).toISOString();
 
 function makeProposal(id: string, over?: Partial<Proposal>): Proposal {
   return {
