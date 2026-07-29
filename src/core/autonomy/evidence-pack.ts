@@ -52,6 +52,7 @@ import {
   type ProvenanceVerdict,
 } from '../foundry/provenance.js';
 import { causalMetadata } from '../learning/causal.js';
+import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { fsyncDirectory } from '../util/durability.js';
 import {
   assurePrivateStoragePath,
@@ -97,6 +98,10 @@ export interface AutonomyVerificationEvidence {
   passed: boolean;
   detail: string;
   commandKinds: string[];
+  /** Metadata-only digest of the complete required verifier command contract. */
+  requiredManifestDigest?: string;
+  /** Number of required commands bound into requiredManifestDigest. */
+  requiredCommandCount?: number;
   baseBranch?: string;
   baseHead?: string;
   diffHash?: string;
@@ -393,6 +398,12 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
     passed: input.passed,
     detail: input.detail,
     commandKinds: [...input.commandKinds],
+    ...(input.requiredManifestDigest
+      ? { requiredManifestDigest: input.requiredManifestDigest }
+      : {}),
+    ...(input.requiredCommandCount !== undefined
+      ? { requiredCommandCount: input.requiredCommandCount }
+      : {}),
     ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
     ...(input.baseHead ? { baseHead: input.baseHead } : {}),
     ...(input.diffHash ? { diffHash: input.diffHash } : {}),
@@ -707,13 +718,22 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
 
   const verification = jsonRecord(record['verification']);
   if (!verification || !hasOnlyKeys(verification, [
-    'passed', 'detail', 'commandKinds', 'baseBranch', 'baseHead', 'diffHash',
-    'verifiedAt', 'source', 'browser',
+    'passed', 'detail', 'commandKinds', 'requiredManifestDigest', 'requiredCommandCount',
+    'baseBranch', 'baseHead', 'diffHash', 'verifiedAt', 'source', 'browser',
   ]) || typeof verification['passed'] !== 'boolean' ||
     !boundedNonEmptyString(verification['detail'], 16 * 1024) ||
     !Array.isArray(verification['commandKinds']) || verification['commandKinds'].length > 100 ||
     !(verification['commandKinds'] as unknown[]).every((kind) =>
       typeof kind === 'string' && VERIFY_COMMAND_KINDS.has(kind)) ||
+    (verification['requiredManifestDigest'] !== undefined &&
+      (typeof verification['requiredManifestDigest'] !== 'string' ||
+        !SHA256_RE.test(verification['requiredManifestDigest']))) ||
+    (verification['requiredCommandCount'] !== undefined &&
+      (!Number.isSafeInteger(verification['requiredCommandCount']) ||
+        (verification['requiredCommandCount'] as number) <= 0 ||
+        (verification['requiredCommandCount'] as number) > 100)) ||
+    ((verification['requiredManifestDigest'] === undefined) !==
+      (verification['requiredCommandCount'] === undefined)) ||
     (verification['baseBranch'] !== undefined && !boundedTrimmedString(verification['baseBranch'], 256)) ||
     (verification['baseHead'] !== undefined && (typeof verification['baseHead'] !== 'string' ||
       !GIT_OID_RE.test(verification['baseHead'])) ) ||
@@ -870,6 +890,7 @@ export function sealAutonomyEvidencePackV3(
 ): SignedAutonomyEvidencePackV3 | null {
   try {
     if (!isAutonomyEvidencePackLegacy(pack)) return null;
+    if (pack.trustBasis === 'evidence' && !hasRequiredVerifierManifestBinding(pack)) return null;
     const payload = { ...pack, version: 3 } as AutonomyEvidencePackV3Payload;
     if (!strictEvidencePackV3Payload(payload)) return null;
     const signedPayload = signEvidencePackPayloadV3(payload);
@@ -1436,6 +1457,35 @@ function timestampsAreFresh(pack: AutonomyEvidencePack, nowMs: number, maxAgeMs:
   return generatedMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS >= verifiedMs;
 }
 
+export function hasRequiredVerifierManifestBinding(pack: AutonomyEvidencePack): boolean {
+  return (
+    typeof pack.verification.requiredManifestDigest === 'string' &&
+    SHA256_RE.test(pack.verification.requiredManifestDigest) &&
+    Number.isSafeInteger(pack.verification.requiredCommandCount) &&
+    (pack.verification.requiredCommandCount ?? 0) > 0
+  );
+}
+
+/**
+ * Recompute the required verifier contract from the live proposal metadata.
+ * Only its digest and count are compared; raw argv/cwd never enter evidence.
+ */
+export function evidenceVerifierManifestMatchesProposal(
+  pack: AutonomyEvidencePack,
+  proposal: Proposal,
+): boolean {
+  if (!proposal.repo || !hasRequiredVerifierManifestBinding(pack)) return false;
+  const manifest = buildRequiredVerificationManifest(
+    proposal.repo,
+    proposal.verifyResult?.ran ?? [],
+  );
+  return (
+    manifest !== null &&
+    manifest.digest === pack.verification.requiredManifestDigest &&
+    manifest.commandCount === pack.verification.requiredCommandCount
+  );
+}
+
 /** Fail-closed binding check for evidence used by daemon scheduling. */
 export function evidencePackMatchesLiveProposal(
   pack: AutonomyEvidencePack,
@@ -1477,6 +1527,7 @@ export function evidencePackMatchesLiveProposal(
     pack.policy.action === 'merge-main' &&
     pack.verification.passed === true &&
     pack.verification.commandKinds.length > 0 &&
+    evidenceVerifierManifestMatchesProposal(pack, proposal) &&
     (pack.trustBasis !== 'evidence' || isLiveRemoteProtectionEvidence(pack.gates.remoteProtection)) &&
     requiredGates.every((gate) => gate.ok) &&
     typeof proposal.diffHash === 'string' &&

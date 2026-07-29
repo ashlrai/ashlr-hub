@@ -170,6 +170,7 @@ import {
 import { parseFailedTestIds } from '../run/completeness-gate.js';
 import {
   buildAutonomyEvidencePack,
+  evidenceVerifierManifestMatchesProposal,
   persistAutonomyEvidencePack,
   readAutonomyEvidencePack,
   sealAutonomyEvidencePackV3,
@@ -179,6 +180,7 @@ import {
   type SignedAutonomyEvidencePackV3,
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
+import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 import {
@@ -2037,6 +2039,8 @@ function signedEvidenceMatchesMutationProposal(
     pack.diff.hash === diffHash &&
     pack.verification.passed === verification.passed &&
     isDeepStrictEqual(pack.verification.commandKinds, commandKinds) &&
+    (pack.trustBasis !== 'evidence' ||
+      evidenceVerifierManifestMatchesProposal(pack, proposal)) &&
     pack.verification.baseBranch === verification.baseBranch &&
     pack.verification.baseHead === verification.baseHead &&
     pack.verification.diffHash === verification.diffHash &&
@@ -2048,8 +2052,12 @@ function signedEvidenceMatchesMutationProposal(
 
 function signedEvidenceSealIsLive(proposalId: string, sealedPackDigest: string): boolean {
   const pack = readAutonomyEvidencePack(proposalId);
+  const liveProposal = pack?.trustBasis === 'evidence' ? loadProposal(proposalId) : null;
   return Boolean(pack && pack.version === 3 &&
-    pack.sealedPackDigest === sealedPackDigest && verifyAutonomyEvidencePackV3(pack).ok);
+    pack.sealedPackDigest === sealedPackDigest &&
+    verifyAutonomyEvidencePackV3(pack).ok &&
+    (pack.trustBasis !== 'evidence' ||
+      (liveProposal !== null && evidenceVerifierManifestMatchesProposal(pack, liveProposal))));
 }
 
 function persistNonAuthorizingEvidence(
@@ -3628,6 +3636,13 @@ export async function autoMergeProposal(
         detail: `${capturedProtection.evidence.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
       };
     }
+    const requiredVerifierManifest = buildRequiredVerificationManifest(repo, verify.ran);
+    if (trustBasis === 'evidence' && !requiredVerifierManifest) {
+      return refuse(
+        'required verifier manifest is missing or empty — refusing evidence authority',
+        repo,
+      );
+    }
     const evidenceDraft = buildAutonomyEvidencePack({
       proposal,
       target: toMain ? 'main' : 'branch',
@@ -3640,6 +3655,12 @@ export async function autoMergeProposal(
         passed: verify.ok,
         detail: verify.detail,
         commandKinds: verify.ran.map((cmd) => cmd.kind),
+        ...(requiredVerifierManifest
+          ? {
+              requiredManifestDigest: requiredVerifierManifest.digest,
+              requiredCommandCount: requiredVerifierManifest.commandCount,
+            }
+          : {}),
         ...(verify.baseBranch ? { baseBranch: verify.baseBranch } : {}),
         ...(verify.baseHead ? { baseHead: verify.baseHead } : {}),
         ...(proposal.verifyResult?.diffHash ? { diffHash: proposal.verifyResult.diffHash } : {}),
