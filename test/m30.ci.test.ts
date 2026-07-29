@@ -158,6 +158,12 @@ describe('M30 CI workflow', () => {
       'test/m460.policy-assignment-receipts.test.ts';
     const claimedBatchAdmissionTest =
       'test/m463.claimed-batch-admission.test.ts';
+    const agentWorkTransitionsTest =
+      'test/m464.agent-work-transitions.test.ts';
+    const hostMergeRevocationProtocolTest =
+      'test/m466.host-merge-revocation-protocol.test.ts';
+    const detachedPostMergeVerificationTest =
+      'test/m467.detached-post-merge-verification.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -222,6 +228,9 @@ describe('M30 CI workflow', () => {
         'test/m419.remote-handoff-intent.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
+        agentWorkTransitionsTest,
+        hostMergeRevocationProtocolTest,
+        detachedPostMergeVerificationTest,
       ],
     ];
     const expectedMacosFiles = [
@@ -236,6 +245,9 @@ describe('M30 CI workflow', () => {
       externalSkillArtifactFirewallTest,
       policyAssignmentReceiptsTest,
       claimedBatchAdmissionTest,
+      agentWorkTransitionsTest,
+      hostMergeRevocationProtocolTest,
+      detachedPostMergeVerificationTest,
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
@@ -468,6 +480,9 @@ describe('M30 CI workflow', () => {
       externalSkillArtifactFirewallTest,
       policyAssignmentReceiptsTest,
       claimedBatchAdmissionTest,
+      agentWorkTransitionsTest,
+      hostMergeRevocationProtocolTest,
+      detachedPostMergeVerificationTest,
       'test/m426.sandbox-reservation-identity.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(

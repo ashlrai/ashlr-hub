@@ -99,6 +99,9 @@ jobs:
               test/m419.remote-handoff-intent.test.ts
               test/m420.remote-handoff-recovery.test.ts
               test/m421.legacy-pulse-quiescence.test.ts
+              test/m464.agent-work-transitions.test.ts
+              test/m466.host-merge-revocation-protocol.test.ts
+              test/m467.detached-post-merge-verification.test.ts
               test/m299.web-fleet-control.test.ts
               test/activation-readiness-package.test.ts
               test/activation-readiness-windows.test.ts
@@ -116,6 +119,9 @@ jobs:
               test/m457.external-skill-artifact-firewall.test.ts
               test/m460.policy-assignment-receipts.test.ts
               test/m463.claimed-batch-admission.test.ts
+              test/m464.agent-work-transitions.test.ts
+              test/m466.host-merge-revocation-protocol.test.ts
+              test/m467.detached-post-merge-verification.test.ts
     runs-on: ${{ matrix.os }}
     env:
       ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}
