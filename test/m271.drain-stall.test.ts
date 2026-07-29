@@ -197,6 +197,8 @@ function reviewVerdict(proposalId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(NOW_ISO));
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m271-test-'));
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
@@ -223,6 +225,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   rmSync(tmpHome, { recursive: true, force: true });
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
