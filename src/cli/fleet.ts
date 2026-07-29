@@ -810,6 +810,27 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const detachedPostMerge = s.detachedPostMergeVerificationReadiness;
+  lines.push('Detached post-merge verification (observation only):');
+  if (!detachedPostMerge) {
+    lines.push('  unavailable');
+  } else {
+    const summary = detachedPostMerge.summary;
+    lines.push(`  state:      ${detachedPostMerge.state}`);
+    lines.push(`  observed:   ${detachedPostMerge.latestObservedAt ?? 'never'}`);
+    lines.push(
+      `  cohorts:    ${summary.conclusiveCompleteCohorts}/${summary.cohorts} conclusive, ` +
+        `${summary.denominatorCompleteCohorts}/${summary.cohorts} denominator-complete`,
+    );
+    lines.push(
+      `  outcomes:   ${summary.pass} pass, ${summary.fail} fail, ${summary.unknown} unknown`,
+    );
+    lines.push(
+      '  authority:  policy=false, merge=false, rollback=false, deploy=false',
+    );
+  }
+  lines.push('');
+
   // Authenticated observation checkpoints are deliberately outside readiness.
   const cutoff = s.cutoffCheckpoints;
   lines.push('Cutoff checkpoints (observation only):');
