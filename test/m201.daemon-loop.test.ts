@@ -4653,6 +4653,68 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h2d3: an aborted partial artifact settles its shared claim without cooldown authority', async () => {
+    const { repo, items } = enrollWithItems(1);
+    const item = items[0]!;
+    const sharedPath = join(fx.ashlrDir, 'shared-partial-artifact');
+    const observer = new SharedStore(sharedPath, 60_000);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'partial shared claim' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => {
+      const runId = (options as { runId: string }).runId;
+      const proposal = createProposal({
+        repo: repo.dir,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Review-only partial artifact',
+        summary: 'The producer aborted after filing incomplete evidence.',
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+partial\n',
+        workItemId: item.id,
+        workSource: item.source,
+        runId,
+        trajectoryId: `run:${runId}`,
+        runEventSummary: { runId, status: 'aborted', outcome: 'gate-blocked', proposalCreated: false },
+        isPartial: true,
+      });
+      return {
+        id: runId,
+        status: 'aborted' as const,
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: {
+          kind: 'filed' as const,
+          proposalId: proposal.id,
+          reason: 'partial artifact filed after abort',
+          isPartial: true,
+          files: 1,
+          insertions: 1,
+          deletions: 1,
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'm201-partial-artifact',
+          trustedCoherentStorage: true,
+        },
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'gate-blocked',
+      runEventSummary: { status: 'aborted', proposalCreated: false },
+    });
+    expect(observer.readSnapshot().claims).not.toHaveProperty(item.id);
+    expect(observer.readSnapshot().worked.some((event) => event.itemId === item.id)).toBe(false);
+    expect(pendingCount()).toBe(1);
+    expect(loadWorkedLedger().events.some((event) => event.itemId === item.id)).toBe(false);
+  });
+
   it('A1h2e: builtin governance suppression remains proposal-disabled and does not cool work', async () => {
     const { items } = enrollWithItems(1);
     mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
