@@ -34,10 +34,90 @@ import {
 import { createPolicyAssignmentReceipt } from '../src/core/learning/policy-assignment-receipts.js';
 import { enroll } from '../src/core/sandbox/policy.js';
 import * as durability from '../src/core/util/durability.js';
+import {
+  assurePrivateStoragePath,
+  type PrivateStorageInvocation,
+  type PrivateStorageRunner,
+} from '../src/core/util/private-storage.js';
 import type { WorkItem } from '../src/core/types.js';
 
 const CAMPAIGN = 'a'.repeat(64);
 const ADMISSION_POLICY = 'b'.repeat(64);
+
+function privateStorageResponse(
+  invocation: PrivateStorageInvocation,
+  status: number,
+  ok: boolean,
+  reason: string,
+): ReturnType<PrivateStorageRunner> {
+  const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
+  return {
+    status,
+    stdout: JSON.stringify({
+      nonce: request.nonce,
+      operation: request.operation,
+      ok,
+      reason,
+    }),
+  };
+}
+
+describe('M463 Windows setup adapter resilience', () => {
+  const options = {
+    platform: 'win32' as const,
+    systemRoot: 'C:\\Windows',
+    anchorPath: 'C:\\fixture',
+  };
+
+  it('retries one adapter failure without retrying semantic ACL rejection', () => {
+    const transport = vi.fn<PrivateStorageRunner>()
+      .mockReturnValueOnce({ status: null, error: new Error('simulated timeout') })
+      .mockImplementation((invocation) =>
+        privateStorageResponse(invocation, 0, true, 'exact-private-dacl'));
+    expect(assurePrivateStoragePath(
+      'C:\\fixture\\.ashlr',
+      'directory',
+      'secure-created',
+      { ...options, runner: transport },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(transport).toHaveBeenCalledTimes(2);
+
+    const readOwner = vi.fn<PrivateStorageRunner>()
+      .mockImplementationOnce((invocation) =>
+        privateStorageResponse(invocation, 1, false, 'adapter-error-read-owner'))
+      .mockImplementation((invocation) =>
+        privateStorageResponse(invocation, 0, true, 'exact-private-dacl'));
+    expect(assurePrivateStoragePath(
+      'C:\\fixture\\.ashlr',
+      'directory',
+      'secure-created',
+      { ...options, runner: readOwner },
+    )).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(readOwner).toHaveBeenCalledTimes(2);
+
+    const repeatedReadOwner = vi.fn<PrivateStorageRunner>()
+      .mockImplementation((invocation) =>
+        privateStorageResponse(invocation, 1, false, 'adapter-error-read-owner'));
+    expect(assurePrivateStoragePath(
+      'C:\\fixture\\.ashlr',
+      'directory',
+      'secure-created',
+      { ...options, runner: repeatedReadOwner },
+    )).toEqual({ ok: false, reason: 'adapter-error-read-owner' });
+    expect(repeatedReadOwner).toHaveBeenCalledTimes(2);
+
+    const semantic = vi.fn<PrivateStorageRunner>()
+      .mockImplementation((invocation) =>
+        privateStorageResponse(invocation, 1, false, 'untrusted-ancestor-owner'));
+    expect(assurePrivateStoragePath(
+      'C:\\fixture\\.ashlr',
+      'directory',
+      'secure-created',
+      { ...options, runner: semantic },
+    )).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
+    expect(semantic).toHaveBeenCalledOnce();
+  });
+});
 
 function item(repo: string, suffix: string, overrides: Partial<WorkItem> = {}): WorkItem {
   return {
