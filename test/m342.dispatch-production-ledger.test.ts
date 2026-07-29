@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
@@ -88,6 +88,7 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
 
 import {
   _setDispatchProductionLedgerRetentionHooksForTest,
+  currentAuthoritativeDispatchProductionLearningLabel,
   dispatchProductionDir,
   hasExactDispatchProductionTreatmentOutcomeReceipt,
   readDispatchProductionEvents,
@@ -5621,6 +5622,158 @@ describe('M342 dispatch production ledger', () => {
       }],
     });
     expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+  });
+
+  it('accepts the exact v1 run trajectory alias without widening receipt semantics', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    const canonical = sanitizeDispatchProductionEvent(witness, { materializeLearningLabel: true });
+    expect(canonical.runId).toBeTruthy();
+    expect(canonical.trajectoryId).toBe(`run:${canonical.runId}`);
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const receiptPath = join(
+      dispatchProductionDir(),
+      'repair-treatment-outcomes',
+      `${witness.repairGenerationId}-${witness.repairTreatmentAttemptHash}.json`,
+    );
+    const legacy = { ...canonical };
+    legacy.learningLabel = {
+      ...canonical.learningLabel!,
+      classifierVersion: 'attempt-shape-v1',
+    };
+    const stored = `${JSON.stringify(legacy)}\n`;
+    writeFileSync(receiptPath, stored, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+
+    const accepted = readDispatchProductionEventsDetailed();
+    expect(accepted).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      invalidRows: 0,
+      events: [{
+        trajectoryId: `run:${canonical.runId}`,
+        labelOrigin: 'stored-legacy',
+      }],
+    });
+    expect(readFileSync(receiptPath, 'utf8')).toBe(stored);
+
+    const mutated = JSON.stringify({
+      ...legacy,
+      trajectoryId: `run:${canonical.runId}:other`,
+    });
+    writeFileSync(receiptPath, `${mutated}\n`, { mode: 0o600 });
+    protectWindowsFixtureTree(dirname(receiptPath));
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+  });
+
+  it('reads the exact v1 generated-repair label delta as non-authoritative legacy evidence', () => {
+    const repo = join(realpathSync.native(tmpdir()), 'repo');
+    const parentItemId = 'goal-compat';
+    const repairHash = createHash('sha1')
+      .update(`${repo}\0${parentItemId}\0dispatch-no-diff-reslice`)
+      .digest('hex')
+      .slice(0, 12);
+    const current = makeEvent({
+      itemId: `${basename(repo)}:proposal-repair-nodiff:${repairHash}`,
+      source: 'self',
+      repo,
+      title: `Reslice no-diff dispatch for ${basename(repo)} item ${parentItemId}`,
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-compat',
+      runId: 'run-compat',
+      trajectoryId: 'run:run-compat',
+      runEventSummary: {
+        runId: 'run-compat',
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-compat',
+        actionCounts: {
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          transientRetries: 0,
+          proposalCaptureAttempts: 1,
+          completenessGateRuns: 1,
+          verifyRepairAttempts: 0,
+          modelSteps: 1,
+          toolSteps: 0,
+          totalSteps: 1,
+          diffFiles: 1,
+          diffLines: 1,
+          proposalCreated: 1,
+          proposalBlocked: 0,
+          proposalDisabled: 0,
+        },
+      },
+    });
+    const canonical = sanitizeDispatchProductionEvent(current, { materializeLearningLabel: true });
+    expect(canonical.learningLabel?.attemptShape.repairAttempts).toBe(1);
+    const legacy = {
+      ...canonical,
+      learningLabel: {
+        ...canonical.learningLabel!,
+        classifierVersion: 'attempt-shape-v1',
+        attemptShape: {
+          ...canonical.learningLabel!.attemptShape,
+          repairAttempts: 0,
+        },
+      },
+    };
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const partition = join(dir, `${legacy.ts.slice(0, 10)}.jsonl`);
+    writeFileSync(partition, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    const read = readDispatchProductionEventsDetailed();
+    expect(read).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      invalidRows: 0,
+      events: [{
+        labelOrigin: 'stored-legacy',
+        learningLabel: {
+          classifierVersion: 'attempt-shape-v2',
+          attemptShape: { repairAttempts: 1 },
+        },
+      }],
+    });
+    expect(currentAuthoritativeDispatchProductionLearningLabel(read.events[0]!)).toBeUndefined();
+
+    const invalidIdentities = [
+      {
+        ...legacy,
+        itemId: 'ordinary-item',
+        title: 'Repair proposal forged-proposal: unrelated title-only alias',
+      },
+      {
+        ...legacy,
+        itemId: `${basename(repo)}:proposal-repair-nodiff:${'0'.repeat(12)}`,
+      },
+      {
+        ...legacy,
+        source: 'goal',
+      },
+    ];
+    for (const invalidIdentity of invalidIdentities) {
+      writeFileSync(partition, `${JSON.stringify(invalidIdentity)}\n`, { mode: 0o600 });
+      expect(readDispatchProductionEventsDetailed()).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+    }
+
+    legacy.learningLabel.attemptShape.backendNoDiff = 1;
+    writeFileSync(partition, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
   });
 
   it('accepts one canonical legacy receipt line without rewriting a missing terminal newline', () => {
