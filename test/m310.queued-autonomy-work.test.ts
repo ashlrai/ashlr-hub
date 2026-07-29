@@ -1641,6 +1641,7 @@ describe('queued autonomy work scanner', () => {
     )).toMatchObject({ disposition: 'exhausted' });
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'a'.repeat(32),
       repos: [repo.dir],
       items: [ordinary, repair],
     });
@@ -1673,6 +1674,78 @@ describe('queued autonomy work scanner', () => {
     expect(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'))).toEqual(queueBefore);
   });
 
+  it('withholds destructive retirement for a legacy backlog without snapshot identity', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:legacy-unidentified-backlog',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-legacy-unidentified',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordDiagnosticEmpty(repair, 'attempt-d2345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-e2345678-1234-4123-8123-123456789abc', 'kimi', 2);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    const before = readFileSync(join(fx.ashlrDir, 'backlog.json'));
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'backlog-identity-unavailable',
+    });
+    expect(readFileSync(join(fx.ashlrDir, 'backlog.json'))).toEqual(before);
+  });
+
+  it('withholds retirement when the exact backlog snapshot changes before commit', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T15:00:00.000Z',
+      itemId: 'repo:goal:replaced-backlog-snapshot',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-replaced-backlog',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
+    const repair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    const ordinary = item(repo.dir, 'ordinary-in-replacement-snapshot');
+    recordDiagnosticEmpty(repair, 'attempt-f2345678-1234-4123-8123-123456789abc', 'local-coder', 1);
+    recordDiagnosticEmpty(repair, 'attempt-12345678-2234-4123-8123-123456789abc', 'kimi', 2);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      snapshotId: '1'.repeat(32),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    const replacement = {
+      generatedAt: new Date(now.getTime() + 1_000).toISOString(),
+      snapshotId: '2'.repeat(32),
+      repos: [repo.dir],
+      items: [ordinary, repair],
+    };
+    _setTerminalRepairRetirementRaceHookForTest(() => {
+      writeJson(join(fx.ashlrDir, 'backlog.json'), replacement);
+    });
+
+    expect(retireTerminalRepairBacklogProjections()).toMatchObject({
+      sourceState: 'unavailable',
+      retired: 0,
+      changed: false,
+      reason: 'backlog-changed',
+    });
+    expect(JSON.parse(readFileSync(join(fx.ashlrDir, 'backlog.json'), 'utf8'))).toEqual(replacement);
+  });
+
   it('preserves active repairs and unrelated backlog work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1691,6 +1764,7 @@ describe('queued autonomy work scanner', () => {
     const ordinary = item(repo.dir, 'ordinary-next-to-active-repair');
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'b'.repeat(32),
       repos: [repo.dir],
       items: [ordinary, repair],
     });
@@ -1725,6 +1799,7 @@ describe('queued autonomy work scanner', () => {
     recordDiagnosticEmpty(repair, 'attempt-62345678-1234-4123-8123-123456789abc', 'kimi', 2);
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'c'.repeat(32),
       repos: [repo.dir],
       items: [repair],
     });
@@ -1757,6 +1832,7 @@ describe('queued autonomy work scanner', () => {
     recordDiagnosticEmpty(repair, 'attempt-c2345678-1234-4123-8123-123456789abc', 'kimi', 2);
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'd'.repeat(32),
       repos: [repo.dir],
       items: [repair],
     });
@@ -1800,6 +1876,7 @@ describe('queued autonomy work scanner', () => {
     const stale = { ...repair, repairGenerationId: 'f'.repeat(64) };
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'e'.repeat(32),
       repos: [repo.dir],
       items: [stale],
     });
@@ -1831,6 +1908,7 @@ describe('queued autonomy work scanner', () => {
     recordDiagnosticEmpty(repair, 'attempt-a2345678-1234-4123-8123-123456789abc', 'kimi', 2);
     writeJson(join(fx.ashlrDir, 'backlog.json'), {
       generatedAt: now.toISOString(),
+      snapshotId: 'f'.repeat(32),
       repos: [repo.dir],
       items: [repair],
     });

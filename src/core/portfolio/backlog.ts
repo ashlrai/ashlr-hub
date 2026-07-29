@@ -38,9 +38,11 @@ import {
 } from '../fleet/local-store-lock.js';
 import { isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import { sanitizeSourceBaseDigest } from '../fleet/source-base-digest.js';
+import { readStableRegularFile } from '../util/stable-file-read.js';
 import { isStrictWorkItem } from './queued-autonomy.js';
 
 const MAX_RETIREMENT_BACKLOG_ITEMS = 10_000;
+const MAX_RETIREMENT_BACKLOG_BYTES = 32 * 1024 * 1024;
 let terminalRepairRetirementRaceHookForTest: (() => void) | undefined;
 
 /** Deterministic lock/source race seam; production callers must never set this. */
@@ -151,11 +153,8 @@ export function sourceTierMultiplier(source: string): number {
  * Returns null if the file is absent or unreadable/malformed.
  * Never throws.
  */
-export function loadBacklog(): Backlog | null {
+function parseBacklog(raw: string): Backlog | null {
   try {
-    const p = backlogPath();
-    if (!existsSync(p)) return null;
-    const raw = readFileSync(p, 'utf8');
     const parsed: unknown = JSON.parse(raw);
     if (
       parsed !== null &&
@@ -204,6 +203,16 @@ export function loadBacklog(): Backlog | null {
       };
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+export function loadBacklog(): Backlog | null {
+  try {
+    const p = backlogPath();
+    if (!existsSync(p)) return null;
+    return parseBacklog(readFileSync(p, 'utf8'));
   } catch {
     return null;
   }
@@ -319,6 +328,7 @@ export type TerminalRepairBacklogRetirementReason =
   | 'mutation-lock-unavailable'
   | 'mutation-lock-lost'
   | 'backlog-unavailable'
+  | 'backlog-identity-unavailable'
   | 'backlog-changed'
   | 'generation-identity-unavailable'
   | 'lifecycle-evidence-unavailable'
@@ -342,6 +352,18 @@ interface TerminalRepairProjectionInspection {
   unavailableReason?: 'generation-identity-unavailable' | 'lifecycle-evidence-unavailable';
 }
 
+type RetirementBacklogRead =
+  | { state: 'missing' }
+  | {
+      state: 'unavailable';
+      reason: 'backlog-unavailable' | 'backlog-identity-unavailable';
+    }
+  | {
+      state: 'ready';
+      backlog: Backlog;
+      sourceText: string;
+    };
+
 function retirementResult(
   reason: TerminalRepairBacklogRetirementReason,
   values: Partial<Omit<TerminalRepairBacklogRetirementResult, 'reason'>> = {},
@@ -360,9 +382,16 @@ function retirementResult(
   };
 }
 
-function completeBacklogForRetirement(): Backlog | null | undefined {
-  if (!existsSync(backlogPath())) return null;
-  const backlog = loadBacklog();
+function completeBacklogForRetirement(): RetirementBacklogRead {
+  const path = backlogPath();
+  if (!existsSync(path)) return { state: 'missing' };
+  const read = readStableRegularFile(path, {
+    anchorPath: homedir(),
+    maxFileBytes: MAX_RETIREMENT_BACKLOG_BYTES,
+    remainingBytes: MAX_RETIREMENT_BACKLOG_BYTES,
+  });
+  if (!read.ok) return { state: 'unavailable', reason: 'backlog-unavailable' };
+  const backlog = parseBacklog(read.text);
   if (
     !backlog ||
     backlog.items.length > MAX_RETIREMENT_BACKLOG_ITEMS ||
@@ -375,8 +404,11 @@ function completeBacklogForRetirement(): Backlog | null | undefined {
         return false;
       }
     })
-  ) return undefined;
-  return backlog;
+  ) return { state: 'unavailable', reason: 'backlog-unavailable' };
+  if (!backlog.snapshotId) {
+    return { state: 'unavailable', reason: 'backlog-identity-unavailable' };
+  }
+  return { state: 'ready', backlog, sourceText: read.text };
 }
 
 function inspectTerminalRepairProjections(
@@ -460,10 +492,10 @@ export function retireTerminalRepairBacklogProjections(): TerminalRepairBacklogR
   if (!lock) return retirementResult('mutation-lock-unavailable');
   try {
     if (!ownsLocalStoreLock(lock)) return retirementResult('mutation-lock-lost');
-    const backlog = completeBacklogForRetirement();
-    if (backlog === null) return retirementResult('no-backlog');
-    if (backlog === undefined) return retirementResult('backlog-unavailable');
-    const initialBytes = JSON.stringify(backlog);
+    const source = completeBacklogForRetirement();
+    if (source.state === 'missing') return retirementResult('no-backlog');
+    if (source.state === 'unavailable') return retirementResult(source.reason);
+    const { backlog } = source;
     const initial = inspectTerminalRepairProjections(backlog);
     const common = {
       scanned: backlog.items.length,
@@ -483,10 +515,11 @@ export function retireTerminalRepairBacklogProjections(): TerminalRepairBacklogR
       return retirementResult('lifecycle-evidence-changed', common);
     }
     if (!ownsLocalStoreLock(lock)) return retirementResult('mutation-lock-lost', common);
-    const current = completeBacklogForRetirement();
-    if (current === null || current === undefined || JSON.stringify(current) !== initialBytes) {
+    const currentSource = completeBacklogForRetirement();
+    if (currentSource.state !== 'ready' || currentSource.sourceText !== source.sourceText) {
       return retirementResult('backlog-changed', common);
     }
+    const current = currentSource.backlog;
     const confirmed = inspectTerminalRepairProjections(current);
     if (confirmed.unavailableReason) {
       return retirementResult(confirmed.unavailableReason, {
@@ -502,7 +535,14 @@ export function retireTerminalRepairBacklogProjections(): TerminalRepairBacklogR
 
     const items = current.items.filter((_item, index) => !confirmed.terminalIndexes.has(index));
     try {
-      persistBacklogUnlocked({ ...current, items }, () => ownsLocalStoreLock(lock));
+      persistBacklogUnlocked(
+        { ...current, items },
+        () => {
+          if (!ownsLocalStoreLock(lock)) return false;
+          const latest = completeBacklogForRetirement();
+          return latest.state === 'ready' && latest.sourceText === currentSource.sourceText;
+        },
+      );
     } catch {
       return retirementResult(
         ownsLocalStoreLock(lock) ? 'persistence-failed' : 'mutation-lock-lost',
