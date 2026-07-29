@@ -21,6 +21,7 @@ import {
   readSync,
   writeSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
@@ -139,6 +140,8 @@ export interface AgentActionEvent {
   outcome: AgentActionOutcome;
   action: string;
   summary: string;
+  /** Stable digest of omitted free-form prose. Never contains the prose itself. */
+  proseDigest?: string;
   repo?: string;
   itemId?: string;
   source?: WorkSource;
@@ -222,6 +225,88 @@ const AGENT_ACTION_OUTCOMES = new Set<AgentActionOutcome>([
   'unknown',
 ]);
 
+const AGENT_ACTION_COUNT_KEYS = new Set([
+  'available',
+  'automatic',
+  'backlogItems',
+  'baseCooldownMs',
+  'blocked',
+  'capped',
+  'claimed',
+  'commands',
+  'cooldownBlocked',
+  'diagnosticNoProposal',
+  'diffFiles',
+  'diffLines',
+  'dispatchBlocked',
+  'dispatchEvaluated',
+  'dispatched',
+  'drainAvailable',
+  'drainRequested',
+  'drainSelected',
+  'effectiveCooldownMs',
+  'eligibleEvents',
+  'eligibleItems',
+  'failed',
+  'fairnessDeferred',
+  'fastRepairCooldown',
+  'generatedRepairDecisionDropped',
+  'itemsConsidered',
+  'limit',
+  'merged',
+  'noProposal',
+  'parallel',
+  'pendingBlocked',
+  'perTickItems',
+  'policySuppressed',
+  'proposalCreated',
+  'proposalsCreated',
+  'rawSelectCount',
+  'routeBlocked',
+  'routeEvaluated',
+  'routeFeasible',
+  'routeRequiresAlternative',
+  'selectCount',
+  'selected',
+  'uniqueTrajectories',
+]);
+const AGENT_ACTION_REASON_CODES = new Set([
+  'blocked',
+  'budget-exhausted',
+  'cancelled',
+  'dry-run',
+  'empty-diff',
+  'engine-failed',
+  'failed',
+  'gate-blocked',
+  'judged',
+  'kill-switch',
+  'live',
+  'merged',
+  'no-backlog',
+  'no-claim',
+  'no-enrolled-repos',
+  'no-proposal',
+  'ok',
+  'pause',
+  'proposal-capture-error',
+  'proposal-created',
+  'proposal-disabled',
+  'rejected',
+  'route-selected',
+  'sandbox-failed',
+  'selected',
+  'skipped',
+  'skipped-before-dispatch',
+  'started',
+  'state-persistence-failed',
+  'unknown',
+  'verified',
+  'verify-only',
+]);
+const ACTION_CODE_RE = /^[a-z0-9][a-z0-9:._-]{0,119}$/;
+const PROSE_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+
 const ENGINE_IDS = new Set<EngineId>([
   'builtin',
   'local-coder',
@@ -272,6 +357,7 @@ export interface AgentWorkspaceRecentAction {
   outcome: AgentActionOutcome;
   action: string;
   summary: string;
+  proseDigest?: string;
   repo?: string;
   itemId?: string;
   proposalId?: string;
@@ -383,19 +469,59 @@ function sanitizeCounts(counts: unknown): Record<string, number> | undefined {
   if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return undefined;
   const out: Record<string, number> = {};
   for (const [key, value] of Object.entries(counts).slice(0, 20)) {
-    if (!Number.isFinite(value)) continue;
-    out[boundedText(key, 64)] = value;
+    if (!AGENT_ACTION_COUNT_KEYS.has(key) || !Number.isFinite(value)) continue;
+    out[key] = value;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function sanitizeTags(tags: unknown): string[] | undefined {
-  if (!Array.isArray(tags)) return undefined;
-  const out = tags
-    .filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
-    .slice(0, 12)
-    .map((tag) => boundedText(tag.trim(), 48));
+function sanitizeActionCode(value: unknown, actor: AgentActionActor, kind: AgentActionKind): string {
+  if (typeof value === 'string' && ACTION_CODE_RE.test(value)) return value;
+  return `${actor}:${kind}`;
+}
+
+function sanitizeTags(fields: {
+  kind: AgentActionKind;
+  outcome: AgentActionOutcome;
+  source?: WorkSource;
+  backend?: EngineId | null;
+  tier?: EngineTier | null;
+}): string[] | undefined {
+  const out = [
+    `kind:${fields.kind}`,
+    `outcome:${fields.outcome}`,
+    ...(fields.source ? [`source:${fields.source}`] : []),
+    ...(fields.backend ? [`backend:${fields.backend}`] : []),
+    ...(fields.tier ? [`tier:${fields.tier}`] : []),
+  ];
   return out.length > 0 ? out : undefined;
+}
+
+function proseDigest(event: AgentActionEvent): string {
+  if (typeof event.proseDigest === 'string' && PROSE_DIGEST_RE.test(event.proseDigest)) {
+    return event.proseDigest;
+  }
+  const prose = [
+    event.summary,
+    event.reason,
+    event.routeSnapshot?.reason,
+    ...(Array.isArray(event.tags) ? event.tags : []),
+  ].map((value) => typeof value === 'string' ? scrubSecrets(value) : null);
+  return `sha256:${createHash('sha256')
+    .update('ashlr:agent-action-prose:v1\0', 'utf8')
+    .update(JSON.stringify(prose), 'utf8')
+    .digest('hex')}`;
+}
+
+function canonicalReason(
+  event: AgentActionEvent,
+  runEventSummary: RunEventSummary | undefined,
+  outcome: AgentActionOutcome,
+): string {
+  for (const candidate of [runEventSummary?.outcome, event.reason, outcome]) {
+    if (typeof candidate === 'string' && AGENT_ACTION_REASON_CODES.has(candidate)) return candidate;
+  }
+  return outcome;
 }
 
 function expectedAgentActionSemanticProducer(
@@ -409,7 +535,6 @@ function expectedAgentActionSemanticProducer(
 
 function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false): AgentActionEvent {
   const ts = eventTimestamp(event.ts);
-  const tags = sanitizeTags(event.tags);
   const counts = sanitizeCounts(event.counts);
   const durationMs = finiteNumber(event.durationMs);
   const spentUsd = finiteNumber(event.spentUsd);
@@ -417,6 +542,12 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const source = enumValue(event.source, WORK_SOURCES);
   const backend = event.backend === null ? null : enumValue(event.backend, ENGINE_IDS);
   const tier = event.tier === null ? null : enumValue(event.tier, ENGINE_TIERS);
+  const actor = enumValue(event.actor, AGENT_ACTION_ACTORS) ?? 'system';
+  const kind = enumValue(event.kind, AGENT_ACTION_KINDS) ?? 'reflection';
+  const outcome = enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown';
+  const action = sanitizeActionCode(event.action, actor, kind);
+  const digest = proseDigest(event);
+  const tags = sanitizeTags({ kind, outcome, source, backend, tier });
   const machineId = boundedOptionalText(event.machineId, 120);
   const repo = boundedOptionalText(event.repo, 500);
   const itemId = boundedOptionalText(event.itemId, 240);
@@ -460,7 +591,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : event.workTransitions !== undefined || event.workTransitionsState === 'rejected'
       ? 'rejected' as const
       : undefined;
-  const reason = boundedOptionalText(event.reason, 240);
+  const reason = canonicalReason(event, runEventSummary, outcome);
   const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
     ? event.repairHandoffId
     : undefined;
@@ -525,15 +656,26 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     routerPolicyVersion: event.routerPolicyVersion,
     learningEpoch: event.learningEpoch,
   });
+  const metadataOnlyRouteSnapshot = causal.routeSnapshot
+    ? {
+        ...causal.routeSnapshot,
+        reason: undefined,
+      }
+    : undefined;
 
   return {
     schemaVersion: 1,
     ts,
-    actor: enumValue(event.actor, AGENT_ACTION_ACTORS) ?? 'system',
-    kind: enumValue(event.kind, AGENT_ACTION_KINDS) ?? 'reflection',
-    outcome: enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown',
-    action: boundedText(event.action, 120),
-    summary: boundedText(event.summary, 240),
+    actor,
+    kind,
+    outcome,
+    action,
+    summary:
+      `${action} outcome=${outcome}` +
+      `${backend ? ` backend=${backend}` : ''}` +
+      `${source ? ` source=${source}` : ''}` +
+      ` ref=${digest.slice('sha256:'.length, 'sha256:'.length + 12)}`,
+    proseDigest: digest,
     ...(machineId ? { machineId } : {}),
     ...(repo ? { repo } : {}),
     ...(itemId ? { itemId } : {}),
@@ -541,6 +683,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
+    ...(metadataOnlyRouteSnapshot ? { routeSnapshot: metadataOnlyRouteSnapshot } : {}),
     ...(learningLabel ? { learningLabel } : {}),
     ...(semanticEvents ? { semanticEvents } : {}),
     ...(semanticEventsState ? { semanticEventsState } : {}),
@@ -561,7 +704,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
     ...(model ? { model } : {}),
-    ...(reason ? { reason } : {}),
+    reason,
     ...(durationMs !== undefined ? { durationMs: Math.max(0, durationMs) } : {}),
     ...(spentUsd !== undefined ? { spentUsd: Math.max(0, spentUsd) } : {}),
     ...(tags ? { tags } : {}),
@@ -585,6 +728,8 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     enumValue(obj['outcome'], AGENT_ACTION_OUTCOMES) !== undefined &&
     typeof obj['action'] === 'string' && obj['action'].trim() !== '' &&
     typeof obj['summary'] === 'string' && obj['summary'].trim() !== '' &&
+    (obj['proseDigest'] === undefined ||
+      (typeof obj['proseDigest'] === 'string' && PROSE_DIGEST_RE.test(obj['proseDigest']))) &&
     validOptionalCausalRecord(obj['routeSnapshot'], ROUTE_SNAPSHOT_KEYS, normalizeRouteSnapshot, ['routerPolicyVersion']) &&
     validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
     (runId === undefined || runEventSummary?.runId === undefined || runEventSummary.runId === runId) &&
@@ -1179,6 +1324,7 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
     outcome: event.outcome,
     action: event.action,
     summary: event.summary,
+    ...(event.proseDigest ? { proseDigest: event.proseDigest } : {}),
     ...(event.repo ? { repo: event.repo } : {}),
     ...(event.itemId ? { itemId: event.itemId } : {}),
     ...(event.proposalId ? { proposalId: event.proposalId } : {}),

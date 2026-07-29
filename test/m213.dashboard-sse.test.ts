@@ -24,8 +24,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  readAgentWorkspace,
+  recordAgentAction,
+} from '../src/core/fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -345,6 +350,60 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(match).not.toBeNull();
     const payload = JSON.parse(match![1]);
     expect(payload.dispatchEnabled).toBe(true);
+  });
+
+  it('keeps raw agent prose out of the SSE snapshot payload', async () => {
+    const rawCanary = 'RAW_CUSTOMER_STDOUT_CANARY_7f8a91 ordinary private text';
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m213-privacy-'));
+    const previous = process.env.ASHLR_HOME;
+    process.env.ASHLR_HOME = home;
+    try {
+      recordAgentAction({
+        schemaVersion: 1,
+        ts: new Date().toISOString(),
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: rawCanary,
+        repo: '/tmp/privacy-repo',
+        itemId: 'privacy-item',
+        source: 'todo',
+        backend: 'codex',
+        tier: 'frontier',
+        reason: rawCanary,
+        routeSnapshot: {
+          backend: 'codex',
+          tier: 'frontier',
+          assignedBy: 'router',
+          reason: rawCanary,
+        },
+        tags: [rawCanary],
+      });
+      const workspace = readAgentWorkspace({ repoScope: 'all' });
+      vi.mocked(buildSnapshot).mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        repos: [],
+        runs: [],
+        swarms: [],
+        pulse: null,
+        genome: [],
+        inbox: { pending: 0 },
+        fleet: { workspace },
+        frontierUsage: null,
+      } as any);
+
+      const { res } = await openSseAndDrainInitial();
+      const payload = res._chunks().join('');
+
+      expect(payload).not.toContain(rawCanary);
+      expect(payload).toContain('daemon:dispatch outcome=no-proposal backend=codex source=todo ref=');
+      expect(payload).toContain('"proseDigest":"sha256:');
+    } finally {
+      if (previous === undefined) delete process.env.ASHLR_HOME;
+      else process.env.ASHLR_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('does not overlap full snapshot builds when an SSE update is still in flight', async () => {
@@ -1627,6 +1686,32 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(helpers.fleetActivitySourceText!(degraded)).toBe('degraded (io-error)');
     expect(src).toContain('Proposal evidence is unavailable; repository activity is withheld.');
     expect(src).toContain('Merge evidence is unavailable; recent merges are withheld.');
+  });
+
+  it('app.js never renders free-form agent summaries', () => {
+    const rawCanary = 'RAW_CUSTOMER_STDOUT_CANARY_7f8a91 ordinary private text';
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function agentActionDisplayText(action)');
+    const end = src.indexOf('\nfunction renderFleetActivity()', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const agentActionDisplayText = new Function(
+      `${src.slice(start, end)}\nreturn agentActionDisplayText;`,
+    )() as (action: Record<string, unknown>) => string;
+
+    const display = agentActionDisplayText({
+      action: 'daemon:dispatch',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      summary: rawCanary,
+      proseDigest: `sha256:${'a'.repeat(64)}`,
+    });
+
+    expect(display).toBe('daemon:dispatch dispatch/no-proposal ref=aaaaaaaaaaaa');
+    expect(display).not.toContain(rawCanary);
+    expect(src).not.toContain('title: action.summary');
+    expect(src).not.toContain('compactFleetReason(action.summary');
   });
 
   it('renders cutoff checkpoints outside readiness and labels evidence source quality honestly', () => {

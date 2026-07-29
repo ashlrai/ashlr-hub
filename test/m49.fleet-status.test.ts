@@ -3649,6 +3649,54 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('memory:    2 entries');
   });
 
+  it('keeps raw action prose out of Fleet Status JSON', async () => {
+    const rawCanary = 'RAW_CUSTOMER_STDOUT_CANARY_7f8a91 ordinary private text';
+    const repo = join(tmpHome, 'privacy-repo');
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(tmpHome, '.ashlr'), { recursive: true });
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'enrollment.json'),
+      JSON.stringify({ repos: [repo] }),
+      'utf8',
+    );
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49-privacy',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: rawCanary,
+      repo,
+      itemId: 'privacy-item',
+      source: 'todo',
+      backend: 'codex',
+      tier: 'frontier',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        assignedBy: 'router',
+        reason: rawCanary,
+      },
+      reason: rawCanary,
+      tags: [rawCanary],
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    const encoded = JSON.stringify(status);
+
+    expect(encoded).not.toContain(rawCanary);
+    expect(status.workspace?.recentActions[0]).toMatchObject({
+      action: 'daemon:dispatch',
+      outcome: 'no-proposal',
+    });
+    expect(status.workspace?.recentActions[0]).not.toHaveProperty('reason');
+    expect(status.workspace?.recentActions[0]?.summary)
+      .toMatch(/^daemon:dispatch outcome=no-proposal backend=codex source=todo ref=[a-f0-9]{12}$/);
+    expect(status.workspace?.recentActions[0]?.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
     const now = settledLearningTimestamp();
     const repo = join(tmpHome, 'repo-attempts');

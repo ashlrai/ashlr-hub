@@ -4911,6 +4911,17 @@ function fleetActivityObservedMetric(source, value) {
   return fleetActivitySourceHealthy(source) ? String(value ?? 0) : 'unavailable';
 }
 
+function agentActionDisplayText(action) {
+  const codePattern = /^[a-z0-9][a-z0-9:._-]{0,119}$/;
+  const actionCode = codePattern.test(action?.action ?? '') ? action.action : 'agent:action';
+  const kind = codePattern.test(action?.kind ?? '') ? action.kind : 'action';
+  const outcome = codePattern.test(action?.outcome ?? '') ? action.outcome : 'unknown';
+  const digest = /^sha256:[a-f0-9]{64}$/.test(action?.proseDigest ?? '')
+    ? ` ref=${action.proseDigest.slice(7, 19)}`
+    : '';
+  return `${actionCode} ${kind}/${outcome}${digest}`;
+}
+
 function renderFleetActivity() {
   if (state.activeView !== 'fleet-activity') return;
   const main = getMain();
@@ -5128,12 +5139,13 @@ function renderFleetActivity() {
   } else {
     for (const action of actions.slice(0, 20)) {
       const repoName = action.repo ? basenameFromPath(action.repo) : action.backend ?? action.actor ?? 'fleet';
-      actionsBody.appendChild(el('div', { cls: 'fa-feed-row', title: action.summary ?? '' },
+      const displayText = agentActionDisplayText(action);
+      actionsBody.appendChild(el('div', { cls: 'fa-feed-row', title: displayText },
         el('span', { cls: 'fa-feed-dot' }),
         el('span', { cls: 'fa-feed-time' }, fmtRelative(action.ts)),
         el('span', { cls: 'fa-feed-repo' }, repoName),
         el('span', { cls: 'fa-feed-engine badge' }, `${action.kind ?? 'action'}/${action.outcome ?? 'unknown'}`),
-        el('span', { cls: 'fa-feed-pid' }, compactFleetReason(action.summary ?? action.action ?? '', 72))
+        el('span', { cls: 'fa-feed-pid' }, compactFleetReason(displayText, 72))
       ));
     }
   }

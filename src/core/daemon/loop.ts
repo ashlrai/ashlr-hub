@@ -2507,7 +2507,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     kind: 'dispatch',
     outcome,
     action: 'daemon:dispatch',
-    summary: `${event.backend ?? 'unknown'} ${event.outcome} for ${event.title}`,
+    summary: `${event.backend ?? 'unknown'} ${event.outcome} dispatch`,
     repo: event.repo,
     itemId: event.itemId,
     source: event.source,
@@ -2532,7 +2532,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),
-    reason: event.reason ?? event.routeReason,
+    reason: event.outcome,
     spentUsd: event.spentUsd,
     tags: [event.source, event.outcome, event.basis],
     counts: {
@@ -2551,7 +2551,6 @@ function agentActionFromDispatchSkip(
   if (value.dispatched) return null;
   const trace = value.dispatch;
   if (!trace) return null;
-  const skipReason = trace.skipReason ?? trace.reason ?? 'skipped-before-dispatch';
   return {
     schemaVersion: 1,
     ts,
@@ -2560,7 +2559,7 @@ function agentActionFromDispatchSkip(
     kind: 'dispatch',
     outcome: 'skipped',
     action: 'daemon:dispatch-skip',
-    summary: `dispatch skipped: ${boundedText(skipReason, 120)}`,
+    summary: 'dispatch skipped before engine invocation',
     repo: value.item.repo,
     itemId: value.item.id,
     source: value.item.source,
@@ -2574,12 +2573,11 @@ function agentActionFromDispatchSkip(
     backend: trace.backend,
     tier: trace.tier,
     ...(trace.model !== undefined ? { model: trace.model } : {}),
-    reason: skipReason,
+    reason: 'skipped-before-dispatch',
     spentUsd: 0,
     tags: [
       'dispatch-skip',
       value.item.source,
-      boundedText(skipReason, 48),
       ...(isTrustedGeneratedRepairItem(value.item) ? ['generated-repair'] : []),
     ],
     counts: {
@@ -2689,7 +2687,7 @@ function dispatchTrace(
     tier: fields.tier ?? null,
     model: fields.model,
     assignedBy: fields.assignedBy,
-    reason: fields.reason,
+    reason: 'route-selected',
   });
   const runId = fields.production?.runId ?? fields.runId;
   const summary = runEventSummary({
