@@ -58,6 +58,15 @@ import {
   remintAgentSemanticEvents,
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
+import {
+  agentWorkTransitionBoundSubjectRef,
+  projectAgentWorkTransitionSequence,
+  sanitizeAgentWorkTransitions,
+  type AgentWorkPhaseV1,
+  type AgentWorkTransitionCodeV1,
+  type AgentWorkTransitionV1,
+  type AgentWorkTriggerV1,
+} from '../learning/agent-work-transitions.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -148,6 +157,10 @@ export interface AgentActionEvent {
   semanticEvents?: AgentSemanticEventV1[];
   /** Writer rejected a supplied semantic batch; parent history remains readable. */
   semanticEventsState?: 'rejected';
+  /** Harness-emitted deterministic work checkpoints; observational and non-authoritative. */
+  workTransitions?: AgentWorkTransitionV1[];
+  /** Writer rejected a supplied transition sequence; parent history remains readable. */
+  workTransitionsState?: 'rejected';
   repairHandoffId?: string;
   repairGenerationId?: string;
   repairTreatmentUnitId?: string;
@@ -277,6 +290,17 @@ export interface AgentWorkspaceRunSignal {
   latestAt: string;
 }
 
+export interface AgentWorkspacePeerState {
+  runId: string;
+  phase: AgentWorkPhaseV1;
+  transition: AgentWorkTransitionCodeV1;
+  trigger: AgentWorkTriggerV1;
+  ordinal: number;
+  replanCount: number;
+  latestAt: string;
+  parentSubjectRef?: string;
+}
+
 export interface AgentWorkspaceStatus {
   generatedAt: string;
   windowHours: number;
@@ -308,6 +332,9 @@ export interface AgentWorkspaceStatus {
   /** Advisory closed work-state projection. Never grants dispatch or merge authority. */
   runSignals?: AgentWorkspaceRunSignal[];
   runSignalsState?: 'available' | 'withheld';
+  /** Conflict-free latest harness checkpoint per run. Never grants execution authority. */
+  peerStates?: AgentWorkspacePeerState[];
+  peerStatesState?: 'available' | 'withheld';
   sourceQuality?: AgentActionSourceQuality;
 }
 
@@ -421,6 +448,18 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : event.semanticEvents !== undefined || event.semanticEventsState === 'rejected'
       ? 'rejected' as const
       : undefined;
+  const workTransitionSubjectRef = agentWorkTransitionBoundSubjectRef(event.workTransitions, {
+    runId,
+    trajectoryId: event.trajectoryId,
+  });
+  const workTransitions = event.actor === 'agent' && workTransitionSubjectRef
+    ? sanitizeAgentWorkTransitions(event.workTransitions, workTransitionSubjectRef)
+    : undefined;
+  const workTransitionsState = workTransitions
+    ? undefined
+    : event.workTransitions !== undefined || event.workTransitionsState === 'rejected'
+      ? 'rejected' as const
+      : undefined;
   const reason = boundedOptionalText(event.reason, 240);
   const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
     ? event.repairHandoffId
@@ -505,6 +544,8 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(learningLabel ? { learningLabel } : {}),
     ...(semanticEvents ? { semanticEvents } : {}),
     ...(semanticEventsState ? { semanticEventsState } : {}),
+    ...(workTransitions ? { workTransitions } : {}),
+    ...(workTransitionsState ? { workTransitionsState } : {}),
     ...(repairLineageInvalid
       ? { repairLineageInvalid: true as const }
       : repairLineageComplete
@@ -568,6 +609,23 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     (obj['semanticEventsState'] === undefined || (
       obj['semanticEventsState'] === 'rejected' && obj['semanticEvents'] === undefined
     )) &&
+    (obj['workTransitions'] === undefined || (
+      obj['actor'] === 'agent' &&
+      agentWorkTransitionBoundSubjectRef(obj['workTransitions'], {
+        runId: boundedOptionalText(obj['runId'], 160),
+        trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+      }) !== undefined &&
+      sanitizeAgentWorkTransitions(
+        obj['workTransitions'],
+        agentWorkTransitionBoundSubjectRef(obj['workTransitions'], {
+          runId: boundedOptionalText(obj['runId'], 160),
+          trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+        }),
+      ) !== undefined
+    )) &&
+    (obj['workTransitionsState'] === undefined || (
+      obj['workTransitionsState'] === 'rejected' && obj['workTransitions'] === undefined
+    )) &&
     (!['proposal-created', 'verified', 'judged', 'merged', 'rejected'].includes(String(obj['outcome'])) ||
       (typeof obj['proposalId'] === 'string' && obj['proposalId'].trim() !== ''))
   );
@@ -620,6 +678,7 @@ export interface AgentActionSourceQuality {
   rowsScanned: number;
   invalidRows: number;
   semanticRejectedRows?: number;
+  workTransitionRejectedRows?: number;
   unreadableFiles: number;
 }
 
@@ -804,6 +863,7 @@ function emptyAgentActionRead(
     rowsScanned: 0,
     invalidRows: 0,
     semanticRejectedRows: 0,
+    workTransitionRejectedRows: 0,
     unreadableFiles: 0,
     ...overrides,
   };
@@ -960,6 +1020,9 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
           if (parsed.semanticEventsState === 'rejected') {
             result.semanticRejectedRows = (result.semanticRejectedRows ?? 0) + 1;
           }
+          if (parsed.workTransitionsState === 'rejected') {
+            result.workTransitionRejectedRows = (result.workTransitionRejectedRows ?? 0) + 1;
+          }
           const eventMs = Date.parse(parsed.ts);
           const partitionDate = DATE_LEDGER_FILE_RE.exec(file)?.[1];
           if (!Number.isFinite(eventMs) ||
@@ -1038,6 +1101,7 @@ export function readAgentActions(opts: ReadAgentActionsOptions = {}): AgentActio
       rowsScanned: result.rowsScanned,
       invalidRows: result.invalidRows,
       semanticRejectedRows: result.semanticRejectedRows,
+      workTransitionRejectedRows: result.workTransitionRejectedRows,
       unreadableFiles: result.unreadableFiles,
     } satisfies AgentActionSourceQuality,
     enumerable: false,
@@ -1184,6 +1248,46 @@ function agentWorkspaceRunSignals(events: AgentActionEvent[]): AgentWorkspaceRun
     .slice(0, 50);
 }
 
+function agentWorkspacePeerStates(events: AgentActionEvent[]): {
+  state: 'available' | 'withheld';
+  peerStates: AgentWorkspacePeerState[];
+} {
+  if (events.some((event) => event.workTransitionsState === 'rejected')) {
+    return { state: 'withheld', peerStates: [] };
+  }
+  const batchesByRun = new Map<string, AgentWorkTransitionV1[][]>();
+  for (const event of events) {
+    if (!event.workTransitions) continue;
+    if (!event.runId) return { state: 'withheld', peerStates: [] };
+    const subjectRef = `run:${event.runId}`;
+    const accepted = sanitizeAgentWorkTransitions(event.workTransitions, subjectRef);
+    if (!accepted) return { state: 'withheld', peerStates: [] };
+    const batches = batchesByRun.get(event.runId) ?? [];
+    batches.push(accepted);
+    batchesByRun.set(event.runId, batches);
+  }
+  const peerStates: AgentWorkspacePeerState[] = [];
+  for (const [runId, batches] of batchesByRun) {
+    const projected = projectAgentWorkTransitionSequence(batches, `run:${runId}`);
+    if (projected.state !== 'available') return { state: 'withheld', peerStates: [] };
+    const latest = projected.transitions.at(-1);
+    if (!latest) continue;
+    peerStates.push({
+      runId,
+      phase: latest.phase,
+      transition: latest.transition,
+      trigger: latest.trigger,
+      ordinal: latest.ordinal,
+      replanCount: projected.transitions.filter((transition) => transition.transition === 'replan').length,
+      latestAt: latest.observedAt,
+      ...(latest.parentSubjectRef ? { parentSubjectRef: latest.parentSubjectRef } : {}),
+    });
+  }
+  peerStates.sort((left, right) =>
+    Date.parse(right.latestAt) - Date.parse(left.latestAt) || left.runId.localeCompare(right.runId));
+  return { state: 'available', peerStates: peerStates.slice(0, 50) };
+}
+
 function isAgentWorkspaceProductionEvent(event: AgentActionEvent): boolean {
   if (event.outcome === 'started') return false;
   if (event.counts?.dispatched === 0) return false;
@@ -1320,6 +1424,7 @@ export function summarizeAgentWorkspace(
     ...attentionFromCounts('backend', backendRows, 'backend events', 2),
     ...attentionFromCounts('source', sourceRows, 'source events', 1),
   ].slice(0, 8);
+  const peerStateProjection = agentWorkspacePeerStates(semanticEvents);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1355,6 +1460,8 @@ export function summarizeAgentWorkspace(
     recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
     runSignals: agentWorkspaceRunSignals(semanticEvents),
     runSignalsState: 'available',
+    peerStates: peerStateProjection.peerStates,
+    peerStatesState: peerStateProjection.state,
   };
 }
 
@@ -1398,12 +1505,16 @@ export function readAgentWorkspaceDetailed(opts?: {
     bytesRead: read.bytesRead,
     rowsScanned: read.rowsScanned,
     invalidRows: read.invalidRows,
+    semanticRejectedRows: read.semanticRejectedRows,
+    workTransitionRejectedRows: read.workTransitionRejectedRows,
     unreadableFiles: read.unreadableFiles,
   };
   workspace.sourceQuality = sourceQuality;
   if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
     workspace.runSignals = [];
     workspace.runSignalsState = 'withheld';
+    workspace.peerStates = [];
+    workspace.peerStatesState = 'withheld';
   }
   return { workspace, events, sourceQuality };
 }

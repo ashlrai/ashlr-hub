@@ -91,6 +91,7 @@ import {
 } from '../inbox/persistence-mismatch.js';
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { agentRunSemanticEvents } from '../learning/agent-semantic-events.js';
+import { sandboxedRunAgentWorkTransitions } from '../learning/agent-work-transitions.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
@@ -487,11 +488,19 @@ function writeSandboxedRunAgentAction(fields: {
   outcome?: RunProposalOutcome;
   status: RunState['status'];
   usage?: RunUsage;
+  startedAt?: string;
   durationMs?: number;
   actionCounts: RunActionCounts;
   contextSummary?: RunContextSummary;
 }): void {
   try {
+    const observedAt = new Date().toISOString();
+    const startedAt = fields.startedAt &&
+      Number.isFinite(Date.parse(fields.startedAt)) &&
+      new Date(Date.parse(fields.startedAt)).toISOString() === fields.startedAt &&
+      Date.parse(fields.startedAt) <= Date.parse(observedAt)
+      ? fields.startedAt
+      : observedAt;
     const counts = sanitizedRunActionCounts(actionCountsWithOutcome(fields.actionCounts, fields.outcome));
     const outcomeLabel = fields.outcome?.kind ?? fields.status;
     const proposalId = fields.proposalId ?? fields.outcome?.proposalId;
@@ -501,6 +510,14 @@ function writeSandboxedRunAgentAction(fields: {
       model: fields.engineModel,
       status: fields.status,
       ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+    });
+    const workTransitions = sandboxedRunAgentWorkTransitions({
+      runId: fields.runId,
+      startedAt,
+      observedAt,
+      status: fields.status,
+      outcomeKind: fields.outcome?.kind,
+      isPartial: fields.outcome?.isPartial,
     });
     const summary = runEventSummary({
       runId: fields.runId,
@@ -523,7 +540,7 @@ function writeSandboxedRunAgentAction(fields: {
     });
     recordAgentAction({
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: observedAt,
       actor: 'agent',
       kind: 'maintenance',
       outcome: sandboxAgentOutcome(fields.outcome, fields.status),
@@ -545,6 +562,7 @@ function writeSandboxedRunAgentAction(fields: {
       learningSource: 'agent-action',
       labelBasis: 'dispatch-outcome',
       semanticEvents,
+      workTransitions,
       backend: fields.engine,
       tier: fields.tier,
       model: fields.engineModel,
@@ -1333,9 +1351,11 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
-    : writeSandboxedRunAgentAction;
+    : (fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) =>
+        writeSandboxedRunAgentAction({ ...fields, startedAt: runCreatedAtIso });
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -1363,7 +1383,7 @@ export async function runEngineSandboxed(
     provider: 'external',
     engineModel,
     engineTier: tier,
-    createdAt: new Date().toISOString(),
+    createdAt: runCreatedAtIso,
     updatedAt: new Date().toISOString(),
     budget: {
       maxTokens: opts.budget?.maxTokens ?? 0,
@@ -2274,14 +2294,14 @@ export async function runApiModelSandboxed(
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
   const actionCounts: RunActionCounts = {};
-  const recordSandboxedRunAgentAction = opts.deferTerminalAction
+  const writeApiModelTerminalAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'api-model' || !spec.api) {
     const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
     const unsupportedRunId = `run-${Date.now().toString(36)}`;
-    recordSandboxedRunAgentAction({
+    writeApiModelTerminalAction({
       engine,
       engineModel: `${engine}:${resolveConcreteModel(engine, cfg, opts.model)}`,
       tier: engineTierOf(engine, cfg),
@@ -2319,6 +2339,12 @@ export async function runApiModelSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const runCreatedAtIso = new Date().toISOString();
+  const recordSandboxedRunAgentAction = (
+    fields: Parameters<typeof writeSandboxedRunAgentAction>[0],
+  ): void => {
+    writeApiModelTerminalAction({ ...fields, startedAt: runCreatedAtIso });
+  };
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -2346,7 +2372,7 @@ export async function runApiModelSandboxed(
     provider: spec.api!.protocol ?? 'openai-compat',
     engineModel,
     engineTier: tier,
-    createdAt: new Date().toISOString(),
+    createdAt: runCreatedAtIso,
     updatedAt: new Date().toISOString(),
     budget: {
       maxTokens: opts.budget?.maxTokens ?? 50_000,
