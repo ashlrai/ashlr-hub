@@ -302,6 +302,36 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
     });
   });
 
+  it('refuses to publish when lock ownership is lost during a transition', () => {
+    const exactIdentity = identity();
+    const prepared = prepare(exactIdentity);
+    const lockPath = path.join(
+      path.dirname(hostMergeRevocationStatePath(exactIdentity)!),
+      `${prepared.authorityId}.lock`,
+    );
+    let timeReads = 0;
+    class LockDroppingDate extends Date {
+      override getTime(): number {
+        timeReads += 1;
+        if (timeReads === 2) fs.unlinkSync(lockPath);
+        return super.getTime();
+      }
+    }
+    const result = transitionHostMergeRevocation({
+      identity: exactIdentity,
+      action: 'arm',
+      operationId: 'lost-lock-arm-466',
+      expectedSequence: prepared.record.sequence,
+      expectedReceiptDigest: prepared.receipt.receiptDigest,
+      now: new LockDroppingDate(NOW.getTime() + 1_000),
+    });
+    expect(result).toMatchObject({ status: 'degraded', reason: 'state-lock-lost' });
+    expect(readHostMergeRevocationState(exactIdentity)).toMatchObject({
+      state: 'healthy',
+      record: { phase: 'prepared', sequence: 1 },
+    });
+  });
+
   it('refuses clock rollback and expiry for authority-advancing transitions', () => {
     const exactIdentity = identity();
     const prepared = prepare(exactIdentity);
@@ -346,6 +376,40 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
       status: 'applied',
       record: { phase: 'revoked', operationalAuthority: false, hostAutoMergeEnabled: false },
     });
+  });
+
+  it('does not replay authority-advancing receipts after expiry', () => {
+    const armIdentity = identity();
+    const prepared = prepare(armIdentity);
+    arm(armIdentity, prepared);
+    const expiredAt = new Date(Date.parse(armIdentity.expiresAt) + 1);
+    expect(transitionHostMergeRevocation({
+      identity: armIdentity,
+      action: 'arm',
+      operationId: 'arm-466',
+      expectedSequence: prepared.record.sequence,
+      expectedReceiptDigest: prepared.receipt.receiptDigest,
+      now: expiredAt,
+    })).toMatchObject({ status: 'refused', reason: 'authority-expired' });
+
+    const consumeIdentity = identity({ pullRequestNumber: 467, pullRequestId: 'PR_kwDOHostMerge467' });
+    const armed = arm(consumeIdentity);
+    const consumed = applied(transitionHostMergeRevocation({
+      identity: consumeIdentity,
+      action: 'consume',
+      operationId: 'consume-expiry-466',
+      expectedSequence: armed.record.sequence,
+      expectedReceiptDigest: armed.receipt.receiptDigest,
+      now: new Date(NOW.getTime() + 2_000),
+    }));
+    expect(transitionHostMergeRevocation({
+      identity: consumeIdentity,
+      action: 'consume',
+      operationId: 'consume-expiry-466',
+      expectedSequence: consumed.record.sequence - 1,
+      expectedReceiptDigest: consumed.record.receipts.at(-2)!.receiptDigest,
+      now: new Date(Date.parse(consumeIdentity.expiresAt) + 1),
+    })).toMatchObject({ status: 'refused', reason: 'authority-expired' });
   });
 
   it('fails closed on a partial write and never repairs ambiguous state', () => {

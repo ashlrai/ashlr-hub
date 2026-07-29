@@ -13,7 +13,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
 import {
   acquireLocalStoreLock,
+  ownsLocalStoreLock,
   releaseLocalStoreLock,
+  type LocalStoreLock,
 } from '../fleet/local-store-lock.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
@@ -673,7 +675,12 @@ function refusal(
 
 function withAuthorityLock(
   identity: HostMergeRevocationIdentityV1,
-  run: (root: string, authorityId: string, key: SigningKey) => HostMergeRevocationWriteResult,
+  run: (
+    root: string,
+    authorityId: string,
+    key: SigningKey,
+    lock: LocalStoreLock,
+  ) => HostMergeRevocationWriteResult,
 ): HostMergeRevocationWriteResult {
   const authorityId = hostMergeRevocationAuthorityId(identity);
   if (!authorityId) return refusal('refused', null, 'identity-invalid');
@@ -687,7 +694,9 @@ function withAuthorityLock(
   });
   if (!lock) return refusal('degraded', authorityId, 'state-lock-unavailable');
   try {
-    return run(root, authorityId, key);
+    return ownsLocalStoreLock(lock)
+      ? run(root, authorityId, key, lock)
+      : refusal('degraded', authorityId, 'state-lock-lost');
   } finally {
     releaseLocalStoreLock(lock);
   }
@@ -723,9 +732,10 @@ export function prepareHostMergeRevocation(
   if (expiresAt <= now.getTime() || expiresAt - now.getTime() > MAX_TTL_MS) {
     return refusal('refused', hostMergeRevocationAuthorityId(identity), 'expiry-invalid');
   }
-  return withAuthorityLock(identity, (root, authorityId, key) => {
+  return withAuthorityLock(identity, (root, authorityId, key, lock) => {
     const request = requestDigest('prepare', authorityId, input.operationId, 0, null);
     const current = readHostMergeRevocationState(identity);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (current.state === 'degraded') return refusal('degraded', authorityId, current.reason);
     if (current.state === 'healthy') {
       return replayReceipt(current.record, input.operationId, request) ??
@@ -743,8 +753,11 @@ export function prepareHostMergeRevocation(
       now.toISOString(),
     );
     const record = buildState(key, authorityId, identity, [receipt]);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (!persistState(root, record)) return refusal('degraded', authorityId, 'state-write-failed');
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     const reread = readHostMergeRevocationState(identity);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (reread.state !== 'healthy' || !equalDigest(reread.record.stateDigest, record.stateDigest)) {
       return refusal('degraded', authorityId, 'state-post-write-verification-failed');
     }
@@ -769,8 +782,9 @@ export function transitionHostMergeRevocation(
     !DIGEST_RE.test(input.expectedReceiptDigest)) {
     return refusal('refused', identity ? hostMergeRevocationAuthorityId(identity) : null, 'transition-input-invalid');
   }
-  return withAuthorityLock(identity, (root, authorityId, key) => {
+  return withAuthorityLock(identity, (root, authorityId, key, lock) => {
     const current = readHostMergeRevocationState(identity);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (current.state === 'missing') return refusal('refused', authorityId, 'authority-missing');
     if (current.state === 'degraded') return refusal('degraded', authorityId, current.reason);
     const record = current.record;
@@ -778,6 +792,13 @@ export function transitionHostMergeRevocation(
     if (now.getTime() < Date.parse(latest.recordedAt)) {
       return refusal('refused', authorityId, 'clock-rollback');
     }
+    // Authority-advancing retries must not turn an old idempotency receipt into
+    // fresh authority after expiry. Restrictive revocation remains replayable.
+    if ((input.action === 'arm' || input.action === 'consume') &&
+      now.getTime() >= Date.parse(identity.expiresAt)) {
+      return refusal('refused', authorityId, 'authority-expired');
+    }
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     const request = requestDigest(
       input.action,
       authorityId,
@@ -800,10 +821,6 @@ export function transitionHostMergeRevocation(
     }
     // Expiry forbids every authority-advancing transition. Revocation remains
     // available after expiry because it is terminal and strictly restrictive.
-    if ((input.action === 'arm' || input.action === 'consume') &&
-      now.getTime() >= Date.parse(identity.expiresAt)) {
-      return refusal('refused', authorityId, 'authority-expired');
-    }
     if (record.receipts.length >= MAX_RECEIPTS) {
       return refusal('degraded', authorityId, 'receipt-limit-exceeded');
     }
@@ -819,8 +836,11 @@ export function transitionHostMergeRevocation(
       now.toISOString(),
     );
     const next = buildState(key, authorityId, identity, [...record.receipts, receipt]);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (!persistState(root, next)) return refusal('degraded', authorityId, 'state-write-failed');
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     const reread = readHostMergeRevocationState(identity);
+    if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
     if (reread.state !== 'healthy' || !equalDigest(reread.record.stateDigest, next.stateDigest)) {
       return refusal('degraded', authorityId, 'state-post-write-verification-failed');
     }
