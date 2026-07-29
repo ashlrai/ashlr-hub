@@ -2292,14 +2292,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const repairDecision = readAgentActions().find((event) =>
       event.action === 'daemon:generated-repair-decision' &&
       event.itemId === reslice.id &&
-      event.reason === 'cooldown: latest=dispatch-blocked',
+      event.reason === 'cooldown-latest-dispatch-blocked',
     );
     expect(second.itemsConsidered).toBe(1);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
     expect(repairDecision).toMatchObject({
       outcome: 'blocked',
-      reason: 'cooldown: latest=dispatch-blocked',
+      reason: 'cooldown-latest-dispatch-blocked',
       counts: {
         effectiveCooldownMs: 5 * 60 * 1000,
         cooldownBlocked: 1,
@@ -2335,7 +2335,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'blocked',
       action: 'daemon:generated-repair-decision',
       itemId: reslice.id,
-      reason: 'cooldown: latest=empty',
+      reason: 'cooldown-latest-empty',
       counts: {
         pendingBlocked: 0,
         cooldownBlocked: 1,
@@ -2499,7 +2499,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'blocked',
       action: 'daemon:generated-repair-decision',
       itemId: reslice.id,
-      reason: 'cooldown: latest=judged-decline',
+      reason: 'cooldown-latest-judged-decline',
       counts: {
         baseCooldownMs: 6 * 60 * 60 * 1000,
         effectiveCooldownMs: 6 * 60 * 60 * 1000,
@@ -2546,7 +2546,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       reason: 'budget-cap',
       counts: { dispatched: 0, selected: 1 },
     });
-    expect(skipped?.summary).toContain('dispatch skipped: budget-cap');
+    expect(skipped?.summary).toContain('daemon:dispatch-skip outcome=skipped');
+    expect(skipped?.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(skipped?.summary).not.toContain(resliceB.title);
     expect(skipped?.tags).toEqual(expect.arrayContaining(['dispatch-skip', 'generated-repair', 'budget-cap']));
     expect(decisions).toEqual(expect.arrayContaining([
@@ -3747,7 +3748,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         backend: 'local-coder',
         tier: 'mid',
         assignedBy: 'router',
-        reason: 'mock local-coder',
+        reason: 'route-selected',
       },
       runEventSummary: {
         runId: 'run-empty-diff',
@@ -3845,7 +3846,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readAgentActions().find((event) => event.action === 'daemon:dispatch')).toMatchObject({
       itemId: items[0]!.id,
       outcome: 'skipped',
-      reason: 'run cancelled by owner',
+      reason: 'cancelled',
       runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
       learningLabel: {
         learningKind: 'cancelled',
@@ -3905,7 +3906,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readAgentActions().find((event) => event.action === 'daemon:dispatch')).toMatchObject({
       itemId: items[0]!.id,
       outcome: 'skipped',
-      reason: 'swarm cancelled by owner',
+      reason: 'cancelled',
       runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
       learningLabel: {
         learningKind: 'cancelled',
@@ -3978,7 +3979,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readAgentActions().find((event) => event.action === 'daemon:dispatch')).toMatchObject({
       itemId: items[0]!.id,
       outcome: 'skipped',
-      reason: 'best-of-2 selection cancelled by owner',
+      reason: 'cancelled',
       runEventSummary: { status: 'aborted', outcome: 'cancelled', proposalCreated: false },
       learningLabel: {
         learningKind: 'cancelled',
@@ -4143,7 +4144,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readAgentActions().find((event) => event.action === 'daemon:dispatch')).toMatchObject({
       itemId: items[0]!.id,
       outcome: 'failed',
-      reason: 'best-of-2: hard total budget exceeded',
+      reason: 'engine-failed',
     });
   });
 
@@ -7842,8 +7843,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         claimed: 1,
       },
     });
-    expect(selection?.summary).toContain('normal: claimed 1/1 from 1/3 eligible');
-    expect(selection?.summary).toContain('cooldown 1, pending 1');
+    expect(selection?.summary).toContain('daemon:selection outcome=ok');
+    expect(selection?.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(selection?.summary).not.toContain(items[0]!.id);
     expect(selection?.summary).not.toContain(items[1]!.id);
     expect(selection?.summary).not.toContain(items[2]!.id);

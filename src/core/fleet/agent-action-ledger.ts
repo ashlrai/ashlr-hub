@@ -258,8 +258,12 @@ const AGENT_ACTION_COUNT_KEYS = new Set([
   'parallel',
   'pendingBlocked',
   'perTickItems',
+  'persisted',
   'policySuppressed',
+  'playbooks',
+  'proposalCaptureAttempts',
   'proposalCreated',
+  'proposalDisabled',
   'proposalsCreated',
   'rawSelectCount',
   'routeBlocked',
@@ -268,13 +272,19 @@ const AGENT_ACTION_COUNT_KEYS = new Set([
   'routeRequiresAlternative',
   'selectCount',
   'selected',
+  'sandboxCreated',
+  'spawnAttempts',
   'uniqueTrajectories',
 ]);
 const AGENT_ACTION_REASON_CODES = new Set([
   'blocked',
+  'budget-cap',
   'budget-exhausted',
   'cancelled',
   'dry-run',
+  'auto-live',
+  'dispatch-route-unavailable',
+  'dispatch-skip',
   'empty-diff',
   'engine-failed',
   'failed',
@@ -287,15 +297,20 @@ const AGENT_ACTION_REASON_CODES = new Set([
   'no-claim',
   'no-enrolled-repos',
   'no-proposal',
+  'not-selected',
   'ok',
+  'ordinary-turn-fairness',
   'pause',
+  'pending-proposal',
   'proposal-capture-error',
   'proposal-created',
   'proposal-disabled',
   'rejected',
   'route-selected',
+  'same-tier-backend-unavailable',
   'sandbox-failed',
   'selected',
+  'claimed',
   'skipped',
   'skipped-before-dispatch',
   'started',
@@ -306,6 +321,50 @@ const AGENT_ACTION_REASON_CODES = new Set([
 ]);
 const ACTION_CODE_RE = /^[a-z0-9][a-z0-9:._-]{0,119}$/;
 const PROSE_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+const AGENT_ACTION_TAG_CODES = new Set([
+  'auto-merge',
+  'auto-drain',
+  'autonomous',
+  'budget-cap',
+  'capped',
+  'capture-gate',
+  'claimed',
+  'context-rollup',
+  'cooldown-blocked',
+  'diagnostic-reslice',
+  'dispatch-capture-repair',
+  'dispatch-no-diff-reslice',
+  'dispatch-not-evaluated',
+  'dispatch-skip',
+  'dispatch-start',
+  'dispatch-route-unavailable',
+  'dry-run',
+  'drain-select',
+  'high-priority',
+  'fairness-deferred',
+  'fast-repair-cooldown',
+  'generated-repair-decision',
+  'generated-repair',
+  'live',
+  'latest-empty',
+  'latest-judged-decline',
+  'metadata-only',
+  'no-diff',
+  'ordinary-turn',
+  'pending-blocked',
+  'persisted',
+  'playbooks',
+  'proposal-repair',
+  'reflection',
+  'sandboxed-engine',
+  'selection',
+  'self-heal',
+  'standard-cooldown',
+  'swarm',
+  'tick-start',
+  'normal-selection',
+  'verify',
+]);
 
 const ENGINE_IDS = new Set<EngineId>([
   'builtin',
@@ -486,14 +545,17 @@ function sanitizeTags(fields: {
   source?: WorkSource;
   backend?: EngineId | null;
   tier?: EngineTier | null;
+  tags?: string[];
 }): string[] | undefined {
   const out = [
+    ...(fields.tags ?? []).filter((tag) =>
+      AGENT_ACTION_TAG_CODES.has(tag) || /^drain:(?:diagnostic-reslices|ordinary)$/.test(tag)),
     `kind:${fields.kind}`,
     `outcome:${fields.outcome}`,
     ...(fields.source ? [`source:${fields.source}`] : []),
     ...(fields.backend ? [`backend:${fields.backend}`] : []),
     ...(fields.tier ? [`tier:${fields.tier}`] : []),
-  ];
+  ].filter((tag, index, tags) => tags.indexOf(tag) === index).slice(0, 12);
   return out.length > 0 ? out : undefined;
 }
 
@@ -518,8 +580,13 @@ function canonicalReason(
   runEventSummary: RunEventSummary | undefined,
   outcome: AgentActionOutcome,
 ): string {
-  for (const candidate of [runEventSummary?.outcome, event.reason, outcome]) {
+  for (const candidate of [event.reason, runEventSummary?.outcome, outcome]) {
     if (typeof candidate === 'string' && AGENT_ACTION_REASON_CODES.has(candidate)) return candidate;
+    if (typeof candidate === 'string') {
+      const cooldown = /^cooldown: latest=([a-z0-9-]{1,48})$/.exec(candidate);
+      if (cooldown) return `cooldown-latest-${cooldown[1]}`;
+      if (/^cooldown-latest-[a-z0-9-]{1,48}$/.test(candidate)) return candidate;
+    }
   }
   return outcome;
 }
@@ -547,7 +614,16 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const outcome = enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown';
   const action = sanitizeActionCode(event.action, actor, kind);
   const digest = proseDigest(event);
-  const tags = sanitizeTags({ kind, outcome, source, backend, tier });
+  const tags = sanitizeTags({
+    kind,
+    outcome,
+    source,
+    backend,
+    tier,
+    tags: Array.isArray(event.tags)
+      ? event.tags.filter((tag): tag is string => typeof tag === 'string')
+      : undefined,
+  });
   const machineId = boundedOptionalText(event.machineId, 120);
   const repo = boundedOptionalText(event.repo, 500);
   const itemId = boundedOptionalText(event.itemId, 240);
@@ -659,7 +735,11 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const metadataOnlyRouteSnapshot = causal.routeSnapshot
     ? {
         ...causal.routeSnapshot,
-        reason: undefined,
+        reason:
+          typeof causal.routeSnapshot.reason === 'string' &&
+          AGENT_ACTION_REASON_CODES.has(causal.routeSnapshot.reason)
+            ? causal.routeSnapshot.reason
+            : undefined,
       }
     : undefined;
 

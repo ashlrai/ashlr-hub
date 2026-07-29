@@ -2532,7 +2532,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),
-    reason: event.outcome,
+    reason: event.reason ?? event.routeReason ?? event.outcome,
     spentUsd: event.spentUsd,
     tags: [event.source, event.outcome, event.basis],
     counts: {
@@ -2551,6 +2551,7 @@ function agentActionFromDispatchSkip(
   if (value.dispatched) return null;
   const trace = value.dispatch;
   if (!trace) return null;
+  const skipReason = trace.skipReason ?? trace.reason ?? 'skipped-before-dispatch';
   return {
     schemaVersion: 1,
     ts,
@@ -2573,11 +2574,12 @@ function agentActionFromDispatchSkip(
     backend: trace.backend,
     tier: trace.tier,
     ...(trace.model !== undefined ? { model: trace.model } : {}),
-    reason: 'skipped-before-dispatch',
+    reason: skipReason,
     spentUsd: 0,
     tags: [
       'dispatch-skip',
       value.item.source,
+      skipReason,
       ...(isTrustedGeneratedRepairItem(value.item) ? ['generated-repair'] : []),
     ],
     counts: {
