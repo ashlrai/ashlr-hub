@@ -1074,6 +1074,51 @@ function rollBack(
   return rolledBack;
 }
 
+/**
+ * Roll back one exact locally committed shadow candidate after a separately
+ * authenticated external conflict. The caller must bind the committed
+ * attestation; this primitive does not authenticate remote evidence or grant
+ * rollback, historical, or operational authority.
+ */
+export function rollbackCommittedOperationalProjectionShadowWrite(
+  transactionId: string,
+  committedAttestation: string,
+  storeLock: ProposalStoreMutationLock,
+  now = new Date(),
+): OperationalProjectionShadowInspection {
+  if (!DIGEST_RE.test(transactionId) ||
+    !DIGEST_RE.test(committedAttestation) ||
+    !ownsProposalStoreMutationLock(storeLock)) {
+    return degradedInspection('shadow-input-invalid');
+  }
+  const inspected = inspectOperationalProjectionShadowWrite();
+  if (inspected.state !== 'healthy' || !inspected.transaction) return inspected;
+  const transaction = inspected.transaction;
+  if (transaction.transactionId !== transactionId ||
+    !equalDigest(transaction.attestation, committedAttestation)) {
+    return degradedInspection('shadow-transaction-identity-mismatch', transaction);
+  }
+  if (transaction.phase !== 'committed' || transaction.localRollForwardRequired) {
+    return degradedInspection('shadow-phase-invalid', transaction, inspected.actual);
+  }
+  if (inspected.actual === 'unknown') {
+    return degradedInspection(
+      'shadow-replacement-race',
+      transaction,
+      inspected.actual,
+      'refuse',
+    );
+  }
+  try {
+    const signing = loadSigningContext();
+    if (!signing) throw new Error('shadow-journal-key-unavailable');
+    rollBack(transaction, loadStages(transaction), signing, storeLock, now);
+    return inspectOperationalProjectionShadowWrite();
+  } catch (error) {
+    return operationFailure(error, transaction);
+  }
+}
+
 export function recoverOperationalProjectionShadowWrite(
   storeLock: ProposalStoreMutationLock,
   now = new Date(),
