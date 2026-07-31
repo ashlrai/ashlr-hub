@@ -250,7 +250,7 @@ async function startHolder(): Promise<ChildProcess> {
     owns: true,
   });
   if (process.platform === 'win32') {
-    expect(ready.semanticRequests).toEqual(expect.arrayContaining([
+    expect(ready.semanticRequests).toEqual([
       {
         operation: 'assure-private-path',
         anchorPath: fx.home,
@@ -265,7 +265,7 @@ async function startHolder(): Promise<ChildProcess> {
         kind: 'directory',
         mode: authorityMode,
       },
-    ]));
+    ]);
   } else {
     expect(ready.semanticRequests).toEqual([]);
   }
