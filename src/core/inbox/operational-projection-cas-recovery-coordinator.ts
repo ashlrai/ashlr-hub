@@ -233,8 +233,8 @@ function persistedDecisionCompatible(
   const current = decisionFor(request, receipt);
   if (current === persisted) return true;
   // Before exact-observed conflicts were recognized as acceptance-equivalent,
-  // this schema durably recorded them as rollback. Preserve that authenticated
-  // local intent on upgrade; only newly prepared records use roll-forward.
+  // this schema durably recorded them as rollback. Keep those authenticated
+  // records readable; the execution path below refuses the semantic mismatch.
   return current === 'roll-forward' &&
     receipt.decision === 'conflict' &&
     persisted === 'rollback';
@@ -681,6 +681,20 @@ export function applyOperationalProjectionCasRecovery(
     return failed(
       'refused',
       'shadow-decision-binding-mismatch',
+      existing.prepared,
+      existing.completion,
+      shadow,
+    );
+  }
+  if (existing.prepared && existing.prepared.decision !== decision) {
+    // Legacy exact-proposal conflicts were persisted as rollback before they
+    // were recognized as proof of remote acceptance. The v1 ledger has no
+    // authenticated append-only supersession record, so never execute that
+    // obsolete rollback or overwrite its immutable history. Reconciliation
+    // must be performed by a future schema that can bind the complete chain.
+    return failed(
+      'degraded',
+      'legacy-prepared-rollback-reconciliation-required',
       existing.prepared,
       existing.completion,
       shadow,

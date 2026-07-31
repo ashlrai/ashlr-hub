@@ -583,7 +583,7 @@ describe('M438 operational projection CAS recovery composition', () => {
     ['stable v2', false],
     ['coordinate-bound v1', true],
   ] as const)(
-    'resumes a locally attested pre-fix %s rollback decision without degrading',
+    'preserves a committed candidate instead of executing a pre-fix %s rollback',
     (_identity, coordinateBound) => {
       const fixture = signedFixture('conflict');
       const input = {
@@ -607,19 +607,130 @@ describe('M438 operational projection CAS recovery composition', () => {
         complete: true,
         records: [{ phase: 'prepared', decision: 'rollback' }],
       });
+      const before = readOperationalProjectionCasConsumptionRecords().records[0]!;
+      const recordsPath = path.join(
+        operationalProjectionCasConsumptionStorePath(),
+        'records',
+      );
+      const beforeFiles = fs.readdirSync(recordsPath).sort();
+      const beforeBytes = beforeFiles.map((fileName) =>
+        fs.readFileSync(path.join(recordsPath, fileName)));
 
-      expect(applyOperationalProjectionCasRecovery({
+      const reconcile = () => applyOperationalProjectionCasRecovery({
         ...input,
         untrustedCasReceipt: null,
         now: new Date('2036-07-29T16:05:00.000Z'),
-      })).toMatchObject({
-        state: 'applied',
-        decision: 'rollback',
-        authenticated: true,
-        localMutationApplied: true,
+      });
+      expect(reconcile()).toMatchObject({
+        state: 'degraded',
+        reason: 'legacy-prepared-rollback-reconciliation-required',
+        decision: null,
+        authenticated: false,
+        localMutationApplied: false,
         prepared: { phase: 'prepared', decision: 'rollback' },
-        completion: { phase: 'applied', decision: 'rollback', resultingShadowPhase: 'rolled-back' },
-        shadow: { actual: 'no-effect', transaction: { phase: 'rolled-back' } },
+        completion: null,
+        shadow: { actual: 'complete', transaction: { phase: 'committed' } },
+      });
+      // A restart after the refusal is identical: no superseding record was
+      // published and the authenticated legacy record remains readable.
+      expect(reconcile()).toMatchObject({
+        state: 'degraded',
+        reason: 'legacy-prepared-rollback-reconciliation-required',
+        localMutationApplied: false,
+        shadow: { actual: 'complete', transaction: { phase: 'committed' } },
+      });
+      const after = readOperationalProjectionCasConsumptionRecords();
+      expect(after).toMatchObject({ sourceState: 'healthy', complete: true });
+      expect(after.records).toEqual([before]);
+      expect(fs.readdirSync(recordsPath).sort()).toEqual(beforeFiles);
+      expect(beforeFiles.map((fileName) =>
+        fs.readFileSync(path.join(recordsPath, fileName)))).toEqual(beforeBytes);
+    },
+  );
+
+  it('keeps a legacy prepared true conflict eligible for rollback', () => {
+    const fixture = signedFixture('conflict');
+    const first = applyOperationalProjectionCasRecovery(fixture.input);
+    expect(first).toMatchObject({
+      state: 'applied',
+      decision: 'rollback',
+      localMutationApplied: true,
+    });
+    rewritePreparedAsPreFixRollback(first.prepared!, true);
+    expect(readOperationalProjectionCasConsumptionRecords()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      records: [{ phase: 'prepared', decision: 'rollback' }],
+    });
+
+    const result = applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      untrustedCasReceipt: null,
+      now: new Date('2036-07-29T16:05:00.000Z'),
+    });
+
+    expect(result).toMatchObject({
+      state: 'applied',
+      decision: 'rollback',
+      authenticated: true,
+      localMutationApplied: false,
+      prepared: { phase: 'prepared', decision: 'rollback' },
+      completion: { phase: 'applied', decision: 'rollback', resultingShadowPhase: 'rolled-back' },
+      shadow: { actual: 'no-effect', transaction: { phase: 'rolled-back' } },
+    });
+  });
+
+  it.each(['sequence', 'value digest'] as const)(
+    'refuses a new near-match %s receipt while a legacy acceptance-equivalent rollback awaits reconciliation',
+    (field) => {
+      const fixture = signedFixture('conflict');
+      const exactObserved: OperationalProjectionAnchorStateV1 = {
+        sequence: fixture.input.casRequest.proposed.sequence,
+        valueDigest: fixture.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      };
+      const exactReceipt = signedReceipt(
+        fixture.input.casRequest,
+        'conflict',
+        fixture.privateKey,
+        exactObserved,
+      );
+      const exactInput = { ...fixture.input, untrustedCasReceipt: exactReceipt };
+      const first = applyOperationalProjectionCasRecovery(exactInput);
+      expect(first).toMatchObject({ state: 'applied', decision: 'roll-forward' });
+      rewritePreparedAsPreFixRollback(first.prepared!, false);
+
+      const nearObserved = { ...exactObserved };
+      if (field === 'sequence') {
+        nearObserved.sequence = (BigInt(nearObserved.sequence) + 1n).toString();
+      } else {
+        nearObserved.valueDigest = nearObserved.valueDigest === 'b'.repeat(64)
+          ? 'c'.repeat(64)
+          : 'b'.repeat(64);
+      }
+      const nearReceipt = signedReceipt(
+        fixture.input.casRequest,
+        'conflict',
+        fixture.privateKey,
+        nearObserved,
+      );
+
+      expect(applyOperationalProjectionCasRecovery({
+        ...fixture.input,
+        untrustedCasReceipt: nearReceipt,
+      })).toMatchObject({
+        state: 'refused',
+        reason: 'cas-decision-equivocal',
+        localMutationApplied: false,
+      });
+      expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+        actual: 'complete',
+        transaction: { phase: 'committed' },
+      });
+      expect(readOperationalProjectionCasConsumptionRecords()).toMatchObject({
+        sourceState: 'healthy',
+        complete: true,
+        records: [{ phase: 'prepared', decision: 'rollback' }],
       });
     },
   );
