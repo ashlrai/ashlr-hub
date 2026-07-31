@@ -4,6 +4,7 @@ import type {
   DispatchProductionEvent,
   DispatchProductionSourceQuality,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { sanitizeDispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   buildProposalFunnelObservability,
   withholdProposalFunnelForUnstableSnapshot,
@@ -23,11 +24,20 @@ const healthySource: DispatchProductionSourceQuality = {
   unreadableFiles: 0,
 };
 
+function attemptIdFor(itemId: string): string {
+  const suffix = [...itemId].reduce((value, char) => value + char.charCodeAt(0), 0)
+    .toString(16)
+    .padStart(12, '0')
+    .slice(-12);
+  return `attempt-00000000-0000-4000-8000-${suffix}`;
+}
+
 function event(
   itemId: string,
   outcome: DispatchProductionEvent['outcome'],
   overrides: Partial<DispatchProductionEvent> = {},
 ): DispatchProductionEvent {
+  const attemptId = attemptIdFor(itemId);
   return {
     schemaVersion: 1,
     ts: `2026-07-31T00:00:${itemId.padStart(2, '0')}.000Z`,
@@ -41,8 +51,9 @@ function event(
     routeReason: 'PRIVATE_ROUTE_REASON',
     outcome,
     proposalCreated: outcome === 'proposal-created',
+    attemptId,
     runId: `run-${itemId}`,
-    trajectoryId: `run:run-${itemId}`,
+    trajectoryId: `run:${attemptId}`,
     spentUsd: 0,
     reason: 'STDOUT_SECRET_TOKEN',
     basis: 'run-proposal-outcome',
@@ -168,17 +179,14 @@ describe('buildProposalFunnelObservability', () => {
   it('deduplicates exact identities after canonical semantic cancellation accounting', () => {
     const filed = event('1', 'proposal-created', {
       runId: 'run-filed',
-      trajectoryId: 'run:run-filed',
       proposalId: 'proposal-filed',
     });
     const cancelled = event('2', 'cancelled', {
       runId: 'run-cancelled',
-      trajectoryId: 'run:run-cancelled',
       reason: 'cancelled by owner',
     });
     const legacyCancelled = event('2', 'engine-failed', {
       runId: 'run-cancelled',
-      trajectoryId: 'run:run-cancelled',
       reason: 'selection cancelled after daemon ownership changed',
       runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
     });
@@ -208,10 +216,20 @@ describe('buildProposalFunnelObservability', () => {
   });
 
   it('withholds all rates when rows sharing an attempt identity conflict', () => {
+    const attemptId = attemptIdFor('conflict');
     const result = buildProposalFunnelObservability({
       events: [
-        event('1', 'empty-diff', { runId: 'run-conflict', trajectoryId: 'run:run-conflict' }),
-        event('2', 'proposal-created', { runId: 'run-conflict', trajectoryId: 'run:run-conflict', proposalId: 'proposal-conflict' }),
+        event('1', 'empty-diff', {
+          attemptId,
+          runId: 'run-conflict',
+          trajectoryId: `run:${attemptId}`,
+        }),
+        event('2', 'proposal-created', {
+          attemptId,
+          runId: 'run-conflict',
+          trajectoryId: `run:${attemptId}`,
+          proposalId: 'proposal-conflict',
+        }),
       ],
       sourceQuality: healthySource,
       windowMs: 24 * 60 * 60 * 1000,
@@ -247,8 +265,9 @@ describe('buildProposalFunnelObservability', () => {
 
   it.each([
     ['removed run id', { runId: undefined }],
-    ['changed run id', { runId: 'other-run' }],
-    ['changed trajectory id', { trajectoryId: 'run:other-run' }],
+    ['removed attempt id', { attemptId: undefined }],
+    ['changed trajectory id', { trajectoryId: 'run:attempt-00000000-0000-4000-8000-000000000099' }],
+    ['unsafe attempt id', { attemptId: 'attempt-not-a-generated-uuid' }],
   ] as const)('withholds ambiguous causal identity: %s', (_name, overrides) => {
     const result = buildProposalFunnelObservability({
       events: [event('1', 'empty-diff', overrides)],
@@ -267,10 +286,11 @@ describe('buildProposalFunnelObservability', () => {
   });
 
   it('withholds when distinct run ids claim one shared trajectory', () => {
+    const firstAttemptId = attemptIdFor('1');
     const result = buildProposalFunnelObservability({
       events: [
-        event('1', 'empty-diff', { runId: 'run-a', trajectoryId: 'run:run-a' }),
-        event('2', 'empty-diff', { runId: 'run-b', trajectoryId: 'run:run-a' }),
+        event('1', 'empty-diff', { runId: 'run-a' }),
+        event('2', 'empty-diff', { runId: 'run-b', trajectoryId: `run:${firstAttemptId}` }),
       ],
       sourceQuality: healthySource,
       windowMs: 60_000,
@@ -281,6 +301,113 @@ describe('buildProposalFunnelObservability', () => {
       state: 'withheld',
       withheldReason: 'attempt-identity-unavailable',
       sample: { invalidAttemptIdentities: 1 },
+    });
+  });
+
+  it('treats coherent run and nested-summary rewrites as one conflicting execution', () => {
+    const original = event('1', 'empty-diff', {
+      runId: 'run-original',
+      runEventSummary: {
+        runId: 'run-original',
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+      },
+    });
+    const rewritten = {
+      ...original,
+      runId: 'run-rewritten',
+      runEventSummary: { ...original.runEventSummary, runId: 'run-rewritten' },
+    };
+
+    const result = buildProposalFunnelObservability({
+      events: [original, rewritten],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-conflict',
+      sample: { includedAttempts: 1, conflictingAttemptIdentities: 1 },
+    });
+  });
+
+  it.each([
+    ['nested run id', {
+      runEventSummary: { runId: 'other-run', outcome: 'empty-diff', proposalCreated: false },
+    }],
+    ['nested proposal id', {
+      proposalId: 'proposal-top',
+      runEventSummary: {
+        runId: 'run-1',
+        proposalId: 'proposal-nested',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+      },
+    }],
+  ] as const)('withholds a top-level and %s identity mismatch', (_name, overrides) => {
+    const result = buildProposalFunnelObservability({
+      events: [event('1', 'proposal-created', overrides)],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 1 },
+    });
+  });
+
+  it('includes nested causal metadata in the duplicate conflict signature', () => {
+    const original = event('1', 'empty-diff', {
+      runEventSummary: {
+        runId: 'run-1',
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+      },
+    });
+    const result = buildProposalFunnelObservability({
+      events: [
+        original,
+        { ...original, runEventSummary: { ...original.runEventSummary, status: 'failed' } },
+      ],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-conflict',
+      sample: { conflictingAttemptIdentities: 1 },
+    });
+  });
+
+  it('rejects redaction-colliding and unsafe raw ids before causal sanitization', () => {
+    const events = [
+      event('1', 'empty-diff', { runId: 'token=ghp_1234567890abcdefABCDEF' }),
+      event('2', 'empty-diff', { runId: 'token=ghp_abcdef1234567890ABCDEF' }),
+      event('3', 'empty-diff', { runId: '[REDACTED]' }),
+      event('4', 'empty-diff', { runId: 'unsafe/run-id' }),
+    ].map((row) => sanitizeDispatchProductionEvent(row));
+
+    expect(events.every((row) => row.attemptId === undefined && row.runId === undefined)).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('[REDACTED]');
+    const result = buildProposalFunnelObservability({
+      events,
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 4, includedAttempts: 0 },
     });
   });
 
@@ -311,6 +438,7 @@ describe('buildProposalFunnelObservability', () => {
     expect(withheld).toMatchObject({
       state: 'withheld',
       withheldReason: 'snapshot-unstable',
+      source: { sourceState: 'degraded', complete: false },
       sample: { includedAttempts: 1 },
     });
     expect(withheld.metrics).toBeUndefined();

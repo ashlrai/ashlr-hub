@@ -63,7 +63,7 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
-import { isSafeExecutionIdentity } from './attempt-identity.js';
+import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import {
   generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
@@ -161,7 +161,7 @@ const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
 const DISPATCH_PRODUCTION_EVENT_KEYS = new Set([
   'schemaVersion', 'ts', 'machineId', 'itemId', 'source', 'repo', 'title', 'backend',
   'tier', 'model', 'assignedBy', 'routeReason', 'outcome', 'proposalCreated',
-  'proposalId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
+  'proposalId', 'attemptId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
   'evidenceOutcome', 'learningSource', 'labelBasis', 'routerPolicyVersion',
   'learningEpoch', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
   'diffLines', 'reason', 'basis', 'repairHandoffId', 'repairGenerationId',
@@ -203,6 +203,8 @@ export interface DispatchProductionEvent {
   outcome: DaemonDispatchProductionOutcome;
   proposalCreated: boolean;
   proposalId?: string;
+  /** Writer-issued immutable identity allocated before this dispatch begins. */
+  attemptId?: string;
   runId?: string;
   trajectoryId?: string;
   routeSnapshot?: RouteSnapshot;
@@ -1459,6 +1461,60 @@ function boundedNullableText(value: unknown, max: number): string | null | undef
   return boundedOptionalText(value, max);
 }
 
+function trustedExecutionIdentity(value: unknown): string | undefined {
+  return isSafeExecutionIdentity(value) && scrubSecrets(value) === value ? value : undefined;
+}
+
+function trustedRunTrajectory(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 240 || scrubSecrets(value) !== value) return undefined;
+  return value.startsWith('run:') && isSafeExecutionIdentity(value.slice('run:'.length))
+    ? value
+    : undefined;
+}
+
+function dispatchCausalIdentities(event: DispatchProductionEvent): {
+  attemptId?: string;
+  proposalId?: string;
+  runId?: string;
+  trajectoryId?: string;
+  runEventSummary?: RunEventSummary;
+} {
+  const attemptId = isOuterAttemptIdentity(event.attemptId) && scrubSecrets(event.attemptId) === event.attemptId
+    ? event.attemptId
+    : undefined;
+  const proposalId = trustedExecutionIdentity(event.proposalId);
+  const runId = trustedExecutionIdentity(event.runId);
+  const trajectoryId = trustedRunTrajectory(event.trajectoryId);
+  const rawSummary = event.runEventSummary;
+  const summaryRunId = trustedExecutionIdentity(rawSummary?.runId);
+  const summaryProposalId = trustedExecutionIdentity(rawSummary?.proposalId);
+  const invalidOptionalIdentity =
+    (event.proposalId !== undefined && proposalId === undefined) ||
+    (rawSummary?.runId !== undefined && summaryRunId === undefined) ||
+    (rawSummary?.proposalId !== undefined && summaryProposalId === undefined);
+  const identitiesAgree =
+    attemptId !== undefined &&
+    runId !== undefined &&
+    trajectoryId === `run:${attemptId}` &&
+    !invalidOptionalIdentity &&
+    (summaryRunId === undefined || summaryRunId === runId) &&
+    (summaryProposalId === undefined || summaryProposalId === proposalId);
+  const safeSummary = rawSummary
+    ? {
+        ...rawSummary,
+        runId: summaryRunId,
+        proposalId: summaryProposalId,
+      }
+    : undefined;
+  return {
+    ...(identitiesAgree ? { attemptId } : {}),
+    ...(proposalId ? { proposalId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(trajectoryId ? { trajectoryId } : {}),
+    ...(safeSummary ? { runEventSummary: safeSummary } : {}),
+  };
+}
+
 export function canonicalDispatchRepoIdentity(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 500 || !isAbsolute(value)) return null;
   if (scrubSecrets(value) !== value) return null;
@@ -1492,9 +1548,8 @@ export function sanitizeDispatchProductionEvent(
   const model = boundedNullableText(event.model, 160) as string | null | undefined;
   const assignedBy = boundedText(event.assignedBy, 80) || 'unknown';
   const routeReason = boundedText(event.routeReason, 240) || 'unknown';
-  const proposalId = boundedOptionalText(event.proposalId, 160);
-  const runId = boundedOptionalText(event.runId, 160);
-  const trajectoryId = boundedOptionalText(event.trajectoryId, 240);
+  const identities = dispatchCausalIdentities(event);
+  const { attemptId, proposalId, runId, trajectoryId } = identities;
   const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
   const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
   const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
@@ -1627,7 +1682,7 @@ export function sanitizeDispatchProductionEvent(
     runId,
     trajectoryId,
     routeSnapshot: event.routeSnapshot ?? legacyCausal.routeSnapshot,
-    runEventSummary: event.runEventSummary ?? legacyCausal.runEventSummary,
+    runEventSummary: identities.runEventSummary ?? legacyCausal.runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
     learningSource: event.learningSource ??
       (opts.preserveMissingCausalAuthority ? undefined : 'daemon-dispatch'),
@@ -1636,6 +1691,10 @@ export function sanitizeDispatchProductionEvent(
     routerPolicyVersion,
     learningEpoch,
   });
+  const legacyTreatmentTrajectoryAllowed =
+    (basis === 'repair-lifecycle-candidate' || basis === 'repair-lifecycle-outcome') &&
+    runId !== undefined;
+  if (trajectoryId === undefined && !legacyTreatmentTrajectoryAllowed) delete causal.trajectoryId;
   if (opts.preserveMissingCausalAuthority) {
     if (
       routerPolicyVersion === undefined &&
@@ -1670,6 +1729,7 @@ export function sanitizeDispatchProductionEvent(
     outcome,
     proposalCreated: Boolean(event.proposalCreated),
     ...(proposalId ? { proposalId } : {}),
+    ...(attemptId ? { attemptId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),

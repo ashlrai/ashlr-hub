@@ -4,6 +4,8 @@ import type {
   DispatchProductionSourceQuality,
 } from './dispatch-production-ledger.js';
 import { isCancelledDispatchProductionEvent } from './dispatch-production-ledger.js';
+import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 export type ProposalFunnelWithheldReason =
   | 'source-missing'
@@ -104,21 +106,34 @@ function isLifecycleBookkeeping(event: DispatchProductionEvent): boolean {
   return event.basis === 'repair-lifecycle-candidate' || event.basis === 'repair-lifecycle-outcome';
 }
 
-function nonEmptyIdentity(value: string | undefined): string | undefined {
-  const normalized = value?.trim();
-  return normalized ? normalized : undefined;
+function trustedExecutionIdentity(value: unknown): value is string {
+  return isSafeExecutionIdentity(value) && scrubSecrets(value) === value;
 }
 
 function attemptIdentity(event: DispatchProductionEvent): string | null {
-  const runId = nonEmptyIdentity(event.runId);
-  const trajectoryId = nonEmptyIdentity(event.trajectoryId);
-  if (!runId || !trajectoryId || trajectoryId !== `run:${runId}`) return null;
-  return JSON.stringify(['run', runId]);
+  if (!isOuterAttemptIdentity(event.attemptId) || scrubSecrets(event.attemptId) !== event.attemptId) {
+    return null;
+  }
+  if (!trustedExecutionIdentity(event.runId) || event.trajectoryId !== `run:${event.attemptId}`) {
+    return null;
+  }
+  if (event.proposalId !== undefined && !trustedExecutionIdentity(event.proposalId)) return null;
+  const summary = event.runEventSummary;
+  if (summary?.runId !== undefined && (
+    !trustedExecutionIdentity(summary.runId) || summary.runId !== event.runId
+  )) return null;
+  if (summary?.proposalId !== undefined && (
+    !trustedExecutionIdentity(summary.proposalId) || summary.proposalId !== event.proposalId
+  )) return null;
+  return JSON.stringify(['attempt', event.attemptId]);
 }
 
 function attemptAccountingSignature(event: DispatchProductionEvent): string {
   const cancelled = isCancelledDispatchProductionEvent(event);
+  const summary = event.runEventSummary;
   return JSON.stringify([
+    event.runId,
+    event.trajectoryId,
     event.itemId,
     event.repo,
     event.source,
@@ -129,6 +144,22 @@ function attemptAccountingSignature(event: DispatchProductionEvent): string {
     cancelled ? 'cancelled' : event.outcome,
     cancelled ? false : event.proposalCreated,
     event.proposalId ?? null,
+    [
+      summary?.runId ?? event.runId,
+      summary?.proposalId ?? event.proposalId ?? null,
+      cancelled ? 'aborted' : summary?.status ?? null,
+      cancelled ? 'cancelled' : summary?.outcome ?? event.outcome,
+      cancelled ? false : summary?.proposalCreated ?? event.proposalCreated,
+      summary?.diffFiles ?? event.diffFiles ?? null,
+      summary?.diffLines ?? event.diffLines ?? null,
+      summary?.tokensIn ?? null,
+      summary?.tokensOut ?? null,
+      summary?.costUsd ?? null,
+      summary?.durationMs ?? null,
+      summary?.cacheHit ?? null,
+      summary?.contextSummary ?? null,
+      summary?.actionCounts ?? null,
+    ],
     event.repairGenerationId ?? null,
     event.repairAttemptOrdinal ?? null,
   ]);
@@ -339,12 +370,25 @@ export function buildProposalFunnelObservability(
 
 export function withholdProposalFunnelForUnstableSnapshot(
   observation: ProposalFunnelObservability,
+  invalidatingSource?: DispatchProductionSourceQuality,
 ): ProposalFunnelObservability {
   const { metrics: _metrics, ...withoutMetrics } = observation;
+  const source = invalidatingSource
+    ? {
+        sourceState: invalidatingSource.sourceState === 'missing' ? 'missing' as const : 'degraded' as const,
+        complete: false,
+        stopReasons: [...invalidatingSource.stopReasons],
+      }
+    : {
+        ...observation.source,
+        sourceState: observation.source.sourceState === 'missing' ? 'missing' as const : 'degraded' as const,
+        complete: false,
+      };
   return {
     ...withoutMetrics,
     schemaVersion: 3,
     state: 'withheld',
+    source,
     withheldReason: 'snapshot-unstable',
     primaryBlocker: 'source-unavailable',
     primaryAction: 'repair-telemetry-source',

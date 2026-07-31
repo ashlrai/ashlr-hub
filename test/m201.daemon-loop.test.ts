@@ -8403,6 +8403,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(productionEvents).toHaveLength(1);
     expect(productionEvents[0]).toMatchObject({
       itemId: items[0]!.id,
+      attemptId: manifestAttemptId,
       runId: manifestAttemptId,
       trajectoryId: `run:${manifestAttemptId}`,
     });

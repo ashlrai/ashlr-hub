@@ -1712,6 +1712,33 @@ function learningSnapshotSourceQuality(value: unknown): Record<string, unknown> 
   };
 }
 
+function invalidatedDispatchProductionSource(
+  source: DispatchProductionSourceQuality | undefined,
+  stopReason?: 'io-error',
+): DispatchProductionSourceQuality {
+  const fallback: DispatchProductionSourceQuality = {
+    sourceState: 'degraded',
+    sourcePresent: true,
+    complete: false,
+    stopReasons: [],
+    filesRead: 0,
+    datedFilesRead: 0,
+    looseFilesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+  };
+  const base = source ?? fallback;
+  return {
+    ...base,
+    sourceState: base.sourceState === 'missing' ? 'missing' : 'degraded',
+    complete: false,
+    stopReasons: [...new Set([...base.stopReasons, ...(stopReason ? [stopReason] : [])])],
+    unreadableFiles: base.unreadableFiles + (stopReason ? 1 : 0),
+  };
+}
+
 function learningSnapshotTimestamp(...values: Array<string | undefined>): string | undefined {
   let latest: string | undefined;
   let latestMs = Number.NEGATIVE_INFINITY;
@@ -2356,6 +2383,7 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
   let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
+  let initialDispatchRead: ReturnType<typeof readDispatchProductionYieldDetailed> | undefined;
   let queueSnapshotAt: string | null = null;
   let queueAuthorityObservedAt: string | null = null;
   let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
@@ -3171,6 +3199,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limit: 1200,
       limitPerDimension: 8,
     });
+    initialDispatchRead = dispatchRead;
     status.dispatchProductionSource = dispatchRead.sourceQuality;
     status.proposalFunnel = buildProposalFunnelObservability({
       events: dispatchRead.events,
@@ -3512,11 +3541,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         (observation) => observation.observedAt,
       );
 
+      const dispatchSnapshotStable = initialDispatchRead !== undefined &&
+        learningSnapshotDigest(
+          learningSnapshotSourceQuality(initialDispatchRead.sourceQuality),
+          initialDispatchRead.events,
+        ) === learningSnapshotDigest(
+          learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality),
+          dispatchReadAfter.events,
+        );
+
       const stable = [
         learningSnapshotDigest(learningSnapshotSourceQuality(proposalSourceQuality), learningProposals) ===
           learningSnapshotDigest(learningSnapshotSourceQuality(proposalReadAfter), proposalRowsAfter),
-        learningSnapshotDigest(learningSnapshotSourceQuality(status.dispatchProductionSource), learningDispatchEvents) ===
-          learningSnapshotDigest(learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality), dispatchRowsAfter),
+        dispatchSnapshotStable,
         learningSnapshotDigest(learningSnapshotSourceQuality(workspaceRead?.sourceQuality), learningActions) ===
           learningSnapshotDigest(learningSnapshotSourceQuality(actionReadAfter.sourceQuality), actionRowsAfter),
         learningSnapshotDigest(learningSnapshotSourceQuality(learningDecisionsRead), learningDecisions) ===
@@ -3532,6 +3569,31 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ].every(Boolean);
 
       if (stable) {
+        status.dispatchProductionSource = dispatchReadAfter.sourceQuality;
+        const dispatchAvailabilitySource = learningSourceAvailability(
+          'dispatch-production',
+          dispatchReadAfter.sourceQuality,
+        );
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          dispatchProduction: learningMetricAvailability(
+            [dispatchAvailabilitySource],
+            [],
+            1,
+          ),
+        };
+        if (dispatchReadAfter.summary) {
+          status.dispatchProduction = dispatchReadAfter.summary;
+          status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(
+            dispatchReadAfter.summary,
+            cfg,
+            backends,
+          );
+        } else {
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+        }
         status.proposalFunnel = buildProposalFunnelObservability({
           events: dispatchReadAfter.events,
           sourceQuality: dispatchReadAfter.sourceQuality,
@@ -3547,9 +3609,31 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         learningWorkedEvents = workedRowsAfter;
         learningPostMergeObservations = postMergeRowsAfter;
       } else {
+        if (!dispatchSnapshotStable) {
+          const invalidatingSource = invalidatedDispatchProductionSource(
+            dispatchReadAfter.sourceQuality,
+          );
+          status.dispatchProductionSource = invalidatingSource;
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+          const dispatchAvailabilitySource = learningSourceAvailability(
+            'dispatch-production',
+            invalidatingSource,
+          );
+          status.learningMetrics = {
+            ...status.learningMetrics,
+            sourceQuality: invalidatingSource,
+            dispatchProduction: learningMetricAvailability(
+              [dispatchAvailabilitySource],
+              ['dispatchProduction'],
+              1,
+            ),
+          };
+        }
         if (status.proposalFunnel) {
           status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
             status.proposalFunnel,
+            !dispatchSnapshotStable ? status.dispatchProductionSource : undefined,
           );
         }
         status.learningMetrics = {
@@ -3559,15 +3643,33 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         };
       }
     } catch {
+      const invalidatingSource = invalidatedDispatchProductionSource(
+        status.dispatchProductionSource,
+        'io-error',
+      );
+      status.dispatchProductionSource = invalidatingSource;
+      delete status.dispatchProduction;
+      delete status.dispatchYieldDiagnostics;
       if (status.proposalFunnel) {
         status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
           status.proposalFunnel,
+          invalidatingSource,
         );
       }
+      const dispatchAvailabilitySource = learningSourceAvailability(
+        'dispatch-production',
+        invalidatingSource,
+      );
       status.learningMetrics = {
         ...status.learningMetrics,
         state: 'withheld',
         reason: 'learning-snapshot-unstable',
+        sourceQuality: invalidatingSource,
+        dispatchProduction: learningMetricAvailability(
+          [dispatchAvailabilitySource],
+          ['dispatchProduction'],
+          1,
+        ),
       };
     }
   }

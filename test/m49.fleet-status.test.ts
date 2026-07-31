@@ -3024,6 +3024,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
     const now = settledLearningTimestamp();
+    const attemptA = 'attempt-00000000-0000-4000-8000-00000000000a';
+    const attemptB = 'attempt-00000000-0000-4000-8000-00000000000b';
+    const attemptC = 'attempt-00000000-0000-4000-8000-00000000000c';
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -3039,8 +3042,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       routeReason: 'local-mid bulk',
       outcome: 'empty-diff',
       proposalCreated: false,
+      attemptId: attemptA,
       runId: 'run-item-a',
-      trajectoryId: 'run:run-item-a',
+      trajectoryId: `run:${attemptA}`,
       spentUsd: 0.001,
       reason: 'agent returned no diff',
       basis: 'run-proposal-outcome',
@@ -3050,8 +3054,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       {
         ...baseEvent,
         itemId: 'item-b',
+        attemptId: attemptB,
         runId: 'run-item-b',
-        trajectoryId: 'run:run-item-b',
+        trajectoryId: `run:${attemptB}`,
         outcome: 'gate-blocked',
         reason: 'completeness gate blocked proposal',
       },
@@ -3066,8 +3071,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         outcome: 'proposal-created',
         proposalCreated: true,
         proposalId: 'prop-c',
+        attemptId: attemptC,
         runId: 'run-item-c',
-        trajectoryId: 'run:run-item-c',
+        trajectoryId: `run:${attemptC}`,
         reason: 'proposal filed',
       },
     ]);
@@ -3242,6 +3248,152 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(formatFleetStatus(status)).toContain(
         'withheld (cross-source learning snapshot changed during read)',
       );
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds dispatch summary and funnel when a recent append changes only the raw second snapshot', async () => {
+    const now = settledLearningTimestamp();
+    const firstAttempt = 'attempt-00000000-0000-4000-8000-000000000011';
+    const appendedAttempt = 'attempt-00000000-0000-4000-8000-000000000012';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'settled-dispatch',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Settled dispatch',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId: firstAttempt,
+      runId: 'run-settled',
+      trajectoryId: `run:${firstAttempt}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let appended = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!appended) {
+          appended = true;
+          recordDispatchProduction({
+            schemaVersion: 1,
+            ts: new Date().toISOString(),
+            itemId: 'recent-second-read-append',
+            source: 'goal',
+            repo: '/repo/a',
+            title: 'Recent second read append',
+            backend: 'local-coder',
+            tier: 'mid',
+            assignedBy: 'daemon',
+            routeReason: 'local route',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'proposal-recent',
+            attemptId: appendedAttempt,
+            runId: 'run-recent',
+            trajectoryId: `run:${appendedAttempt}`,
+            spentUsd: 0,
+            basis: 'run-proposal-outcome',
+          });
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(appended).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchYieldDiagnostics).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        rowsScanned: 2,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+        sample: { observedEvents: 1, includedAttempts: 1 },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, rowsScanned: 2 },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('propagates a degraded second dispatch read into every invalidated projection', async () => {
+    const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000021';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'degraded-second-read',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Degraded second read',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId,
+      runId: 'run-degraded-second-read',
+      trajectoryId: `run:${attemptId}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let degraded = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!degraded) {
+          degraded = true;
+          const path = join(
+            process.env.ASHLR_HOME!,
+            'dispatch-production',
+            `${now.slice(0, 10)}.jsonl`,
+          );
+          writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(degraded).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, invalidRows: 1 },
+        dispatchProduction: { state: 'withheld' },
+      });
     } finally {
       readSpy.mockRestore();
     }
@@ -3771,6 +3923,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
     const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000031';
+    const trajectoryId = `run:${attemptId}`;
     const repo = join(tmpHome, 'repo-attempts');
     const cfg = withFoundry({
       autoMerge: {
@@ -3810,8 +3964,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'proposal-created',
       proposalCreated: true,
       proposalId: proposal.id,
+      attemptId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       routeSnapshot: {
         backend: 'codex',
         tier: 'frontier',
@@ -3848,7 +4003,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       source: 'goal',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       backend: 'codex',
       tier: 'frontier',
       model: 'gpt-5.5',
@@ -3860,7 +4015,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalId: proposal.id,
       workItemId: itemId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       action: 'judged',
       verdict: 'ship',
       reason: 'metadata-only approval',
@@ -3884,7 +4039,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       reason: 'private observe-only selection',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
     });
     expect(readSkillUseEvents({ limit: 10 })).toHaveLength(1);
 

@@ -2467,6 +2467,7 @@ function dispatchProductionBasis(
 function dispatchProductionEventFromOutcome(
   value: TickItemOutcome,
   proposal: Proposal | undefined,
+  attemptId: string,
   machineId: string,
   ts: string,
   cfg: AshlrConfig,
@@ -2609,6 +2610,7 @@ function dispatchProductionEventFromOutcome(
     outcome,
     proposalCreated,
     ...(proposalId ? { proposalId } : {}),
+    attemptId,
     ...(runId ? { runId } : {}),
     ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
@@ -6730,6 +6732,7 @@ export async function tick(
     const event = dispatchProductionEventFromOutcome(
       outcome.value,
       newPendingProposalsByItemId.get(outcome.value.item.id),
+      attemptIds.get(outcome.value.item.id)!,
       machineId,
       productionCompletedAt,
       routingCfg,
