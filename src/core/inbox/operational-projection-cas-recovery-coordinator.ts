@@ -42,6 +42,10 @@ const LEGACY_CONSUMPTION_DOMAIN =
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const SIGNATURE_RE = /^[A-Za-z0-9_-]{86}$/;
 const MAX_RECORDS = 50_000;
+const PHASE_RANK: Readonly<Record<OperationalProjectionCasConsumptionPhase, number>> = {
+  prepared: 0,
+  applied: 1,
+};
 
 const NO_AUTHORITY = {
   historicalAuthority: false as const,
@@ -432,7 +436,7 @@ OperationalProjectionCasConsumptionRecordV1
     compare: (left, right) =>
       left.recordedAt.localeCompare(right.recordedAt) ||
       left.decisionId.localeCompare(right.decisionId) ||
-      left.phase.localeCompare(right.phase),
+      PHASE_RANK[left.phase] - PHASE_RANK[right.phase],
   };
 }
 
@@ -586,6 +590,8 @@ function findDecisionRecords(
   completion: OperationalProjectionCasConsumptionRecordV1 | null;
   equivocal: boolean;
   requestMismatch: boolean;
+  phaseMismatch: boolean;
+  completionBeforePrepared: boolean;
 } {
   const matching = records.filter((record) =>
     equalDigest(consumptionDigest(record.casRequest), stableConsumptionDigest));
@@ -596,14 +602,22 @@ function findDecisionRecords(
       completion: null,
       equivocal: true,
       requestMismatch: false,
+      phaseMismatch: false,
+      completionBeforePrepared: false,
     };
   }
+  const prepared = matching.find((record) => record.phase === 'prepared') ?? null;
+  const completion = matching.find((record) => record.phase === 'applied') ?? null;
   return {
-    prepared: matching.find((record) => record.phase === 'prepared') ?? null,
-    completion: matching.find((record) => record.phase === 'applied') ?? null,
+    prepared,
+    completion,
     equivocal: false,
     requestMismatch: matching.some((record) =>
       !equalDigest(record.requestDigest, requestDigest)),
+    phaseMismatch: prepared !== null && completion !== null &&
+      prepared.decision !== completion.decision,
+    completionBeforePrepared: prepared !== null && completion !== null &&
+      Date.parse(completion.recordedAt) < Date.parse(prepared.recordedAt),
   };
 }
 
@@ -640,12 +654,36 @@ export function applyOperationalProjectionCasRecovery(
     stableConsumptionDigest,
   );
   if (existing.equivocal) return failed('refused', 'cas-decision-equivocal');
+  if (existing.phaseMismatch) {
+    return failed(
+      'degraded',
+      'cas-decision-phase-mismatch',
+      existing.prepared,
+      existing.completion,
+    );
+  }
+  if (existing.completionBeforePrepared) {
+    return failed(
+      'degraded',
+      'completion-before-prepared-decision',
+      existing.prepared,
+      existing.completion,
+    );
+  }
   if (existing.completion && !existing.prepared) {
     return failed(
       'degraded',
       'completion-without-prepared-decision',
       null,
       existing.completion,
+    );
+  }
+  if (existing.prepared && !existing.completion &&
+    nowMs < Date.parse(existing.prepared.recordedAt)) {
+    return failed(
+      'refused',
+      'completion-clock-before-prepared',
+      existing.prepared,
     );
   }
   if (existing.requestMismatch) {

@@ -273,6 +273,32 @@ function consumptionPayload(record: OperationalProjectionCasConsumptionRecordV1)
   });
 }
 
+function rewriteConsumptionRecord(
+  source: OperationalProjectionCasConsumptionRecordV1,
+  updates: Partial<Pick<
+  OperationalProjectionCasConsumptionRecordV1,
+  'decision' | 'recordedAt' | 'resultingShadowPhase'
+  >>,
+): OperationalProjectionCasConsumptionRecordV1 {
+  const recordsPath = path.join(operationalProjectionCasConsumptionStorePath(), 'records');
+  const recordPath = path.join(recordsPath, `${source.decisionId}.${source.phase}.json`);
+  const record = JSON.parse(
+    fs.readFileSync(recordPath, 'utf8'),
+  ) as OperationalProjectionCasConsumptionRecordV1;
+  Object.assign(record, updates);
+  record.recordDigest = sha(RECORD_DOMAIN, consumptionPayload(record));
+  const localKey = createHmac('sha256', loadOrCreateKey())
+    .update(`${KEY_DOMAIN}\n`, 'utf8')
+    .digest();
+  record.attestation = createHmac('sha256', localKey)
+    .update(`${ATTESTATION_DOMAIN}\n`, 'utf8')
+    .update(record.recordDigest, 'utf8')
+    .digest('hex');
+  fs.writeFileSync(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  fsyncDirectory(recordsPath);
+  return record;
+}
+
 function rewriteConsumptionRecordsAsLegacy(): void {
   const provenanceKey = loadOrCreateKey();
   const localKey = createHmac('sha256', provenanceKey)
@@ -373,6 +399,111 @@ describe('M438 operational projection CAS recovery composition', () => {
     expect(records.records).toHaveLength(2);
     const persisted = records.records.map((record) => JSON.stringify(record)).join('\n');
     expect(persisted).not.toContain('not-recorded');
+  });
+
+  it('orders prepared before applied when authenticated phase timestamps tie', () => {
+    expect(applyOperationalProjectionCasRecovery(fixture('accepted'))).toMatchObject({
+      state: 'applied',
+      prepared: { recordedAt: APPLIED_AT.toISOString() },
+      completion: { recordedAt: APPLIED_AT.toISOString() },
+    });
+
+    expect(readOperationalProjectionCasConsumptionRecords().records.map((record) =>
+      record.phase)).toEqual(['prepared', 'applied']);
+  });
+
+  it('fails closed before shadow evaluation for contradictory authenticated phase decisions', () => {
+    const signed = signedFixture('conflict');
+    const exactReceipt = signedReceipt(
+      signed.input.casRequest,
+      'conflict',
+      signed.privateKey,
+      {
+        sequence: signed.input.casRequest.proposed.sequence,
+        valueDigest: signed.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      },
+    );
+    const input = { ...signed.input, untrustedCasReceipt: exactReceipt };
+    const first = applyOperationalProjectionCasRecovery(input);
+    expect(first).toMatchObject({ state: 'applied', decision: 'roll-forward' });
+    rewriteConsumptionRecord(first.completion!, {
+      decision: 'rollback',
+      resultingShadowPhase: 'rolled-back',
+    });
+    expect(readOperationalProjectionCasConsumptionRecords()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      records: [
+        { phase: 'prepared', decision: 'roll-forward' },
+        { phase: 'applied', decision: 'rollback' },
+      ],
+    });
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...input,
+      untrustedCasReceipt: null,
+      now: new Date('2036-07-29T16:05:00.000Z'),
+    })).toMatchObject({
+      state: 'degraded',
+      reason: 'cas-decision-phase-mismatch',
+      decision: null,
+      authenticated: false,
+      localMutationApplied: false,
+      prepared: { phase: 'prepared', decision: 'roll-forward' },
+      completion: { phase: 'applied', decision: 'rollback' },
+      shadow: null,
+    });
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
+  });
+
+  it('fails closed when an authenticated completion predates its prepared record', () => {
+    const input = fixture('accepted');
+    const first = applyOperationalProjectionCasRecovery(input);
+    expect(first.state).toBe('applied');
+    rewriteConsumptionRecord(first.completion!, {
+      recordedAt: new Date(APPLIED_AT.getTime() - 1).toISOString(),
+    });
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...input,
+      untrustedCasReceipt: null,
+    })).toMatchObject({
+      state: 'degraded',
+      reason: 'completion-before-prepared-decision',
+      decision: null,
+      authenticated: false,
+      localMutationApplied: false,
+      shadow: null,
+    });
+  });
+
+  it('refuses a resumed completion when the current clock predates preparation', () => {
+    const input = restorePreparedPublicationWitness('records-directory-fsync');
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...input,
+      now: new Date(APPLIED_AT.getTime() - 1),
+    })).toMatchObject({
+      state: 'refused',
+      reason: 'completion-clock-before-prepared',
+      decision: null,
+      authenticated: false,
+      localMutationApplied: false,
+      prepared: { phase: 'prepared', recordedAt: APPLIED_AT.toISOString() },
+      completion: null,
+      shadow: null,
+    });
+    expect(readOperationalProjectionCasConsumptionRecords().records).toMatchObject([
+      { phase: 'prepared' },
+    ]);
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
   });
 
   it('rolls back a committed candidate only after an exact signed CAS conflict', () => {
