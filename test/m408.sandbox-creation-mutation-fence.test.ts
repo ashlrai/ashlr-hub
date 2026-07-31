@@ -250,7 +250,7 @@ async function startHolder(): Promise<ChildProcess> {
     const authorityRoot = join(fx.home, '.ashlr', 'authority');
     expect(ready.semanticRequests.some((request) =>
       request.operation === 'assure-private-path' &&
-      request.anchorPath === authorityRoot &&
+      request.anchorPath === fx.home &&
       request.kind === 'file' &&
       request.mode === 'secure-created' &&
       request.paths.length === 1 &&
