@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,6 +25,7 @@ import {
   operationalProjectionCasConsumptionStorePath,
   readOperationalProjectionCasConsumptionRecords,
   type ApplyOperationalProjectionCasRecoveryInputV1,
+  type OperationalProjectionCasConsumptionRecordV1,
 } from '../src/core/inbox/operational-projection-cas-recovery-coordinator.js';
 import {
   buildOperationalProjectionAnchorRequest,
@@ -52,6 +53,11 @@ const originalUserProfile = process.env.USERPROFILE;
 const PREPARED_AT = new Date('2026-07-29T16:00:00.000Z');
 const COMMITTED_AT = new Date('2026-07-29T16:01:00.000Z');
 const APPLIED_AT = new Date('2026-07-29T16:05:00.000Z');
+const LEGACY_CONSUMPTION_DOMAIN =
+  'ashlr.operational-projection-cas-consumption.identity.v1';
+const KEY_DOMAIN = 'ashlr.operational-projection-cas-consumption.key.v1';
+const RECORD_DOMAIN = 'ashlr.operational-projection-cas-consumption.record.v1';
+const ATTESTATION_DOMAIN = 'ashlr.operational-projection-cas-consumption.attestation.v1';
 
 let home: string;
 let lock: ProposalStoreMutationLock | null;
@@ -222,6 +228,80 @@ function restorePreparedPublicationWitness(
   return { ...input, untrustedCasReceipt: null };
 }
 
+function sha(domain: string, value: string): string {
+  return createHash('sha256')
+    .update(`${domain}\n`, 'utf8')
+    .update(value, 'utf8')
+    .digest('hex');
+}
+
+function legacyConsumptionDigest(
+  request: ApplyOperationalProjectionCasRecoveryInputV1['casRequest'],
+): string {
+  return sha(LEGACY_CONSUMPTION_DOMAIN, JSON.stringify({
+    anchorId: request.anchorId,
+    namespace: request.namespace,
+    source: {
+      projectionDigest: request.source.projectionDigest,
+      proposalDigest: request.source.proposalDigest,
+      proposalId: request.source.proposalId,
+      transactionId: request.source.transactionId,
+    },
+  }));
+}
+
+function consumptionPayload(record: OperationalProjectionCasConsumptionRecordV1): string {
+  return JSON.stringify({
+    casReceipt: record.casReceipt,
+    casRequest: record.casRequest,
+    consumptionDigest: record.consumptionDigest,
+    decision: record.decision,
+    decisionId: record.decisionId,
+    historicalAuthority: record.historicalAuthority,
+    operationalAuthority: record.operationalAuthority,
+    phase: record.phase,
+    receiptDigest: record.receiptDigest,
+    recordType: record.recordType,
+    recordedAt: record.recordedAt,
+    requestDigest: record.requestDigest,
+    resultingShadowPhase: record.resultingShadowPhase,
+    rollbackAuthority: record.rollbackAuthority,
+    rollbackProtected: record.rollbackProtected,
+    schemaVersion: record.schemaVersion,
+  });
+}
+
+function rewriteConsumptionRecordsAsLegacy(): void {
+  const provenanceKey = loadOrCreateKey();
+  const localKey = createHmac('sha256', provenanceKey)
+    .update(`${KEY_DOMAIN}\n`, 'utf8')
+    .digest();
+  const recordsPath = path.join(operationalProjectionCasConsumptionStorePath(), 'records');
+  for (const fileName of fs.readdirSync(recordsPath)) {
+    const recordPath = path.join(recordsPath, fileName);
+    const record = JSON.parse(
+      fs.readFileSync(recordPath, 'utf8'),
+    ) as OperationalProjectionCasConsumptionRecordV1;
+    record.consumptionDigest = legacyConsumptionDigest(record.casRequest);
+    record.recordDigest = sha(RECORD_DOMAIN, consumptionPayload(record));
+    record.attestation = createHmac('sha256', localKey)
+      .update(`${ATTESTATION_DOMAIN}\n`, 'utf8')
+      .update(record.recordDigest, 'utf8')
+      .digest('hex');
+    fs.writeFileSync(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  }
+  const stagingPath = path.join(operationalProjectionCasConsumptionStorePath(), 'staging');
+  for (const fileName of fs.readdirSync(stagingPath)) {
+    if (!fileName.endsWith('.stage')) continue;
+    const stagePath = path.join(stagingPath, fileName);
+    const record = JSON.parse(
+      fs.readFileSync(stagePath, 'utf8'),
+    ) as OperationalProjectionCasConsumptionRecordV1;
+    const expectedName = `.${record.decisionId}.${record.phase}.${record.recordDigest}.stage`;
+    if (fileName !== expectedName) fs.renameSync(stagePath, path.join(stagingPath, expectedName));
+  }
+}
+
 beforeEach(() => {
   lock = null;
   _setOperationalProjectionShadowWriterHookForTest(undefined);
@@ -357,6 +437,118 @@ describe('M438 operational projection CAS recovery composition', () => {
       state: 'healthy',
       actual: 'complete',
       transaction: { phase: 'committed' },
+    });
+    expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
+  });
+
+  it('refuses a conflicting decision under alternate CAS coordinates after acceptance', () => {
+    const fixture = signedFixture('accepted');
+    expect(applyOperationalProjectionCasRecovery(fixture.input)).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+    });
+    const alternateRequest = buildOperationalProjectionAnchorRequest({
+      anchorId: 'ashlr-anchor-secondary',
+      namespace: 'ashlr/projections/alternate',
+      requestNonce: '8'.repeat(64),
+      expected: fixture.input.casRequest.expected,
+      source: fixture.input.casRequest.source,
+    });
+    const conflictingReceipt = signedReceipt(
+      alternateRequest,
+      'conflict',
+      fixture.privateKey,
+    );
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      casRequest: alternateRequest,
+      untrustedCasReceipt: conflictingReceipt,
+      casTrust: {
+        ...fixture.input.casTrust,
+        anchorId: alternateRequest.anchorId,
+      },
+    })).toMatchObject({
+      state: 'refused',
+      reason: 'cas-consumption-identity-already-decided',
+      authenticated: false,
+      localMutationApplied: false,
+      historicalAuthority: false,
+      operationalAuthority: false,
+      rollbackAuthority: false,
+      rollbackProtected: false,
+    });
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      state: 'healthy',
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
+    expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
+  });
+
+  it('normalizes legacy coordinate-bound records before refusing an alternate conflict', () => {
+    const fixture = signedFixture('accepted');
+    expect(applyOperationalProjectionCasRecovery(fixture.input).state).toBe('applied');
+    rewriteConsumptionRecordsAsLegacy();
+    const legacyRecords = readOperationalProjectionCasConsumptionRecords();
+    expect(legacyRecords).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+    });
+    expect(legacyRecords.records.map((record) => record.phase).sort()).toEqual([
+      'applied',
+      'prepared',
+    ]);
+    const alternateRequest = buildOperationalProjectionAnchorRequest({
+      anchorId: 'ashlr-anchor-secondary',
+      namespace: 'ashlr/projections/alternate',
+      requestNonce: '8'.repeat(64),
+      expected: fixture.input.casRequest.expected,
+      source: fixture.input.casRequest.source,
+    });
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      casRequest: alternateRequest,
+      untrustedCasReceipt: signedReceipt(
+        alternateRequest,
+        'conflict',
+        fixture.privateKey,
+      ),
+      casTrust: {
+        ...fixture.input.casTrust,
+        anchorId: alternateRequest.anchorId,
+      },
+    })).toMatchObject({
+      state: 'refused',
+      reason: 'cas-consumption-identity-already-decided',
+      authenticated: false,
+      localMutationApplied: false,
+    });
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      state: 'healthy',
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
+    expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
+  });
+
+  it('resumes a legacy coordinate-bound prepared decision after restart', () => {
+    const input = restorePreparedPublicationWitness('records-directory-fsync');
+    rewriteConsumptionRecordsAsLegacy();
+
+    expect(applyOperationalProjectionCasRecovery(input)).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+      authenticated: true,
+      localMutationApplied: false,
+      prepared: { phase: 'prepared' },
+      completion: { phase: 'applied', resultingShadowPhase: 'committed' },
+      shadow: { actual: 'complete', transaction: { phase: 'committed' } },
+    });
+    expect(readOperationalProjectionCasConsumptionRecords()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
     });
     expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
   });

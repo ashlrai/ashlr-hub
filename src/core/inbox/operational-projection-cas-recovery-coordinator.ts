@@ -36,7 +36,9 @@ const KEY_DOMAIN = 'ashlr.operational-projection-cas-consumption.key.v1';
 const RECORD_DOMAIN = 'ashlr.operational-projection-cas-consumption.record.v1';
 const ATTESTATION_DOMAIN = 'ashlr.operational-projection-cas-consumption.attestation.v1';
 const DECISION_DOMAIN = 'ashlr.operational-projection-cas-consumption.decision.v1';
-const CONSUMPTION_DOMAIN = 'ashlr.operational-projection-cas-consumption.identity.v1';
+const CONSUMPTION_DOMAIN = 'ashlr.operational-projection-cas-consumption.identity.v2';
+const LEGACY_CONSUMPTION_DOMAIN =
+  'ashlr.operational-projection-cas-consumption.identity.v1';
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const SIGNATURE_RE = /^[A-Za-z0-9_-]{86}$/;
 const MAX_RECORDS = 50_000;
@@ -212,8 +214,22 @@ function decisionId(requestDigest: string, receiptDigest: string): string {
   return sha(DECISION_DOMAIN, JSON.stringify([requestDigest, receiptDigest]));
 }
 
+// Routing coordinates and retry state cannot partition one shadow transaction's decision history.
 function consumptionDigest(request: OperationalProjectionAnchorCasRequestV1): string {
   return sha(CONSUMPTION_DOMAIN, JSON.stringify({
+    source: {
+      projectionDigest: request.source.projectionDigest,
+      proposalDigest: request.source.proposalDigest,
+      proposalId: request.source.proposalId,
+      transactionId: request.source.transactionId,
+    },
+  }));
+}
+
+function legacyCoordinateBoundConsumptionDigest(
+  request: OperationalProjectionAnchorCasRequestV1,
+): string {
+  return sha(LEGACY_CONSUMPTION_DOMAIN, JSON.stringify({
     anchorId: request.anchorId,
     namespace: request.namespace,
     source: {
@@ -336,13 +352,16 @@ function parseRecord(
   try {
     const requestDigest = operationalProjectionAnchorRequestDigest(record.casRequest);
     const stableConsumptionDigest = consumptionDigest(record.casRequest);
+    // Parent-format records remain readable only after their local HMAC is verified below.
+    const legacyConsumptionDigest = legacyCoordinateBoundConsumptionDigest(record.casRequest);
     const receiptDigest = operationalProjectionAnchorReceiptDigest(
       receiptCore(record.casReceipt),
     );
     const decision = decisionFor(record.casReceipt);
     if (!decision ||
       decision !== record.decision ||
-      !equalDigest(stableConsumptionDigest, record.consumptionDigest) ||
+      (!equalDigest(stableConsumptionDigest, record.consumptionDigest) &&
+        !equalDigest(legacyConsumptionDigest, record.consumptionDigest)) ||
       !equalDigest(requestDigest, record.requestDigest) ||
       !equalDigest(receiptDigest, record.receiptDigest) ||
       !equalDigest(record.casReceipt.receiptDigest, record.receiptDigest) ||
@@ -532,7 +551,7 @@ function findDecisionRecords(
   requestMismatch: boolean;
 } {
   const matching = records.filter((record) =>
-    equalDigest(record.consumptionDigest, stableConsumptionDigest));
+    equalDigest(consumptionDigest(record.casRequest), stableConsumptionDigest));
   const decisionIds = new Set(matching.map((record) => record.decisionId));
   if (decisionIds.size > 1) {
     return {
