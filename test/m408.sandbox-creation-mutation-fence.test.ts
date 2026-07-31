@@ -13,31 +13,55 @@ import {
   sandboxesDir,
 } from '../src/core/sandbox/worktree.js';
 
-const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+const privateStorageHarness = vi.hoisted(() => ({ semanticInvocations: 0 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  const { semanticPrivateStorageRunner } = await import('./helpers/semantic-private-storage.js');
   return {
     ...actual,
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
-      ? {
-          ok: true,
-          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
-        }
-      : actual.assurePrivateStoragePath(...args),
+    ) => {
+      const options = args[3];
+      if (process.platform !== 'win32' || options?.runner !== undefined) {
+        return actual.assurePrivateStoragePath(...args);
+      }
+      privateStorageHarness.semanticInvocations += 1;
+      return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
+        ...options,
+        runner: semanticPrivateStorageRunner,
+      });
+    },
   };
 });
 
 const CHILD_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 8_000;
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
+const privateStorageModuleUrl = new URL('../src/core/util/private-storage.ts', import.meta.url).href;
+const semanticPrivateStorageHelperUrl = new URL(
+  './helpers/semantic-private-storage.ts',
+  import.meta.url,
+).href;
 const CHILD_SOURCE = String.raw`
   import {
     acquireOutwardMutationFence,
     ownsOutwardMutationFence,
     releaseOutwardMutationFence,
   } from ${JSON.stringify(fenceModuleUrl)};
+  import {
+    PRIVATE_STORAGE_TEST_CONTROL,
+    _setPrivateStorageTestControlForTest,
+  } from ${JSON.stringify(privateStorageModuleUrl)};
+  import { semanticPrivateStorageRunner } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
+
+  let semanticInvocations = 0;
+  if (process.platform === 'win32') {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticPrivateStorageRunner,
+      observeInvocation: () => { semanticInvocations += 1; },
+    });
+  }
 
   const send = (message) => new Promise((resolve, reject) => {
     if (!process.send) return reject(new Error('IPC unavailable'));
@@ -49,6 +73,7 @@ const CHILD_SOURCE = String.raw`
     type: 'ready',
     acquired: fence !== null,
     owns: ownsOutwardMutationFence(fence),
+    semanticInvocations,
   });
 
   if (!fence) {
@@ -66,7 +91,7 @@ const CHILD_SOURCE = String.raw`
 `;
 
 type ChildMessage =
-  | { type: 'ready'; acquired: boolean; owns: boolean }
+  | { type: 'ready'; acquired: boolean; owns: boolean; semanticInvocations: number }
   | { type: 'released' };
 
 interface SourceSnapshot {
@@ -197,11 +222,17 @@ async function startHolder(): Promise<ChildProcess> {
   children.add(child);
   child.once('exit', () => children.delete(child));
 
-  await expect(waitForMessage(child, 'ready')).resolves.toEqual({
+  const ready = await waitForMessage(child, 'ready');
+  expect(ready).toMatchObject({
     type: 'ready',
     acquired: true,
     owns: true,
   });
+  if (process.platform === 'win32') {
+    expect(ready.semanticInvocations).toBeGreaterThan(0);
+  } else {
+    expect(ready.semanticInvocations).toBe(0);
+  }
   return child;
 }
 
@@ -213,7 +244,7 @@ async function releaseHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
-  privateStorageHarness.useSemanticAdapter = true;
+  privateStorageHarness.semanticInvocations = 0;
   fx = makeFixture();
 });
 
@@ -222,13 +253,15 @@ afterEach(async () => {
   for (const child of running) child.kill('SIGKILL');
   await Promise.all(running.map(waitForExit));
   fx.cleanup();
-  privateStorageHarness.useSemanticAdapter = false;
 });
 
 describe('M408 createSandbox outward mutation fence', () => {
   it('refuses without branch, worktree, or metadata changes while another process owns the fence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    if (process.platform === 'win32') {
+      expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
+    }
     const holder = await startHolder();
 
     const sourceBefore = sourceSnapshot(repo);

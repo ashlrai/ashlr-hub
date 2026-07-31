@@ -21,20 +21,26 @@ import {
   type DetachedPostMergeVerificationMemberInput,
 } from '../src/core/fleet/detached-post-merge-verification.js';
 
-const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+const privateStorageHarness = vi.hoisted(() => ({ semanticInvocations: 0 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  const { semanticPrivateStorageRunner } = await import('./helpers/semantic-private-storage.js');
   return {
     ...actual,
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
-      ? {
-          ok: true,
-          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
-        }
-      : actual.assurePrivateStoragePath(...args),
+    ) => {
+      const options = args[3];
+      if (process.platform !== 'win32' || options?.runner !== undefined) {
+        return actual.assurePrivateStoragePath(...args);
+      }
+      privateStorageHarness.semanticInvocations += 1;
+      return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
+        ...options,
+        runner: semanticPrivateStorageRunner,
+      });
+    },
   };
 });
 
@@ -49,11 +55,10 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ashlr-m467-postmerge-'));
   process.env.HOME = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
-  privateStorageHarness.useSemanticAdapter = true;
+  privateStorageHarness.semanticInvocations = 0;
 });
 
 afterEach(() => {
-  privateStorageHarness.useSemanticAdapter = false;
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
   if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
@@ -63,6 +68,9 @@ afterEach(() => {
 
 function key(): void {
   expect(loadOrCreateKey()).toHaveLength(32);
+  if (process.platform === 'win32') {
+    expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
+  }
 }
 
 function member(
