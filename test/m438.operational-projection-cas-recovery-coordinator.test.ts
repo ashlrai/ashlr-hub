@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -45,6 +45,7 @@ import {
   releaseProposalStoreMutationLock,
   type ProposalStoreMutationLock,
 } from '../src/core/inbox/proposal-mutation-lock.js';
+import { fsyncDirectory } from '../src/core/util/durability.js';
 
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
@@ -74,9 +75,48 @@ function projection(): Buffer {
   return Buffer.from(JSON.stringify({ schemaVersion: 1, generation: 438, members: [] }), 'utf8');
 }
 
-function fixture(
+function signedReceipt(
+  casRequest: ApplyOperationalProjectionCasRecoveryInputV1['casRequest'],
   casDecision: 'accepted' | 'conflict',
-): ApplyOperationalProjectionCasRecoveryInputV1 {
+  privateKey: KeyObject,
+): OperationalProjectionAnchorReceiptV1 {
+  const receiptCore: OperationalProjectionAnchorReceiptCoreV1 = {
+    schemaVersion: 1,
+    protocol: 'ashlr.operational-projection-monotonic-anchor.v1',
+    anchorId: casRequest.anchorId,
+    namespace: casRequest.namespace,
+    keyId: 'projection-anchor-key',
+    keyEpoch: '4',
+    decision: casDecision,
+    reason: casDecision === 'accepted' ? 'accepted' : 'compare-mismatch',
+    requestDigest: operationalProjectionAnchorRequestDigest(casRequest),
+    observed: casDecision === 'accepted'
+      ? casRequest.expected
+      : {
+          sequence: '8',
+          valueDigest: 'b'.repeat(64),
+          receiptDigest: 'c'.repeat(64),
+        },
+    accepted: casDecision === 'accepted' ? casRequest.proposed : null,
+    historicalAuthority: false,
+    rollbackProtected: false,
+    operationalAuthority: false,
+  };
+  const receiptDigest = operationalProjectionAnchorReceiptDigest(receiptCore);
+  return {
+    ...receiptCore,
+    receiptDigest,
+    signature: sign(
+      null,
+      operationalProjectionAnchorReceiptSigningBytes(receiptDigest),
+      privateKey,
+    ).toString('base64url'),
+  };
+}
+
+function signedFixture(
+  casDecision: 'accepted' | 'conflict',
+): { input: ApplyOperationalProjectionCasRecoveryInputV1; privateKey: KeyObject } {
   const storeLock = lock ?? acquire();
   const proposalId = `proposal-438-${casDecision}`;
   const prepared = prepareOperationalProjectionShadowWrite({
@@ -118,50 +158,68 @@ function fixture(
       projectionDigest: transaction.after.projection.digest!,
     },
   });
-  const receiptCore: OperationalProjectionAnchorReceiptCoreV1 = {
-    schemaVersion: 1,
-    protocol: 'ashlr.operational-projection-monotonic-anchor.v1',
-    anchorId: casRequest.anchorId,
-    namespace: casRequest.namespace,
-    keyId: 'projection-anchor-key',
-    keyEpoch: '4',
-    decision: casDecision,
-    reason: casDecision === 'accepted' ? 'accepted' : 'compare-mismatch',
-    requestDigest: operationalProjectionAnchorRequestDigest(casRequest),
-    observed: casDecision === 'accepted'
-      ? casRequest.expected
-      : {
-          sequence: '8',
-          valueDigest: 'b'.repeat(64),
-          receiptDigest: 'c'.repeat(64),
-        },
-    accepted: casDecision === 'accepted' ? casRequest.proposed : null,
-    historicalAuthority: false,
-    rollbackProtected: false,
-    operationalAuthority: false,
-  };
-  const receiptDigest = operationalProjectionAnchorReceiptDigest(receiptCore);
-  const receipt: OperationalProjectionAnchorReceiptV1 = {
-    ...receiptCore,
-    receiptDigest,
-    signature: sign(
-      null,
-      operationalProjectionAnchorReceiptSigningBytes(receiptDigest),
-      keyPair.privateKey,
-    ).toString('base64url'),
-  };
+  const receipt = signedReceipt(casRequest, casDecision, keyPair.privateKey);
   return {
-    casRequest,
-    untrustedCasReceipt: receipt,
-    casTrust: {
-      anchorId: casRequest.anchorId,
-      keyId: receipt.keyId,
-      keyEpoch: receipt.keyEpoch,
-      publicKey: keyPair.publicKey,
+    input: {
+      casRequest,
+      untrustedCasReceipt: receipt,
+      casTrust: {
+        anchorId: casRequest.anchorId,
+        keyId: receipt.keyId,
+        keyEpoch: receipt.keyEpoch,
+        publicKey: keyPair.publicKey,
+      },
+      storeLock,
+      now: APPLIED_AT,
     },
-    storeLock,
-    now: APPLIED_AT,
+    privateKey: keyPair.privateKey,
   };
+}
+
+function fixture(
+  casDecision: 'accepted' | 'conflict',
+): ApplyOperationalProjectionCasRecoveryInputV1 {
+  return signedFixture(casDecision).input;
+}
+
+function restorePreparedPublicationWitness(
+  boundary: 'temporary' | 'stage' | 'target-link' | 'records-directory-fsync',
+): ApplyOperationalProjectionCasRecoveryInputV1 {
+  const input = fixture('accepted');
+  const first = applyOperationalProjectionCasRecovery(input);
+  expect(first.state).toBe('applied');
+  const prepared = first.prepared!;
+  const root = operationalProjectionCasConsumptionStorePath();
+  const persisted = fs.readFileSync(
+    path.join(root, 'records', `${prepared.decisionId}.prepared.json`),
+  );
+  fs.rmSync(root, { recursive: true, force: true });
+  const records = path.join(root, 'records');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(records, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    fs.chmodSync(root, 0o700);
+    fs.chmodSync(records, 0o700);
+    fs.chmodSync(staging, 0o700);
+  }
+  const stage = path.join(
+    staging,
+    `.${prepared.decisionId}.prepared.${prepared.recordDigest}.stage`,
+  );
+  const temporary = `${stage}.tmp`;
+  const target = path.join(records, `${prepared.decisionId}.prepared.json`);
+  if (boundary === 'temporary') {
+    fs.writeFileSync(temporary, persisted, { mode: 0o600 });
+  } else {
+    fs.writeFileSync(stage, persisted, { mode: 0o600 });
+    fsyncDirectory(staging);
+    if (boundary === 'target-link' || boundary === 'records-directory-fsync') {
+      fs.linkSync(stage, target);
+      if (boundary === 'records-directory-fsync') fsyncDirectory(records);
+    }
+  }
+  return { ...input, untrustedCasReceipt: null };
 }
 
 beforeEach(() => {
@@ -259,6 +317,150 @@ describe('M438 operational projection CAS recovery composition', () => {
       localMutationApplied: false,
     });
     expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
+  });
+
+  it('refuses a new-nonce conflict after the stable transaction value was accepted', () => {
+    const fixture = signedFixture('accepted');
+    expect(applyOperationalProjectionCasRecovery(fixture.input).state).toBe('applied');
+    const nonceRetry = structuredClone(fixture.input.casRequest);
+    nonceRetry.requestNonce = '8'.repeat(64);
+    const advancedExpectedRetry = buildOperationalProjectionAnchorRequest({
+      anchorId: fixture.input.casRequest.anchorId,
+      namespace: fixture.input.casRequest.namespace,
+      requestNonce: '9'.repeat(64),
+      expected: {
+        sequence: '8',
+        valueDigest: fixture.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'd'.repeat(64),
+      },
+      source: fixture.input.casRequest.source,
+    });
+
+    for (const retryRequest of [nonceRetry, advancedExpectedRetry]) {
+      const retryReceipt = signedReceipt(retryRequest, 'conflict', fixture.privateKey);
+      expect(applyOperationalProjectionCasRecovery({
+        ...fixture.input,
+        casRequest: retryRequest,
+        untrustedCasReceipt: retryReceipt,
+      })).toMatchObject({
+        state: 'refused',
+        reason: 'cas-consumption-identity-already-decided',
+        authenticated: false,
+        localMutationApplied: false,
+        historicalAuthority: false,
+        operationalAuthority: false,
+        rollbackAuthority: false,
+        rollbackProtected: false,
+      });
+    }
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      state: 'healthy',
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
+    expect(readOperationalProjectionCasConsumptionRecords().records).toHaveLength(2);
+  });
+
+  it.each(['accepted', 'conflict'] as const)(
+    'refuses a signed %s receipt whose request forges the committed attestation',
+    (decision) => {
+      const fixture = signedFixture(decision);
+      const forgedRequest = buildOperationalProjectionAnchorRequest({
+        anchorId: fixture.input.casRequest.anchorId,
+        namespace: fixture.input.casRequest.namespace,
+        requestNonce: fixture.input.casRequest.requestNonce,
+        expected: fixture.input.casRequest.expected,
+        source: {
+          ...fixture.input.casRequest.source,
+          transactionAttestation: 'f'.repeat(64),
+        },
+      });
+      const forgedReceipt = signedReceipt(forgedRequest, decision, fixture.privateKey);
+
+      expect(applyOperationalProjectionCasRecovery({
+        ...fixture.input,
+        casRequest: forgedRequest,
+        untrustedCasReceipt: forgedReceipt,
+      })).toMatchObject({
+        state: 'refused',
+        reason: 'shadow-decision-binding-mismatch',
+        authenticated: false,
+        localMutationApplied: false,
+        historicalAuthority: false,
+        operationalAuthority: false,
+        rollbackAuthority: false,
+        rollbackProtected: false,
+      });
+      expect(fs.existsSync(operationalProjectionCasConsumptionStorePath())).toBe(false);
+      expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+        state: 'healthy',
+        actual: 'complete',
+        transaction: { phase: 'committed' },
+      });
+    },
+  );
+
+  it.each([
+    'temporary',
+    'stage',
+    'target-link',
+    'records-directory-fsync',
+  ] as const)(
+    'recovers an authenticated prepared record after the %s publication boundary',
+    (boundary) => {
+      const resumed = applyOperationalProjectionCasRecovery(
+        restorePreparedPublicationWitness(boundary),
+      );
+      expect(resumed).toMatchObject({
+        state: 'applied',
+        decision: 'roll-forward',
+        authenticated: true,
+        localMutationApplied: false,
+        prepared: { phase: 'prepared' },
+        completion: { phase: 'applied', resultingShadowPhase: 'committed' },
+        historicalAuthority: false,
+        operationalAuthority: false,
+        rollbackAuthority: false,
+        rollbackProtected: false,
+      });
+      const records = readOperationalProjectionCasConsumptionRecords();
+      expect(records).toMatchObject({
+        sourceState: 'healthy',
+        complete: true,
+      });
+      expect(records.records.map((record) => record.phase).sort()).toEqual([
+        'applied',
+        'prepared',
+      ]);
+      expect(fs.readdirSync(path.join(
+        operationalProjectionCasConsumptionStorePath(),
+        'staging',
+      ))).toEqual([]);
+    },
+  );
+
+  it('reclaims a provably dead writer lock before recovering staged publication', () => {
+    const input = restorePreparedPublicationWitness('stage');
+    const lockPath = path.join(
+      operationalProjectionCasConsumptionStorePath(),
+      '.cas-consumption.lock',
+    );
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      pid: 2_147_483_647,
+      token: 'stale-m438',
+    })}\n`, { mode: 0o600 });
+
+    expect(applyOperationalProjectionCasRecovery(input)).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+      authenticated: true,
+      localMutationApplied: false,
+    });
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.readdirSync(path.join(
+      operationalProjectionCasConsumptionStorePath(),
+      'staging',
+    ))).toEqual([]);
   });
 
   it('refuses unavailable or invalid CAS decisions without creating authority', () => {

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
 import {
+  recoverImmutablePrivateRecordStore,
   readImmutablePrivateRecords,
   writeImmutablePrivateRecord,
   type ImmutablePrivateRecordCodec,
@@ -35,6 +36,7 @@ const KEY_DOMAIN = 'ashlr.operational-projection-cas-consumption.key.v1';
 const RECORD_DOMAIN = 'ashlr.operational-projection-cas-consumption.record.v1';
 const ATTESTATION_DOMAIN = 'ashlr.operational-projection-cas-consumption.attestation.v1';
 const DECISION_DOMAIN = 'ashlr.operational-projection-cas-consumption.decision.v1';
+const CONSUMPTION_DOMAIN = 'ashlr.operational-projection-cas-consumption.identity.v1';
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const SIGNATURE_RE = /^[A-Za-z0-9_-]{86}$/;
 const MAX_RECORDS = 50_000;
@@ -60,6 +62,7 @@ export interface OperationalProjectionCasConsumptionRecordV1 {
   decisionId: string;
   phase: OperationalProjectionCasConsumptionPhase;
   decision: OperationalProjectionCasConsumptionDecision;
+  consumptionDigest: string;
   requestDigest: string;
   receiptDigest: string;
   casRequest: OperationalProjectionAnchorCasRequestV1;
@@ -131,6 +134,7 @@ const RECORD_KEYS = [
   'decisionId',
   'phase',
   'decision',
+  'consumptionDigest',
   'requestDigest',
   'receiptDigest',
   'casRequest',
@@ -208,6 +212,19 @@ function decisionId(requestDigest: string, receiptDigest: string): string {
   return sha(DECISION_DOMAIN, JSON.stringify([requestDigest, receiptDigest]));
 }
 
+function consumptionDigest(request: OperationalProjectionAnchorCasRequestV1): string {
+  return sha(CONSUMPTION_DOMAIN, JSON.stringify({
+    anchorId: request.anchorId,
+    namespace: request.namespace,
+    source: {
+      projectionDigest: request.source.projectionDigest,
+      proposalDigest: request.source.proposalDigest,
+      proposalId: request.source.proposalId,
+      transactionId: request.source.transactionId,
+    },
+  }));
+}
+
 function unsigned(
   record: OperationalProjectionCasConsumptionRecordV1,
 ): UnsignedRecord {
@@ -223,6 +240,7 @@ function payload(record: UnsignedRecord): string {
   return JSON.stringify({
     casReceipt: record.casReceipt,
     casRequest: record.casRequest,
+    consumptionDigest: record.consumptionDigest,
     decision: record.decision,
     decisionId: record.decisionId,
     historicalAuthority: record.historicalAuthority,
@@ -248,6 +266,7 @@ function buildRecord(
 ): OperationalProjectionCasConsumptionRecordV1 | null {
   try {
     const requestDigest = operationalProjectionAnchorRequestDigest(request);
+    const stableConsumptionDigest = consumptionDigest(request);
     const computedReceiptDigest = operationalProjectionAnchorReceiptDigest(receiptCore(receipt));
     const decision = decisionFor(receipt);
     if (!decision ||
@@ -260,6 +279,7 @@ function buildRecord(
       decisionId: id,
       phase,
       decision,
+      consumptionDigest: stableConsumptionDigest,
       requestDigest,
       receiptDigest: receipt.receiptDigest,
       casRequest: structuredClone(request),
@@ -293,6 +313,7 @@ function parseRecord(
     typeof row['decisionId'] !== 'string' || !DIGEST_RE.test(row['decisionId']) ||
     (row['phase'] !== 'prepared' && row['phase'] !== 'applied') ||
     (row['decision'] !== 'roll-forward' && row['decision'] !== 'rollback') ||
+    typeof row['consumptionDigest'] !== 'string' || !DIGEST_RE.test(row['consumptionDigest']) ||
     typeof row['requestDigest'] !== 'string' || !DIGEST_RE.test(row['requestDigest']) ||
     typeof row['receiptDigest'] !== 'string' || !DIGEST_RE.test(row['receiptDigest']) ||
     !row['casRequest'] || typeof row['casRequest'] !== 'object' ||
@@ -314,12 +335,14 @@ function parseRecord(
   const record = row as unknown as OperationalProjectionCasConsumptionRecordV1;
   try {
     const requestDigest = operationalProjectionAnchorRequestDigest(record.casRequest);
+    const stableConsumptionDigest = consumptionDigest(record.casRequest);
     const receiptDigest = operationalProjectionAnchorReceiptDigest(
       receiptCore(record.casReceipt),
     );
     const decision = decisionFor(record.casReceipt);
     if (!decision ||
       decision !== record.decision ||
+      !equalDigest(stableConsumptionDigest, record.consumptionDigest) ||
       !equalDigest(requestDigest, record.requestDigest) ||
       !equalDigest(receiptDigest, record.receiptDigest) ||
       !equalDigest(record.casReceipt.receiptDigest, record.receiptDigest) ||
@@ -432,10 +455,9 @@ function failed(
   };
 }
 
-function exactShadowBinding(
+function exactShadowValueBinding(
   request: OperationalProjectionAnchorCasRequestV1,
   shadow: OperationalProjectionShadowInspection,
-  committedAttestation: string,
 ): boolean {
   const transaction = shadow.transaction;
   const source = request.source;
@@ -443,13 +465,38 @@ function exactShadowBinding(
     transaction !== null &&
     transaction.transactionId === source.transactionId &&
     transaction.proposalId === source.proposalId &&
-    equalDigest(committedAttestation, source.transactionAttestation) &&
     transaction.after.proposal.present &&
     transaction.after.proposal.digest !== null &&
     equalDigest(transaction.after.proposal.digest, source.proposalDigest) &&
     transaction.after.projection.present &&
     transaction.after.projection.digest !== null &&
     equalDigest(transaction.after.projection.digest, source.projectionDigest);
+}
+
+function exactCommittedShadowBinding(
+  request: OperationalProjectionAnchorCasRequestV1,
+  shadow: OperationalProjectionShadowInspection,
+): boolean {
+  return exactShadowValueBinding(request, shadow) &&
+    shadow.transaction?.phase === 'committed' &&
+    !shadow.transaction.localRollForwardRequired &&
+    equalDigest(shadow.transaction.attestation, request.source.transactionAttestation) &&
+    shadow.actual === 'complete';
+}
+
+function exactPersistedShadowBinding(
+  prepared: OperationalProjectionCasConsumptionRecordV1,
+  shadow: OperationalProjectionShadowInspection,
+): boolean {
+  if (!exactShadowValueBinding(prepared.casRequest, shadow)) return false;
+  if (shadow.transaction?.phase === 'committed') {
+    return !shadow.transaction.localRollForwardRequired &&
+      equalDigest(
+        shadow.transaction.attestation,
+        prepared.casRequest.source.transactionAttestation,
+      );
+  }
+  return prepared.decision === 'rollback' && shadow.transaction?.phase === 'rolled-back';
 }
 
 function applied(
@@ -477,21 +524,30 @@ function applied(
 function findDecisionRecords(
   records: readonly OperationalProjectionCasConsumptionRecordV1[],
   requestDigest: string,
+  stableConsumptionDigest: string,
 ): {
   prepared: OperationalProjectionCasConsumptionRecordV1 | null;
   completion: OperationalProjectionCasConsumptionRecordV1 | null;
   equivocal: boolean;
+  requestMismatch: boolean;
 } {
   const matching = records.filter((record) =>
-    equalDigest(record.requestDigest, requestDigest));
+    equalDigest(record.consumptionDigest, stableConsumptionDigest));
   const decisionIds = new Set(matching.map((record) => record.decisionId));
   if (decisionIds.size > 1) {
-    return { prepared: null, completion: null, equivocal: true };
+    return {
+      prepared: null,
+      completion: null,
+      equivocal: true,
+      requestMismatch: false,
+    };
   }
   return {
     prepared: matching.find((record) => record.phase === 'prepared') ?? null,
     completion: matching.find((record) => record.phase === 'applied') ?? null,
     equivocal: false,
+    requestMismatch: matching.some((record) =>
+      !equalDigest(record.requestDigest, requestDigest)),
   };
 }
 
@@ -505,24 +561,42 @@ export function applyOperationalProjectionCasRecovery(
   if (!Number.isFinite(nowMs)) return failed('refused', 'invalid-clock');
   const recordedAt = input.now.toISOString();
   let requestDigest: string;
+  let stableConsumptionDigest: string;
   try {
     requestDigest = operationalProjectionAnchorRequestDigest(input.casRequest);
+    stableConsumptionDigest = consumptionDigest(input.casRequest);
   } catch {
     return failed('refused', 'invalid-cas-request');
   }
 
+  const recovery = recoverImmutablePrivateRecordStore(storeConfig());
+  if (recovery === 'invalid' || recovery === 'failed') {
+    return failed('degraded', `consumption-ledger-recovery-${recovery}`);
+  }
   const ledger = readOperationalProjectionCasConsumptionRecords();
   if (ledger.sourceState === 'degraded' ||
     (ledger.sourceState === 'healthy' && !ledger.complete)) {
     return failed('degraded', `consumption-ledger-${ledger.stopReasons.join(',') || 'incomplete'}`);
   }
-  const existing = findDecisionRecords(ledger.records, requestDigest);
+  const existing = findDecisionRecords(
+    ledger.records,
+    requestDigest,
+    stableConsumptionDigest,
+  );
   if (existing.equivocal) return failed('refused', 'cas-decision-equivocal');
   if (existing.completion && !existing.prepared) {
     return failed(
       'degraded',
       'completion-without-prepared-decision',
       null,
+      existing.completion,
+    );
+  }
+  if (existing.requestMismatch) {
+    return failed(
+      'refused',
+      'cas-consumption-identity-already-decided',
+      existing.prepared,
       existing.completion,
     );
   }
@@ -544,9 +618,10 @@ export function applyOperationalProjectionCasRecovery(
   }
 
   let shadow = inspectOperationalProjectionShadowWrite();
-  const committedAttestation = existing.prepared?.casRequest.source.transactionAttestation ??
-    input.casRequest.source.transactionAttestation;
-  if (!exactShadowBinding(input.casRequest, shadow, committedAttestation)) {
+  const shadowBound = existing.prepared
+    ? exactPersistedShadowBinding(existing.prepared, shadow)
+    : exactCommittedShadowBinding(input.casRequest, shadow);
+  if (!shadowBound) {
     return failed(
       'refused',
       'shadow-decision-binding-mismatch',
@@ -581,11 +656,6 @@ export function applyOperationalProjectionCasRecovery(
   if (!key) return failed('degraded', 'consumption-key-unavailable', existing.prepared);
   let prepared = existing.prepared;
   if (!prepared) {
-    if (shadow.transaction?.phase !== 'committed' ||
-      shadow.transaction.localRollForwardRequired ||
-      shadow.actual !== 'complete') {
-      return failed('refused', 'shadow-not-committed-candidate', null, null, shadow);
-    }
     prepared = buildRecord(
       key,
       input.casRequest,
@@ -606,17 +676,19 @@ export function applyOperationalProjectionCasRecovery(
     }
   }
 
+  const committedAttestation = prepared.casRequest.source.transactionAttestation;
+  const appliedDecision = prepared.decision;
   let localMutationApplied = false;
-  if (decision === 'rollback' && shadow.transaction?.phase !== 'rolled-back') {
+  if (appliedDecision === 'rollback' && shadow.transaction?.phase !== 'rolled-back') {
     shadow = rollbackCommittedOperationalProjectionShadowWrite(
-      input.casRequest.source.transactionId,
+      prepared.casRequest.source.transactionId,
       committedAttestation,
       input.storeLock,
       input.now,
     );
     localMutationApplied = true;
   }
-  const expectedPhase = decision === 'roll-forward' ? 'committed' : 'rolled-back';
+  const expectedPhase = appliedDecision === 'roll-forward' ? 'committed' : 'rolled-back';
   if (shadow.state !== 'healthy' ||
     shadow.transaction?.phase !== expectedPhase ||
     (expectedPhase === 'committed' && shadow.actual !== 'complete') ||
