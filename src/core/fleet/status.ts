@@ -114,6 +114,10 @@ import {
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
+import {
+  buildProposalFunnelObservability,
+  type ProposalFunnelObservability,
+} from './proposal-funnel-observability.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
@@ -1557,6 +1561,8 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Metadata-only proposal-funnel rates; withheld whenever the bounded source is incomplete. */
+  proposalFunnel?: ProposalFunnelObservability;
   /** Whether dispatch-backed learning metrics have a complete denominator. */
   learningMetrics?: {
     state: 'available' | 'withheld';
@@ -3165,6 +3171,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitPerDimension: 8,
     });
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: dispatchRead.events,
+      sourceQuality: dispatchRead.sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
     const dispatchAvailabilitySource = learningSourceAvailability(
       'dispatch-production', dispatchRead.sourceQuality,
     );
@@ -3206,6 +3218,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
     };
     status.dispatchProductionSource = sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
     status.learningMetrics = {
       state: 'withheld',
       denominator: 'dispatch-production',

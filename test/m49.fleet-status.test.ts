@@ -3065,6 +3065,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         proposalRepairs: 0,
       },
     });
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'available',
+      source: { sourceState: 'healthy', complete: true },
+      sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
+      metrics: {
+        attempts: 3,
+        mergeGradeProposals: { count: 1, rate: 1 / 3 },
+        anyDurableArtifact: { count: 1, rate: 1 / 3 },
+        gateBlocked: { count: 1, rate: 1 / 3 },
+        emptyAttempts: { count: 1, rate: 1 / 3 },
+      },
+      primaryBlocker: 'gate-blocking',
+      primaryAction: 'inspect-verification-gates',
+    });
     expect(s.attemptCoverage?.production.generatedRepairAttempts).toMatchObject({
       attempts: 1,
       proposalsCreated: 1,
@@ -3272,6 +3286,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.attemptCoverage).toBeUndefined();
     expect(s.trajectoryLearning).toBeUndefined();
     expect(s.dispatchYieldDiagnostics).toBeUndefined();
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'source-degraded',
+      source: { sourceState: 'degraded', complete: false },
+      sample: { observedEvents: 2, includedAttempts: 2 },
+      primaryBlocker: 'source-unavailable',
+      primaryAction: 'repair-telemetry-source',
+    });
+    expect(s.proposalFunnel?.metrics).toBeUndefined();
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('source:    degraded (partial)');
     expect(formatted).toContain('withheld because the bounded dispatch source is incomplete');
