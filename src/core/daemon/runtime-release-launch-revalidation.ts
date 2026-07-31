@@ -21,6 +21,7 @@ import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
   verifyRuntimeReleaseEvidenceEnvelope,
+  type RuntimeReleaseEvidenceVerificationDependencies,
 } from './runtime-release-evidence-envelope.js';
 
 const STAGED_TREE_IDENTITY_DOMAIN =
@@ -52,7 +53,7 @@ const MAX_ARGUMENT_BYTES = 64 * 1024;
 const MAX_POLICY_BYTES = 64 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
-const REVISION_RE = /^[a-f0-9]{40,64}$/;
+const REVISION_RE = /^[a-f0-9]{40}$/;
 const KEY_ID_RE = /^ed25519-sha256:[a-f0-9]{64}$/;
 const POLICY_ID_RE = /^sha256:[a-f0-9]{64}$/;
 
@@ -76,6 +77,14 @@ interface FileObservation {
     path: string;
   };
 }
+
+interface RuntimeReleaseLaunchRevalidationTestHooks {
+  afterBeforeObservation?: () => void;
+  afterFilePathSnapshotBeforeOpen?: (path: string, label: string) => void;
+}
+
+export type RuntimeReleaseLaunchRevalidationDependencies =
+  RuntimeReleaseEvidenceVerificationDependencies;
 
 interface RootObservation {
   bytes: number;
@@ -124,6 +133,7 @@ export interface RuntimeReleaseImmutableStagedTreeReceiptV1 {
     interpreter: 'complete-declared-interpreter-artifact';
     launchConsumer: 'absent';
     mutationAfterReceipt: 'not-prevented';
+    replayPrevention: 'absent-no-durable-consumption-store';
     stableIdentity: 'before-after-required';
   };
   expectedRevision: string;
@@ -156,7 +166,6 @@ export interface RuntimeReleaseLaunchRevalidationOptions
   expectedServiceInvocationDigest: string;
   expectedStagedTreeIdentity: string;
   expectedTrustRootCanonicalSha256: string;
-  now: string;
   policy: string | Buffer;
   trustRoot: string | Buffer;
 }
@@ -182,6 +191,7 @@ export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
     launchConsumer: 'absent';
     mutationAfterReceipt: 'not-prevented';
     policy: 'caller-pinned-canonical-observation-only';
+    replayPrevention: 'absent-no-durable-consumption-store';
     stableIdentity: 'before-after-equal';
   };
   expectedRevision: string;
@@ -202,6 +212,8 @@ export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
     keyId: string;
     manifestCanonicalSha256: string;
     manifestDigest: string;
+    expectedRevision: string;
+    rollbackTargetManifestDigest: string | null;
     trustRootCanonicalSha256: string;
   };
   roots: {
@@ -377,6 +389,7 @@ function snapshotFile(
   logicalPath: string,
   label: string,
   anchor?: string,
+  testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
 ): FileObservation {
   const absolute = resolve(filePath);
   const before = lstatSync(absolute, { bigint: true });
@@ -390,13 +403,16 @@ function snapshotFile(
   if (realBefore !== absolute || (anchor && !contained(anchor, realBefore))) {
     throw new Error(`${label} contains or escapes through a symlink`);
   }
+  testHooks?.afterFilePathSnapshotBeforeOpen?.(absolute, label);
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(absolute, fsConstants.O_RDONLY | noFollow);
   try {
     const openedBefore = fstatSync(fd, { bigint: true });
-    if (!openedBefore.isFile() || !sameIdentity(before, openedBefore)) {
+    if (!openedBefore.isFile() || !sameSnapshot(before, openedBefore)) {
       throw new Error(`${label} changed before read`);
     }
+    if (openedBefore.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
+    requireImmutable(openedBefore, label);
     const size = Number(openedBefore.size);
     const hash = createHash('sha256');
     let offset = 0;
@@ -419,6 +435,11 @@ function snapshotFile(
       realpathSync(absolute) !== realBefore) {
       throw new Error(`${label} changed during read`);
     }
+    if (openedAfter.nlink !== 1n || after.nlink !== 1n) {
+      throw new Error(`${label} has multiple hard links`);
+    }
+    requireImmutable(openedAfter, label);
+    requireImmutable(after, label);
     return {
       content: {
         executable: (after.mode & 0o111n) !== 0n,
@@ -439,6 +460,7 @@ function snapshotFile(
 function observeArtifactRoot(
   packageRoot: string,
   artifacts: readonly UnsignedRuntimeReleaseArtifact[],
+  testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
 ): RootObservation {
   const rootBefore = lstatSync(packageRoot, { bigint: true });
   requireImmutable(rootBefore, 'runtime release package root');
@@ -469,6 +491,7 @@ function observeArtifactRoot(
       artifact.path,
       'runtime release artifact',
       packageRoot,
+      testHooks,
     );
     if (observation.content.executable !== artifact.executable ||
       observation.content.size !== artifact.size ||
@@ -492,7 +515,11 @@ function observeArtifactRoot(
   };
 }
 
-function observeDirectoryTree(rootPath: string, label: string): RootObservation {
+function observeDirectoryTree(
+  rootPath: string,
+  label: string,
+  testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
+): RootObservation {
   const root = canonicalDirectory(rootPath, label);
   const content: Array<Record<string, JsonValue>> = [];
   const stable: Array<{ identity: string; path: string }> = [];
@@ -527,7 +554,7 @@ function observeDirectoryTree(rootPath: string, label: string): RootObservation 
       } else if (entry.isFile() && stat.isFile()) {
         files += 1;
         if (files > MAX_FILES) throw new Error(`${label} file count exceeds limit`);
-        const observation = snapshotFile(childPath, childLogical, label, root);
+        const observation = snapshotFile(childPath, childLogical, label, root, testHooks);
         bytes += observation.content.size;
         if (bytes > MAX_TOTAL_BYTES) throw new Error(`${label} bytes exceed limit`);
         content.push(observation.content as unknown as Record<string, JsonValue>);
@@ -556,6 +583,10 @@ function observeDirectoryTree(rootPath: string, label: string): RootObservation 
 function observeStage(
   options: RuntimeReleaseImmutableStagedTreeOptions,
 ): StageObservation {
+  const internal = options as RuntimeReleaseImmutableStagedTreeOptions & {
+    __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
+  };
+  const testHooks = process.env['VITEST'] === 'true' ? internal.__testHooks : undefined;
   const platform = options.platform ?? process.platform;
   if (platform === 'win32') {
     throw new Error('runtime release launch revalidation requires available directory durability');
@@ -592,24 +623,37 @@ function observeStage(
   fsyncStableDirectory(dependencyRoot, platform);
   const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
   if (!manifest.ok) throw new Error(manifest.reason);
+  if (manifest.manifest.expectedRevision !== options.expectedRevision) {
+    throw new Error('runtime release manifest revision does not match expected revision');
+  }
   const verified = verifyUnsignedRuntimeReleaseManifest({
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
     expectedManifestDigest: options.expectedManifestDigest,
     expectedPackageName: options.expectedPackageName,
+    expectedRevision: options.expectedRevision,
     manifest: options.manifest,
     packageRoot,
+    declaredRollbackTargetDigest:
+      manifest.manifest.rollbackDeclaration.targetManifestDigest,
   });
   if (!verified.ok) throw new Error(verified.reason);
-  const artifactRoot = observeArtifactRoot(packageRoot, manifest.manifest.artifacts);
+  const artifactRoot = observeArtifactRoot(
+    packageRoot,
+    manifest.manifest.artifacts,
+    testHooks,
+  );
   const dependencyRootObservation = observeDirectoryTree(
     dependencyRoot,
     'runtime release dependency root',
+    testHooks,
   );
   const interpreter = snapshotFile(
     interpreterPath,
     interpreterPath,
     'runtime release declared interpreter',
+    undefined,
+    testHooks,
   );
   if (!equalDigest(
     interpreter.content.sha256,
@@ -662,6 +706,7 @@ function immutableReceipt(
       interpreter: 'complete-declared-interpreter-artifact',
       launchConsumer: 'absent',
       mutationAfterReceipt: 'not-prevented',
+      replayPrevention: 'absent-no-durable-consumption-store',
       stableIdentity: 'before-after-required',
     },
     domain: RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V1,
@@ -747,6 +792,7 @@ export function runtimeReleaseTrustRootCanonicalSha256(
 
 export function revalidateRuntimeReleaseLaunch(
   options: RuntimeReleaseLaunchRevalidationOptions,
+  dependencies: RuntimeReleaseLaunchRevalidationDependencies = {},
 ): RevalidateRuntimeReleaseLaunchResult {
   try {
     if (!KEY_ID_RE.test(options.expectedKeyId)) {
@@ -802,9 +848,8 @@ export function revalidateRuntimeReleaseLaunch(
     const signedRelease = verifyRuntimeReleaseEvidenceEnvelope({
       envelope: options.envelope,
       manifest: options.manifest,
-      now: options.now,
       trustRoot: options.trustRoot,
-    });
+    }, dependencies);
     if (!signedRelease.ok) return signedRelease;
     if (signedRelease.keyId !== options.expectedKeyId) {
       return { ok: false, reason: 'runtime release signing key does not match expected key id' };
@@ -812,13 +857,16 @@ export function revalidateRuntimeReleaseLaunch(
     if (!equalDigest(signedRelease.manifestDigest, options.expectedManifestDigest)) {
       return { ok: false, reason: 'runtime release signed manifest does not match expected digest' };
     }
+    if (signedRelease.expectedRevision !== options.expectedRevision) {
+      return { ok: false, reason: 'runtime release signed revision does not match expected revision' };
+    }
 
     const before = observeStage(options);
     if (!equalDigest(before.stagedTreeIdentity, options.expectedStagedTreeIdentity)) {
       return { ok: false, reason: 'runtime release staged tree identity does not match expected' };
     }
     const internal = options as RuntimeReleaseLaunchRevalidationOptions & {
-      __testHooks?: { afterBeforeObservation?: () => void };
+      __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
     };
     if (process.env['VITEST'] === 'true') {
       internal.__testHooks?.afterBeforeObservation?.();
@@ -851,6 +899,7 @@ export function revalidateRuntimeReleaseLaunch(
         launchConsumer: 'absent',
         mutationAfterReceipt: 'not-prevented',
         policy: 'caller-pinned-canonical-observation-only',
+        replayPrevention: 'absent-no-durable-consumption-store',
         stableIdentity: 'before-after-equal',
       },
       domain: RUNTIME_RELEASE_LAUNCH_REVALIDATION_RECEIPT_DOMAIN_V1,
@@ -867,6 +916,7 @@ export function revalidateRuntimeReleaseLaunch(
       },
       release: {
         envelopeCanonicalSha256,
+        expectedRevision: signedRelease.expectedRevision,
         expiresAt: signedRelease.expiresAt,
         issuedAt: signedRelease.issuedAt,
         keyId: signedRelease.keyId,
@@ -875,6 +925,7 @@ export function revalidateRuntimeReleaseLaunch(
           options.manifest,
         ),
         manifestDigest: signedRelease.manifestDigest,
+        rollbackTargetManifestDigest: signedRelease.rollbackTargetManifestDigest,
         trustRootCanonicalSha256,
       },
       roots: {

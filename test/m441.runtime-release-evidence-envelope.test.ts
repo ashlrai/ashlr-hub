@@ -30,6 +30,7 @@ import {
 const ISSUED_AT = '2026-07-29T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-29T12:10:00.000Z';
 const NOW = '2026-07-29T12:05:00.000Z';
+const REVISION = 'a'.repeat(40);
 const KEY_VALID_FROM = '2026-07-29T11:00:00.000Z';
 const KEY_VALID_UNTIL = '2026-07-29T13:00:00.000Z';
 const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-release-evidence-signature-input:v1';
@@ -44,7 +45,7 @@ function write(path: string, value: string, mode?: number): void {
   );
 }
 
-function releaseManifest(marker = 'first'): string {
+function releaseManifest(marker = 'first', expectedRevision = REVISION): string {
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-signed-release-')));
   tempDirs.push(packageRoot);
   write(join(packageRoot, 'package.json'), `${JSON.stringify({
@@ -74,9 +75,14 @@ function releaseManifest(marker = 'first'): string {
     packageRoot,
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
+    expectedRevision,
   });
   if (!built.ok) throw new Error(built.reason);
   return built.canonicalJson;
+}
+
+function clockAt(value: string): { clock: () => number } {
+  return { clock: () => Date.parse(value) };
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -172,6 +178,7 @@ describe('signed runtime release evidence envelope', () => {
         assurance: 'signed-observation-only',
         coverage: RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1,
         expiresAt: EXPIRES_AT,
+        expectedRevision: REVISION,
         issuedAt: ISSUED_AT,
         schemaVersion: 1,
       },
@@ -180,15 +187,16 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: first.canonicalJson,
       manifest,
-      now: NOW,
       trustRoot: trustRoot(keys.publicKey),
-    })).toEqual({
+    }, clockAt(NOW))).toEqual({
       ok: true,
       assurance: 'signed-observation-only',
       expiresAt: EXPIRES_AT,
       issuedAt: ISSUED_AT,
       keyId: first.keyId,
       manifestDigest: first.envelope.payload.manifestDigest,
+      expectedRevision: REVISION,
+      rollbackTargetManifestDigest: null,
     });
   });
 
@@ -201,9 +209,8 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope,
       manifest,
-      now: NOW,
       trustRoot: trustRoot(other.publicKey),
-    })).toEqual({
+    }, clockAt(NOW))).toEqual({
       ok: false,
       reason: 'runtime release evidence signing key is unknown',
     });
@@ -236,9 +243,8 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: encode(invalid),
       manifest,
-      now: NOW,
       trustRoot: trustRoot(keys.publicKey),
-    })).toEqual({
+    }, clockAt(NOW))).toEqual({
       ok: false,
       reason: 'runtime release evidence signature verification failed',
     });
@@ -277,18 +283,29 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: signed(manifest, keys.privateKey),
       manifest,
-      now: EXPIRES_AT,
       trustRoot: root,
-    })).toEqual({
+    }, clockAt(EXPIRES_AT))).toEqual({
+      ok: false,
+      reason: 'runtime release evidence is stale',
+    });
+    const historicalTimestampReplay = {
+      envelope: signed(manifest, keys.privateKey),
+      manifest,
+      now: NOW,
+      trustRoot: root,
+    };
+    expect(verifyRuntimeReleaseEvidenceEnvelope(
+      historicalTimestampReplay,
+      clockAt(EXPIRES_AT),
+    )).toEqual({
       ok: false,
       reason: 'runtime release evidence is stale',
     });
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: signed(manifest, keys.privateKey),
       manifest,
-      now: '2026-07-29T11:59:59.999Z',
       trustRoot: root,
-    })).toEqual({
+    }, clockAt('2026-07-29T11:59:59.999Z'))).toEqual({
       ok: false,
       reason: 'runtime release evidence is not yet valid',
     });
@@ -311,9 +328,8 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: signed(firstManifest, keys.privateKey),
       manifest: secondManifest,
-      now: NOW,
       trustRoot: trustRoot(keys.publicKey),
-    })).toEqual({
+    }, clockAt(NOW))).toEqual({
       ok: false,
       reason: 'runtime release evidence manifest digest mismatch',
     });
@@ -325,11 +341,28 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: encode(envelope),
       manifest: firstManifest,
-      now: NOW,
       trustRoot: trustRoot(keys.publicKey),
-    })).toEqual({
+    }, clockAt(NOW))).toEqual({
       ok: false,
       reason: 'runtime release evidence canonical manifest digest mismatch',
+    });
+  });
+
+  it('binds the signed payload to the manifest revision', () => {
+    const manifest = releaseManifest();
+    const keys = generateKeyPairSync('ed25519');
+    const envelope = object(signed(manifest, keys.privateKey));
+    const payload = envelope['payload'] as Record<string, unknown>;
+    payload['expectedRevision'] = 'b'.repeat(40);
+    resign(envelope, keys.privateKey);
+
+    expect(verifyRuntimeReleaseEvidenceEnvelope({
+      envelope: encode(envelope),
+      manifest,
+      trustRoot: trustRoot(keys.publicKey),
+    }, clockAt(NOW))).toEqual({
+      ok: false,
+      reason: 'runtime release evidence expected revision mismatch',
     });
   });
 
@@ -406,9 +439,8 @@ describe('signed runtime release evidence envelope', () => {
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope,
       manifest,
-      now: '2026-07-29T12:04:00.000Z',
       trustRoot: shortValidity.canonicalJson,
-    })).toEqual({
+    }, clockAt('2026-07-29T12:04:00.000Z'))).toEqual({
       ok: false,
       reason: 'runtime release evidence falls outside signing key validity',
     });

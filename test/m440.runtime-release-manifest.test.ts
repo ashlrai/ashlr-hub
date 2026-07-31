@@ -20,6 +20,7 @@ import {
 } from '../src/core/daemon/runtime-release-manifest.js';
 
 const tempDirs: string[] = [];
+const REVISION = 'a'.repeat(40);
 
 interface ReleaseFixture {
   interpreterPath: string;
@@ -65,11 +66,13 @@ function build(
   input: ReleaseFixture,
   declaredRollbackTargetDigest?: string,
   declaredInterpreterVersion = 'v22.0.0',
+  expectedRevision = REVISION,
 ) {
   return buildUnsignedRuntimeReleaseManifest({
     packageRoot: input.packageRoot,
     declaredInterpreterPath: input.interpreterPath,
     declaredInterpreterVersion,
+    expectedRevision,
     ...(declaredRollbackTargetDigest ? { declaredRollbackTargetDigest } : {}),
   });
 }
@@ -81,12 +84,14 @@ function verify(
     declaredInterpreterVersion?: string;
     declaredRollbackTargetDigest?: string;
     expectedManifestDigest?: string;
+    expectedRevision?: string;
   } = {},
 ) {
   return verifyUnsignedRuntimeReleaseManifest({
     packageRoot: input.packageRoot,
     declaredInterpreterPath: input.interpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion ?? 'v22.0.0',
+    expectedRevision: options.expectedRevision ?? REVISION,
     manifest,
     ...(options.declaredRollbackTargetDigest
       ? { declaredRollbackTargetDigest: options.declaredRollbackTargetDigest }
@@ -121,6 +126,7 @@ describe('unsigned runtime release manifest', () => {
     expect(first.manifest).toMatchObject({
       algorithm: 'sha256',
       assurance: 'unsigned-observation-only',
+      expectedRevision: REVISION,
       schemaVersion: 1,
       coverage: {
         artifactCoherence: 'two-complete-scans',
@@ -188,12 +194,33 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
+  it('binds the expected revision into the manifest digest', () => {
+    const release = fixture();
+    const first = build(release);
+    const second = build(release, undefined, 'v22.0.0', 'b'.repeat(40));
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+
+    expect(first.manifest.manifestDigest).not.toBe(second.manifest.manifestDigest);
+    expect(first.manifest.expectedRevision).toBe(REVISION);
+    expect(second.manifest.expectedRevision).toBe('b'.repeat(40));
+
+    const relocated = jsonObject(first.canonicalJson);
+    relocated['expectedRevision'] = 'b'.repeat(40);
+    expect(parseUnsignedRuntimeReleaseManifest(`${JSON.stringify(relocated)}\n`)).toEqual({
+      ok: false,
+      reason: 'runtime release manifest digest mismatch',
+    });
+  });
+
   it('rejects a release that changes between its two complete scans', () => {
     const release = fixture();
     const options = {
       packageRoot: release.packageRoot,
       declaredInterpreterPath: release.interpreterPath,
       declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
       __testHooks: {
         afterFirstCompleteScan: () => {
           writeFileSync(join(release.packageRoot, 'dist', 'core', 'worker.js'), 'second scan bytes\n');

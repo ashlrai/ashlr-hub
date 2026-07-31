@@ -33,6 +33,7 @@ const MAX_DIRECTORY_ENTRIES = 1_024;
 const MAX_DIRECTORIES = 512;
 const READ_CHUNK_BYTES = 64 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const REVISION_RE = /^[a-f0-9]{40}$/;
 const NODE_VERSION_RE = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const PACKAGE_MANIFEST_PATH = 'package.json';
 const LOCKFILE_PATH = 'package-lock.json';
@@ -72,6 +73,7 @@ export interface UnsignedRuntimeReleaseManifest {
     runtime: 'dist/cli/index.js';
     verifierRunner: 'scripts/run-verify-command.mjs';
   };
+  expectedRevision: string;
   interpreterDeclaration: {
     source: 'caller-declared';
     kind: 'node';
@@ -105,6 +107,7 @@ export interface BuildUnsignedRuntimeReleaseManifestOptions {
   packageRoot: string;
   declaredInterpreterPath: string;
   declaredInterpreterVersion: string;
+  expectedRevision: string;
   expectedPackageName?: string;
   declaredRollbackTargetDigest?: string | null;
 }
@@ -630,6 +633,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     'assurance',
     'coverage',
     'entrypoints',
+    'expectedRevision',
     'interpreterDeclaration',
     'lockfile',
     'manifestDigest',
@@ -640,6 +644,10 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
   if (value['schemaVersion'] !== 1 || value['algorithm'] !== 'sha256' ||
     value['assurance'] !== 'unsigned-observation-only') {
     throw new Error('runtime release manifest has an unsupported schema');
+  }
+  if (typeof value['expectedRevision'] !== 'string' ||
+    !REVISION_RE.test(value['expectedRevision'])) {
+    throw new Error('runtime release manifest expected revision is invalid');
   }
 
   const coverage = value['coverage'];
@@ -782,6 +790,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
       runtime: RUNTIME_ENTRY_PATH,
       verifierRunner: VERIFIER_RUNNER_PATH,
     },
+    expectedRevision: value['expectedRevision'],
     interpreterDeclaration: {
       source: 'caller-declared',
       kind: 'node',
@@ -820,6 +829,9 @@ export function buildUnsignedRuntimeReleaseManifest(
     const expectedPackageName = options.expectedPackageName ?? '@ashlr/hub';
     if (!isBoundedText(expectedPackageName, 256)) {
       return { ok: false, reason: 'expected package name is invalid' };
+    }
+    if (!REVISION_RE.test(options.expectedRevision)) {
+      return { ok: false, reason: 'expected revision is invalid' };
     }
     const rollbackTargetDigest = options.declaredRollbackTargetDigest ?? null;
     if (rollbackTargetDigest !== null && !SHA256_RE.test(rollbackTargetDigest)) {
@@ -867,6 +879,7 @@ export function buildUnsignedRuntimeReleaseManifest(
         runtime: RUNTIME_ENTRY_PATH,
         verifierRunner: VERIFIER_RUNNER_PATH,
       },
+      expectedRevision: options.expectedRevision,
       interpreterDeclaration: {
         source: 'caller-declared',
         kind: 'node',
@@ -957,6 +970,7 @@ export function verifyUnsignedRuntimeReleaseManifest(
     packageRoot: options.packageRoot,
     declaredInterpreterPath: options.declaredInterpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
+    expectedRevision: options.expectedRevision,
     expectedPackageName: options.expectedPackageName,
     declaredRollbackTargetDigest: options.declaredRollbackTargetDigest,
   });

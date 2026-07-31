@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   revalidateRuntimeReleaseLaunch,
+  type RuntimeReleaseLaunchRevalidationDependencies,
   type RuntimeReleaseLaunchRevalidationOptions,
 } from './runtime-release-launch-revalidation.js';
 import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.js';
@@ -38,7 +39,9 @@ export interface RuntimeReleaseLaunchAdmissionDecision {
     launchRevalidation: 'failed' | 'passed';
     launchRevalidationReceiptSha256: string | null;
     manifestDigest: string | null;
+    replayPrevention: 'absent-no-durable-consumption-store';
     secondByteIdentityObservation: 'not-completed' | 'before-after-equal';
+    signedRevision: 'unobserved' | 'manifest-and-envelope-bound';
     stagedTreeIdentity: string | null;
   };
   rollback: {
@@ -97,14 +100,16 @@ function blocked(
 /**
  * Observe launch readiness without granting service authority. The signed
  * envelope, trust root, policy, invocation, and staged identity are caller
- * pinned and revalidated against bounded reads. Rollback remains explicitly
- * unresolved in the v1 manifest, so even complete evidence is refused.
+ * pinned and revalidated against bounded reads. Rollback resolution, durable
+ * anti-replay consumption, and a launch consumer remain absent, so even
+ * complete evidence is refused.
  */
 export function evaluateRuntimeReleaseLaunchAdmission(
   options: RuntimeReleaseLaunchRevalidationOptions,
+  dependencies: RuntimeReleaseLaunchRevalidationDependencies = {},
 ): RuntimeReleaseLaunchAdmissionDecision {
   const pinned = pinInputs(options);
-  const revalidated = revalidateRuntimeReleaseLaunch(pinned);
+  const revalidated = revalidateRuntimeReleaseLaunch(pinned, dependencies);
   if (!revalidated.ok) {
     return blocked(
       {
@@ -117,7 +122,9 @@ export function evaluateRuntimeReleaseLaunchAdmission(
         launchRevalidation: 'failed',
         launchRevalidationReceiptSha256: null,
         manifestDigest: null,
+        replayPrevention: 'absent-no-durable-consumption-store',
         secondByteIdentityObservation: 'not-completed',
+        signedRevision: 'unobserved',
         stagedTreeIdentity: null,
       },
       {
@@ -130,7 +137,10 @@ export function evaluateRuntimeReleaseLaunchAdmission(
 
   const manifest = parseUnsignedRuntimeReleaseManifest(pinned.manifest);
   if (!manifest.ok ||
-    manifest.manifest.manifestDigest !== revalidated.receipt.release.manifestDigest) {
+    manifest.manifest.manifestDigest !== revalidated.receipt.release.manifestDigest ||
+    manifest.manifest.expectedRevision !== revalidated.receipt.release.expectedRevision ||
+    manifest.manifest.rollbackDeclaration.targetManifestDigest !==
+      revalidated.receipt.release.rollbackTargetManifestDigest) {
     return blocked(
       {
         code: 'release-manifest-incoherent',
@@ -144,7 +154,9 @@ export function evaluateRuntimeReleaseLaunchAdmission(
         launchRevalidation: 'passed',
         launchRevalidationReceiptSha256: receiptDigest(revalidated.canonicalJson),
         manifestDigest: revalidated.receipt.release.manifestDigest,
+        replayPrevention: 'absent-no-durable-consumption-store',
         secondByteIdentityObservation: 'before-after-equal',
+        signedRevision: 'manifest-and-envelope-bound',
         stagedTreeIdentity: revalidated.receipt.stagedTreeIdentity,
       },
       {
@@ -168,7 +180,9 @@ export function evaluateRuntimeReleaseLaunchAdmission(
       launchRevalidation: 'passed',
       launchRevalidationReceiptSha256: receiptDigest(revalidated.canonicalJson),
       manifestDigest: revalidated.receipt.release.manifestDigest,
+      replayPrevention: 'absent-no-durable-consumption-store',
       secondByteIdentityObservation: 'before-after-equal',
+      signedRevision: 'manifest-and-envelope-bound',
       stagedTreeIdentity: revalidated.receipt.stagedTreeIdentity,
     },
     {

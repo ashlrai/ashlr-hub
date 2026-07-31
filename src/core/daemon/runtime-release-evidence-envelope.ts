@@ -27,6 +27,7 @@ const MAX_TRUST_KEYS = 32;
 const MAX_PUBLIC_KEY_BYTES = 512;
 const ED25519_SIGNATURE_BYTES = 64;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const REVISION_RE = /^[a-f0-9]{40}$/;
 const KEY_ID_RE = /^ed25519-sha256:[a-f0-9]{64}$/;
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -67,6 +68,7 @@ export interface RuntimeReleaseEvidencePayloadV1 {
   assurance: 'signed-observation-only';
   coverage: RuntimeReleaseEvidenceCoverageV1;
   expiresAt: string;
+  expectedRevision: string;
   issuedAt: string;
   manifestCanonicalSha256: string;
   manifestDigest: string;
@@ -149,8 +151,11 @@ export type ParseRuntimeReleaseEvidenceTrustRootResult =
 export interface VerifyRuntimeReleaseEvidenceEnvelopeOptions {
   envelope: string | Buffer;
   manifest: string | Buffer;
-  now: string;
   trustRoot: string | Buffer;
+}
+
+export interface RuntimeReleaseEvidenceVerificationDependencies {
+  clock?: () => number;
 }
 
 export type VerifyRuntimeReleaseEvidenceEnvelopeResult =
@@ -161,6 +166,8 @@ export type VerifyRuntimeReleaseEvidenceEnvelopeResult =
     issuedAt: string;
     keyId: string;
     manifestDigest: string;
+    expectedRevision: string;
+    rollbackTargetManifestDigest: string | null;
   }
   | { ok: false; reason: string };
 
@@ -466,6 +473,7 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
     'assurance',
     'coverage',
     'expiresAt',
+    'expectedRevision',
     'issuedAt',
     'manifestCanonicalSha256',
     'manifestDigest',
@@ -476,6 +484,10 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
   if (payload['schemaVersion'] !== 1 ||
     payload['assurance'] !== 'signed-observation-only') {
     throw new Error('runtime release evidence payload schema is unsupported');
+  }
+  if (typeof payload['expectedRevision'] !== 'string' ||
+    !REVISION_RE.test(payload['expectedRevision'])) {
+    throw new Error('runtime release evidence expected revision is invalid');
   }
   if (typeof payload['manifestDigest'] !== 'string' ||
     !SHA256_RE.test(payload['manifestDigest']) ||
@@ -503,6 +515,7 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
         'runtime release evidence coverage',
       ),
       expiresAt,
+      expectedRevision: payload['expectedRevision'],
       issuedAt,
       manifestCanonicalSha256: payload['manifestCanonicalSha256'],
       manifestDigest: payload['manifestDigest'],
@@ -626,6 +639,7 @@ export function signRuntimeReleaseEvidenceEnvelope(
         assurance: 'signed-observation-only',
         coverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1 },
         expiresAt,
+        expectedRevision: manifest.manifest.expectedRevision,
         issuedAt,
         manifestCanonicalSha256: manifestCanonicalSha256(manifest.canonicalJson),
         manifestDigest: manifest.manifest.manifestDigest,
@@ -669,6 +683,7 @@ export function parseRuntimeReleaseEvidenceEnvelope(
 
 export function verifyRuntimeReleaseEvidenceEnvelope(
   options: VerifyRuntimeReleaseEvidenceEnvelopeOptions,
+  dependencies: RuntimeReleaseEvidenceVerificationDependencies = {},
 ): VerifyRuntimeReleaseEvidenceEnvelopeResult {
   try {
     const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
@@ -681,7 +696,10 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
       'runtime release evidence trust root',
     );
     const { trustRoot, publicKeys } = validateTrustRoot(parsedTrustRoot.value);
-    const now = canonicalTimestamp(options.now, 'runtime release evidence verification time');
+    const nowMs = (dependencies.clock ?? Date.now)();
+    if (!Number.isFinite(nowMs) || !Number.isSafeInteger(nowMs)) {
+      return { ok: false, reason: 'runtime release evidence trusted clock is invalid' };
+    }
 
     const key = trustRoot.keys.find((candidate) =>
       candidate.keyId === envelope.envelope.keyId);
@@ -731,7 +749,9 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
         reason: 'runtime release evidence canonical manifest digest mismatch',
       };
     }
-    const nowMs = timestampMs(now);
+    if (envelope.envelope.payload.expectedRevision !== manifest.manifest.expectedRevision) {
+      return { ok: false, reason: 'runtime release evidence expected revision mismatch' };
+    }
     if (nowMs < timestampMs(envelope.envelope.payload.issuedAt)) {
       return { ok: false, reason: 'runtime release evidence is not yet valid' };
     }
@@ -745,6 +765,9 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
       issuedAt: envelope.envelope.payload.issuedAt,
       keyId: envelope.envelope.keyId,
       manifestDigest: envelope.envelope.payload.manifestDigest,
+      expectedRevision: envelope.envelope.payload.expectedRevision,
+      rollbackTargetManifestDigest:
+        manifest.manifest.rollbackDeclaration.targetManifestDigest,
     };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };

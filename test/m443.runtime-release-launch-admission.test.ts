@@ -26,9 +26,14 @@ import {
 
 const MANIFEST_DIGEST = 'a'.repeat(64);
 const STAGED_TREE_IDENTITY = 'b'.repeat(64);
+const REVISION = 'c'.repeat(40);
 const RECEIPT = {
-  expectedRevision: 'c'.repeat(40),
-  release: { manifestDigest: MANIFEST_DIGEST },
+  expectedRevision: REVISION,
+  release: {
+    expectedRevision: REVISION,
+    manifestDigest: MANIFEST_DIGEST,
+    rollbackTargetManifestDigest: null,
+  },
   stableIdentity: {
     afterSha256: 'd'.repeat(64),
     beforeSha256: 'd'.repeat(64),
@@ -48,12 +53,11 @@ function options(): RuntimeReleaseLaunchRevalidationOptions {
     expectedKeyId: `ed25519-sha256:${'f'.repeat(64)}`,
     expectedManifestDigest: MANIFEST_DIGEST,
     expectedPolicyId: `sha256:${'1'.repeat(64)}`,
-    expectedRevision: 'c'.repeat(40),
+    expectedRevision: REVISION,
     expectedServiceInvocationDigest: '2'.repeat(64),
     expectedStagedTreeIdentity: STAGED_TREE_IDENTITY,
     expectedTrustRootCanonicalSha256: '3'.repeat(64),
     manifest: Buffer.from('manifest'),
-    now: '2026-07-29T12:05:00.000Z',
     packageRoot: '/release',
     policy: Buffer.from('policy'),
     trustRoot: Buffer.from('trust-root'),
@@ -63,6 +67,7 @@ function options(): RuntimeReleaseLaunchRevalidationOptions {
 function manifest(targetManifestDigest: string | null): UnsignedRuntimeReleaseManifest {
   return {
     manifestDigest: MANIFEST_DIGEST,
+    expectedRevision: REVISION,
     rollbackDeclaration: {
       resolution: 'unresolved',
       source: 'caller-declared',
@@ -71,11 +76,17 @@ function manifest(targetManifestDigest: string | null): UnsignedRuntimeReleaseMa
   } as UnsignedRuntimeReleaseManifest;
 }
 
-function successfulRevalidation(): void {
+function successfulRevalidation(targetManifestDigest: string | null = null): void {
   mocks.revalidateLaunch.mockReturnValue({
     ok: true,
     canonicalJson: '{"receipt":"canonical"}\n',
-    receipt: RECEIPT,
+    receipt: {
+      ...RECEIPT,
+      release: {
+        ...RECEIPT.release,
+        rollbackTargetManifestDigest: targetManifestDigest,
+      },
+    },
   });
 }
 
@@ -113,7 +124,9 @@ describe('runtime release launch admission', () => {
         contentAddressedRelease: 'caller-pinned-staged-tree-identity',
         launchRevalidation: 'passed',
         manifestDigest: MANIFEST_DIGEST,
+        replayPrevention: 'absent-no-durable-consumption-store',
         secondByteIdentityObservation: 'before-after-equal',
+        signedRevision: 'manifest-and-envelope-bound',
         stagedTreeIdentity: STAGED_TREE_IDENTITY,
       },
       rollback: {
@@ -138,8 +151,8 @@ describe('runtime release launch admission', () => {
   });
 
   it('does not treat a caller-declared rollback digest as resolved', () => {
-    successfulRevalidation();
     const target = '4'.repeat(64);
+    successfulRevalidation(target);
     mocks.parseManifest.mockReturnValue({
       ok: true,
       canonicalJson: '{}\n',

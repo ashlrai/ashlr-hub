@@ -25,7 +25,7 @@ import {
 } from '../src/core/daemon/runtime-release-evidence-envelope.js';
 import {
   observeRuntimeReleaseImmutableStagedTree,
-  revalidateRuntimeReleaseLaunch,
+  revalidateRuntimeReleaseLaunch as revalidateRuntimeReleaseLaunchWithClock,
   runtimeReleaseEnvelopeCanonicalSha256,
   runtimeReleasePolicyId,
   runtimeReleaseServiceInvocationDigest,
@@ -81,7 +81,7 @@ function readFileNames(path: string): string[] {
   return readdirSync(path);
 }
 
-function fixture(): Fixture {
+function fixture(declaredRollbackTargetDigest?: string): Fixture {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-launch-revalidation-')));
   tempDirs.push(parent);
   const packageRoot = join(parent, REVISION);
@@ -117,7 +117,9 @@ function fixture(): Fixture {
   const manifestResult = buildUnsignedRuntimeReleaseManifest({
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
+    expectedRevision: REVISION,
     packageRoot,
+    ...(declaredRollbackTargetDigest ? { declaredRollbackTargetDigest } : {}),
   });
   if (!manifestResult.ok) throw new Error(manifestResult.reason);
   const keys = generateKeyPairSync('ed25519');
@@ -196,11 +198,20 @@ function launchOptions(
     expectedServiceInvocationDigest: digest,
     expectedStagedTreeIdentity: observed.receipt.stagedTreeIdentity,
     expectedTrustRootCanonicalSha256: trustRootCanonicalSha256,
-    now: NOW,
     policy: POLICY,
     trustRoot: input.trustRoot,
     ...overrides,
   };
+}
+
+function revalidateRuntimeReleaseLaunch(
+  options: RuntimeReleaseLaunchRevalidationOptions,
+  now = NOW,
+) {
+  return revalidateRuntimeReleaseLaunchWithClock(
+    options,
+    { clock: () => Date.parse(now) },
+  );
 }
 
 afterEach(() => {
@@ -239,6 +250,7 @@ describe('runtime release launch revalidation', () => {
         invocation: 'exact-executable-and-argv-digest',
         launchConsumer: 'absent',
         mutationAfterReceipt: 'not-prevented',
+        replayPrevention: 'absent-no-durable-consumption-store',
       },
       expectedRevision: REVISION,
       invocation: {
@@ -255,6 +267,8 @@ describe('runtime release launch revalidation', () => {
         issuedAt: ISSUED_AT,
         keyId: release.expectedKeyId,
         manifestDigest: release.expectedManifestDigest,
+        expectedRevision: REVISION,
+        rollbackTargetManifestDigest: null,
       },
     });
     expect(result.receipt.roots.artifactRootSha256).toMatch(/^[a-f0-9]{64}$/);
@@ -308,9 +322,7 @@ describe('runtime release launch revalidation', () => {
 
   it('rejects stale signatures and unknown signing keys', () => {
     const release = fixture();
-    expect(revalidateRuntimeReleaseLaunch(launchOptions(release, {
-      now: EXPIRES_AT,
-    }))).toEqual({
+    expect(revalidateRuntimeReleaseLaunch(launchOptions(release), EXPIRES_AT)).toEqual({
       ok: false,
       reason: 'runtime release evidence is stale',
     });
@@ -321,6 +333,19 @@ describe('runtime release launch revalidation', () => {
       ok: false,
       reason: 'runtime release signing key does not match expected key id',
     });
+  });
+
+  it('revalidates a non-null signed rollback declaration end to end', () => {
+    const rollbackTarget = 'f'.repeat(64);
+    const release = fixture(rollbackTarget);
+    const result = revalidateRuntimeReleaseLaunch(launchOptions(release));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.receipt.release.rollbackTargetManifestDigest).toBe(rollbackTarget);
+    expect(result.receipt.authority.rollbackPermitted).toBe(false);
+    expect(result.receipt.coverage.replayPrevention)
+      .toBe('absent-no-durable-consumption-store');
   });
 
   it('rejects a signature from a key absent from the trust root', () => {
@@ -478,6 +503,51 @@ describe('runtime release launch revalidation', () => {
       reason: 'runtime release staged path does not match expected revision',
     });
   });
+
+  it('rejects identical signed bytes relocated beneath another revision', () => {
+    const release = fixture();
+    const relocatedRevision = 'b'.repeat(40);
+    const relocatedRoot = join(dirname(release.packageRoot), relocatedRevision);
+    renameSync(release.packageRoot, relocatedRoot);
+
+    expect(observeRuntimeReleaseImmutableStagedTree({
+      ...stageOptions(release),
+      dependencyRoot: join(relocatedRoot, 'node_modules'),
+      expectedRevision: relocatedRevision,
+      packageRoot: relocatedRoot,
+    })).toEqual({
+      ok: false,
+      reason: 'runtime release manifest revision does not match expected revision',
+    });
+  });
+
+  it.each(['writable mode', 'hard-link count'] as const)(
+    'rejects a %s race between path snapshot and descriptor open',
+    (mutation) => {
+    const release = fixture();
+    const target = join(release.packageRoot, 'package.json');
+    let mutated = false;
+    const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+      __testHooks?: {
+        afterFilePathSnapshotBeforeOpen?: (path: string) => void;
+      };
+    };
+    options.__testHooks = {
+      afterFilePathSnapshotBeforeOpen: (path) => {
+        if (path !== target || mutated) return;
+        mutated = true;
+        if (mutation === 'writable mode') chmodSync(path, 0o644);
+        else linkSync(path, join(dirname(release.packageRoot), 'race-hard-link'));
+      },
+    };
+
+    expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+      ok: false,
+      reason: 'runtime release artifact changed before read',
+    });
+    expect(mutated).toBe(true);
+    },
+  );
 
   it('requires caller-pinned staged, policy, key, and invocation identities', () => {
     const release = fixture();
