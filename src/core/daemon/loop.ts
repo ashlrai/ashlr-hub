@@ -1071,10 +1071,22 @@ export type DaemonTerminationReason =
   | 'runtime-failure'
   | 'ownership-loss';
 
+export type DaemonTerminationDiagnosticCode =
+  | 'start-refused'
+  | 'state-malformed'
+  | 'state-unsafe'
+  | 'state-io-transient'
+  | 'state-io-permanent'
+  | 'state-write-unclassified'
+  | 'successor-owner'
+  | 'runtime-transient'
+  | 'runtime-unclassified';
+
 export interface DaemonTerminationDisposition {
   reason: DaemonTerminationReason;
   retryable: boolean;
   exitCode: 0 | 1;
+  diagnosticCode?: DaemonTerminationDiagnosticCode;
 }
 
 export type DaemonRunResult = DaemonState & {
@@ -1082,14 +1094,53 @@ export type DaemonRunResult = DaemonState & {
   termination: DaemonTerminationDisposition;
 };
 
-function daemonTermination(reason: DaemonTerminationReason): DaemonTerminationDisposition {
-  const retryable = reason === 'persistence-failure' ||
-    reason === 'runtime-failure' ||
-    reason === 'ownership-loss';
+interface DaemonFailureClassification {
+  diagnosticCode: DaemonTerminationDiagnosticCode;
+  retryable: boolean;
+}
+
+const TRANSIENT_DAEMON_ERROR_CODE = /(?:^|[^A-Z])(?:EAGAIN|EBUSY|EINTR|EIO|EMFILE|ENFILE|ETIMEDOUT)(?:[^A-Z]|$)/;
+
+function classifyPersistenceFailure(fields: {
+  reason?: 'malformed' | 'unreadable';
+  error?: string;
+}): DaemonFailureClassification {
+  if (fields.reason === 'malformed') {
+    return { diagnosticCode: 'state-malformed', retryable: false };
+  }
+  const error = fields.error ?? '';
+  if (/unsafe|identity changed|changed while being read/i.test(error)) {
+    return { diagnosticCode: 'state-unsafe', retryable: false };
+  }
+  if (/ownership lost/i.test(error)) {
+    return { diagnosticCode: 'successor-owner', retryable: false };
+  }
+  if (/could not acquire resident state lock/i.test(error) || TRANSIENT_DAEMON_ERROR_CODE.test(error)) {
+    return { diagnosticCode: 'state-io-transient', retryable: true };
+  }
+  return { diagnosticCode: 'state-io-permanent', retryable: false };
+}
+
+function classifyRuntimeFailure(error: unknown): DaemonFailureClassification {
+  const code = typeof error === 'object' && error !== null &&
+    typeof (error as NodeJS.ErrnoException).code === 'string'
+    ? (error as NodeJS.ErrnoException).code!
+    : '';
+  return TRANSIENT_DAEMON_ERROR_CODE.test(code)
+    ? { diagnosticCode: 'runtime-transient', retryable: true }
+    : { diagnosticCode: 'runtime-unclassified', retryable: false };
+}
+
+function daemonTermination(
+  reason: DaemonTerminationReason,
+  failure?: DaemonFailureClassification,
+): DaemonTerminationDisposition {
+  const retryable = failure?.retryable === true;
   return {
     reason,
     retryable,
-    exitCode: retryable || reason === 'start-refused' ? 1 : 0,
+    exitCode: retryable ? 1 : 0,
+    ...(failure ? { diagnosticCode: failure.diagnosticCode } : {}),
   };
 }
 
@@ -7344,10 +7395,11 @@ export async function runDaemon(
   const refusedState = (
     reason: string,
     terminationReason: DaemonTerminationReason = 'start-refused',
+    failure: DaemonFailureClassification = { diagnosticCode: 'start-refused', retryable: false },
   ): DaemonRunResult => ({
     ...loadDaemonState(),
     startRefusal: reason,
-    termination: daemonTermination(terminationReason),
+    termination: daemonTermination(terminationReason, failure),
   });
   // -------------------------------------------------------------------------
   // RE-ENTRANCY GUARD — must be the very first check.
@@ -7371,15 +7423,16 @@ export async function runDaemon(
 
   const startLoadedState = loadDaemonStateStrict();
   if (!startLoadedState.ok) {
+    const failure = classifyPersistenceFailure(startLoadedState);
     releaseDaemonLock(daemonLock);
     audit({
       action: 'daemon:persistence-failed',
       repo: null,
       sandboxId: null,
-      summary: `daemon start refused: daemon state ${startLoadedState.reason} (${startLoadedState.error})`,
+      summary: `daemon start refused: ${failure.diagnosticCode}`,
       result: 'refused',
     });
-    return refusedState(`daemon-state-${startLoadedState.reason}`, 'persistence-failure');
+    return refusedState(`daemon-state-${startLoadedState.reason}`, 'persistence-failure', failure);
   }
   let state = startLoadedState.state;
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
@@ -7427,8 +7480,9 @@ export async function runDaemon(
     state.pid = null;
     const recovered = saveResidentDaemonState(daemonLock, state);
     if (!recovered.ok) {
+      const failure = classifyPersistenceFailure(recovered);
       releaseDaemonLock(daemonLock);
-      return refusedState('stale-resident-state-recovery-failed', 'persistence-failure');
+      return refusedState('stale-resident-state-recovery-failed', 'persistence-failure', failure);
     }
   }
 
@@ -7453,6 +7507,7 @@ export async function runDaemon(
   state.startedAt = new Date().toISOString();
   const startSave = saveResidentDaemonState(daemonLock, state);
   if (!startSave.ok) {
+    const failure = classifyPersistenceFailure(startSave);
     releaseDaemonLock(daemonLock);
     if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
     else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
@@ -7460,16 +7515,17 @@ export async function runDaemon(
       action: 'daemon:persistence-failed',
       repo: null,
       sandboxId: null,
-      summary: `daemon start refused: failed to persist running state (${startSave.error})`,
+      summary: `daemon start refused: ${failure.diagnosticCode}`,
       result: 'refused',
     });
-    return refusedState('daemon-running-state-persistence-failed', 'persistence-failure');
+    return refusedState('daemon-running-state-persistence-failed', 'persistence-failure', failure);
   }
   const daemonStartedAt = state.startedAt;
   const daemonActivityInstanceId = randomUUID();
   const shutdown = new AbortController();
   let ownershipLost = false;
   let terminationReason: DaemonTerminationReason = 'clean-completion';
+  let terminationFailure: DaemonFailureClassification | undefined;
   let shutdownCause: 'kill-switch' | 'signal' | null = null;
   let activityPhase: DaemonActivityPhase = 'starting';
   let activityActiveChildren: number | null = null;
@@ -7520,6 +7576,7 @@ export async function runDaemon(
     if (ownershipLost) return;
     ownershipLost = true;
     terminationReason = 'ownership-loss';
+    terminationFailure = { diagnosticCode: 'successor-owner', retryable: false };
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
@@ -7654,6 +7711,7 @@ export async function runDaemon(
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
           terminationReason = 'persistence-failure';
+          terminationFailure = { diagnosticCode: 'state-write-unclassified', retryable: false };
         }
         if (!activation.capability) {
           await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
@@ -7688,14 +7746,16 @@ export async function runDaemon(
 
         const currentLoaded = loadDaemonStateStrict();
         if (!currentLoaded.ok) {
+          const failure = classifyPersistenceFailure(currentLoaded);
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
             sandboxId: null,
-            summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
+            summary: `daemon loop stopped: ${failure.diagnosticCode}`,
             result: 'refused',
           });
           terminationReason = 'persistence-failure';
+          terminationFailure = failure;
           break;
         }
         transitionActivity('tick');
@@ -7708,23 +7768,23 @@ export async function runDaemon(
           onOwnershipLost: requestOwnershipLoss,
         });
         await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
-        // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
-        // so the budget break can never fire. Terminate after a single iteration
-        // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
-        if (opts.dryRun) break;
-
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
             sandboxId: null,
-            summary: 'continuous daemon stopped after persistence authority failed; paid work remains dispatch-blocked',
+            summary: 'continuous daemon stopped: state-write-unclassified',
             result: 'refused',
           });
           terminationReason = 'persistence-failure';
+          terminationFailure = { diagnosticCode: 'state-write-unclassified', retryable: false };
           break;
         }
+        // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
+        // so the budget break can never fire. Terminate after a single iteration
+        // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
+        if (opts.dryRun) break;
 
         if (killSwitchOn()) {
           requestShutdown('kill-switch');
@@ -7733,14 +7793,16 @@ export async function runDaemon(
         if (shutdown.signal.aborted || !ownsDaemonLock()) break;
         const afterTickLoaded = loadDaemonStateStrict();
         if (!afterTickLoaded.ok) {
+          const failure = classifyPersistenceFailure(afterTickLoaded);
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
             sandboxId: null,
-            summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
+            summary: `daemon loop stopped after tick: ${failure.diagnosticCode}`,
             result: 'refused',
           });
           terminationReason = 'persistence-failure';
+          terminationFailure = failure;
           break;
         }
         // Re-read config before post-tick controls so budget caps, mode, idle
@@ -7799,12 +7861,16 @@ export async function runDaemon(
       }
     }
   } catch (error) {
-    if (!ownershipLost) terminationReason = 'runtime-failure';
+    const failure = classifyRuntimeFailure(error);
+    if (!ownershipLost) {
+      terminationReason = 'runtime-failure';
+      terminationFailure = failure;
+    }
     audit({
       action: 'daemon:runtime-failed',
       repo: null,
       sandboxId: null,
-      summary: `daemon loop stopped after unexpected runtime failure (${error instanceof Error ? error.name : 'unknown error'})`,
+      summary: `daemon loop stopped: ${failure.diagnosticCode}`,
       result: 'error',
     });
   }
@@ -7826,12 +7892,16 @@ export async function runDaemon(
         ? { ...current, running: false, pid: null }
         : null);
     if (!stopSave.ok) {
-      if (!ownershipLost) terminationReason = 'persistence-failure';
+      const failure = classifyPersistenceFailure(stopSave);
+      if (!ownershipLost && terminationReason === 'clean-completion') {
+        terminationReason = 'persistence-failure';
+        terminationFailure = failure;
+      }
       audit({
         action: 'daemon:persistence-failed',
         repo: null,
         sandboxId: null,
-        summary: `daemon stop could not persist stopped state (${stopSave.error})`,
+        summary: `daemon stop could not persist stopped state: ${failure.diagnosticCode}`,
         result: 'error',
       });
     }
@@ -7861,7 +7931,7 @@ export async function runDaemon(
   }
   return {
     ...loadDaemonState(),
-    termination: daemonTermination(terminationReason),
+    termination: daemonTermination(terminationReason, terminationFailure),
   };
 }
 

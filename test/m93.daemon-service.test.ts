@@ -275,6 +275,8 @@ describe('strict Windows Task Scheduler scripts', () => {
     expect(script).toContain('$settings.AllowDemandStart=$true');
     expect(script).toContain('$settings.DisallowStartIfOnBatteries=$false');
     expect(script).toContain('$settings.StopIfGoingOnBatteries=$false');
+    expect(script).toContain('$settings.RestartCount=3');
+    expect(script).toContain("$settings.RestartInterval='PT1M'");
     expect(script).toContain("$settings.IdleSettings.IdleDuration='PT10M'");
     expect(script).toContain("$settings.IdleSettings.WaitTimeout='PT1H'");
     expect(script).toContain('$definition.RegistrationInfo.SecurityDescriptor=$sddl');
@@ -476,9 +478,12 @@ describe('generateServiceDefinition — linux (systemd)', () => {
     expect(def.content).toContain('--parallel 1');
   });
 
-  it('unit has Restart=always', () => {
+  it('unit restarts only failures and bounds restart bursts', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
-    expect(def.content).toContain('Restart=always');
+    expect(def.content).toContain('Restart=on-failure');
+    expect(def.content).not.toContain('Restart=always');
+    expect(def.content).toContain('StartLimitIntervalSec=300');
+    expect(def.content).toContain('StartLimitBurst=3');
   });
 
   it('unit RestartSec is independent from daemon work interval', () => {

@@ -8519,6 +8519,51 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(mockRunSwarm.mock.calls.length).toBeLessThanOrEqual(2);
   }, 10_000);
 
+  it('E2p: dry-run classifies tick persistence failure before its one-shot break', async () => {
+    if (process.platform === 'win32') return;
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const stateDir = process.env.ASHLR_HOME!;
+    const statePath = join(stateDir, 'daemon.json');
+    const blockedStatePath = `${statePath}.blocked`;
+    const restoreStatePath = (): void => {
+      if (fs.existsSync(statePath) && fs.lstatSync(statePath).isDirectory()) {
+        fs.rmSync(statePath, { recursive: true, force: true });
+      }
+      if (fs.existsSync(blockedStatePath)) fs.renameSync(blockedStatePath, statePath);
+    };
+    mockBuildBacklog.mockImplementationOnce(async () => {
+      fs.renameSync(statePath, blockedStatePath);
+      fs.mkdirSync(statePath);
+      return {
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: makeItems(repo.dir, 1),
+      };
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((message: unknown) => {
+      if (String(message).includes('recordTick persistence failed')) restoreStatePath();
+    });
+
+    try {
+      const result = await runDaemon(cfgBuiltin({ perTickItems: 1 }), {
+        once: false,
+        dryRun: true,
+        maxCycles: 2,
+      });
+
+      expect(result.termination).toEqual({
+        reason: 'persistence-failure',
+        retryable: false,
+        exitCode: 0,
+        diagnosticCode: 'state-write-unclassified',
+      });
+    } finally {
+      restoreStatePath();
+      warnSpy.mockRestore();
+    }
+  });
+
   it('E2a: continuous mode remains resident after a durably settled generated-repair failure', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -9067,8 +9112,9 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
       expect(finalState).toMatchObject(successorState);
       expect(finalState.termination).toEqual({
         reason: 'ownership-loss',
-        retryable: true,
-        exitCode: 1,
+        retryable: false,
+        exitCode: 0,
+        diagnosticCode: 'successor-owner',
       });
       expect(loadDaemonState()).toMatchObject(successorState);
       expect(fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8')).toBe(successorStateRaw);
@@ -9089,7 +9135,7 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     }
   });
 
-  it('E3k: malformed resident state terminates retryably instead of exiting cleanly', async () => {
+  it('E3k: malformed resident state stops without entering a restart loop', async () => {
     enrollWithItems(1);
     mockRunPulseSync.mockImplementationOnce(async () => {
       fs.writeFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), '{"running":', 'utf8');
@@ -9110,18 +9156,71 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
 
     expect(result.termination).toEqual({
       reason: 'persistence-failure',
-      retryable: true,
-      exitCode: 1,
+      retryable: false,
+      exitCode: 0,
+      diagnosticCode: 'state-malformed',
     });
   });
 
-  it('E3l: unexpected resident runtime failure terminates retryably', async () => {
+  it('E3k1: unsafe resident state stops without entering a restart loop', async () => {
+    if (process.platform === 'win32') return;
+    const statePath = join(process.env.ASHLR_HOME!, 'daemon.json');
+    saveDaemonState(loadDaemonState());
+    fs.chmodSync(statePath, 0o666);
+
+    try {
+      const result = await runDaemon(cfgBuiltin(), {
+        once: false,
+        dryRun: false,
+        maxCycles: 1,
+      });
+
+      expect(result.startRefusal).toBe('daemon-state-unreadable');
+      expect(result.termination).toEqual({
+        reason: 'persistence-failure',
+        retryable: false,
+        exitCode: 0,
+        diagnosticCode: 'state-unsafe',
+      });
+    } finally {
+      fs.chmodSync(statePath, 0o600);
+    }
+  });
+
+  it('E3k2: transient resident state lock contention permits a bounded retry', async () => {
+    const statePath = join(process.env.ASHLR_HOME!, 'daemon.json');
+    const stateLock = acquireLocalStoreLock(`${statePath}.resident.lock`, 0);
+    expect(stateLock).not.toBeNull();
+    if (!stateLock) return;
+
+    try {
+      const result = await runDaemon(cfgBuiltin(), {
+        once: false,
+        dryRun: false,
+        maxCycles: 1,
+      });
+
+      expect(result.startRefusal).toBe('daemon-running-state-persistence-failed');
+      expect(result.termination).toEqual({
+        reason: 'persistence-failure',
+        retryable: true,
+        exitCode: 1,
+        diagnosticCode: 'state-io-transient',
+      });
+    } finally {
+      releaseLocalStoreLock(stateLock);
+    }
+  });
+
+  it('E3l: explicitly transient resident runtime failure terminates retryably', async () => {
     enrollWithItems(1);
     const liveCfg = cfgBuiltin();
     const malformedReload = {
       ...liveCfg,
       get daemon(): AshlrConfig['daemon'] {
-        throw new Error('transient runtime fixture');
+        const error = new Error('transient runtime fixture') as NodeJS.ErrnoException;
+        error.code = 'EAGAIN';
+        throw error;
       },
     };
     mockLoadConfig
@@ -9138,11 +9237,43 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
       reason: 'runtime-failure',
       retryable: true,
       exitCode: 1,
+      diagnosticCode: 'runtime-transient',
     });
     expect(readAudit()).toContainEqual(expect.objectContaining({
       action: 'daemon:runtime-failed',
       result: 'error',
     }));
+  });
+
+  it('E3m: unclassified runtime failure stops without exposing the raw error', async () => {
+    enrollWithItems(1);
+    const liveCfg = cfgBuiltin();
+    const malformedReload = {
+      ...liveCfg,
+      get daemon(): AshlrConfig['daemon'] {
+        throw new Error('/private/path secret fixture');
+      },
+    };
+    mockLoadConfig
+      .mockReturnValueOnce(liveCfg)
+      .mockReturnValueOnce(malformedReload);
+
+    const result = await runDaemon(cfgBuiltin(), {
+      once: false,
+      dryRun: false,
+      maxCycles: 1,
+    });
+
+    expect(result.termination).toEqual({
+      reason: 'runtime-failure',
+      retryable: false,
+      exitCode: 0,
+      diagnosticCode: 'runtime-unclassified',
+    });
+    const runtimeAudit = readAudit().find((entry) => entry.action === 'daemon:runtime-failed');
+    expect(runtimeAudit?.summary).toBe('daemon loop stopped: runtime-unclassified');
+    expect(JSON.stringify(runtimeAudit)).not.toContain('/private/path');
+    expect(JSON.stringify(runtimeAudit)).not.toContain('secret fixture');
   });
 
   it('E3j1: lock theft after producer settlement fences every durable outcome phase', async () => {
@@ -9389,16 +9520,17 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     try {
       const result = await runDaemon(cfgBuiltin(), { once: true, dryRun: false });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         ...persisted,
         startRefusal: 'persisted-resident-owner-not-stale',
         termination: {
           reason: 'start-refused',
           retryable: false,
-          exitCode: 1,
+          exitCode: 0,
+          diagnosticCode: 'start-refused',
         },
       });
-      expect(loadDaemonState()).toEqual(persisted);
+      expect(loadDaemonState()).toMatchObject(persisted);
       expect(mockBuildBacklog).not.toHaveBeenCalled();
       expect(readAudit().some((entry) =>
         entry.action === 'daemon:start' &&
