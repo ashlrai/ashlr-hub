@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  SemanticPrivateStorageHarness,
+  SemanticPrivateStorageRequest,
+} from './helpers/semantic-private-storage.js';
 
 import { makeFixture, type DisposableRepo, type H1Fixture } from './helpers/h1-fixture.js';
 import {
@@ -13,11 +17,15 @@ import {
   sandboxesDir,
 } from '../src/core/sandbox/worktree.js';
 
-const privateStorageHarness = vi.hoisted(() => ({ semanticInvocations: 0 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  harness: undefined as SemanticPrivateStorageHarness | undefined,
+}));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { semanticPrivateStorageRunner } = await import('./helpers/semantic-private-storage.js');
+  const { createSemanticPrivateStorageHarness } =
+    await import('./helpers/semantic-private-storage.js');
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
   return {
     ...actual,
     assurePrivateStoragePath: (
@@ -27,10 +35,9 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
       if (process.platform !== 'win32' || options?.runner !== undefined) {
         return actual.assurePrivateStoragePath(...args);
       }
-      privateStorageHarness.semanticInvocations += 1;
       return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
         ...options,
-        runner: semanticPrivateStorageRunner,
+        runner: privateStorageHarness.harness!.runner,
       });
     },
   };
@@ -53,13 +60,12 @@ const CHILD_SOURCE = String.raw`
     PRIVATE_STORAGE_TEST_CONTROL,
     _setPrivateStorageTestControlForTest,
   } from ${JSON.stringify(privateStorageModuleUrl)};
-  import { semanticPrivateStorageRunner } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
+  import { createSemanticPrivateStorageHarness } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
 
-  let semanticInvocations = 0;
+  const semanticStorage = createSemanticPrivateStorageHarness();
   if (process.platform === 'win32') {
     _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
-      runner: semanticPrivateStorageRunner,
-      observeInvocation: () => { semanticInvocations += 1; },
+      runner: semanticStorage.runner,
     });
   }
 
@@ -73,7 +79,7 @@ const CHILD_SOURCE = String.raw`
     type: 'ready',
     acquired: fence !== null,
     owns: ownsOutwardMutationFence(fence),
-    semanticInvocations,
+    semanticRequests: semanticStorage.requests,
   });
 
   if (!fence) {
@@ -91,7 +97,12 @@ const CHILD_SOURCE = String.raw`
 `;
 
 type ChildMessage =
-  | { type: 'ready'; acquired: boolean; owns: boolean; semanticInvocations: number }
+  | {
+      type: 'ready';
+      acquired: boolean;
+      owns: boolean;
+      semanticRequests: readonly SemanticPrivateStorageRequest[];
+    }
   | { type: 'released' };
 
 interface SourceSnapshot {
@@ -229,9 +240,19 @@ async function startHolder(): Promise<ChildProcess> {
     owns: true,
   });
   if (process.platform === 'win32') {
-    expect(ready.semanticInvocations).toBeGreaterThan(0);
+    const authorityRoot = join(fx.home, '.ashlr', 'authority');
+    expect(ready.semanticRequests.some((request) =>
+      request.operation === 'assure-private-path' &&
+      request.anchorPath === authorityRoot &&
+      request.kind === 'file' &&
+      request.mode === 'secure-created' &&
+      request.paths.length === 1 &&
+      /^outward-mutation\.lock\.\d+\.[0-9a-f-]+\.candidate$/iu.test(
+        request.paths[0]!.slice(authorityRoot.length + 1),
+      ),
+    )).toBe(true);
   } else {
-    expect(ready.semanticInvocations).toBe(0);
+    expect(ready.semanticRequests).toEqual([]);
   }
   return child;
 }
@@ -244,7 +265,7 @@ async function releaseHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
-  privateStorageHarness.semanticInvocations = 0;
+  privateStorageHarness.harness?.reset();
   fx = makeFixture();
 });
 
@@ -259,9 +280,7 @@ describe('M408 createSandbox outward mutation fence', () => {
   it('refuses without branch, worktree, or metadata changes while another process owns the fence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    if (process.platform === 'win32') {
-      expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
-    }
+    privateStorageHarness.harness?.reset();
     const holder = await startHolder();
 
     const sourceBefore = sourceSnapshot(repo);

@@ -12,12 +12,13 @@ import {
 } from 'node:fs';
 import { createHash, createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, win32 } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   loadExistingProvenanceKey,
   loadOrCreateKey,
+  provenanceKeyPath,
 } from '../src/core/foundry/provenance.js';
 import {
   admitClaimedBatchAfterExactFence,
@@ -40,12 +41,17 @@ import {
   type PrivateStorageRunner,
 } from '../src/core/util/private-storage.js';
 import type { WorkItem } from '../src/core/types.js';
+import type { SemanticPrivateStorageHarness } from './helpers/semantic-private-storage.js';
 
-const privateStorageHarness = vi.hoisted(() => ({ semanticInvocations: 0 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  harness: undefined as SemanticPrivateStorageHarness | undefined,
+}));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { semanticPrivateStorageRunner } = await import('./helpers/semantic-private-storage.js');
+  const { createSemanticPrivateStorageHarness } =
+    await import('./helpers/semantic-private-storage.js');
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
   return {
     ...actual,
     assurePrivateStoragePath: (
@@ -55,10 +61,9 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
       if (process.platform !== 'win32' || options?.runner !== undefined) {
         return actual.assurePrivateStoragePath(...args);
       }
-      privateStorageHarness.semanticInvocations += 1;
       return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
         ...options,
-        runner: semanticPrivateStorageRunner,
+        runner: privateStorageHarness.harness!.runner,
       });
     },
   };
@@ -239,12 +244,9 @@ describe.runIf(process.platform !== 'win32')('M463 claimed-batch admission', () 
     vi.stubEnv('USERPROFILE', home);
     repo = join(home, 'repo');
     mkdirSync(repo);
-    privateStorageHarness.semanticInvocations = 0;
+    privateStorageHarness.harness?.reset();
     loadOrCreateKey();
     expect(enroll(repo).ok).toBe(true);
-    if (process.platform === 'win32') {
-      expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
-    }
   });
 
   afterEach(() => {
@@ -900,10 +902,10 @@ describe.runIf(process.platform === 'win32')('M463 Windows refusal', () => {
     vi.stubEnv('USERPROFILE', home);
     repo = join(home, 'repo');
     mkdirSync(repo);
-    privateStorageHarness.semanticInvocations = 0;
+    privateStorageHarness.harness?.reset();
     loadOrCreateKey();
     expect(enroll(repo).ok).toBe(true);
-    expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
+    privateStorageHarness.harness?.reset();
   });
 
   afterEach(() => {
@@ -921,6 +923,13 @@ describe.runIf(process.platform === 'win32')('M463 Windows refusal', () => {
       receipt: null,
     });
     expect(releaseClaimGenerations).toHaveBeenCalledOnce();
+    expect(privateStorageHarness.harness?.requests).toEqual(expect.arrayContaining([{
+      operation: 'assure-private-path',
+      anchorPath: win32.normalize(join(home, '.ashlr', 'foundry')),
+      paths: [win32.normalize(provenanceKeyPath())],
+      kind: 'file',
+      mode: 'inspect-existing',
+    }]));
     expect(existsSync(claimedBatchAdmissionRootPath())).toBe(false);
     expect(existsSync(claimedBatchAdmissionCommitRootPath())).toBe(false);
   });

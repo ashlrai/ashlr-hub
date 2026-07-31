@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import {
@@ -20,12 +20,17 @@ import {
   type DetachedPostMergeVerificationCohortInput,
   type DetachedPostMergeVerificationMemberInput,
 } from '../src/core/fleet/detached-post-merge-verification.js';
+import type { SemanticPrivateStorageHarness } from './helpers/semantic-private-storage.js';
 
-const privateStorageHarness = vi.hoisted(() => ({ semanticInvocations: 0 }));
+const privateStorageHarness = vi.hoisted(() => ({
+  harness: undefined as SemanticPrivateStorageHarness | undefined,
+}));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { semanticPrivateStorageRunner } = await import('./helpers/semantic-private-storage.js');
+  const { createSemanticPrivateStorageHarness } =
+    await import('./helpers/semantic-private-storage.js');
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
   return {
     ...actual,
     assurePrivateStoragePath: (
@@ -35,10 +40,9 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
       if (process.platform !== 'win32' || options?.runner !== undefined) {
         return actual.assurePrivateStoragePath(...args);
       }
-      privateStorageHarness.semanticInvocations += 1;
       return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
         ...options,
-        runner: semanticPrivateStorageRunner,
+        runner: privateStorageHarness.harness!.runner,
       });
     },
   };
@@ -55,7 +59,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ashlr-m467-postmerge-'));
   process.env.HOME = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
-  privateStorageHarness.semanticInvocations = 0;
+  privateStorageHarness.harness?.reset();
 });
 
 afterEach(() => {
@@ -68,9 +72,6 @@ afterEach(() => {
 
 function key(): void {
   expect(loadOrCreateKey()).toHaveLength(32);
-  if (process.platform === 'win32') {
-    expect(privateStorageHarness.semanticInvocations).toBeGreaterThan(0);
-  }
 }
 
 function member(
@@ -309,7 +310,18 @@ describe('M467 detached post-merge verification cohorts', () => {
 
   it('replays exact cohorts and rejects identity reuse or duplicate members', () => {
     key();
+    privateStorageHarness.harness?.reset();
     expect(recordDetachedPostMergeVerificationCohort(cohort())).toBe('recorded');
+    if (process.platform === 'win32') {
+      const store = win32.normalize(detachedPostMergeVerificationStorePath());
+      expect(privateStorageHarness.harness?.requests.some((request) =>
+        request.operation === 'assure-private-path' &&
+        request.kind === 'file' &&
+        request.mode === 'secure-created' &&
+        request.paths.length === 1 &&
+        request.paths[0]!.startsWith(`${store}\\`),
+      )).toBe(true);
+    }
     expect(recordDetachedPostMergeVerificationCohort(cohort())).toBe('replayed');
     expect(recordDetachedPostMergeVerificationCohort(cohort({
       members: [member('1'), member('2', { verifierManifest: { digest: 'e'.repeat(64), commandCount: 4 } })],

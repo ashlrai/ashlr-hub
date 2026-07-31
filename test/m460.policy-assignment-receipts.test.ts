@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -32,7 +32,7 @@ import {
   _setPrivateStorageTestControlForTest,
 } from '../src/core/util/private-storage.js';
 import {
-  semanticPrivateStorageRunner,
+  createSemanticPrivateStorageHarness,
 } from './helpers/semantic-private-storage.js';
 
 const GENERATION = 'a'.repeat(64);
@@ -40,6 +40,7 @@ const OBJECTIVE = 'b'.repeat(64);
 const CODEX_ACTION = '1'.repeat(64);
 const LOCAL_ACTION = '2'.repeat(64);
 let repoPath = '';
+const semanticPrivateStorage = createSemanticPrivateStorageHarness();
 
 function assignment(overrides: Partial<PolicyAssignmentReceiptInput> = {}): PolicyAssignmentReceiptInput {
   return {
@@ -88,7 +89,6 @@ function writePrivateCrashFile(path: string, value: string, anchorPath: string):
 
 describe('M460 policy assignment receipts', () => {
   let home: string;
-  let semanticPrivateStorageInvocations = 0;
 
   beforeEach(() => {
     _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
@@ -97,19 +97,14 @@ describe('M460 policy assignment receipts', () => {
     vi.stubEnv('USERPROFILE', home);
     repoPath = join(home, 'repo');
     mkdirSync(repoPath);
-    semanticPrivateStorageInvocations = 0;
+    semanticPrivateStorage.reset();
     if (process.platform === 'win32') {
       _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
-        runner: semanticPrivateStorageRunner,
-        observeInvocation: () => {
-          semanticPrivateStorageInvocations += 1;
-        },
+        runner: semanticPrivateStorage.runner,
       });
     }
     loadOrCreateKey();
-    if (process.platform === 'win32') {
-      expect(semanticPrivateStorageInvocations).toBeGreaterThan(0);
-    }
+    semanticPrivateStorage.reset();
   });
 
   afterEach(() => {
@@ -189,6 +184,18 @@ describe('M460 policy assignment receipts', () => {
 
   it('records once, recognizes exact replay, and rejects a conflicting policy assignment', () => {
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    if (process.platform === 'win32') {
+      const receiptRoot = win32.normalize(policyAssignmentReceiptRootPath());
+      const root = `${receiptRoot}\\`;
+      expect(semanticPrivateStorage.requests.some((request) =>
+        request.operation === 'assure-private-path' &&
+        request.kind === 'file' &&
+        request.mode === 'secure-created' &&
+        request.anchorPath === win32.dirname(win32.dirname(receiptRoot)) &&
+        request.paths.length === 1 &&
+        request.paths[0]!.startsWith(root),
+      )).toBe(true);
+    }
     expect(recordPolicyAssignmentReceipt(assignment())).toBe('replayed');
     expect(recordPolicyAssignmentReceipt(assignment({
       reportedProbabilityDenominator: 2,
