@@ -240,10 +240,10 @@ function result(
   checks: ResidentServiceReadinessChecks,
   reasons: ResidentServiceReadinessReason[],
 ): ResidentServiceReadiness {
-  const state: ResidentServiceReadinessState = reasons.some((reason) => reason.severity === 'degraded')
-    ? 'degraded'
-    : reasons.length > 0
-      ? 'blocked'
+  const state: ResidentServiceReadinessState = reasons.some((reason) => reason.severity === 'blocked')
+    ? 'blocked'
+    : reasons.some((reason) => reason.severity === 'degraded')
+      ? 'degraded'
       : 'ready';
   return {
     schemaVersion: 1,

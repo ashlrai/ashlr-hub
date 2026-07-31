@@ -245,6 +245,18 @@ describe('residentServiceReadiness', () => {
     expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-enable-state-unavailable' }));
   });
 
+  it('keeps a proven blocker dominant when another observation is degraded', () => {
+    const readiness = residentServiceReadiness(options(), dependencies({
+      disabled: { status: 0, stdout: 'disabled services = {}\n', stderr: '' },
+      kill: 'present',
+    }));
+    expect(readiness.state).toBe('blocked');
+    expect(readiness.reasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'service-enable-state-unavailable', severity: 'degraded' }),
+      expect.objectContaining({ code: 'kill-switch-present', severity: 'blocked' }),
+    ]));
+  });
+
   it('degrades when state changes between snapshots', () => {
     const readiness = residentServiceReadiness(options(), dependencies({ varySecondRuntime: true }));
     expect(readiness.state).toBe('degraded');
