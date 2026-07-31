@@ -422,21 +422,13 @@ describe('daemon valid flags remain supported', () => {
     expect(result.stderr).toContain('supervisor restart is not permitted');
   });
 
-  it('returns zero for a supervised non-retryable failure so the service does not loop', async () => {
-    effects.runDaemon.mockResolvedValue({
-      ...daemonState,
-      termination: {
-        reason: 'persistence-failure',
-        retryable: false,
-        exitCode: 0,
-        diagnosticCode: 'state-malformed',
-      },
-    });
-
+  it('rejects caller-spoofed supervisor context before loading or running the daemon', async () => {
     const result = await capture(['start', '--supervised']);
 
-    expect(result.code).toBe(0);
-    expect(result.stderr).toContain('supervisor restart is not permitted');
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('Unknown flag: --supervised');
+    expect(effects.loadConfig).not.toHaveBeenCalled();
+    expect(effects.runDaemon).not.toHaveBeenCalled();
   });
 
   it.each(['clean-completion', 'kill-switch', 'signal'] as const)(

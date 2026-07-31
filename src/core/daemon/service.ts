@@ -32,6 +32,7 @@ import {
   WINDOWS_TASK_RESTORE_SCRIPT,
   WINDOWS_TASK_RUN_SCRIPT,
   WINDOWS_TASK_SNAPSHOT_SCRIPT,
+  WINDOWS_TASK_STRICT_SNAPSHOT_SCRIPT,
   WINDOWS_TASK_STOP_DELETE_SCRIPT,
   windowsPowerShellPath,
 } from './windows-task-scripts.js';
@@ -211,7 +212,6 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   runtimeArguments.push(
     'daemon',
     'start',
-    '--supervised',
     '--budget',
     String(o.budget),
     '--interval',
@@ -281,7 +281,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=${o.nodePath} ${o.binPath} daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
+ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
 Restart=on-failure
 RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
@@ -322,7 +322,7 @@ function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
     '/IT',
   ];
 
-  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
+  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
 
   return {
     filePath: cmdPath,
@@ -757,7 +757,10 @@ function decodeCanonicalBase64(
   };
 }
 
-function readWindowsTaskSnapshot(expectedLauncherPath: string):
+function readWindowsTaskSnapshot(
+  expectedLauncherPath: string,
+  allowLegacyRestartPolicy = true,
+):
   | { present: false }
   | {
       present: true;
@@ -777,7 +780,9 @@ function readWindowsTaskSnapshot(expectedLauncherPath: string):
     '-NoProfile',
     '-NonInteractive',
     '-Command',
-    WINDOWS_TASK_SNAPSHOT_SCRIPT,
+    allowLegacyRestartPolicy
+      ? WINDOWS_TASK_SNAPSHOT_SCRIPT
+      : WINDOWS_TASK_STRICT_SNAPSHOT_SCRIPT,
   ], JSON.stringify({ expectedLauncherPath }));
   if (!result.ok) {
     throw new Error(`PowerShell Task Scheduler snapshot failed: ${result.stderr.trim() || 'exit non-zero'}`);
@@ -972,7 +977,9 @@ function verifyWindowsState(
   try {
     const expectedHasSnapshot = expected.present && expected.taskXmlBase64 !== undefined;
     const actual = expected.present
-      ? readWindowsTaskSnapshot(expectedLauncherPath)
+      // Exact prior snapshots are migration/rollback evidence and may describe
+      // the one supported legacy policy. Newly desired state must be strict.
+      ? readWindowsTaskSnapshot(expectedLauncherPath, expectedHasSnapshot)
       : readWindowsTaskState();
     if (!expected.present) {
       return !actual.present

@@ -264,7 +264,10 @@ export function buildWindowsTaskCreateScript(taskName: string): string {
   ].join(';');
 }
 
-export function buildWindowsTaskSnapshotScript(taskName: string): string {
+export function buildWindowsTaskSnapshotScript(
+  taskName: string,
+  allowLegacyRestartPolicy = true,
+): string {
   assertSupportedTaskName(taskName);
   return [
     "$ErrorActionPreference='Stop'",
@@ -282,7 +285,7 @@ export function buildWindowsTaskSnapshotScript(taskName: string): string {
     "try{$registered=$folder.GetTask($taskName)}catch{if($_.Exception.HResult -eq -2147024894){[Console]::Out.Write('absent');exit 0};throw}",
     '$definition=$registered.Definition',
     '$sddl=[string]$registered.GetSecurityDescriptor(7)',
-    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName $true',
+    `Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName $${allowLegacyRestartPolicy ? 'true' : 'false'}`,
     '$xml=Get-AshlrCanonicalTaskXml $definition $sddl',
     '$xmlBytes=[Text.Encoding]::UTF8.GetBytes($xml)',
     '$sddlBytes=[Text.Encoding]::UTF8.GetBytes($sddl)',
@@ -401,6 +404,7 @@ function buildWindowsTaskRunScriptWithPolicy(taskName: string, allowLegacyRestar
 
 export const WINDOWS_TASK_CREATE_SCRIPT = buildWindowsTaskCreateScript('AshlrDaemon');
 export const WINDOWS_TASK_SNAPSHOT_SCRIPT = buildWindowsTaskSnapshotScript('AshlrDaemon');
+export const WINDOWS_TASK_STRICT_SNAPSHOT_SCRIPT = buildWindowsTaskSnapshotScript('AshlrDaemon', false);
 export const WINDOWS_TASK_RESTORE_SCRIPT = buildWindowsTaskRestoreScript('AshlrDaemon');
 export const WINDOWS_TASK_STOP_DELETE_SCRIPT = buildWindowsTaskStopDeleteScript('AshlrDaemon');
 export const WINDOWS_TASK_RUN_SCRIPT = buildWindowsTaskRunScript('AshlrDaemon');

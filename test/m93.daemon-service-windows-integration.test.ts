@@ -321,6 +321,10 @@ describe.skipIf(process.platform !== 'win32')(
           buildWindowsTaskSnapshotScript(taskName),
           { expectedLauncherPath: launcherPath },
         ));
+        expect(parseTaskSnapshot(runPowerShellInput(
+          buildWindowsTaskSnapshotScript(taskName, false),
+          { expectedLauncherPath: launcherPath },
+        ))).toEqual(before);
         const taskXmlSha256 = sha256Base64(before.taskXmlBase64);
         const taskSecurityDescriptorSha256 = sha256Base64(
           before.taskSecurityDescriptorBase64,

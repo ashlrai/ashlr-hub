@@ -198,7 +198,6 @@ function printDaemonUsageError(message: string, subcommand?: DaemonSubcommand): 
 interface StartFlags {
   once: boolean;
   dryRun: boolean;
-  supervised: boolean;
   drain?: DaemonDrainMode;
   limit?: number;
   budgetUsd?: number;
@@ -214,7 +213,7 @@ function parseNum(v: string | undefined): number | undefined {
 }
 
 function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
-  const flags: StartFlags = { once: false, dryRun: false, supervised: false };
+  const flags: StartFlags = { once: false, dryRun: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     switch (a) {
@@ -223,9 +222,6 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
         break;
       case '--dry-run':
         flags.dryRun = true;
-        break;
-      case '--supervised':
-        flags.supervised = true;
         break;
       case '--drain': {
         const v = args[++i];
@@ -378,7 +374,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
         `daemon start refused [${finalState.termination.diagnosticCode ?? 'start-refused'}]; ` +
         'supervisor restart is not permitted.',
     );
-    return flags.supervised ? finalState.termination.exitCode : 1;
+    return 1;
   }
   if (finalState.termination.reason === 'persistence-failure' ||
     finalState.termination.reason === 'runtime-failure' ||
@@ -415,11 +411,11 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   console.log('  ' + col.dim('Use `ashlr inbox` to review PENDING proposals (never auto-applied).'));
   console.log('');
 
-  if (!flags.supervised && (
+  if (
     finalState.termination.reason === 'persistence-failure' ||
     finalState.termination.reason === 'runtime-failure' ||
     finalState.termination.reason === 'ownership-loss'
-  )) {
+  ) {
     return 1;
   }
   return finalState.termination.exitCode;

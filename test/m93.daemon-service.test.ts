@@ -320,6 +320,7 @@ describe('strict Windows Task Scheduler scripts', () => {
   it('accepts only the exact legacy restart shape for migration and rollback', () => {
     const create = buildWindowsTaskCreateScript(taskName);
     const snapshot = buildWindowsTaskSnapshotScript(taskName);
+    const strictSnapshot = buildWindowsTaskSnapshotScript(taskName, false);
     const restore = buildWindowsTaskRestoreScript(taskName);
     const remove = buildWindowsTaskStopDeleteScript(taskName);
     const run = buildWindowsTaskRunScript(taskName);
@@ -327,6 +328,8 @@ describe('strict Windows Task Scheduler scripts', () => {
 
     expect(create).not.toContain('$taskName $true');
     expect(run).not.toContain('$taskName $true');
+    expect(strictSnapshot).toContain('$taskName $false');
+    expect(strictSnapshot).not.toContain('$taskName $true');
     for (const script of [snapshot, restore, remove, recoveryRun]) {
       expect(script).toContain('$taskName $true');
       expect(script).toContain('$restartCount -eq 0');
@@ -359,7 +362,6 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
-        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -391,7 +393,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain('<string>daemon</string>');
     expect(def.content).toContain('<string>start</string>');
-    expect(def.content).toContain('<string>--supervised</string>');
+    expect(def.content).not.toContain('<string>--supervised</string>');
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -412,7 +414,6 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
-        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -500,7 +501,7 @@ describe('generateServiceDefinition — linux (systemd)', () => {
   it('unit ExecStart contains node path + bin/ashlr + daemon start args', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
     expect(def.content).toContain(`ExecStart=${FAKE_NODE} ${FAKE_BIN} daemon start`);
-    expect(def.content).toContain('daemon start --supervised');
+    expect(def.content).not.toContain('--supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
@@ -583,7 +584,7 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     expect(def.content).toContain(FAKE_NODE);
     expect(def.content).toContain(FAKE_BIN);
     expect(def.content).toContain('daemon start');
-    expect(def.content).toContain('daemon start --supervised');
+    expect(def.content).not.toContain('--supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
@@ -973,6 +974,19 @@ describe('install() — mocked spawnSync', () => {
       isWindowsPowerShellCommand(cmd) &&
       args.join(' ').includes('$folder.RegisterTaskDefinition($taskName,$definition'));
     expect(hasCreate).toBe(true);
+  });
+
+  it('win32: verifies newly desired state with the strict restart policy', async () => {
+    await install(baseOpts('win32'));
+    const snapshotScripts = (spawnSyncMock.mock.calls as [string, string[]][])
+      .filter(([cmd, args]) =>
+        isWindowsPowerShellCommand(cmd) &&
+        args.join(' ').includes('$snapshot=[ordered]@{}'))
+      .map(([, args]) => args.at(-1) ?? '');
+
+    expect(snapshotScripts.some((script) => script.includes('$taskName $true'))).toBe(true);
+    expect(snapshotScripts.filter((script) => script.includes('$taskName $false')).length)
+      .toBeGreaterThanOrEqual(2);
   });
 
   it('win32: ignores hostile PATH when selecting Windows PowerShell', async () => {
@@ -1392,7 +1406,7 @@ describe('serviceStatus() — mocked OS query output', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (state: string, pid?: number): string => `${[
@@ -1549,7 +1563,7 @@ describe('ensureRunning() — mocked OS activation', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (
