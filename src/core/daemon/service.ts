@@ -202,6 +202,7 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   runtimeArguments.push(
     'daemon',
     'start',
+    '--supervised',
     '--budget',
     String(o.budget),
     '--interval',
@@ -276,7 +277,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
+ExecStart=${o.nodePath} ${o.binPath} daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
 Restart=on-failure
 RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
@@ -317,7 +318,7 @@ function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
     '/IT',
   ];
 
-  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
+  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
 
   return {
     filePath: cmdPath,

@@ -333,6 +333,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
+        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -364,6 +365,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain('<string>daemon</string>');
     expect(def.content).toContain('<string>start</string>');
+    expect(def.content).toContain('<string>--supervised</string>');
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -384,6 +386,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
+        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -473,6 +476,7 @@ describe('generateServiceDefinition — linux (systemd)', () => {
   it('unit ExecStart contains node path + bin/ashlr + daemon start args', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
     expect(def.content).toContain(`ExecStart=${FAKE_NODE} ${FAKE_BIN} daemon start`);
+    expect(def.content).toContain('daemon start --supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
@@ -555,6 +559,7 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     expect(def.content).toContain(FAKE_NODE);
     expect(def.content).toContain(FAKE_BIN);
     expect(def.content).toContain('daemon start');
+    expect(def.content).toContain('daemon start --supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
@@ -1363,7 +1368,7 @@ describe('serviceStatus() — mocked OS query output', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (state: string, pid?: number): string => `${[
@@ -1520,7 +1525,7 @@ describe('ensureRunning() — mocked OS activation', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (
