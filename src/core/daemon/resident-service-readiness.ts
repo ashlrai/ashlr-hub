@@ -429,7 +429,7 @@ function architecturalBlockers(): ResidentServiceDiagnosticReason[] {
     {
       code: 'exact-loaded-definition-binding-missing',
       severity: 'blocked',
-      detail: 'launchd runtime output cannot prove the exact loaded SuccessfulExit=false definition',
+      detail: 'launchd runtime output cannot prove the exact loaded KeepAlive=false definition',
     },
     {
       code: 'atomic-activation-handoff-missing',
