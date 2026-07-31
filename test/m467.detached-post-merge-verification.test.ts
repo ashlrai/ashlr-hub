@@ -28,9 +28,11 @@ const privateStorageHarness = vi.hoisted(() => ({
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { createSemanticPrivateStorageHarness } =
+  const { createSemanticPrivateStorageHarness, trustedWindowsSystemRootForTest } =
     await import('./helpers/semantic-private-storage.js');
-  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
   return {
     ...actual,
     assurePrivateStoragePath: (
@@ -313,13 +315,26 @@ describe('M467 detached post-merge verification cohorts', () => {
     privateStorageHarness.harness?.reset();
     expect(recordDetachedPostMergeVerificationCohort(cohort())).toBe('recorded');
     if (process.platform === 'win32') {
+      const anchor = win32.normalize(process.env.ASHLR_HOME!);
       const store = win32.normalize(detachedPostMergeVerificationStorePath());
-      expect(privateStorageHarness.harness?.requests.some((request) =>
+      const requests = privateStorageHarness.harness?.requests ?? [];
+      expect(requests.some((request) =>
         request.operation === 'assure-private-path' &&
+        request.anchorPath === anchor &&
         request.kind === 'file' &&
         request.mode === 'secure-created' &&
         request.paths.length === 1 &&
-        request.paths[0]!.startsWith(`${store}\\`),
+        /^staging\\\.[a-f0-9]{64}\.[a-f0-9]{64}\.stage\.tmp$/u.test(
+          win32.relative(store, request.paths[0]!),
+        ),
+      )).toBe(true);
+      expect(requests.some((request) =>
+        request.operation === 'assure-private-path' &&
+        request.anchorPath === anchor &&
+        request.kind === 'file' &&
+        request.mode === 'inspect-existing' &&
+        request.paths.length === 1 &&
+        /^records\\[a-f0-9]{64}\.json$/u.test(win32.relative(store, request.paths[0]!)),
       )).toBe(true);
     }
     expect(recordDetachedPostMergeVerificationCohort(cohort())).toBe('replayed');

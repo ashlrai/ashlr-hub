@@ -23,9 +23,11 @@ const privateStorageHarness = vi.hoisted(() => ({
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { createSemanticPrivateStorageHarness } =
+  const { createSemanticPrivateStorageHarness, trustedWindowsSystemRootForTest } =
     await import('./helpers/semantic-private-storage.js');
-  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
   return {
     ...actual,
     assurePrivateStoragePath: (
@@ -60,9 +62,14 @@ const CHILD_SOURCE = String.raw`
     PRIVATE_STORAGE_TEST_CONTROL,
     _setPrivateStorageTestControlForTest,
   } from ${JSON.stringify(privateStorageModuleUrl)};
-  import { createSemanticPrivateStorageHarness } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
+  import {
+    createSemanticPrivateStorageHarness,
+    trustedWindowsSystemRootForTest,
+  } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
 
-  const semanticStorage = createSemanticPrivateStorageHarness();
+  const semanticStorage = createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
   if (process.platform === 'win32') {
     _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
       runner: semanticStorage.runner,

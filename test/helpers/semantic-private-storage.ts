@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { win32 } from 'node:path';
 
@@ -68,6 +69,12 @@ const POWERSHELL_ARGS = [
 ] as const;
 const NONCE_RE = /^[a-f0-9]{32}$/u;
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+// SHA-256 over the exact base64 argv payload emitted by private-storage.ts.
+// A production script change must update these fixtures through explicit review.
+const CANONICAL_ENCODED_COMMAND_SHA256: Record<SemanticPrivateStorageOperation, string> = {
+  'assure-private-path': '6d15f1551b0c198b05f11ec3e1979860f7f880b01703545b066b0fec14a97246',
+  'assure-private-paths': '3504f98ec2d564707a15d9ab1f2bb42b0c97a5271819f4be4e617c5b33f241db',
+};
 
 function defaultPathInspector(path: string): SemanticPrivateStoragePathFact {
   if (process.platform !== 'win32') return { inspectable: false };
@@ -103,6 +110,12 @@ function localWindowsPath(value: unknown): string {
   const normalized = win32.normalize(value);
   if (!/^[A-Za-z]:\\/u.test(normalized)) fail('path must be drive-absolute');
   return normalized;
+}
+
+export function trustedWindowsSystemRootForTest(): string {
+  const configured = process.platform === 'win32' ? process.env.SystemRoot : 'C:\\Windows';
+  if (!configured) fail('trusted SystemRoot is unavailable');
+  return localWindowsPath(configured);
 }
 
 function validateNestedPath(anchorPath: string, path: string): void {
@@ -144,9 +157,17 @@ function inspectAncestors(
 function validateInvocationContract(
   invocation: PrivateStorageInvocation,
   operation: SemanticPrivateStorageOperation,
+  trustedSystemRoot: string,
 ): void {
   const executable = win32.normalize(invocation.executable);
-  if (!/^[A-Za-z]:\\.+\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/iu.test(executable)) {
+  const expectedExecutable = win32.join(
+    trustedSystemRoot,
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  if (executable !== expectedExecutable) {
     fail('unexpected executable');
   }
   if (invocation.args.length !== POWERSHELL_ARGS.length + 1 ||
@@ -157,13 +178,9 @@ function validateInvocationContract(
   if (!encodedCommand || encodedCommand.length % 4 !== 0 || !BASE64_RE.test(encodedCommand)) {
     fail('invalid encoded command');
   }
-  const script = Buffer.from(encodedCommand, 'base64').toString('utf16le');
-  const operationGuard = operation === 'assure-private-path'
-    ? "$request.operation -ne 'assure-private-path'"
-    : "$request.operation -ne 'assure-private-paths'";
-  if (!script.includes('$ErrorActionPreference') || !script.includes('ConvertFrom-Json') ||
-    !script.includes(operationGuard)) {
-    fail('encoded command does not implement the requested operation');
+  const encodedDigest = createHash('sha256').update(encodedCommand, 'utf8').digest('hex');
+  if (encodedDigest !== CANONICAL_ENCODED_COMMAND_SHA256[operation]) {
+    fail('unexpected encoded command identity');
   }
   if (!Number.isFinite(invocation.timeoutMs) || invocation.timeoutMs < 100 ||
     invocation.timeoutMs > 15_000 || invocation.maxBuffer !== 4 * 1_024) {
@@ -238,13 +255,15 @@ function validateRequest(
  * Only fully validated requests are captured or answered successfully.
  */
 export function createSemanticPrivateStorageHarness(options: {
+  systemRoot: string;
   pathInspector?: SemanticPrivateStoragePathInspector;
-} = {}): SemanticPrivateStorageHarness {
+}): SemanticPrivateStorageHarness {
   const captured: SemanticPrivateStorageRequest[] = [];
   const inspector = options.pathInspector ?? defaultPathInspector;
+  const trustedSystemRoot = localWindowsPath(options.systemRoot);
   const runner: PrivateStorageRunner = (invocation) => {
     const request = parseRequest(invocation.input);
-    validateInvocationContract(invocation, request.operation);
+    validateInvocationContract(invocation, request.operation, trustedSystemRoot);
     const metadata = validateRequest(request, inspector);
     captured.push(metadata);
     const reason = request.operation === 'assure-private-paths'

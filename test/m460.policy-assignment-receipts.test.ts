@@ -33,6 +33,7 @@ import {
 } from '../src/core/util/private-storage.js';
 import {
   createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
 } from './helpers/semantic-private-storage.js';
 
 const GENERATION = 'a'.repeat(64);
@@ -40,7 +41,9 @@ const OBJECTIVE = 'b'.repeat(64);
 const CODEX_ACTION = '1'.repeat(64);
 const LOCAL_ACTION = '2'.repeat(64);
 let repoPath = '';
-const semanticPrivateStorage = createSemanticPrivateStorageHarness();
+const semanticPrivateStorage = createSemanticPrivateStorageHarness({
+  systemRoot: trustedWindowsSystemRootForTest(),
+});
 
 function assignment(overrides: Partial<PolicyAssignmentReceiptInput> = {}): PolicyAssignmentReceiptInput {
   return {

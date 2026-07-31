@@ -45,9 +45,11 @@ const privateStorageHarness = vi.hoisted(() => ({
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  const { createSemanticPrivateStorageHarness } =
+  const { createSemanticPrivateStorageHarness, trustedWindowsSystemRootForTest } =
     await import('./helpers/semantic-private-storage.js');
-  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness();
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
   return {
     ...actual,
     assurePrivateStoragePath: (
