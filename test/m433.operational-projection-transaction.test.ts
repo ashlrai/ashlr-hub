@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const privateStorageHarness = vi.hoisted(() => ({
   calls: [] as Array<{ kind: string; mode: string }>,
+  refuseDirectory: false,
 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -16,6 +17,9 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     ) => {
       if (process.platform === 'win32') {
         privateStorageHarness.calls.push({ kind: args[1], mode: args[2] });
+        if (privateStorageHarness.refuseDirectory && args[1] === 'directory') {
+          return { ok: false, reason: 'unsafe-test-directory' };
+        }
         return {
           ok: true,
           reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
@@ -74,12 +78,12 @@ function prepare() {
 beforeEach(() => {
   lock = null;
   privateStorageHarness.calls.length = 0;
+  privateStorageHarness.refuseDirectory = false;
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m433-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  expect(fs.readdirSync(home)).toEqual([]);
   loadOrCreateKey();
-  fs.mkdirSync(operationalProposalProjectionDir(), { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') fs.chmodSync(operationalProposalProjectionDir(), 0o700);
 });
 
 afterEach(() => {
@@ -100,13 +104,84 @@ describe('M433 operational projection transaction journal', () => {
     expect(fs.existsSync(operationalProjectionTransactionPath())).toBe(false);
   });
 
-  it.runIf(process.platform !== 'win32')('reports an unsafe existing directory instead of a clean miss', () => {
+  it.runIf(process.platform !== 'win32')('refuses an unsafe existing projection directory', () => {
+    fs.mkdirSync(operationalProposalProjectionDir(), { mode: 0o755 });
     fs.chmodSync(operationalProposalProjectionDir(), 0o755);
     expect(readOperationalProjectionTransaction()).toEqual({
       state: 'degraded',
       reason: 'transaction-directory-unsafe',
       transaction: null,
     });
+    expect(prepare()).toEqual({
+      state: 'degraded',
+      reason: 'transaction-directory-unsafe',
+      transaction: null,
+    });
+    expect(fs.existsSync(operationalProjectionTransactionPath())).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses an unsafe private root before creating transaction storage', () => {
+    const storeLock = acquire();
+    const root = path.join(home, '.ashlr');
+    fs.chmodSync(root, 0o755);
+    expect(prepareOperationalProjectionTransactionJournalOnly({
+      proposalId: 'proposal-433', before: BEFORE, after: AFTER, storeLock, now: NOW,
+    })).toEqual({
+      state: 'degraded',
+      reason: 'transaction-directory-unsafe',
+      transaction: null,
+    });
+    expect(fs.existsSync(operationalProposalProjectionDir())).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('invalidates the writer lock when the private root becomes a symlink', () => {
+    const storeLock = acquire();
+    const root = path.join(home, '.ashlr');
+    const redirected = path.join(home, 'redirected-ashlr');
+    fs.renameSync(root, redirected);
+    fs.symlinkSync(redirected, root, 'dir');
+    expect(prepareOperationalProjectionTransactionJournalOnly({
+      proposalId: 'proposal-433', before: BEFORE, after: AFTER, storeLock, now: NOW,
+    })).toEqual({
+      state: 'degraded',
+      reason: 'transaction-input-invalid',
+      transaction: null,
+    });
+    expect(fs.existsSync(path.join(redirected, 'proposal-projection'))).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked projection parent', () => {
+    const redirected = path.join(home, 'redirected-projection');
+    fs.mkdirSync(redirected, { mode: 0o700 });
+    fs.symlinkSync(redirected, operationalProposalProjectionDir(), 'dir');
+    expect(prepare()).toEqual({
+      state: 'degraded',
+      reason: 'transaction-directory-unsafe',
+      transaction: null,
+    });
+    expect(fs.existsSync(path.join(redirected, 'active-transaction.json'))).toBe(false);
+  });
+
+  it('creates and assures the private projection directory on first prepare', () => {
+    expect(fs.existsSync(operationalProposalProjectionDir())).toBe(false);
+    expect(prepare()).toMatchObject({
+      state: 'healthy', transaction: { phase: 'prepared', proposalId: 'proposal-433' },
+    });
+    const stat = fs.lstatSync(operationalProposalProjectionDir());
+    expect(stat.isDirectory()).toBe(true);
+    expect(stat.isSymbolicLink()).toBe(false);
+    if (process.platform !== 'win32') expect(stat.mode & 0o777).toBe(0o700);
+  });
+
+  it.runIf(process.platform === 'win32')('refuses an existing parent that fails private ACL assurance', () => {
+    fs.mkdirSync(operationalProposalProjectionDir(), { mode: 0o700 });
+    privateStorageHarness.refuseDirectory = true;
+    expect(prepare()).toEqual({
+      state: 'degraded',
+      reason: 'transaction-directory-unsafe',
+      transaction: null,
+    });
+    expect(fs.existsSync(operationalProjectionTransactionPath())).toBe(false);
   });
 
   it('persists a private authenticated prepare and monotonic phases', () => {
@@ -300,6 +375,7 @@ describe('M433 operational projection transaction journal', () => {
     expect(prepare().state).toBe('healthy');
     expect(readOperationalProjectionTransaction().state).toBe('healthy');
     expect(privateStorageHarness.calls).toEqual(expect.arrayContaining([
+      { kind: 'directory', mode: 'secure-created' },
       { kind: 'directory', mode: 'inspect-existing' },
       { kind: 'file', mode: 'secure-created' },
       { kind: 'file', mode: 'inspect-owned' },
