@@ -223,6 +223,9 @@ function waitForMessage<T extends ChildMessage['type']>(
 }
 
 async function startHolder(): Promise<ChildProcess> {
+  const authorityRoot = join(fx.ashlrDir, 'authority');
+  const rootMode = existsSync(fx.ashlrDir) ? 'inspect-owned' : 'secure-created';
+  const authorityMode = existsSync(authorityRoot) ? 'inspect-owned' : 'secure-created';
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '--eval', CHILD_SOURCE],
@@ -247,17 +250,22 @@ async function startHolder(): Promise<ChildProcess> {
     owns: true,
   });
   if (process.platform === 'win32') {
-    const authorityRoot = join(fx.home, '.ashlr', 'authority');
-    expect(ready.semanticRequests.some((request) =>
-      request.operation === 'assure-private-path' &&
-      request.anchorPath === fx.home &&
-      request.kind === 'file' &&
-      request.mode === 'secure-created' &&
-      request.paths.length === 1 &&
-      /^outward-mutation\.lock\.\d+\.[0-9a-f-]+\.candidate$/iu.test(
-        request.paths[0]!.slice(authorityRoot.length + 1),
-      ),
-    )).toBe(true);
+    expect(ready.semanticRequests).toEqual(expect.arrayContaining([
+      {
+        operation: 'assure-private-path',
+        anchorPath: fx.home,
+        paths: [fx.ashlrDir],
+        kind: 'directory',
+        mode: rootMode,
+      },
+      {
+        operation: 'assure-private-path',
+        anchorPath: fx.ashlrDir,
+        paths: [authorityRoot],
+        kind: 'directory',
+        mode: authorityMode,
+      },
+    ]));
   } else {
     expect(ready.semanticRequests).toEqual([]);
   }
