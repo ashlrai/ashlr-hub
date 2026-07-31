@@ -2,7 +2,11 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  SemanticPrivateStorageHarness,
+  SemanticPrivateStorageRequest,
+} from './helpers/semantic-private-storage.js';
 
 import { makeFixture, type DisposableRepo, type H1Fixture } from './helpers/h1-fixture.js';
 import {
@@ -13,14 +17,64 @@ import {
   sandboxesDir,
 } from '../src/core/sandbox/worktree.js';
 
-const CHILD_TIMEOUT_MS = 8_000;
+const privateStorageHarness = vi.hoisted(() => ({
+  harness: undefined as SemanticPrivateStorageHarness | undefined,
+}));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  const { createSemanticPrivateStorageHarness, trustedWindowsSystemRootForTest } =
+    await import('./helpers/semantic-private-storage.js');
+  privateStorageHarness.harness ??= createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => {
+      const options = args[3];
+      if (process.platform !== 'win32' || options?.runner !== undefined) {
+        return actual.assurePrivateStoragePath(...args);
+      }
+      return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
+        ...options,
+        runner: privateStorageHarness.harness!.runner,
+      });
+    },
+  };
+});
+
+const CHILD_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 8_000;
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
+const privateStorageModuleUrl = new URL('../src/core/util/private-storage.ts', import.meta.url).href;
+const semanticPrivateStorageHelperUrl = new URL(
+  './helpers/semantic-private-storage.ts',
+  import.meta.url,
+).href;
 const CHILD_SOURCE = String.raw`
   import {
     acquireOutwardMutationFence,
     ownsOutwardMutationFence,
     releaseOutwardMutationFence,
   } from ${JSON.stringify(fenceModuleUrl)};
+  import {
+    PRIVATE_STORAGE_TEST_CONTROL,
+    _setPrivateStorageTestControlForTest,
+  } from ${JSON.stringify(privateStorageModuleUrl)};
+  import {
+    createSemanticPrivateStorageHarness,
+    trustedWindowsSystemRootForTest,
+  } from ${JSON.stringify(semanticPrivateStorageHelperUrl)};
+
+  const semanticStorage = createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
+  if (process.platform === 'win32') {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticStorage.runner,
+    });
+  }
 
   const send = (message) => new Promise((resolve, reject) => {
     if (!process.send) return reject(new Error('IPC unavailable'));
@@ -32,6 +86,7 @@ const CHILD_SOURCE = String.raw`
     type: 'ready',
     acquired: fence !== null,
     owns: ownsOutwardMutationFence(fence),
+    semanticRequests: semanticStorage.requests,
   });
 
   if (!fence) {
@@ -49,7 +104,12 @@ const CHILD_SOURCE = String.raw`
 `;
 
 type ChildMessage =
-  | { type: 'ready'; acquired: boolean; owns: boolean }
+  | {
+      type: 'ready';
+      acquired: boolean;
+      owns: boolean;
+      semanticRequests: readonly SemanticPrivateStorageRequest[];
+    }
   | { type: 'released' };
 
 interface SourceSnapshot {
@@ -163,6 +223,9 @@ function waitForMessage<T extends ChildMessage['type']>(
 }
 
 async function startHolder(): Promise<ChildProcess> {
+  const authorityRoot = join(fx.ashlrDir, 'authority');
+  const rootMode = existsSync(fx.ashlrDir) ? 'inspect-owned' : 'secure-created';
+  const authorityMode = existsSync(authorityRoot) ? 'inspect-owned' : 'secure-created';
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '--eval', CHILD_SOURCE],
@@ -180,11 +243,32 @@ async function startHolder(): Promise<ChildProcess> {
   children.add(child);
   child.once('exit', () => children.delete(child));
 
-  await expect(waitForMessage(child, 'ready')).resolves.toEqual({
+  const ready = await waitForMessage(child, 'ready');
+  expect(ready).toMatchObject({
     type: 'ready',
     acquired: true,
     owns: true,
   });
+  if (process.platform === 'win32') {
+    expect(ready.semanticRequests).toEqual([
+      {
+        operation: 'assure-private-path',
+        anchorPath: fx.home,
+        paths: [fx.ashlrDir],
+        kind: 'directory',
+        mode: rootMode,
+      },
+      {
+        operation: 'assure-private-path',
+        anchorPath: fx.ashlrDir,
+        paths: [authorityRoot],
+        kind: 'directory',
+        mode: authorityMode,
+      },
+    ]);
+  } else {
+    expect(ready.semanticRequests).toEqual([]);
+  }
   return child;
 }
 
@@ -196,6 +280,7 @@ async function releaseHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
+  privateStorageHarness.harness?.reset();
   fx = makeFixture();
 });
 
@@ -210,6 +295,7 @@ describe('M408 createSandbox outward mutation fence', () => {
   it('refuses without branch, worktree, or metadata changes while another process owns the fence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
+    privateStorageHarness.harness?.reset();
     const holder = await startHolder();
 
     const sourceBefore = sourceSnapshot(repo);
@@ -235,5 +321,5 @@ describe('M408 createSandbox outward mutation fence', () => {
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  }, 15_000);
+  }, process.platform === 'win32' ? 120_000 : 15_000);
 });
