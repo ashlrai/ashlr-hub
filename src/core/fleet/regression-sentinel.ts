@@ -46,7 +46,8 @@ import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from '../run/verify-commands.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
-import { createProposal } from '../inbox/store.js';
+import { createProposal, loadProposal } from '../inbox/store.js';
+import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import {
@@ -491,6 +492,68 @@ function proposalIdFromCommit(git: GitRunner, sha: string): string | undefined {
   return m?.[1];
 }
 
+type RevertCapturePlan =
+  | { args: string[] }
+  | { reason: string };
+
+/**
+ * Select the only safe revert invocation for the isolated culprit.
+ *
+ * Ordinary commits retain the historical `git revert --no-commit <sha>` path.
+ * A two-parent commit needs mainline selection, which is authority-sensitive:
+ * only an authenticated GitHub-host merge bound to this proposal, repository,
+ * merge OID, and second parent may select parent 1. Unknown or octopus topology
+ * is refused instead of guessing which history to preserve.
+ */
+function planRevertCapture(
+  git: GitRunner,
+  repoDir: string,
+  culprit: string,
+  culpritProposalId: string | undefined,
+): RevertCapturePlan {
+  const ancestry = git(['rev-list', '--parents', '-n', '1', culprit]);
+  if (!ancestry) {
+    return { reason: 'cannot prove culprit parent topology; rollback proposal not created' };
+  }
+  const rows = ancestry.split('\n').map((row) => row.trim()).filter(Boolean);
+  if (rows.length !== 1) {
+    return { reason: 'ambiguous culprit parent topology; rollback proposal not created' };
+  }
+  const [observedCulprit, ...parents] = rows[0]!.split(/\s+/);
+  if (!observedCulprit || observedCulprit.toLowerCase() !== culprit.toLowerCase()) {
+    return { reason: 'culprit parent topology identity mismatch; rollback proposal not created' };
+  }
+
+  if (parents.length <= 1) {
+    return { args: ['revert', '--no-commit', culprit] };
+  }
+  if (parents.length !== 2) {
+    return {
+      reason: `ambiguous culprit parent topology (${parents.length} parents); rollback proposal not created`,
+    };
+  }
+  if (!culpritProposalId) {
+    return { reason: 'two-parent culprit lacks proposal provenance; rollback proposal not created' };
+  }
+
+  const culpritProposal = loadProposal(culpritProposalId);
+  const realizedMerge = authenticatedRealizedMergeOf(culpritProposal);
+  const proposalRepo = culpritProposal?.repo;
+  if (
+    typeof proposalRepo !== 'string' ||
+    resolve(proposalRepo) !== resolve(repoDir) ||
+    realizedMerge?.source !== 'github-host' ||
+    realizedMerge.mergeCommitOid.toLowerCase() !== culprit.toLowerCase() ||
+    realizedMerge.expectedHeadOid.toLowerCase() !== parents[1]!.toLowerCase()
+  ) {
+    return {
+      reason: 'two-parent culprit lacks authenticated protected-merge provenance; rollback proposal not created',
+    };
+  }
+
+  return { args: ['revert', '--no-commit', '-m', '1', culprit] };
+}
+
 /**
  * Isolate the culprit auto-merge commit among recent fleet merges, then build a
  * SIGNED revert PROPOSAL for the existing approval flow. NEVER applies/merges.
@@ -509,7 +572,9 @@ function proposalIdFromCommit(git: GitRunner, sha: string): string | undefined {
  *     the repo is left exactly as found.
  *
  * Revert-proposal shape (proposal-only):
- *   kind:'patch', origin:'swarm', diff = `git revert --no-commit <culprit>`
+ *   kind:'patch', origin:'swarm', diff captured from an ordinary
+ *   `git revert --no-commit <culprit>`, or `-m 1` only for an authenticated
+ *   exact two-parent protected merge.
  *   captured as a unified diff, with diffHash + provenanceSig stamped via
  *   provenance.ts so a later one-tap confirmation can verify it. The proposal is
  *   created 'pending' via createProposal — it is NEVER auto-applied here.
@@ -637,6 +702,9 @@ export async function bisectAndRevert(
 
     const culpritProposalId = proposalIdFromCommit(git, culprit);
 
+    const revertPlan = planRevertCapture(git, repoDir, culprit, culpritProposalId);
+    if ('reason' in revertPlan) return { reason: revertPlan.reason };
+
     const preRevertAuthorityFailure = forwardAuthorityFailure();
     if (preRevertAuthorityFailure) return { reason: preRevertAuthorityFailure };
 
@@ -645,7 +713,7 @@ export async function bisectAndRevert(
     let revertDiff = '';
     restoreSha = originalHead;
     revertStarted = true;
-    const reverted = git(['revert', '--no-commit', culprit]) !== null;
+    const reverted = git(revertPlan.args) !== null;
     if (reverted) {
       revertDiff = git(['diff', '--cached']) ?? '';
     }
@@ -658,10 +726,9 @@ export async function bisectAndRevert(
     restoreSha = null;
     const postRevertAuthorityFailure = forwardAuthorityFailure();
     if (postRevertAuthorityFailure) return { reason: postRevertAuthorityFailure };
-    if (!revertDiff) {
-      // Fall back to a descriptive diff-less proposal pointing at the culprit;
-      // the approval flow / human can still act. Synthesize a minimal marker.
-      revertDiff = `# revert ${culprit}\n# (diff capture unavailable; apply: git revert ${culprit})\n`;
+    if (!reverted) return { reason: 'git revert failed; rollback proposal not created' };
+    if (!revertDiff.trim()) {
+      return { reason: 'git revert produced no staged diff; rollback proposal not created' };
     }
 
     // Sign the revert proposal via provenance.ts so a later one-tap Telegram
