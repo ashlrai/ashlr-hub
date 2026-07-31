@@ -6942,7 +6942,7 @@ function incrementOutcome(
   }
 }
 
-function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boolean {
+export function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boolean {
   if (String(event.outcome).trim().toLowerCase() === 'cancelled') return true;
   const classification = classifyProductionAttemptForLearningWithLabel({
     outcome: event.outcome,

@@ -515,6 +515,50 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const proposalFunnel = s.proposalFunnel;
+  lines.push('Proposal funnel:');
+  if (!proposalFunnel) {
+    lines.push('  unavailable (legacy snapshot)');
+  } else {
+    lines.push(
+      `  source:    ${proposalFunnel.source.sourceState}` +
+        `${proposalFunnel.source.complete ? '' : ' (partial)'}`,
+    );
+    lines.push(
+      `  sample:    ${proposalFunnel.sample.includedAttempts} canonical attempt(s) from ` +
+        `${proposalFunnel.sample.observedEvents} event(s); ` +
+        `duplicates ${proposalFunnel.sample.duplicateEvents ?? 'unknown'}, ` +
+        `cancelled ${proposalFunnel.sample.cancelledEvents}, ` +
+        `conflicts ${proposalFunnel.sample.conflictingAttemptIdentities ?? 'unknown'}`,
+    );
+    const metrics = proposalFunnel.metrics;
+    const currentMetricSchema = proposalFunnel.schemaVersion === 2 &&
+      metrics?.completeFiledProposals !== undefined &&
+      metrics.observedProposalReferences !== undefined;
+    if (proposalFunnel.state === 'withheld' || !metrics || !currentMetricSchema) {
+      const reason = proposalFunnel.state === 'withheld'
+        ? proposalFunnel.withheldReason ?? 'source-unavailable'
+        : 'legacy-metric-schema';
+      lines.push(`  output:    withheld (${reason})`);
+    } else {
+      lines.push(
+        `  output:    complete filed ${metrics.completeFiledProposals.count}/${metrics.attempts} ` +
+          `(${formatPercent(metrics.completeFiledProposals.rate)}), proposal references ` +
+          `${metrics.observedProposalReferences.count}/${metrics.attempts} ` +
+          `(${formatPercent(metrics.observedProposalReferences.rate)})`,
+      );
+      lines.push(
+        `  failures:  capture ${metrics.captureErrors.count}, gate ${metrics.gateBlocked.count}, ` +
+          `empty ${metrics.emptyAttempts.count}, policy ${metrics.policySuppressions.count}, ` +
+          `other ${metrics.otherAttempts.count}`,
+      );
+    }
+    lines.push(
+      `  diagnosis: ${proposalFunnel.primaryBlocker} · ${proposalFunnel.primaryAction}`,
+    );
+  }
+  lines.push('');
+
   // Global workspace
   const workspace = s.workspace;
   lines.push('Global workspace:');

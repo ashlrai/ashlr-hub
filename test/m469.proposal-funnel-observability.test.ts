@@ -64,6 +64,7 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
+      schemaVersion: 2,
       state: 'available',
       sample: {
         requestedWindowHours: 24,
@@ -71,11 +72,13 @@ describe('buildProposalFunnelObservability', () => {
         includedAttempts: 6,
         excludedLifecycleEvents: 1,
         cancelledEvents: 1,
+        duplicateEvents: 0,
+        conflictingAttemptIdentities: 0,
       },
       metrics: {
         attempts: 6,
-        mergeGradeProposals: { count: 1, rate: 1 / 6 },
-        anyDurableArtifact: { count: 2, rate: 2 / 6 },
+        completeFiledProposals: { count: 1, rate: 1 / 6 },
+        observedProposalReferences: { count: 2, rate: 2 / 6 },
         captureErrors: { count: 1, rate: 1 / 6 },
         policySuppressions: { count: 1, rate: 1 / 6 },
         gateBlocked: { count: 1, rate: 1 / 6 },
@@ -147,10 +150,75 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
-      state: 'available',
-      metrics: { attempts: 0 },
+      state: 'withheld',
+      withheldReason: 'insufficient-sample',
+      sample: { includedAttempts: 0, duplicateEvents: 0, conflictingAttemptIdentities: 0 },
       primaryBlocker: 'insufficient-sample',
       primaryAction: 'collect-attempts',
     });
+    expect(result.metrics).toBeUndefined();
+  });
+
+  it('deduplicates exact identities after canonical semantic cancellation accounting', () => {
+    const filed = event('1', 'proposal-created', {
+      runId: 'run-filed',
+      trajectoryId: 'trajectory-filed',
+      proposalId: 'proposal-filed',
+    });
+    const cancelled = event('2', 'cancelled', {
+      runId: 'run-cancelled',
+      reason: 'cancelled by owner',
+    });
+    const legacyCancelled = event('2', 'engine-failed', {
+      runId: 'run-cancelled',
+      reason: 'selection cancelled after daemon ownership changed',
+      runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
+    });
+
+    const result = buildProposalFunnelObservability({
+      events: [filed, { ...filed }, cancelled, legacyCancelled],
+      sourceQuality: healthySource,
+      windowMs: 24 * 60 * 60 * 1000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'available',
+      sample: {
+        observedEvents: 4,
+        includedAttempts: 1,
+        cancelledEvents: 1,
+        duplicateEvents: 2,
+        conflictingAttemptIdentities: 0,
+      },
+      metrics: {
+        attempts: 1,
+        completeFiledProposals: { count: 1, rate: 1 },
+        observedProposalReferences: { count: 1, rate: 1 },
+      },
+    });
+  });
+
+  it('withholds all rates when rows sharing an attempt identity conflict', () => {
+    const result = buildProposalFunnelObservability({
+      events: [
+        event('1', 'empty-diff', { runId: 'run-conflict' }),
+        event('2', 'proposal-created', { runId: 'run-conflict', proposalId: 'proposal-conflict' }),
+      ],
+      sourceQuality: healthySource,
+      windowMs: 24 * 60 * 60 * 1000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-conflict',
+      sample: { conflictingAttemptIdentities: 1 },
+      primaryBlocker: 'identity-conflict',
+      primaryAction: 'inspect-attempt-identity-conflicts',
+    });
+    expect(result.metrics).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('run-conflict');
+    expect(JSON.stringify(result)).not.toContain('proposal-conflict');
   });
 });

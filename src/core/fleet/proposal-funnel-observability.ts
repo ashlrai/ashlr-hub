@@ -3,11 +3,14 @@ import type {
   DispatchProductionReadStopReason,
   DispatchProductionSourceQuality,
 } from './dispatch-production-ledger.js';
+import { isCancelledDispatchProductionEvent } from './dispatch-production-ledger.js';
 
 export type ProposalFunnelWithheldReason =
   | 'source-missing'
   | 'source-degraded'
-  | 'sample-limit-exceeded';
+  | 'sample-limit-exceeded'
+  | 'attempt-identity-conflict'
+  | 'insufficient-sample';
 
 export type ProposalFunnelBlocker =
   | 'none'
@@ -18,7 +21,8 @@ export type ProposalFunnelBlocker =
   | 'policy-suppression'
   | 'other-failures'
   | 'source-unavailable'
-  | 'sample-incomplete';
+  | 'sample-incomplete'
+  | 'identity-conflict';
 
 export type ProposalFunnelAction =
   | 'keep-routing'
@@ -29,7 +33,8 @@ export type ProposalFunnelAction =
   | 'review-proposal-policy'
   | 'inspect-other-failures'
   | 'repair-telemetry-source'
-  | 'increase-or-narrow-sample-window';
+  | 'increase-or-narrow-sample-window'
+  | 'inspect-attempt-identity-conflicts';
 
 export interface ProposalFunnelRate {
   count: number;
@@ -38,8 +43,8 @@ export interface ProposalFunnelRate {
 
 export interface ProposalFunnelMetrics {
   attempts: number;
-  mergeGradeProposals: ProposalFunnelRate;
-  anyDurableArtifact: ProposalFunnelRate;
+  completeFiledProposals: ProposalFunnelRate;
+  observedProposalReferences: ProposalFunnelRate;
   captureErrors: ProposalFunnelRate;
   policySuppressions: ProposalFunnelRate;
   gateBlocked: ProposalFunnelRate;
@@ -48,7 +53,7 @@ export interface ProposalFunnelMetrics {
 }
 
 export interface ProposalFunnelObservability {
-  schemaVersion: 1;
+  schemaVersion: 2;
   state: 'available' | 'withheld';
   source: {
     sourceState: DispatchProductionSourceQuality['sourceState'];
@@ -63,6 +68,8 @@ export interface ProposalFunnelObservability {
     includedAttempts: number;
     excludedLifecycleEvents: number;
     cancelledEvents: number;
+    duplicateEvents: number;
+    conflictingAttemptIdentities: number;
     observedFrom?: string;
     observedThrough?: string;
   };
@@ -90,6 +97,74 @@ function rate(count: number, attempts: number): ProposalFunnelRate {
 
 function isLifecycleBookkeeping(event: DispatchProductionEvent): boolean {
   return event.basis === 'repair-lifecycle-candidate' || event.basis === 'repair-lifecycle-outcome';
+}
+
+function nonEmptyIdentity(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function attemptIdentity(event: DispatchProductionEvent): string {
+  const runId = nonEmptyIdentity(event.runId);
+  if (runId) return JSON.stringify(['run', event.machineId ?? '', runId]);
+  const trajectoryId = nonEmptyIdentity(event.trajectoryId);
+  if (trajectoryId) return JSON.stringify(['trajectory', event.machineId ?? '', trajectoryId]);
+  return JSON.stringify([
+    'legacy',
+    event.machineId ?? '',
+    event.ts,
+    event.itemId,
+    event.repo,
+    event.basis,
+  ]);
+}
+
+function attemptAccountingSignature(event: DispatchProductionEvent): string {
+  const cancelled = isCancelledDispatchProductionEvent(event);
+  return JSON.stringify([
+    event.machineId ?? '',
+    event.itemId,
+    event.repo,
+    event.source,
+    event.backend,
+    event.tier,
+    event.model ?? null,
+    event.basis,
+    event.runId ?? null,
+    event.trajectoryId ?? null,
+    cancelled ? 'cancelled' : event.outcome,
+    cancelled ? false : event.proposalCreated,
+    event.proposalId ?? null,
+    event.repairGenerationId ?? null,
+    event.repairAttemptOrdinal ?? null,
+  ]);
+}
+
+function canonicalAttempts(events: readonly DispatchProductionEvent[]): {
+  events: DispatchProductionEvent[];
+  duplicateEvents: number;
+  conflictingAttemptIdentities: number;
+} {
+  const identities = new Map<string, { event: DispatchProductionEvent; signature: string }>();
+  const conflicts = new Set<string>();
+  let duplicateEvents = 0;
+  for (const event of events) {
+    const identity = attemptIdentity(event);
+    const signature = attemptAccountingSignature(event);
+    const existing = identities.get(identity);
+    if (!existing) {
+      identities.set(identity, { event, signature });
+    } else if (existing.signature === signature) {
+      duplicateEvents++;
+    } else {
+      conflicts.add(identity);
+    }
+  }
+  return {
+    events: [...identities.values()].map(({ event }) => event),
+    duplicateEvents,
+    conflictingAttemptIdentities: conflicts.size,
+  };
 }
 
 function observationBounds(events: readonly DispatchProductionEvent[]): {
@@ -137,12 +212,9 @@ export function buildProposalFunnelObservability(
   const eventLimit = boundedPositiveInteger(input.eventLimit, 1_200);
   const sampledEvents = input.events.slice(0, eventLimit);
   const excludedLifecycleEvents = sampledEvents.filter(isLifecycleBookkeeping).length;
-  const cancelledEvents = sampledEvents.filter((event) =>
-    !isLifecycleBookkeeping(event) && event.outcome === 'cancelled'
-  ).length;
-  const attempts = sampledEvents.filter((event) =>
-    !isLifecycleBookkeeping(event) && event.outcome !== 'cancelled'
-  );
+  const canonical = canonicalAttempts(sampledEvents.filter((event) => !isLifecycleBookkeeping(event)));
+  const cancelledEvents = canonical.events.filter(isCancelledDispatchProductionEvent).length;
+  const attempts = canonical.events.filter((event) => !isCancelledDispatchProductionEvent(event));
   const sample = {
     requestedWindowMs: windowMs,
     requestedWindowHours: windowMs / (60 * 60 * 1000),
@@ -151,6 +223,8 @@ export function buildProposalFunnelObservability(
     includedAttempts: attempts.length,
     excludedLifecycleEvents,
     cancelledEvents,
+    duplicateEvents: canonical.duplicateEvents,
+    conflictingAttemptIdentities: canonical.conflictingAttemptIdentities,
     ...observationBounds(sampledEvents),
   };
   const source = {
@@ -161,7 +235,7 @@ export function buildProposalFunnelObservability(
 
   if (input.events.length > eventLimit) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       state: 'withheld',
       source,
       sample,
@@ -172,7 +246,7 @@ export function buildProposalFunnelObservability(
   }
   if (input.sourceQuality.sourceState !== 'healthy' || !input.sourceQuality.complete) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       state: 'withheld',
       source,
       sample,
@@ -184,20 +258,44 @@ export function buildProposalFunnelObservability(
     };
   }
 
-  let mergeGradeProposals = 0;
-  let anyDurableArtifact = 0;
+  if (canonical.conflictingAttemptIdentities > 0) {
+    return {
+      schemaVersion: 2,
+      state: 'withheld',
+      source,
+      sample,
+      withheldReason: 'attempt-identity-conflict',
+      primaryBlocker: 'identity-conflict',
+      primaryAction: 'inspect-attempt-identity-conflicts',
+    };
+  }
+
+  if (attempts.length === 0) {
+    return {
+      schemaVersion: 2,
+      state: 'withheld',
+      source,
+      sample,
+      withheldReason: 'insufficient-sample',
+      primaryBlocker: 'insufficient-sample',
+      primaryAction: 'collect-attempts',
+    };
+  }
+
+  let completeFiledProposals = 0;
+  let observedProposalReferences = 0;
   let captureErrors = 0;
   let policySuppressions = 0;
   let gateBlocked = 0;
   let emptyAttempts = 0;
   let otherAttempts = 0;
   for (const event of attempts) {
-    const mergeGrade = event.outcome === 'proposal-created' && event.proposalCreated === true;
-    if (mergeGrade) mergeGradeProposals++;
-    if (mergeGrade || (typeof event.proposalId === 'string' && event.proposalId.length > 0)) {
-      anyDurableArtifact++;
+    const completeFiled = event.outcome === 'proposal-created' && event.proposalCreated === true;
+    if (completeFiled) completeFiledProposals++;
+    if (typeof event.proposalId === 'string' && event.proposalId.length > 0) {
+      observedProposalReferences++;
     }
-    if (mergeGrade) continue;
+    if (completeFiled) continue;
     if (event.outcome === 'proposal-capture-error') captureErrors++;
     else if (event.outcome === 'proposal-disabled') policySuppressions++;
     else if (event.outcome === 'gate-blocked') gateBlocked++;
@@ -207,8 +305,8 @@ export function buildProposalFunnelObservability(
 
   const metrics: ProposalFunnelMetrics = {
     attempts: attempts.length,
-    mergeGradeProposals: rate(mergeGradeProposals, attempts.length),
-    anyDurableArtifact: rate(anyDurableArtifact, attempts.length),
+    completeFiledProposals: rate(completeFiledProposals, attempts.length),
+    observedProposalReferences: rate(observedProposalReferences, attempts.length),
     captureErrors: rate(captureErrors, attempts.length),
     policySuppressions: rate(policySuppressions, attempts.length),
     gateBlocked: rate(gateBlocked, attempts.length),
@@ -216,7 +314,7 @@ export function buildProposalFunnelObservability(
     otherAttempts: rate(otherAttempts, attempts.length),
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     state: 'available',
     source,
     sample,

@@ -26,6 +26,7 @@ import {
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
+import { buildProposalFunnelObservability } from '../src/core/fleet/proposal-funnel-observability.js';
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
@@ -663,6 +664,36 @@ function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): 
 // ---------------------------------------------------------------------------
 
 describe('buildFleetStatus — read-only aggregation (M49)', () => {
+  it('formats a healthy zero-attempt proposal funnel as withheld without rates', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 0,
+        rowsScanned: 0,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      windowMs: 24 * 60 * 60 * 1000,
+      eventLimit: 1_200,
+    });
+
+    const formatted = formatFleetStatus({ ...status, proposalFunnel });
+
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('sample:    0 canonical attempt(s) from 0 event(s)');
+    expect(formatted).toContain('output:    withheld (insufficient-sample)');
+    expect(formatted).toContain('diagnosis: insufficient-sample · collect-attempts');
+    expect(formatted).not.toContain('complete filed 0/0');
+  });
+
   let tmpHome: string;
   let prevHome: string | undefined;
   let prevUserProfile: string | undefined;
@@ -3071,8 +3102,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
       metrics: {
         attempts: 3,
-        mergeGradeProposals: { count: 1, rate: 1 / 3 },
-        anyDurableArtifact: { count: 1, rate: 1 / 3 },
+        completeFiledProposals: { count: 1, rate: 1 / 3 },
+        observedProposalReferences: { count: 1, rate: 1 / 3 },
         gateBlocked: { count: 1, rate: 1 / 3 },
         emptyAttempts: { count: 1, rate: 1 / 3 },
       },
@@ -3124,6 +3155,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('complete filed 1/3 (33%), proposal references 1/3 (33%)');
+    expect(formatted).toContain('diagnosis: gate-blocking · inspect-verification-gates');
   });
 
   it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
@@ -3298,6 +3332,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('source:    degraded (partial)');
     expect(formatted).toContain('withheld because the bounded dispatch source is incomplete');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('output:    withheld (source-degraded)');
     expect(formatted).toContain('withheld (dispatch denominator degraded; 4 invalid row(s))');
     expect(formatted).not.toContain('proposals 0/2');
     expect(JSON.stringify(s)).not.toContain('"diagnosticProposalRate":0');
