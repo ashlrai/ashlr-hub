@@ -27,6 +27,13 @@ import {
   type PolicyAssignmentReceiptInput,
 } from '../src/core/learning/policy-assignment-receipts.js';
 import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+} from '../src/core/util/private-storage.js';
+import {
+  semanticPrivateStorageRunner,
+} from './helpers/semantic-private-storage.js';
 
 const GENERATION = 'a'.repeat(64);
 const OBJECTIVE = 'b'.repeat(64);
@@ -81,17 +88,32 @@ function writePrivateCrashFile(path: string, value: string, anchorPath: string):
 
 describe('M460 policy assignment receipts', () => {
   let home: string;
+  let semanticPrivateStorageInvocations = 0;
 
   beforeEach(() => {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
     home = mkdtempSync(join(tmpdir(), 'ashlr-policy-assignment-'));
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);
     repoPath = join(home, 'repo');
     mkdirSync(repoPath);
+    semanticPrivateStorageInvocations = 0;
+    if (process.platform === 'win32') {
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+        runner: semanticPrivateStorageRunner,
+        observeInvocation: () => {
+          semanticPrivateStorageInvocations += 1;
+        },
+      });
+    }
     loadOrCreateKey();
+    if (process.platform === 'win32') {
+      expect(semanticPrivateStorageInvocations).toBeGreaterThan(0);
+    }
   });
 
   afterEach(() => {
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
