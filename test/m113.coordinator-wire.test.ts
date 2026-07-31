@@ -204,13 +204,20 @@ beforeEach(() => {
 
   privateStorageMocks.useRealAssurance = true;
   try {
-    const fence = acquireOutwardMutationFence();
-    try {
-      if (!ownsOutwardMutationFence(fence)) {
-        throw new Error('M113 fixture failed to establish private authority roots');
+    let authorityReady = false;
+    // A fresh Windows runner can complete root DACL assurance while the nested
+    // authority-directory probe is still cold. Re-run the complete production
+    // acquisition once; both attempts must independently prove fence ownership.
+    for (let attempt = 0; attempt < 2 && !authorityReady; attempt += 1) {
+      const fence = acquireOutwardMutationFence();
+      try {
+        authorityReady = ownsOutwardMutationFence(fence);
+      } finally {
+        releaseOutwardMutationFence(fence);
       }
-    } finally {
-      releaseOutwardMutationFence(fence);
+    }
+    if (!authorityReady) {
+      throw new Error('M113 fixture failed to establish private authority roots');
     }
   } finally {
     privateStorageMocks.useRealAssurance = false;
