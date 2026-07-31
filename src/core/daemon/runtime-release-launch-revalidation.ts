@@ -879,6 +879,16 @@ export function revalidateRuntimeReleaseLaunch(
         reason: 'runtime release staged tree identity changed during launch revalidation',
       };
     }
+    const finalNowMs = (dependencies.clock ?? Date.now)();
+    if (!Number.isFinite(finalNowMs) || !Number.isSafeInteger(finalNowMs)) {
+      return { ok: false, reason: 'runtime release evidence trusted clock is invalid' };
+    }
+    if (finalNowMs >= Date.parse(signedRelease.expiresAt)) {
+      return {
+        ok: false,
+        reason: 'runtime release evidence expired during launch revalidation',
+      };
+    }
     const receipt: RuntimeReleaseLaunchRevalidationReceiptV1 = {
       algorithm: 'sha256',
       assurance: 'final-pre-exec-observation-only',

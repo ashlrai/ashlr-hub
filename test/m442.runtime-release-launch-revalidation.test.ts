@@ -348,6 +348,23 @@ describe('runtime release launch revalidation', () => {
       .toBe('absent-no-durable-consumption-store');
   });
 
+  it('refuses evidence that expires during the final staged-tree observation', () => {
+    const release = fixture();
+    let clockReads = 0;
+    const result = revalidateRuntimeReleaseLaunchWithClock(
+      launchOptions(release),
+      {
+        clock: () => Date.parse(clockReads++ === 0 ? NOW : EXPIRES_AT),
+      },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'runtime release evidence expired during launch revalidation',
+    });
+    expect(clockReads).toBe(2);
+  });
+
   it('rejects a signature from a key absent from the trust root', () => {
     const release = fixture();
     const other = generateKeyPairSync('ed25519');
