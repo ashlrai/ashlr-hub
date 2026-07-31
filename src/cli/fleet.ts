@@ -529,11 +529,12 @@ export function formatFleetStatus(s: FleetStatus): string {
         `${proposalFunnel.sample.observedEvents} event(s); ` +
         `duplicates ${proposalFunnel.sample.duplicateEvents ?? 'unknown'}, ` +
         `cancelled ${proposalFunnel.sample.cancelledEvents}, ` +
+        `invalid identities ${proposalFunnel.sample.invalidAttemptIdentities ?? 'unknown'}, ` +
         `conflicts ${proposalFunnel.sample.conflictingAttemptIdentities ?? 'unknown'}`,
     );
     const metrics = proposalFunnel.metrics;
-    const currentMetricSchema = proposalFunnel.schemaVersion === 2 &&
-      metrics?.completeFiledProposals !== undefined &&
+    const currentMetricSchema = proposalFunnel.schemaVersion === 3 &&
+      metrics?.reportedProposalCreatedOutcomes !== undefined &&
       metrics.observedProposalReferences !== undefined;
     if (proposalFunnel.state === 'withheld' || !metrics || !currentMetricSchema) {
       const reason = proposalFunnel.state === 'withheld'
@@ -542,8 +543,8 @@ export function formatFleetStatus(s: FleetStatus): string {
       lines.push(`  output:    withheld (${reason})`);
     } else {
       lines.push(
-        `  output:    complete filed ${metrics.completeFiledProposals.count}/${metrics.attempts} ` +
-          `(${formatPercent(metrics.completeFiledProposals.rate)}), proposal references ` +
+        `  output:    reported proposal-created ${metrics.reportedProposalCreatedOutcomes.count}/${metrics.attempts} ` +
+          `(${formatPercent(metrics.reportedProposalCreatedOutcomes.rate)}), proposal references ` +
           `${metrics.observedProposalReferences.count}/${metrics.attempts} ` +
           `(${formatPercent(metrics.observedProposalReferences.rate)})`,
       );

@@ -9,7 +9,9 @@ export type ProposalFunnelWithheldReason =
   | 'source-missing'
   | 'source-degraded'
   | 'sample-limit-exceeded'
+  | 'attempt-identity-unavailable'
   | 'attempt-identity-conflict'
+  | 'snapshot-unstable'
   | 'insufficient-sample';
 
 export type ProposalFunnelBlocker =
@@ -22,6 +24,7 @@ export type ProposalFunnelBlocker =
   | 'other-failures'
   | 'source-unavailable'
   | 'sample-incomplete'
+  | 'identity-unavailable'
   | 'identity-conflict';
 
 export type ProposalFunnelAction =
@@ -34,6 +37,7 @@ export type ProposalFunnelAction =
   | 'inspect-other-failures'
   | 'repair-telemetry-source'
   | 'increase-or-narrow-sample-window'
+  | 'repair-attempt-identity'
   | 'inspect-attempt-identity-conflicts';
 
 export interface ProposalFunnelRate {
@@ -43,7 +47,7 @@ export interface ProposalFunnelRate {
 
 export interface ProposalFunnelMetrics {
   attempts: number;
-  completeFiledProposals: ProposalFunnelRate;
+  reportedProposalCreatedOutcomes: ProposalFunnelRate;
   observedProposalReferences: ProposalFunnelRate;
   captureErrors: ProposalFunnelRate;
   policySuppressions: ProposalFunnelRate;
@@ -53,7 +57,7 @@ export interface ProposalFunnelMetrics {
 }
 
 export interface ProposalFunnelObservability {
-  schemaVersion: 2;
+  schemaVersion: 3;
   state: 'available' | 'withheld';
   source: {
     sourceState: DispatchProductionSourceQuality['sourceState'];
@@ -69,6 +73,7 @@ export interface ProposalFunnelObservability {
     excludedLifecycleEvents: number;
     cancelledEvents: number;
     duplicateEvents: number;
+    invalidAttemptIdentities: number;
     conflictingAttemptIdentities: number;
     observedFrom?: string;
     observedThrough?: string;
@@ -104,25 +109,16 @@ function nonEmptyIdentity(value: string | undefined): string | undefined {
   return normalized ? normalized : undefined;
 }
 
-function attemptIdentity(event: DispatchProductionEvent): string {
+function attemptIdentity(event: DispatchProductionEvent): string | null {
   const runId = nonEmptyIdentity(event.runId);
-  if (runId) return JSON.stringify(['run', event.machineId ?? '', runId]);
   const trajectoryId = nonEmptyIdentity(event.trajectoryId);
-  if (trajectoryId) return JSON.stringify(['trajectory', event.machineId ?? '', trajectoryId]);
-  return JSON.stringify([
-    'legacy',
-    event.machineId ?? '',
-    event.ts,
-    event.itemId,
-    event.repo,
-    event.basis,
-  ]);
+  if (!runId || !trajectoryId || trajectoryId !== `run:${runId}`) return null;
+  return JSON.stringify(['run', runId]);
 }
 
 function attemptAccountingSignature(event: DispatchProductionEvent): string {
   const cancelled = isCancelledDispatchProductionEvent(event);
   return JSON.stringify([
-    event.machineId ?? '',
     event.itemId,
     event.repo,
     event.source,
@@ -130,8 +126,6 @@ function attemptAccountingSignature(event: DispatchProductionEvent): string {
     event.tier,
     event.model ?? null,
     event.basis,
-    event.runId ?? null,
-    event.trajectoryId ?? null,
     cancelled ? 'cancelled' : event.outcome,
     cancelled ? false : event.proposalCreated,
     event.proposalId ?? null,
@@ -143,13 +137,19 @@ function attemptAccountingSignature(event: DispatchProductionEvent): string {
 function canonicalAttempts(events: readonly DispatchProductionEvent[]): {
   events: DispatchProductionEvent[];
   duplicateEvents: number;
+  invalidAttemptIdentities: number;
   conflictingAttemptIdentities: number;
 } {
   const identities = new Map<string, { event: DispatchProductionEvent; signature: string }>();
   const conflicts = new Set<string>();
   let duplicateEvents = 0;
+  let invalidAttemptIdentities = 0;
   for (const event of events) {
     const identity = attemptIdentity(event);
+    if (identity === null) {
+      invalidAttemptIdentities++;
+      continue;
+    }
     const signature = attemptAccountingSignature(event);
     const existing = identities.get(identity);
     if (!existing) {
@@ -163,6 +163,7 @@ function canonicalAttempts(events: readonly DispatchProductionEvent[]): {
   return {
     events: [...identities.values()].map(({ event }) => event),
     duplicateEvents,
+    invalidAttemptIdentities,
     conflictingAttemptIdentities: conflicts.size,
   };
 }
@@ -224,6 +225,7 @@ export function buildProposalFunnelObservability(
     excludedLifecycleEvents,
     cancelledEvents,
     duplicateEvents: canonical.duplicateEvents,
+    invalidAttemptIdentities: canonical.invalidAttemptIdentities,
     conflictingAttemptIdentities: canonical.conflictingAttemptIdentities,
     ...observationBounds(sampledEvents),
   };
@@ -235,7 +237,7 @@ export function buildProposalFunnelObservability(
 
   if (input.events.length > eventLimit) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       state: 'withheld',
       source,
       sample,
@@ -246,7 +248,7 @@ export function buildProposalFunnelObservability(
   }
   if (input.sourceQuality.sourceState !== 'healthy' || !input.sourceQuality.complete) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       state: 'withheld',
       source,
       sample,
@@ -258,9 +260,21 @@ export function buildProposalFunnelObservability(
     };
   }
 
+  if (canonical.invalidAttemptIdentities > 0) {
+    return {
+      schemaVersion: 3,
+      state: 'withheld',
+      source,
+      sample,
+      withheldReason: 'attempt-identity-unavailable',
+      primaryBlocker: 'identity-unavailable',
+      primaryAction: 'repair-attempt-identity',
+    };
+  }
+
   if (canonical.conflictingAttemptIdentities > 0) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       state: 'withheld',
       source,
       sample,
@@ -272,7 +286,7 @@ export function buildProposalFunnelObservability(
 
   if (attempts.length === 0) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       state: 'withheld',
       source,
       sample,
@@ -282,7 +296,7 @@ export function buildProposalFunnelObservability(
     };
   }
 
-  let completeFiledProposals = 0;
+  let reportedProposalCreatedOutcomes = 0;
   let observedProposalReferences = 0;
   let captureErrors = 0;
   let policySuppressions = 0;
@@ -290,12 +304,12 @@ export function buildProposalFunnelObservability(
   let emptyAttempts = 0;
   let otherAttempts = 0;
   for (const event of attempts) {
-    const completeFiled = event.outcome === 'proposal-created' && event.proposalCreated === true;
-    if (completeFiled) completeFiledProposals++;
+    const reportedProposalCreated = event.outcome === 'proposal-created' && event.proposalCreated === true;
+    if (reportedProposalCreated) reportedProposalCreatedOutcomes++;
     if (typeof event.proposalId === 'string' && event.proposalId.length > 0) {
       observedProposalReferences++;
     }
-    if (completeFiled) continue;
+    if (reportedProposalCreated) continue;
     if (event.outcome === 'proposal-capture-error') captureErrors++;
     else if (event.outcome === 'proposal-disabled') policySuppressions++;
     else if (event.outcome === 'gate-blocked') gateBlocked++;
@@ -305,7 +319,7 @@ export function buildProposalFunnelObservability(
 
   const metrics: ProposalFunnelMetrics = {
     attempts: attempts.length,
-    completeFiledProposals: rate(completeFiledProposals, attempts.length),
+    reportedProposalCreatedOutcomes: rate(reportedProposalCreatedOutcomes, attempts.length),
     observedProposalReferences: rate(observedProposalReferences, attempts.length),
     captureErrors: rate(captureErrors, attempts.length),
     policySuppressions: rate(policySuppressions, attempts.length),
@@ -314,11 +328,25 @@ export function buildProposalFunnelObservability(
     otherAttempts: rate(otherAttempts, attempts.length),
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     state: 'available',
     source,
     sample,
     metrics,
     ...dominantBlocker(metrics),
+  };
+}
+
+export function withholdProposalFunnelForUnstableSnapshot(
+  observation: ProposalFunnelObservability,
+): ProposalFunnelObservability {
+  const { metrics: _metrics, ...withoutMetrics } = observation;
+  return {
+    ...withoutMetrics,
+    schemaVersion: 3,
+    state: 'withheld',
+    withheldReason: 'snapshot-unstable',
+    primaryBlocker: 'source-unavailable',
+    primaryAction: 'repair-telemetry-source',
   };
 }

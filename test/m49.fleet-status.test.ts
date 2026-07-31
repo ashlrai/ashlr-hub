@@ -691,7 +691,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('sample:    0 canonical attempt(s) from 0 event(s)');
     expect(formatted).toContain('output:    withheld (insufficient-sample)');
     expect(formatted).toContain('diagnosis: insufficient-sample · collect-attempts');
-    expect(formatted).not.toContain('complete filed 0/0');
+    expect(formatted).not.toContain('reported proposal-created 0/0');
   });
 
   let tmpHome: string;
@@ -3039,13 +3039,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       routeReason: 'local-mid bulk',
       outcome: 'empty-diff',
       proposalCreated: false,
+      runId: 'run-item-a',
+      trajectoryId: 'run:run-item-a',
       spentUsd: 0.001,
       reason: 'agent returned no diff',
       basis: 'run-proposal-outcome',
     };
     recordDispatchProduction([
       baseEvent,
-      { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
+      {
+        ...baseEvent,
+        itemId: 'item-b',
+        runId: 'run-item-b',
+        trajectoryId: 'run:run-item-b',
+        outcome: 'gate-blocked',
+        reason: 'completeness gate blocked proposal',
+      },
       {
         ...baseEvent,
         itemId: 'repo:proposal-repair-capture:abcdef123456',
@@ -3057,6 +3066,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         outcome: 'proposal-created',
         proposalCreated: true,
         proposalId: 'prop-c',
+        runId: 'run-item-c',
+        trajectoryId: 'run:run-item-c',
         reason: 'proposal filed',
       },
     ]);
@@ -3102,7 +3113,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
       metrics: {
         attempts: 3,
-        completeFiledProposals: { count: 1, rate: 1 / 3 },
+        reportedProposalCreatedOutcomes: { count: 1, rate: 1 / 3 },
         observedProposalReferences: { count: 1, rate: 1 / 3 },
         gateBlocked: { count: 1, rate: 1 / 3 },
         emptyAttempts: { count: 1, rate: 1 / 3 },
@@ -3156,7 +3167,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
     expect(formatted).toContain('Proposal funnel:');
-    expect(formatted).toContain('complete filed 1/3 (33%), proposal references 1/3 (33%)');
+    expect(formatted).toContain(
+      'reported proposal-created 1/3 (33%), proposal references 1/3 (33%)',
+    );
     expect(formatted).toContain('diagnosis: gate-blocking · inspect-verification-gates');
   });
 
@@ -3324,7 +3337,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'withheld',
       withheldReason: 'source-degraded',
       source: { sourceState: 'degraded', complete: false },
-      sample: { observedEvents: 2, includedAttempts: 2 },
+      sample: { observedEvents: 2, includedAttempts: 0 },
       primaryBlocker: 'source-unavailable',
       primaryAction: 'repair-telemetry-source',
     });

@@ -4,7 +4,10 @@ import type {
   DispatchProductionEvent,
   DispatchProductionSourceQuality,
 } from '../src/core/fleet/dispatch-production-ledger.js';
-import { buildProposalFunnelObservability } from '../src/core/fleet/proposal-funnel-observability.js';
+import {
+  buildProposalFunnelObservability,
+  withholdProposalFunnelForUnstableSnapshot,
+} from '../src/core/fleet/proposal-funnel-observability.js';
 
 const healthySource: DispatchProductionSourceQuality = {
   sourceState: 'healthy',
@@ -38,6 +41,8 @@ function event(
     routeReason: 'PRIVATE_ROUTE_REASON',
     outcome,
     proposalCreated: outcome === 'proposal-created',
+    runId: `run-${itemId}`,
+    trajectoryId: `run:run-${itemId}`,
     spentUsd: 0,
     reason: 'STDOUT_SECRET_TOKEN',
     basis: 'run-proposal-outcome',
@@ -64,7 +69,7 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       state: 'available',
       sample: {
         requestedWindowHours: 24,
@@ -73,11 +78,12 @@ describe('buildProposalFunnelObservability', () => {
         excludedLifecycleEvents: 1,
         cancelledEvents: 1,
         duplicateEvents: 0,
+        invalidAttemptIdentities: 0,
         conflictingAttemptIdentities: 0,
       },
       metrics: {
         attempts: 6,
-        completeFiledProposals: { count: 1, rate: 1 / 6 },
+        reportedProposalCreatedOutcomes: { count: 1, rate: 1 / 6 },
         observedProposalReferences: { count: 2, rate: 2 / 6 },
         captureErrors: { count: 1, rate: 1 / 6 },
         policySuppressions: { count: 1, rate: 1 / 6 },
@@ -162,15 +168,17 @@ describe('buildProposalFunnelObservability', () => {
   it('deduplicates exact identities after canonical semantic cancellation accounting', () => {
     const filed = event('1', 'proposal-created', {
       runId: 'run-filed',
-      trajectoryId: 'trajectory-filed',
+      trajectoryId: 'run:run-filed',
       proposalId: 'proposal-filed',
     });
     const cancelled = event('2', 'cancelled', {
       runId: 'run-cancelled',
+      trajectoryId: 'run:run-cancelled',
       reason: 'cancelled by owner',
     });
     const legacyCancelled = event('2', 'engine-failed', {
       runId: 'run-cancelled',
+      trajectoryId: 'run:run-cancelled',
       reason: 'selection cancelled after daemon ownership changed',
       runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
     });
@@ -193,7 +201,7 @@ describe('buildProposalFunnelObservability', () => {
       },
       metrics: {
         attempts: 1,
-        completeFiledProposals: { count: 1, rate: 1 },
+        reportedProposalCreatedOutcomes: { count: 1, rate: 1 },
         observedProposalReferences: { count: 1, rate: 1 },
       },
     });
@@ -202,8 +210,8 @@ describe('buildProposalFunnelObservability', () => {
   it('withholds all rates when rows sharing an attempt identity conflict', () => {
     const result = buildProposalFunnelObservability({
       events: [
-        event('1', 'empty-diff', { runId: 'run-conflict' }),
-        event('2', 'proposal-created', { runId: 'run-conflict', proposalId: 'proposal-conflict' }),
+        event('1', 'empty-diff', { runId: 'run-conflict', trajectoryId: 'run:run-conflict' }),
+        event('2', 'proposal-created', { runId: 'run-conflict', trajectoryId: 'run:run-conflict', proposalId: 'proposal-conflict' }),
       ],
       sourceQuality: healthySource,
       windowMs: 24 * 60 * 60 * 1000,
@@ -220,5 +228,91 @@ describe('buildProposalFunnelObservability', () => {
     expect(result.metrics).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('run-conflict');
     expect(JSON.stringify(result)).not.toContain('proposal-conflict');
+  });
+
+  it('deduplicates one execution when mutable machine ownership changes', () => {
+    const first = event('1', 'empty-diff', { machineId: 'machine-a' });
+    const result = buildProposalFunnelObservability({
+      events: [first, { ...first, machineId: 'machine-b' }],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'available',
+      sample: { includedAttempts: 1, duplicateEvents: 1, invalidAttemptIdentities: 0 },
+    });
+  });
+
+  it.each([
+    ['removed run id', { runId: undefined }],
+    ['changed run id', { runId: 'other-run' }],
+    ['changed trajectory id', { trajectoryId: 'run:other-run' }],
+  ] as const)('withholds ambiguous causal identity: %s', (_name, overrides) => {
+    const result = buildProposalFunnelObservability({
+      events: [event('1', 'empty-diff', overrides)],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 1 },
+      primaryBlocker: 'identity-unavailable',
+    });
+    expect(result.metrics).toBeUndefined();
+  });
+
+  it('withholds when distinct run ids claim one shared trajectory', () => {
+    const result = buildProposalFunnelObservability({
+      events: [
+        event('1', 'empty-diff', { runId: 'run-a', trajectoryId: 'run:run-a' }),
+        event('2', 'empty-diff', { runId: 'run-b', trajectoryId: 'run:run-a' }),
+      ],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 1 },
+    });
+  });
+
+  it('reports a producer outcome without claiming a durable filed proposal', () => {
+    const result = buildProposalFunnelObservability({
+      events: [event('1', 'proposal-created')],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result.metrics).toMatchObject({
+      reportedProposalCreatedOutcomes: { count: 1, rate: 1 },
+      observedProposalReferences: { count: 0, rate: 0 },
+    });
+    expect(JSON.stringify(result)).not.toContain('completeFiled');
+  });
+
+  it('withholds rates when a later source read invalidates the snapshot', () => {
+    const available = buildProposalFunnelObservability({
+      events: [event('1', 'proposal-created', { proposalId: 'proposal-1' })],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+    const withheld = withholdProposalFunnelForUnstableSnapshot(available);
+
+    expect(withheld).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'snapshot-unstable',
+      sample: { includedAttempts: 1 },
+    });
+    expect(withheld.metrics).toBeUndefined();
   });
 });

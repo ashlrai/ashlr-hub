@@ -116,6 +116,7 @@ import {
 } from './dispatch-production-ledger.js';
 import {
   buildProposalFunnelObservability,
+  withholdProposalFunnelForUnstableSnapshot,
   type ProposalFunnelObservability,
 } from './proposal-funnel-observability.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
@@ -3531,6 +3532,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ].every(Boolean);
 
       if (stable) {
+        status.proposalFunnel = buildProposalFunnelObservability({
+          events: dispatchReadAfter.events,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          windowMs: RECENT_WINDOW_MS,
+          eventLimit: 1200,
+        });
         learningProposals = proposalRowsAfter;
         learningDispatchEvents = dispatchRowsAfter;
         learningActions = actionRowsAfter;
@@ -3540,6 +3547,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         learningWorkedEvents = workedRowsAfter;
         learningPostMergeObservations = postMergeRowsAfter;
       } else {
+        if (status.proposalFunnel) {
+          status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+            status.proposalFunnel,
+          );
+        }
         status.learningMetrics = {
           ...status.learningMetrics,
           state: 'withheld',
@@ -3547,6 +3559,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         };
       }
     } catch {
+      if (status.proposalFunnel) {
+        status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+          status.proposalFunnel,
+        );
+      }
       status.learningMetrics = {
         ...status.learningMetrics,
         state: 'withheld',
