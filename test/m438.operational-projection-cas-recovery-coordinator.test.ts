@@ -32,6 +32,7 @@ import {
   operationalProjectionAnchorReceiptDigest,
   operationalProjectionAnchorReceiptSigningBytes,
   operationalProjectionAnchorRequestDigest,
+  type OperationalProjectionAnchorStateV1,
   type OperationalProjectionAnchorReceiptCoreV1,
   type OperationalProjectionAnchorReceiptV1,
 } from '../src/core/inbox/operational-projection-monotonic-anchor.js';
@@ -85,6 +86,7 @@ function signedReceipt(
   casRequest: ApplyOperationalProjectionCasRecoveryInputV1['casRequest'],
   casDecision: 'accepted' | 'conflict',
   privateKey: KeyObject,
+  conflictObserved?: OperationalProjectionAnchorStateV1,
 ): OperationalProjectionAnchorReceiptV1 {
   const receiptCore: OperationalProjectionAnchorReceiptCoreV1 = {
     schemaVersion: 1,
@@ -98,7 +100,7 @@ function signedReceipt(
     requestDigest: operationalProjectionAnchorRequestDigest(casRequest),
     observed: casDecision === 'accepted'
       ? casRequest.expected
-      : {
+      : conflictObserved ?? {
           sequence: '8',
           valueDigest: 'b'.repeat(64),
           receiptDigest: 'c'.repeat(64),
@@ -190,8 +192,8 @@ function fixture(
 
 function restorePreparedPublicationWitness(
   boundary: 'temporary' | 'stage' | 'target-link' | 'records-directory-fsync',
+  input = fixture('accepted'),
 ): ApplyOperationalProjectionCasRecoveryInputV1 {
-  const input = fixture('accepted');
   const first = applyOperationalProjectionCasRecovery(input);
   expect(first.state).toBe('applied');
   const prepared = first.prepared!;
@@ -302,6 +304,32 @@ function rewriteConsumptionRecordsAsLegacy(): void {
   }
 }
 
+function rewritePreparedAsPreFixRollback(
+  prepared: OperationalProjectionCasConsumptionRecordV1,
+  coordinateBound: boolean,
+): void {
+  const root = operationalProjectionCasConsumptionStorePath();
+  const recordsPath = path.join(root, 'records');
+  const preparedPath = path.join(recordsPath, `${prepared.decisionId}.prepared.json`);
+  const completionPath = path.join(recordsPath, `${prepared.decisionId}.applied.json`);
+  const record = JSON.parse(
+    fs.readFileSync(preparedPath, 'utf8'),
+  ) as OperationalProjectionCasConsumptionRecordV1;
+  record.decision = 'rollback';
+  if (coordinateBound) record.consumptionDigest = legacyConsumptionDigest(record.casRequest);
+  record.recordDigest = sha(RECORD_DOMAIN, consumptionPayload(record));
+  const localKey = createHmac('sha256', loadOrCreateKey())
+    .update(`${KEY_DOMAIN}\n`, 'utf8')
+    .digest();
+  record.attestation = createHmac('sha256', localKey)
+    .update(`${ATTESTATION_DOMAIN}\n`, 'utf8')
+    .update(record.recordDigest, 'utf8')
+    .digest('hex');
+  fs.writeFileSync(preparedPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  fs.rmSync(completionPath);
+  fsyncDirectory(recordsPath);
+}
+
 beforeEach(() => {
   lock = null;
   _setOperationalProjectionShadowWriterHookForTest(undefined);
@@ -361,6 +389,240 @@ describe('M438 operational projection CAS recovery composition', () => {
       rollbackProtected: false,
     });
   });
+
+  it('treats an authenticated retry conflict observing the exact proposal as accepted', () => {
+    const fixture = signedFixture('conflict');
+    const lostResponseReceipt = signedReceipt(
+      fixture.input.casRequest,
+      'conflict',
+      fixture.privateKey,
+      {
+        sequence: fixture.input.casRequest.proposed.sequence,
+        valueDigest: fixture.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      },
+    );
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      untrustedCasReceipt: lostResponseReceipt,
+    })).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+      authenticated: true,
+      localMutationApplied: false,
+      completion: { resultingShadowPhase: 'committed' },
+      shadow: { actual: 'complete', transaction: { phase: 'committed' } },
+    });
+  });
+
+  it.each(['sequence', 'value digest'] as const)(
+    'keeps a near-match on %s as a true conflict',
+    (field) => {
+      const fixture = signedFixture('conflict');
+      const observed: OperationalProjectionAnchorStateV1 = {
+        sequence: fixture.input.casRequest.proposed.sequence,
+        valueDigest: fixture.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      };
+      if (field === 'sequence') {
+        observed.sequence = (BigInt(observed.sequence) + 1n).toString();
+      } else {
+        observed.valueDigest = observed.valueDigest === 'b'.repeat(64)
+          ? 'c'.repeat(64)
+          : 'b'.repeat(64);
+      }
+      const receipt = signedReceipt(
+        fixture.input.casRequest,
+        'conflict',
+        fixture.privateKey,
+        observed,
+      );
+
+      expect(applyOperationalProjectionCasRecovery({
+        ...fixture.input,
+        untrustedCasReceipt: receipt,
+      })).toMatchObject({
+        state: 'applied',
+        decision: 'rollback',
+        authenticated: true,
+        localMutationApplied: true,
+        shadow: { actual: 'no-effect', transaction: { phase: 'rolled-back' } },
+      });
+    },
+  );
+
+  it('refuses an exact-proposal conflict for a different transaction', () => {
+    const fixture = signedFixture('conflict');
+    const differentRequest = buildOperationalProjectionAnchorRequest({
+      anchorId: fixture.input.casRequest.anchorId,
+      namespace: fixture.input.casRequest.namespace,
+      requestNonce: '9'.repeat(64),
+      expected: fixture.input.casRequest.expected,
+      source: {
+        ...fixture.input.casRequest.source,
+        transactionId: 'f'.repeat(64),
+        proposalId: 'proposal-438-different',
+      },
+    });
+    const receipt = signedReceipt(
+      differentRequest,
+      'conflict',
+      fixture.privateKey,
+      {
+        sequence: differentRequest.proposed.sequence,
+        valueDigest: differentRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      },
+    );
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      casRequest: differentRequest,
+      untrustedCasReceipt: receipt,
+    })).toMatchObject({
+      state: 'refused',
+      reason: 'shadow-decision-binding-mismatch',
+      authenticated: false,
+      localMutationApplied: false,
+    });
+    expect(inspectOperationalProjectionShadowWrite()).toMatchObject({
+      actual: 'complete',
+      transaction: { phase: 'committed' },
+    });
+  });
+
+  it('rejects an unauthenticated exact-proposal conflict', () => {
+    const fixture = signedFixture('conflict');
+    const attacker = generateKeyPairSync('ed25519');
+    const receipt = signedReceipt(
+      fixture.input.casRequest,
+      'conflict',
+      attacker.privateKey,
+      {
+        sequence: fixture.input.casRequest.proposed.sequence,
+        valueDigest: fixture.input.casRequest.proposed.valueDigest,
+        receiptDigest: 'e'.repeat(64),
+      },
+    );
+
+    expect(applyOperationalProjectionCasRecovery({
+      ...fixture.input,
+      untrustedCasReceipt: receipt,
+    })).toMatchObject({
+      state: 'refused',
+      reason: 'invalid-cas-receipt-signature-invalid',
+      authenticated: false,
+      localMutationApplied: false,
+    });
+  });
+
+  it('replays an exact-proposal conflict without a second local mutation', () => {
+    const fixture = signedFixture('conflict');
+    const input = {
+      ...fixture.input,
+      untrustedCasReceipt: signedReceipt(
+        fixture.input.casRequest,
+        'conflict',
+        fixture.privateKey,
+        {
+          sequence: fixture.input.casRequest.proposed.sequence,
+          valueDigest: fixture.input.casRequest.proposed.valueDigest,
+          receiptDigest: 'e'.repeat(64),
+        },
+      ),
+    };
+    expect(applyOperationalProjectionCasRecovery(input)).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+    });
+    expect(applyOperationalProjectionCasRecovery({
+      ...input,
+      untrustedCasReceipt: null,
+    })).toMatchObject({
+      state: 'applied',
+      reason: 'signed-cas-decision-already-applied',
+      decision: 'roll-forward',
+      localMutationApplied: false,
+    });
+  });
+
+  it('resumes an exact-proposal conflict from its immutable prepared record', () => {
+    const fixture = signedFixture('conflict');
+    const input = {
+      ...fixture.input,
+      untrustedCasReceipt: signedReceipt(
+        fixture.input.casRequest,
+        'conflict',
+        fixture.privateKey,
+        {
+          sequence: fixture.input.casRequest.proposed.sequence,
+          valueDigest: fixture.input.casRequest.proposed.valueDigest,
+          receiptDigest: 'e'.repeat(64),
+        },
+      ),
+    };
+    const resumed = applyOperationalProjectionCasRecovery({
+      ...restorePreparedPublicationWitness('records-directory-fsync', input),
+      untrustedCasReceipt: null,
+      now: new Date('2036-07-29T16:05:00.000Z'),
+    });
+
+    expect(resumed).toMatchObject({
+      state: 'applied',
+      decision: 'roll-forward',
+      authenticated: true,
+      localMutationApplied: false,
+      prepared: { phase: 'prepared', decision: 'roll-forward' },
+      completion: { phase: 'applied', resultingShadowPhase: 'committed' },
+      shadow: { actual: 'complete', transaction: { phase: 'committed' } },
+    });
+  });
+
+  it.each([
+    ['stable v2', false],
+    ['coordinate-bound v1', true],
+  ] as const)(
+    'resumes a locally attested pre-fix %s rollback decision without degrading',
+    (_identity, coordinateBound) => {
+      const fixture = signedFixture('conflict');
+      const input = {
+        ...fixture.input,
+        untrustedCasReceipt: signedReceipt(
+          fixture.input.casRequest,
+          'conflict',
+          fixture.privateKey,
+          {
+            sequence: fixture.input.casRequest.proposed.sequence,
+            valueDigest: fixture.input.casRequest.proposed.valueDigest,
+            receiptDigest: 'e'.repeat(64),
+          },
+        ),
+      };
+      const first = applyOperationalProjectionCasRecovery(input);
+      expect(first).toMatchObject({ state: 'applied', decision: 'roll-forward' });
+      rewritePreparedAsPreFixRollback(first.prepared!, coordinateBound);
+      expect(readOperationalProjectionCasConsumptionRecords()).toMatchObject({
+        sourceState: 'healthy',
+        complete: true,
+        records: [{ phase: 'prepared', decision: 'rollback' }],
+      });
+
+      expect(applyOperationalProjectionCasRecovery({
+        ...input,
+        untrustedCasReceipt: null,
+        now: new Date('2036-07-29T16:05:00.000Z'),
+      })).toMatchObject({
+        state: 'applied',
+        decision: 'rollback',
+        authenticated: true,
+        localMutationApplied: true,
+        prepared: { phase: 'prepared', decision: 'rollback' },
+        completion: { phase: 'applied', decision: 'rollback', resultingShadowPhase: 'rolled-back' },
+        shadow: { actual: 'no-effect', transaction: { phase: 'rolled-back' } },
+      });
+    },
+  );
 
   it('recovers indefinitely from the immutable prepared receipt after a crash', () => {
     const input = fixture('conflict');

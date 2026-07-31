@@ -203,11 +203,41 @@ function receiptCore(
 }
 
 function decisionFor(
+  request: OperationalProjectionAnchorCasRequestV1,
   receipt: OperationalProjectionAnchorReceiptV1,
 ): OperationalProjectionCasConsumptionDecision | null {
   if (receipt.decision === 'accepted') return 'roll-forward';
-  if (receipt.decision === 'conflict') return 'rollback';
+  if (receipt.decision === 'conflict') {
+    // A retry after a lost acceptance response can legitimately observe the
+    // exact proposed value as a compare mismatch. The signed receipt is still
+    // a conflict for this retry, but it proves the transaction already won.
+    const observed = receipt.observed;
+    if (receipt.reason === 'compare-mismatch' &&
+      receipt.accepted === null &&
+      observed !== null &&
+      observed.sequence === request.proposed.sequence &&
+      observed.valueDigest !== null &&
+      equalDigest(observed.valueDigest, request.proposed.valueDigest)) {
+      return 'roll-forward';
+    }
+    return 'rollback';
+  }
   return null;
+}
+
+function persistedDecisionCompatible(
+  request: OperationalProjectionAnchorCasRequestV1,
+  receipt: OperationalProjectionAnchorReceiptV1,
+  persisted: OperationalProjectionCasConsumptionDecision,
+): boolean {
+  const current = decisionFor(request, receipt);
+  if (current === persisted) return true;
+  // Before exact-observed conflicts were recognized as acceptance-equivalent,
+  // this schema durably recorded them as rollback. Preserve that authenticated
+  // local intent on upgrade; only newly prepared records use roll-forward.
+  return current === 'roll-forward' &&
+    receipt.decision === 'conflict' &&
+    persisted === 'rollback';
 }
 
 function decisionId(requestDigest: string, receiptDigest: string): string {
@@ -279,13 +309,16 @@ function buildRecord(
   receipt: OperationalProjectionAnchorReceiptV1,
   phase: OperationalProjectionCasConsumptionPhase,
   recordedAt: string,
+  persistedDecision?: OperationalProjectionCasConsumptionDecision,
 ): OperationalProjectionCasConsumptionRecordV1 | null {
   try {
     const requestDigest = operationalProjectionAnchorRequestDigest(request);
     const stableConsumptionDigest = consumptionDigest(request);
     const computedReceiptDigest = operationalProjectionAnchorReceiptDigest(receiptCore(receipt));
-    const decision = decisionFor(receipt);
-    if (!decision ||
+    const inferredDecision = decisionFor(request, receipt);
+    if (!inferredDecision) return null;
+    const decision = persistedDecision ?? inferredDecision;
+    if (!persistedDecisionCompatible(request, receipt, decision) ||
       !equalDigest(receipt.receiptDigest, computedReceiptDigest) ||
       !canonicalTimestamp(recordedAt)) return null;
     const id = decisionId(requestDigest, receipt.receiptDigest);
@@ -357,9 +390,13 @@ function parseRecord(
     const receiptDigest = operationalProjectionAnchorReceiptDigest(
       receiptCore(record.casReceipt),
     );
-    const decision = decisionFor(record.casReceipt);
+    const decision = decisionFor(record.casRequest, record.casReceipt);
+    const expectedResultingPhase = record.decision === 'roll-forward'
+      ? 'committed'
+      : 'rolled-back';
     if (!decision ||
-      decision !== record.decision ||
+      !persistedDecisionCompatible(record.casRequest, record.casReceipt, record.decision) ||
+      (record.phase === 'applied' && record.resultingShadowPhase !== expectedResultingPhase) ||
       (!equalDigest(stableConsumptionDigest, record.consumptionDigest) &&
         !equalDigest(legacyConsumptionDigest, record.consumptionDigest)) ||
       !equalDigest(requestDigest, record.requestDigest) ||
@@ -629,7 +666,7 @@ export function applyOperationalProjectionCasRecovery(
   if (verified.state !== 'authenticated') {
     return failed('refused', `invalid-cas-receipt-${verified.reason}`);
   }
-  const decision = decisionFor(verified.receipt);
+  const decision = decisionFor(input.casRequest, verified.receipt);
   if (!decision) return failed('refused', 'cas-decision-unavailable');
   const id = decisionId(requestDigest, verified.receipt.receiptDigest);
   if (existing.prepared && !equalDigest(existing.prepared.decisionId, id)) {
@@ -721,6 +758,7 @@ export function applyOperationalProjectionCasRecovery(
     prepared.casReceipt,
     'applied',
     recordedAt,
+    prepared.decision,
   );
   if (!completion) return failed('degraded', 'completion-record-invalid', prepared, null, shadow);
   const write = writeRecord(completion);
