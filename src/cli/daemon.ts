@@ -75,7 +75,7 @@ Run \`ashlr daemon <subcommand> --help\` for subcommand usage.`;
 type RunDaemonFn = (
   cfg: AshlrConfig,
   opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode; drainLimit?: number },
-) => Promise<DaemonState>;
+) => Promise<import('../core/daemon/loop.js').DaemonRunResult>;
 type StopDaemonFn = () => PolicyMutationResult | void;
 type LoadDaemonStateFn = () => DaemonState;
 type LoadDaemonStateStrictFn =
@@ -359,9 +359,8 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   console.log(col.dim('  proposal-only · sandboxed · enrollment-only'));
   console.log('');
 
-  // runDaemon never throws by contract; it REFUSES on re-entrancy (handled
-  // above) and stops on kill switch / budget exhaustion. It ONLY produces
-  // PENDING inbox proposals — never applies/pushes/PRs/deploys/mutates.
+  // runDaemon never throws by contract. Its explicit termination disposition
+  // prevents retryable resident failures from masquerading as a clean exit.
   const finalState = await loop.runDaemon(merged, {
     once: flags.once,
     dryRun: flags.dryRun,
@@ -372,6 +371,13 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   if (finalState.startRefusal) {
     console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
     return 1;
+  }
+  if (finalState.termination.exitCode !== 0) {
+    console.error(
+      col.red('error: ') +
+        `daemon terminated after ${finalState.termination.reason}; supervisor restart is ` +
+        `${finalState.termination.retryable ? 'permitted' : 'not permitted'}.`,
+    );
   }
 
   // Summarize the most-recent tick (if any) for human feedback.
@@ -398,7 +404,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   console.log('  ' + col.dim('Use `ashlr inbox` to review PENDING proposals (never auto-applied).'));
   console.log('');
 
-  return 0;
+  return finalState.termination.exitCode;
 }
 
 // ---------------------------------------------------------------------------

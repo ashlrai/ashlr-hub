@@ -92,6 +92,11 @@ const daemonState = {
   todaySpentUsd: 0,
   itemsProcessed: 0,
   ticks: [],
+  termination: {
+    reason: 'clean-completion' as const,
+    retryable: false,
+    exitCode: 0 as const,
+  },
 };
 
 const serviceStatus = {
@@ -350,6 +355,11 @@ describe('daemon valid flags remain supported', () => {
     effects.runDaemon.mockResolvedValue({
       ...daemonState,
       startRefusal: 'activation trust roots unavailable',
+      termination: {
+        reason: 'start-refused',
+        retryable: false,
+        exitCode: 1,
+      },
     });
 
     const result = await capture(['start', '--once']);
@@ -359,6 +369,38 @@ describe('daemon valid flags remain supported', () => {
       'daemon start refused: activation trust roots unavailable',
     );
   });
+
+  it.each([
+    'persistence-failure',
+    'runtime-failure',
+    'ownership-loss',
+  ] as const)('returns nonzero for retryable %s termination', async (reason) => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      termination: { reason, retryable: true, exitCode: 1 },
+    });
+
+    const result = await capture(['start']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`daemon terminated after ${reason}`);
+    expect(result.stderr).toContain('supervisor restart is permitted');
+  });
+
+  it.each(['clean-completion', 'kill-switch', 'signal'] as const)(
+    'returns zero for %s termination',
+    async (reason) => {
+      effects.runDaemon.mockResolvedValue({
+        ...daemonState,
+        termination: { reason, retryable: false, exitCode: 0 },
+      });
+
+      const result = await capture(['start', '--once']);
+
+      expect(result.code).toBe(0);
+      expect(result.stderr).not.toContain('daemon terminated');
+    },
+  );
 
   it('refuses start before the daemon loop when strict config loading fails', async () => {
     effects.loadConfig.mockImplementationOnce(() => {
