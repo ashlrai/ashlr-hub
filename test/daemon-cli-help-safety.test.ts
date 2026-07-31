@@ -351,40 +351,56 @@ describe('daemon valid flags remain supported', () => {
     );
   });
 
-  it('returns nonzero and surfaces a structured activation refusal', async () => {
+  it('returns zero and surfaces a bounded non-retryable activation refusal', async () => {
     effects.runDaemon.mockResolvedValue({
       ...daemonState,
       startRefusal: 'activation trust roots unavailable',
       termination: {
         reason: 'start-refused',
         retryable: false,
-        exitCode: 1,
+        exitCode: 0,
+        diagnosticCode: 'start-refused',
       },
     });
 
     const result = await capture(['start', '--once']);
 
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain(
-      'daemon start refused: activation trust roots unavailable',
-    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('daemon start refused [start-refused]');
+    expect(result.stderr).not.toContain('activation trust roots unavailable');
   });
 
   it.each([
-    'persistence-failure',
-    'runtime-failure',
-    'ownership-loss',
-  ] as const)('returns nonzero for retryable %s termination', async (reason) => {
+    ['persistence-failure', 'state-io-transient'],
+    ['runtime-failure', 'runtime-transient'],
+  ] as const)('returns nonzero for retryable %s termination', async (reason, diagnosticCode) => {
     effects.runDaemon.mockResolvedValue({
       ...daemonState,
-      termination: { reason, retryable: true, exitCode: 1 },
+      termination: { reason, retryable: true, exitCode: 1, diagnosticCode },
     });
 
     const result = await capture(['start']);
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain(`daemon terminated after ${reason}`);
+    expect(result.stderr).toContain(`daemon terminated [${diagnosticCode}]`);
     expect(result.stderr).toContain('supervisor restart is permitted');
+  });
+
+  it.each([
+    ['persistence-failure', 'state-malformed'],
+    ['runtime-failure', 'runtime-unclassified'],
+    ['ownership-loss', 'successor-owner'],
+  ] as const)('returns zero and refuses restart for non-retryable %s', async (reason, diagnosticCode) => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      termination: { reason, retryable: false, exitCode: 0, diagnosticCode },
+    });
+
+    const result = await capture(['start']);
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain(`daemon terminated [${diagnosticCode}]`);
+    expect(result.stderr).toContain('supervisor restart is not permitted');
   });
 
   it.each(['clean-completion', 'kill-switch', 'signal'] as const)(

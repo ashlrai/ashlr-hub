@@ -271,11 +271,13 @@ function buildSystemdDefinition(o: BuildOpts): ServiceDefinition {
   const content = `[Unit]
 Description=ashlr autonomous daemon
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
-Restart=always
+Restart=on-failure
 RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
 Environment=PATH=${buildToolPath({ home: o.home, basePath: '' })}

@@ -369,13 +369,20 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   });
 
   if (finalState.startRefusal) {
-    console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
-    return 1;
-  }
-  if (finalState.termination.exitCode !== 0) {
     console.error(
       col.red('error: ') +
-        `daemon terminated after ${finalState.termination.reason}; supervisor restart is ` +
+        `daemon start refused [${finalState.termination.diagnosticCode ?? 'start-refused'}]; ` +
+        'supervisor restart is not permitted.',
+    );
+    return finalState.termination.exitCode;
+  }
+  if (finalState.termination.reason === 'persistence-failure' ||
+    finalState.termination.reason === 'runtime-failure' ||
+    finalState.termination.reason === 'ownership-loss') {
+    console.error(
+      col.red('error: ') +
+        `daemon terminated [${finalState.termination.diagnosticCode ?? 'runtime-unclassified'}]; ` +
+        'supervisor restart is ' +
         `${finalState.termination.retryable ? 'permitted' : 'not permitted'}.`,
     );
   }
