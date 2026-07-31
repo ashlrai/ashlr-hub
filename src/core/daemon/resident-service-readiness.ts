@@ -6,10 +6,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { lstatSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+  type BigIntStats,
+} from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, join, resolve } from 'node:path';
-import { daemonActivationReleaseTreeBinding } from './activation-permit.js';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   generateServiceDefinition,
   parseExactLaunchdPrintRuntime,
@@ -21,6 +31,7 @@ const SERVICE_LABEL = 'ai.ashlr.daemon';
 const RELEASE_ID_RE = /^[0-9a-f]{40}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_TIMEOUT_MS = 5_000;
+const MAX_TIMEOUT_MS = 30_000;
 
 export type ResidentServiceReadinessState = 'ready' | 'blocked' | 'degraded';
 
@@ -29,16 +40,21 @@ export type ResidentServiceReadinessReasonCode =
   | 'release-contract-invalid'
   | 'release-binding-unavailable'
   | 'release-binding-mismatch'
+  | 'interpreter-contract-invalid'
+  | 'interpreter-binding-unavailable'
+  | 'interpreter-binding-mismatch'
   | 'service-definition-unavailable'
   | 'service-label-mismatch'
   | 'service-invocation-mismatch'
   | 'restart-policy-mismatch'
   | 'service-not-loaded'
+  | 'service-not-running'
   | 'service-state-unavailable'
   | 'service-disabled'
   | 'service-enable-state-unavailable'
   | 'kill-switch-present'
   | 'kill-switch-state-unavailable'
+  | 'observation-deadline-exceeded'
   | 'observation-changed';
 
 export interface ResidentServiceReadinessReason {
@@ -50,8 +66,10 @@ export interface ResidentServiceReadinessReason {
 export interface ResidentServiceReadinessChecks {
   exactLabel: boolean | null;
   loaded: boolean | null;
+  running: boolean | null;
   enabled: boolean | null;
   immutableRelease: boolean | null;
+  interpreterIdentityBound: boolean | null;
   exactInvocation: boolean | null;
   restartPolicyCompatible: boolean | null;
   killSwitchAbsent: boolean | null;
@@ -82,6 +100,8 @@ export interface ResidentServiceReleaseContract {
   identity: string;
   /** Expected digest of package.json, bin/ashlr, and the complete dist tree. */
   treeSha256: string;
+  /** Canonical executable identity for the interpreter launchd will execute. */
+  interpreter: ResidentServiceFileBinding;
 }
 
 export interface ResidentServiceReadinessOptions extends ServiceInstallOptions {
@@ -96,16 +116,18 @@ interface CommandObservation {
   error?: string;
 }
 
-interface ReleaseTreeObservation {
+export interface ResidentServiceFileBinding {
   path: string;
   sha256: string;
 }
 
 export interface ResidentServiceReadinessDependencies {
   run?: (command: string, args: readonly string[], timeoutMs: number) => CommandObservation;
-  releaseTreeBinding?: (entrypointPath: string) => ReleaseTreeObservation;
+  releaseTreeBinding?: (entrypointPath: string, timeoutMs: number) => ResidentServiceFileBinding;
+  interpreterBinding?: (interpreterPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   killSwitchState?: (path: string) => 'absent' | 'present' | 'unknown';
   uid?: () => number;
+  nowMs?: () => number;
 }
 
 interface LaunchdSnapshot {
@@ -140,6 +162,135 @@ function runReadOnlyCommand(
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function bindingDeadline(timeoutMs: number): () => void {
+  const deadlineAt = Date.now() + timeoutMs;
+  return () => {
+    if (Date.now() >= deadlineAt) throw new Error('artifact binding deadline exceeded');
+  };
+}
+
+function hashStableFile(path: string, assertWithinDeadline: () => void): ResidentServiceFileBinding {
+  assertWithinDeadline();
+  const canonical = realpathSync(resolve(path));
+  assertWithinDeadline();
+  const fd = openSync(canonical, 'r');
+  try {
+    assertWithinDeadline();
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) throw new Error(`artifact is not a regular file: ${canonical}`);
+    const hash = createHash('sha256');
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    while (offset < Number(before.size)) {
+      assertWithinDeadline();
+      const count = readSync(fd, chunk, 0, Math.min(chunk.length, Number(before.size) - offset), offset);
+      if (count <= 0) throw new Error(`short artifact binding read: ${canonical}`);
+      hash.update(chunk.subarray(0, count));
+      offset += count;
+    }
+    assertWithinDeadline();
+    const after = fstatSync(fd, { bigint: true });
+    assertWithinDeadline();
+    if (!sameFileSnapshot(before, after) || realpathSync(canonical) !== canonical) {
+      throw new Error(`artifact changed during read: ${canonical}`);
+    }
+    assertWithinDeadline();
+    return { path: canonical, sha256: hash.digest('hex') };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function hashStableInterpreter(path: string, timeoutMs: number): ResidentServiceFileBinding {
+  return hashStableFile(path, bindingDeadline(timeoutMs));
+}
+
+function releasePackageRoot(entrypointPath: string, assertWithinDeadline: () => void): string {
+  assertWithinDeadline();
+  let current = dirname(realpathSync(resolve(entrypointPath)));
+  for (;;) {
+    assertWithinDeadline();
+    if (
+      existsSync(join(current, 'package.json'))
+      && existsSync(join(current, 'bin', 'ashlr'))
+      && existsSync(join(current, 'dist', 'cli', 'index.js'))
+    ) {
+      assertWithinDeadline();
+      return realpathSync(current);
+    }
+    const parent = dirname(current);
+    if (parent === current) throw new Error('runtime-release-root-unavailable');
+    current = parent;
+  }
+}
+
+function releaseFilePaths(root: string, assertWithinDeadline: () => void): string[] {
+  const files = [join(root, 'package.json'), join(root, 'bin', 'ashlr')];
+  const pending = [join(root, 'dist')];
+  while (pending.length > 0) {
+    assertWithinDeadline();
+    const directory = pending.pop()!;
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      assertWithinDeadline();
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`runtime release contains a symlink: ${path}`);
+      if (entry.isDirectory()) pending.push(path);
+      else if (entry.isFile()) files.push(path);
+      else throw new Error(`runtime release contains an unsupported entry: ${path}`);
+      if (files.length + pending.length > 20_000) {
+        throw new Error('runtime release file bound exceeded');
+      }
+    }
+  }
+  assertWithinDeadline();
+  return files.sort((left, right) => relative(root, left).localeCompare(relative(root, right)));
+}
+
+function releaseFilesDigest(
+  root: string,
+  files: readonly string[],
+  assertWithinDeadline: () => void,
+): string {
+  const hash = createHash('sha256');
+  for (const path of files) {
+    assertWithinDeadline();
+    const binding = hashStableFile(path, assertWithinDeadline);
+    const name = relative(root, binding.path).replaceAll('\\', '/');
+    if (name.startsWith('../') || name === '..' || isAbsolute(name)) {
+      throw new Error('runtime release file escaped package root');
+    }
+    hash.update(`${name}\0${binding.sha256}\0`, 'utf8');
+  }
+  assertWithinDeadline();
+  return hash.digest('hex');
+}
+
+function hashStableReleaseTree(entrypointPath: string, timeoutMs: number): ResidentServiceFileBinding {
+  const assertWithinDeadline = bindingDeadline(timeoutMs);
+  const root = releasePackageRoot(entrypointPath, assertWithinDeadline);
+  const before = releaseFilePaths(root, assertWithinDeadline);
+  const firstDigest = releaseFilesDigest(root, before, assertWithinDeadline);
+  const after = releaseFilePaths(root, assertWithinDeadline);
+  if (before.length !== after.length || before.some((path, index) => path !== after[index])) {
+    throw new Error('runtime release tree changed during hashing');
+  }
+  const secondDigest = releaseFilesDigest(root, after, assertWithinDeadline);
+  if (firstDigest !== secondDigest) throw new Error('runtime release content changed during hashing');
+  assertWithinDeadline();
+  return { path: root, sha256: secondDigest };
 }
 
 function observeKillSwitch(path: string): 'absent' | 'present' | 'unknown' {
@@ -183,6 +334,29 @@ function exactDisabledState(output: string, label: string): boolean | null {
   return matches[0]?.[1] === 'disabled';
 }
 
+function exactLaunchdValue(output: string, field: string): string | null {
+  const prefix = `\t${field} = `;
+  const values = output.trimEnd().split(/\r?\n/)
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length).trim());
+  return values.length === 1 ? values[0]! : null;
+}
+
+function loadedRestartPolicyCompatible(output: string, restartSec: number): boolean | null {
+  const minimumRuntime = exactLaunchdValue(output, 'minimum runtime');
+  const properties = exactLaunchdValue(output, 'properties');
+  if (minimumRuntime === null || properties === null) return null;
+  if (!/^\d+$/.test(minimumRuntime) || Number(minimumRuntime) !== restartSec) return false;
+  const propertySet = new Set(properties.split('|').map((entry) => entry.trim()).filter(Boolean));
+  return propertySet.has('keepalive')
+    && propertySet.has('runatload')
+    && !propertySet.has('launchonlyonce');
+}
+
+function launchdRuntimeState(output: string): string | null {
+  return exactLaunchdValue(output, 'state');
+}
+
 function parsePlistJson(result: CommandObservation): Record<string, unknown> | null {
   if (!commandSucceeded(result)) return null;
   try {
@@ -212,6 +386,13 @@ function restartPolicyCompatible(plist: Record<string, unknown>, restartSec: num
     && Object.keys(keepAlive as Record<string, unknown>).length === 1
     && (keepAlive as Record<string, unknown>)['SuccessfulExit'] === false
     && plist['ThrottleInterval'] === restartSec;
+}
+
+function sameBinding(
+  left: ResidentServiceFileBinding,
+  right: ResidentServiceFileBinding,
+): boolean {
+  return left.path === right.path && left.sha256 === right.sha256;
 }
 
 function strictAnd(left: boolean | null, right: boolean): boolean | null {
@@ -267,8 +448,10 @@ function emptyChecks(): ResidentServiceReadinessChecks {
   return {
     exactLabel: null,
     loaded: null,
+    running: null,
     enabled: null,
     immutableRelease: null,
+    interpreterIdentityBound: null,
     exactInvocation: null,
     restartPolicyCompatible: null,
     killSwitchAbsent: null,
@@ -286,7 +469,7 @@ export function residentServiceReadiness(
 ): ResidentServiceReadiness {
   const checks = emptyChecks();
   const reasons: ResidentServiceReadinessReason[] = [];
-  const platform = (options.platform ?? process.platform) as Platform;
+  const platform = process.platform as Platform;
   if (platform !== 'darwin') {
     blocked(reasons, 'unsupported-platform', 'resident readiness currently requires launchd on macOS');
     return result(options.release.identity, checks, reasons);
@@ -303,27 +486,28 @@ export function residentServiceReadiness(
     return result(options.release.identity, checks, reasons);
   }
 
-  const entrypoint = join(releaseRoot, 'bin', 'ashlr');
-  const releaseTreeBinding = dependencies.releaseTreeBinding ?? daemonActivationReleaseTreeBinding;
-  let firstReleaseBinding: ReleaseTreeObservation | null = null;
-  try {
-    firstReleaseBinding = releaseTreeBinding(entrypoint);
-    checks.immutableRelease = firstReleaseBinding.path === releaseRoot
-      && firstReleaseBinding.sha256 === options.release.treeSha256;
-    if (!checks.immutableRelease) {
-      blocked(reasons, 'release-binding-mismatch', 'observed release tree does not match the admitted immutable identity');
-    }
-  } catch {
-    checks.immutableRelease = null;
-    degraded(reasons, 'release-binding-unavailable', 'immutable release tree could not be observed safely');
+  const interpreterPath = resolve(options.release.interpreter.path);
+  const interpreterContractValid = interpreterPath === options.release.interpreter.path
+    && SHA256_RE.test(options.release.interpreter.sha256)
+    && (options.nodePath === undefined || options.nodePath === interpreterPath);
+  if (!interpreterContractValid) {
+    checks.interpreterIdentityBound = false;
+    blocked(
+      reasons,
+      'interpreter-contract-invalid',
+      'interpreter path and digest must be canonical and agree with the service invocation',
+    );
+    return result(options.release.identity, checks, reasons);
   }
 
+  const entrypoint = join(releaseRoot, 'bin', 'ashlr');
   let definition;
   try {
     definition = generateServiceDefinition({
       ...options,
       platform: 'darwin',
       binPath: entrypoint,
+      nodePath: interpreterPath,
     });
   } catch {
     degraded(reasons, 'service-definition-unavailable', 'expected launchd service definition could not be generated');
@@ -339,45 +523,159 @@ export function residentServiceReadiness(
   )))();
   const domainTarget = `gui/${uid}`;
   const serviceTarget = `${domainTarget}/${SERVICE_LABEL}`;
-  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Number.isFinite(requestedTimeout)
+    ? Math.min(MAX_TIMEOUT_MS, Math.max(1, Math.floor(requestedTimeout)))
+    : DEFAULT_TIMEOUT_MS;
   const run = dependencies.run ?? runReadOnlyCommand;
   const killSwitchState = dependencies.killSwitchState ?? observeKillSwitch;
+  const releaseTreeBinding = dependencies.releaseTreeBinding ?? hashStableReleaseTree;
+  const interpreterBinding = dependencies.interpreterBinding ?? hashStableInterpreter;
   const killPath = join(options.homeDir ?? homedir(), '.ashlr', 'KILL');
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const startedAt = nowMs();
+  let lastObservedAt = startedAt;
+  let deadlineExceeded = !Number.isFinite(startedAt);
+  const deadlineAt = deadlineExceeded ? startedAt : startedAt + timeoutMs;
 
-  const observe = (): LaunchdSnapshot => ({
-    runtime: run('launchctl', ['print', serviceTarget], timeoutMs),
-    disabled: run('launchctl', ['print-disabled', domainTarget], timeoutMs),
-    plist: run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', definition.filePath], timeoutMs),
-    killSwitch: killSwitchState(killPath),
+  const remainingMs = (): number => {
+    const observedAt = nowMs();
+    if (
+      !Number.isFinite(observedAt)
+      || observedAt < lastObservedAt
+      || observedAt >= deadlineAt
+    ) {
+      deadlineExceeded = true;
+      return 0;
+    }
+    lastObservedAt = observedAt;
+    return Math.max(1, Math.floor(deadlineAt - observedAt));
+  };
+  const unavailableCommand = (): CommandObservation => ({
+    status: null,
+    stdout: '',
+    stderr: '',
+    error: 'resident readiness observation deadline exceeded',
   });
+  const runBounded = (command: string, args: readonly string[]): CommandObservation => {
+    const remaining = remainingMs();
+    if (remaining === 0) return unavailableCommand();
+    const observation = run(command, args, remaining);
+    remainingMs();
+    return observation;
+  };
+  const bindBounded = (
+    binding: (path: string, remaining: number) => ResidentServiceFileBinding,
+    path: string,
+  ): ResidentServiceFileBinding | null => {
+    const remaining = remainingMs();
+    if (remaining === 0) return null;
+    try {
+      const observation = binding(path, remaining);
+      remainingMs();
+      return observation;
+    } catch {
+      remainingMs();
+      return null;
+    }
+  };
+  const observeKillSwitchBounded = (): 'absent' | 'present' | 'unknown' => {
+    if (remainingMs() === 0) return 'unknown';
+    let observation: 'absent' | 'present' | 'unknown';
+    try {
+      observation = killSwitchState(killPath);
+    } catch {
+      observation = 'unknown';
+    }
+    remainingMs();
+    return observation;
+  };
+  const observe = (): LaunchdSnapshot => ({
+    runtime: runBounded('/bin/launchctl', ['print', serviceTarget]),
+    disabled: runBounded('/bin/launchctl', ['print-disabled', domainTarget]),
+    plist: runBounded('/usr/bin/plutil', ['-convert', 'json', '-o', '-', definition.filePath]),
+    killSwitch: observeKillSwitchBounded(),
+  });
+
+  const firstReleaseBinding = bindBounded(releaseTreeBinding, entrypoint);
+  const firstInterpreterBinding = bindBounded(interpreterBinding, interpreterPath);
   const first = observe();
   const second = observe();
-  let secondReleaseBinding: ReleaseTreeObservation | null = null;
-  if (firstReleaseBinding) {
-    try {
-      secondReleaseBinding = releaseTreeBinding(entrypoint);
-    } catch {
-      checks.immutableRelease = null;
-      degraded(reasons, 'release-binding-unavailable', 'immutable release tree could not be re-observed safely');
-    }
-  }
-  const releaseStable = firstReleaseBinding === null || secondReleaseBinding === null
-    ? null
-    : firstReleaseBinding.path === secondReleaseBinding.path
-      && firstReleaseBinding.sha256 === secondReleaseBinding.sha256;
-  const serviceStable = sameSnapshot(first, second);
-  checks.stableObservation = serviceStable ? releaseStable : false;
-  if (releaseStable === false) {
+  const secondReleaseBinding = bindBounded(releaseTreeBinding, entrypoint);
+  const secondInterpreterBinding = bindBounded(interpreterBinding, interpreterPath);
+  const finalKillSwitch = observeKillSwitchBounded();
+  // Last external reads bind artifacts after all launchd and kill-switch observations.
+  const finalInterpreterBinding = bindBounded(interpreterBinding, interpreterPath);
+  const finalReleaseBinding = bindBounded(releaseTreeBinding, entrypoint);
+
+  const releaseBindings = [firstReleaseBinding, secondReleaseBinding, finalReleaseBinding];
+  const completeReleaseBindings = releaseBindings.filter(
+    (binding): binding is ResidentServiceFileBinding => binding !== null,
+  );
+  const releaseMatchesContract = completeReleaseBindings.every((binding) => (
+    binding.path === releaseRoot && binding.sha256 === options.release.treeSha256
+  ));
+  if (!releaseMatchesContract) {
     checks.immutableRelease = false;
-    degraded(reasons, 'observation-changed', 'immutable release identity changed during the bounded observation window');
-    return result(options.release.identity, checks, reasons);
+    blocked(reasons, 'release-binding-mismatch', 'observed release tree does not match the admitted immutable identity');
+  } else if (completeReleaseBindings.length !== releaseBindings.length) {
+    checks.immutableRelease = null;
+    degraded(reasons, 'release-binding-unavailable', 'immutable release tree could not be observed across the full window');
+  } else {
+    checks.immutableRelease = true;
   }
-  if (!checks.stableObservation) {
-    degraded(reasons, 'observation-changed', 'resident service state changed during the bounded observation window');
-    return result(options.release.identity, checks, reasons);
+  const releaseStable = completeReleaseBindings.length === releaseBindings.length
+    ? completeReleaseBindings.every((binding) => sameBinding(binding, completeReleaseBindings[0]!))
+    : null;
+
+  const interpreterBindings = [
+    firstInterpreterBinding,
+    secondInterpreterBinding,
+    finalInterpreterBinding,
+  ];
+  const completeInterpreterBindings = interpreterBindings.filter(
+    (binding): binding is ResidentServiceFileBinding => binding !== null,
+  );
+  const interpreterMatchesContract = completeInterpreterBindings.every((binding) => (
+    binding.path === options.release.interpreter.path
+    && binding.sha256 === options.release.interpreter.sha256
+  ));
+  if (!interpreterMatchesContract) {
+    checks.interpreterIdentityBound = false;
+    blocked(reasons, 'interpreter-binding-mismatch', 'loaded interpreter does not match the admitted executable identity');
+  } else if (completeInterpreterBindings.length !== interpreterBindings.length) {
+    checks.interpreterIdentityBound = null;
+    degraded(reasons, 'interpreter-binding-unavailable', 'interpreter identity could not be observed across the full window');
+  } else {
+    checks.interpreterIdentityBound = true;
+  }
+  const interpreterStable = completeInterpreterBindings.length === interpreterBindings.length
+    ? completeInterpreterBindings.every((binding) => sameBinding(binding, completeInterpreterBindings[0]!))
+    : null;
+
+  const serviceStable = sameSnapshot(first, second)
+    && second.killSwitch === finalKillSwitch;
+  const bindingChanged = releaseStable === false || interpreterStable === false;
+  checks.stableObservation = deadlineExceeded
+    ? false
+    : !serviceStable || bindingChanged
+      ? false
+      : releaseStable === true && interpreterStable === true
+        ? true
+        : null;
+  if (deadlineExceeded) {
+    degraded(reasons, 'observation-deadline-exceeded', 'resident readiness exceeded its single bounded observation deadline');
+  }
+  if (checks.stableObservation === false && !deadlineExceeded) {
+    degraded(reasons, 'observation-changed', 'resident service, release, interpreter, or kill state changed during observation');
   }
 
   const plist = parsePlistJson(second.plist);
+  const restartSec = Number.isFinite(options.restartSec) && options.restartSec !== undefined
+    ? Math.max(5, Math.floor(options.restartSec))
+    : 30;
+  let diskRestartPolicyCompatible: boolean | null = null;
+  let loadedRestartPolicy: boolean | null = null;
   if (!plist) {
     degraded(reasons, 'service-definition-unavailable', 'installed launchd plist could not be parsed as structured data');
   } else {
@@ -392,11 +690,8 @@ export function residentServiceReadiness(
     if (!checks.exactInvocation) {
       blocked(reasons, 'service-invocation-mismatch', 'installed launchd plist does not invoke the admitted immutable release');
     }
-    const restartSec = Number.isFinite(options.restartSec) && options.restartSec !== undefined
-      ? Math.max(5, Math.floor(options.restartSec))
-      : 30;
-    checks.restartPolicyCompatible = restartPolicyCompatible(plist, restartSec);
-    if (!checks.restartPolicyCompatible) {
+    diskRestartPolicyCompatible = restartPolicyCompatible(plist, restartSec);
+    if (!diskRestartPolicyCompatible) {
       blocked(reasons, 'restart-policy-mismatch', 'launchd restart policy is incompatible with resident crash recovery');
     }
   }
@@ -424,7 +719,26 @@ export function residentServiceReadiness(
     if (!runtimeInvocationExact) {
       blocked(reasons, 'service-invocation-mismatch', 'loaded launchd runtime does not match the admitted service path and argv');
     }
+    const runtimeState = launchdRuntimeState(second.runtime.stdout);
+    checks.running = runtimeState === 'running' && exactRuntime?.pid !== undefined;
+    if (!checks.running) {
+      blocked(reasons, 'service-not-running', 'loaded launchd resident service is not proven running with a live pid');
+    }
+    loadedRestartPolicy = loadedRestartPolicyCompatible(second.runtime.stdout, restartSec);
+    if (loadedRestartPolicy !== true) {
+      blocked(
+        reasons,
+        'restart-policy-mismatch',
+        loadedRestartPolicy === null
+          ? 'loaded launchd restart policy could not be proven from native runtime state'
+          : 'loaded launchd restart policy is incompatible with resident crash recovery',
+      );
+    }
   }
+
+  checks.restartPolicyCompatible = diskRestartPolicyCompatible === null || loadedRestartPolicy === null
+    ? null
+    : diskRestartPolicyCompatible && loadedRestartPolicy;
 
   if (!commandSucceeded(second.disabled)) {
     checks.enabled = null;
@@ -439,14 +753,15 @@ export function residentServiceReadiness(
     }
   }
 
-  checks.killSwitchAbsent = second.killSwitch === 'absent'
-    ? true
-    : second.killSwitch === 'present'
-      ? false
-      : null;
-  if (second.killSwitch === 'present') {
+  const killObservations = [first.killSwitch, second.killSwitch, finalKillSwitch];
+  checks.killSwitchAbsent = killObservations.includes('present')
+    ? false
+    : killObservations.includes('unknown')
+      ? null
+      : true;
+  if (killObservations.includes('present')) {
     blocked(reasons, 'kill-switch-present', 'daemon kill switch is present');
-  } else if (second.killSwitch === 'unknown') {
+  } else if (killObservations.includes('unknown')) {
     degraded(reasons, 'kill-switch-state-unavailable', 'daemon kill-switch absence could not be proven');
   }
 
