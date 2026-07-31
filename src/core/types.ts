@@ -4345,6 +4345,14 @@ export interface DaemonTick {
   reason: string;
   /** A treatment-only persistence failure safe for the resident loop; any later daemon persistence failure strips this flag. */
   residentSafePersistenceFailure?: 'repair-treatment';
+  /** Bounded storage classification for supervisor retry policy; never raw error text or paths. */
+  persistenceDiagnosticCode?:
+    | 'state-malformed'
+    | 'state-unsafe'
+    | 'state-io-transient'
+    | 'state-io-permanent'
+    | 'state-write-unclassified'
+    | 'successor-owner';
   /** True when this tick was produced by a dry-run/simulation path. */
   dryRun?: boolean;
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */

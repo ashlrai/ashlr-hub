@@ -309,6 +309,25 @@ describe('daemon valid flags remain supported', () => {
     });
   });
 
+  it('renders a running legacy service as blocked when resident authority is absent', async () => {
+    effects.serviceStatus.mockReturnValue({
+      installed: true,
+      running: true,
+      runtimeState: 'running',
+      platformSpec: 'launchd',
+      productionReady: false,
+      residentActivationAuthorized: false,
+      residentActivationBlocker: 'resident-activation-authority-unavailable',
+    });
+
+    const result = await capture(['service-status']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('blocked (resident authority unavailable)');
+    expect(result.stdout).toContain('authority:');
+    expect(result.stdout).not.toContain('running:    yes');
+  });
+
   it('reports scheduler activity after autostart without calling it stopped', async () => {
     effects.ensureRunning.mockResolvedValue({
       installed: true,

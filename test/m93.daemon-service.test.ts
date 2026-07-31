@@ -60,6 +60,13 @@ vi.mock('../src/core/util/durability.js', () => ({
   fsyncDirectory: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/resident-service-install-admission.js', () => ({
+  residentServiceInstallAdmission: () => ({
+    authorized: true,
+    reason: 'test-only-transaction-fixture',
+  }),
+}));
+
 import * as cp from 'node:child_process';
 import {
   ensureRunning,
@@ -71,6 +78,7 @@ import {
 import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
 import {
   buildWindowsTaskCreateScript,
+  buildWindowsTaskRecoveryRunScript,
   buildWindowsTaskRestoreScript,
   buildWindowsTaskRunScript,
   buildWindowsTaskSnapshotScript,
@@ -292,6 +300,7 @@ describe('strict Windows Task Scheduler scripts', () => {
       buildWindowsTaskRestoreScript(taskName),
       buildWindowsTaskStopDeleteScript(taskName),
       buildWindowsTaskRunScript(taskName),
+      buildWindowsTaskRecoveryRunScript(taskName),
     ];
 
     for (const script of scripts) {
@@ -305,6 +314,23 @@ describe('strict Windows Task Scheduler scripts', () => {
       expect(script).toContain("untrusted identity can modify the task");
       expect(script).not.toContain('/Task/Principals/Principal/RequiredPrivileges');
       expect(script).not.toContain('/Task/Principals/Principal/ProcessTokenSidType');
+    }
+  });
+
+  it('accepts only the exact legacy restart shape for migration and rollback', () => {
+    const create = buildWindowsTaskCreateScript(taskName);
+    const snapshot = buildWindowsTaskSnapshotScript(taskName);
+    const restore = buildWindowsTaskRestoreScript(taskName);
+    const remove = buildWindowsTaskStopDeleteScript(taskName);
+    const run = buildWindowsTaskRunScript(taskName);
+    const recoveryRun = buildWindowsTaskRecoveryRunScript(taskName);
+
+    expect(create).not.toContain('$taskName $true');
+    expect(run).not.toContain('$taskName $true');
+    for (const script of [snapshot, restore, remove, recoveryRun]) {
+      expect(script).toContain('$taskName $true');
+      expect(script).toContain('$restartCount -eq 0');
+      expect(script).toContain('[string]::IsNullOrEmpty($restartInterval)');
     }
   });
 
@@ -404,32 +430,30 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain(path.join(configDir, 'daemon.launchd.err.log'));
   });
 
-  it('plist has RunAtLoad true and KeepAlive with SuccessfulExit false', () => {
+  it('plist starts once at login without an automatic crash-restart loop', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain('<key>RunAtLoad</key>');
     expect(def.content).toContain('<true/>');
     expect(def.content).toContain('<key>KeepAlive</key>');
-    expect(def.content).toContain('<key>SuccessfulExit</key>');
-    expect(def.content).toContain('<false/>');
+    expect(def.content).toContain('<key>KeepAlive</key>\n\t<false/>');
+    expect(def.content).not.toContain('<key>SuccessfulExit</key>');
   });
 
-  it('plist crash restart throttle is independent from daemon work interval', () => {
+  it('plist omits crash restart throttling because automatic retry is disabled', () => {
     const def = generateServiceDefinition({
       ...baseOpts('darwin'),
       intervalMs: 1_800_000,
     });
-    expect(def.content).toContain('<key>ThrottleInterval</key>');
-    expect(def.content).toContain('<integer>30</integer>');
+    expect(def.content).not.toContain('<key>ThrottleInterval</key>');
     expect(def.content).toContain('<string>1800000</string>');
-    expect(def.content).not.toContain('<integer>1800</integer>');
   });
 
-  it('plist honors custom restartSec with a 5s minimum', () => {
+  it('plist ignores restartSec while automatic retry is disabled', () => {
     const custom = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 12 });
-    expect(custom.content).toContain('<integer>12</integer>');
+    expect(custom.content).not.toContain('<integer>12</integer>');
 
     const clamped = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 1 });
-    expect(clamped.content).toContain('<integer>5</integer>');
+    expect(clamped.content).not.toContain('<integer>5</integer>');
   });
 
   it('plist PATH env includes common developer tool bins', () => {

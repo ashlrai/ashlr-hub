@@ -8,6 +8,13 @@ vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/resident-service-install-admission.js', () => ({
+  residentServiceInstallAdmission: () => ({
+    authorized: true,
+    reason: 'test-only-transaction-fixture',
+  }),
+}));
+
 import * as cp from 'node:child_process';
 import {
   ensureRunning,
@@ -418,6 +425,11 @@ describe('daemon service rollback', () => {
     );
     expect(fs.readFileSync(def.filePath, 'utf8')).toBe('prior-launcher');
     expect(taskState).toBe('queued');
+    const recoveryRunCall = spawnSyncMock.mock.calls.find(
+      ([cmd, args]: [string, string[]]) =>
+        isWindowsPowerShellCommand(cmd) && args.join(' ').includes('$registered.Run($null)'),
+    );
+    expect(recoveryRunCall?.[1].join(' ')).toContain('$taskName $true');
     expect(fs.readdirSync(path.join(home, '.ashlr', 'locks'))
       .filter((name) => name.endsWith('.journal.json'))).toHaveLength(1);
   });

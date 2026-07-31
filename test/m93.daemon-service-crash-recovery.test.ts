@@ -13,6 +13,13 @@ vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/resident-service-install-admission.js', () => ({
+  residentServiceInstallAdmission: () => ({
+    authorized: true,
+    reason: 'test-only-crash-recovery-fixture',
+  }),
+}));
+
 vi.mock('../src/core/daemon/launchd-plist-transaction.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/daemon/launchd-plist-transaction.js')>();
   return {

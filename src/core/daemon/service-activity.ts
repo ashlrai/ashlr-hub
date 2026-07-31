@@ -1,6 +1,7 @@
 export type ServiceActivity =
   | 'running'
   | 'scheduler-active-unverified'
+  | 'blocked'
   | 'inactive'
   | 'unknown';
 
@@ -8,6 +9,7 @@ export interface ServiceActivityInput {
   running: boolean;
   runtimeState?: 'running' | 'queued' | 'ready' | 'disabled' | 'stopped' | 'unknown';
   platformSpec: string;
+  residentActivationAuthorized?: false;
 }
 
 /**
@@ -15,6 +17,7 @@ export interface ServiceActivityInput {
  * Task Scheduler's Running/Queued states do not prove the daemon process is live.
  */
 export function serviceActivity(status: ServiceActivityInput): ServiceActivity {
+  if (status.residentActivationAuthorized === false) return 'blocked';
   if (status.running) return 'running';
   if (
     status.platformSpec === 'schtasks' &&

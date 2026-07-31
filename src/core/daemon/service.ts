@@ -1,8 +1,8 @@
 /**
  * DaemonServiceManager — M93
  *
- * Cross-platform OS service registration for the ashlr daemon.
- * Supports macOS (launchd), Linux (systemd --user), and Windows (schtasks).
+ * Cross-platform OS service definition and cleanup for the ashlr daemon.
+ * New installation/activation is blocked until resident authority exists.
  *
  * DESIGN CONTRACT:
  *  - install(), uninstall(), and ensureRunning() are side-effectful entry points.
@@ -28,12 +28,17 @@ import {
 import { validateWindowsFileAuthority } from './windows-file-authority.js';
 import {
   WINDOWS_TASK_CREATE_SCRIPT,
+  WINDOWS_TASK_RECOVERY_RUN_SCRIPT,
   WINDOWS_TASK_RESTORE_SCRIPT,
   WINDOWS_TASK_RUN_SCRIPT,
   WINDOWS_TASK_SNAPSHOT_SCRIPT,
   WINDOWS_TASK_STOP_DELETE_SCRIPT,
   windowsPowerShellPath,
 } from './windows-task-scripts.js';
+import { residentServiceInstallAdmission } from './resident-service-install-admission.js';
+
+const RESIDENT_SERVICE_AUTHORITY_ERROR =
+  'resident service installation is blocked: externally authenticated resident activation authority is unavailable';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -51,7 +56,7 @@ export interface ServiceInstallOptions {
   budget?: number;
   /** Interval in ms passed to `daemon start --interval`. */
   intervalMs?: number;
-  /** Crash restart throttle in seconds (default: 30). Independent of intervalMs. */
+  /** Linux crash restart throttle in seconds (default: 30). Independent of intervalMs. */
   restartSec?: number;
   /** Parallelism passed to `daemon start --parallel`. */
   parallel?: number;
@@ -77,6 +82,10 @@ export interface ServiceInstallOptions {
 export interface ServiceStatusResult {
   installed: boolean;
   running: boolean;
+  /** False until a separately authenticated resident activation permit exists. */
+  productionReady?: false;
+  residentActivationAuthorized?: false;
+  residentActivationBlocker?: string;
   /** Exact runtime authority when the platform exposes one without localized text. */
   runtimeState?: 'running' | 'queued' | 'ready' | 'disabled' | 'stopped' | 'unknown';
   platformSpec: PlatformSpec;
@@ -234,12 +243,7 @@ ${programArgs.join('\n')}
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
-\t<dict>
-\t\t<key>SuccessfulExit</key>
-\t\t<false/>
-\t</dict>
-\t<key>ThrottleInterval</key>
-\t<integer>${o.restartSec}</integer>
+\t<false/>
 \t<key>StandardOutPath</key>
 \t<string>${outLog}</string>
 \t<key>StandardErrorPath</key>
@@ -928,7 +932,7 @@ function stopAndDeleteWindowsTask(
   }
 }
 
-function runWindowsTask(expectedLauncherPath: string): CommandResult {
+function runWindowsTaskWithScript(expectedLauncherPath: string, script: string): CommandResult {
   try {
     if (!path.isAbsolute(expectedLauncherPath)) {
       return { ok: false, stdout: '', stderr: 'expected Task Scheduler launcher path must be absolute' };
@@ -939,7 +943,7 @@ function runWindowsTask(expectedLauncherPath: string): CommandResult {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      WINDOWS_TASK_RUN_SCRIPT,
+      script,
     ], JSON.stringify({ expectedLauncherPath }));
     return started.ok && started.stdout === 'started'
       ? { ok: true, stdout: '', stderr: '' }
@@ -951,6 +955,14 @@ function runWindowsTask(expectedLauncherPath: string): CommandResult {
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function runWindowsTask(expectedLauncherPath: string): CommandResult {
+  return runWindowsTaskWithScript(expectedLauncherPath, WINDOWS_TASK_RUN_SCRIPT);
+}
+
+function runWindowsTaskForRecovery(expectedLauncherPath: string): CommandResult {
+  return runWindowsTaskWithScript(expectedLauncherPath, WINDOWS_TASK_RECOVERY_RUN_SCRIPT);
 }
 
 function verifyWindowsState(
@@ -1029,7 +1041,7 @@ function restoreWindowsTaskDefinition(
       };
     }
     if (expected.state === 'running' || expected.state === 'queued') {
-      const started = runWindowsTask(expectedLauncherPath);
+      const started = runWindowsTaskForRecovery(expectedLauncherPath);
       if (!started.ok) return started;
     }
     return verifyWindowsState(parsed, expectedLauncherPath);
@@ -1290,7 +1302,7 @@ function restoreWindowsState(
           (state.state === 'running' || state.state === 'queued') &&
           current.state === 'ready'
         ) {
-          const started = runWindowsTask(def.filePath);
+          const started = runWindowsTaskForRecovery(def.filePath);
           if (!started.ok) return started;
         }
         return verifyWindowsState(state, def.filePath);
@@ -1369,9 +1381,14 @@ function recoverWindowsTransactionUnload(
  * Idempotent: backs up any existing service file, writes fresh, then loads.
  * Every platform verifies the requested activation state before returning.
  * Missing service managers, permission failures, and ambiguous status output
- * fail closed so callers cannot mistake a partial install for success.
+ * fail closed so callers cannot mistake a partial install for success. This
+ * entry point currently refuses before mutation because proposal-once authority
+ * cannot authorize a resident process.
  */
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
+  if (!residentServiceInstallAdmission().authorized) {
+    throw new Error(RESIDENT_SERVICE_AUTHORITY_ERROR);
+  }
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
   const autostart = opts.autostart !== false;
@@ -1893,10 +1910,12 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
  * This intentionally does not install a missing service and does not change the
  * daemon kill switch. It closes the common gap where a service was loaded while
  * the fleet was paused, exited cleanly, and then needed a kick after resume.
+ * Until resident authority exists it returns observation only and never starts.
  */
 export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<ServiceStatusResult> {
   const before = serviceStatus(opts);
   if (!before.installed || before.running) return before;
+  if (!residentServiceInstallAdmission().authorized) return before;
 
   const platform = (opts.platform ?? process.platform) as Platform;
   if (platform === 'win32' && before.runtimeState !== 'ready') return before;
@@ -1949,14 +1968,25 @@ export function serviceStatus(opts: ServiceInstallOptions = {}): ServiceStatusRe
   const def = generateServiceDefinition(opts);
   const installed = fs.existsSync(def.filePath);
 
+  let observed: ServiceStatusResult;
   if (platform === 'darwin') {
-    return queryLaunchd(def, installed);
+    observed = queryLaunchd(def, installed);
   } else if (platform === 'linux') {
-    return querySystemd(def.filePath, installed);
+    observed = querySystemd(def.filePath, installed);
   } else if (platform === 'win32') {
-    return querySchtasks(def.filePath, installed);
+    observed = querySchtasks(def.filePath, installed);
+  } else {
+    observed = { installed, running: false, platformSpec: 'unknown', serviceFilePath: def.filePath };
   }
-  return { installed, running: false, platformSpec: 'unknown', serviceFilePath: def.filePath };
+  const admission = residentServiceInstallAdmission();
+  return admission.authorized
+    ? observed
+    : {
+        ...observed,
+        productionReady: false,
+        residentActivationAuthorized: false,
+        residentActivationBlocker: admission.reason,
+      };
 }
 
 export function serviceStatusCached(

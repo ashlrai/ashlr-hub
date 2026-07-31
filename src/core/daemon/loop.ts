@@ -1099,12 +1099,22 @@ interface DaemonFailureClassification {
   retryable: boolean;
 }
 
+type DaemonPersistenceDiagnosticCode = Exclude<
+  DaemonTerminationDiagnosticCode,
+  'start-refused' | 'runtime-transient' | 'runtime-unclassified'
+>;
+
+interface DaemonPersistenceFailureClassification {
+  diagnosticCode: DaemonPersistenceDiagnosticCode;
+  retryable: boolean;
+}
+
 const TRANSIENT_DAEMON_ERROR_CODE = /(?:^|[^A-Z])(?:EAGAIN|EBUSY|EINTR|EIO|EMFILE|ENFILE|ETIMEDOUT)(?:[^A-Z]|$)/;
 
 function classifyPersistenceFailure(fields: {
   reason?: 'malformed' | 'unreadable';
   error?: string;
-}): DaemonFailureClassification {
+}): DaemonPersistenceFailureClassification {
   if (fields.reason === 'malformed') {
     return { diagnosticCode: 'state-malformed', retryable: false };
   }
@@ -1141,6 +1151,28 @@ function daemonTermination(
     retryable,
     exitCode: retryable ? 1 : 0,
     ...(failure ? { diagnosticCode: failure.diagnosticCode } : {}),
+  };
+}
+
+export function daemonLockFailureDisposition(
+  reason: 'busy' | 'io-error',
+): DaemonTerminationDisposition {
+  return reason === 'io-error'
+    ? daemonTermination('persistence-failure', {
+        diagnosticCode: 'state-io-transient',
+        retryable: true,
+      })
+    : daemonTermination('start-refused', {
+        diagnosticCode: 'start-refused',
+        retryable: false,
+      });
+}
+
+function tickPersistenceFailure(tick: DaemonTick): DaemonFailureClassification {
+  const diagnosticCode = tick.persistenceDiagnosticCode ?? 'state-write-unclassified';
+  return {
+    diagnosticCode,
+    retryable: diagnosticCode === 'state-io-transient',
   };
 }
 
@@ -3271,9 +3303,19 @@ export async function tick(
     reason: 'shutdown-requested',
     durationMs: t.durationMs ?? Date.now() - _tickStartMs,
   });
-  const nonResidentPersistenceFailureTick = (tick: DaemonTick): DaemonTick => {
+  const nonResidentPersistenceFailureTick = (
+    tick: DaemonTick,
+    failure: DaemonPersistenceFailureClassification = {
+      diagnosticCode: 'state-write-unclassified',
+      retryable: false,
+    },
+  ): DaemonTick => {
     const { residentSafePersistenceFailure: _residentSafePersistenceFailure, ...failed } = tick;
-    return { ...failed, reason: 'state-persistence-failed' };
+    return {
+      ...failed,
+      reason: 'state-persistence-failed',
+      persistenceDiagnosticCode: failure.diagnosticCode,
+    };
   };
   if (!stillOwnsTick()) {
     return ownershipLostTick({
@@ -3324,7 +3366,7 @@ export async function tick(
     try {
       const loaded = loadDaemonStateStrict();
       if (!loaded.ok) {
-        const failedTick = nonResidentPersistenceFailureTick(tick);
+        const failedTick = nonResidentPersistenceFailureTick(tick, classifyPersistenceFailure(loaded));
         recordTickAgentAction(failedTick);
         return failedTick;
       }
@@ -3334,21 +3376,29 @@ export async function tick(
       s.ticks = [...s.ticks, tick];
       const saveResult = saveTickState(s);
       if (!saveResult.ok) {
-        console.warn('[ashlr] daemon:recordTick persistence failed:', saveResult.error);
-        const failedTick = nonResidentPersistenceFailureTick(tick);
+        const failure = classifyPersistenceFailure(saveResult);
+        console.warn(`[ashlr] daemon:recordTick persistence failed: ${failure.diagnosticCode}`);
+        const failedTick = nonResidentPersistenceFailureTick(tick, failure);
         recordTickAgentAction(failedTick);
         return failedTick;
       }
     } catch (err) {
-      console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
-      const failedTick = nonResidentPersistenceFailureTick(tick);
+      const failure = classifyPersistenceFailure({
+        error: err instanceof Error ? `${(err as NodeJS.ErrnoException).code ?? ''} ${err.message}` : '',
+      });
+      console.warn(`[ashlr] daemon:recordTick persistence failed: ${failure.diagnosticCode}`);
+      const failedTick = nonResidentPersistenceFailureTick(tick, failure);
       recordTickAgentAction(failedTick);
       return failedTick;
     }
     recordTickAgentAction(tick);
     return tick;
   };
-  const persistenceRefusal = (summary: string, result: 'refused' | 'error' = 'refused'): DaemonTick => {
+  const persistenceRefusal = (
+    summary: string,
+    result: 'refused' | 'error' = 'refused',
+    failure?: DaemonPersistenceFailureClassification,
+  ): DaemonTick => {
     if (!stillOwnsTick()) {
       return ownershipLostTick({
         ts: now,
@@ -3371,6 +3421,7 @@ export async function tick(
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'state-persistence-failed',
+      ...(failure ? { persistenceDiagnosticCode: failure.diagnosticCode } : {}),
     });
   };
   const acquireTickMutationFence = () => {
@@ -4006,7 +4057,8 @@ export async function tick(
   // -------------------------------------------------------------------------
   const loadedState = loadDaemonStateStrict();
   if (!loadedState.ok) {
-    return persistenceRefusal(`tick refused: daemon state ${loadedState.reason} (${loadedState.error})`);
+    const failure = classifyPersistenceFailure(loadedState);
+    return persistenceRefusal(`tick refused: ${failure.diagnosticCode}`, 'refused', failure);
   }
   const existingSpendGuard = readDaemonSpendGuard();
   if (existingSpendGuard.exists) {
@@ -4023,7 +4075,12 @@ export async function tick(
   }
   const initialSave = saveTickState(state);
   if (!initialSave.ok) {
-    return persistenceRefusal(`tick refused: failed to persist daemon state before dispatch (${initialSave.error})`, 'error');
+    const failure = classifyPersistenceFailure(initialSave);
+    return persistenceRefusal(
+      `tick refused before dispatch: ${failure.diagnosticCode}`,
+      'error',
+      failure,
+    );
   }
 
   const remainingBudget = dcfg.dailyBudgetUsd - state.todaySpentUsd;
@@ -5076,7 +5133,8 @@ export async function tick(
     } catch (err) {
       console.warn('[ashlr] daemon:tick coordinator release after spend-guard failure failed:', (err as Error)?.message ?? err);
     }
-    return persistenceRefusal(`tick refused: failed to arm spend guard (${spendGuard.error})`);
+    const failure = classifyPersistenceFailure(spendGuard);
+    return persistenceRefusal(`tick refused: ${failure.diagnosticCode}`, 'refused', failure);
   }
 
   const shadowSkillSelectedAt = new Date().toISOString();
@@ -7105,12 +7163,14 @@ export async function tick(
   // -------------------------------------------------------------------------
   const finalLoadedState = loadDaemonStateStrict(); // reload in case of concurrent writes
   if (!finalLoadedState.ok) {
+    const failure = classifyPersistenceFailure(finalLoadedState);
     const failedTick: DaemonTick = {
       ts: now,
       itemsConsidered: selected.length,
       proposalsCreated,
       spentUsd: tickSpent,
 	      reason: 'state-persistence-failed',
+	      persistenceDiagnosticCode: failure.diagnosticCode,
 	      ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
 	      ...(directionMode ? { directionMode } : {}),
 	      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
@@ -7127,7 +7187,7 @@ export async function tick(
       action: 'daemon:persistence-failed',
       repo: null,
       sandboxId: null,
-      summary: `tick completed but spend accounting refused: daemon state ${finalLoadedState.reason} (${finalLoadedState.error}); spend guard remains armed`,
+      summary: `tick completed but spend accounting refused: ${failure.diagnosticCode}; spend guard remains armed`,
       result: 'error',
     });
     recordTickAgentAction(failedTick, machineId);
@@ -7178,27 +7238,29 @@ export async function tick(
   state.ticks = [...state.ticks, tickRecord];
   const saveResult = saveTickState(state);
   if (!saveResult.ok) {
+    const failure = classifyPersistenceFailure(saveResult);
     audit({
       action: 'daemon:persistence-failed',
       repo: null,
       sandboxId: null,
-      summary: `tick completed but spend accounting save failed (${saveResult.error}); spend guard remains armed`,
+      summary: `tick completed but spend accounting save failed: ${failure.diagnosticCode}; spend guard remains armed`,
       result: 'error',
     });
-    const failedTick = nonResidentPersistenceFailureTick(tickRecord);
+    const failedTick = nonResidentPersistenceFailureTick(tickRecord, failure);
     recordTickAgentAction(failedTick, machineId);
     return failedTick;
   }
   const clearGuardResult = clearDaemonSpendGuard(spendGuard.guard.token);
   if (!clearGuardResult.ok) {
+    const failure = classifyPersistenceFailure(clearGuardResult);
     audit({
       action: 'daemon:persistence-failed',
       repo: null,
       sandboxId: null,
-      summary: `tick completed but spend guard clear failed (${clearGuardResult.error}); future ticks will refuse`,
+      summary: `tick completed but spend guard clear failed: ${failure.diagnosticCode}; future ticks will refuse`,
       result: 'error',
     });
-    const failedTick = nonResidentPersistenceFailureTick(tickRecord);
+    const failedTick = nonResidentPersistenceFailureTick(tickRecord, failure);
     recordTickAgentAction(failedTick, machineId);
     return failedTick;
   }
@@ -7410,6 +7472,21 @@ export async function runDaemon(
 
   const lockAttempt = acquireDaemonLock();
   if (!lockAttempt.acquired) {
+    if (lockAttempt.reason === 'io-error') {
+      const disposition = daemonLockFailureDisposition(lockAttempt.reason);
+      audit({
+        action: 'daemon:persistence-failed',
+        repo: null,
+        sandboxId: null,
+        summary: `daemon start refused: ${disposition.diagnosticCode}`,
+        result: 'refused',
+      });
+      return {
+        ...loadDaemonState(),
+        startRefusal: 'daemon-singleton-lock-io-failure',
+        termination: disposition,
+      };
+    }
     audit({
       action: 'daemon:start',
       repo: null,
@@ -7711,7 +7788,7 @@ export async function runDaemon(
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
           terminationReason = 'persistence-failure';
-          terminationFailure = { diagnosticCode: 'state-write-unclassified', retryable: false };
+          terminationFailure = tickPersistenceFailure(tickResult);
         }
         if (!activation.capability) {
           await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
@@ -7770,15 +7847,16 @@ export async function runDaemon(
         await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
+          const failure = tickPersistenceFailure(tickResult);
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
             sandboxId: null,
-            summary: 'continuous daemon stopped: state-write-unclassified',
+            summary: `continuous daemon stopped: ${failure.diagnosticCode}`,
             result: 'refused',
           });
           terminationReason = 'persistence-failure';
-          terminationFailure = { diagnosticCode: 'state-write-unclassified', retryable: false };
+          terminationFailure = failure;
           break;
         }
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,

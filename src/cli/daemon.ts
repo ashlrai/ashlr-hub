@@ -767,11 +767,13 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
     '  ' + col.bold('running:    ') +
       (activity === 'unknown'
         ? col.yellow('unknown')
-        : activity === 'running'
-          ? col.green('yes')
-          : activity === 'scheduler-active-unverified'
-            ? col.yellow(`unverified (scheduler ${status.runtimeState})`)
-            : col.dim('no')),
+        : activity === 'blocked'
+          ? col.yellow('blocked (resident authority unavailable)')
+          : activity === 'running'
+            ? col.green('yes')
+            : activity === 'scheduler-active-unverified'
+              ? col.yellow(`unverified (scheduler ${status.runtimeState})`)
+              : col.dim('no')),
   );
   if (status.serviceFilePath) {
     console.log('  ' + col.bold('file:       ') + col.dim(status.serviceFilePath));
@@ -779,9 +781,16 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   if (status.errorLog) {
     console.log('  ' + col.bold('error:      ') + col.red(status.errorLog));
   }
+  if (status.residentActivationAuthorized === false) {
+    console.log('  ' + col.bold('authority:  ') + col.yellow(status.residentActivationBlocker ?? 'blocked'));
+  }
   console.log('');
   if (!status.installed) {
-    console.log(col.dim('  Run `ashlr daemon install` to register as an OS service.'));
+    console.log(col.dim(
+      status.residentActivationAuthorized === false
+        ? '  Resident service installation is blocked until authenticated authority exists.'
+        : '  Run `ashlr daemon install` to register as an OS service.',
+    ));
     console.log('');
   }
   return 0;

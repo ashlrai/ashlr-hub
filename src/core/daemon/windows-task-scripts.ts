@@ -93,7 +93,7 @@ export const WINDOWS_TASK_DEFINITION_VALIDATION_SCRIPT = [
   "$uriNodes=@($document.SelectNodes('/t:Task/t:RegistrationInfo/t:URI',$namespaceManager))",
   "if($uriNodes.Count -eq 1 -and [string]$uriNodes[0].InnerText -cne ('\\'+$expectedTaskName)){throw 'task XML URI is not exact'}}",
   'function Assert-AshlrTaskXml($definition,[string]$expectedTaskName){Assert-AshlrTaskXmlText ([string]$definition.XmlText) $expectedTaskName}',
-  'function Assert-AshlrTaskDefinition($definition,[string]$expectedLauncher,[string]$expectedTaskName){$actions=$definition.Actions',
+  'function Assert-AshlrTaskDefinition($definition,[string]$expectedLauncher,[string]$expectedTaskName,[bool]$allowLegacyRestartPolicy=$false){$actions=$definition.Actions',
   "if($actions.Count -ne 1){throw 'unsupported task action schema'}",
   '$action=$actions.Item(1)',
   "if([int]$action.Type -ne 0){throw 'unsupported task action schema'}",
@@ -123,7 +123,12 @@ export const WINDOWS_TASK_DEFINITION_VALIDATION_SCRIPT = [
   "try{$principalSid=([Security.Principal.SecurityIdentifier]$principalId).Value}catch{$principalSid=([Security.Principal.NTAccount]$principalId).Translate([Security.Principal.SecurityIdentifier]).Value}",
   "if(-not [string]::Equals($principalSid,$current.User.Value,[StringComparison]::OrdinalIgnoreCase)){throw 'task principal is not the current user'}",
   '$settings=$definition.Settings',
-  "if(-not [bool]$settings.Enabled -or [bool]$settings.Hidden -or [bool]$settings.WakeToRun -or [bool]$settings.StartWhenAvailable -or [int]$settings.RestartCount -ne 3 -or [string]$settings.RestartInterval -cne 'PT1M' -or -not [bool]$settings.AllowDemandStart -or [int]$settings.MultipleInstances -ne 2 -or [string]$settings.ExecutionTimeLimit -cne 'PT0S' -or [bool]$settings.RunOnlyIfIdle -or [bool]$settings.RunOnlyIfNetworkAvailable -or [bool]$settings.DisallowStartIfOnBatteries -or [bool]$settings.StopIfGoingOnBatteries -or -not [bool]$settings.AllowHardTerminate -or [int]$settings.Priority -ne 7 -or [int]$settings.Compatibility -ne 2 -or [string]$settings.IdleSettings.IdleDuration -cne 'PT10M' -or [string]$settings.IdleSettings.WaitTimeout -cne 'PT1H' -or -not [bool]$settings.IdleSettings.StopOnIdleEnd -or [bool]$settings.IdleSettings.RestartOnIdle){throw 'unsupported task settings'}",
+  '$restartCount=[int]$settings.RestartCount',
+  '$restartInterval=[string]$settings.RestartInterval',
+  "$desiredRestartPolicy=$restartCount -eq 3 -and $restartInterval -ceq 'PT1M'",
+  '$legacyRestartPolicy=$restartCount -eq 0 -and [string]::IsNullOrEmpty($restartInterval)',
+  "if(-not $desiredRestartPolicy -and -not ($allowLegacyRestartPolicy -and $legacyRestartPolicy)){throw 'unsupported task restart policy'}",
+  "if(-not [bool]$settings.Enabled -or [bool]$settings.Hidden -or [bool]$settings.WakeToRun -or [bool]$settings.StartWhenAvailable -or -not [bool]$settings.AllowDemandStart -or [int]$settings.MultipleInstances -ne 2 -or [string]$settings.ExecutionTimeLimit -cne 'PT0S' -or [bool]$settings.RunOnlyIfIdle -or [bool]$settings.RunOnlyIfNetworkAvailable -or [bool]$settings.DisallowStartIfOnBatteries -or [bool]$settings.StopIfGoingOnBatteries -or -not [bool]$settings.AllowHardTerminate -or [int]$settings.Priority -ne 7 -or [int]$settings.Compatibility -ne 2 -or [string]$settings.IdleSettings.IdleDuration -cne 'PT10M' -or [string]$settings.IdleSettings.WaitTimeout -cne 'PT1H' -or -not [bool]$settings.IdleSettings.StopOnIdleEnd -or [bool]$settings.IdleSettings.RestartOnIdle){throw 'unsupported task settings'}",
   'Assert-AshlrTaskXml $definition $expectedTaskName',
   '}',
 ].join(';');
@@ -277,7 +282,7 @@ export function buildWindowsTaskSnapshotScript(taskName: string): string {
     "try{$registered=$folder.GetTask($taskName)}catch{if($_.Exception.HResult -eq -2147024894){[Console]::Out.Write('absent');exit 0};throw}",
     '$definition=$registered.Definition',
     '$sddl=[string]$registered.GetSecurityDescriptor(7)',
-    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName',
+    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName $true',
     '$xml=Get-AshlrCanonicalTaskXml $definition $sddl',
     '$xmlBytes=[Text.Encoding]::UTF8.GetBytes($xml)',
     '$sddlBytes=[Text.Encoding]::UTF8.GetBytes($sddl)',
@@ -310,7 +315,7 @@ export function buildWindowsTaskRestoreScript(taskName: string): string {
     '$scheduler.Connect()',
     '$definition=$scheduler.NewTask(0)',
     '$definition.XmlText=$xml',
-    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName',
+    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName $true',
     'Assert-AshlrTaskSecurityBinding $definition $sddl',
     "$folder=$scheduler.GetFolder('\\')",
     '$flags=2 -bor 16 -bor 32',
@@ -340,7 +345,7 @@ export function buildWindowsTaskStopDeleteScript(taskName: string): string {
     "$folder=$scheduler.GetFolder('\\')",
     "$registered=$folder.GetTask($taskName)",
     '$registeredSddl=[string]$registered.GetSecurityDescriptor(7)',
-    'Assert-AshlrTaskDefinition $registered.Definition $expectedLauncher $taskName',
+    'Assert-AshlrTaskDefinition $registered.Definition $expectedLauncher $taskName $true',
     '$registeredXml=Get-AshlrCanonicalTaskXml $registered.Definition $registeredSddl',
     '$xmlSha256=Get-Sha256Hex ([Text.Encoding]::UTF8.GetBytes($registeredXml))',
     '$securitySha256=Get-Sha256Hex ([Text.Encoding]::UTF8.GetBytes($registeredSddl))',
@@ -350,7 +355,7 @@ export function buildWindowsTaskStopDeleteScript(taskName: string): string {
     "if(@(2,4) -contains [int]$registered.State){throw 'Task Scheduler could not prove task stopped before deletion'}}",
     '$current=$folder.GetTask($taskName)',
     '$currentSddl=[string]$current.GetSecurityDescriptor(7)',
-    'Assert-AshlrTaskDefinition $current.Definition $expectedLauncher $taskName',
+    'Assert-AshlrTaskDefinition $current.Definition $expectedLauncher $taskName $true',
     '$currentXml=Get-AshlrCanonicalTaskXml $current.Definition $currentSddl',
     '$currentXmlSha256=Get-Sha256Hex ([Text.Encoding]::UTF8.GetBytes($currentXml))',
     '$currentSecuritySha256=Get-Sha256Hex ([Text.Encoding]::UTF8.GetBytes($currentSddl))',
@@ -362,6 +367,14 @@ export function buildWindowsTaskStopDeleteScript(taskName: string): string {
 }
 
 export function buildWindowsTaskRunScript(taskName: string): string {
+  return buildWindowsTaskRunScriptWithPolicy(taskName, false);
+}
+
+export function buildWindowsTaskRecoveryRunScript(taskName: string): string {
+  return buildWindowsTaskRunScriptWithPolicy(taskName, true);
+}
+
+function buildWindowsTaskRunScriptWithPolicy(taskName: string, allowLegacyRestartPolicy: boolean): string {
   assertSupportedTaskName(taskName);
   return [
     "$ErrorActionPreference='Stop'",
@@ -379,7 +392,7 @@ export function buildWindowsTaskRunScript(taskName: string): string {
     "if([int]$registered.State -ne 3){throw 'Ashlr task is not uniquely ready'}",
     '$definition=$registered.Definition',
     '$sddl=[string]$registered.GetSecurityDescriptor(7)',
-    'Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName',
+    `Assert-AshlrTaskDefinition $definition $expectedLauncher $taskName${allowLegacyRestartPolicy ? ' $true' : ''}`,
     'Assert-AshlrTaskSecurityBinding $definition $sddl',
     '[void]$registered.Run($null)',
     "[Console]::Out.Write('started')",
@@ -391,3 +404,4 @@ export const WINDOWS_TASK_SNAPSHOT_SCRIPT = buildWindowsTaskSnapshotScript('Ashl
 export const WINDOWS_TASK_RESTORE_SCRIPT = buildWindowsTaskRestoreScript('AshlrDaemon');
 export const WINDOWS_TASK_STOP_DELETE_SCRIPT = buildWindowsTaskStopDeleteScript('AshlrDaemon');
 export const WINDOWS_TASK_RUN_SCRIPT = buildWindowsTaskRunScript('AshlrDaemon');
+export const WINDOWS_TASK_RECOVERY_RUN_SCRIPT = buildWindowsTaskRecoveryRunScript('AshlrDaemon');

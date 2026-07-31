@@ -362,6 +362,7 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 import {
   tick,
   runDaemon,
+  daemonLockFailureDisposition,
   saveResidentDaemonState,
   stopDaemon,
   buildItemGoal,
@@ -8556,12 +8557,68 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
         reason: 'persistence-failure',
         retryable: false,
         exitCode: 0,
-        diagnosticCode: 'state-write-unclassified',
+        diagnosticCode: 'state-unsafe',
       });
     } finally {
       restoreStatePath();
       warnSpy.mockRestore();
     }
+  });
+
+  it('E2p1: propagates a transient mid-tick state write without raw error data', async () => {
+    const { items } = enrollWithItems(1);
+    const statePath = join(process.env.ASHLR_HOME!, 'daemon.json');
+    let residentStateLock: ReturnType<typeof acquireLocalStoreLock> = null;
+    mockRunSwarm.mockImplementationOnce(async () => {
+      residentStateLock = acquireLocalStoreLock(`${statePath}.resident.lock`, 0);
+      expect(residentStateLock).not.toBeNull();
+      return {
+        id: 'mid-tick-persistence-fixture',
+        status: 'done',
+        goal: items[0]!.title,
+        result: 'No changes were needed.',
+        usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'engine completed without file changes' },
+      };
+    });
+
+    try {
+      const result = await runDaemon(cfgBuiltin({ perTickItems: 1 }), {
+        once: true,
+        dryRun: false,
+      });
+
+      expect(result.termination).toEqual({
+        reason: 'persistence-failure',
+        retryable: true,
+        exitCode: 1,
+        diagnosticCode: 'state-io-transient',
+      });
+      const persistedMetadata = JSON.stringify({
+        audit: readAudit(),
+        actions: readAgentActions(),
+      });
+      expect(persistedMetadata).toContain('state-io-transient');
+      expect(persistedMetadata).not.toContain(statePath);
+      expect(persistedMetadata).not.toContain('could not acquire resident state lock');
+    } finally {
+      if (residentStateLock) releaseLocalStoreLock(residentStateLock);
+    }
+  });
+
+  it('E2p2: distinguishes startup lock contention from retryable lock I/O', () => {
+    expect(daemonLockFailureDisposition('busy')).toEqual({
+      reason: 'start-refused',
+      retryable: false,
+      exitCode: 0,
+      diagnosticCode: 'start-refused',
+    });
+    expect(daemonLockFailureDisposition('io-error')).toEqual({
+      reason: 'persistence-failure',
+      retryable: true,
+      exitCode: 1,
+      diagnosticCode: 'state-io-transient',
+    });
   });
 
   it('E2a: continuous mode remains resident after a durably settled generated-repair failure', async () => {
