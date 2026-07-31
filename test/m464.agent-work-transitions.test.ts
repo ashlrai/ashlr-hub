@@ -31,8 +31,9 @@ import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-product
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const originalAshlrHome = process.env.ASHLR_HOME;
-const STARTED_AT = '2026-07-28T12:00:00.000Z';
-const OBSERVED_AT = '2026-07-28T12:01:00.000Z';
+const OBSERVED_AT_MS = Date.now() - 60_000;
+const STARTED_AT = new Date(OBSERVED_AT_MS - 60_000).toISOString();
+const OBSERVED_AT = new Date(OBSERVED_AT_MS).toISOString();
 let home: string;
 
 function restore(name: 'HOME' | 'USERPROFILE' | 'ASHLR_HOME', value: string | undefined): void {

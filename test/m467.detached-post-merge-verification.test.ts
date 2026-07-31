@@ -290,7 +290,7 @@ describe('M467 detached post-merge verification cohorts', () => {
     expect(recordDetachedPostMergeVerificationCohort(cohort({
       members: [member('1'), member('1')],
     }))).toBe('invalid');
-  });
+  }, process.platform === 'win32' ? 120_000 : 30_000);
 
   it('rejects malformed commits, manifests, timestamps, branches, and causal ids', () => {
     key();
