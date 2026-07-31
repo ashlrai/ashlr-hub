@@ -275,6 +275,8 @@ describe('strict Windows Task Scheduler scripts', () => {
     expect(script).toContain('$settings.AllowDemandStart=$true');
     expect(script).toContain('$settings.DisallowStartIfOnBatteries=$false');
     expect(script).toContain('$settings.StopIfGoingOnBatteries=$false');
+    expect(script).toContain('$settings.RestartCount=3');
+    expect(script).toContain("$settings.RestartInterval='PT1M'");
     expect(script).toContain("$settings.IdleSettings.IdleDuration='PT10M'");
     expect(script).toContain("$settings.IdleSettings.WaitTimeout='PT1H'");
     expect(script).toContain('$definition.RegistrationInfo.SecurityDescriptor=$sddl');
@@ -331,6 +333,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
+        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -362,6 +365,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain('<string>daemon</string>');
     expect(def.content).toContain('<string>start</string>');
+    expect(def.content).toContain('<string>--supervised</string>');
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -382,6 +386,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         FAKE_BIN,
         'daemon',
         'start',
+        '--supervised',
         '--budget',
         '5',
         '--interval',
@@ -471,14 +476,18 @@ describe('generateServiceDefinition — linux (systemd)', () => {
   it('unit ExecStart contains node path + bin/ashlr + daemon start args', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
     expect(def.content).toContain(`ExecStart=${FAKE_NODE} ${FAKE_BIN} daemon start`);
+    expect(def.content).toContain('daemon start --supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
   });
 
-  it('unit has Restart=always', () => {
+  it('unit restarts only failures and bounds restart bursts', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
-    expect(def.content).toContain('Restart=always');
+    expect(def.content).toContain('Restart=on-failure');
+    expect(def.content).not.toContain('Restart=always');
+    expect(def.content).toContain('StartLimitIntervalSec=300');
+    expect(def.content).toContain('StartLimitBurst=3');
   });
 
   it('unit RestartSec is independent from daemon work interval', () => {
@@ -550,6 +559,7 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     expect(def.content).toContain(FAKE_NODE);
     expect(def.content).toContain(FAKE_BIN);
     expect(def.content).toContain('daemon start');
+    expect(def.content).toContain('daemon start --supervised');
     expect(def.content).toContain('--budget 5');
     expect(def.content).toContain('--interval 1800000');
     expect(def.content).toContain('--parallel 1');
@@ -1358,7 +1368,7 @@ describe('serviceStatus() — mocked OS query output', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (state: string, pid?: number): string => `${[
@@ -1515,7 +1525,7 @@ describe('ensureRunning() — mocked OS activation', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (

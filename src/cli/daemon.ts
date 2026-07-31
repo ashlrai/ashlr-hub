@@ -75,7 +75,7 @@ Run \`ashlr daemon <subcommand> --help\` for subcommand usage.`;
 type RunDaemonFn = (
   cfg: AshlrConfig,
   opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode; drainLimit?: number },
-) => Promise<DaemonState>;
+) => Promise<import('../core/daemon/loop.js').DaemonRunResult>;
 type StopDaemonFn = () => PolicyMutationResult | void;
 type LoadDaemonStateFn = () => DaemonState;
 type LoadDaemonStateStrictFn =
@@ -198,6 +198,7 @@ function printDaemonUsageError(message: string, subcommand?: DaemonSubcommand): 
 interface StartFlags {
   once: boolean;
   dryRun: boolean;
+  supervised: boolean;
   drain?: DaemonDrainMode;
   limit?: number;
   budgetUsd?: number;
@@ -213,7 +214,7 @@ function parseNum(v: string | undefined): number | undefined {
 }
 
 function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
-  const flags: StartFlags = { once: false, dryRun: false };
+  const flags: StartFlags = { once: false, dryRun: false, supervised: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     switch (a) {
@@ -222,6 +223,9 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
         break;
       case '--dry-run':
         flags.dryRun = true;
+        break;
+      case '--supervised':
+        flags.supervised = true;
         break;
       case '--drain': {
         const v = args[++i];
@@ -359,9 +363,8 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   console.log(col.dim('  proposal-only · sandboxed · enrollment-only'));
   console.log('');
 
-  // runDaemon never throws by contract; it REFUSES on re-entrancy (handled
-  // above) and stops on kill switch / budget exhaustion. It ONLY produces
-  // PENDING inbox proposals — never applies/pushes/PRs/deploys/mutates.
+  // runDaemon never throws by contract. Its explicit termination disposition
+  // prevents retryable resident failures from masquerading as a clean exit.
   const finalState = await loop.runDaemon(merged, {
     once: flags.once,
     dryRun: flags.dryRun,
@@ -370,8 +373,22 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   });
 
   if (finalState.startRefusal) {
-    console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
-    return 1;
+    console.error(
+      col.red('error: ') +
+        `daemon start refused [${finalState.termination.diagnosticCode ?? 'start-refused'}]; ` +
+        'supervisor restart is not permitted.',
+    );
+    return flags.supervised ? finalState.termination.exitCode : 1;
+  }
+  if (finalState.termination.reason === 'persistence-failure' ||
+    finalState.termination.reason === 'runtime-failure' ||
+    finalState.termination.reason === 'ownership-loss') {
+    console.error(
+      col.red('error: ') +
+        `daemon terminated [${finalState.termination.diagnosticCode ?? 'runtime-unclassified'}]; ` +
+        'supervisor restart is ' +
+        `${finalState.termination.retryable ? 'permitted' : 'not permitted'}.`,
+    );
   }
 
   // Summarize the most-recent tick (if any) for human feedback.
@@ -398,7 +415,14 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   console.log('  ' + col.dim('Use `ashlr inbox` to review PENDING proposals (never auto-applied).'));
   console.log('');
 
-  return 0;
+  if (!flags.supervised && (
+    finalState.termination.reason === 'persistence-failure' ||
+    finalState.termination.reason === 'runtime-failure' ||
+    finalState.termination.reason === 'ownership-loss'
+  )) {
+    return 1;
+  }
+  return finalState.termination.exitCode;
 }
 
 // ---------------------------------------------------------------------------

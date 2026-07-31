@@ -202,6 +202,7 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   runtimeArguments.push(
     'daemon',
     'start',
+    '--supervised',
     '--budget',
     String(o.budget),
     '--interval',
@@ -271,11 +272,13 @@ function buildSystemdDefinition(o: BuildOpts): ServiceDefinition {
   const content = `[Unit]
 Description=ashlr autonomous daemon
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
-Restart=always
+ExecStart=${o.nodePath} ${o.binPath} daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
+Restart=on-failure
 RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
 Environment=PATH=${buildToolPath({ home: o.home, basePath: '' })}
@@ -315,7 +318,7 @@ function buildSchtasksDefinition(o: BuildOpts): ServiceDefinition {
     '/IT',
   ];
 
-  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
+  const content = `@echo off\r\n"${o.nodePath}" "${o.binPath}" daemon start --supervised --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}\r\n`;
 
   return {
     filePath: cmdPath,
