@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import {
-  residentServiceReadiness,
-  type ResidentServiceReadinessDependencies,
-  type ResidentServiceReadinessOptions,
+  observeResidentServiceDiagnostic,
+  type ResidentServiceDiagnosticDependencies,
+  type ResidentServiceDiagnosticOptions,
 } from '../src/core/daemon/resident-service-readiness.js';
 
 const HOME = '/Users/tester';
@@ -30,7 +30,7 @@ const ARGS = [
   '1',
 ];
 
-function options(overrides: Partial<ResidentServiceReadinessOptions> = {}): ResidentServiceReadinessOptions {
+function options(overrides: Partial<ResidentServiceDiagnosticOptions> = {}): ResidentServiceDiagnosticOptions {
   return {
     platform: 'darwin',
     homeDir: HOME,
@@ -95,7 +95,7 @@ function dependencies(overrides: {
   varyFinalInterpreter?: boolean;
   varySecondRuntime?: boolean;
   killSequence?: Array<'absent' | 'present' | 'unknown'>;
-} = {}): ResidentServiceReadinessDependencies {
+} = {}): ResidentServiceDiagnosticDependencies {
   let runtimeReads = 0;
   let killReads = 0;
   return {
@@ -155,7 +155,7 @@ function dependencies(overrides: {
   };
 }
 
-describe('residentServiceReadiness', () => {
+describe('observeResidentServiceDiagnostic', () => {
   beforeAll(() => {
     Object.defineProperty(process, 'platform', { configurable: true, value: 'darwin' });
   });
@@ -164,87 +164,96 @@ describe('residentServiceReadiness', () => {
     Object.defineProperty(process, 'platform', { configurable: true, value: ACTUAL_PLATFORM });
   });
 
-  it('admits only a stable exact resident observation and grants no authority', () => {
-    const readiness = residentServiceReadiness(options(), dependencies());
+  it('keeps a perfectly matching local snapshot blocked on missing production authorities', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies());
 
-    expect(readiness).toMatchObject({
-      authority: 'observation-only',
-      state: 'ready',
-      ready: true,
-      residentStartAuthorized: false,
-      installAuthorized: false,
-      enableAuthorized: false,
-      loadAuthorized: false,
-      kickstartAuthorized: false,
-      killSwitchClearAuthorized: false,
-      checks: {
+    expect(diagnostic).toMatchObject({
+      schemaVersion: 2,
+      scope: 'observation-only-diagnostic',
+      diagnosticStatus: 'blocked',
+      lifecycleAuthority: 'none',
+      declaredReleaseIdentity: RELEASE_ID,
+      localChecks: {
         exactLabel: true,
         loaded: true,
         running: true,
         enabled: true,
-        immutableRelease: true,
-        interpreterIdentityBound: true,
-        exactInvocation: true,
-        restartPolicyCompatible: true,
+        localReleaseMatchesDeclaredDigest: true,
+        localInterpreterMatchesDeclaredDigest: true,
+        observedInvocationMatchesDeclaration: true,
+        diskDefinitionRestartPolicyCompatible: true,
+        loadedRestartPolicyHintsCompatible: true,
+        exactLoadedDefinitionBound: false,
         killSwitchAbsent: true,
-        stableObservation: true,
+        repeatedSnapshotConsistent: true,
+        hardDeadlineEnforced: false,
       },
-      reasons: [],
     });
+    expect(diagnostic.findings.map(({ code }) => code)).toEqual([
+      'trusted-signed-release-evidence-missing',
+      'trusted-signed-interpreter-evidence-missing',
+      'exact-loaded-definition-binding-missing',
+      'atomic-activation-handoff-missing',
+      'hard-deadline-worker-missing',
+      'native-consumer-evidence-missing',
+    ]);
+    expect(diagnostic).not.toHaveProperty('ready');
+    expect(diagnostic).not.toHaveProperty('state');
+    expect(diagnostic).not.toHaveProperty('authority');
+    expect(diagnostic).not.toHaveProperty('residentStartAuthorized');
   });
 
   it('blocks an explicitly disabled service', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       disabled: {
         status: 0,
         stdout: 'disabled services = {\n\t"ai.ashlr.daemon" => disabled\n}\n',
         stderr: '',
       },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.enabled).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-disabled' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.enabled).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-disabled' }));
   });
 
   it('blocks a proven absent loaded service', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       runtime: { status: 113, stdout: '', stderr: 'Could not find service' },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.loaded).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-not-loaded' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.loaded).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-not-loaded' }));
   });
 
   it('blocks a different runtime label and invocation', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       runtime: { status: 0, stdout: launchdPrint(ARGS, 'gui/501/ai.attacker.daemon'), stderr: '' },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.exactLabel).toBe(false);
-    expect(readiness.checks.exactInvocation).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-invocation-mismatch' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.exactLabel).toBe(false);
+    expect(diagnostic.localChecks.observedInvocationMatchesDeclaration).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-invocation-mismatch' }));
   });
 
-  it('blocks an invocation outside the admitted immutable release', () => {
+  it('blocks an invocation outside the caller-declared release', () => {
     const foreignArgs = [...ARGS];
     foreignArgs[1] = '/tmp/ashlr/bin/ashlr';
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       runtime: { status: 0, stdout: launchdPrint(foreignArgs), stderr: '' },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.exactInvocation).toBe(false);
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.observedInvocationMatchesDeclaration).toBe(false);
   });
 
   it.each(['waiting', 'exited', 'stopped', 'dead'])(
-    'never admits a loaded launchd job in %s state',
+    'diagnoses a loaded launchd job in %s state',
     (state) => {
-      const readiness = residentServiceReadiness(options(), dependencies({
+      const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
         runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, state), stderr: '' },
       }));
-      expect(readiness.state).toBe('blocked');
-      expect(readiness.ready).toBe(false);
-      expect(readiness.checks.running).toBe(false);
-      expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-not-running' }));
+      expect(diagnostic.diagnosticStatus).toBe('blocked');
+      expect(diagnostic.localChecks.running).toBe(false);
+      expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-not-running' }));
     },
   );
 
@@ -255,41 +264,41 @@ describe('residentServiceReadiness', () => {
     ['wrong loaded throttle', launchdPrint(ARGS, TARGET, 'running', 'keepalive | runatload', 5)],
     ['launch-only-once', launchdPrint(ARGS, TARGET, 'running', 'keepalive | runatload | launchonlyonce')],
   ])('blocks when restart policy is not proven from loaded state: %s', (_name, stdout) => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       runtime: { status: 0, stdout, stderr: '' },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.restartPolicyCompatible).not.toBe(true);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.loadedRestartPolicyHintsCompatible).not.toBe(true);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
   });
 
   it('blocks a release tree digest mismatch', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ releaseSha: 'b'.repeat(64) }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.immutableRelease).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'release-binding-mismatch' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ releaseSha: 'b'.repeat(64) }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localReleaseMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'release-binding-mismatch' }));
   });
 
   it('blocks an interpreter identity mismatch even when the path is exact', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       interpreterSha: 'e'.repeat(64),
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.interpreterIdentityBound).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'interpreter-binding-mismatch' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localInterpreterMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'interpreter-binding-mismatch' }));
   });
 
   it('blocks before observation when nodePath disagrees with the interpreter contract', () => {
     const deps = dependencies();
     deps.run = () => { throw new Error('must not run'); };
-    const readiness = residentServiceReadiness(options({ nodePath: '/tmp/substituted-node' }), deps);
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.interpreterIdentityBound).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'interpreter-contract-invalid' }));
+    const diagnostic = observeResidentServiceDiagnostic(options({ nodePath: '/tmp/substituted-node' }), deps);
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localInterpreterMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'interpreter-declaration-invalid' }));
   });
 
   it('blocks a non-canonical release identity before probing launchd', () => {
-    const readiness = residentServiceReadiness(options({
+    const diagnostic = observeResidentServiceDiagnostic(options({
       release: {
         root: RELEASE_ROOT,
         identity: 'not-a-release',
@@ -297,9 +306,9 @@ describe('residentServiceReadiness', () => {
         interpreter: { path: NODE, sha256: INTERPRETER_SHA },
       },
     }), dependencies());
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.immutableRelease).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'release-contract-invalid' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localReleaseMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'release-declaration-invalid' }));
   });
 
   it.each([
@@ -310,20 +319,19 @@ describe('residentServiceReadiness', () => {
     ['LaunchOnlyOnce', { LaunchOnlyOnce: true }],
     ['Program override', { Program: '/tmp/substituted-node' }],
   ])('blocks incompatible restart policy: %s', (_name, plistOverrides) => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       plist: { status: 0, stdout: plist(plistOverrides), stderr: '' },
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.restartPolicyCompatible).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.diskDefinitionRestartPolicyCompatible).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
   });
 
   it('blocks a present kill switch without clearing it', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ kill: 'present' }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.killSwitchAbsent).toBe(false);
-    expect(readiness.killSwitchClearAuthorized).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'kill-switch-present' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ kill: 'present' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.killSwitchAbsent).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'kill-switch-present' }));
   });
 
   it.each([
@@ -331,78 +339,78 @@ describe('residentServiceReadiness', () => {
     ['second snapshot', ['absent', 'present', 'absent']],
     ['final observation', ['absent', 'absent', 'present']],
   ] as const)('preserves kill-switch presence from the %s as a blocker', (_name, killSequence) => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       killSequence: [...killSequence],
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.killSwitchAbsent).toBe(false);
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toEqual(expect.arrayContaining([
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.killSwitchAbsent).toBe(false);
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'kill-switch-present', severity: 'blocked' }),
       expect.objectContaining({ code: 'observation-changed', severity: 'degraded' }),
     ]));
   });
 
   it('degrades unknown kill-switch state', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ kill: 'unknown' }));
-    expect(readiness.state).toBe('degraded');
-    expect(readiness.checks.killSwitchAbsent).toBeNull();
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'kill-switch-state-unavailable' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ kill: 'unknown' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.killSwitchAbsent).toBeNull();
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'kill-switch-state-unavailable' }));
   });
 
   it('degrades an ambiguous enable observation', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       disabled: { status: 0, stdout: 'disabled services = {}\n', stderr: '' },
     }));
-    expect(readiness.state).toBe('degraded');
-    expect(readiness.checks.enabled).toBeNull();
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'service-enable-state-unavailable' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.enabled).toBeNull();
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-enable-state-unavailable' }));
   });
 
   it('keeps a proven blocker dominant when another observation is degraded', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       disabled: { status: 0, stdout: 'disabled services = {}\n', stderr: '' },
       kill: 'present',
     }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.reasons).toEqual(expect.arrayContaining([
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'service-enable-state-unavailable', severity: 'degraded' }),
       expect.objectContaining({ code: 'kill-switch-present', severity: 'blocked' }),
     ]));
   });
 
   it('fails closed when state changes between snapshots', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ varySecondRuntime: true }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'observation-changed' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ varySecondRuntime: true }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'observation-changed' }));
   });
 
   it('fails closed when the release tree changes between snapshots', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ varySecondRelease: true }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.immutableRelease).toBe(false);
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'observation-changed' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ varySecondRelease: true }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localReleaseMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'observation-changed' }));
   });
 
   it('detects release mutation that occurs only after the final service observation', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ varyFinalRelease: true }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.immutableRelease).toBe(false);
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toEqual(expect.arrayContaining([
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ varyFinalRelease: true }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localReleaseMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'release-binding-mismatch' }),
       expect.objectContaining({ code: 'observation-changed' }),
     ]));
   });
 
   it('detects interpreter mutation that occurs only after the final service observation', () => {
-    const readiness = residentServiceReadiness(options(), dependencies({ varyFinalInterpreter: true }));
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.checks.interpreterIdentityBound).toBe(false);
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'interpreter-binding-mismatch' }));
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({ varyFinalInterpreter: true }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.localInterpreterMatchesDeclaredDigest).toBe(false);
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'interpreter-binding-mismatch' }));
   });
 
   it('uses only the read-only launchctl and plutil command surface', () => {
@@ -413,7 +421,7 @@ describe('residentServiceReadiness', () => {
       calls.push([command, args]);
       return baseRun(command, args, timeoutMs);
     };
-    residentServiceReadiness(options(), deps);
+    observeResidentServiceDiagnostic(options(), deps);
 
     expect(calls).toHaveLength(6);
     expect(calls.filter(([command]) => command.includes('launchctl')).every(([command]) => (
@@ -431,23 +439,43 @@ describe('residentServiceReadiness', () => {
   it('fails closed on non-macOS platforms without probing service state', () => {
     const deps = dependencies();
     deps.run = () => { throw new Error('must not run'); };
-    let readiness: ReturnType<typeof residentServiceReadiness>;
+    let diagnostic: ReturnType<typeof observeResidentServiceDiagnostic>;
     try {
       Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
-      readiness = residentServiceReadiness(options({ platform: 'darwin' }), deps);
+      diagnostic = observeResidentServiceDiagnostic(options({ platform: 'darwin' }), deps);
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: 'darwin' });
     }
-    expect(readiness.state).toBe('blocked');
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({ code: 'unsupported-platform' }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'unsupported-platform' }));
   });
 
   it('uses host platform truth rather than the caller-selected service platform', () => {
-    const readiness = residentServiceReadiness(
+    const diagnostic = observeResidentServiceDiagnostic(
       options({ platform: 'linux' }),
       dependencies(),
     );
-    expect(readiness.state).toBe('ready');
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.localChecks.running).toBe(true);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+      code: 'atomic-activation-handoff-missing',
+    }));
+  });
+
+  it('never lets the test-only clock mint a production claim', () => {
+    const deps = dependencies();
+    deps.testOnlyNowMs = () => 1_000;
+
+    const diagnostic = observeResidentServiceDiagnostic(options(), deps);
+
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.lifecycleAuthority).toBe('none');
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(true);
+    expect(diagnostic.localChecks.hardDeadlineEnforced).toBe(false);
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'hard-deadline-worker-missing', severity: 'blocked' }),
+      expect.objectContaining({ code: 'atomic-activation-handoff-missing', severity: 'blocked' }),
+    ]));
   });
 
   it('shares one decreasing deadline across hashing and commands and stops probing when exhausted', () => {
@@ -456,7 +484,7 @@ describe('residentServiceReadiness', () => {
     const commandBudgets: number[] = [];
     let releaseReads = 0;
     const deps = dependencies();
-    deps.nowMs = () => now;
+    deps.testOnlyNowMs = () => now;
     deps.releaseTreeBinding = (_path, timeoutMs) => {
       bindingBudgets.push(timeoutMs);
       now += 4;
@@ -475,14 +503,13 @@ describe('residentServiceReadiness', () => {
       return baseRun(command, args, timeoutMs);
     };
 
-    const readiness = residentServiceReadiness(options({ timeoutMs: 10 }), deps);
+    const diagnostic = observeResidentServiceDiagnostic(options({ timeoutMs: 10 }), deps);
 
     expect(bindingBudgets).toEqual([10, 6]);
     expect(commandBudgets).toEqual([2]);
     expect(releaseReads).toBe(1);
-    expect(readiness.ready).toBe(false);
-    expect(readiness.checks.stableObservation).toBe(false);
-    expect(readiness.reasons).toContainEqual(expect.objectContaining({
+    expect(diagnostic.localChecks.repeatedSnapshotConsistent).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
       code: 'observation-deadline-exceeded',
     }));
   });

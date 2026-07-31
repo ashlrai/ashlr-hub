@@ -1,8 +1,9 @@
 /**
- * Read-only admission evidence for a resident macOS daemon service.
+ * Read-only diagnostics for a resident macOS daemon service.
  *
- * This module observes launchd and local release artifacts only. A ready result
- * is not an activation capability and deliberately grants no lifecycle authority.
+ * Finite local observations cannot establish activation-time artifact identity,
+ * exact loaded launchd policy, or lifecycle authority. This module therefore
+ * always reports a blocked diagnostic and only exposes local consistency hints.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -32,15 +33,20 @@ const RELEASE_ID_RE = /^[0-9a-f]{40}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 30_000;
+const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
 
-export type ResidentServiceReadinessState = 'ready' | 'blocked' | 'degraded';
-
-export type ResidentServiceReadinessReasonCode =
+export type ResidentServiceDiagnosticReasonCode =
+  | 'trusted-signed-release-evidence-missing'
+  | 'trusted-signed-interpreter-evidence-missing'
+  | 'exact-loaded-definition-binding-missing'
+  | 'atomic-activation-handoff-missing'
+  | 'hard-deadline-worker-missing'
+  | 'native-consumer-evidence-missing'
   | 'unsupported-platform'
-  | 'release-contract-invalid'
+  | 'release-declaration-invalid'
   | 'release-binding-unavailable'
   | 'release-binding-mismatch'
-  | 'interpreter-contract-invalid'
+  | 'interpreter-declaration-invalid'
   | 'interpreter-binding-unavailable'
   | 'interpreter-binding-mismatch'
   | 'service-definition-unavailable'
@@ -57,55 +63,52 @@ export type ResidentServiceReadinessReasonCode =
   | 'observation-deadline-exceeded'
   | 'observation-changed';
 
-export interface ResidentServiceReadinessReason {
-  code: ResidentServiceReadinessReasonCode;
+export interface ResidentServiceDiagnosticReason {
+  code: ResidentServiceDiagnosticReasonCode;
   severity: 'blocked' | 'degraded';
   detail: string;
 }
 
-export interface ResidentServiceReadinessChecks {
+export interface ResidentServiceDiagnosticChecks {
   exactLabel: boolean | null;
   loaded: boolean | null;
   running: boolean | null;
   enabled: boolean | null;
-  immutableRelease: boolean | null;
-  interpreterIdentityBound: boolean | null;
-  exactInvocation: boolean | null;
-  restartPolicyCompatible: boolean | null;
+  localReleaseMatchesDeclaredDigest: boolean | null;
+  localInterpreterMatchesDeclaredDigest: boolean | null;
+  observedInvocationMatchesDeclaration: boolean | null;
+  diskDefinitionRestartPolicyCompatible: boolean | null;
+  loadedRestartPolicyHintsCompatible: boolean | null;
+  exactLoadedDefinitionBound: false;
   killSwitchAbsent: boolean | null;
-  stableObservation: boolean | null;
+  repeatedSnapshotConsistent: boolean | null;
+  hardDeadlineEnforced: false;
 }
 
-export interface ResidentServiceReadiness {
-  schemaVersion: 1;
-  authority: 'observation-only';
-  state: ResidentServiceReadinessState;
-  ready: boolean;
-  residentStartAuthorized: false;
-  installAuthorized: false;
-  enableAuthorized: false;
-  loadAuthorized: false;
-  kickstartAuthorized: false;
-  killSwitchClearAuthorized: false;
+export interface ResidentServiceDiagnostic {
+  schemaVersion: 2;
+  scope: 'observation-only-diagnostic';
+  diagnosticStatus: 'blocked';
+  lifecycleAuthority: 'none';
   serviceLabel: typeof SERVICE_LABEL;
-  releaseIdentity: string;
-  checks: ResidentServiceReadinessChecks;
-  reasons: ResidentServiceReadinessReason[];
+  declaredReleaseIdentity: string;
+  localChecks: ResidentServiceDiagnosticChecks;
+  findings: ResidentServiceDiagnosticReason[];
 }
 
-export interface ResidentServiceReleaseContract {
-  /** Canonical immutable release root, ending in the exact release identity. */
+export interface ResidentServiceDeclaredRelease {
+  /** Caller-declared canonical release root, ending in the declared identity. */
   root: string;
-  /** Exact 40-character lowercase Git object identity. */
+  /** Caller-declared 40-character lowercase Git-shaped identity. */
   identity: string;
-  /** Expected digest of package.json, bin/ashlr, and the complete dist tree. */
+  /** Caller-declared digest of package.json, bin/ashlr, and the complete dist tree. */
   treeSha256: string;
-  /** Canonical executable identity for the interpreter launchd will execute. */
+  /** Caller-declared local interpreter path and digest. */
   interpreter: ResidentServiceFileBinding;
 }
 
-export interface ResidentServiceReadinessOptions extends ServiceInstallOptions {
-  release: ResidentServiceReleaseContract;
+export interface ResidentServiceDiagnosticOptions extends ServiceInstallOptions {
+  release: ResidentServiceDeclaredRelease;
   timeoutMs?: number;
 }
 
@@ -121,13 +124,14 @@ export interface ResidentServiceFileBinding {
   sha256: string;
 }
 
-export interface ResidentServiceReadinessDependencies {
+export interface ResidentServiceDiagnosticDependencies {
   run?: (command: string, args: readonly string[], timeoutMs: number) => CommandObservation;
   releaseTreeBinding?: (entrypointPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   interpreterBinding?: (interpreterPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   killSwitchState?: (path: string) => 'absent' | 'present' | 'unknown';
   uid?: () => number;
-  nowMs?: () => number;
+  /** Test-only cooperative clock. It never establishes a hard production deadline. */
+  testOnlyNowMs?: () => number;
 }
 
 interface LaunchdSnapshot {
@@ -146,6 +150,7 @@ function runReadOnlyCommand(
     const result = spawnSync(command, [...args], {
       encoding: 'utf8',
       timeout: timeoutMs,
+      maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return {
@@ -342,7 +347,7 @@ function exactLaunchdValue(output: string, field: string): string | null {
   return values.length === 1 ? values[0]! : null;
 }
 
-function loadedRestartPolicyCompatible(output: string, restartSec: number): boolean | null {
+function loadedRestartPolicyHintsCompatible(output: string, restartSec: number): boolean | null {
   const minimumRuntime = exactLaunchdValue(output, 'minimum runtime');
   const properties = exactLaunchdValue(output, 'properties');
   if (minimumRuntime === null || properties === null) return null;
@@ -375,7 +380,10 @@ function exactStringArray(value: unknown, expected: readonly string[]): boolean 
     && value.every((entry, index) => entry === expected[index]);
 }
 
-function restartPolicyCompatible(plist: Record<string, unknown>, restartSec: number): boolean {
+function diskDefinitionRestartPolicyCompatible(
+  plist: Record<string, unknown>,
+  restartSec: number,
+): boolean {
   const keepAlive = plist['KeepAlive'];
   return plist['RunAtLoad'] === true
     && plist['LaunchOnlyOnce'] !== true
@@ -401,101 +409,129 @@ function strictAnd(left: boolean | null, right: boolean): boolean | null {
 }
 
 function blocked(
-  reasons: ResidentServiceReadinessReason[],
-  code: ResidentServiceReadinessReasonCode,
+  reasons: ResidentServiceDiagnosticReason[],
+  code: ResidentServiceDiagnosticReasonCode,
   detail: string,
 ): void {
   reasons.push({ code, severity: 'blocked', detail });
 }
 
 function degraded(
-  reasons: ResidentServiceReadinessReason[],
-  code: ResidentServiceReadinessReasonCode,
+  reasons: ResidentServiceDiagnosticReason[],
+  code: ResidentServiceDiagnosticReasonCode,
   detail: string,
 ): void {
   reasons.push({ code, severity: 'degraded', detail });
 }
 
+function architecturalBlockers(): ResidentServiceDiagnosticReason[] {
+  return [
+    {
+      code: 'trusted-signed-release-evidence-missing',
+      severity: 'blocked',
+      detail: 'caller-declared release identity and digest are not bound to trusted signed release evidence',
+    },
+    {
+      code: 'trusted-signed-interpreter-evidence-missing',
+      severity: 'blocked',
+      detail: 'caller-declared interpreter identity is not bound to trusted signed release evidence',
+    },
+    {
+      code: 'exact-loaded-definition-binding-missing',
+      severity: 'blocked',
+      detail: 'launchd runtime output cannot prove the exact loaded SuccessfulExit=false definition',
+    },
+    {
+      code: 'atomic-activation-handoff-missing',
+      severity: 'blocked',
+      detail: 'no atomic activation-time handoff or final revalidation binds this finite observation to lifecycle mutation',
+    },
+    {
+      code: 'hard-deadline-worker-missing',
+      severity: 'blocked',
+      detail: 'synchronous filesystem inspection is not isolated in a killable hard-deadline worker',
+    },
+    {
+      code: 'native-consumer-evidence-missing',
+      severity: 'blocked',
+      detail: 'no production lifecycle consumer or native resident-service integration evidence exists',
+    },
+  ];
+}
+
 function result(
-  releaseIdentity: string,
-  checks: ResidentServiceReadinessChecks,
-  reasons: ResidentServiceReadinessReason[],
-): ResidentServiceReadiness {
-  const state: ResidentServiceReadinessState = reasons.some((reason) => reason.severity === 'blocked')
-    ? 'blocked'
-    : reasons.some((reason) => reason.severity === 'degraded')
-      ? 'degraded'
-      : 'ready';
+  declaredReleaseIdentity: string,
+  localChecks: ResidentServiceDiagnosticChecks,
+  findings: ResidentServiceDiagnosticReason[],
+): ResidentServiceDiagnostic {
   return {
-    schemaVersion: 1,
-    authority: 'observation-only',
-    state,
-    ready: state === 'ready',
-    residentStartAuthorized: false,
-    installAuthorized: false,
-    enableAuthorized: false,
-    loadAuthorized: false,
-    kickstartAuthorized: false,
-    killSwitchClearAuthorized: false,
+    schemaVersion: 2,
+    scope: 'observation-only-diagnostic',
+    diagnosticStatus: 'blocked',
+    lifecycleAuthority: 'none',
     serviceLabel: SERVICE_LABEL,
-    releaseIdentity,
-    checks,
-    reasons,
+    declaredReleaseIdentity,
+    localChecks,
+    findings,
   };
 }
 
-function emptyChecks(): ResidentServiceReadinessChecks {
+function emptyChecks(): ResidentServiceDiagnosticChecks {
   return {
     exactLabel: null,
     loaded: null,
     running: null,
     enabled: null,
-    immutableRelease: null,
-    interpreterIdentityBound: null,
-    exactInvocation: null,
-    restartPolicyCompatible: null,
+    localReleaseMatchesDeclaredDigest: null,
+    localInterpreterMatchesDeclaredDigest: null,
+    observedInvocationMatchesDeclaration: null,
+    diskDefinitionRestartPolicyCompatible: null,
+    loadedRestartPolicyHintsCompatible: null,
+    exactLoadedDefinitionBound: false,
     killSwitchAbsent: null,
-    stableObservation: null,
+    repeatedSnapshotConsistent: null,
+    hardDeadlineEnforced: false,
   };
 }
 
 /**
- * Observe resident launchd readiness without changing service or kill state.
- * The two complete snapshots must match, closing obvious observation races.
+ * Observe local resident launchd consistency without changing service or kill
+ * state. Repeated snapshots are diagnostic hints only; they cannot close the
+ * post-read or activation-time race.
  */
-export function residentServiceReadiness(
-  options: ResidentServiceReadinessOptions,
-  dependencies: ResidentServiceReadinessDependencies = {},
-): ResidentServiceReadiness {
+export function observeResidentServiceDiagnostic(
+  options: ResidentServiceDiagnosticOptions,
+  dependencies: ResidentServiceDiagnosticDependencies = {},
+): ResidentServiceDiagnostic {
   const checks = emptyChecks();
-  const reasons: ResidentServiceReadinessReason[] = [];
+  const reasons = architecturalBlockers();
   const platform = process.platform as Platform;
   if (platform !== 'darwin') {
-    blocked(reasons, 'unsupported-platform', 'resident readiness currently requires launchd on macOS');
+    blocked(reasons, 'unsupported-platform', 'resident diagnostic currently requires launchd on macOS');
     return result(options.release.identity, checks, reasons);
   }
 
   const releaseRoot = resolve(options.release.root);
-  const releaseContractValid = RELEASE_ID_RE.test(options.release.identity)
+  const releaseDeclarationValid = RELEASE_ID_RE.test(options.release.identity)
     && SHA256_RE.test(options.release.treeSha256)
     && basename(releaseRoot) === options.release.identity
     && releaseRoot === options.release.root;
-  if (!releaseContractValid) {
-    checks.immutableRelease = false;
-    blocked(reasons, 'release-contract-invalid', 'release root, identity, or tree digest is not canonical');
+  if (!releaseDeclarationValid) {
+    checks.localReleaseMatchesDeclaredDigest = false;
+    blocked(reasons, 'release-declaration-invalid', 'caller-declared release root, identity, or tree digest is not canonical');
     return result(options.release.identity, checks, reasons);
   }
 
   const interpreterPath = resolve(options.release.interpreter.path);
-  const interpreterContractValid = interpreterPath === options.release.interpreter.path
+  const interpreterDeclarationValid = interpreterPath === options.release.interpreter.path
     && SHA256_RE.test(options.release.interpreter.sha256)
     && (options.nodePath === undefined || options.nodePath === interpreterPath);
-  if (!interpreterContractValid) {
-    checks.interpreterIdentityBound = false;
+  if (!interpreterDeclarationValid) {
+    checks.localInterpreterMatchesDeclaredDigest = false;
     blocked(
       reasons,
-      'interpreter-contract-invalid',
-      'interpreter path and digest must be canonical and agree with the service invocation',
+      'interpreter-declaration-invalid',
+      'caller-declared interpreter path and digest must be canonical and agree with the service invocation',
     );
     return result(options.release.identity, checks, reasons);
   }
@@ -532,7 +568,7 @@ export function residentServiceReadiness(
   const releaseTreeBinding = dependencies.releaseTreeBinding ?? hashStableReleaseTree;
   const interpreterBinding = dependencies.interpreterBinding ?? hashStableInterpreter;
   const killPath = join(options.homeDir ?? homedir(), '.ashlr', 'KILL');
-  const nowMs = dependencies.nowMs ?? Date.now;
+  const nowMs = dependencies.testOnlyNowMs ?? Date.now;
   const startedAt = nowMs();
   let lastObservedAt = startedAt;
   let deadlineExceeded = !Number.isFinite(startedAt);
@@ -555,7 +591,7 @@ export function residentServiceReadiness(
     status: null,
     stdout: '',
     stderr: '',
-    error: 'resident readiness observation deadline exceeded',
+    error: 'resident diagnostic cooperative observation budget exceeded',
   });
   const runBounded = (command: string, args: readonly string[]): CommandObservation => {
     const remaining = remainingMs();
@@ -604,7 +640,7 @@ export function residentServiceReadiness(
   const secondReleaseBinding = bindBounded(releaseTreeBinding, entrypoint);
   const secondInterpreterBinding = bindBounded(interpreterBinding, interpreterPath);
   const finalKillSwitch = observeKillSwitchBounded();
-  // Last external reads bind artifacts after all launchd and kill-switch observations.
+  // These repeated reads are consistency hints only, not a final authority handoff.
   const finalInterpreterBinding = bindBounded(interpreterBinding, interpreterPath);
   const finalReleaseBinding = bindBounded(releaseTreeBinding, entrypoint);
 
@@ -612,17 +648,17 @@ export function residentServiceReadiness(
   const completeReleaseBindings = releaseBindings.filter(
     (binding): binding is ResidentServiceFileBinding => binding !== null,
   );
-  const releaseMatchesContract = completeReleaseBindings.every((binding) => (
+  const releaseMatchesDeclaration = completeReleaseBindings.every((binding) => (
     binding.path === releaseRoot && binding.sha256 === options.release.treeSha256
   ));
-  if (!releaseMatchesContract) {
-    checks.immutableRelease = false;
-    blocked(reasons, 'release-binding-mismatch', 'observed release tree does not match the admitted immutable identity');
+  if (!releaseMatchesDeclaration) {
+    checks.localReleaseMatchesDeclaredDigest = false;
+    blocked(reasons, 'release-binding-mismatch', 'observed release tree does not match the caller-declared digest');
   } else if (completeReleaseBindings.length !== releaseBindings.length) {
-    checks.immutableRelease = null;
-    degraded(reasons, 'release-binding-unavailable', 'immutable release tree could not be observed across the full window');
+    checks.localReleaseMatchesDeclaredDigest = null;
+    degraded(reasons, 'release-binding-unavailable', 'local release tree could not be observed across the full diagnostic window');
   } else {
-    checks.immutableRelease = true;
+    checks.localReleaseMatchesDeclaredDigest = true;
   }
   const releaseStable = completeReleaseBindings.length === releaseBindings.length
     ? completeReleaseBindings.every((binding) => sameBinding(binding, completeReleaseBindings[0]!))
@@ -636,18 +672,18 @@ export function residentServiceReadiness(
   const completeInterpreterBindings = interpreterBindings.filter(
     (binding): binding is ResidentServiceFileBinding => binding !== null,
   );
-  const interpreterMatchesContract = completeInterpreterBindings.every((binding) => (
+  const interpreterMatchesDeclaration = completeInterpreterBindings.every((binding) => (
     binding.path === options.release.interpreter.path
     && binding.sha256 === options.release.interpreter.sha256
   ));
-  if (!interpreterMatchesContract) {
-    checks.interpreterIdentityBound = false;
-    blocked(reasons, 'interpreter-binding-mismatch', 'loaded interpreter does not match the admitted executable identity');
+  if (!interpreterMatchesDeclaration) {
+    checks.localInterpreterMatchesDeclaredDigest = false;
+    blocked(reasons, 'interpreter-binding-mismatch', 'local interpreter does not match the caller-declared digest');
   } else if (completeInterpreterBindings.length !== interpreterBindings.length) {
-    checks.interpreterIdentityBound = null;
-    degraded(reasons, 'interpreter-binding-unavailable', 'interpreter identity could not be observed across the full window');
+    checks.localInterpreterMatchesDeclaredDigest = null;
+    degraded(reasons, 'interpreter-binding-unavailable', 'local interpreter could not be observed across the full diagnostic window');
   } else {
-    checks.interpreterIdentityBound = true;
+    checks.localInterpreterMatchesDeclaredDigest = true;
   }
   const interpreterStable = completeInterpreterBindings.length === interpreterBindings.length
     ? completeInterpreterBindings.every((binding) => sameBinding(binding, completeInterpreterBindings[0]!))
@@ -656,7 +692,7 @@ export function residentServiceReadiness(
   const serviceStable = sameSnapshot(first, second)
     && second.killSwitch === finalKillSwitch;
   const bindingChanged = releaseStable === false || interpreterStable === false;
-  checks.stableObservation = deadlineExceeded
+  checks.repeatedSnapshotConsistent = deadlineExceeded
     ? false
     : !serviceStable || bindingChanged
       ? false
@@ -664,10 +700,10 @@ export function residentServiceReadiness(
         ? true
         : null;
   if (deadlineExceeded) {
-    degraded(reasons, 'observation-deadline-exceeded', 'resident readiness exceeded its single bounded observation deadline');
+    degraded(reasons, 'observation-deadline-exceeded', 'resident diagnostic exceeded its cooperative observation budget');
   }
-  if (checks.stableObservation === false && !deadlineExceeded) {
-    degraded(reasons, 'observation-changed', 'resident service, release, interpreter, or kill state changed during observation');
+  if (checks.repeatedSnapshotConsistent === false && !deadlineExceeded) {
+    degraded(reasons, 'observation-changed', 'resident service, release, interpreter, or kill state changed during the diagnostic');
   }
 
   const plist = parsePlistJson(second.plist);
@@ -683,14 +719,14 @@ export function residentServiceReadiness(
     if (!checks.exactLabel) {
       blocked(reasons, 'service-label-mismatch', 'installed launchd plist label does not match the resident service label');
     }
-    checks.exactInvocation = exactStringArray(
+    checks.observedInvocationMatchesDeclaration = exactStringArray(
       plist['ProgramArguments'],
       definition.launchdRuntime.arguments,
     );
-    if (!checks.exactInvocation) {
-      blocked(reasons, 'service-invocation-mismatch', 'installed launchd plist does not invoke the admitted immutable release');
+    if (!checks.observedInvocationMatchesDeclaration) {
+      blocked(reasons, 'service-invocation-mismatch', 'installed launchd plist does not match the caller-declared invocation');
     }
-    diskRestartPolicyCompatible = restartPolicyCompatible(plist, restartSec);
+    diskRestartPolicyCompatible = diskDefinitionRestartPolicyCompatible(plist, restartSec);
     if (!diskRestartPolicyCompatible) {
       blocked(reasons, 'restart-policy-mismatch', 'launchd restart policy is incompatible with resident crash recovery');
     }
@@ -715,16 +751,19 @@ export function residentServiceReadiness(
     const runtimeLabelExact = second.runtime.stdout.trimEnd().split(/\r?\n/, 1)[0]
       === `${serviceTarget} = {`;
     checks.exactLabel = strictAnd(checks.exactLabel, runtimeLabelExact);
-    checks.exactInvocation = strictAnd(checks.exactInvocation, runtimeInvocationExact);
+    checks.observedInvocationMatchesDeclaration = strictAnd(
+      checks.observedInvocationMatchesDeclaration,
+      runtimeInvocationExact,
+    );
     if (!runtimeInvocationExact) {
-      blocked(reasons, 'service-invocation-mismatch', 'loaded launchd runtime does not match the admitted service path and argv');
+      blocked(reasons, 'service-invocation-mismatch', 'loaded launchd runtime does not match the caller-declared service path and argv');
     }
     const runtimeState = launchdRuntimeState(second.runtime.stdout);
     checks.running = runtimeState === 'running' && exactRuntime?.pid !== undefined;
     if (!checks.running) {
       blocked(reasons, 'service-not-running', 'loaded launchd resident service is not proven running with a live pid');
     }
-    loadedRestartPolicy = loadedRestartPolicyCompatible(second.runtime.stdout, restartSec);
+    loadedRestartPolicy = loadedRestartPolicyHintsCompatible(second.runtime.stdout, restartSec);
     if (loadedRestartPolicy !== true) {
       blocked(
         reasons,
@@ -736,9 +775,8 @@ export function residentServiceReadiness(
     }
   }
 
-  checks.restartPolicyCompatible = diskRestartPolicyCompatible === null || loadedRestartPolicy === null
-    ? null
-    : diskRestartPolicyCompatible && loadedRestartPolicy;
+  checks.diskDefinitionRestartPolicyCompatible = diskRestartPolicyCompatible;
+  checks.loadedRestartPolicyHintsCompatible = loadedRestartPolicy;
 
   if (!commandSucceeded(second.disabled)) {
     checks.enabled = null;
