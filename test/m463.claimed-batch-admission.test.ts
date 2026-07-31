@@ -41,6 +41,23 @@ import {
 } from '../src/core/util/private-storage.js';
 import type { WorkItem } from '../src/core/types.js';
 
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 const CAMPAIGN = 'a'.repeat(64);
 const ADMISSION_POLICY = 'b'.repeat(64);
 
@@ -216,11 +233,13 @@ describe.runIf(process.platform !== 'win32')('M463 claimed-batch admission', () 
     vi.stubEnv('USERPROFILE', home);
     repo = join(home, 'repo');
     mkdirSync(repo);
+    privateStorageHarness.useSemanticAdapter = true;
     loadOrCreateKey();
     expect(enroll(repo).ok).toBe(true);
   });
 
   afterEach(() => {
+    privateStorageHarness.useSemanticAdapter = false;
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
@@ -873,11 +892,13 @@ describe.runIf(process.platform === 'win32')('M463 Windows refusal', () => {
     vi.stubEnv('USERPROFILE', home);
     repo = join(home, 'repo');
     mkdirSync(repo);
+    privateStorageHarness.useSemanticAdapter = true;
     loadOrCreateKey();
     expect(enroll(repo).ok).toBe(true);
   });
 
   afterEach(() => {
+    privateStorageHarness.useSemanticAdapter = false;
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });

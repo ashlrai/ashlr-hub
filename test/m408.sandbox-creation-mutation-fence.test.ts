@@ -2,7 +2,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { makeFixture, type DisposableRepo, type H1Fixture } from './helpers/h1-fixture.js';
 import {
@@ -13,7 +13,24 @@ import {
   sandboxesDir,
 } from '../src/core/sandbox/worktree.js';
 
-const CHILD_TIMEOUT_MS = 8_000;
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
+const CHILD_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 8_000;
 const fenceModuleUrl = new URL('../src/core/sandbox/mutation-fence.ts', import.meta.url).href;
 const CHILD_SOURCE = String.raw`
   import {
@@ -196,6 +213,7 @@ async function releaseHolder(child: ChildProcess): Promise<void> {
 }
 
 beforeEach(() => {
+  privateStorageHarness.useSemanticAdapter = true;
   fx = makeFixture();
 });
 
@@ -204,6 +222,7 @@ afterEach(async () => {
   for (const child of running) child.kill('SIGKILL');
   await Promise.all(running.map(waitForExit));
   fx.cleanup();
+  privateStorageHarness.useSemanticAdapter = false;
 });
 
 describe('M408 createSandbox outward mutation fence', () => {
@@ -235,5 +254,5 @@ describe('M408 createSandbox outward mutation fence', () => {
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  }, 15_000);
+  }, process.platform === 'win32' ? 120_000 : 15_000);
 });

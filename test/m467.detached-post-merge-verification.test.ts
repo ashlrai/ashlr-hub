@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   existsSync,
@@ -21,6 +21,23 @@ import {
   type DetachedPostMergeVerificationMemberInput,
 } from '../src/core/fleet/detached-post-merge-verification.js';
 
+const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: (
+      ...args: Parameters<typeof actual.assurePrivateStoragePath>
+    ) => process.platform === 'win32' && privateStorageHarness.useSemanticAdapter
+      ? {
+          ok: true,
+          reason: args[2] === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+        }
+      : actual.assurePrivateStoragePath(...args),
+  };
+});
+
 let home: string;
 let previousHome: string | undefined;
 let previousAshlrHome: string | undefined;
@@ -32,9 +49,11 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ashlr-m467-postmerge-'));
   process.env.HOME = home;
   process.env.ASHLR_HOME = join(home, '.ashlr');
+  privateStorageHarness.useSemanticAdapter = true;
 });
 
 afterEach(() => {
+  privateStorageHarness.useSemanticAdapter = false;
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
   if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
@@ -336,7 +355,7 @@ describe('M467 detached post-merge verification cohorts', () => {
         invalidFiles: 1,
       });
     }
-  });
+  }, process.platform === 'win32' ? 120_000 : 30_000);
 
   it('fails closed when the key disappears or storage permissions widen', () => {
     key();

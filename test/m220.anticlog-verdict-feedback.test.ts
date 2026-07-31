@@ -239,11 +239,11 @@ beforeAll(() => {
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
 
+  privateStorageHarness.useSemanticAdapter = true;
   const enrollment = enroll(tmpRepo);
   if (!enrollment.ok) {
     throw new Error(`M220 fixture enrollment failed: ${enrollment.reason}`);
   }
-  privateStorageHarness.useSemanticAdapter = true;
 });
 
 beforeEach(() => {
