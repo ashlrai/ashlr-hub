@@ -347,14 +347,12 @@ function exactLaunchdValue(output: string, field: string): string | null {
   return values.length === 1 ? values[0]! : null;
 }
 
-function loadedRestartPolicyHintsCompatible(output: string, restartSec: number): boolean | null {
-  const minimumRuntime = exactLaunchdValue(output, 'minimum runtime');
+function loadedRestartPolicyHintsCompatible(output: string): boolean | null {
   const properties = exactLaunchdValue(output, 'properties');
-  if (minimumRuntime === null || properties === null) return null;
-  if (!/^\d+$/.test(minimumRuntime) || Number(minimumRuntime) !== restartSec) return false;
+  if (properties === null) return null;
   const propertySet = new Set(properties.split('|').map((entry) => entry.trim()).filter(Boolean));
-  return propertySet.has('keepalive')
-    && propertySet.has('runatload')
+  return propertySet.has('runatload')
+    && !propertySet.has('keepalive')
     && !propertySet.has('launchonlyonce');
 }
 
@@ -380,20 +378,12 @@ function exactStringArray(value: unknown, expected: readonly string[]): boolean 
     && value.every((entry, index) => entry === expected[index]);
 }
 
-function diskDefinitionRestartPolicyCompatible(
-  plist: Record<string, unknown>,
-  restartSec: number,
-): boolean {
-  const keepAlive = plist['KeepAlive'];
+function diskDefinitionRestartPolicyCompatible(plist: Record<string, unknown>): boolean {
   return plist['RunAtLoad'] === true
     && plist['LaunchOnlyOnce'] !== true
     && plist['Program'] === undefined
-    && keepAlive !== null
-    && typeof keepAlive === 'object'
-    && !Array.isArray(keepAlive)
-    && Object.keys(keepAlive as Record<string, unknown>).length === 1
-    && (keepAlive as Record<string, unknown>)['SuccessfulExit'] === false
-    && plist['ThrottleInterval'] === restartSec;
+    && plist['KeepAlive'] === false
+    && plist['ThrottleInterval'] === undefined;
 }
 
 function sameBinding(
@@ -707,9 +697,6 @@ export function observeResidentServiceDiagnostic(
   }
 
   const plist = parsePlistJson(second.plist);
-  const restartSec = Number.isFinite(options.restartSec) && options.restartSec !== undefined
-    ? Math.max(5, Math.floor(options.restartSec))
-    : 30;
   let diskRestartPolicyCompatible: boolean | null = null;
   let loadedRestartPolicy: boolean | null = null;
   if (!plist) {
@@ -726,9 +713,9 @@ export function observeResidentServiceDiagnostic(
     if (!checks.observedInvocationMatchesDeclaration) {
       blocked(reasons, 'service-invocation-mismatch', 'installed launchd plist does not match the caller-declared invocation');
     }
-    diskRestartPolicyCompatible = diskDefinitionRestartPolicyCompatible(plist, restartSec);
+    diskRestartPolicyCompatible = diskDefinitionRestartPolicyCompatible(plist);
     if (!diskRestartPolicyCompatible) {
-      blocked(reasons, 'restart-policy-mismatch', 'launchd restart policy is incompatible with resident crash recovery');
+      blocked(reasons, 'restart-policy-mismatch', 'launchd policy does not prove automatic crash relaunch is disabled');
     }
   }
 
@@ -763,14 +750,14 @@ export function observeResidentServiceDiagnostic(
     if (!checks.running) {
       blocked(reasons, 'service-not-running', 'loaded launchd resident service is not proven running with a live pid');
     }
-    loadedRestartPolicy = loadedRestartPolicyHintsCompatible(second.runtime.stdout, restartSec);
+    loadedRestartPolicy = loadedRestartPolicyHintsCompatible(second.runtime.stdout);
     if (loadedRestartPolicy !== true) {
       blocked(
         reasons,
         'restart-policy-mismatch',
         loadedRestartPolicy === null
           ? 'loaded launchd restart policy could not be proven from native runtime state'
-          : 'loaded launchd restart policy is incompatible with resident crash recovery',
+          : 'loaded launchd state does not prove automatic crash relaunch is disabled',
       );
     }
   }

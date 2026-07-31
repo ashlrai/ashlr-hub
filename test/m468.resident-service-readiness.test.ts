@@ -52,7 +52,7 @@ function launchdPrint(
   args: readonly string[] = ARGS,
   target = TARGET,
   state = 'running',
-  properties = 'keepalive | runatload',
+  properties = 'runatload',
   minimumRuntime = 30,
 ): string {
   return `${[
@@ -75,8 +75,7 @@ function plist(overrides: Record<string, unknown> = {}): string {
     Label: 'ai.ashlr.daemon',
     ProgramArguments: ARGS,
     RunAtLoad: true,
-    KeepAlive: { SuccessfulExit: false },
-    ThrottleInterval: 30,
+    KeepAlive: false,
     ...overrides,
   });
 }
@@ -259,10 +258,9 @@ describe('observeResidentServiceDiagnostic', () => {
 
   it.each([
     ['missing loaded properties', launchdPrint(ARGS, TARGET, 'running', '')],
-    ['missing keepalive', launchdPrint(ARGS, TARGET, 'running', 'runatload')],
-    ['missing runatload', launchdPrint(ARGS, TARGET, 'running', 'keepalive')],
-    ['wrong loaded throttle', launchdPrint(ARGS, TARGET, 'running', 'keepalive | runatload', 5)],
-    ['launch-only-once', launchdPrint(ARGS, TARGET, 'running', 'keepalive | runatload | launchonlyonce')],
+    ['automatic keepalive', launchdPrint(ARGS, TARGET, 'running', 'keepalive | runatload')],
+    ['missing runatload', launchdPrint(ARGS, TARGET, 'running', 'other')],
+    ['launch-only-once', launchdPrint(ARGS, TARGET, 'running', 'runatload | launchonlyonce')],
   ])('blocks when restart policy is not proven from loaded state: %s', (_name, stdout) => {
     const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
       runtime: { status: 0, stdout, stderr: '' },
@@ -270,6 +268,17 @@ describe('observeResidentServiceDiagnostic', () => {
     expect(diagnostic.diagnosticStatus).toBe('blocked');
     expect(diagnostic.localChecks.loadedRestartPolicyHintsCompatible).not.toBe(true);
     expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
+  });
+
+  it('treats restartSec and launchd minimum-runtime hints as irrelevant on macOS', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options({ restartSec: 999 }), dependencies({
+      runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 1), stderr: '' },
+    }));
+    expect(diagnostic.diagnosticStatus).toBe('blocked');
+    expect(diagnostic.lifecycleAuthority).toBe('none');
+    expect(diagnostic.localChecks.diskDefinitionRestartPolicyCompatible).toBe(true);
+    expect(diagnostic.localChecks.loadedRestartPolicyHintsCompatible).toBe(true);
+    expect(diagnostic.findings).not.toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
   });
 
   it('blocks a release tree digest mismatch', () => {
@@ -313,8 +322,9 @@ describe('observeResidentServiceDiagnostic', () => {
 
   it.each([
     ['RunAtLoad', { RunAtLoad: false }],
-    ['SuccessfulExit', { KeepAlive: { SuccessfulExit: true } }],
-    ['extra keepalive condition', { KeepAlive: { SuccessfulExit: false, NetworkState: true } }],
+    ['KeepAlive true', { KeepAlive: true }],
+    ['obsolete SuccessfulExit policy', { KeepAlive: { SuccessfulExit: false }, ThrottleInterval: 30 }],
+    ['conditional keepalive', { KeepAlive: { NetworkState: true } }],
     ['ThrottleInterval', { ThrottleInterval: 5 }],
     ['LaunchOnlyOnce', { LaunchOnlyOnce: true }],
     ['Program override', { Program: '/tmp/substituted-node' }],
