@@ -154,10 +154,6 @@ export interface VerifyRuntimeReleaseEvidenceEnvelopeOptions {
   trustRoot: string | Buffer;
 }
 
-export interface RuntimeReleaseEvidenceVerificationDependencies {
-  clock?: () => number;
-}
-
 export type VerifyRuntimeReleaseEvidenceEnvelopeResult =
   | {
     ok: true;
@@ -168,6 +164,7 @@ export type VerifyRuntimeReleaseEvidenceEnvelopeResult =
     manifestDigest: string;
     expectedRevision: string;
     rollbackTargetManifestDigest: string | null;
+    verifiedAtMs: number;
   }
   | { ok: false; reason: string };
 
@@ -683,7 +680,6 @@ export function parseRuntimeReleaseEvidenceEnvelope(
 
 export function verifyRuntimeReleaseEvidenceEnvelope(
   options: VerifyRuntimeReleaseEvidenceEnvelopeOptions,
-  dependencies: RuntimeReleaseEvidenceVerificationDependencies = {},
 ): VerifyRuntimeReleaseEvidenceEnvelopeResult {
   try {
     const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
@@ -696,7 +692,7 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
       'runtime release evidence trust root',
     );
     const { trustRoot, publicKeys } = validateTrustRoot(parsedTrustRoot.value);
-    const nowMs = (dependencies.clock ?? Date.now)();
+    const nowMs = Date.now();
     if (!Number.isFinite(nowMs) || !Number.isSafeInteger(nowMs)) {
       return { ok: false, reason: 'runtime release evidence trusted clock is invalid' };
     }
@@ -768,6 +764,7 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
       expectedRevision: envelope.envelope.payload.expectedRevision,
       rollbackTargetManifestDigest:
         manifest.manifest.rollbackDeclaration.targetManifestDigest,
+      verifiedAtMs: nowMs,
     };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };

@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeReleaseEvidenceTrustRoot,
   parseRuntimeReleaseEvidenceEnvelope,
@@ -81,10 +81,6 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
   return built.canonicalJson;
 }
 
-function clockAt(value: string): { clock: () => number } {
-  return { clock: () => Date.parse(value) };
-}
-
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (value !== null && typeof value === 'object') {
@@ -143,7 +139,13 @@ function resign(envelope: Record<string, unknown>, privateKey: KeyObject): void 
   ).toString('base64url');
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -188,7 +190,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope: first.canonicalJson,
       manifest,
       trustRoot: trustRoot(keys.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: true,
       assurance: 'signed-observation-only',
       expiresAt: EXPIRES_AT,
@@ -197,6 +199,7 @@ describe('signed runtime release evidence envelope', () => {
       manifestDigest: first.envelope.payload.manifestDigest,
       expectedRevision: REVISION,
       rollbackTargetManifestDigest: null,
+      verifiedAtMs: Date.parse(NOW),
     });
   });
 
@@ -210,7 +213,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope,
       manifest,
       trustRoot: trustRoot(other.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence signing key is unknown',
     });
@@ -244,7 +247,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope: encode(invalid),
       manifest,
       trustRoot: trustRoot(keys.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence signature verification failed',
     });
@@ -280,32 +283,31 @@ describe('signed runtime release evidence envelope', () => {
     const keys = generateKeyPairSync('ed25519');
     const root = trustRoot(keys.publicKey);
 
+    vi.setSystemTime(EXPIRES_AT);
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: signed(manifest, keys.privateKey),
       manifest,
       trustRoot: root,
-    }, clockAt(EXPIRES_AT))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence is stale',
     });
     const historicalTimestampReplay = {
+      clock: () => Date.parse(NOW),
       envelope: signed(manifest, keys.privateKey),
       manifest,
-      now: NOW,
       trustRoot: root,
     };
-    expect(verifyRuntimeReleaseEvidenceEnvelope(
-      historicalTimestampReplay,
-      clockAt(EXPIRES_AT),
-    )).toEqual({
+    expect(verifyRuntimeReleaseEvidenceEnvelope(historicalTimestampReplay)).toEqual({
       ok: false,
       reason: 'runtime release evidence is stale',
     });
+    vi.setSystemTime('2026-07-29T11:59:59.999Z');
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: signed(manifest, keys.privateKey),
       manifest,
       trustRoot: root,
-    }, clockAt('2026-07-29T11:59:59.999Z'))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence is not yet valid',
     });
@@ -329,7 +331,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope: signed(firstManifest, keys.privateKey),
       manifest: secondManifest,
       trustRoot: trustRoot(keys.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence manifest digest mismatch',
     });
@@ -342,7 +344,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope: encode(envelope),
       manifest: firstManifest,
       trustRoot: trustRoot(keys.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence canonical manifest digest mismatch',
     });
@@ -360,7 +362,7 @@ describe('signed runtime release evidence envelope', () => {
       envelope: encode(envelope),
       manifest,
       trustRoot: trustRoot(keys.publicKey),
-    }, clockAt(NOW))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence expected revision mismatch',
     });
@@ -436,11 +438,12 @@ describe('signed runtime release evidence envelope', () => {
       }],
     });
     if (!shortValidity.ok) throw new Error(shortValidity.reason);
+    vi.setSystemTime('2026-07-29T12:04:00.000Z');
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope,
       manifest,
       trustRoot: shortValidity.canonicalJson,
-    }, clockAt('2026-07-29T12:04:00.000Z'))).toEqual({
+    })).toEqual({
       ok: false,
       reason: 'runtime release evidence falls outside signing key validity',
     });

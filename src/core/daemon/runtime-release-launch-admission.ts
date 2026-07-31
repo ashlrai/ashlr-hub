@@ -1,21 +1,25 @@
 import { createHash } from 'node:crypto';
 import {
-  revalidateRuntimeReleaseLaunch,
-  type RuntimeReleaseLaunchRevalidationDependencies,
-  type RuntimeReleaseLaunchRevalidationOptions,
+  observeRuntimeReleaseLaunchInputs,
+  type RuntimeReleaseLaunchObservationOptions,
 } from './runtime-release-launch-revalidation.js';
 import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.js';
 
-export const RUNTIME_RELEASE_LAUNCH_ADMISSION_SCHEMA_VERSION = 1 as const;
+export const RUNTIME_RELEASE_LAUNCH_ADMISSION_SCHEMA_VERSION = 2 as const;
 export const RUNTIME_RELEASE_LAUNCH_ADMISSION_AUTHORITY = 'observation-only' as const;
 
 const RECEIPT_DIGEST_DOMAIN =
-  'ashlr:runtime-release-launch-admission-revalidation-receipt:v1';
+  'ashlr:runtime-release-launch-admission-observation-receipt:v2';
 
 export type RuntimeReleaseLaunchAdmissionBlockerCode =
-  | 'launch-revalidation-failed'
+  | 'launch-observation-failed'
   | 'release-manifest-incoherent'
-  | 'rollback-unresolved';
+  | 'atomic-launch-handoff-absent'
+  | 'durable-replay-consumption-absent'
+  | 'rollback-unresolved'
+  | 'revision-provenance-unresolved'
+  | 'trusted-activation-root-absent'
+  | 'trusted-policy-authority-absent';
 
 export interface RuntimeReleaseLaunchAdmissionBlocker {
   code: RuntimeReleaseLaunchAdmissionBlockerCode;
@@ -32,17 +36,22 @@ export interface RuntimeReleaseLaunchAdmissionDecision {
   launchPermitted: false;
   rollbackPermitted: false;
   startPermitted: false;
-  blocker: RuntimeReleaseLaunchAdmissionBlocker;
+  blockers: RuntimeReleaseLaunchAdmissionBlocker[];
   evidence: {
+    atomicLaunchHandoff: 'absent-descriptors-closed';
     callerPinnedEnvelope: 'canonical-digest-and-key-id';
+    closedByteIdentityObservation: 'not-completed' | 'before-after-equal';
     contentAddressedRelease: 'caller-pinned-staged-tree-identity';
-    launchRevalidation: 'failed' | 'passed';
-    launchRevalidationReceiptSha256: string | null;
+    launchConsumer: 'absent';
+    launchObservation: 'failed' | 'passed-closed-observation-only';
+    launchObservationReceiptSha256: string | null;
     manifestDigest: string | null;
+    mutationAfterObservation: 'not-prevented';
+    policyAuthority: 'caller-pinned-unsigned';
     replayPrevention: 'absent-no-durable-consumption-store';
-    secondByteIdentityObservation: 'not-completed' | 'before-after-equal';
-    signedRevision: 'unobserved' | 'manifest-and-envelope-bound';
+    revisionBinding: 'unobserved' | 'manifest-and-envelope-bound-declaration-only';
     stagedTreeIdentity: string | null;
+    trustRootAuthority: 'caller-provided-not-activation-root';
   };
   rollback: {
     resolution: 'unobserved' | 'unresolved';
@@ -56,8 +65,8 @@ function copyBytes(value: string | Buffer): string | Buffer {
 }
 
 function pinInputs(
-  options: RuntimeReleaseLaunchRevalidationOptions,
-): RuntimeReleaseLaunchRevalidationOptions {
+  options: RuntimeReleaseLaunchObservationOptions,
+): RuntimeReleaseLaunchObservationOptions {
   return {
     ...options,
     argv: [...options.argv],
@@ -76,8 +85,41 @@ function receiptDigest(canonicalJson: string): string {
     .digest('hex');
 }
 
+function permanentAuthorityBlockers(
+  targetManifestDigest: string | null,
+): RuntimeReleaseLaunchAdmissionBlocker[] {
+  return [
+    {
+      code: 'atomic-launch-handoff-absent',
+      detail: 'Observed descriptors are closed and no descriptor-bound launch consumer exists.',
+    },
+    {
+      code: 'durable-replay-consumption-absent',
+      detail: 'No durable single-consumption store prevents evidence replay.',
+    },
+    {
+      code: 'rollback-unresolved',
+      detail: targetManifestDigest === null
+        ? 'The signed release has no resolved rollback target or rollback consumer.'
+        : 'The signed release names a rollback target but does not validate or resolve it.',
+    },
+    {
+      code: 'revision-provenance-unresolved',
+      detail: 'The signed revision is a bound declaration, not a proven repository object identity.',
+    },
+    {
+      code: 'trusted-activation-root-absent',
+      detail: 'The caller-provided trust root is not bound to configured activation authority.',
+    },
+    {
+      code: 'trusted-policy-authority-absent',
+      detail: 'The caller-pinned policy is unsigned and has no configured authority binding.',
+    },
+  ];
+}
+
 function blocked(
-  blocker: RuntimeReleaseLaunchAdmissionBlocker,
+  blockers: RuntimeReleaseLaunchAdmissionBlocker[],
   evidence: RuntimeReleaseLaunchAdmissionDecision['evidence'],
   rollback: RuntimeReleaseLaunchAdmissionDecision['rollback'],
 ): RuntimeReleaseLaunchAdmissionDecision {
@@ -91,104 +133,95 @@ function blocked(
     launchPermitted: false,
     rollbackPermitted: false,
     startPermitted: false,
-    blocker,
+    blockers,
     evidence,
     rollback,
   };
 }
 
+function unavailableEvidence(
+  launchObservation: 'failed',
+): RuntimeReleaseLaunchAdmissionDecision['evidence'] {
+  return {
+    atomicLaunchHandoff: 'absent-descriptors-closed',
+    callerPinnedEnvelope: 'canonical-digest-and-key-id',
+    closedByteIdentityObservation: 'not-completed',
+    contentAddressedRelease: 'caller-pinned-staged-tree-identity',
+    launchConsumer: 'absent',
+    launchObservation,
+    launchObservationReceiptSha256: null,
+    manifestDigest: null,
+    mutationAfterObservation: 'not-prevented',
+    policyAuthority: 'caller-pinned-unsigned',
+    replayPrevention: 'absent-no-durable-consumption-store',
+    revisionBinding: 'unobserved',
+    stagedTreeIdentity: null,
+    trustRootAuthority: 'caller-provided-not-activation-root',
+  };
+}
+
 /**
- * Observe launch readiness without granting service authority. The signed
- * envelope, trust root, policy, invocation, and staged identity are caller
- * pinned and revalidated against bounded reads. Rollback resolution, durable
- * anti-replay consumption, and a launch consumer remain absent, so even
- * complete evidence is refused.
+ * Evaluate closed byte observations without granting service authority. A
+ * successful observation cannot become launch authority until a descriptor-
+ * bound consumer, durable replay consumption, trusted activation roots and
+ * policy, revision provenance, and rollback resolution are implemented.
  */
 export function evaluateRuntimeReleaseLaunchAdmission(
-  options: RuntimeReleaseLaunchRevalidationOptions,
-  dependencies: RuntimeReleaseLaunchRevalidationDependencies = {},
+  options: RuntimeReleaseLaunchObservationOptions,
 ): RuntimeReleaseLaunchAdmissionDecision {
   const pinned = pinInputs(options);
-  const revalidated = revalidateRuntimeReleaseLaunch(pinned, dependencies);
-  if (!revalidated.ok) {
+  const observed = observeRuntimeReleaseLaunchInputs(pinned);
+  if (!observed.ok) {
     return blocked(
-      {
-        code: 'launch-revalidation-failed',
-        detail: revalidated.reason,
-      },
-      {
-        callerPinnedEnvelope: 'canonical-digest-and-key-id',
-        contentAddressedRelease: 'caller-pinned-staged-tree-identity',
-        launchRevalidation: 'failed',
-        launchRevalidationReceiptSha256: null,
-        manifestDigest: null,
-        replayPrevention: 'absent-no-durable-consumption-store',
-        secondByteIdentityObservation: 'not-completed',
-        signedRevision: 'unobserved',
-        stagedTreeIdentity: null,
-      },
-      {
-        resolution: 'unobserved',
-        source: 'unobserved',
-        targetManifestDigest: null,
-      },
+      [{ code: 'launch-observation-failed', detail: observed.reason },
+        ...permanentAuthorityBlockers(null)],
+      unavailableEvidence('failed'),
+      { resolution: 'unobserved', source: 'unobserved', targetManifestDigest: null },
     );
   }
 
+  const evidence: RuntimeReleaseLaunchAdmissionDecision['evidence'] = {
+    atomicLaunchHandoff: 'absent-descriptors-closed',
+    callerPinnedEnvelope: 'canonical-digest-and-key-id',
+    closedByteIdentityObservation: 'before-after-equal',
+    contentAddressedRelease: 'caller-pinned-staged-tree-identity',
+    launchConsumer: 'absent',
+    launchObservation: 'passed-closed-observation-only',
+    launchObservationReceiptSha256: receiptDigest(observed.canonicalJson),
+    manifestDigest: observed.receipt.release.manifestDigest,
+    mutationAfterObservation: 'not-prevented',
+    policyAuthority: 'caller-pinned-unsigned',
+    replayPrevention: 'absent-no-durable-consumption-store',
+    revisionBinding: 'manifest-and-envelope-bound-declaration-only',
+    stagedTreeIdentity: observed.receipt.stagedTreeIdentity,
+    trustRootAuthority: 'caller-provided-not-activation-root',
+  };
   const manifest = parseUnsignedRuntimeReleaseManifest(pinned.manifest);
   if (!manifest.ok ||
-    manifest.manifest.manifestDigest !== revalidated.receipt.release.manifestDigest ||
-    manifest.manifest.expectedRevision !== revalidated.receipt.release.expectedRevision ||
+    manifest.manifest.manifestDigest !== observed.receipt.release.manifestDigest ||
+    manifest.manifest.expectedRevision !== observed.receipt.release.expectedRevision ||
     manifest.manifest.rollbackDeclaration.targetManifestDigest !==
-      revalidated.receipt.release.rollbackTargetManifestDigest) {
+      observed.receipt.release.rollbackTargetManifestDigest) {
     return blocked(
-      {
+      [{
         code: 'release-manifest-incoherent',
         detail: manifest.ok
-          ? 'Revalidated release receipt does not match the pinned manifest.'
+          ? 'Closed release observation does not match the pinned manifest.'
           : manifest.reason,
-      },
-      {
-        callerPinnedEnvelope: 'canonical-digest-and-key-id',
-        contentAddressedRelease: 'caller-pinned-staged-tree-identity',
-        launchRevalidation: 'passed',
-        launchRevalidationReceiptSha256: receiptDigest(revalidated.canonicalJson),
-        manifestDigest: revalidated.receipt.release.manifestDigest,
-        replayPrevention: 'absent-no-durable-consumption-store',
-        secondByteIdentityObservation: 'before-after-equal',
-        signedRevision: 'manifest-and-envelope-bound',
-        stagedTreeIdentity: revalidated.receipt.stagedTreeIdentity,
-      },
-      {
-        resolution: 'unobserved',
-        source: 'unobserved',
-        targetManifestDigest: null,
-      },
+      }, ...permanentAuthorityBlockers(null)],
+      evidence,
+      { resolution: 'unobserved', source: 'unobserved', targetManifestDigest: null },
     );
   }
 
+  const rollbackTarget = manifest.manifest.rollbackDeclaration.targetManifestDigest;
   return blocked(
-    {
-      code: 'rollback-unresolved',
-      detail: manifest.manifest.rollbackDeclaration.targetManifestDigest === null
-        ? 'The signed release has no resolved rollback target.'
-        : 'The signed release names a rollback target but does not validate or resolve it.',
-    },
-    {
-      callerPinnedEnvelope: 'canonical-digest-and-key-id',
-      contentAddressedRelease: 'caller-pinned-staged-tree-identity',
-      launchRevalidation: 'passed',
-      launchRevalidationReceiptSha256: receiptDigest(revalidated.canonicalJson),
-      manifestDigest: revalidated.receipt.release.manifestDigest,
-      replayPrevention: 'absent-no-durable-consumption-store',
-      secondByteIdentityObservation: 'before-after-equal',
-      signedRevision: 'manifest-and-envelope-bound',
-      stagedTreeIdentity: revalidated.receipt.stagedTreeIdentity,
-    },
+    permanentAuthorityBlockers(rollbackTarget),
+    evidence,
     {
       resolution: 'unresolved',
       source: 'caller-declared',
-      targetManifestDigest: manifest.manifest.rollbackDeclaration.targetManifestDigest,
+      targetManifestDigest: rollbackTarget,
     },
   );
 }

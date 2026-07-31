@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
-  RuntimeReleaseLaunchRevalidationOptions,
-  RuntimeReleaseLaunchRevalidationReceiptV1,
+  RuntimeReleaseLaunchObservationOptions,
+  RuntimeReleaseLaunchObservationReceiptV2,
 } from '../src/core/daemon/runtime-release-launch-revalidation.js';
 import type {
   UnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
 
 const mocks = vi.hoisted(() => ({
+  observeLaunch: vi.fn(),
   parseManifest: vi.fn(),
-  revalidateLaunch: vi.fn(),
 }));
 
 vi.mock('../src/core/daemon/runtime-release-launch-revalidation.js', () => ({
-  revalidateRuntimeReleaseLaunch: mocks.revalidateLaunch,
+  observeRuntimeReleaseLaunchInputs: mocks.observeLaunch,
 }));
 
 vi.mock('../src/core/daemon/runtime-release-manifest.js', () => ({
@@ -27,7 +27,16 @@ import {
 const MANIFEST_DIGEST = 'a'.repeat(64);
 const STAGED_TREE_IDENTITY = 'b'.repeat(64);
 const REVISION = 'c'.repeat(40);
+const PERMANENT_BLOCKERS = [
+  'atomic-launch-handoff-absent',
+  'durable-replay-consumption-absent',
+  'rollback-unresolved',
+  'revision-provenance-unresolved',
+  'trusted-activation-root-absent',
+  'trusted-policy-authority-absent',
+];
 const RECEIPT = {
+  assurance: 'closed-byte-observation-only',
   expectedRevision: REVISION,
   release: {
     expectedRevision: REVISION,
@@ -39,9 +48,9 @@ const RECEIPT = {
     beforeSha256: 'd'.repeat(64),
   },
   stagedTreeIdentity: STAGED_TREE_IDENTITY,
-} as RuntimeReleaseLaunchRevalidationReceiptV1;
+} as RuntimeReleaseLaunchObservationReceiptV2;
 
-function options(): RuntimeReleaseLaunchRevalidationOptions {
+function options(): RuntimeReleaseLaunchObservationOptions {
   return {
     argv: ['/release/bin/ashlr', 'daemon', 'start'],
     declaredInterpreterPath: '/release/node',
@@ -76,8 +85,8 @@ function manifest(targetManifestDigest: string | null): UnsignedRuntimeReleaseMa
   } as UnsignedRuntimeReleaseManifest;
 }
 
-function successfulRevalidation(targetManifestDigest: string | null = null): void {
-  mocks.revalidateLaunch.mockReturnValue({
+function successfulObservation(targetManifestDigest: string | null = null): void {
+  mocks.observeLaunch.mockReturnValue({
     ok: true,
     canonicalJson: '{"receipt":"canonical"}\n',
     receipt: {
@@ -95,8 +104,8 @@ afterEach(() => {
 });
 
 describe('runtime release launch admission', () => {
-  it('revalidates pinned inputs and explicitly refuses an unresolved rollback', () => {
-    successfulRevalidation();
+  it('enumerates every missing authority primitive after a closed observation', () => {
+    successfulObservation();
     mocks.parseManifest.mockReturnValue({
       ok: true,
       canonicalJson: '{}\n',
@@ -115,18 +124,15 @@ describe('runtime release launch admission', () => {
       launchPermitted: false,
       rollbackPermitted: false,
       startPermitted: false,
-      blocker: {
-        code: 'rollback-unresolved',
-        detail: 'The signed release has no resolved rollback target.',
-      },
       evidence: {
-        callerPinnedEnvelope: 'canonical-digest-and-key-id',
-        contentAddressedRelease: 'caller-pinned-staged-tree-identity',
-        launchRevalidation: 'passed',
+        atomicLaunchHandoff: 'absent-descriptors-closed',
+        closedByteIdentityObservation: 'before-after-equal',
+        launchConsumer: 'absent',
+        launchObservation: 'passed-closed-observation-only',
         manifestDigest: MANIFEST_DIGEST,
+        mutationAfterObservation: 'not-prevented',
         replayPrevention: 'absent-no-durable-consumption-store',
-        secondByteIdentityObservation: 'before-after-equal',
-        signedRevision: 'manifest-and-envelope-bound',
+        revisionBinding: 'manifest-and-envelope-bound-declaration-only',
         stagedTreeIdentity: STAGED_TREE_IDENTITY,
       },
       rollback: {
@@ -134,13 +140,14 @@ describe('runtime release launch admission', () => {
         source: 'caller-declared',
         targetManifestDigest: null,
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
     });
-    expect(decision.evidence.launchRevalidationReceiptSha256)
+    expect(decision.blockers.map(({ code }) => code)).toEqual(PERMANENT_BLOCKERS);
+    expect(decision.evidence.launchObservationReceiptSha256)
       .toMatch(/^[a-f0-9]{64}$/);
 
-    const pinned = mocks.revalidateLaunch.mock.calls[0]![0] as
-      RuntimeReleaseLaunchRevalidationOptions;
+    const pinned = mocks.observeLaunch.mock.calls[0]![0] as
+      RuntimeReleaseLaunchObservationOptions;
     expect(pinned.argv).toEqual(input.argv);
     expect(pinned.argv).not.toBe(input.argv);
     for (const field of ['envelope', 'manifest', 'policy', 'trustRoot'] as const) {
@@ -152,7 +159,7 @@ describe('runtime release launch admission', () => {
 
   it('does not treat a caller-declared rollback digest as resolved', () => {
     const target = '4'.repeat(64);
-    successfulRevalidation(target);
+    successfulObservation(target);
     mocks.parseManifest.mockReturnValue({
       ok: true,
       canonicalJson: '{}\n',
@@ -161,7 +168,7 @@ describe('runtime release launch admission', () => {
 
     const decision = evaluateRuntimeReleaseLaunchAdmission(options());
 
-    expect(decision.blocker).toEqual({
+    expect(decision.blockers.find(({ code }) => code === 'rollback-unresolved')).toEqual({
       code: 'rollback-unresolved',
       detail: 'The signed release names a rollback target but does not validate or resolve it.',
     });
@@ -171,65 +178,49 @@ describe('runtime release launch admission', () => {
       targetManifestDigest: target,
     });
     expect(decision.admissionPermitted).toBe(false);
-    expect(decision.installPermitted).toBe(false);
-    expect(decision.startPermitted).toBe(false);
   });
 
-  it('fails closed before rollback inspection when launch revalidation fails', () => {
-    mocks.revalidateLaunch.mockReturnValue({
+  it('retains permanent blockers when the closed observation fails', () => {
+    mocks.observeLaunch.mockReturnValue({
       ok: false,
       reason: 'runtime release evidence envelope identity mismatch',
     });
 
     const decision = evaluateRuntimeReleaseLaunchAdmission(options());
 
-    expect(decision).toMatchObject({
-      blocker: {
-        code: 'launch-revalidation-failed',
-        detail: 'runtime release evidence envelope identity mismatch',
-      },
-      evidence: {
-        launchRevalidation: 'failed',
-        launchRevalidationReceiptSha256: null,
-        manifestDigest: null,
-        secondByteIdentityObservation: 'not-completed',
-        stagedTreeIdentity: null,
-      },
-      rollback: {
-        resolution: 'unobserved',
-        source: 'unobserved',
-        targetManifestDigest: null,
-      },
-      admissionPermitted: false,
-      deployPermitted: false,
-      installPermitted: false,
-      launchPermitted: false,
-      rollbackPermitted: false,
-      startPermitted: false,
+    expect(decision.blockers.map(({ code }) => code)).toEqual([
+      'launch-observation-failed',
+      ...PERMANENT_BLOCKERS,
+    ]);
+    expect(decision.evidence).toMatchObject({
+      launchObservation: 'failed',
+      launchObservationReceiptSha256: null,
+      closedByteIdentityObservation: 'not-completed',
+      mutationAfterObservation: 'not-prevented',
     });
+    expect(decision.rollback.resolution).toBe('unobserved');
+    expect(decision.launchPermitted).toBe(false);
     expect(mocks.parseManifest).not.toHaveBeenCalled();
   });
 
-  it('withholds authority when a successful receipt is incoherent with the manifest', () => {
-    successfulRevalidation();
+  it('adds manifest incoherence without hiding permanent authority gaps', () => {
+    successfulObservation();
     mocks.parseManifest.mockReturnValue({
       ok: true,
       canonicalJson: '{}\n',
-      manifest: {
-        ...manifest(null),
-        manifestDigest: '5'.repeat(64),
-      },
+      manifest: { ...manifest(null), manifestDigest: '5'.repeat(64) },
     });
 
     const decision = evaluateRuntimeReleaseLaunchAdmission(options());
 
-    expect(decision.blocker).toEqual({
-      code: 'release-manifest-incoherent',
-      detail: 'Revalidated release receipt does not match the pinned manifest.',
-    });
-    expect(decision.evidence.launchRevalidation).toBe('passed');
+    expect(decision.blockers.map(({ code }) => code)).toEqual([
+      'release-manifest-incoherent',
+      ...PERMANENT_BLOCKERS,
+    ]);
+    expect(decision.blockers[0]?.detail)
+      .toBe('Closed release observation does not match the pinned manifest.');
+    expect(decision.evidence.launchObservation).toBe('passed-closed-observation-only');
     expect(decision.rollback.resolution).toBe('unobserved');
-    expect(decision.installPermitted).toBe(false);
     expect(decision.startPermitted).toBe(false);
   });
 });

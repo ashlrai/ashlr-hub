@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeReleaseEvidenceTrustRoot,
   runtimeReleaseEvidenceKeyId,
@@ -25,12 +25,12 @@ import {
 } from '../src/core/daemon/runtime-release-evidence-envelope.js';
 import {
   observeRuntimeReleaseImmutableStagedTree,
-  revalidateRuntimeReleaseLaunch as revalidateRuntimeReleaseLaunchWithClock,
+  observeRuntimeReleaseLaunchInputs,
   runtimeReleaseEnvelopeCanonicalSha256,
   runtimeReleasePolicyId,
   runtimeReleaseServiceInvocationDigest,
   runtimeReleaseTrustRootCanonicalSha256,
-  type RuntimeReleaseLaunchRevalidationOptions,
+  type RuntimeReleaseLaunchObservationOptions,
 } from '../src/core/daemon/runtime-release-launch-revalidation.js';
 import {
   buildUnsignedRuntimeReleaseManifest,
@@ -172,8 +172,8 @@ function stageOptions(input: Fixture) {
 
 function launchOptions(
   input: Fixture,
-  overrides: Partial<RuntimeReleaseLaunchRevalidationOptions> = {},
-): RuntimeReleaseLaunchRevalidationOptions {
+  overrides: Partial<RuntimeReleaseLaunchObservationOptions> = {},
+): RuntimeReleaseLaunchObservationOptions {
   const observed = observeRuntimeReleaseImmutableStagedTree(stageOptions(input));
   if (!observed.ok) throw new Error(observed.reason);
   const digest = runtimeReleaseServiceInvocationDigest(input.executablePath, input.argv);
@@ -204,17 +204,21 @@ function launchOptions(
   };
 }
 
-function revalidateRuntimeReleaseLaunch(
-  options: RuntimeReleaseLaunchRevalidationOptions,
+function observeLaunch(
+  options: RuntimeReleaseLaunchObservationOptions,
   now = NOW,
 ) {
-  return revalidateRuntimeReleaseLaunchWithClock(
-    options,
-    { clock: () => Date.parse(now) },
-  );
+  vi.setSystemTime(now);
+  return observeRuntimeReleaseLaunchInputs(options);
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   for (const directory of tempDirs.splice(0)) {
     try {
       chmodTree(directory, false);
@@ -225,16 +229,16 @@ afterEach(() => {
   }
 });
 
-describe('runtime release launch revalidation', () => {
+describe('runtime release closed launch-input observation', () => {
   it('binds immutable roots, signed release, exact invocation, and stable identity without authority', () => {
     const release = fixture();
     const options = launchOptions(release);
-    const result = revalidateRuntimeReleaseLaunch(options);
+    const result = observeLaunch(options);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.receipt).toMatchObject({
-      assurance: 'final-pre-exec-observation-only',
+      assurance: 'closed-byte-observation-only',
       authority: {
         deployPermitted: false,
         installPermitted: false,
@@ -243,6 +247,8 @@ describe('runtime release launch revalidation', () => {
         startPermitted: false,
       },
       coverage: {
+        atomicLaunchHandoff: 'absent-descriptors-closed',
+        descriptorLifetime: 'closed-after-each-read',
         artifacts: 'complete-manifest-artifact-root',
         dependencies: 'complete-staged-dependency-tree',
         envelope: 'signed-release-observation-revalidated',
@@ -251,6 +257,14 @@ describe('runtime release launch revalidation', () => {
         launchConsumer: 'absent',
         mutationAfterReceipt: 'not-prevented',
         replayPrevention: 'absent-no-durable-consumption-store',
+      },
+      hostPlatform: process.platform,
+      schemaVersion: 2,
+      time: {
+        completedAtMs: Date.parse(NOW),
+        movement: 'nondecreasing-observed',
+        source: 'host-Date.now',
+        verifiedAtMs: Date.parse(NOW),
       },
       expectedRevision: REVISION,
       invocation: {
@@ -293,7 +307,7 @@ describe('runtime release launch revalidation', () => {
     writeFileSync(path, 'mutated\n');
     chmodSync(path, 0o444);
 
-    expect(revalidateRuntimeReleaseLaunch(options)).toMatchObject({ ok: false });
+    expect(observeLaunch(options)).toMatchObject({ ok: false });
   });
 
   it('rejects interpreter and service invocation mismatches', () => {
@@ -301,7 +315,7 @@ describe('runtime release launch revalidation', () => {
     const options = launchOptions(release);
     const otherInterpreter = join(dirname(release.packageRoot), 'other-node');
     write(otherInterpreter, 'fixture node binary\n', 0o555);
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       executablePath: otherInterpreter,
       expectedServiceInvocationDigest:
@@ -311,7 +325,7 @@ describe('runtime release launch revalidation', () => {
       reason: 'runtime release service invocation is not the staged launcher',
     });
 
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       argv: [...release.argv, '--budget', '10'],
     })).toEqual({
@@ -322,12 +336,12 @@ describe('runtime release launch revalidation', () => {
 
   it('rejects stale signatures and unknown signing keys', () => {
     const release = fixture();
-    expect(revalidateRuntimeReleaseLaunch(launchOptions(release), EXPIRES_AT)).toEqual({
+    expect(observeLaunch(launchOptions(release), EXPIRES_AT)).toEqual({
       ok: false,
       reason: 'runtime release evidence is stale',
     });
 
-    expect(revalidateRuntimeReleaseLaunch(launchOptions(release, {
+    expect(observeLaunch(launchOptions(release, {
       expectedKeyId: `ed25519-sha256:${'0'.repeat(64)}`,
     }))).toEqual({
       ok: false,
@@ -338,7 +352,7 @@ describe('runtime release launch revalidation', () => {
   it('revalidates a non-null signed rollback declaration end to end', () => {
     const rollbackTarget = 'f'.repeat(64);
     const release = fixture(rollbackTarget);
-    const result = revalidateRuntimeReleaseLaunch(launchOptions(release));
+    const result = observeLaunch(launchOptions(release));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -348,21 +362,53 @@ describe('runtime release launch revalidation', () => {
       .toBe('absent-no-durable-consumption-store');
   });
 
+  it('makes post-observation mutation explicit instead of claiming pre-exec authority', () => {
+    const release = fixture();
+    const result = observeLaunch(launchOptions(release));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const launcher = join(release.packageRoot, 'bin', 'ashlr');
+    chmodSync(launcher, 0o755);
+    writeFileSync(launcher, '#!/bin/sh\nexit 1\n');
+
+    expect(result.receipt.assurance).toBe('closed-byte-observation-only');
+    expect(result.receipt.coverage.atomicLaunchHandoff)
+      .toBe('absent-descriptors-closed');
+    expect(result.receipt.coverage.mutationAfterReceipt).toBe('not-prevented');
+    expect(result.receipt.authority.launchPermitted).toBe(false);
+    expect(result.receipt.authority.startPermitted).toBe(false);
+  });
+
   it('refuses evidence that expires during the final staged-tree observation', () => {
     const release = fixture();
-    let clockReads = 0;
-    const result = revalidateRuntimeReleaseLaunchWithClock(
-      launchOptions(release),
-      {
-        clock: () => Date.parse(clockReads++ === 0 ? NOW : EXPIRES_AT),
-      },
-    );
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterBeforeObservation?: () => void };
+    };
+    options.__testHooks = {
+      afterBeforeObservation: () => vi.setSystemTime(EXPIRES_AT),
+    };
+    const result = observeLaunch(options);
 
     expect(result).toEqual({
       ok: false,
       reason: 'runtime release evidence expired during launch revalidation',
     });
-    expect(clockReads).toBe(2);
+  });
+
+  it('rejects a backward host clock movement during observation', () => {
+    const release = fixture();
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterBeforeObservation?: () => void };
+    };
+    options.__testHooks = {
+      afterBeforeObservation: () => vi.setSystemTime('2026-07-29T12:04:59.999Z'),
+    };
+
+    expect(observeLaunch(options)).toEqual({
+      ok: false,
+      reason: 'runtime release host clock moved backward during observation',
+    });
   });
 
   it('rejects a signature from a key absent from the trust root', () => {
@@ -379,7 +425,7 @@ describe('runtime release launch revalidation', () => {
     const otherRootDigest =
       runtimeReleaseTrustRootCanonicalSha256(otherRoot.canonicalJson);
     if (!otherRootDigest) throw new Error('other trust root was invalid');
-    expect(revalidateRuntimeReleaseLaunch(launchOptions(release, {
+    expect(observeLaunch(launchOptions(release, {
       expectedTrustRootCanonicalSha256: otherRootDigest,
       trustRoot: otherRoot.canonicalJson,
     }))).toEqual({
@@ -398,7 +444,7 @@ describe('runtime release launch revalidation', () => {
       privateKey: release.privateKey,
     });
     if (!substitutedEnvelope.ok) throw new Error(substitutedEnvelope.reason);
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       envelope: substitutedEnvelope.canonicalJson,
     })).toEqual({
@@ -414,7 +460,7 @@ describe('runtime release launch revalidation', () => {
       }],
     });
     if (!substitutedRoot.ok) throw new Error(substitutedRoot.reason);
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       trustRoot: substitutedRoot.canonicalJson,
     })).toEqual({
@@ -479,7 +525,7 @@ describe('runtime release launch revalidation', () => {
     const release = fixture();
     const launcher = join(release.packageRoot, 'bin', 'ashlr');
     const bytes = readFileSync(launcher);
-    const options = launchOptions(release) as RuntimeReleaseLaunchRevalidationOptions & {
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
       __testHooks?: { afterBeforeObservation?: () => void };
     };
     options.__testHooks = {
@@ -491,7 +537,7 @@ describe('runtime release launch revalidation', () => {
       },
     };
 
-    expect(revalidateRuntimeReleaseLaunch(options)).toEqual({
+    expect(observeLaunch(options)).toEqual({
       ok: false,
       reason: 'runtime release staged tree identity changed during launch revalidation',
     });
@@ -499,7 +545,7 @@ describe('runtime release launch revalidation', () => {
 
   it('detects staged-root replacement races and revision path mismatch', () => {
     const release = fixture();
-    const options = launchOptions(release) as RuntimeReleaseLaunchRevalidationOptions & {
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
       __testHooks?: { afterBeforeObservation?: () => void };
     };
     const original = `${release.packageRoot}-old`;
@@ -509,7 +555,7 @@ describe('runtime release launch revalidation', () => {
         cpSync(original, release.packageRoot, { recursive: true, preserveTimestamps: true });
       },
     };
-    expect(revalidateRuntimeReleaseLaunch(options)).toMatchObject({ ok: false });
+    expect(observeLaunch(options)).toMatchObject({ ok: false });
 
     const wrongRevision = fixture();
     expect(observeRuntimeReleaseImmutableStagedTree({
@@ -569,28 +615,28 @@ describe('runtime release launch revalidation', () => {
   it('requires caller-pinned staged, policy, key, and invocation identities', () => {
     const release = fixture();
     const options = launchOptions(release);
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       expectedStagedTreeIdentity: '0'.repeat(64),
     })).toEqual({
       ok: false,
       reason: 'runtime release staged tree identity does not match expected',
     });
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       expectedPolicyId: 'bad policy',
     })).toEqual({
       ok: false,
       reason: 'runtime release expected policy id is invalid',
     });
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       expectedPolicyId: `sha256:${'0'.repeat(64)}`,
     })).toEqual({
       ok: false,
       reason: 'runtime release launch policy identity mismatch',
     });
-    expect(revalidateRuntimeReleaseLaunch({
+    expect(observeLaunch({
       ...options,
       policy: '{\n  "scope": "release-launch",\n  "policyVersion": 1\n}\n',
     })).toEqual({
@@ -602,14 +648,29 @@ describe('runtime release launch revalidation', () => {
       .not.toBe(release.expectedKeyId);
   });
 
-  it('fails closed when Windows directory durability is unavailable', () => {
-    const release = fixture();
-    expect(observeRuntimeReleaseImmutableStagedTree({
-      ...stageOptions(release),
-      platform: 'win32',
-    })).toEqual({
-      ok: false,
-      reason: 'runtime release launch revalidation requires available directory durability',
-    });
-  });
+  it.skipIf(process.platform === 'win32')(
+    'ignores a caller platform spoof instead of minting a durability claim',
+    () => {
+      const release = fixture();
+      const spoofed = { ...stageOptions(release), platform: 'win32' };
+      const result = observeRuntimeReleaseImmutableStagedTree(spoofed);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.receipt.hostPlatform).toBe(process.platform);
+      expect(result.receipt.hostPlatform).not.toBe(spoofed.platform);
+      expect(result.receipt.schemaVersion).toBe(2);
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'fails closed on a Windows host when directory durability is unavailable',
+    () => {
+      const release = fixture();
+      expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
+        ok: false,
+        reason: 'runtime release launch revalidation requires available directory durability',
+      });
+    },
+  );
 });

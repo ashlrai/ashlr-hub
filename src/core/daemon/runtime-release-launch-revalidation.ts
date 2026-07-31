@@ -21,15 +21,14 @@ import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
   verifyRuntimeReleaseEvidenceEnvelope,
-  type RuntimeReleaseEvidenceVerificationDependencies,
 } from './runtime-release-evidence-envelope.js';
 
 const STAGED_TREE_IDENTITY_DOMAIN =
   'ashlr:runtime-release-immutable-staged-tree:v1';
-export const RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V1 =
-  'ashlr:runtime-release-immutable-staged-tree-receipt:v1' as const;
-export const RUNTIME_RELEASE_LAUNCH_REVALIDATION_RECEIPT_DOMAIN_V1 =
-  'ashlr:runtime-release-launch-revalidation-receipt:v1' as const;
+export const RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V2 =
+  'ashlr:runtime-release-immutable-staged-tree-receipt:v2' as const;
+export const RUNTIME_RELEASE_LAUNCH_OBSERVATION_RECEIPT_DOMAIN_V2 =
+  'ashlr:runtime-release-launch-observation-receipt:v2' as const;
 const ARTIFACT_ROOT_DOMAIN = 'ashlr:runtime-release-artifact-root:v1';
 const DEPENDENCY_ROOT_DOMAIN = 'ashlr:runtime-release-dependency-root:v1';
 const INTERPRETER_ROOT_DOMAIN = 'ashlr:runtime-release-interpreter-root:v1';
@@ -56,6 +55,7 @@ const SHA256_RE = /^[a-f0-9]{64}$/;
 const REVISION_RE = /^[a-f0-9]{40}$/;
 const KEY_ID_RE = /^ed25519-sha256:[a-f0-9]{64}$/;
 const POLICY_ID_RE = /^sha256:[a-f0-9]{64}$/;
+const HOST_PLATFORM = process.platform;
 
 type JsonValue =
   | null
@@ -83,9 +83,6 @@ interface RuntimeReleaseLaunchRevalidationTestHooks {
   afterFilePathSnapshotBeforeOpen?: (path: string, label: string) => void;
 }
 
-export type RuntimeReleaseLaunchRevalidationDependencies =
-  RuntimeReleaseEvidenceVerificationDependencies;
-
 interface RootObservation {
   bytes: number;
   directories: number;
@@ -112,10 +109,9 @@ export interface RuntimeReleaseImmutableStagedTreeOptions {
   expectedRevision: string;
   manifest: string | Buffer;
   packageRoot: string;
-  platform?: NodeJS.Platform;
 }
 
-export interface RuntimeReleaseImmutableStagedTreeReceiptV1 {
+export interface RuntimeReleaseImmutableStagedTreeReceiptV2 {
   algorithm: 'sha256';
   assurance: 'immutable-staged-tree-observation-only';
   authority: {
@@ -125,10 +121,12 @@ export interface RuntimeReleaseImmutableStagedTreeReceiptV1 {
     rollbackPermitted: false;
     startPermitted: false;
   };
-  domain: typeof RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V1;
+  domain: typeof RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V2;
   coverage: {
     artifacts: 'complete-manifest-artifact-root';
+    atomicLaunchHandoff: 'absent-descriptors-closed';
     dependencies: 'complete-staged-dependency-tree';
+    descriptorLifetime: 'closed-after-each-read';
     durability: 'posix-directory-fsync-observed';
     interpreter: 'complete-declared-interpreter-artifact';
     launchConsumer: 'absent';
@@ -137,12 +135,13 @@ export interface RuntimeReleaseImmutableStagedTreeReceiptV1 {
     stableIdentity: 'before-after-required';
   };
   expectedRevision: string;
+  hostPlatform: NodeJS.Platform;
   roots: {
     artifactRootSha256: string;
     dependencyRootSha256: string;
     interpreterRootSha256: string;
   };
-  schemaVersion: 1;
+  schemaVersion: 2;
   stableIdentitySha256: string;
   stagedTreeIdentity: string;
 }
@@ -151,11 +150,11 @@ export type ObserveRuntimeReleaseImmutableStagedTreeResult =
   | {
     ok: true;
     canonicalJson: string;
-    receipt: RuntimeReleaseImmutableStagedTreeReceiptV1;
+    receipt: RuntimeReleaseImmutableStagedTreeReceiptV2;
   }
   | { ok: false; reason: string };
 
-export interface RuntimeReleaseLaunchRevalidationOptions
+export interface RuntimeReleaseLaunchObservationOptions
   extends RuntimeReleaseImmutableStagedTreeOptions {
   argv: string[];
   envelope: string | Buffer;
@@ -170,9 +169,9 @@ export interface RuntimeReleaseLaunchRevalidationOptions
   trustRoot: string | Buffer;
 }
 
-export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
+export interface RuntimeReleaseLaunchObservationReceiptV2 {
   algorithm: 'sha256';
-  assurance: 'final-pre-exec-observation-only';
+  assurance: 'closed-byte-observation-only';
   authority: {
     deployPermitted: false;
     installPermitted: false;
@@ -180,10 +179,12 @@ export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
     rollbackPermitted: false;
     startPermitted: false;
   };
-  domain: typeof RUNTIME_RELEASE_LAUNCH_REVALIDATION_RECEIPT_DOMAIN_V1;
+  domain: typeof RUNTIME_RELEASE_LAUNCH_OBSERVATION_RECEIPT_DOMAIN_V2;
   coverage: {
     artifacts: 'complete-manifest-artifact-root';
+    atomicLaunchHandoff: 'absent-descriptors-closed';
     dependencies: 'complete-staged-dependency-tree';
+    descriptorLifetime: 'closed-after-each-read';
     durability: 'posix-directory-fsync-observed';
     envelope: 'signed-release-observation-revalidated';
     interpreter: 'complete-declared-interpreter-artifact';
@@ -195,6 +196,7 @@ export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
     stableIdentity: 'before-after-equal';
   };
   expectedRevision: string;
+  hostPlatform: NodeJS.Platform;
   invocation: {
     argumentCount: number;
     executablePath: string;
@@ -221,19 +223,25 @@ export interface RuntimeReleaseLaunchRevalidationReceiptV1 {
     dependencyRootSha256: string;
     interpreterRootSha256: string;
   };
-  schemaVersion: 1;
+  schemaVersion: 2;
   stableIdentity: {
     afterSha256: string;
     beforeSha256: string;
   };
   stagedTreeIdentity: string;
+  time: {
+    completedAtMs: number;
+    movement: 'nondecreasing-observed';
+    source: 'host-Date.now';
+    verifiedAtMs: number;
+  };
 }
 
-export type RevalidateRuntimeReleaseLaunchResult =
+export type ObserveRuntimeReleaseLaunchInputsResult =
   | {
     ok: true;
     canonicalJson: string;
-    receipt: RuntimeReleaseLaunchRevalidationReceiptV1;
+    receipt: RuntimeReleaseLaunchObservationReceiptV2;
   }
   | { ok: false; reason: string };
 
@@ -375,9 +383,9 @@ function canonicalDirectory(path: string, label: string): string {
   return real;
 }
 
-function fsyncStableDirectory(path: string, platform: NodeJS.Platform): void {
+function fsyncStableDirectory(path: string): void {
   const before = lstatSync(path, { bigint: true });
-  fsyncDirectory(path, { platform });
+  fsyncDirectory(path, { platform: HOST_PLATFORM });
   const after = lstatSync(path, { bigint: true });
   if (!sameSnapshot(before, after) || realpathSync(path) !== path) {
     throw new Error(`runtime release durability directory identity changed: ${path}`);
@@ -587,8 +595,7 @@ function observeStage(
     __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
   };
   const testHooks = process.env['VITEST'] === 'true' ? internal.__testHooks : undefined;
-  const platform = options.platform ?? process.platform;
-  if (platform === 'win32') {
+  if (HOST_PLATFORM === 'win32') {
     throw new Error('runtime release launch revalidation requires available directory durability');
   }
   if (!REVISION_RE.test(options.expectedRevision)) {
@@ -619,8 +626,8 @@ function observeStage(
     throw new Error('runtime release declared interpreter contains a symlink');
   }
 
-  fsyncStableDirectory(packageRoot, platform);
-  fsyncStableDirectory(dependencyRoot, platform);
+  fsyncStableDirectory(packageRoot);
+  fsyncStableDirectory(dependencyRoot);
   const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
   if (!manifest.ok) throw new Error(manifest.reason);
   if (manifest.manifest.expectedRevision !== options.expectedRevision) {
@@ -688,7 +695,7 @@ function observeStage(
 function immutableReceipt(
   observation: StageObservation,
   expectedRevision: string,
-): RuntimeReleaseImmutableStagedTreeReceiptV1 {
+): RuntimeReleaseImmutableStagedTreeReceiptV2 {
   return {
     algorithm: 'sha256',
     assurance: 'immutable-staged-tree-observation-only',
@@ -701,7 +708,9 @@ function immutableReceipt(
     },
     coverage: {
       artifacts: 'complete-manifest-artifact-root',
+      atomicLaunchHandoff: 'absent-descriptors-closed',
       dependencies: 'complete-staged-dependency-tree',
+      descriptorLifetime: 'closed-after-each-read',
       durability: 'posix-directory-fsync-observed',
       interpreter: 'complete-declared-interpreter-artifact',
       launchConsumer: 'absent',
@@ -709,14 +718,15 @@ function immutableReceipt(
       replayPrevention: 'absent-no-durable-consumption-store',
       stableIdentity: 'before-after-required',
     },
-    domain: RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V1,
+    domain: RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V2,
     expectedRevision,
+    hostPlatform: HOST_PLATFORM,
     roots: {
       artifactRootSha256: observation.artifactRoot.rootSha256,
       dependencyRootSha256: observation.dependencyRoot.rootSha256,
       interpreterRootSha256: observation.interpreterRootSha256,
     },
-    schemaVersion: 1,
+    schemaVersion: 2,
     stableIdentitySha256: observation.stableIdentitySha256,
     stagedTreeIdentity: observation.stagedTreeIdentity,
   };
@@ -790,10 +800,9 @@ export function runtimeReleaseTrustRootCanonicalSha256(
     : null;
 }
 
-export function revalidateRuntimeReleaseLaunch(
-  options: RuntimeReleaseLaunchRevalidationOptions,
-  dependencies: RuntimeReleaseLaunchRevalidationDependencies = {},
-): RevalidateRuntimeReleaseLaunchResult {
+export function observeRuntimeReleaseLaunchInputs(
+  options: RuntimeReleaseLaunchObservationOptions,
+): ObserveRuntimeReleaseLaunchInputsResult {
   try {
     if (!KEY_ID_RE.test(options.expectedKeyId)) {
       return { ok: false, reason: 'runtime release expected key id is invalid' };
@@ -849,7 +858,7 @@ export function revalidateRuntimeReleaseLaunch(
       envelope: options.envelope,
       manifest: options.manifest,
       trustRoot: options.trustRoot,
-    }, dependencies);
+    });
     if (!signedRelease.ok) return signedRelease;
     if (signedRelease.keyId !== options.expectedKeyId) {
       return { ok: false, reason: 'runtime release signing key does not match expected key id' };
@@ -865,7 +874,7 @@ export function revalidateRuntimeReleaseLaunch(
     if (!equalDigest(before.stagedTreeIdentity, options.expectedStagedTreeIdentity)) {
       return { ok: false, reason: 'runtime release staged tree identity does not match expected' };
     }
-    const internal = options as RuntimeReleaseLaunchRevalidationOptions & {
+    const internal = options as RuntimeReleaseLaunchObservationOptions & {
       __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
     };
     if (process.env['VITEST'] === 'true') {
@@ -879,9 +888,15 @@ export function revalidateRuntimeReleaseLaunch(
         reason: 'runtime release staged tree identity changed during launch revalidation',
       };
     }
-    const finalNowMs = (dependencies.clock ?? Date.now)();
+    const finalNowMs = Date.now();
     if (!Number.isFinite(finalNowMs) || !Number.isSafeInteger(finalNowMs)) {
       return { ok: false, reason: 'runtime release evidence trusted clock is invalid' };
+    }
+    if (finalNowMs < signedRelease.verifiedAtMs) {
+      return {
+        ok: false,
+        reason: 'runtime release host clock moved backward during observation',
+      };
     }
     if (finalNowMs >= Date.parse(signedRelease.expiresAt)) {
       return {
@@ -889,9 +904,9 @@ export function revalidateRuntimeReleaseLaunch(
         reason: 'runtime release evidence expired during launch revalidation',
       };
     }
-    const receipt: RuntimeReleaseLaunchRevalidationReceiptV1 = {
+    const receipt: RuntimeReleaseLaunchObservationReceiptV2 = {
       algorithm: 'sha256',
-      assurance: 'final-pre-exec-observation-only',
+      assurance: 'closed-byte-observation-only',
       authority: {
         deployPermitted: false,
         installPermitted: false,
@@ -901,7 +916,9 @@ export function revalidateRuntimeReleaseLaunch(
       },
       coverage: {
         artifacts: 'complete-manifest-artifact-root',
+        atomicLaunchHandoff: 'absent-descriptors-closed',
         dependencies: 'complete-staged-dependency-tree',
+        descriptorLifetime: 'closed-after-each-read',
         durability: 'posix-directory-fsync-observed',
         envelope: 'signed-release-observation-revalidated',
         interpreter: 'complete-declared-interpreter-artifact',
@@ -912,8 +929,9 @@ export function revalidateRuntimeReleaseLaunch(
         replayPrevention: 'absent-no-durable-consumption-store',
         stableIdentity: 'before-after-equal',
       },
-      domain: RUNTIME_RELEASE_LAUNCH_REVALIDATION_RECEIPT_DOMAIN_V1,
+      domain: RUNTIME_RELEASE_LAUNCH_OBSERVATION_RECEIPT_DOMAIN_V2,
       expectedRevision: options.expectedRevision,
+      hostPlatform: HOST_PLATFORM,
       invocation: {
         argumentCount: options.argv.length,
         executablePath: options.executablePath,
@@ -943,12 +961,18 @@ export function revalidateRuntimeReleaseLaunch(
         dependencyRootSha256: after.dependencyRoot.rootSha256,
         interpreterRootSha256: after.interpreterRootSha256,
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
       stableIdentity: {
         afterSha256: after.stableIdentitySha256,
         beforeSha256: before.stableIdentitySha256,
       },
       stagedTreeIdentity: after.stagedTreeIdentity,
+      time: {
+        completedAtMs: finalNowMs,
+        movement: 'nondecreasing-observed',
+        source: 'host-Date.now',
+        verifiedAtMs: signedRelease.verifiedAtMs,
+      },
     };
     return {
       ok: true,
