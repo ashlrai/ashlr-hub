@@ -351,7 +351,7 @@ describe('daemon valid flags remain supported', () => {
     );
   });
 
-  it('returns zero and surfaces a bounded non-retryable activation refusal', async () => {
+  it('returns nonzero and surfaces a bounded non-retryable activation refusal to a human', async () => {
     effects.runDaemon.mockResolvedValue({
       ...daemonState,
       startRefusal: 'activation trust roots unavailable',
@@ -365,7 +365,7 @@ describe('daemon valid flags remain supported', () => {
 
     const result = await capture(['start', '--once']);
 
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     expect(result.stderr).toContain('daemon start refused [start-refused]');
     expect(result.stderr).not.toContain('activation trust roots unavailable');
   });
@@ -390,7 +390,7 @@ describe('daemon valid flags remain supported', () => {
     ['persistence-failure', 'state-malformed'],
     ['runtime-failure', 'runtime-unclassified'],
     ['ownership-loss', 'successor-owner'],
-  ] as const)('returns zero and refuses restart for non-retryable %s', async (reason, diagnosticCode) => {
+  ] as const)('returns nonzero and refuses restart for non-retryable %s to a human', async (reason, diagnosticCode) => {
     effects.runDaemon.mockResolvedValue({
       ...daemonState,
       termination: { reason, retryable: false, exitCode: 0, diagnosticCode },
@@ -398,8 +398,25 @@ describe('daemon valid flags remain supported', () => {
 
     const result = await capture(['start']);
 
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     expect(result.stderr).toContain(`daemon terminated [${diagnosticCode}]`);
+    expect(result.stderr).toContain('supervisor restart is not permitted');
+  });
+
+  it('returns zero for a supervised non-retryable failure so the service does not loop', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      termination: {
+        reason: 'persistence-failure',
+        retryable: false,
+        exitCode: 0,
+        diagnosticCode: 'state-malformed',
+      },
+    });
+
+    const result = await capture(['start', '--supervised']);
+
+    expect(result.code).toBe(0);
     expect(result.stderr).toContain('supervisor restart is not permitted');
   });
 
