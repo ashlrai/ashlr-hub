@@ -26,7 +26,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  signPendingProposalAuthorityV1,
+  signProvenance,
+} from '../src/core/foundry/provenance.js';
 import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
@@ -104,7 +108,7 @@ function makeSandboxMock(opts: {
       const diffHash = hashDiff(persistedDiff);
       const engineModel = 'local-coder:mock-model';
       const engineTier = 'mid' as const;
-      mockPersistedProposals.set(proposalId, {
+      const proposal: import('../src/core/types.js').Proposal = {
         id: proposalId,
         repo: canonicalFilesystemPathIdentity(String(runOpts['sourceRepo'] ?? MOCK_REPO), { foldWindowsCase: false }),
         origin: 'agent',
@@ -129,7 +133,11 @@ function makeSandboxMock(opts: {
           proposalCreated: true,
           proposalId,
         },
-      });
+        producerStatus: 'done',
+      };
+      proposal.pendingAuthorityVersion = 1;
+      proposal.pendingAuthoritySig = signPendingProposalAuthorityV1(proposal);
+      mockPersistedProposals.set(proposalId, proposal);
     }
     return {
       state: {

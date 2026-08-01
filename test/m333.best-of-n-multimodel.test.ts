@@ -21,13 +21,26 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  signPendingProposalAuthorityV1,
+  signProvenance,
+} from '../src/core/foundry/provenance.js';
 import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
 
 const MOCK_REPO = '/tmp/fake-repo';
 const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
 const originalHome = process.env.HOME;
 let testHome: string;
+
+function stampPendingAuthority(
+  proposal: import('../src/core/types.js').Proposal,
+): import('../src/core/types.js').Proposal {
+  proposal.pendingAuthorityVersion = 1;
+  proposal.pendingAuthoritySig = signPendingProposalAuthorityV1(proposal);
+  if (!proposal.pendingAuthoritySig) throw new Error(`failed to sign current authority for ${proposal.id}`);
+  return proposal;
+}
 
 function proposalAuthorityFields(
   id: string,
@@ -46,6 +59,7 @@ function proposalAuthorityFields(
     engineTier,
     runId,
     trajectoryId: `run:${runId}`,
+    producerStatus: isPartial ? (opts.status === 'aborted' ? 'aborted' : 'failed') : 'done',
     runEventSummary: isPartial
       ? {
           runId,
@@ -119,7 +133,7 @@ function makeSandboxMock(costUsd: number, label: string) {
       if (runOpts['propose'] !== false) {
         const runId = String(runOpts['runId'] ?? `run-${label}-${idx}`);
         const diff = `PROPOSAL_DIFF_${label}_${idx}`;
-        mockPersistedProposals.set(proposalOutcome.proposalId, {
+        const proposal = stampPendingAuthority({
           id: proposalOutcome.proposalId,
           repo: canonicalFilesystemPathIdentity(String(runOpts['sourceRepo'] ?? MOCK_REPO), { foldWindowsCase: false }),
           origin: 'agent',
@@ -133,6 +147,7 @@ function makeSandboxMock(costUsd: number, label: string) {
           status: 'pending',
           createdAt: new Date().toISOString(),
         });
+        mockPersistedProposals.set(proposalOutcome.proposalId, proposal);
       }
       return {
         state: {
@@ -243,7 +258,7 @@ async function harness(opts: {
         };
       }
       const proposalId = `proposal-${sandboxId}`;
-      const proposal = {
+      const proposal = stampPendingAuthority({
         ...baseProposal,
         id: proposalId,
         repo: canonicalFilesystemPathIdentity(baseProposal.repo, { foldWindowsCase: false }),
@@ -252,7 +267,7 @@ async function harness(opts: {
           isPartial,
           status: producerStatus,
         }),
-      };
+      });
       filedProposals.set(proposal.id, proposal);
       const proposalOutcome = {
         kind: 'filed',
@@ -763,13 +778,13 @@ describe('M333 — file-once proposal capture', () => {
         return result;
       }
       if (!draft) throw new Error('expected draft before final capture');
-      const existing = {
+      const existing = stampPendingAuthority({
         ...draft,
         id: 'proposal-existing',
         repo: canonicalFilesystemPathIdentity(draft.repo!, { foldWindowsCase: false }),
         status: 'pending' as const,
         ...proposalAuthorityFields('proposal-existing', draft.diff!, draft.runId!),
-      };
+      });
       h.filedProposals!.set(existing.id, existing);
       const proposalOutcome = {
         kind: 'proposal-disabled' as const,
@@ -809,14 +824,14 @@ describe('M333 — file-once proposal capture', () => {
         return result;
       }
       if (!draft) throw new Error('expected draft before final capture');
-      const existing = {
+      const existing = stampPendingAuthority({
         ...draft,
         id: 'proposal-stale-owner',
         repo: canonicalFilesystemPathIdentity(draft.repo!, { foldWindowsCase: false }),
         status: 'pending' as const,
         createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
         ...proposalAuthorityFields('proposal-stale-owner', draft.diff!, draft.runId!),
-      };
+      });
       h.filedProposals!.set(existing.id, existing);
       const proposalOutcome = {
         kind: 'proposal-disabled' as const,
@@ -1178,7 +1193,16 @@ describe('M333 — file-once proposal capture', () => {
       winnerIndex: number;
       winnerProposalId: string | null;
       totalCostUsd: number;
-      candidates: Array<{ error?: string; costUsd?: number; proposalId: string | null; won: boolean }>;
+      candidates: Array<{
+        error?: string;
+        costUsd?: number;
+        proposalId: string | null;
+        producerStatus: string;
+        isPartial: boolean;
+        selectionWon: boolean;
+        fullProposalWon: boolean;
+        won: boolean;
+      }>;
     };
     expect(record).toMatchObject({
       winnerIndex: 1,
@@ -1187,7 +1211,16 @@ describe('M333 — file-once proposal capture', () => {
     });
     expect(record.candidates).toEqual([
       expect.objectContaining({ error: 'producer 0 failed after material draft', costUsd: 0.2, proposalId: null, won: false }),
-      expect.objectContaining({ error: 'producer 1 failed after material draft', costUsd: 0.3, proposalId: 'proposal-sb-1', won: true }),
+      expect.objectContaining({
+        error: 'producer 1 failed after material draft',
+        costUsd: 0.3,
+        proposalId: 'proposal-sb-1',
+        producerStatus: 'failed',
+        isPartial: true,
+        selectionWon: true,
+        fullProposalWon: false,
+        won: true,
+      }),
       expect.objectContaining({ error: 'producer 2 failed after material draft', costUsd: 0.4, proposalId: null, won: false }),
     ]);
     expect(lifecycle).toEqual([
@@ -1294,10 +1327,22 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.filedProposals?.has('proposal-sb-0')).toBe(true);
     const record = h.recordBestOfN.mock.calls[0]?.[0] as {
       winnerProposalId: string | null;
-      candidates: Array<{ won: boolean }>;
+      candidates: Array<{
+        producerStatus: string;
+        isPartial: boolean;
+        selectionWon: boolean;
+        fullProposalWon: boolean;
+        won: boolean;
+      }>;
     };
     expect(record.winnerProposalId).toBe('proposal-sb-0');
-    expect(record.candidates).toEqual([expect.objectContaining({ won: true })]);
+    expect(record.candidates).toEqual([expect.objectContaining({
+      producerStatus: 'done',
+      isPartial: false,
+      selectionWon: true,
+      fullProposalWon: true,
+      won: true,
+    })]);
   });
 
   it('propagates mid-cancel through legacy judging and tests while retaining settled evidence', async () => {

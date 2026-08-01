@@ -1,8 +1,13 @@
-import type { AshlrConfig, Proposal } from '../types.js';
+import type { AshlrConfig, Proposal, RunActionCounts, RunEventSummary } from '../types.js';
 import { pendingProposalIsStaleForProductionVelocity } from '../fabric/production-velocity-pending.js';
-import { hashDiff, verifyProvenance } from '../foundry/provenance.js';
+import {
+  hashDiff,
+  verifyPendingProposalAuthorityV1,
+  verifyProvenance,
+} from '../foundry/provenance.js';
 import { canonicalizeProposalDiff } from '../util/scrub.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
+import { runEventSummary as boundedRunEventSummary } from '../learning/causal.js';
 
 type PendingAuthorityConfig = Pick<AshlrConfig, 'foundry'> | undefined;
 
@@ -53,22 +58,137 @@ export function canonicalProposalDiffHash(
   }
 }
 
-function hasExactRunSummary(proposal: Proposal): boolean {
+const RUN_SUMMARY_KEYS = new Set<keyof RunEventSummary>([
+  'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles', 'diffLines',
+  'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit', 'contextSummary', 'actionCounts',
+]);
+
+const ACTION_COUNT_KEYS = new Set<keyof RunActionCounts>([
+  'sandboxCreated', 'spawnAttempts', 'transientRetries', 'proposalCaptureAttempts',
+  'completenessGateRuns', 'verifyRepairAttempts', 'modelSteps', 'toolSteps', 'totalSteps',
+  'diffFiles', 'diffLines', 'proposalCreated', 'proposalBlocked', 'proposalDisabled',
+]);
+
+const MAX_AUTHORITY_ACTION_COUNT = 1_000_000_000;
+
+export interface PendingAuthoritySummaryVerdict {
+  ok: boolean;
+  reason: string;
+}
+
+function canonicalComparable(value: unknown): string | undefined {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : undefined;
+  if (Array.isArray(value)) {
+    const entries = value.map(canonicalComparable);
+    return entries.some((entry) => entry === undefined) ? undefined : `[${entries.join(',')}]`;
+  }
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const entries: string[] = [];
+  for (const key of Object.keys(record).sort()) {
+    const encoded = canonicalComparable(record[key]);
+    if (encoded === undefined) return undefined;
+    entries.push(`${JSON.stringify(key)}:${encoded}`);
+  }
+  return `{${entries.join(',')}}`;
+}
+
+export function validatePendingAuthorityActionCounts(
+  summary: RunEventSummary,
+): PendingAuthoritySummaryVerdict {
+  const counts = summary.actionCounts;
+  if (counts === undefined) return { ok: true, reason: 'action counts absent and signed as absent' };
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) {
+    return { ok: false, reason: 'action counts are not an object' };
+  }
+  const raw = counts as Record<string, unknown>;
+  if (Object.keys(raw).some((key) => !ACTION_COUNT_KEYS.has(key as keyof RunActionCounts))) {
+    return { ok: false, reason: 'action counts contain unknown fields' };
+  }
+  for (const [key, value] of Object.entries(raw)) {
+    if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > MAX_AUTHORITY_ACTION_COUNT) {
+      return { ok: false, reason: `action count ${key} is not a bounded non-negative integer` };
+    }
+  }
+
+  const created = counts.proposalCreated ?? 0;
+  const blocked = counts.proposalBlocked ?? 0;
+  const disabled = counts.proposalDisabled ?? 0;
+  if (created > 1 || blocked > 1 || disabled > 1 || created + blocked + disabled > 1) {
+    return { ok: false, reason: 'created, blocked, and disabled counts are contradictory' };
+  }
+  if (created !== (summary.proposalCreated === true ? 1 : 0)) {
+    return { ok: false, reason: 'proposal-created count contradicts the run summary' };
+  }
+  if (blocked !== (summary.outcome === 'gate-blocked' ? 1 : 0)) {
+    return { ok: false, reason: 'proposal-blocked count contradicts the run outcome' };
+  }
+  if (disabled !== (summary.outcome === 'proposal-disabled' ? 1 : 0)) {
+    return { ok: false, reason: 'proposal-disabled count contradicts the run outcome' };
+  }
+
+  const modelSteps = counts.modelSteps ?? 0;
+  const toolSteps = counts.toolSteps ?? 0;
+  const totalSteps = counts.totalSteps;
+  if ((modelSteps > 0 || toolSteps > 0) && totalSteps === undefined) {
+    return { ok: false, reason: 'component steps require a total step count' };
+  }
+  if (totalSteps !== undefined && modelSteps + toolSteps !== totalSteps) {
+    return { ok: false, reason: 'total steps do not equal model plus tool steps' };
+  }
+  if ((counts.transientRetries ?? 0) > (counts.spawnAttempts ?? 0)) {
+    return { ok: false, reason: 'transient retries exceed spawn attempts' };
+  }
+  if (summary.diffFiles !== undefined && counts.diffFiles !== undefined && summary.diffFiles !== counts.diffFiles) {
+    return { ok: false, reason: 'diff file counts do not reconcile' };
+  }
+  if (summary.diffLines !== undefined && counts.diffLines !== undefined && summary.diffLines !== counts.diffLines) {
+    return { ok: false, reason: 'diff line counts do not reconcile' };
+  }
+  return { ok: true, reason: 'action counts are semantically consistent' };
+}
+
+/** Validate the exact bounded run truth covered by current pending authority. */
+export function validatePendingAuthorityRunSummary(proposal: Proposal): PendingAuthoritySummaryVerdict {
   const runId = proposal.runId;
   const summary = proposal.runEventSummary;
-  if (!runId || !summary || summary.runId !== runId) return false;
+  if (!runId || !summary || summary.runId !== runId) {
+    return { ok: false, reason: 'run summary does not match proposal run identity' };
+  }
+  if (!proposal.producerStatus || summary.status !== proposal.producerStatus) {
+    return { ok: false, reason: 'producer status does not match the run summary' };
+  }
+  if (Object.keys(summary).some((key) => !RUN_SUMMARY_KEYS.has(key as keyof RunEventSummary))) {
+    return { ok: false, reason: 'run summary contains unknown fields' };
+  }
+  const bounded = boundedRunEventSummary(summary);
+  if (!bounded || canonicalComparable(summary) !== canonicalComparable(bounded)) {
+    return { ok: false, reason: 'run summary is not exact bounded metadata' };
+  }
+
+  const actionVerdict = validatePendingAuthorityActionCounts(summary);
+  if (!actionVerdict.ok) return actionVerdict;
 
   if (proposal.isPartial === true) {
-    return (summary.status === 'failed' || summary.status === 'aborted') &&
+    const exact = (summary.status === 'failed' || summary.status === 'aborted') &&
       summary.outcome === 'gate-blocked' &&
       summary.proposalCreated === false &&
       summary.proposalId === undefined;
+    return exact
+      ? { ok: true, reason: 'partial producer summary is exact' }
+      : { ok: false, reason: 'partial producer summary contradicts blocked failure semantics' };
   }
 
-  return summary.status === 'done' &&
+  const exact = summary.status === 'done' &&
     summary.outcome === 'filed' &&
     summary.proposalCreated === true &&
     summary.proposalId === proposal.id;
+  return exact
+    ? { ok: true, reason: 'filed producer summary is exact' }
+    : { ok: false, reason: 'filed producer summary contradicts successful proposal semantics' };
 }
 
 /**
@@ -127,5 +247,6 @@ export function isAuthoritativeDurablePendingProposal(
     return false;
   }
 
-  return hasExactRunSummary(proposal);
+  if (!validatePendingAuthorityRunSummary(proposal).ok) return false;
+  return verifyPendingProposalAuthorityV1(proposal).ok;
 }

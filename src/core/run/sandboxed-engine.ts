@@ -1165,6 +1165,7 @@ export async function captureSandboxedProposal(
       ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
       workSource: opts.workSource,
       runId: id,
+      producerStatus,
       engineModel,
       engineTier: tier,
       ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),

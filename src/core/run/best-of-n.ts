@@ -900,25 +900,37 @@ async function runBestOfNInternal(
         winnerIndex: winner?.index ?? -1,
         winnerProposalId: winnerPid ?? null,
         totalCostUsd,
-        candidates: candidates.map((c) => ({
-          index: c.index,
-          ...(c.runId ? { runId: c.runId } : {}),
-          engine: String(c.engine ?? ''),
-          model: c.model ?? null,
-          score: c.score,
-          ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
-          ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
-          ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
-          ...(c.error ? { error: c.error } : {}),
-          ...(c.proposalOutcome
-            ? {
-                proposalOutcome: c.proposalOutcome.kind,
-                proposalOutcomeReason: c.proposalOutcome.reason,
-              }
-            : {}),
-          proposalId: c.proposalId && c.proposalId === winnerPid ? c.proposalId : null,
-          won: c.proposalId != null && c.proposalId === winnerPid,
-        })),
+        candidates: candidates.map((c) => {
+          const selectionWon = c.proposalId != null && c.proposalId === winnerPid;
+          const isPartial = candidateHasPartialProposalMaterial(c);
+          const producerStatus = c.state?.status;
+          const fullProposalWon = selectionWon && !isPartial && producerStatus === 'done' &&
+            c.proposalOutcome?.kind === 'filed';
+          return {
+            index: c.index,
+            ...(c.runId ? { runId: c.runId } : {}),
+            engine: String(c.engine ?? ''),
+            model: c.model ?? null,
+            score: c.score,
+            ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
+            ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
+            ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+            ...(c.error ? { error: c.error } : {}),
+            ...(c.proposalOutcome
+              ? {
+                  proposalOutcome: c.proposalOutcome.kind,
+                  proposalOutcomeReason: c.proposalOutcome.reason,
+                }
+              : {}),
+            ...(producerStatus ? { producerStatus } : {}),
+            isPartial,
+            selectionWon,
+            fullProposalWon,
+            proposalId: selectionWon ? c.proposalId! : null,
+            // Compatibility alias: historical readers interpret `won` as selection.
+            won: selectionWon,
+          };
+        }),
       });
     } catch {
       // Ledger capture is best-effort and must not change execution results.

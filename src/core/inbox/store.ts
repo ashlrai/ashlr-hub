@@ -87,6 +87,7 @@ import {
   verifyLocalRealizedMergeEvidence,
 } from './realized-merge.js';
 import {
+  signPendingProposalAuthorityV1,
   signProducerProvenanceV2,
   signLocalRealizedMergeReceipt,
   verifyProvenance,
@@ -95,6 +96,8 @@ import {
 import {
   canonicalProposalDiffHash,
   isAuthoritativeDurablePendingProposal,
+  validatePendingAuthorityActionCounts,
+  validatePendingAuthorityRunSummary,
 } from './pending-authority.js';
 import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
 import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
@@ -225,6 +228,8 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
       delete next.provenanceSig;
       delete next.producerProvenanceVersion;
       delete next.producerProvenanceSig;
+      delete next.pendingAuthorityVersion;
+      delete next.pendingAuthoritySig;
       changed = true;
     }
   }
@@ -1032,14 +1037,24 @@ export function createProposal(
 
   const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
+  const inputActionCountsValid = input.runEventSummary === undefined ||
+    validatePendingAuthorityActionCounts(input.runEventSummary).ok;
   const boundRunEventSummary = bindCreatedProposalRunSummary(
     input.runEventSummary,
     input.runId,
     proposalId,
   );
+  const producerStatus = input.producerStatus === 'done' || input.producerStatus === 'failed' ||
+    input.producerStatus === 'aborted'
+    ? input.producerStatus
+    : boundRunEventSummary?.status === 'done' || boundRunEventSummary?.status === 'failed' ||
+      boundRunEventSummary?.status === 'aborted'
+      ? boundRunEventSummary.status
+      : undefined;
   const baseProposal: Proposal = {
     ...input,
     ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
+    ...(producerStatus ? { producerStatus } : {}),
     ...(owner !== undefined ? { owner } : {}),
     id: proposalId,
     status: initialStatus,
@@ -1070,6 +1085,16 @@ export function createProposal(
     if (producerProvenanceSig) {
       proposal.producerProvenanceVersion = 2;
       proposal.producerProvenanceSig = producerProvenanceSig;
+    }
+  }
+  if (
+    inputActionCountsValid && verifyProvenance(proposal).ok &&
+    validatePendingAuthorityRunSummary(proposal).ok
+  ) {
+    const pendingAuthoritySig = signPendingProposalAuthorityV1(proposal);
+    if (pendingAuthoritySig) {
+      proposal.pendingAuthorityVersion = 1;
+      proposal.pendingAuthoritySig = pendingAuthoritySig;
     }
   }
 
