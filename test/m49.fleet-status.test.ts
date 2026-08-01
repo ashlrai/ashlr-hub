@@ -2644,7 +2644,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }));
   });
 
-  it('summarizes proposal starvation when the daemon is running with backlog but no proposals', async () => {
+  it('summarizes proposal starvation without letting daemon ticks steer next actions', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
@@ -2770,15 +2770,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.autonomyEffectiveness?.summary).toContain('2 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('top reason: gate-blocked: completeness gate blocked proposal: typecheck failed');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-proposal-production',
-          label: 'Inspect proposal production',
-          detail: expect.stringContaining('typecheck failed'),
-        }),
-      ]),
-    );
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-proposal-production');
   });
 
   it('keeps proposal-disabled attempts out of operator production diagnosis', async () => {
@@ -2904,9 +2898,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(3);
     expect(s.contextEfficiency?.risks.map((risk) => risk.id)).not.toContain('proposal-yield-low');
     expect(s.contextEfficiency?.recommendations.join('\n')).not.toContain('Reslice low-yield backlog items');
-    const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(inspectAction?.detail).toContain('agent returned no diff');
-    expect(inspectAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
     const dispatchYieldAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield');
     expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
   });
@@ -3044,9 +3036,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
     expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('keeps skipped not-attempted rows out of no-proposal diagnostics', async () => {
@@ -3123,12 +3113,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
 
-    const skipAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-skips');
-    expect(skipAction?.detail).toContain('6 selected item(s) were not attempted');
-    expect(skipAction?.detail).toContain('top skip: not-attempted');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('not-attempted');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
@@ -4343,7 +4329,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).not.toContain('Recent trajectory traces: none');
   });
 
-  it('promotes weak causal attempt coverage into next actions', async () => {
+  it('keeps weak causal attempt coverage visible without steering next actions', async () => {
     const now = settledLearningTimestamp();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-causal');
@@ -4418,8 +4404,6 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-attempt-causal-coverage');
-
     expect(s.attemptCoverage?.causalWeak).toMatchObject({
       weak: true,
       reasons: expect.arrayContaining([
@@ -4434,23 +4418,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       byLearningSource: [expect.objectContaining({ key: 'daemon-dispatch', count: 3 })],
       byLabelBasis: [expect.objectContaining({ key: 'dispatch-outcome', count: 3 })],
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      label: 'Inspect causal coverage',
-      detail: expect.stringContaining('top cause: missing-authoritative-label on 3 attempts'),
-      commands: expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Evaluate attention',
-          argv: ['ashlr', 'eval', 'attention', '--json'],
-          safety: 'read-only',
-        }),
-      ]),
-    });
-    expect(s.nextActions?.[0]?.id).toBe('inspect-attempt-causal-coverage');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Inspect causal learning coverage',
-      action: { id: 'inspect-attempt-causal-coverage' },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.directive).not.toBe('Inspect causal learning coverage');
   });
 
   it('does not report healthy context efficiency when genome health is unavailable', () => {
@@ -4490,7 +4460,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
   });
 
-  it('promotes degraded context efficiency into next actions', async () => {
+  it('keeps degraded context efficiency visible without steering actions or persistent commands', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4525,35 +4495,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         expect.objectContaining({ id: 'reflection-missing', severity: 'low' }),
       ],
     });
-    expect(s.nextActions).toContainEqual(expect.objectContaining({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: expect.stringContaining('No hub genome memories'),
-    }));
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Run reflection',
-        argv: ['ashlr', 'reflect', 'playbooks', '--persist'],
-        safety: 'control-plane',
-      }),
-      expect.objectContaining({
-        label: 'Evaluate attention',
-        argv: ['ashlr', 'eval', 'attention', '--json'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
   });
 
-  it('adds a daemon monitor command to context-efficiency action when generated reslices are queued', async () => {
+  it('keeps generated-reslice context diagnostics display-only', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4602,23 +4551,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-
     expect(s.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
       proposalRepair: 1,
     });
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Inspect daemon status',
-        argv: ['ashlr', 'daemon', 'status'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
   });
 
-  it('uses the reflection mission directive when low yield is the primary action', async () => {
+  it('keeps low-yield tick counters out of mission selection', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4695,16 +4637,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ], now);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(action?.commands?.map((command) => command.label)).toContain('Inspect daemon status');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
-    });
+    expect(s.contextEfficiency?.risks.map((risk) => risk.id)).toContain('proposal-yield-low');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {

@@ -5272,33 +5272,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     });
   }
 
-  const contextEfficiency = status.contextEfficiency;
-  const contextRisk = contextEfficiency?.risks.find((risk) => risk.severity === 'high' || risk.severity === 'medium');
-  if (contextEfficiency && (contextEfficiency.posture === 'strained' || contextRisk)) {
-    const shouldDrainReslices = contextEfficiency.risks.some((risk) => risk.id === 'proposal-yield-low') ||
-      (status.queue.generatedWork?.diagnosticReslices ?? 0) > 0;
-    add({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
-      commands: [
-        nextActionCommand('Run reflection', ['ashlr', 'reflect', 'playbooks', '--persist'], 'control-plane', {
-          note: 'Writes only metadata-derived playbooks under the Ashlr genome hub; no repo source, merge, or network authority.',
-        }),
-        nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-        ...(shouldDrainReslices && status.daemon.running
-          ? [nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only', {
-              note: 'Daemon auto-drains eligible diagnostic reslices during normal live ticks.',
-            })]
-          : []),
-        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      ],
-    });
-  }
-  const causalCoverageAction = causalCoverageNextAction(status.attemptCoverage);
-  if (causalCoverageAction) add(causalCoverageAction);
-
   const goalFocus = status.goalFocus;
   const staleLane = status.laneLocks?.samples.find(
     (sample) => sample.reason === 'stale-in-progress' && sample.goalId && sample.milestoneId,
@@ -5361,33 +5334,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems === 0) addRestoreRepairRoutes();
   if (eligibleBacklogItems > 0 && !controlBlocked) {
-    // Dispatch-production diagnostics are owner-writable observations and never mint actions.
-    const production = status.proposalProduction;
-    const diagnosticNoProposalDispatches = production?.diagnosticNoProposalDispatches ?? production?.noProposalDispatches ?? 0;
-    if (production && production.skipped > 0) {
-      const topSkip = production.skipReasons[0];
-      add({
-        id: 'inspect-dispatch-skips',
-        priority: 'medium',
-        label: 'Inspect dispatch skips',
-        detail: `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`,
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        ],
-      });
-    }
-    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0)) {
-      add({
-        id: 'inspect-proposal-production',
-        priority: production.errors > 0 ? 'high' : 'medium',
-        label: 'Inspect proposal production',
-        detail: proposalProductionDiagnosis(production),
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
-        ],
-      });
-    }
     const top = status.queue.next?.[0];
     add({
       id: 'build-backlog',
@@ -5514,7 +5460,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'process-capture-repairs' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.1;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-learning-evidence') return 1;
-    if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
     return 0;
   };
@@ -5621,39 +5566,6 @@ function phantomAuditReadinessSource(
       sourcePresent: true,
     },
   );
-}
-
-function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): FleetNextAction | null {
-  if (!status?.causalWeak.weak) return null;
-  const weak = status.causalWeak.reasons[0];
-  if (!weak) return null;
-  const percent = Math.round(weak.rate * 100);
-  const denominator = weak.denominator ?? status.attempts;
-  const topCause = status.causalGapDiagnostics.causes[0];
-  const actionableCause = status.causalGapDiagnostics.actionableCauses[0];
-  const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
-  const topSource = status.causalGapDiagnostics.byLearningSource[0];
-  const diagnostics = [
-    topCause ? `top cause: ${topCause.cause} on ${countPhrase(topCause.count, 'attempt')}` : null,
-    actionableCause && actionableCause.cause !== topCause?.cause
-      ? `actionable cause: ${actionableCause.cause} on ${countPhrase(actionableCause.count, 'attempt')}`
-      : null,
-    topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
-    topSource ? `learning ${topSource.key}:${topSource.count}` : null,
-  ].filter((part): part is string => part !== null);
-  return {
-    id: 'inspect-attempt-causal-coverage',
-    priority: 'medium',
-    label: 'Inspect causal coverage',
-    detail:
-      `Attempt causal metadata coverage is weak: ` +
-      `${weak.kind} ${weak.count}/${denominator} (${percent}%).` +
-      `${diagnostics.length > 0 ? ` ${diagnostics.join('; ')}.` : ''}`,
-    commands: [
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-    ],
-  };
 }
 
 function countSignal(count: number, singular: string): string | null {
@@ -6633,26 +6545,10 @@ function missionDirective(
       return 'Drain failed proposal blockers';
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
-    case 'drain-diagnostic-reslices':
-      return action.label === 'Monitor diagnostic auto-drain'
-        ? 'Monitor diagnostic auto-drain'
-        : 'Drain diagnostic reslices';
-    case 'process-capture-repairs':
-      return 'Monitor capture repairs';
-    case 'inspect-dispatch-yield':
-      return 'Recover dispatch yield';
-    case 'inspect-dispatch-skips':
-      return 'Inspect dispatch skips';
-    case 'inspect-proposal-production':
-      return 'Recover proposal production';
-    case 'improve-context-efficiency':
-      return 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'repair-enrollment-registry':
       return 'Repair enrollment authority';
-    case 'inspect-attempt-causal-coverage':
-      return 'Inspect causal learning coverage';
     case 'inspect-learning-evidence':
       return 'Diagnose withheld evidence';
     case 'build-backlog':

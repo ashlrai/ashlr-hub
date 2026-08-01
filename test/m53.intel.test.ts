@@ -877,7 +877,11 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
       ...comparativeCandidateEvents(alternate),
-    ].map((event, index) => ({ ...event, itemId: `repo:security:degraded-${index}` }));
+    ].map((event, index) => ({
+      ...event,
+      itemId: `repo:security:degraded-${index}`,
+      runId: `attempt-00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    }));
     recordDispatchProduction(events);
     const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
     writeFileSync(ledger, `${readFileSync(ledger, 'utf8')}not-json\n`, 'utf8');
@@ -905,7 +909,11 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
       ...comparativeCandidateEvents(alternate),
-    ].map((event, index) => ({ ...event, itemId: `repo:security:legacy-${index}` }));
+    ].map((event, index) => ({
+      ...event,
+      itemId: `repo:security:legacy-${index}`,
+      runId: `attempt-00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    }));
     recordDispatchProduction(events);
     const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
     const legacyRows = readFileSync(ledger, 'utf8')
