@@ -2,12 +2,13 @@
  * Read-only diagnostics for a resident macOS daemon service.
  *
  * Finite local observations cannot establish activation-time artifact identity,
- * exact loaded launchd policy, or lifecycle authority. This module therefore
- * always reports a blocked diagnostic and only exposes local consistency hints.
+ * exact loaded launchd policy, an immutable signing root, or lifecycle authority.
+ * This module therefore always reports a blocked diagnostic and only exposes
+ * local consistency hints.
  */
 
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -34,10 +35,24 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 30_000;
 const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
+const MAX_MANIFEST_AGE_MS = 60 * 60 * 1_000;
+const ENVIRONMENT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export type ResidentServiceDiagnosticReasonCode =
   | 'trusted-signed-release-evidence-missing'
   | 'trusted-signed-interpreter-evidence-missing'
+  | 'immutable-release-trust-root-missing'
+  | 'signed-release-manifest-invalid'
+  | 'signed-release-manifest-stale'
+  | 'signed-release-manifest-mismatch'
+  | 'installed-service-environment-absent'
+  | 'installed-service-environment-unavailable'
+  | 'loaded-service-environment-absent'
+  | 'loaded-service-environment-unavailable'
+  | 'service-environment-mismatch'
+  | 'service-environment-unsafe'
+  | 'service-invocation-unsafe'
   | 'exact-loaded-definition-binding-missing'
   | 'atomic-activation-handoff-missing'
   | 'hard-deadline-worker-missing'
@@ -79,6 +94,12 @@ export interface ResidentServiceDiagnosticChecks {
   observedInvocationMatchesDeclaration: boolean | null;
   diskDefinitionRestartPolicyCompatible: boolean | null;
   loadedRestartPolicyHintsCompatible: boolean | null;
+  signedReleaseManifest: ResidentServiceManifestState;
+  installedEnvironment: ResidentServiceEnvironmentState;
+  loadedEnvironment: ResidentServiceEnvironmentState;
+  environmentMatchesSignedManifest: boolean | null;
+  environmentSafe: boolean | null;
+  invocationSafe: boolean | null;
   exactLoadedDefinitionBound: false;
   killSwitchAbsent: boolean | null;
   repeatedSnapshotConsistent: boolean | null;
@@ -86,10 +107,11 @@ export interface ResidentServiceDiagnosticChecks {
 }
 
 export interface ResidentServiceDiagnostic {
-  schemaVersion: 2;
+  schemaVersion: 3;
   scope: 'observation-only-diagnostic';
   diagnosticStatus: 'blocked';
   lifecycleAuthority: 'none';
+  operationalAuthority: false;
   serviceLabel: typeof SERVICE_LABEL;
   declaredReleaseIdentity: string;
   localChecks: ResidentServiceDiagnosticChecks;
@@ -109,7 +131,44 @@ export interface ResidentServiceDeclaredRelease {
 
 export interface ResidentServiceDiagnosticOptions extends ServiceInstallOptions {
   release: ResidentServiceDeclaredRelease;
+  signedReleaseManifest?: ResidentServiceSignedReleaseManifestBinding;
   timeoutMs?: number;
+}
+
+export type ResidentServiceManifestState = 'absent' | 'degraded' | 'stale' | 'mismatch' | 'signature-consistent';
+export type ResidentServiceEnvironmentState = 'absent' | 'degraded' | 'unbound' | 'mismatch' | 'exact';
+
+export interface ResidentServiceReleaseManifestPayloadV1 {
+  schemaVersion: 1;
+  release: ResidentServiceDeclaredRelease;
+  service: {
+    label: typeof SERVICE_LABEL;
+    platform: Platform;
+    program: string;
+    arguments: string[];
+    environment: Record<string, string>;
+  };
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export interface ResidentServiceSignedReleaseManifestV1 {
+  payload: ResidentServiceReleaseManifestPayloadV1;
+  keyId: string;
+  signatureAlgorithm: 'Ed25519';
+  signature: string;
+}
+
+export interface ResidentServiceReleaseTrustKeyV1 {
+  keyId: string;
+  publicKeyPem: string;
+  validFrom: string;
+  validUntil: string;
+}
+
+export interface ResidentServiceSignedReleaseManifestBinding {
+  manifest: ResidentServiceSignedReleaseManifestV1;
+  trustKey: ResidentServiceReleaseTrustKeyV1;
 }
 
 interface CommandObservation {
@@ -132,6 +191,8 @@ export interface ResidentServiceDiagnosticDependencies {
   uid?: () => number;
   /** Test-only cooperative clock. It never establishes a hard production deadline. */
   testOnlyNowMs?: () => number;
+  /** Test-only wall clock for signed-evidence freshness fixtures. */
+  testOnlyWallClockMs?: () => number;
 }
 
 interface LaunchdSnapshot {
@@ -378,6 +439,229 @@ function exactStringArray(value: unknown, expected: readonly string[]): boolean 
     && value.every((entry, index) => entry === expected[index]);
 }
 
+function exactIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function exactObjectKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function normalizedEnvironment(value: unknown): Record<string, string> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 16) return null;
+  const environment: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [name, entry] of entries) {
+    if (
+      !ENVIRONMENT_NAME_RE.test(name)
+      || typeof entry !== 'string'
+      || Buffer.byteLength(entry, 'utf8') > 4_096
+      || entry.includes('\0')
+      || entry.includes('\r')
+      || entry.includes('\n')
+      || Object.hasOwn(environment, name)
+    ) return null;
+    environment[name] = entry;
+  }
+  return Object.fromEntries(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function sameEnvironment(left: Record<string, string>, right: Record<string, string>): boolean {
+  const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
+  return leftEntries.length === rightEntries.length
+    && leftEntries.every(([key, value], index) => (
+      rightEntries[index]?.[0] === key && rightEntries[index]?.[1] === value
+    ));
+}
+
+function exactSafeEnvironment(environment: Record<string, string>, home: string): boolean {
+  const entries = Object.entries(environment);
+  return entries.length === 1 && entries[0]?.[0] === 'HOME' && entries[0]?.[1] === home;
+}
+
+const UNSAFE_NODE_ARGUMENT_RE = /^(?:-r|--require(?:=|$)|--import(?:=|$)|--loader(?:=|$)|--experimental-loader(?:=|$)|-e|--eval(?:=|$)|--inspect(?:-brk)?(?:=|$))/i;
+
+function exactSafeInvocation(
+  args: readonly string[],
+  interpreterPath: string,
+  entrypointPath: string,
+): boolean {
+  return args.length >= 2
+    && args[0] === interpreterPath
+    && args[1] === entrypointPath
+    && args.every((argument) => !UNSAFE_NODE_ARGUMENT_RE.test(argument));
+}
+
+function canonicalManifestPayload(
+  payload: ResidentServiceReleaseManifestPayloadV1 | null | undefined,
+): ResidentServiceReleaseManifestPayloadV1 | null {
+  const release = payload?.release;
+  const service = payload?.service;
+  const environment = normalizedEnvironment(service?.environment);
+  if (
+    !exactObjectKeys(payload, ['schemaVersion', 'release', 'service', 'issuedAt', 'expiresAt'])
+    || payload.schemaVersion !== 1
+    || !exactObjectKeys(release, ['root', 'identity', 'treeSha256', 'interpreter'])
+    || typeof release.root !== 'string'
+    || typeof release.identity !== 'string'
+    || typeof release.treeSha256 !== 'string'
+    || !exactObjectKeys(release.interpreter, ['path', 'sha256'])
+    || typeof release.interpreter.path !== 'string'
+    || typeof release.interpreter.sha256 !== 'string'
+    || !exactObjectKeys(service, ['label', 'platform', 'program', 'arguments', 'environment'])
+    || service.label !== SERVICE_LABEL
+    || !['darwin', 'linux', 'win32'].includes(service.platform)
+    || typeof service.program !== 'string'
+    || !Array.isArray(service.arguments)
+    || service.arguments.length === 0
+    || service.arguments.length > 64
+    || service.arguments.some((argument) => (
+      typeof argument !== 'string'
+      || Buffer.byteLength(argument, 'utf8') > 8_192
+      || argument.includes('\0')
+      || argument.includes('\r')
+      || argument.includes('\n')
+    ))
+    || environment === null
+    || !exactIsoTimestamp(payload.issuedAt)
+    || !exactIsoTimestamp(payload.expiresAt)
+  ) return null;
+  return {
+    schemaVersion: 1,
+    release: {
+      root: release.root,
+      identity: release.identity,
+      treeSha256: release.treeSha256,
+      interpreter: {
+        path: release.interpreter.path,
+        sha256: release.interpreter.sha256,
+      },
+    },
+    service: {
+      label: SERVICE_LABEL,
+      platform: service.platform,
+      program: service.program,
+      arguments: [...service.arguments],
+      environment,
+    },
+    issuedAt: payload.issuedAt,
+    expiresAt: payload.expiresAt,
+  };
+}
+
+export function residentServiceReleaseManifestPayloadBytes(
+  payload: ResidentServiceReleaseManifestPayloadV1,
+): Buffer | null {
+  const canonical = canonicalManifestPayload(payload);
+  return canonical === null ? null : Buffer.from(JSON.stringify(canonical), 'utf8');
+}
+
+interface ManifestVerification {
+  state: Exclude<ResidentServiceManifestState, 'absent' | 'mismatch'>;
+  payload: ResidentServiceReleaseManifestPayloadV1 | null;
+}
+
+function verifyReleaseManifestBinding(
+  binding: ResidentServiceSignedReleaseManifestBinding,
+  nowMs: number,
+): ManifestVerification {
+  const { manifest, trustKey } = binding;
+  const payload = canonicalManifestPayload(manifest?.payload);
+  const payloadBytes = payload === null ? null : residentServiceReleaseManifestPayloadBytes(payload);
+  const signature = typeof manifest?.signature === 'string'
+    && BASE64_RE.test(manifest.signature)
+    ? Buffer.from(manifest.signature, 'base64')
+    : null;
+  if (
+    !exactObjectKeys(manifest, ['payload', 'keyId', 'signatureAlgorithm', 'signature'])
+    || !exactObjectKeys(trustKey, ['keyId', 'publicKeyPem', 'validFrom', 'validUntil'])
+    || payload === null
+    || payloadBytes === null
+    || manifest.keyId !== trustKey?.keyId
+    || manifest.signatureAlgorithm !== 'Ed25519'
+    || typeof trustKey.publicKeyPem !== 'string'
+    || !exactIsoTimestamp(trustKey.validFrom)
+    || !exactIsoTimestamp(trustKey.validUntil)
+    || signature === null
+    || signature.length !== 64
+  ) return { state: 'degraded', payload: null };
+
+  const issuedAt = Date.parse(payload.issuedAt);
+  const expiresAt = Date.parse(payload.expiresAt);
+  const keyValidFrom = Date.parse(trustKey.validFrom);
+  const keyValidUntil = Date.parse(trustKey.validUntil);
+  if (
+    !Number.isFinite(nowMs)
+    || nowMs < keyValidFrom
+    || issuedAt > nowMs + 60_000
+    || expiresAt <= issuedAt
+    || expiresAt - issuedAt > MAX_MANIFEST_AGE_MS
+    || issuedAt < keyValidFrom
+    || expiresAt > keyValidUntil
+    || nowMs >= expiresAt
+  ) return { state: 'stale', payload: null };
+
+  try {
+    const publicKey = createPublicKey(trustKey.publicKeyPem);
+    if (publicKey.asymmetricKeyType !== 'ed25519') return { state: 'degraded', payload: null };
+    return verifySignature(null, payloadBytes, publicKey, signature)
+      ? { state: 'signature-consistent', payload }
+      : { state: 'degraded', payload: null };
+  } catch {
+    return { state: 'degraded', payload: null };
+  }
+}
+
+interface EnvironmentObservation {
+  state: 'absent' | 'degraded' | 'observed';
+  environment: Record<string, string> | null;
+}
+
+function installedLaunchdEnvironment(plist: Record<string, unknown> | null): EnvironmentObservation {
+  if (plist === null) return { state: 'degraded', environment: null };
+  if (!Object.hasOwn(plist, 'EnvironmentVariables')) return { state: 'absent', environment: null };
+  const environment = normalizedEnvironment(plist['EnvironmentVariables']);
+  return environment === null
+    ? { state: 'degraded', environment: null }
+    : { state: 'observed', environment };
+}
+
+function loadedLaunchdEnvironment(output: string): EnvironmentObservation {
+  const lines = output.trimEnd().split(/\r?\n/);
+  const starts = lines.flatMap((line, index) => line === '\tenvironment = {' ? [index] : []);
+  if (starts.length === 0) return { state: 'absent', environment: null };
+  if (starts.length !== 1) return { state: 'degraded', environment: null };
+  const environment: Record<string, string> = Object.create(null) as Record<string, string>;
+  let closed = false;
+  for (let index = starts[0]! + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line === '\t}') {
+      closed = true;
+      break;
+    }
+    const match = /^\t\t([A-Za-z_][A-Za-z0-9_]*) => (.*)$/.exec(line);
+    if (!match || Object.hasOwn(environment, match[1]!)) {
+      return { state: 'degraded', environment: null };
+    }
+    environment[match[1]!] = match[2]!;
+  }
+  const normalized = closed ? normalizedEnvironment(environment) : null;
+  return normalized === null
+    ? { state: 'degraded', environment: null }
+    : { state: 'observed', environment: normalized };
+}
+
 function diskDefinitionRestartPolicyCompatible(plist: Record<string, unknown>): boolean {
   return plist['RunAtLoad'] === true
     && plist['LaunchOnlyOnce'] !== true
@@ -417,14 +701,9 @@ function degraded(
 function architecturalBlockers(): ResidentServiceDiagnosticReason[] {
   return [
     {
-      code: 'trusted-signed-release-evidence-missing',
+      code: 'immutable-release-trust-root-missing',
       severity: 'blocked',
-      detail: 'caller-declared release identity and digest are not bound to trusted signed release evidence',
-    },
-    {
-      code: 'trusted-signed-interpreter-evidence-missing',
-      severity: 'blocked',
-      detail: 'caller-declared interpreter identity is not bound to trusted signed release evidence',
+      detail: 'the evidence key is caller-supplied and is not anchored to an independently configured immutable release trust root',
     },
     {
       code: 'exact-loaded-definition-binding-missing',
@@ -455,10 +734,11 @@ function result(
   findings: ResidentServiceDiagnosticReason[],
 ): ResidentServiceDiagnostic {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     scope: 'observation-only-diagnostic',
     diagnosticStatus: 'blocked',
     lifecycleAuthority: 'none',
+    operationalAuthority: false,
     serviceLabel: SERVICE_LABEL,
     declaredReleaseIdentity,
     localChecks,
@@ -477,6 +757,12 @@ function emptyChecks(): ResidentServiceDiagnosticChecks {
     observedInvocationMatchesDeclaration: null,
     diskDefinitionRestartPolicyCompatible: null,
     loadedRestartPolicyHintsCompatible: null,
+    signedReleaseManifest: 'absent',
+    installedEnvironment: 'absent',
+    loadedEnvironment: 'absent',
+    environmentMatchesSignedManifest: null,
+    environmentSafe: null,
+    invocationSafe: null,
     exactLoadedDefinitionBound: false,
     killSwitchAbsent: null,
     repeatedSnapshotConsistent: null,
@@ -497,7 +783,11 @@ export function observeResidentServiceDiagnostic(
   const reasons = architecturalBlockers();
   const platform = process.platform as Platform;
   if (platform !== 'darwin') {
-    blocked(reasons, 'unsupported-platform', 'resident diagnostic currently requires launchd on macOS');
+    blocked(
+      reasons,
+      'unsupported-platform',
+      'this dormant slice cannot authenticate systemd loaded environments or the inherited environment of Windows Task Scheduler processes',
+    );
     return result(options.release.identity, checks, reasons);
   }
 
@@ -542,6 +832,66 @@ export function observeResidentServiceDiagnostic(
   if (!definition.launchdRuntime) {
     degraded(reasons, 'service-definition-unavailable', 'expected launchd runtime contract is unavailable');
     return result(options.release.identity, checks, reasons);
+  }
+
+  const entrypointInvocationSafe = exactSafeInvocation(
+    definition.launchdRuntime.arguments,
+    interpreterPath,
+    entrypoint,
+  );
+  checks.invocationSafe = entrypointInvocationSafe;
+  if (!entrypointInvocationSafe) {
+    blocked(reasons, 'service-invocation-unsafe', 'resident invocation contains a loader, preload, eval, or debug injection surface');
+  }
+
+  let manifestPayload: ResidentServiceReleaseManifestPayloadV1 | null = null;
+  if (!options.signedReleaseManifest) {
+    blocked(reasons, 'trusted-signed-release-evidence-missing', 'signed immutable release manifest is absent');
+    blocked(reasons, 'trusted-signed-interpreter-evidence-missing', 'signed interpreter binding is absent');
+  } else {
+    const manifestVerification = verifyReleaseManifestBinding(
+      options.signedReleaseManifest,
+      (dependencies.testOnlyWallClockMs ?? Date.now)(),
+    );
+    checks.signedReleaseManifest = manifestVerification.state;
+    if (manifestVerification.state === 'degraded') {
+      blocked(reasons, 'signed-release-manifest-invalid', 'signed release manifest or trust-key binding is invalid or unreadable');
+    } else if (manifestVerification.state === 'stale') {
+      blocked(reasons, 'signed-release-manifest-stale', 'signed release manifest is expired, future-dated, or outside the trust-key validity window');
+    } else if (manifestVerification.payload) {
+      const payload = manifestVerification.payload;
+      const signedInvocationSafe = exactSafeInvocation(
+        payload.service.arguments,
+        interpreterPath,
+        entrypoint,
+      );
+      checks.invocationSafe = checks.invocationSafe === true && signedInvocationSafe;
+      if (!signedInvocationSafe) {
+        blocked(reasons, 'service-invocation-unsafe', 'signed invocation contains a loader, preload, eval, or debug injection surface');
+      }
+      const releaseExact = payload.release.root === options.release.root
+        && payload.release.identity === options.release.identity
+        && payload.release.treeSha256 === options.release.treeSha256
+        && sameBinding(payload.release.interpreter, options.release.interpreter);
+      const serviceExact = payload.service.label === SERVICE_LABEL
+        && payload.service.platform === 'darwin'
+        && payload.service.program === definition.launchdRuntime.program
+        && exactStringArray(payload.service.arguments, definition.launchdRuntime.arguments);
+      if (!releaseExact || !serviceExact) {
+        checks.signedReleaseManifest = 'mismatch';
+        blocked(reasons, 'signed-release-manifest-mismatch', 'signed release manifest does not match the declared release, interpreter, platform, or invocation');
+      } else {
+        manifestPayload = payload;
+        if (!exactSafeEnvironment(payload.service.environment, options.homeDir ?? homedir())) {
+          checks.environmentSafe = false;
+          blocked(
+            reasons,
+            'service-environment-unsafe',
+            'signed environment must contain only the exact HOME binding; PATH and all Node, npm, loader, and shell startup variables are refused',
+          );
+        }
+      }
+    }
   }
 
   const uid = (dependencies.uid ?? (() => (
@@ -759,6 +1109,71 @@ export function observeResidentServiceDiagnostic(
           ? 'loaded launchd restart policy could not be proven from native runtime state'
           : 'loaded launchd state does not prove automatic crash relaunch is disabled',
       );
+    }
+  }
+
+  const installedEnvironment = installedLaunchdEnvironment(plist);
+  const loadedEnvironment = launchdAbsent(second.runtime)
+    ? { state: 'absent', environment: null } as const
+    : commandSucceeded(second.runtime)
+      ? loadedLaunchdEnvironment(second.runtime.stdout)
+      : { state: 'degraded', environment: null } as const;
+
+  if (installedEnvironment.state === 'absent') {
+    checks.installedEnvironment = 'absent';
+    blocked(reasons, 'installed-service-environment-absent', 'installed launchd definition has no explicit environment');
+  } else if (installedEnvironment.state === 'degraded') {
+    checks.installedEnvironment = 'degraded';
+    degraded(reasons, 'installed-service-environment-unavailable', 'installed launchd environment is unreadable or structurally ambiguous');
+  }
+  if (loadedEnvironment.state === 'absent') {
+    checks.loadedEnvironment = 'absent';
+    blocked(reasons, 'loaded-service-environment-absent', 'loaded launchd state has no exact environment observation');
+  } else if (loadedEnvironment.state === 'degraded') {
+    checks.loadedEnvironment = 'degraded';
+    degraded(reasons, 'loaded-service-environment-unavailable', 'loaded launchd environment is unreadable or structurally ambiguous');
+  }
+
+  if (installedEnvironment.environment && loadedEnvironment.environment) {
+    const installedSafe = exactSafeEnvironment(
+      installedEnvironment.environment,
+      options.homeDir ?? homedir(),
+    );
+    const loadedSafe = exactSafeEnvironment(
+      loadedEnvironment.environment,
+      options.homeDir ?? homedir(),
+    );
+    const observedSafe = installedSafe && loadedSafe;
+    checks.environmentSafe = checks.environmentSafe === false ? false : observedSafe;
+    if (!observedSafe && !reasons.some(({ code }) => code === 'service-environment-unsafe')) {
+      blocked(
+        reasons,
+        'service-environment-unsafe',
+        'installed or loaded environment exposes PATH, Node, npm, loader, dynamic-linker, or shell startup influence',
+      );
+    }
+
+    if (manifestPayload) {
+      const installedExact = sameEnvironment(
+        installedEnvironment.environment,
+        manifestPayload.service.environment,
+      );
+      const loadedExact = sameEnvironment(
+        loadedEnvironment.environment,
+        manifestPayload.service.environment,
+      );
+      checks.installedEnvironment = installedExact ? 'exact' : 'mismatch';
+      checks.loadedEnvironment = loadedExact ? 'exact' : 'mismatch';
+      checks.environmentMatchesSignedManifest = installedExact
+        && loadedExact
+        && sameEnvironment(installedEnvironment.environment, loadedEnvironment.environment);
+      if (!checks.environmentMatchesSignedManifest) {
+        blocked(reasons, 'service-environment-mismatch', 'installed and loaded environments do not both equal the signed immutable release manifest');
+      }
+    } else {
+      checks.installedEnvironment = 'unbound';
+      checks.loadedEnvironment = 'unbound';
+      checks.environmentMatchesSignedManifest = null;
     }
   }
 

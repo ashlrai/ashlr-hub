@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { join } from 'node:path';
 import {
   observeResidentServiceDiagnostic,
+  residentServiceReleaseManifestPayloadBytes,
   type ResidentServiceDiagnosticDependencies,
   type ResidentServiceDiagnosticOptions,
+  type ResidentServiceReleaseManifestPayloadV1,
+  type ResidentServiceSignedReleaseManifestBinding,
 } from '../src/core/daemon/resident-service-readiness.js';
 
 const HOME = '/Users/tester';
@@ -17,6 +21,8 @@ const PLIST = `${HOME}/Library/LaunchAgents/ai.ashlr.daemon.plist`;
 const UID = 501;
 const TARGET = `gui/${UID}/ai.ashlr.daemon`;
 const ACTUAL_PLATFORM = process.platform;
+const NOW = Date.parse('2026-08-01T12:00:00.000Z');
+const SIGNER = generateKeyPairSync('ed25519');
 const ARGS = [
   NODE,
   ENTRYPOINT,
@@ -30,8 +36,48 @@ const ARGS = [
   '1',
 ];
 
-function options(overrides: Partial<ResidentServiceDiagnosticOptions> = {}): ResidentServiceDiagnosticOptions {
+function signedReleaseManifest(
+  overrides: Partial<ResidentServiceReleaseManifestPayloadV1> = {},
+): ResidentServiceSignedReleaseManifestBinding {
+  const payload: ResidentServiceReleaseManifestPayloadV1 = {
+    schemaVersion: 1,
+    release: {
+      root: RELEASE_ROOT,
+      identity: RELEASE_ID,
+      treeSha256: TREE_SHA,
+      interpreter: { path: NODE, sha256: INTERPRETER_SHA },
+    },
+    service: {
+      label: 'ai.ashlr.daemon',
+      platform: 'darwin',
+      program: NODE,
+      arguments: [...ARGS],
+      environment: { HOME },
+    },
+    issuedAt: '2026-08-01T11:30:00.000Z',
+    expiresAt: '2026-08-01T12:30:00.000Z',
+    ...overrides,
+  };
+  const payloadBytes = residentServiceReleaseManifestPayloadBytes(payload);
+  if (!payloadBytes) throw new Error('invalid signed release fixture');
   return {
+    manifest: {
+      payload,
+      keyId: 'resident-release-test-key',
+      signatureAlgorithm: 'Ed25519',
+      signature: sign(null, payloadBytes, SIGNER.privateKey).toString('base64'),
+    },
+    trustKey: {
+      keyId: 'resident-release-test-key',
+      publicKeyPem: SIGNER.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      validFrom: '2026-08-01T00:00:00.000Z',
+      validUntil: '2026-08-02T00:00:00.000Z',
+    },
+  };
+}
+
+function options(overrides: Partial<ResidentServiceDiagnosticOptions> = {}): ResidentServiceDiagnosticOptions {
+  const defaults: ResidentServiceDiagnosticOptions = {
     platform: 'darwin',
     homeDir: HOME,
     nodePath: NODE,
@@ -44,8 +90,9 @@ function options(overrides: Partial<ResidentServiceDiagnosticOptions> = {}): Res
         sha256: INTERPRETER_SHA,
       },
     },
-    ...overrides,
+    signedReleaseManifest: signedReleaseManifest(),
   };
+  return { ...defaults, ...overrides };
 }
 
 function launchdPrint(
@@ -54,6 +101,7 @@ function launchdPrint(
   state = 'running',
   properties = 'runatload',
   minimumRuntime = 30,
+  environment: Record<string, string> | null = { HOME },
 ): string {
   return `${[
     `${target} = {`,
@@ -64,6 +112,11 @@ function launchdPrint(
     ...args.map((argument) => `\t\t${argument}`),
     '\t}',
     ...(state === 'running' ? ['\tpid = 4242'] : []),
+    ...(environment === null ? [] : [
+      '\tenvironment = {',
+      ...Object.entries(environment).map(([key, value]) => `\t\t${key} => ${value}`),
+      '\t}',
+    ]),
     `\tminimum runtime = ${minimumRuntime}`,
     `\tproperties = ${properties}`,
     '}',
@@ -71,13 +124,16 @@ function launchdPrint(
 }
 
 function plist(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
+  const value: Record<string, unknown> = {
     Label: 'ai.ashlr.daemon',
     ProgramArguments: ARGS,
+    EnvironmentVariables: { HOME },
     RunAtLoad: true,
     KeepAlive: false,
     ...overrides,
-  });
+  };
+  if (overrides['EnvironmentVariables'] === null) delete value['EnvironmentVariables'];
+  return JSON.stringify(value);
 }
 
 function dependencies(overrides: {
@@ -94,11 +150,13 @@ function dependencies(overrides: {
   varyFinalInterpreter?: boolean;
   varySecondRuntime?: boolean;
   killSequence?: Array<'absent' | 'present' | 'unknown'>;
+  wallClockMs?: number;
 } = {}): ResidentServiceDiagnosticDependencies {
   let runtimeReads = 0;
   let killReads = 0;
   return {
     uid: () => UID,
+    testOnlyWallClockMs: () => overrides.wallClockMs ?? NOW,
     releaseTreeBinding: (() => {
       let reads = 0;
       return () => {
@@ -163,14 +221,15 @@ describe('observeResidentServiceDiagnostic', () => {
     Object.defineProperty(process, 'platform', { configurable: true, value: ACTUAL_PLATFORM });
   });
 
-  it('keeps a perfectly matching local snapshot blocked on missing production authorities', () => {
+  it('keeps an exact signed environment observation blocked on missing lifecycle authorities', () => {
     const diagnostic = observeResidentServiceDiagnostic(options(), dependencies());
 
     expect(diagnostic).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       scope: 'observation-only-diagnostic',
       diagnosticStatus: 'blocked',
       lifecycleAuthority: 'none',
+      operationalAuthority: false,
       declaredReleaseIdentity: RELEASE_ID,
       localChecks: {
         exactLabel: true,
@@ -182,6 +241,12 @@ describe('observeResidentServiceDiagnostic', () => {
         observedInvocationMatchesDeclaration: true,
         diskDefinitionRestartPolicyCompatible: true,
         loadedRestartPolicyHintsCompatible: true,
+        signedReleaseManifest: 'signature-consistent',
+        installedEnvironment: 'exact',
+        loadedEnvironment: 'exact',
+        environmentMatchesSignedManifest: true,
+        environmentSafe: true,
+        invocationSafe: true,
         exactLoadedDefinitionBound: false,
         killSwitchAbsent: true,
         repeatedSnapshotConsistent: true,
@@ -189,8 +254,7 @@ describe('observeResidentServiceDiagnostic', () => {
       },
     });
     expect(diagnostic.findings.map(({ code }) => code)).toEqual([
-      'trusted-signed-release-evidence-missing',
-      'trusted-signed-interpreter-evidence-missing',
+      'immutable-release-trust-root-missing',
       'exact-loaded-definition-binding-missing',
       'atomic-activation-handoff-missing',
       'hard-deadline-worker-missing',
@@ -200,6 +264,248 @@ describe('observeResidentServiceDiagnostic', () => {
     expect(diagnostic).not.toHaveProperty('state');
     expect(diagnostic).not.toHaveProperty('authority');
     expect(diagnostic).not.toHaveProperty('residentStartAuthorized');
+  });
+
+  it('rejects NODE_OPTIONS preload injection even when it is signed and exactly observed', () => {
+    const environment = { HOME, NODE_OPTIONS: '--require /tmp/attacker.js' };
+    const diagnostic = observeResidentServiceDiagnostic(
+      options({
+        signedReleaseManifest: signedReleaseManifest({
+          service: {
+            label: 'ai.ashlr.daemon',
+            platform: 'darwin',
+            program: NODE,
+            arguments: [...ARGS],
+            environment,
+          },
+        }),
+      }),
+      dependencies({
+        plist: { status: 0, stdout: plist({ EnvironmentVariables: environment }), stderr: '' },
+        runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 30, environment), stderr: '' },
+      }),
+    );
+
+    expect(diagnostic.localChecks).toMatchObject({
+      signedReleaseManifest: 'signature-consistent',
+      installedEnvironment: 'exact',
+      loadedEnvironment: 'exact',
+      environmentMatchesSignedManifest: true,
+      environmentSafe: false,
+    });
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+      code: 'service-environment-unsafe',
+      severity: 'blocked',
+    }));
+  });
+
+  it('rejects loaded environment drift from the installed and signed environment', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
+      runtime: {
+        status: 0,
+        stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 30, { HOME: '/tmp/substituted-home' }),
+        stderr: '',
+      },
+    }));
+
+    expect(diagnostic.localChecks).toMatchObject({
+      installedEnvironment: 'exact',
+      loadedEnvironment: 'mismatch',
+      environmentMatchesSignedManifest: false,
+      environmentSafe: false,
+    });
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'service-environment-mismatch', severity: 'blocked' }),
+      expect.objectContaining({ code: 'service-environment-unsafe', severity: 'blocked' }),
+    ]));
+  });
+
+  it('distinguishes absent installed and loaded environments', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
+      plist: { status: 0, stdout: plist({ EnvironmentVariables: null }), stderr: '' },
+      runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 30, null), stderr: '' },
+    }));
+
+    expect(diagnostic.localChecks.installedEnvironment).toBe('absent');
+    expect(diagnostic.localChecks.loadedEnvironment).toBe('absent');
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBeNull();
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'installed-service-environment-absent', severity: 'blocked' }),
+      expect.objectContaining({ code: 'loaded-service-environment-absent', severity: 'blocked' }),
+    ]));
+  });
+
+  it('distinguishes unreadable installed and loaded environments', () => {
+    const malformedRuntime = launchdPrint().replace(`\t\tHOME => ${HOME}`, '\t\tHOME = malformed');
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
+      plist: { status: 0, stdout: plist({ EnvironmentVariables: ['not', 'a', 'map'] }), stderr: '' },
+      runtime: { status: 0, stdout: malformedRuntime, stderr: '' },
+    }));
+
+    expect(diagnostic.localChecks.installedEnvironment).toBe('degraded');
+    expect(diagnostic.localChecks.loadedEnvironment).toBe('degraded');
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'installed-service-environment-unavailable', severity: 'degraded' }),
+      expect.objectContaining({ code: 'loaded-service-environment-unavailable', severity: 'degraded' }),
+    ]));
+  });
+
+  it('rejects stale signed release evidence before treating its environment as authoritative', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options({
+      signedReleaseManifest: signedReleaseManifest({
+        issuedAt: '2026-08-01T09:00:00.000Z',
+        expiresAt: '2026-08-01T10:00:00.000Z',
+      }),
+    }), dependencies());
+
+    expect(diagnostic.localChecks.signedReleaseManifest).toBe('stale');
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBeNull();
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+      code: 'signed-release-manifest-stale',
+      severity: 'blocked',
+    }));
+  });
+
+  it('rejects future-dated signed release evidence', () => {
+    const diagnostic = observeResidentServiceDiagnostic(options({
+      signedReleaseManifest: signedReleaseManifest({
+        issuedAt: '2026-08-01T12:05:00.000Z',
+        expiresAt: '2026-08-01T12:30:00.000Z',
+      }),
+    }), dependencies());
+
+    expect(diagnostic.localChecks.signedReleaseManifest).toBe('stale');
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+      code: 'signed-release-manifest-stale',
+      severity: 'blocked',
+    }));
+  });
+
+  it('degrades duplicate loaded environment blocks instead of choosing one', () => {
+    const duplicate = launchdPrint().replace(
+      '\tproperties = runatload',
+      `\tenvironment = {\n\t\tHOME => ${HOME}\n\t}\n\tproperties = runatload`,
+    );
+    const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
+      runtime: { status: 0, stdout: duplicate, stderr: '' },
+    }));
+
+    expect(diagnostic.localChecks.loadedEnvironment).toBe('degraded');
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+      code: 'loaded-service-environment-unavailable',
+      severity: 'degraded',
+    }));
+  });
+
+  it('rejects mutable PATH even when installed, loaded, and signed values are exact', () => {
+    const environment = { HOME, PATH: '/usr/local/bin:/usr/bin:/bin' };
+    const diagnostic = observeResidentServiceDiagnostic(
+      options({
+        signedReleaseManifest: signedReleaseManifest({
+          service: {
+            label: 'ai.ashlr.daemon',
+            platform: 'darwin',
+            program: NODE,
+            arguments: [...ARGS],
+            environment,
+          },
+        }),
+      }),
+      dependencies({
+        plist: { status: 0, stdout: plist({ EnvironmentVariables: environment }), stderr: '' },
+        runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 30, environment), stderr: '' },
+      }),
+    );
+
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(true);
+    expect(diagnostic.localChecks.environmentSafe).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-environment-unsafe' }));
+  });
+
+  it.each([
+    'NODE_PATH',
+    'NPM_CONFIG_NODE_OPTIONS',
+    'npm_config_node_options',
+    'npm_execpath',
+    'npm_node_execpath',
+    'BASH_ENV',
+    'ENV',
+    'ZDOTDIR',
+    'SHELL',
+    'LD_PRELOAD',
+    'DYLD_INSERT_LIBRARIES',
+  ])('rejects exact signed runtime influence through %s', (name) => {
+    const environment = { HOME, [name]: '/tmp/attacker' };
+    const diagnostic = observeResidentServiceDiagnostic(
+      options({
+        signedReleaseManifest: signedReleaseManifest({
+          service: {
+            label: 'ai.ashlr.daemon',
+            platform: 'darwin',
+            program: NODE,
+            arguments: [...ARGS],
+            environment,
+          },
+        }),
+      }),
+      dependencies({
+        plist: { status: 0, stdout: plist({ EnvironmentVariables: environment }), stderr: '' },
+        runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 30, environment), stderr: '' },
+      }),
+    );
+
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(true);
+    expect(diagnostic.localChecks.environmentSafe).toBe(false);
+    expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-environment-unsafe' }));
+  });
+
+  it('distinguishes an absent signed manifest from invalid signed evidence', () => {
+    const absent = observeResidentServiceDiagnostic(
+      options({ signedReleaseManifest: undefined }),
+      dependencies(),
+    );
+    expect(absent.localChecks.signedReleaseManifest).toBe('absent');
+    expect(absent.localChecks.installedEnvironment).toBe('unbound');
+    expect(absent.localChecks.loadedEnvironment).toBe('unbound');
+    expect(absent.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'trusted-signed-release-evidence-missing', severity: 'blocked' }),
+      expect.objectContaining({ code: 'trusted-signed-interpreter-evidence-missing', severity: 'blocked' }),
+    ]));
+
+    const invalidBinding = signedReleaseManifest();
+    invalidBinding.manifest.signature = Buffer.alloc(64, 7).toString('base64');
+    const invalid = observeResidentServiceDiagnostic(
+      options({ signedReleaseManifest: invalidBinding }),
+      dependencies(),
+    );
+    expect(invalid.localChecks.signedReleaseManifest).toBe('degraded');
+    expect(invalid.localChecks.installedEnvironment).toBe('unbound');
+    expect(invalid.localChecks.loadedEnvironment).toBe('unbound');
+    expect(invalid.findings).toContainEqual(expect.objectContaining({
+      code: 'signed-release-manifest-invalid',
+      severity: 'blocked',
+    }));
+  });
+
+  it('rejects Node loader flags in the signed invocation', () => {
+    const argumentsWithLoader = [NODE, '--loader=/tmp/attacker.mjs', ENTRYPOINT, ...ARGS.slice(2)];
+    const diagnostic = observeResidentServiceDiagnostic(options({
+      signedReleaseManifest: signedReleaseManifest({
+        service: {
+          label: 'ai.ashlr.daemon',
+          platform: 'darwin',
+          program: NODE,
+          arguments: argumentsWithLoader,
+          environment: { HOME },
+        },
+      }),
+    }), dependencies());
+
+    expect(diagnostic.localChecks.signedReleaseManifest).toBe('mismatch');
+    expect(diagnostic.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'signed-release-manifest-mismatch' }),
+      expect.objectContaining({ code: 'service-invocation-unsafe' }),
+    ]));
   });
 
   it('blocks an explicitly disabled service', () => {
@@ -446,12 +752,12 @@ describe('observeResidentServiceDiagnostic', () => {
     ]));
   });
 
-  it('fails closed on non-macOS platforms without probing service state', () => {
+  it.each(['linux', 'win32'] as const)('fails closed on %s without probing service state', (platform) => {
     const deps = dependencies();
     deps.run = () => { throw new Error('must not run'); };
     let diagnostic: ReturnType<typeof observeResidentServiceDiagnostic>;
     try {
-      Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
+      Object.defineProperty(process, 'platform', { configurable: true, value: platform });
       diagnostic = observeResidentServiceDiagnostic(options({ platform: 'darwin' }), deps);
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: 'darwin' });
