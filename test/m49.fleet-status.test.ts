@@ -387,7 +387,9 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
     routeReason: 'test parent route',
     outcome: 'empty-diff',
     proposalCreated: false,
+    attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
     runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+    trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
     objectiveHash: hash.padEnd(64, 'a').slice(0, 64),
     spentUsd: 0,
     basis: 'run-proposal-outcome',
@@ -4182,8 +4184,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: { count: 1, rate: 1 },
         learningEpoch: { count: 1, rate: 1 },
         currentLearningEpoch: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 1, rate: 1 },
-        currentAuthoritativeLabel: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+        currentAuthoritativeLabel: { count: 0, rate: 0 },
       },
       causalWeak: {
         weak: false,
@@ -4221,8 +4223,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: true,
         learningEpoch: true,
         currentLearningEpoch: true,
-        labelAuthoritative: true,
-        currentAuthoritativeLabel: true,
+        labelAuthoritative: false,
+        currentAuthoritativeLabel: false,
       },
     });
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
@@ -4291,7 +4293,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
     expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
-    expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
+    expect(formatted).toContain('labels:    authoritative 0 (0%), current 0 (0%)');
     expect(formatted).toContain('Trajectory learning:');
     expect(formatted).toContain('Recent trajectory traces:');
     expect(formatted).toContain('trajectories: 1 in 24h');
@@ -4425,7 +4427,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ]),
     });
     expect(s.attemptCoverage?.causalGapDiagnostics).toMatchObject({
-      blockedCurrentLabels: 0,
+      blockedCurrentLabels: 3,
       causes: expect.arrayContaining([
         expect.objectContaining({ cause: 'missing-route-snapshot', count: 3 }),
       ]),
@@ -4435,7 +4437,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action).toMatchObject({
       priority: 'medium',
       label: 'Inspect causal coverage',
-      detail: expect.stringContaining('top cause: missing-route-snapshot on 3 attempts'),
+      detail: expect.stringContaining('top cause: missing-authoritative-label on 3 attempts'),
       commands: expect.arrayContaining([
         expect.objectContaining({
           label: 'Evaluate attention',
@@ -4805,59 +4807,30 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('same-tier alternatives only');
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('avoid tier escalation');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-dispatch-yield',
-          priority: 'medium',
-          label: 'Inspect dispatch yield',
-          detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
-          target: 'nim',
-        }),
-      ]),
-    );
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: empty-diff');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('sample-gated action: same-tier reroute');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.commands)
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-      ]));
     const actionIds = s.nextActions?.map((action) => action.id) ?? [];
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
-    expect(actionIds.indexOf('inspect-dispatch-yield')).toBeLessThan(actionIds.indexOf('build-backlog'));
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'degraded',
       topBlocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
         source: 'queue',
-        detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
       },
       primaryAction: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Recover dispatch yield',
       blocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
       },
       action: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
 
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[medium] Inspect dispatch yield [nim]');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(formatted).toContain('nim/goal proposal yield 0/3 (0%)');
+    expect(formatted).not.toContain('[medium] Inspect dispatch yield [nim]');
     expect(formatted).toContain('diagnosis: actionable · nim/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
@@ -4937,8 +4910,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.dispatchYieldDiagnostics?.recommendation)
       .toContain('no open installed same-tier alternative is available');
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(action?.detail).toContain('action reason: no open installed same-tier alternative is available');
+    expect(action).toBeUndefined();
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
@@ -5018,49 +4990,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(actionIds[0]).toBe('process-capture-repairs');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(repairAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor capture repairs',
-      detail: expect.stringContaining('1 capture repair item(s) are eligible'),
-      target: repo,
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(repairAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(repairAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
-    expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(repairAction?.detail).toContain('First: Dispatch capture repair: complete the failed proposal capture.');
-    expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(yieldAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(repairAction).toBeUndefined();
+    expect(yieldAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor capture repairs',
       action: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor capture repairs');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(repairAction?.commands?.map((command) => command.safety)).toEqual(['read-only', 'read-only']);
+    expect(formatted).not.toContain('[high] Monitor capture repairs');
   });
 
   it('treats healthy generated repair conversion as active recovery', async () => {
@@ -5137,16 +5083,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
-      id: 'generated-repair-recovery-active',
-      severity: 'low',
-      detail: expect.stringContaining('generated repairs 4/5 converted (80%; capture 5)'),
+      id: 'proposal-production-needed',
+      severity: 'medium',
     });
     expect(s.autonomousShipReadiness?.topBlocker?.id).not.toBe('dispatch-yield-actionable');
-    expect(actionIds[0]).toBe('process-capture-repairs');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
     expect(actionIds).not.toContain('inspect-dispatch-yield');
     expect(s.missionBrief).toMatchObject({
-      blocker: { id: 'generated-repair-recovery-active' },
-      action: { id: 'process-capture-repairs' },
+      blocker: { id: 'proposal-production-needed' },
+      action: { id: 'build-backlog' },
     });
   });
 
@@ -5207,10 +5153,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('process-capture-repairs');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
-  it('shortens cooldown for trusted empty generated repairs when recovery is healthy', async () => {
+  it('keeps full cooldown for trusted empty generated repairs despite healthy observations', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
@@ -5257,13 +5204,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(s.queue.eligibleBacklogItems).toBe(2);
-    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
     expect(s.queue.next?.[0]).toMatchObject({
-      id: repair.id,
-      title: repair.title,
+      id: fresh.id,
+      title: fresh.title,
     });
-    expect(s.nextActions?.map((action) => action.id)).toContain('drain-diagnostic-reslices');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-diagnostic-reslices');
   });
 
   it('projects the same five-minute dispatch-blocked repair cooldown used by the daemon', async () => {
@@ -5371,42 +5318,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         diagnosticAttempts: 3,
       },
     });
-    expect(actionIds[0]).toBe('drain-diagnostic-reslices');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(drainAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor diagnostic auto-drain',
-      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are eligible'),
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(drainAction?.detail).toContain('queued repair coverage: 1 no-diff reslice queued');
-    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:stalled.');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(drainAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor diagnostic auto-drain',
       action: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor diagnostic auto-drain');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
+    expect(formatted).toContain('diagnosis: actionable');
+    expect(formatted).not.toContain('[high] Monitor diagnostic auto-drain');
     expect(formatted).not.toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices --limit 3');
 
     writeRunningDaemon(tmpHome, [
@@ -5440,7 +5368,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       noProposalDispatches: 0,
     });
-    expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
+    expect(stalledDrainAction).toBeUndefined();
   });
 
   it('does not promote diagnostic drain when queued reslices are cooling', async () => {
@@ -5495,7 +5423,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('drain-diagnostic-reslices');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
   it('keeps verification failure repair ahead of diagnostic drain while merge gate is blocked', async () => {
@@ -5560,7 +5489,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       blocked: 1,
     });
     expect(actionIds[0]).toBe('repair-verification-failures');
-    expect(actionIds).toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
     const failureAction = s.nextActions?.find((action) => action.id === 'repair-verification-failures');
     expect(failureAction).toMatchObject({
       label: 'Drain failed proposals',
@@ -5728,13 +5657,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action).toMatchObject({
-      target: 'local-coder',
-      detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
-    });
-    expect(action?.detail).toContain('top reason: empty-diff');
-    expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
-    expect(action?.detail).not.toContain('proposal filing disabled');
+    expect(action).toBeUndefined();
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('reasons:   3x empty-diff');
     expect(formatted).not.toContain('reasons:   16x proposal filing disabled');
@@ -5973,10 +5896,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
       },
     });
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: proposal-capture-missing');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 0, gate/capture 3, repairs 0, policy-off 0');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
     expect(s.attemptCoverage?.production).toMatchObject({
       attempts: 3,
       proposalCreated: 0,

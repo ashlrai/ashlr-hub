@@ -242,6 +242,8 @@ export interface DispatchProductionEvent {
 
 export interface CanonicalDispatchProductionAttempts {
   events: DispatchProductionEvent[];
+  /** Historical rows that predate the complete attempt envelope; observation only. */
+  preEnvelopeEvents: number;
   duplicateEvents: number;
   invalidAttemptIdentities: number;
   conflictingAttemptIdentities: number;
@@ -563,6 +565,7 @@ export interface DispatchProductionYieldSummary {
   proposalsCreated: number;
   noProposal: number;
   proposalRate?: number;
+  preEnvelopeEvents?: number;
   duplicateEvents?: number;
   invalidAttemptIdentities?: number;
   conflictingAttemptIdentities?: number;
@@ -1977,6 +1980,148 @@ function isDispatchProductionEvent(value: unknown): value is DispatchProductionE
   );
 }
 
+function proposalActionCountsForOutcome(event: Pick<DispatchProductionEvent, 'outcome' | 'proposalCreated'>): {
+  proposalCreated: 0 | 1;
+  proposalBlocked: 0 | 1;
+  proposalDisabled: 0 | 1;
+} {
+  return {
+    proposalCreated: event.proposalCreated ? 1 : 0,
+    proposalBlocked: event.outcome === 'gate-blocked' || event.outcome === 'proposal-capture-error' ? 1 : 0,
+    proposalDisabled: event.outcome === 'proposal-disabled' ? 1 : 0,
+  };
+}
+
+function validActionCountValues(actionCounts: RunActionCounts | undefined): boolean {
+  if (actionCounts === undefined) return true;
+  if (typeof actionCounts !== 'object' || Array.isArray(actionCounts)) return false;
+  return RUN_ACTION_COUNT_KEYS.every((key) => {
+    const value = actionCounts[key];
+    return value === undefined || (Number.isSafeInteger(value) && value >= 0);
+  });
+}
+
+function coherentStepCounts(actionCounts: RunActionCounts | undefined): boolean {
+  if (!actionCounts) return true;
+  const { modelSteps, toolSteps, totalSteps } = actionCounts;
+  if (totalSteps === undefined) return true;
+  if (modelSteps !== undefined && totalSteps < modelSteps) return false;
+  if (toolSteps !== undefined && totalSteps < toolSteps) return false;
+  return modelSteps === undefined || toolSteps === undefined || totalSteps === modelSteps + toolSteps;
+}
+
+function actionCountsAgreeWithOutcome(
+  event: Pick<DispatchProductionEvent, 'outcome' | 'proposalCreated' | 'diffFiles' | 'diffLines'>,
+  actionCounts: RunActionCounts | undefined,
+): boolean {
+  if (!validActionCountValues(actionCounts) || !coherentStepCounts(actionCounts)) return false;
+  if (!actionCounts) return true;
+  const expected = proposalActionCountsForOutcome(event);
+  if (
+    (actionCounts.proposalCreated !== undefined &&
+      actionCounts.proposalCreated !== expected.proposalCreated) ||
+    (actionCounts.proposalBlocked !== undefined &&
+      actionCounts.proposalBlocked !== expected.proposalBlocked) ||
+    (actionCounts.proposalDisabled !== undefined &&
+      actionCounts.proposalDisabled !== expected.proposalDisabled) ||
+    (actionCounts.proposalBlocked ?? 0) +
+      (actionCounts.proposalCreated ?? 0) +
+      (actionCounts.proposalDisabled ?? 0) > 1 ||
+    (actionCounts.diffFiles !== undefined && actionCounts.diffFiles !== event.diffFiles) ||
+    (actionCounts.diffLines !== undefined && actionCounts.diffLines !== event.diffLines)
+  ) return false;
+  return event.outcome !== 'cancelled' || (actionCounts.proposalBlocked ?? 0) === 0;
+}
+
+function materializeDispatchProductionAttemptEnvelope(
+  event: DispatchProductionEvent,
+): DispatchProductionEvent {
+  const attemptId = event.attemptId ??
+    (isOuterAttemptIdentity(event.runId) ? event.runId : undefined);
+  const trajectoryId = event.trajectoryId ?? (attemptId ? `run:${attemptId}` : undefined);
+  if (event.proposalCreated !== (event.outcome === 'proposal-created')) {
+    throw new Error('dispatch production outcome contradicts proposal creation');
+  }
+  const summary = event.runEventSummary ?? {};
+  const suppliedCounts = summary.actionCounts;
+  if (!validActionCountValues(suppliedCounts) || !coherentStepCounts(suppliedCounts)) {
+    throw new Error('dispatch production action counts are invalid');
+  }
+  if (summary.runId !== undefined && summary.runId !== event.runId) {
+    throw new Error('dispatch production run identity mismatch');
+  }
+  if (summary.status !== undefined && !dispatchProductionRunStatusAgrees(event.outcome, summary.status)) {
+    throw new Error('dispatch production run status mismatch');
+  }
+  if (summary.outcome !== undefined && summary.outcome !== event.outcome) {
+    throw new Error('dispatch production summary outcome mismatch');
+  }
+  if (summary.proposalCreated !== undefined && summary.proposalCreated !== event.proposalCreated) {
+    throw new Error('dispatch production summary proposal mismatch');
+  }
+  if (summary.proposalId !== undefined && summary.proposalId !== event.proposalId) {
+    throw new Error('dispatch production summary proposal identity mismatch');
+  }
+  if (summary.costUsd !== undefined && summary.costUsd !== event.spentUsd) {
+    throw new Error('dispatch production summary spend mismatch');
+  }
+
+  const diffFiles = event.diffFiles ?? summary.diffFiles ?? suppliedCounts?.diffFiles;
+  const diffLines = event.diffLines ?? summary.diffLines ?? suppliedCounts?.diffLines;
+  if (event.outcome === 'empty-diff' && ((diffFiles ?? 0) !== 0 || (diffLines ?? 0) !== 0)) {
+    throw new Error('empty dispatch outcome contradicts diff counts');
+  }
+  if (
+    (event.diffFiles !== undefined && diffFiles !== event.diffFiles) ||
+    (summary.diffFiles !== undefined && diffFiles !== summary.diffFiles) ||
+    (suppliedCounts?.diffFiles !== undefined && diffFiles !== suppliedCounts.diffFiles) ||
+    (event.diffLines !== undefined && diffLines !== event.diffLines) ||
+    (summary.diffLines !== undefined && diffLines !== summary.diffLines) ||
+    (suppliedCounts?.diffLines !== undefined && diffLines !== suppliedCounts.diffLines)
+  ) {
+    throw new Error('dispatch production diff counts mismatch');
+  }
+
+  const expectedProposalCounts = proposalActionCountsForOutcome(event);
+  if (!actionCountsAgreeWithOutcome(
+    { ...event, diffFiles, diffLines },
+    suppliedCounts,
+  )) throw new Error('dispatch production action counts contradict outcome');
+  const actionCounts: RunActionCounts = {
+    ...(suppliedCounts ?? {}),
+    ...expectedProposalCounts,
+    ...(diffFiles !== undefined ? { diffFiles } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+  };
+  if (
+    actionCounts.totalSteps === undefined &&
+    actionCounts.modelSteps !== undefined &&
+    actionCounts.toolSteps !== undefined
+  ) {
+    actionCounts.totalSteps = actionCounts.modelSteps + actionCounts.toolSteps;
+  }
+
+  return {
+    ...event,
+    ...(attemptId ? { attemptId } : {}),
+    ...(trajectoryId ? { trajectoryId } : {}),
+    ...(diffFiles !== undefined ? { diffFiles } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+    runEventSummary: {
+      ...summary,
+      runId: event.runId,
+      status: summary.status ?? dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+      ...(diffFiles !== undefined ? { diffFiles } : {}),
+      ...(diffLines !== undefined ? { diffLines } : {}),
+      costUsd: event.spentUsd,
+      actionCounts,
+    },
+  };
+}
+
 export function recordDispatchProduction(
   input: DispatchProductionEvent | DispatchProductionEvent[],
 ): DispatchProductionWriteResult {
@@ -1987,8 +2132,14 @@ export function recordDispatchProduction(
     if (events.length === 0) return result;
     for (const event of events) {
       try {
-        const record = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+        const lifecycle = event.basis === 'repair-lifecycle-candidate' ||
+          event.basis === 'repair-lifecycle-outcome';
+        const writeEvent = lifecycle ? event : materializeDispatchProductionAttemptEnvelope(event);
+        const record = sanitizeDispatchProductionEvent(writeEvent, { materializeLearningLabel: true });
         if (!isDispatchProductionEvent(record)) throw new Error('dispatch production repository identity is not canonical');
+        if (!lifecycle && canonicalAttemptIdentity(record) === null) {
+          throw new Error('dispatch production attempt envelope is incomplete');
+        }
         const canonicalLine = JSON.stringify(record);
         const attemptAuthority = parseDispatchProductionAttemptAuthority(record, canonicalLine);
         const failureAuthority = parseDispatchProductionFailureAttemptAuthority(record, canonicalLine);
@@ -7226,6 +7377,7 @@ function canonicalAttemptIdentity(event: DispatchProductionEvent): string | null
   if (event.proposalId !== undefined && !trustedExecutionIdentity(event.proposalId)) return null;
   const summary = event.runEventSummary;
   const actionCounts = summary?.actionCounts;
+  const expectedProposalCounts = proposalActionCountsForOutcome(event);
   if (
     summary === undefined ||
     summary.runId !== event.runId ||
@@ -7237,12 +7389,33 @@ function canonicalAttemptIdentity(event: DispatchProductionEvent): string | null
     summary.diffFiles !== event.diffFiles ||
     summary.diffLines !== event.diffLines ||
     summary.costUsd !== event.spentUsd ||
+    !actionCountsAgreeWithOutcome(event, actionCounts) ||
     (actionCounts?.proposalCreated !== undefined &&
-      actionCounts.proposalCreated !== (event.proposalCreated ? 1 : 0)) ||
-    (actionCounts?.diffFiles !== undefined && actionCounts.diffFiles !== event.diffFiles) ||
-    (actionCounts?.diffLines !== undefined && actionCounts.diffLines !== event.diffLines)
+      actionCounts.proposalCreated !== expectedProposalCounts.proposalCreated) ||
+    (actionCounts?.proposalDisabled !== undefined &&
+      actionCounts.proposalDisabled !== expectedProposalCounts.proposalDisabled)
   ) return null;
   return event.attemptId;
+}
+
+function isPreEnvelopeDispatchProductionEvent(event: DispatchProductionEvent): boolean {
+  const summary = event.runEventSummary;
+  const actionCounts = summary?.actionCounts;
+  return event.attemptId === undefined ||
+    event.runId === undefined ||
+    event.trajectoryId === undefined ||
+    summary === undefined ||
+    summary.runId === undefined ||
+    summary.status === undefined ||
+    summary.outcome === undefined ||
+    summary.proposalCreated === undefined ||
+    summary.costUsd === undefined ||
+    actionCounts === undefined ||
+    actionCounts.proposalCreated === undefined ||
+    actionCounts.proposalBlocked === undefined ||
+    actionCounts.proposalDisabled === undefined ||
+    (actionCounts.modelSteps !== undefined &&
+      actionCounts.toolSteps !== undefined && actionCounts.totalSteps === undefined);
 }
 
 function canonicalAttemptSignature(event: DispatchProductionEvent): string {
@@ -7256,9 +7429,11 @@ export function canonicalDispatchProductionAttempts(
 ): CanonicalDispatchProductionAttempts {
   const identities = new Map<string, { event: DispatchProductionEvent; signature: string }>();
   const conflicts = new Set<string>();
+  let preEnvelopeEvents = 0;
   let duplicateEvents = 0;
   let invalidAttemptIdentities = 0;
   for (const row of rows) {
+    const preEnvelope = isPreEnvelopeDispatchProductionEvent(row);
     let event: DispatchProductionEvent;
     try {
       event = sanitizeDispatchProductionEvent(row, {
@@ -7271,6 +7446,10 @@ export function canonicalDispatchProductionAttempts(
       }
     } catch {
       invalidAttemptIdentities++;
+      continue;
+    }
+    if (preEnvelope) {
+      preEnvelopeEvents++;
       continue;
     }
     const identity = canonicalAttemptIdentity(event);
@@ -7288,6 +7467,7 @@ export function canonicalDispatchProductionAttempts(
     events: [...identities.entries()]
       .filter(([identity]) => !conflicts.has(identity))
       .map(([, { event }]) => event),
+    preEnvelopeEvents,
     duplicateEvents,
     invalidAttemptIdentities,
     conflictingAttemptIdentities: conflicts.size,
@@ -7930,6 +8110,7 @@ export function summarizeDispatchProductionYield(
     proposalsCreated,
     noProposal: Math.max(0, total - proposalsCreated),
     ...(total > 0 ? { proposalRate: proposalsCreated / total } : {}),
+    preEnvelopeEvents: canonical.preEnvelopeEvents,
     duplicateEvents: canonical.duplicateEvents,
     invalidAttemptIdentities: canonical.invalidAttemptIdentities,
     conflictingAttemptIdentities: canonical.conflictingAttemptIdentities,

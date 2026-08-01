@@ -61,6 +61,7 @@ function event(
     ...overrides,
   };
   const suppliedSummary = row.runEventSummary;
+  const proposalBlocked = row.outcome === 'gate-blocked' || row.outcome === 'proposal-capture-error';
   row.runEventSummary = {
     runId: row.runId,
     status: dispatchProductionRunStatusForOutcome(row.outcome),
@@ -71,6 +72,14 @@ function event(
     diffLines: row.diffLines,
     costUsd: row.spentUsd,
     ...suppliedSummary,
+    actionCounts: {
+      proposalCreated: row.proposalCreated ? 1 : 0,
+      proposalBlocked: proposalBlocked ? 1 : 0,
+      proposalDisabled: row.outcome === 'proposal-disabled' ? 1 : 0,
+      ...(row.diffFiles !== undefined ? { diffFiles: row.diffFiles } : {}),
+      ...(row.diffLines !== undefined ? { diffLines: row.diffLines } : {}),
+      ...(suppliedSummary?.actionCounts ?? {}),
+    },
   };
   return row;
 }
@@ -285,7 +294,7 @@ describe('buildProposalFunnelObservability', () => {
     ['removed attempt id', { attemptId: undefined }],
     ['changed trajectory id', { trajectoryId: 'run:attempt-00000000-0000-4000-8000-000000000099' }],
     ['unsafe attempt id', { attemptId: 'attempt-not-a-generated-uuid' }],
-  ] as const)('withholds ambiguous causal identity: %s', (_name, overrides) => {
+  ] as const)('withholds ambiguous causal identity: %s', (name, overrides) => {
     const result = buildProposalFunnelObservability({
       events: [event('1', 'empty-diff', overrides)],
       sourceQuality: healthySource,
@@ -293,12 +302,20 @@ describe('buildProposalFunnelObservability', () => {
       eventLimit: 100,
     });
 
-    expect(result).toMatchObject({
-      state: 'withheld',
-      withheldReason: 'attempt-identity-unavailable',
-      sample: { invalidAttemptIdentities: 1 },
-      primaryBlocker: 'identity-unavailable',
-    });
+    const preEnvelope = name === 'removed run id' || name === 'removed attempt id';
+    expect(result).toMatchObject(preEnvelope
+      ? {
+          state: 'withheld',
+          withheldReason: 'insufficient-sample',
+          sample: { preEnvelopeEvents: 1, invalidAttemptIdentities: 0 },
+          primaryBlocker: 'insufficient-sample',
+        }
+      : {
+          state: 'withheld',
+          withheldReason: 'attempt-identity-unavailable',
+          sample: { preEnvelopeEvents: 0, invalidAttemptIdentities: 1 },
+          primaryBlocker: 'identity-unavailable',
+        });
     expect(result.metrics).toBeUndefined();
   });
 
@@ -423,8 +440,8 @@ describe('buildProposalFunnelObservability', () => {
     });
     expect(result).toMatchObject({
       state: 'withheld',
-      withheldReason: 'attempt-identity-unavailable',
-      sample: { invalidAttemptIdentities: 4, includedAttempts: 0 },
+      withheldReason: 'insufficient-sample',
+      sample: { preEnvelopeEvents: 4, invalidAttemptIdentities: 0, includedAttempts: 0 },
     });
   });
 
@@ -490,6 +507,78 @@ describe('buildProposalFunnelObservability', () => {
     }
   });
 
+  it('keeps pre-envelope rows observational without poisoning current canonical attempts', () => {
+    const legacy = event('legacy-pre-envelope', 'proposal-created', {
+      proposalId: 'legacy-proposal-secret',
+      title: 'LEGACY_PRIVATE_NARRATIVE',
+      reason: 'LEGACY_STDOUT_SECRET',
+    });
+    legacy.runEventSummary = { ...legacy.runEventSummary! };
+    delete legacy.runEventSummary.actionCounts;
+
+    const result = buildProposalFunnelObservability({
+      events: [legacy, event('current-envelope', 'empty-diff')],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'observational',
+      sample: {
+        observedEvents: 2,
+        includedAttempts: 1,
+        preEnvelopeEvents: 1,
+        invalidAttemptIdentities: 0,
+      },
+      metrics: {
+        attempts: 1,
+        reportedProposalCreatedOutcomes: { count: 0, rate: 0 },
+        emptyAttempts: { count: 1, rate: 1 },
+      },
+      authority: {
+        readinessEligible: false,
+        learningEligible: false,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('LEGACY_PRIVATE_NARRATIVE');
+    expect(JSON.stringify(result)).not.toContain('LEGACY_STDOUT_SECRET');
+    expect(JSON.stringify(result)).not.toContain('legacy-proposal-secret');
+  });
+
+  it.each([
+    ['created plus blocked', 'proposal-created', { proposalBlocked: 1 }],
+    ['created plus disabled', 'proposal-created', { proposalDisabled: 1 }],
+    ['empty plus blocked', 'empty-diff', { proposalBlocked: 1 }],
+    ['disabled plus blocked', 'proposal-disabled', { proposalBlocked: 1 }],
+    ['total below model', 'engine-failed', { modelSteps: 4, totalSteps: 3 }],
+    ['total below tool', 'engine-failed', { toolSteps: 4, totalSteps: 3 }],
+    ['total not equal to model plus tool', 'engine-failed', { modelSteps: 2, toolSteps: 3, totalSteps: 4 }],
+  ] as const)('withholds impossible action reconciliation: %s', (_name, outcome, actionCounts) => {
+    const row = event(`action-${_name}`, outcome);
+    row.runEventSummary = {
+      ...row.runEventSummary!,
+      actionCounts: {
+        ...row.runEventSummary!.actionCounts,
+        ...actionCounts,
+      },
+    };
+
+    const result = buildProposalFunnelObservability({
+      events: [row],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { includedAttempts: 0, invalidAttemptIdentities: 1 },
+    });
+    expect(result.metrics).toBeUndefined();
+  });
+
   it.each([
     ['status', { status: 'failed', outcome: 'empty-diff', proposalCreated: false }],
     ['outcome', { status: 'done', outcome: 'engine-failed', proposalCreated: false }],
@@ -520,7 +609,13 @@ describe('buildProposalFunnelObservability', () => {
     ['action proposalCreated', {}, { actionCounts: { proposalCreated: 1 } }],
   ] as const)('withholds a nested %s contradiction', (_field, topLevel, nested) => {
     const row = event(`nested-${_field}`, 'empty-diff', topLevel);
-    row.runEventSummary = { ...row.runEventSummary!, ...nested };
+    row.runEventSummary = {
+      ...row.runEventSummary!,
+      ...nested,
+      ...('actionCounts' in nested
+        ? { actionCounts: { ...row.runEventSummary!.actionCounts, ...nested.actionCounts } }
+        : {}),
+    };
 
     const result = buildProposalFunnelObservability({
       events: [row],

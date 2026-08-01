@@ -158,10 +158,14 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
     const actionCounts = row.runEventSummary?.actionCounts;
     row.diffFiles ??= row.runEventSummary?.diffFiles ?? actionCounts?.diffFiles;
     row.diffLines ??= row.runEventSummary?.diffLines ?? actionCounts?.diffLines;
-    const generatedAttemptId = testAttemptId(`${row.itemId}\0${row.runId ?? ''}\0${row.ts}`);
-    const attemptId = row.attemptId ?? generatedAttemptId;
+    const suppliedTrajectoryOnly = Object.prototype.hasOwnProperty.call(overrides, 'trajectoryId') &&
+      !Object.prototype.hasOwnProperty.call(overrides, 'attemptId');
+    const generatedAttemptId = testAttemptId(suppliedTrajectoryOnly
+      ? `trajectory\0${row.trajectoryId ?? ''}`
+      : `${row.itemId}\0${row.runId ?? ''}\0${row.ts}`);
+    const attemptId = suppliedTrajectoryOnly ? generatedAttemptId : row.attemptId ?? generatedAttemptId;
     row.attemptId = attemptId;
-    if (!Object.prototype.hasOwnProperty.call(overrides, 'trajectoryId')) {
+    if (suppliedTrajectoryOnly || !Object.prototype.hasOwnProperty.call(overrides, 'trajectoryId')) {
       row.trajectoryId = `run:${attemptId}`;
     }
     if (!Object.prototype.hasOwnProperty.call(overrides, 'runEventSummary')) {
@@ -190,6 +194,17 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
         ...row.runEventSummary,
       };
     }
+    const suppliedActionCounts = row.runEventSummary!.actionCounts;
+    row.runEventSummary!.actionCounts = {
+      ...(suppliedActionCounts ?? {}),
+      proposalCreated: row.proposalCreated ? 1 : 0,
+      proposalBlocked: row.outcome === 'gate-blocked' || row.outcome === 'proposal-capture-error' ? 1 : 0,
+      proposalDisabled: row.outcome === 'proposal-disabled' ? 1 : 0,
+      ...(suppliedActionCounts?.totalSteps === undefined &&
+        suppliedActionCounts?.modelSteps !== undefined && suppliedActionCounts.toolSteps !== undefined
+        ? { totalSteps: suppliedActionCounts.modelSteps + suppliedActionCounts.toolSteps }
+        : {}),
+    };
   }
   return row;
 }
@@ -406,7 +421,13 @@ function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): Dispa
   })!;
   const treatment = overrides.repairTreatment ?? repairTreatmentForUnitId(unitId)!;
   const spentUsd = overrides.spentUsd ?? 0.002;
-  const attemptId = overrides.attemptId ?? testAttemptId(`proof\0${runId}`);
+  const suppliedTrajectoryOnly = overrides.trajectoryId !== undefined && overrides.attemptId === undefined;
+  const attemptId = overrides.attemptId ?? testAttemptId(suppliedTrajectoryOnly
+    ? `proof-trajectory\0${overrides.trajectoryId}`
+    : `proof\0${runId}`);
+  const normalizedOverrides = suppliedTrajectoryOnly
+    ? { ...overrides, attemptId, trajectoryId: `run:${attemptId}` }
+    : overrides;
   return makeEvent({
     ts: '2026-07-08T12:00:00.000Z',
     itemId,
@@ -422,7 +443,7 @@ function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): Dispa
     proposalId: undefined,
     attemptId,
     runId,
-    trajectoryId: overrides.trajectoryId ?? `run:${attemptId}`,
+    trajectoryId: normalizedOverrides.trajectoryId ?? `run:${attemptId}`,
     routeSnapshot: overrides.routeSnapshot ?? {
       backend,
       tier,
@@ -447,7 +468,7 @@ function makeProofEvent(overrides: Partial<DispatchProductionEvent> = {}): Dispa
     repairPreviousBackend: undefined,
     spentUsd,
     basis: 'run-proposal-outcome',
-    ...overrides,
+    ...normalizedOverrides,
   });
 }
 
@@ -511,14 +532,15 @@ function makeGeneratedRepairFailureEvent(
   kind: 'proposal' | 'capture',
   overrides: Partial<DispatchProductionEvent> = {},
 ): DispatchProductionEvent {
-  const runId = overrides.runId ?? testAttemptId(`generated-${kind}-failure-authority`);
+  const requestedRunId = overrides.runId ?? testAttemptId(`generated-${kind}-failure-authority`);
+  const attemptId = overrides.attemptId ?? testAttemptId(`generated-${kind}-failure\0${requestedRunId}`);
+  const runId = overrides.attemptId !== undefined && overrides.runId !== undefined
+    ? overrides.runId
+    : attemptId;
   const outcome = overrides.outcome ?? (kind === 'capture' ? 'proposal-capture-error' : 'engine-failed');
   const spentUsd = overrides.spentUsd ?? 0.001;
   return makeFailureAttemptEvent({
     itemId: `ashlr-hub:proposal-repair${kind === 'capture' ? '-capture' : ''}:abcdef123456`,
-    attemptId: overrides.attemptId ?? runId,
-    runId,
-    trajectoryId: overrides.trajectoryId ?? `run:${overrides.attemptId ?? runId}`,
     outcome,
     spentUsd,
     runEventSummary: overrides.runEventSummary ?? {
@@ -531,6 +553,11 @@ function makeGeneratedRepairFailureEvent(
     repairTreatmentUnitId: undefined,
     repairTreatment: undefined,
     ...overrides,
+    attemptId,
+    runId,
+    trajectoryId: overrides.attemptId !== undefined && overrides.trajectoryId !== undefined
+      ? overrides.trajectoryId
+      : `run:${attemptId}`,
   });
 }
 
@@ -570,7 +597,17 @@ function resolveDispatchProductionAttemptProofs(
 }
 
 function appendCanonicalDispatchEvent(event: DispatchProductionEvent): void {
-  const canonical = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+  const canonical = sanitizeDispatchProductionEvent({
+    ...event,
+    runEventSummary: {
+      ...event.runEventSummary,
+      actionCounts: {
+        ...(event.runEventSummary?.actionCounts ?? {}),
+        proposalCreated: event.proposalCreated ? 1 : 0,
+        proposalDisabled: event.outcome === 'proposal-disabled' ? 1 : 0,
+      },
+    },
+  }, { materializeLearningLabel: true });
   mkdirSync(dispatchProductionDir(), { recursive: true });
   appendFileSync(
     join(dispatchProductionDir(), `${canonical.ts.slice(0, 10)}.jsonl`),
@@ -764,6 +801,129 @@ describe('M342 dispatch production ledger', () => {
       proposalId: 'prop-new',
       basis: 'run-proposal-outcome',
     });
+  });
+
+  it('materializes the complete current attempt envelope before accepting a write', () => {
+    const input = makeEvent({
+      itemId: 'materialize-current-envelope',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'proposal-materialized',
+      diffFiles: 2,
+      diffLines: 9,
+      spentUsd: 0.25,
+    });
+    input.runEventSummary = {
+      actionCounts: {
+        modelSteps: 2,
+        toolSteps: 3,
+      },
+    };
+
+    expect(recordDispatchProduction(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      attemptId: input.attemptId,
+      runId: input.runId,
+      trajectoryId: `run:${input.attemptId}`,
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'proposal-materialized',
+      diffFiles: 2,
+      diffLines: 9,
+      spentUsd: 0.25,
+      runEventSummary: {
+        runId: input.runId,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'proposal-materialized',
+        diffFiles: 2,
+        diffLines: 9,
+        costUsd: 0.25,
+        actionCounts: {
+          proposalCreated: 1,
+          proposalBlocked: 0,
+          proposalDisabled: 0,
+          modelSteps: 2,
+          toolSteps: 3,
+          totalSteps: 5,
+          diffFiles: 2,
+          diffLines: 9,
+        },
+      },
+    });
+  });
+
+  it('rejects contradictory outcome controls and impossible model/tool step aggregates', () => {
+    const cases = [
+      ['created-blocked', 'proposal-created', true, { proposalBlocked: 1 }],
+      ['created-disabled', 'proposal-created', true, { proposalDisabled: 1 }],
+      ['empty-blocked', 'empty-diff', false, { proposalBlocked: 1 }],
+      ['disabled-blocked', 'proposal-disabled', false, { proposalBlocked: 1 }],
+      ['model-over-total', 'engine-failed', false, { modelSteps: 4, totalSteps: 3 }],
+      ['tool-over-total', 'engine-failed', false, { toolSteps: 4, totalSteps: 3 }],
+      ['step-sum-mismatch', 'engine-failed', false, { modelSteps: 2, toolSteps: 3, totalSteps: 4 }],
+    ] as const;
+    const rows = cases.map(([itemId, outcome, proposalCreated, actionCounts]) => {
+      const row = makeEvent({
+        itemId,
+        outcome,
+        proposalCreated,
+        ...(proposalCreated ? { proposalId: `proposal-${itemId}` } : {}),
+      });
+      row.runEventSummary = {
+        ...row.runEventSummary,
+        actionCounts,
+      };
+      return row;
+    });
+
+    expect(recordDispatchProduction(rows)).toEqual({ attempted: 7, recorded: 0, failed: 7 });
+    expect(readDispatchProductionEvents()).toEqual([]);
+  });
+
+  it('observes pre-envelope rows without letting them poison current canonical yield', () => {
+    const legacy = makeEvent({
+      itemId: 'legacy-pre-envelope',
+      ts: new Date().toISOString(),
+      title: 'LEGACY_PRIVATE_NARRATIVE',
+      reason: 'Authorization Bearer sk-legacy-private-token',
+    });
+    legacy.runEventSummary = { ...legacy.runEventSummary! };
+    delete legacy.runEventSummary.actionCounts;
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    appendFileSync(
+      join(dispatchProductionDir(), `${legacy.ts.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(legacy)}\n`,
+      'utf8',
+    );
+
+    const current = makeEvent({
+      itemId: 'current-complete-envelope',
+      ts: new Date(Date.now() + 1).toISOString(),
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'proposal-current',
+    });
+    expect(recordDispatchProduction(current)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+
+    const detailed = readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000, limit: 20 });
+    expect(detailed).toMatchObject({
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+      },
+      summary: {
+        events: 2,
+        attempts: 1,
+        proposalsCreated: 1,
+        preEnvelopeEvents: 1,
+        invalidAttemptIdentities: 0,
+        conflictingAttemptIdentities: 0,
+      },
+    });
+    expect(JSON.stringify(detailed.summary)).not.toContain('LEGACY_PRIVATE_NARRATIVE');
+    expect(JSON.stringify(detailed.summary)).not.toContain('sk-legacy-private-token');
   });
 
   it('persists physical repo identity and rejects legacy lexical or linked aliases', () => {
@@ -1002,6 +1162,7 @@ describe('M342 dispatch production ledger', () => {
       itemId: event.itemId,
       repo: event.repo,
       outcome: event.outcome,
+      attemptId: event.attemptId,
       runId: event.runId,
       trajectoryId: event.trajectoryId,
       backend: 'codex',
@@ -1152,10 +1313,8 @@ describe('M342 dispatch production ledger', () => {
         costUsd: 0.003,
       },
     });
-    expect(recordDispatchProduction(summaryMismatch).recorded).toBe(1);
-    expect(resolveDispatchProductionAttemptProofs([proofTarget(summaryMismatch)])).toEqual([
-      { status: 'unproven', reason: 'event-ineligible' },
-    ]);
+    expect(recordDispatchProduction(summaryMismatch)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readDispatchProductionEvents()).toEqual([]);
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });
     const diffMismatch = makeProposalProofEvent({
@@ -1173,10 +1332,8 @@ describe('M342 dispatch production ledger', () => {
         actionCounts: { proposalCreated: 1, diffFiles: 3, diffLines: 17 },
       },
     });
-    expect(recordDispatchProduction(diffMismatch).recorded).toBe(1);
-    expect(resolveDispatchProductionAttemptProofs([proofTarget(diffMismatch)])).toEqual([
-      { status: 'unproven', reason: 'event-ineligible' },
-    ]);
+    expect(recordDispatchProduction(diffMismatch)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+    expect(readDispatchProductionEvents()).toEqual([]);
   });
 
   it('materializes exact failure receipts for treatment-free capture and proposal repair lineage', () => {
@@ -1225,22 +1382,25 @@ describe('M342 dispatch production ledger', () => {
 
     const invalid = accepted.map((event, index) => {
       const handoffId = (20 + index).toString(16).padStart(64, '0');
+      const attemptId = testAttemptId(`invalid-failure-${index}`);
       return makeGeneratedRepairFailureEvent(index === 0 ? 'capture' : 'proposal', {
         repairHandoffId: handoffId,
         repairGenerationId: repairGenerationIdFromHandoffId(handoffId)!,
-        runId: `attempt-invalid-failure-${index}`,
+        attemptId,
+        runId: attemptId,
         trajectoryId: index === 0
-          ? `run:attempt-invalid-failure-${index}`
-          : 'run:another-reservation',
+          ? `run:${attemptId}`
+          : `run:${testAttemptId('another-reservation')}`,
         ...(index === 0 ? { repairRootId: undefined, repairDepth: undefined } : {}),
       });
     });
-    expect(recordDispatchProduction(invalid)).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    expect(recordDispatchProduction(invalid)).toEqual({ attempted: 2, recorded: 1, failed: 1 });
     for (const event of invalid) {
       expect(existsSync(join(receiptDir, failureAttemptReceiptName(event)))).toBe(false);
     }
 
     const terminalHandoffIds = ['3'.repeat(64), '4'.repeat(64)];
+    const terminalAttemptIds = [testAttemptId('terminal-empty'), testAttemptId('terminal-proposal')];
     const terminal = [
       makeProofEvent({
         itemId: 'ashlr-hub:proposal-repair:111111111111',
@@ -1250,8 +1410,9 @@ describe('M342 dispatch production ledger', () => {
         repairTreatment: undefined,
         repairRootId: 'a'.repeat(64),
         repairDepth: 0,
-        runId: 'attempt-nondiagnostic-empty',
-        trajectoryId: 'run:attempt-nondiagnostic-empty',
+        attemptId: terminalAttemptIds[0],
+        runId: terminalAttemptIds[0],
+        trajectoryId: `run:${terminalAttemptIds[0]}`,
       }),
       makeProposalProofEvent({
         itemId: 'ashlr-hub:proposal-repair-capture:222222222222',
@@ -1261,8 +1422,9 @@ describe('M342 dispatch production ledger', () => {
         repairTreatment: undefined,
         repairRootId: 'b'.repeat(64),
         repairDepth: 0,
-        runId: 'attempt-nondiagnostic-proposal',
-        trajectoryId: 'run:attempt-nondiagnostic-proposal',
+        attemptId: terminalAttemptIds[1],
+        runId: terminalAttemptIds[1],
+        trajectoryId: `run:${terminalAttemptIds[1]}`,
       }),
     ];
     expect(recordDispatchProduction(terminal)).toEqual({ attempted: 2, recorded: 2, failed: 0 });
@@ -3450,11 +3612,8 @@ describe('M342 dispatch production ledger', () => {
       event.runEventSummary = summary;
       return event;
     });
-    expect(recordDispatchProduction(events)).toEqual({ attempted: 6, recorded: 6, failed: 0 });
-
-    expect(resolveDispatchProductionAttemptProofs(events.map((event) => proofTarget(event)))).toEqual(
-      events.map(() => ({ status: 'unproven', reason: 'event-ineligible' })),
-    );
+    expect(recordDispatchProduction(events)).toEqual({ attempted: 6, recorded: 0, failed: 6 });
+    expect(readDispatchProductionEvents()).toEqual([]);
   });
 
   it('rejects writer-impossible lineage flags and unknown raw metadata', () => {
@@ -3897,7 +4056,7 @@ describe('M342 dispatch production ledger', () => {
       runEventSummary: {
         outcome: 'proposal-disabled',
         proposalCreated: false,
-        actionCounts: { proposalDisabled: 2, diffFiles: 0 },
+        actionCounts: { proposalDisabled: 1, diffFiles: 0 },
       },
       learningLabel: {
         schemaVersion: 1,
@@ -3934,7 +4093,7 @@ describe('M342 dispatch production ledger', () => {
         backendNoDiff: 0,
         captureOrGateBlocked: 0,
         repairAttempts: 0,
-        policyDisabled: 2,
+          policyDisabled: 1,
       },
     });
     expect(event?.labelOrigin).toBe('stored-current');
@@ -4322,7 +4481,6 @@ describe('M342 dispatch production ledger', () => {
           actionCounts: {
             proposalCaptureAttempts: 1,
             diffFiles: 0,
-            proposalBlocked: 1,
           },
         },
       }),
@@ -4400,7 +4558,7 @@ describe('M342 dispatch production ledger', () => {
         diffFiles: 3,
         diffLines: 20,
         proposalCreated: 1,
-        proposalBlocked: 2,
+        proposalBlocked: 1,
         proposalDisabled: 1,
       },
       attemptShape: {
@@ -4429,7 +4587,7 @@ describe('M342 dispatch production ledger', () => {
         verifyRepairAttempts: 1,
         diffFiles: 2,
         diffLines: 15,
-        proposalBlocked: 2,
+        proposalBlocked: 1,
       },
       attemptShape: {
         backendNoDiff: 1,
@@ -6571,7 +6729,7 @@ describe('M342 dispatch production ledger', () => {
         outcome: 'proposal-capture-error',
         proposalCreated: false,
         actionCounts: {
-          proposalDisabled: 1,
+          proposalBlocked: 1,
           proposalCaptureAttempts: 0,
         },
       },
@@ -6599,7 +6757,7 @@ describe('M342 dispatch production ledger', () => {
         proposalDisabled: 0,
       },
       actionCounts: {
-        proposalDisabled: 1,
+        proposalBlocked: 1,
       },
       attemptShape: {
         backendNoDiff: 0,

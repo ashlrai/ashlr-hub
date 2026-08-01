@@ -82,6 +82,7 @@ export interface ProposalFunnelObservability {
     includedAttempts: number;
     excludedLifecycleEvents: number;
     cancelledEvents: number;
+    preEnvelopeEvents: number;
     duplicateEvents: number;
     invalidAttemptIdentities: number;
     conflictingAttemptIdentities: number;
@@ -180,6 +181,7 @@ export function buildProposalFunnelObservability(
     includedAttempts: attempts.length,
     excludedLifecycleEvents,
     cancelledEvents,
+    preEnvelopeEvents: canonical.preEnvelopeEvents,
     duplicateEvents: canonical.duplicateEvents,
     invalidAttemptIdentities: canonical.invalidAttemptIdentities,
     conflictingAttemptIdentities: canonical.conflictingAttemptIdentities,
