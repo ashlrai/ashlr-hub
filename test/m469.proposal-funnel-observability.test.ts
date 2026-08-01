@@ -60,15 +60,18 @@ function event(
     basis: 'run-proposal-outcome',
     ...overrides,
   };
-  if (!Object.prototype.hasOwnProperty.call(overrides, 'runEventSummary')) {
-    row.runEventSummary = {
-      runId: row.runId,
-      status: dispatchProductionRunStatusForOutcome(row.outcome),
-      outcome: row.outcome,
-      proposalCreated: row.proposalCreated,
-      proposalId: row.proposalId,
-    };
-  }
+  const suppliedSummary = row.runEventSummary;
+  row.runEventSummary = {
+    runId: row.runId,
+    status: dispatchProductionRunStatusForOutcome(row.outcome),
+    outcome: row.outcome,
+    proposalCreated: row.proposalCreated,
+    proposalId: row.proposalId,
+    diffFiles: row.diffFiles,
+    diffLines: row.diffLines,
+    costUsd: row.spentUsd,
+    ...suppliedSummary,
+  };
   return row;
 }
 
@@ -506,6 +509,63 @@ describe('buildProposalFunnelObservability', () => {
       withheldReason: 'attempt-identity-unavailable',
       sample: { invalidAttemptIdentities: 1 },
     });
+  });
+
+  it.each([
+    ['diffFiles', { diffFiles: 2 }, { diffFiles: 7 }],
+    ['diffLines', { diffLines: 20 }, { diffLines: 70 }],
+    ['spend', { spentUsd: 0.25 }, { costUsd: 0.5 }],
+    ['action diffFiles', { diffFiles: 2 }, { actionCounts: { diffFiles: 7 } }],
+    ['action diffLines', { diffLines: 20 }, { actionCounts: { diffLines: 70 } }],
+    ['action proposalCreated', {}, { actionCounts: { proposalCreated: 1 } }],
+  ] as const)('withholds a nested %s contradiction', (_field, topLevel, nested) => {
+    const row = event(`nested-${_field}`, 'empty-diff', topLevel);
+    row.runEventSummary = { ...row.runEventSummary!, ...nested };
+
+    const result = buildProposalFunnelObservability({
+      events: [row],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { includedAttempts: 0, invalidAttemptIdentities: 1 },
+    });
+    expect(result.metrics).toBeUndefined();
+  });
+
+  it.each([
+    ['aggregate spend', (row: DispatchProductionEvent) => ({
+      ...row,
+      spentUsd: 1,
+      runEventSummary: { ...row.runEventSummary!, costUsd: 1 },
+    })],
+    ['routing policy', (row: DispatchProductionEvent) => ({
+      ...row,
+      routerPolicyVersion: 'fleet-router-v999',
+    })],
+    ['eligibility timestamp', (row: DispatchProductionEvent) => ({
+      ...row,
+      ts: '2026-07-31T00:00:59.000Z',
+    })],
+  ] as const)('classifies a materially different duplicate %s row as a conflict', (_field, mutate) => {
+    const original = event('material-duplicate', 'empty-diff');
+    const result = buildProposalFunnelObservability({
+      events: [original, mutate(original)],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-conflict',
+      sample: { includedAttempts: 0, duplicateEvents: 0, conflictingAttemptIdentities: 1 },
+    });
+    expect(result.metrics).toBeUndefined();
   });
 
   it('withholds rates when a later source read invalidates the snapshot', () => {

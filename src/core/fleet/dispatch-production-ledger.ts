@@ -417,7 +417,9 @@ export type DispatchProductionReadStopReason =
   | 'file-limit'
   | 'byte-limit'
   | 'row-limit'
-  | 'io-error';
+  | 'io-error'
+  | 'attempt-identity-unavailable'
+  | 'attempt-identity-conflict';
 
 export interface DispatchProductionSourceQuality {
   sourceState: 'missing' | 'healthy' | 'degraded';
@@ -4893,11 +4895,18 @@ function withLearningLabelOrigin(
 }
 
 export function currentAuthoritativeDispatchProductionLearningLabel(
+  _event: DispatchProductionEvent,
+): ProductionAttemptLearningLabel | undefined {
+  // Dispatch rows and their local attempt receipts are owner-writable and
+  // explicitly non-cryptographic. They remain diagnostic until a writer-
+  // authenticated receipt verifier is available for this exact record type.
+  return undefined;
+}
+
+function diagnosticDispatchProductionLearningLabel(
   event: DispatchProductionEvent,
 ): ProductionAttemptLearningLabel | undefined {
-  if (event.labelOrigin !== 'stored-current') return undefined;
-  const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
-  return label?.authoritative ? label : undefined;
+  return sanitizeProductionAttemptLearningLabel(event.learningLabel);
 }
 
 function storedDispatchProductionIdentities(
@@ -7203,7 +7212,7 @@ export function isCancelledDispatchProductionEvent(event: DispatchProductionEven
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, currentAuthoritativeDispatchProductionLearningLabel(event));
+  }, diagnosticDispatchProductionLearningLabel(event));
   return String(classification.kind) === 'cancelled';
 }
 
@@ -7216,36 +7225,29 @@ function canonicalAttemptIdentity(event: DispatchProductionEvent): string | null
   }
   if (event.proposalId !== undefined && !trustedExecutionIdentity(event.proposalId)) return null;
   const summary = event.runEventSummary;
+  const actionCounts = summary?.actionCounts;
   if (
     summary === undefined ||
     summary.runId !== event.runId ||
     !dispatchProductionRunStatusAgrees(event.outcome, summary.status) ||
     summary.outcome !== event.outcome ||
+    event.proposalCreated !== (event.outcome === 'proposal-created') ||
     summary.proposalCreated !== event.proposalCreated ||
-    summary.proposalId !== event.proposalId
+    summary.proposalId !== event.proposalId ||
+    summary.diffFiles !== event.diffFiles ||
+    summary.diffLines !== event.diffLines ||
+    summary.costUsd !== event.spentUsd ||
+    (actionCounts?.proposalCreated !== undefined &&
+      actionCounts.proposalCreated !== (event.proposalCreated ? 1 : 0)) ||
+    (actionCounts?.diffFiles !== undefined && actionCounts.diffFiles !== event.diffFiles) ||
+    (actionCounts?.diffLines !== undefined && actionCounts.diffLines !== event.diffLines)
   ) return null;
   return event.attemptId;
 }
 
 function canonicalAttemptSignature(event: DispatchProductionEvent): string {
-  const summary = event.runEventSummary!;
-  return JSON.stringify([
-    event.runId,
-    event.trajectoryId,
-    event.itemId,
-    event.repo,
-    event.source,
-    event.backend,
-    event.tier,
-    event.model ?? null,
-    event.basis,
-    event.outcome,
-    event.proposalCreated,
-    event.proposalId ?? null,
-    summary,
-    event.repairGenerationId ?? null,
-    event.repairAttemptOrdinal ?? null,
-  ]);
+  const { machineId: _machineId, ...semantic } = event;
+  return JSON.stringify(semantic);
 }
 
 /** Canonical owner-writable attempt accounting shared by every public yield projection. */
@@ -7621,7 +7623,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, currentAuthoritativeDispatchProductionLearningLabel(event));
+  }, diagnosticDispatchProductionLearningLabel(event));
   const cancelled = isCancelledDispatchProductionEvent(event);
   if (cancelled) return;
   bucket.attempts++;
@@ -7870,7 +7872,7 @@ export function summarizeDispatchProductionYield(
       itemId: event.itemId,
       title: event.title,
       source: event.source,
-    }, currentAuthoritativeDispatchProductionLearningLabel(event));
+    }, diagnosticDispatchProductionLearningLabel(event));
     const backendKey = event.backend ?? 'unknown';
     addToBucket(touchBucket(byBackend, backendKey, { backend: event.backend }), event);
     addToBucket(touchBucket(bySource, event.source, { source: event.source }), event);
@@ -7971,13 +7973,37 @@ export function readDispatchProductionYieldDetailed(opts?: {
     maxRows: opts?.maxRows,
   });
   const sourceComplete = read.sourceState === 'healthy' && read.complete;
-  const summary = sourceComplete
+  const physicalAttemptEvents = read.events.filter((event) =>
+    event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+  );
+  const canonical = sourceComplete
+    ? canonicalDispatchProductionAttempts(physicalAttemptEvents)
+    : undefined;
+  const identityDegraded = canonical !== undefined &&
+    (canonical.invalidAttemptIdentities > 0 || canonical.conflictingAttemptIdentities > 0);
+  const summary = sourceComplete && !identityDegraded
     ? summarizeDispatchProductionYield(read.events, {
         windowHours: windowMs / (60 * 60 * 1000),
         limitPerDimension: opts?.limitPerDimension,
       })
     : undefined;
-  const { events: _events, ...sourceQuality } = read;
+  const { events: _events, ...baseSourceQuality } = read;
+  const sourceQuality: DispatchProductionSourceQuality = identityDegraded
+    ? {
+        ...baseSourceQuality,
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: [
+          ...baseSourceQuality.stopReasons,
+          ...(canonical!.invalidAttemptIdentities > 0
+            ? ['attempt-identity-unavailable' as const]
+            : []),
+          ...(canonical!.conflictingAttemptIdentities > 0
+            ? ['attempt-identity-conflict' as const]
+            : []),
+        ],
+      }
+    : baseSourceQuality;
   return {
     ...(summary ? { summary } : {}),
     sourceQuality,

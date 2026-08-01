@@ -167,7 +167,6 @@ import {
   readDispatchProductionEventsDetailed,
   readDispatchProductionAttemptProtocolQuality,
   recordDispatchProduction,
-  readDispatchProductionYieldDetailed,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
   type DispatchProductionBasis,
@@ -989,7 +988,6 @@ function generatedRepairShouldSkip(
   }
   return workedEventIsCooling(latest, policy.cooldownMs);
 }
-const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
 type DispatchPreflightState =
   | 'dispatchable'
@@ -3210,27 +3208,11 @@ async function tieredBounded<T>(
 // tick — one operator cycle
 // ---------------------------------------------------------------------------
 
-function configuredLowRepairYieldRate(cfg: AshlrConfig): number {
-  const raw = cfg.foundry?.intelligence?.minProposalYieldRate;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0.2;
-  return Math.max(0, Math.min(1, raw));
-}
-
-function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
-  try {
-    const read = readDispatchProductionYieldDetailed({
-      windowMs: GENERATED_REPAIR_RECOVERY_WINDOW_MS,
-      limit: 1200,
-      limitPerDimension: 1,
-    });
-    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
-    const yieldSummary = read.summary;
-    const generated = yieldSummary?.generatedRepairAttempts;
-    if (!generated || generated.attempts < GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS) return false;
-    return generated.proposalRate >= Math.max(configuredLowRepairYieldRate(cfg), 0.5);
-  } catch {
-    return false;
-  }
+function generatedRepairRecoveryHealthy(_cfg: AshlrConfig): boolean {
+  // Generated-repair attempt rows and receipts are owner-writable local
+  // diagnostics. Without a writer-authenticated receipt verifier, they cannot
+  // shorten a control-plane cooldown.
+  return false;
 }
 
 function cooldownMsForSelectionItem(

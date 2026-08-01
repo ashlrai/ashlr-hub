@@ -155,6 +155,9 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
     ...overrides,
   };
   if (row.basis !== 'repair-lifecycle-candidate' && row.basis !== 'repair-lifecycle-outcome') {
+    const actionCounts = row.runEventSummary?.actionCounts;
+    row.diffFiles ??= row.runEventSummary?.diffFiles ?? actionCounts?.diffFiles;
+    row.diffLines ??= row.runEventSummary?.diffLines ?? actionCounts?.diffLines;
     const generatedAttemptId = testAttemptId(`${row.itemId}\0${row.runId ?? ''}\0${row.ts}`);
     const attemptId = row.attemptId ?? generatedAttemptId;
     row.attemptId = attemptId;
@@ -168,6 +171,9 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
         outcome: row.outcome,
         proposalCreated: row.proposalCreated,
         proposalId: row.proposalId,
+        diffFiles: row.diffFiles,
+        diffLines: row.diffLines,
+        costUsd: row.spentUsd,
       };
     } else if (row.runEventSummary) {
       row.runEventSummary = {
@@ -178,6 +184,9 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
         ...(row.runEventSummary.proposalId !== undefined || row.proposalId !== undefined
           ? { proposalId: row.runEventSummary.proposalId ?? row.proposalId }
           : {}),
+        diffFiles: row.diffFiles,
+        diffLines: row.diffLines,
+        costUsd: row.spentUsd,
         ...row.runEventSummary,
       };
     }
@@ -3847,6 +3856,37 @@ describe('M342 dispatch production ledger', () => {
     expect(zero?.byBackend[0]).not.toHaveProperty('diagnosticProposalRate');
   });
 
+  it('degrades a complete durable read when one attempt identity has materially different rows', () => {
+    const ts = new Date().toISOString();
+    const original = sanitizeDispatchProductionEvent(makeEvent({
+      itemId: 'durable-canonical-conflict',
+      ts,
+      spentUsd: 0.001,
+    }), { materializeLearningLabel: true });
+    const conflicting = sanitizeDispatchProductionEvent(makeEvent({
+      ...original,
+      spentUsd: 0.25,
+      runEventSummary: { ...original.runEventSummary!, costUsd: 0.25 },
+    }), { materializeLearningLabel: true });
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${ts.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(original)}\n${JSON.stringify(conflicting)}\n`,
+      'utf8',
+    );
+
+    const read = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 });
+
+    expect(read.summary).toBeUndefined();
+    expect(read.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['attempt-identity-conflict'],
+    });
+    expect(read.events).toHaveLength(2);
+  });
+
   it('persists authoritative versioned learning labels and drops hostile label payloads', () => {
     const rawPromptCanary = 'RAW_PROMPT_ATTEMPT_LABEL_CANARY_M342';
     const rawDiffCanary = 'RAW_DIFF_ATTEMPT_LABEL_CANARY_M342';
@@ -6326,23 +6366,17 @@ describe('M342 dispatch production ledger', () => {
       .toMatchObject({ sourceState: 'degraded', complete: false, stopReasons: ['file-limit'] });
   });
 
-  it('deduplicates a metadata-stripped replay without poisoning treatment conversion', () => {
+  it('withholds a metadata-stripped replay that changes treatment attribution', () => {
     const events = treatmentEvents();
     const stripped = sanitizeDispatchProductionEvent({
       ...events[0]!,
       repairTreatmentUnitId: undefined,
     });
-    const generated = summarizeDispatchProductionYield([...events, stripped])?.generatedRepairAttempts;
+    const summary = summarizeDispatchProductionYield([...events, stripped]);
 
     expect(stripped).toMatchObject({ repairLineageInvalid: true });
     expect(stripped).not.toHaveProperty('repairTreatment');
-    expect(generated?.treatmentAttribution).toMatchObject({
-      eligibleEvents: 10,
-      attributedEvents: 10,
-      unattributedEvents: 0,
-      distinctUnits: 6,
-    });
-    expect(generated?.treatmentConversions).toHaveLength(2);
+    expect(summary).toBeUndefined();
   });
 
   it('withholds detailed conversions for truncated and degraded sources', () => {

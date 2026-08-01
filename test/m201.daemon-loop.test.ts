@@ -1159,6 +1159,7 @@ function seedHealthyGeneratedRepairYield(repoDir: string): void {
         outcome: event.outcome,
         proposalCreated: event.proposalCreated,
         proposalId: event.proposalId,
+        costUsd: event.spentUsd,
       },
     };
   }));
@@ -2483,7 +2484,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     }));
   });
 
-  it('A1-drain-auto-fast-repair-cooldown: healthy repair recovery retries trusted empty repairs after 30 minutes', async () => {
+  it('A1-drain-auto-fast-repair-cooldown: forged healthy yield cannot shorten an empty repair cooldown', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
@@ -2497,8 +2498,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [reslice, generic],
     });
-    mockCanonicalEmptyDiffRunGoal('fast repair cooldown fixture');
-
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
     const selection = actions.find((event) => event.action === 'daemon:drain-select');
@@ -2507,38 +2506,28 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
 
     expect(result.reason).toBe('ok');
-    expect(result.drain).toMatchObject({
-      mode: 'diagnostic-reslices',
-      available: 1,
-      selected: 1,
-      automatic: true,
-      selectedItemIds: [reslice.id],
-    });
-    expect(selection).toMatchObject({
-      action: 'daemon:drain-select',
-      itemId: reslice.id,
-      reason: 'auto-live',
-    });
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
     expect(repairDecision).toMatchObject({
       kind: 'selection',
-      outcome: 'ok',
+      outcome: 'blocked',
       action: 'daemon:generated-repair-decision',
       itemId: reslice.id,
-      reason: 'claimed',
+      reason: 'cooldown-latest-empty',
       counts: {
         baseCooldownMs: 6 * 60 * 60 * 1000,
-        effectiveCooldownMs: 30 * 60 * 1000,
-        fastRepairCooldown: 1,
-        pendingBlocked: 0,
-        cooldownBlocked: 0,
-        selected: 1,
-        claimed: 1,
+        effectiveCooldownMs: 6 * 60 * 60 * 1000,
+        fastRepairCooldown: 0,
+        cooldownBlocked: 1,
+        selected: 0,
+        claimed: 0,
       },
     });
-    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['fast-repair-cooldown', 'latest-empty', 'claimed']));
-    expect(mockRunGoal).toHaveBeenCalledTimes(1);
-    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
-      workItemId: reslice.id,
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['standard-cooldown', 'latest-empty']));
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
     });
   });
 
