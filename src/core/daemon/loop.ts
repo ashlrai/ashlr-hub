@@ -1126,9 +1126,15 @@ function classifyRuntimeFailure(error: unknown): DaemonFailureClassification {
     typeof (error as NodeJS.ErrnoException).code === 'string'
     ? (error as NodeJS.ErrnoException).code!
     : '';
-  return TRANSIENT_DAEMON_ERROR_CODE.test(code)
-    ? { diagnosticCode: 'runtime-transient', retryable: true }
-    : { diagnosticCode: 'runtime-unclassified', retryable: false };
+  // A process-wide catch has no proof that the failure happened before paid or
+  // externally visible work. Preserve the diagnostic, but never grant restart
+  // authority from an errno alone; narrower pre-effect paths classify retries.
+  return {
+    diagnosticCode: TRANSIENT_DAEMON_ERROR_CODE.test(code)
+      ? 'runtime-transient'
+      : 'runtime-unclassified',
+    retryable: false,
+  };
 }
 
 function daemonTermination(

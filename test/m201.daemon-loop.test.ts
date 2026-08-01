@@ -9212,7 +9212,7 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     }
   });
 
-  it('E3l: explicitly transient resident runtime failure terminates retryably', async () => {
+  it('E3l: transient runtime errno without pre-effect proof does not authorize restart', async () => {
     enrollWithItems(1);
     const liveCfg = cfgBuiltin();
     const malformedReload = {
@@ -9235,8 +9235,8 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
 
     expect(result.termination).toEqual({
       reason: 'runtime-failure',
-      retryable: true,
-      exitCode: 1,
+      retryable: false,
+      exitCode: 0,
       diagnosticCode: 'runtime-transient',
     });
     expect(readAudit()).toContainEqual(expect.objectContaining({
