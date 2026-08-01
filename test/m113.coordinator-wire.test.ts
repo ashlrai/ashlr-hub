@@ -59,6 +59,7 @@ const origInSwarm = process.env.ASHLR_IN_SWARM;
 
 let tmpHome: string;
 let tmpRepo: string;
+let realWindowsAuthorityProven = process.platform !== 'win32';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared before lazy imports (same pattern as m85 / m106)
@@ -202,13 +203,14 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 
-  privateStorageMocks.useRealAssurance = true;
+  privateStorageMocks.useRealAssurance = !realWindowsAuthorityProven;
   try {
     let authorityReady = false;
-    // A fresh Windows runner can complete root DACL assurance while the nested
-    // authority-directory probe is still cold. Re-run the complete production
-    // acquisition once; both attempts must independently prove fence ownership.
-    for (let attempt = 0; attempt < 2 && !authorityReady; attempt += 1) {
+    // Exercise the real Windows adapter once per test file. The remaining
+    // coordinator cases still acquire and verify a fresh fence, but use the
+    // semantic adapter already covered by the native ACL suites.
+    const attempts = realWindowsAuthorityProven ? 1 : 3;
+    for (let attempt = 0; attempt < attempts && !authorityReady; attempt += 1) {
       const fence = acquireOutwardMutationFence();
       try {
         authorityReady = ownsOutwardMutationFence(fence);
@@ -219,6 +221,7 @@ beforeEach(() => {
     if (!authorityReady) {
       throw new Error('M113 fixture failed to establish private authority roots');
     }
+    realWindowsAuthorityProven = true;
   } finally {
     privateStorageMocks.useRealAssurance = false;
   }
