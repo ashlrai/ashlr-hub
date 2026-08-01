@@ -38,6 +38,13 @@ export type ImmutablePrivateRecordWriteDisposition =
   | 'invalid'
   | 'failed';
 
+export type ImmutablePrivateRecordRecoveryDisposition =
+  | 'missing'
+  | 'clean'
+  | 'recovered'
+  | 'invalid'
+  | 'failed';
+
 export type ImmutablePrivateRecordReadStopReason =
   | 'codec-unavailable'
   | 'unsafe-storage'
@@ -706,6 +713,48 @@ export function writeImmutablePrivateRecord<RecordType>(
     return persisted !== null && recordsEquivalent(codec, persisted, record)
       ? 'recorded'
       : 'failed';
+  } catch {
+    return 'failed';
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+/**
+ * Recovers authenticated publication witnesses under the store's writer lock.
+ * This is intentionally separate from read paths so observation stays read-only.
+ */
+export function recoverImmutablePrivateRecordStore<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  options: { lockWaitMs?: number } = {},
+): ImmutablePrivateRecordRecoveryDisposition {
+  const validated = validateConfig(config);
+  if (validated === null) return 'invalid';
+  if (!existsSync(validated.rootPath)) return 'missing';
+  const lockWaitMs = options.lockWaitMs === undefined
+    ? MAX_LOCK_WAIT_MS
+    : Number.isFinite(options.lockWaitMs)
+      ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(options.lockWaitMs)))
+      : null;
+  if (lockWaitMs === null) return 'invalid';
+
+  let codec: ImmutablePrivateRecordCodec<RecordType> | null;
+  try { codec = config.codecForWrite(); } catch { codec = null; }
+  if (codec === null) return 'failed';
+
+  let directories: StoreDirectories<RecordType>;
+  try { directories = loadDirectories(validated, false); } catch { return 'failed'; }
+  const lock = acquireLocalStoreLock(directories.lockPath, lockWaitMs, {
+    anchorPath: directories.anchorPath,
+    exactPrivateStorage: true,
+  });
+  if (lock === null) return 'failed';
+
+  try {
+    verifyDirectories(directories);
+    const recovery = recoverStagingNamespace(directories, codec);
+    if (!recovery.ok) return 'failed';
+    return recovery.recoveredRecords.size > 0 ? 'recovered' : 'clean';
   } catch {
     return 'failed';
   } finally {
