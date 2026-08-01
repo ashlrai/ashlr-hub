@@ -303,6 +303,7 @@ function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposa
     'proposal-disabled',
     `duplicate diff skipped; existing pending proposal ${proposal.id} remains authoritative`,
     diff,
+    proposal.id,
   );
 }
 

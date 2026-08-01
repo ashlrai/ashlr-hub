@@ -57,6 +57,9 @@ function makeSandboxMock(costUsd: number, label: string) {
           ? {
               kind: 'proposal-disabled',
               reason: `proposal filing disabled for candidate ${idx}`,
+              files: 1,
+              insertions: 1,
+              deletions: 0,
             }
           : undefined;
       return {
@@ -142,6 +145,8 @@ async function harness(opts: {
         diff,
         sandboxId,
         runId: String(capOpts['runId'] ?? `run-${safeIdx}`),
+        workItemId: capOpts['workItemId'] as string | undefined,
+        workItemGenerationId: capOpts['workItemGenerationId'] as string | undefined,
         engineModel: `${String(engine)}:mock-model`,
         engineTier: 'frontier' as const,
         diffHash: `hash-${safeIdx}`,
@@ -647,8 +652,117 @@ describe('M333 — file-once proposal capture', () => {
     expect(result.winner).toBeUndefined();
     expect(result.critique.winnerIndex).toBe(-1);
     expect(result.candidates.map((candidate) => candidate.testsPassed)).toEqual([false, false]);
+    expect(result.candidates.map((candidate) => candidate.proposalDisposition)).toEqual([
+      { kind: 'verification-rejected' },
+      { kind: 'verification-rejected' },
+    ]);
     expect(h.captureSandboxedProposal).toHaveBeenCalledTimes(2);
     expect(h.captureSandboxedProposal?.mock.calls.every((call) => call[3]?.['draftOnly'] === true)).toBe(true);
+    expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('recognizes final-capture dedup only with exact durable diff ownership', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    let draft: import('../src/core/types.js').Proposal | undefined;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) {
+        const result = await originalCapture(...args);
+        draft = result.proposalDraft;
+        return result;
+      }
+      if (!draft) throw new Error('expected draft before final capture');
+      const existing = { ...draft, id: 'proposal-existing', status: 'pending' as const };
+      h.filedProposals!.set(existing.id, existing);
+      const proposalOutcome = {
+        kind: 'proposal-disabled' as const,
+        reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+        proposalId: existing.id,
+        files: 1,
+        insertions: 1,
+        deletions: 0,
+      };
+      return {
+        state: { id: draft.runId!, status: 'done' as const, result: proposalOutcome.reason, proposalOutcome },
+        proposalOutcome,
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]?.proposalDisposition).toEqual({
+      kind: 'duplicate-owned',
+      proposalId: 'proposal-existing',
+      diffHash: 'hash-0',
+    });
+  });
+
+  it('refuses a final-capture dedup claim when the loaded proposal owns different bytes', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    let draft: import('../src/core/types.js').Proposal | undefined;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) {
+        const result = await originalCapture(...args);
+        draft = result.proposalDraft;
+        return result;
+      }
+      if (!draft) throw new Error('expected draft before final capture');
+      const existing = {
+        ...draft,
+        id: 'proposal-stale-owner',
+        status: 'pending' as const,
+        diff: 'DIFFERENT_DIFF',
+      };
+      h.filedProposals!.set(existing.id, existing);
+      const proposalOutcome = {
+        kind: 'proposal-disabled' as const,
+        reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+        proposalId: existing.id,
+        files: 1,
+        insertions: 1,
+        deletions: 0,
+      };
+      return {
+        state: { id: draft.runId!, status: 'done' as const, result: proposalOutcome.reason, proposalOutcome },
+        proposalOutcome,
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]?.proposalDisposition).toEqual({ kind: 'capture-missing' });
+  });
+
+  it('marks an eligible positive draft as capture-missing when final capture has no durable result', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      return {
+        state: {
+          id: String(args[3]?.['runId']),
+          status: 'done' as const,
+          result: 'final capture returned no proposal identity',
+        },
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]?.proposalDisposition).toEqual({ kind: 'capture-missing' });
     expect(h.filedProposals?.size).toBe(0);
   });
 

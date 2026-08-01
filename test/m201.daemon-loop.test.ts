@@ -4292,6 +4292,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
           files: 2,
           insertions: 5,
         },
+        proposalDisposition: { kind: 'capture-missing' as const },
         error: 'proposal-disabled: proposal filing disabled after sandbox changes',
         costUsd: 0.02,
       };
@@ -4330,7 +4331,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
       expect(result.dispatches?.[0]?.production).toMatchObject({
         outcome: 'proposal-capture-error',
-        reason: 'best-of-2: capture-missing: required proposal dispatch produced changes without proposal filing',
+        reason: 'best-of-2: capture-missing: winning candidate diff was neither filed nor durably deduplicated',
         diffFiles: 2,
         diffLines: 5,
         runEventSummary: {
@@ -4354,6 +4355,250 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       });
     },
   );
+
+  it.each([false, true])(
+    'A1h2a6e2: same-class Best-of-N diagnostics use stable candidate identity (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'stable fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const candidates = [
+        {
+          index: 0,
+          engine: 'local-coder',
+          diff: 'diff --git a/x.ts b/x.ts\n',
+          score: 8,
+          proposalOutcome: {
+            kind: 'proposal-disabled',
+            reason: 'proposal filing disabled for candidate generation',
+            files: 1,
+            insertions: 1,
+            deletions: 0,
+          },
+          proposalDisposition: { kind: 'capture-missing' as const },
+          error: 'proposal-disabled: proposal filing disabled for candidate generation',
+          costUsd: 0.02,
+        },
+        {
+          index: 1,
+          engine: 'local-coder',
+          diff: 'diff --git a/y.ts b/y.ts\n',
+          score: 7,
+          proposalOutcome: {
+            kind: 'proposal-disabled',
+            reason: 'proposal filing disabled for candidate generation',
+            files: 2,
+            insertions: 4,
+            deletions: 0,
+          },
+          proposalDisposition: { kind: 'capture-missing' as const },
+          error: 'proposal-disabled: proposal filing disabled for candidate generation',
+          costUsd: 0.01,
+        },
+      ];
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed ? [...candidates].reverse() : candidates,
+        critique: {
+          n: 2,
+          nonEmpty: 2,
+          judged: 2,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{
+            reason: 'proposal-disabled: proposal filing disabled for candidate generation',
+            count: 2,
+          }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-capture-error',
+        diffFiles: 1,
+        diffLines: 1,
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'A1h2a6f: Best-of-N verification rejection stays expected regardless of candidate order (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'verified fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const rejectedCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        testsPassed: false,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled for candidate generation',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        proposalDisposition: { kind: 'verification-rejected' as const },
+        costUsd: 0.02,
+      };
+      const cancelledCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'cancelled',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [cancelledCandidate, rejectedCandidate]
+          : [rejectedCandidate, cancelledCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{ reason: 'selection cancelled', count: 1 }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'gate-blocked',
+        reason: 'best-of-2: deterministic verification rejected candidate draft',
+        diffFiles: 1,
+        diffLines: 1,
+        runEventSummary: { status: 'done', outcome: 'gate-blocked', proposalCreated: false },
+      });
+      expect(repairHandoffFromDispatchEvent(readDispatchProductionEvents({ limit: 1 })[0]!)).toBeNull();
+    },
+  );
+
+  it.each([false, true])(
+    'A1h2a6g: Best-of-N durable duplicate ownership dominates failures regardless of candidate order (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'dedup fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const duplicateCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled for candidate generation',
+          proposalId: 'proposal-existing',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        proposalDisposition: {
+          kind: 'duplicate-owned' as const,
+          proposalId: 'proposal-existing',
+          diffHash: 'a'.repeat(64),
+        },
+        costUsd: 0.02,
+      };
+      const failedCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'engine exited with status 1',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [failedCandidate, duplicateCandidate]
+          : [duplicateCandidate, failedCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{ reason: 'engine exited with status 1', count: 1 }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-disabled',
+        proposalId: 'proposal-existing',
+        reason: 'best-of-2: duplicate diff skipped; existing pending proposal proposal-existing remains authoritative',
+        runEventSummary: { status: 'done', outcome: 'proposal-disabled', proposalCreated: false },
+      });
+      expect(repairHandoffFromDispatchEvent(readDispatchProductionEvents({ limit: 1 })[0]!)).toBeNull();
+    },
+  );
+
+  it('A1h2a6h: Best-of-N never reports proposal-created without matching candidate identity', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'identity fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'filed',
+          reason: 'proposal filed',
+          proposalId: 'proposal-unbound',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        costUsd: 0.02,
+      }],
+      critique: {
+        n: 1,
+        nonEmpty: 1,
+        judged: 1,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.02,
+        billableCostUsd: 0.02,
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'unknown',
+      reason: 'best-of-2: filed candidate lacked matching durable proposal identity',
+      runEventSummary: { status: 'done', outcome: 'unknown', proposalCreated: false },
+    });
+  });
 
   it.each([false, true])(
     'A1h2a6b: Best-of-N filed proposals beat failures regardless of candidate order (reversed=%s)',

@@ -77,9 +77,16 @@ export interface CandidateResult {
   error?: string;
   /** Structured reason the sandbox run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
+  /** Bounded final-capture classification consumed by the daemon. */
+  proposalDisposition?: CandidateProposalDisposition;
   /** Durable quarantine evidence when process closure could not be confirmed. */
   sandboxRetention?: SandboxRetentionEvidence;
 }
+
+export type CandidateProposalDisposition =
+  | { kind: 'verification-rejected' }
+  | { kind: 'duplicate-owned'; proposalId: string; diffHash: string }
+  | { kind: 'capture-missing' };
 
 interface InternalCandidateResult extends CandidateResult {
   requestedModel?: string | null;
@@ -238,6 +245,51 @@ function proposalForCandidate(item: WorkItem, c: InternalCandidateResult, loadPr
     }
   }
   return syntheticProposal(item, c.diff, c.index);
+}
+
+function durableDuplicateDisposition(
+  candidate: InternalCandidateResult,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+): CandidateProposalDisposition | undefined {
+  const draft = candidate.proposalDraft;
+  if (
+    outcome?.kind !== 'proposal-disabled' ||
+    !outcome.proposalId ||
+    !draft?.diffHash ||
+    !loadProposal
+  ) return undefined;
+
+  try {
+    const existing = loadProposal(outcome.proposalId);
+    if (
+      existing?.status !== 'pending' ||
+      existing.id !== outcome.proposalId ||
+      existing.repo !== draft.repo ||
+      existing.workItemId !== draft.workItemId ||
+      existing.workItemGenerationId !== draft.workItemGenerationId ||
+      existing.diffHash !== draft.diffHash ||
+      existing.diff !== draft.diff
+    ) return undefined;
+    return { kind: 'duplicate-owned', proposalId: existing.id, diffHash: existing.diffHash };
+  } catch {
+    return undefined;
+  }
+}
+
+function finalCaptureDisposition(
+  candidate: InternalCandidateResult,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+): CandidateProposalDisposition | undefined {
+  const duplicate = durableDuplicateDisposition(candidate, outcome, loadProposal);
+  if (duplicate) return duplicate;
+  if (
+    typeof candidate.proposalDraft?.diff === 'string' &&
+    candidate.proposalDraft.diff.trim().length > 0 &&
+    (outcome === undefined || outcome.kind === 'proposal-disabled')
+  ) return { kind: 'capture-missing' };
+  return undefined;
 }
 
 function publicCandidate(c: InternalCandidateResult): CandidateResult {
@@ -909,7 +961,17 @@ async function runBestOfNInternal(
         }
         if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed, taste };
 
-        return { ...c, diff: proposal.diff ?? c.diff, verdict, score, testsPassed, taste };
+        return {
+          ...c,
+          diff: proposal.diff ?? c.diff,
+          verdict,
+          score,
+          testsPassed,
+          taste,
+          ...(testsPassed === false && c.proposalDraft
+            ? { proposalDisposition: { kind: 'verification-rejected' } as const }
+            : {}),
+        };
       }),
     );
 
@@ -1004,9 +1066,11 @@ async function runBestOfNInternal(
 
       const error = candidateErrorFromState(filed.state, false, outcome)
         ?? 'final proposal capture did not file a proposal';
+      const proposalDisposition = finalCaptureDisposition(c, outcome, loadProposal);
       scored[c.index] = {
         ...c,
         ...(outcome ? { proposalOutcome: outcome } : {}),
+        ...(proposalDisposition ? { proposalDisposition } : {}),
         state: filed.state,
         error,
       };

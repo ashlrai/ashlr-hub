@@ -129,6 +129,7 @@ describe('M259 diff dedup producer credit', () => {
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-disabled',
       reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+      proposalId: existing.id,
     });
     expect(recordDecision).not.toHaveBeenCalled();
     expect(loadProposal(existing.id)).toMatchObject({
@@ -181,6 +182,7 @@ describe('M259 diff dedup producer credit', () => {
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-disabled',
       reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+      proposalId: existing.id,
     });
     expect(recordDecision).not.toHaveBeenCalled();
     expect(loadProposal(existing.id)).toMatchObject({
