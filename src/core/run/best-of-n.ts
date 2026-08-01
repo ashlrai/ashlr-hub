@@ -292,6 +292,78 @@ function finalCaptureDisposition(
   return undefined;
 }
 
+function exactDurablePendingProposal(
+  candidate: InternalCandidateResult,
+  proposalId: string | undefined,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+  expected: {
+    repo: string;
+    workItemId: string;
+    workItemGenerationId?: string;
+  },
+): Proposal | undefined {
+  if (
+    !proposalId ||
+    outcome?.kind !== 'filed' ||
+    outcome.proposalId !== proposalId ||
+    !candidate.runId ||
+    !loadProposal
+  ) return undefined;
+
+  let persisted: Proposal | null;
+  try {
+    persisted = loadProposal(proposalId);
+  } catch {
+    return undefined;
+  }
+  if (
+    persisted?.status !== 'pending' ||
+    persisted.id !== proposalId ||
+    persisted.repo !== expected.repo ||
+    persisted.origin !== 'agent' ||
+    persisted.kind !== 'patch' ||
+    persisted.runId !== candidate.runId ||
+    persisted.trajectoryId !== `run:${candidate.runId}` ||
+    persisted.workItemId !== expected.workItemId ||
+    persisted.workItemGenerationId !== expected.workItemGenerationId ||
+    typeof persisted.diff !== 'string' ||
+    persisted.diff.trim().length === 0 ||
+    typeof persisted.diffHash !== 'string' ||
+    persisted.diffHash.length === 0
+  ) return undefined;
+
+  const draft = candidate.proposalDraft;
+  if (draft && (
+    persisted.repo !== draft.repo ||
+    persisted.sandboxId !== draft.sandboxId ||
+    persisted.runId !== draft.runId ||
+    persisted.workItemId !== draft.workItemId ||
+    persisted.workItemGenerationId !== draft.workItemGenerationId ||
+    persisted.diffHash !== draft.diffHash ||
+    persisted.provenanceSig !== draft.provenanceSig ||
+    persisted.diff !== draft.diff ||
+    (persisted.isPartial === true) !== (draft.isPartial === true)
+  )) return undefined;
+
+  return persisted;
+}
+
+function finalCaptureFailureOutcome(
+  outcome: RunProposalOutcome | undefined,
+  proposalId: string | undefined,
+): RunProposalOutcome {
+  if (outcome?.kind === 'proposal-capture-error') return outcome;
+  return {
+    kind: 'proposal-capture-error',
+    reason: 'final proposal capture lacked exact durable pending proposal identity',
+    ...(proposalId ? { proposalId } : {}),
+    ...(outcome?.files !== undefined ? { files: outcome.files } : {}),
+    ...(outcome?.insertions !== undefined ? { insertions: outcome.insertions } : {}),
+    ...(outcome?.deletions !== undefined ? { deletions: outcome.deletions } : {}),
+  };
+}
+
 function publicCandidate(c: InternalCandidateResult): CandidateResult {
   const {
     proposalDraft: _proposalDraft,
@@ -1013,8 +1085,30 @@ async function runBestOfNInternal(
       if (opts?.signal?.aborted) break;
 
       if (c.proposalId) {
-        winner = c;
-        break;
+        const persisted = exactDurablePendingProposal(
+          c,
+          c.proposalId,
+          c.proposalOutcome,
+          loadProposal,
+          {
+            repo: sourceRepo,
+            workItemId: opts?.workItemId ?? item.id,
+            workItemGenerationId: opts?.workItemGenerationId,
+          },
+        );
+        if (persisted) {
+          winner = { ...c, diff: persisted.diff ?? c.diff };
+          scored[c.index] = winner;
+          break;
+        }
+        const captureFailure = finalCaptureFailureOutcome(c.proposalOutcome, c.proposalId);
+        const { proposalId: _unverifiedProposalId, ...candidateWithoutProposalId } = c;
+        scored[c.index] = {
+          ...candidateWithoutProposalId,
+          proposalOutcome: captureFailure,
+          error: formatProposalOutcome(captureFailure),
+        };
+        continue;
       }
 
       if (!c.sandbox || !captureSandboxedProposal) {
@@ -1043,19 +1137,24 @@ async function runBestOfNInternal(
         producerStatus: c.state?.status ?? 'done',
       });
       const outcome = filed.proposalOutcome ?? filed.state.proposalOutcome;
+      const persisted = exactDurablePendingProposal(
+        c,
+        filed.proposalId,
+        outcome,
+        loadProposal,
+        {
+          repo: sourceRepo,
+          workItemId: opts?.workItemId ?? item.id,
+          workItemGenerationId: opts?.workItemGenerationId,
+        },
+      );
 
-      if (filed.proposalId) {
-        let persisted: Proposal | undefined;
-        try {
-          persisted = loadProposal?.(filed.proposalId) ?? undefined;
-        } catch {
-          persisted = undefined;
-        }
+      if (persisted && filed.proposalId && outcome) {
         winner = {
           ...c,
           proposalId: filed.proposalId,
-          ...(outcome ? { proposalOutcome: outcome } : {}),
-          diff: persisted?.diff ?? c.proposalDraft?.diff ?? c.diff,
+          proposalOutcome: outcome,
+          diff: persisted.diff ?? c.proposalDraft?.diff ?? c.diff,
           state: filed.state,
         };
         scored[c.index] = winner;
@@ -1064,12 +1163,15 @@ async function runBestOfNInternal(
 
       if (opts?.signal?.aborted) break;
 
-      const error = candidateErrorFromState(filed.state, false, outcome)
+      const captureOutcome = filed.proposalId
+        ? finalCaptureFailureOutcome(outcome, filed.proposalId)
+        : outcome;
+      const error = candidateErrorFromState(filed.state, false, captureOutcome)
         ?? 'final proposal capture did not file a proposal';
-      const proposalDisposition = finalCaptureDisposition(c, outcome, loadProposal);
+      const proposalDisposition = finalCaptureDisposition(c, captureOutcome, loadProposal);
       scored[c.index] = {
         ...c,
-        ...(outcome ? { proposalOutcome: outcome } : {}),
+        ...(captureOutcome ? { proposalOutcome: captureOutcome } : {}),
         ...(proposalDisposition ? { proposalDisposition } : {}),
         state: filed.state,
         error,

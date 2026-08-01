@@ -4600,6 +4600,60 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h2a6h2: Best-of-N reconciliation ids never report proposal-created', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'reconcile fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'proposal-capture-error',
+          reason: 'proposal capture requires persistence reconciliation',
+          proposalId: 'proposal-reconciliation-failed',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        error: 'proposal-capture-error: proposal capture requires persistence reconciliation',
+        costUsd: 0.02,
+      }],
+      critique: {
+        n: 1,
+        nonEmpty: 1,
+        judged: 1,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.02,
+        billableCostUsd: 0.02,
+        noProposalReasons: [{
+          reason: 'proposal-capture-error: proposal capture requires persistence reconciliation',
+          count: 1,
+        }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-capture-error',
+      proposalId: 'proposal-reconciliation-failed',
+      reason: 'best-of-2: proposal capture requires persistence reconciliation',
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'proposal-capture-error',
+        proposalCreated: false,
+      },
+    });
+  });
+
   it.each([false, true])(
     'A1h2a6b: Best-of-N filed proposals beat failures regardless of candidate order (reversed=%s)',
     async (reversed) => {

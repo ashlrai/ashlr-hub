@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 // ---------------------------------------------------------------------------
 
 const MOCK_REPO = '/tmp/fake-repo';
+const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
 
 function makeItem(overrides: Partial<{
   id: string; repo: string; title: string; detail: string;
@@ -67,13 +68,46 @@ function makeSandboxMock(opts: {
     const idx = callCount++;
     if (opts.throwAt?.includes(idx)) throw new Error(`sandbox error at ${idx}`);
     const hasProposal = !opts.withProposalAt || opts.withProposalAt.includes(idx);
+    const proposalId = hasProposal ? `proposal-${idx}` : undefined;
+    const runId = String(runOpts['runId'] ?? `run-${idx}`);
+    const proposalOutcome = proposalId
+      ? {
+          kind: 'filed' as const,
+          reason: 'proposal filed',
+          proposalId,
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        }
+      : undefined;
+    if (proposalId) {
+      mockPersistedProposals.set(proposalId, {
+        id: proposalId,
+        repo: String(runOpts['sourceRepo'] ?? MOCK_REPO),
+        origin: 'agent',
+        kind: 'patch',
+        title: `candidate ${idx}`,
+        summary: `candidate ${idx}`,
+        diff: `diff content for candidate ${idx}`,
+        diffHash: `hash-${idx}`,
+        provenanceSig: `sig-${idx}`,
+        runId,
+        trajectoryId: `run:${runId}`,
+        workItemId: runOpts['workItemId'] as string | undefined,
+        workItemGenerationId: runOpts['workItemGenerationId'] as string | undefined,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      });
+    }
     return {
       state: {
-        id: runOpts['runId'] ?? `run-${idx}`,
+        id: runId,
         status: 'done',
         result: hasProposal ? `diff content for candidate ${idx}` : '',
+        ...(proposalOutcome ? { proposalOutcome } : {}),
       },
-      proposalId: hasProposal ? `proposal-${idx}` : undefined,
+      proposalId,
+      ...(proposalOutcome ? { proposalOutcome } : {}),
     };
   });
 }
@@ -82,9 +116,13 @@ function mockSandboxedEngine(
   apiSandboxMock: ReturnType<typeof vi.fn>,
   engineSandboxMock: ReturnType<typeof vi.fn> = vi.fn(),
 ) {
+  mockPersistedProposals.clear();
   vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
     runApiModelSandboxed: apiSandboxMock,
     runEngineSandboxed: engineSandboxMock,
+  }));
+  vi.doMock('../src/core/inbox/store.js', () => ({
+    loadProposal: vi.fn((id: string) => mockPersistedProposals.get(id) ?? null),
   }));
 }
 
@@ -472,18 +510,10 @@ describe('M142 — daemon routing alignment', () => {
       judgeProposal: judgeMock,
     }));
     vi.doMock('../src/core/inbox/store.js', () => ({
-      loadProposal: vi.fn((id: string) => ({
-        id,
-        repo: MOCK_REPO,
-        origin: 'agent',
-        kind: 'patch',
-        title: 'Persisted proposal',
-        summary: 'stored diff',
-        diff: 'REAL_PROPOSAL_DIFF',
-        status: 'pending',
-        createdAt: '2026-07-02T00:00:00.000Z',
-        updatedAt: '2026-07-02T00:00:00.000Z',
-      })),
+      loadProposal: vi.fn((id: string) => {
+        const persisted = mockPersistedProposals.get(id);
+        return persisted ? { ...persisted, diff: 'REAL_PROPOSAL_DIFF' } : null;
+      }),
     }));
 
     const { runBestOfN } = await import('../src/core/run/best-of-n.js?realdiff=' + randomUUID());

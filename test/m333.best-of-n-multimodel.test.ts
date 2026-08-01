@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 
 const MOCK_REPO = '/tmp/fake-repo';
+const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
 
 function makeItem() {
   return {
@@ -61,7 +62,34 @@ function makeSandboxMock(costUsd: number, label: string) {
               insertions: 1,
               deletions: 0,
             }
-          : undefined;
+          : {
+              kind: 'filed' as const,
+              reason: 'proposal filed',
+              proposalId: `proposal-${label}-${idx}`,
+              files: 1,
+              insertions: 1,
+              deletions: 0,
+            };
+      if (runOpts['propose'] !== false) {
+        const runId = String(runOpts['runId'] ?? `run-${label}-${idx}`);
+        mockPersistedProposals.set(proposalOutcome.proposalId, {
+          id: proposalOutcome.proposalId,
+          repo: String(runOpts['sourceRepo'] ?? MOCK_REPO),
+          origin: 'agent',
+          kind: 'patch',
+          title: `${label} candidate ${idx}`,
+          summary: `${label} candidate ${idx}`,
+          diff: `PROPOSAL_DIFF_${label}_${idx}`,
+          diffHash: `hash-${label}-${idx}`,
+          provenanceSig: `sig-${label}-${idx}`,
+          runId,
+          trajectoryId: `run:${runId}`,
+          workItemId: runOpts['workItemId'] as string | undefined,
+          workItemGenerationId: runOpts['workItemGenerationId'] as string | undefined,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        });
+      }
       return {
         state: {
           id: `run-${label}-${idx}`,
@@ -70,8 +98,8 @@ function makeSandboxMock(costUsd: number, label: string) {
           usage: { estCostUsd: costUsd },
           ...(proposalOutcome ? { proposalOutcome } : {}),
         },
-        ...(proposalOutcome ? { proposalOutcome } : {}),
-        ...(runOpts['propose'] === false ? {} : { proposalId: `proposal-${label}-${idx}` }),
+        proposalOutcome,
+        ...(runOpts['propose'] === false ? {} : { proposalId: proposalOutcome.proposalId }),
       };
     },
   );
@@ -117,7 +145,8 @@ async function harness(opts: {
   draftMode?: boolean;
 }): Promise<Harness> {
   vi.resetModules();
-  const filedProposals = new Map<string, import('../src/core/types.js').Proposal>();
+  mockPersistedProposals.clear();
+  const filedProposals = mockPersistedProposals;
   const captureSandboxedProposal = vi.fn(
     async (
       engine: unknown,
@@ -145,6 +174,7 @@ async function harness(opts: {
         diff,
         sandboxId,
         runId: String(capOpts['runId'] ?? `run-${safeIdx}`),
+        trajectoryId: `run:${String(capOpts['runId'] ?? `run-${safeIdx}`)}`,
         workItemId: capOpts['workItemId'] as string | undefined,
         workItemGenerationId: capOpts['workItemGenerationId'] as string | undefined,
         engineModel: `${String(engine)}:mock-model`,
@@ -763,6 +793,102 @@ describe('M333 — file-once proposal capture', () => {
 
     expect(result.winner).toBeUndefined();
     expect(result.candidates[0]?.proposalDisposition).toEqual({ kind: 'capture-missing' });
+    expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('continues to a later candidate when reconciliation fails with a proposal id', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 4],
+      draftMode: true,
+    });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    let finalCaptureCount = 0;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      if (finalCaptureCount++ === 0) {
+        const proposalOutcome = {
+          kind: 'proposal-capture-error' as const,
+          reason: 'proposal capture requires persistence reconciliation',
+          proposalId: 'proposal-reconciliation-failed',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        };
+        return {
+          state: {
+            id: String(args[3]?.['runId']),
+            status: 'done' as const,
+            result: proposalOutcome.reason,
+            proposalOutcome,
+          },
+          proposalId: proposalOutcome.proposalId,
+          proposalOutcome,
+        };
+      }
+      return originalCapture(...args);
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toMatchObject({ index: 1, proposalId: 'proposal-sb-1' });
+    expect(result.critique.winnerIndex).toBe(1);
+    expect(result.candidates[0]).toMatchObject({
+      index: 0,
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        proposalId: 'proposal-reconciliation-failed',
+      },
+    });
+    expect(result.candidates[0]?.proposalId).toBeUndefined();
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(2);
+    expect(h.filedProposals?.size).toBe(1);
+  });
+
+  it('does not report a winner when reconciliation failure is the only final capture', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      const proposalOutcome = {
+        kind: 'proposal-capture-error' as const,
+        reason: 'proposal capture requires persistence reconciliation',
+        proposalId: 'proposal-reconciliation-only',
+        files: 1,
+        insertions: 1,
+        deletions: 0,
+      };
+      return {
+        state: {
+          id: String(args[3]?.['runId']),
+          status: 'done' as const,
+          result: proposalOutcome.reason,
+          proposalOutcome,
+        },
+        proposalId: proposalOutcome.proposalId,
+        proposalOutcome,
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
+    expect(result.candidates[0]?.proposalId).toBeUndefined();
+    expect(result.candidates[0]?.proposalOutcome).toMatchObject({
+      kind: 'proposal-capture-error',
+      proposalId: 'proposal-reconciliation-only',
+    });
     expect(h.filedProposals?.size).toBe(0);
   });
 
