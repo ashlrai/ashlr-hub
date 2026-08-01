@@ -59,8 +59,15 @@ const mockCreateProposal = vi.fn(
       createdAt: new Date().toISOString(),
     }) as unknown as Proposal,
 );
+const mockLoadProposal = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
   createProposal: (...args: unknown[]) => mockCreateProposal(...(args as [Record<string, unknown>])),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+
+const mockAuthenticatedRealizedMergeOf = vi.fn();
+vi.mock('../src/core/inbox/realized-merge.js', () => ({
+  authenticatedRealizedMergeOf: (...args: unknown[]) => mockAuthenticatedRealizedMergeOf(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -407,6 +414,7 @@ describe('bisectAndRevert', () => {
         const sha = args[args.length - 1];
         return `ashlr: auto-merge proposal prop-${sha}`;
       }
+      if (a === 'rev-list --parents -n 1 C1') return 'C1 C0';
       if (a.startsWith('checkout')) {
         head = args[args.length - 1]!;
         return '';
@@ -586,6 +594,8 @@ describe('bisectAndRevert', () => {
     expect(arg['repo']).toBe(REPO);
     expect(String(arg['title'])).toMatch(/Revert/i);
     expect(String(arg['diff'])).toMatch(/\+good/);
+    expect(git).toHaveBeenCalledWith(['revert', '--no-commit', 'C1']);
+    expect(git).not.toHaveBeenCalledWith(['revert', '--no-commit', '-m', '1', 'C1']);
 
     // The proposal is pending — never applied/merged by the sentinel.
     expect(r.revertProposal?.proposal.status).toBe('pending');
@@ -599,6 +609,107 @@ describe('bisectAndRevert', () => {
       provenanceSig: arg['provenanceSig'] as string,
     });
     expect(verdict.ok).toBe(true);
+  });
+
+  it('uses mainline parent 1 only for an authenticated two-parent protected merge', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    const git: GitRunner = vi.fn((args) => {
+      if (args.join(' ') === 'rev-list --parents -n 1 C1') return 'C1 C0 PROPOSAL_HEAD';
+      return base(args);
+    });
+    const proposal = { id: 'prop-C1', repo: REPO, status: 'applied' };
+    mockLoadProposal.mockReturnValue(proposal);
+    mockAuthenticatedRealizedMergeOf.mockReturnValue({
+      source: 'github-host',
+      mergeCommitOid: 'C1',
+      expectedHeadOid: 'PROPOSAL_HEAD',
+    });
+
+    const result = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: bisectRunSuite(base),
+    });
+
+    expect(result.revertProposal?.culprit).toBe('C1');
+    expect(mockLoadProposal).toHaveBeenCalledWith('prop-C1');
+    expect(mockAuthenticatedRealizedMergeOf).toHaveBeenCalledWith(proposal);
+    expect(git).toHaveBeenCalledWith(['revert', '--no-commit', '-m', '1', 'C1']);
+    expect(mockCreateProposal).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses ambiguous parent topology instead of guessing a merge mainline', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    const git: GitRunner = vi.fn((args) => {
+      if (args.join(' ') === 'rev-list --parents -n 1 C1') return 'C1 P1 P2 P3';
+      return base(args);
+    });
+
+    const result = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: bisectRunSuite(base),
+    });
+
+    expect(result.reason).toMatch(/ambiguous culprit parent topology \(3 parents\)/);
+    expect(git).not.toHaveBeenCalledWith(expect.arrayContaining(['revert']));
+    expect(mockCreateProposal).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unauthenticated two-parent merge before revert capture', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    const git: GitRunner = vi.fn((args) => {
+      if (args.join(' ') === 'rev-list --parents -n 1 C1') return 'C1 C0 PROPOSAL_HEAD';
+      return base(args);
+    });
+    mockLoadProposal.mockReturnValue({ id: 'prop-C1', repo: REPO, status: 'applied' });
+    mockAuthenticatedRealizedMergeOf.mockReturnValue(null);
+
+    const result = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: bisectRunSuite(base),
+    });
+
+    expect(result.reason).toMatch(/lacks authenticated protected-merge provenance/);
+    expect(git).not.toHaveBeenCalledWith(expect.arrayContaining(['revert']));
+    expect(mockCreateProposal).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when git revert fails and never synthesizes authority evidence', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    const git: GitRunner = vi.fn((args) => {
+      if (args.join(' ') === 'revert --no-commit C1') return null;
+      return base(args);
+    });
+
+    const result = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: bisectRunSuite(base),
+    });
+
+    expect(result).toEqual({ reason: 'git revert failed; rollback proposal not created' });
+    expect(git).toHaveBeenCalledWith(['revert', '--abort']);
+    expect(git).toHaveBeenCalledWith(['reset', '--hard', 'HEAD_BAD']);
+    expect(mockCreateProposal).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a successful revert produces no staged diff', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    const git: GitRunner = vi.fn((args) => {
+      if (args.join(' ') === 'diff --cached') return '';
+      return base(args);
+    });
+
+    const result = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: bisectRunSuite(base),
+    });
+
+    expect(result).toEqual({ reason: 'git revert produced no staged diff; rollback proposal not created' });
+    expect(mockCreateProposal).not.toHaveBeenCalled();
   });
 
   it('restores HEAD after bisecting (working tree left as found)', async () => {
