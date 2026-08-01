@@ -162,6 +162,7 @@ import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authorit
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   dispatchProductionDir,
+  dispatchProductionRunStatusForOutcome,
   readDispatchProductionFailureAttemptReceipts,
   readDispatchProductionEventsDetailed,
   readDispatchProductionAttemptProtocolQuality,
@@ -2487,6 +2488,7 @@ function dispatchProductionEventFromOutcome(
   const eventRunSummary = runEventSummary({
     ...(trace.runEventSummary ?? {}),
     runId,
+    status: trace.runEventSummary?.status ?? dispatchProductionRunStatusForOutcome(outcome),
     outcome,
     proposalCreated,
     proposalId,

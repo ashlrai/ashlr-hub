@@ -14,6 +14,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, 
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
@@ -43,7 +44,11 @@ import {
   signLocalRealizedMergeReceipt,
   signProvenance,
 } from '../src/core/foundry/provenance.js';
-import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchProductionRunStatusForOutcome,
+  recordDispatchProduction as recordDispatchProductionRaw,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import {
@@ -252,6 +257,47 @@ async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
 
 function settledLearningTimestamp(): string {
   return new Date(Date.now() - 5 * 60 * 1000).toISOString();
+}
+
+function testAttemptId(event: DispatchProductionEvent): string {
+  const digest = createHash('sha256')
+    .update(`${event.itemId}\0${event.runId ?? ''}\0${event.ts}`)
+    .digest('hex');
+  return `attempt-${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function canonicalDispatchFixture(event: DispatchProductionEvent): DispatchProductionEvent {
+  const legacyWriterAttempt = typeof event.runId === 'string' &&
+    /^attempt-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.runId) &&
+    event.trajectoryId === `run:${event.runId}`
+    ? event.runId
+    : undefined;
+  const attemptId = event.attemptId ?? legacyWriterAttempt ?? testAttemptId(event);
+  const runId = event.runId ?? `run-${attemptId}`;
+  return {
+    ...event,
+    attemptId,
+    runId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      ...(event.runEventSummary ?? {}),
+      runId,
+      status: dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+    },
+  };
+}
+
+function recordDispatchProduction(
+  input: DispatchProductionEvent | readonly DispatchProductionEvent[],
+): ReturnType<typeof recordDispatchProductionRaw> {
+  return recordDispatchProductionRaw(
+    Array.isArray(input)
+      ? input.map(canonicalDispatchFixture)
+      : canonicalDispatchFixture(input as DispatchProductionEvent),
+  );
 }
 
 function makeEvidencePack(id: string, generatedAt: string) {
@@ -692,6 +738,66 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('output:    withheld (insufficient-sample)');
     expect(formatted).toContain('diagnosis: insufficient-sample · collect-attempts');
     expect(formatted).not.toContain('reported proposal-created 0/0');
+  });
+
+  it('withholds dispatch and backend rates when canonical denominators are zero', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const outcomes = {
+      proposalCreated: 0,
+      emptyDiff: 0,
+      gateBlocked: 0,
+      engineFailed: 0,
+      cancelled: 1,
+      sandboxFailed: 0,
+      proposalCaptureError: 0,
+      proposalDisabled: 0,
+      unknown: 0,
+    };
+    const formatted = formatFleetStatus({
+      ...status,
+      dispatchProductionSource: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 100,
+        rowsScanned: 1,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      dispatchProduction: {
+        windowHours: 24,
+        events: 1,
+        attempts: 0,
+        proposalsCreated: 0,
+        noProposal: 0,
+        cancelledEvents: 1,
+        spentUsd: 0,
+        outcomes,
+        topReasons: [],
+        byBackend: [{
+          key: 'local-coder',
+          backend: 'local-coder',
+          attempts: 0,
+          proposalsCreated: 0,
+          noProposal: 0,
+          spentUsd: 0,
+          outcomes,
+          topReasons: [],
+        }],
+        bySource: [],
+        byRepo: [],
+        byBackendModel: [],
+        byBackendSource: [],
+      },
+    });
+
+    expect(formatted).toContain('reported proposal-created 0/0 (—)');
+    expect(formatted).toContain('local-coder 0/0 —');
+    expect(formatted).not.toContain('0/0 0%');
   });
 
   let tmpHome: string;
@@ -2348,12 +2454,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'local-coder',
       1,
     );
-    expect(recordDiagnosticEmpty(
+    const secondDiagnostic = recordDiagnosticEmpty(
       quarantined,
       'attempt-32345678-1234-4123-8123-123456789abc',
       'kimi',
       2,
-    )).toMatchObject({ disposition: 'quarantined' });
+    );
+    expect(secondDiagnostic).toMatchObject({ disposition: 'quarantined' });
     writeBacklogSnapshot(tmpHome, repo, [quarantined]);
     writeRunningDaemon(tmpHome);
 
@@ -3034,19 +3141,24 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       itemId: 'item-a',
       source: 'todo',
       repo: '/repo/a',
-      title: 'Improve proposal yield',
+      title: 'PROMPT_CANARY_M49',
       backend: 'local-coder',
       tier: 'mid',
       model: 'qwen',
-      assignedBy: 'daemon',
-      routeReason: 'local-mid bulk',
+      assignedBy: 'ENV_CANARY_M49',
+      routeReason: 'STDOUT_CANARY_M49',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'mid',
+        reason: 'FILE_CONTENT_CANARY_M49',
+      },
       outcome: 'empty-diff',
       proposalCreated: false,
       attemptId: attemptA,
       runId: 'run-item-a',
       trajectoryId: `run:${attemptA}`,
       spentUsd: 0.001,
-      reason: 'agent returned no diff',
+      reason: 'DIFF_CANARY_M49',
       basis: 'run-proposal-outcome',
     };
     recordDispatchProduction([
@@ -3114,7 +3226,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.proposalFunnel).toMatchObject({
-      state: 'available',
+      state: 'observational',
       source: { sourceState: 'healthy', complete: true },
       sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
       metrics: {
@@ -3166,7 +3278,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('source:    healthy; files 1');
-    expect(formatted).toContain('proposals 1/3');
+    expect(formatted).toContain('reported proposal-created 1/3');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 1, policy-off 0');
     expect(formatted).toContain('repair yield: capture 1 attempt; 1/1 converted (100%)');
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
@@ -3177,6 +3289,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'reported proposal-created 1/3 (33%), proposal references 1/3 (33%)',
     );
     expect(formatted).toContain('diagnosis: gate-blocking · inspect-verification-gates');
+    for (const canary of [
+      'PROMPT_CANARY_M49',
+      'ENV_CANARY_M49',
+      'STDOUT_CANARY_M49',
+      'DIFF_CANARY_M49',
+      'FILE_CONTENT_CANARY_M49',
+    ]) expect(formatted).not.toContain(canary);
   });
 
   it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
@@ -3489,7 +3608,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'withheld',
       withheldReason: 'source-degraded',
       source: { sourceState: 'degraded', complete: false },
-      sample: { observedEvents: 2, includedAttempts: 0 },
+      sample: { observedEvents: 2, includedAttempts: 2 },
       primaryBlocker: 'source-unavailable',
       primaryAction: 'repair-telemetry-source',
     });
@@ -4303,14 +4422,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       weak: true,
       reasons: expect.arrayContaining([
         expect.objectContaining({ kind: 'routeSnapshot', count: 0, rate: 0 }),
-        expect.objectContaining({ kind: 'runEventSummary', count: 0, rate: 0 }),
       ]),
     });
     expect(s.attemptCoverage?.causalGapDiagnostics).toMatchObject({
       blockedCurrentLabels: 0,
       causes: expect.arrayContaining([
         expect.objectContaining({ cause: 'missing-route-snapshot', count: 3 }),
-        expect.objectContaining({ cause: 'missing-run-summary', count: 3 }),
       ]),
       byLearningSource: [expect.objectContaining({ key: 'daemon-dispatch', count: 3 })],
       byLabelBasis: [expect.objectContaining({ key: 'dispatch-outcome', count: 3 })],
@@ -4683,7 +4800,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
         action: 'route-same-tier-alternative',
         sameTierOnly: true,
-        topReason: 'agent returned no diff',
+        topReason: 'empty-diff',
       },
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('same-tier alternatives only');
@@ -4700,7 +4817,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ]),
     );
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: agent returned no diff');
+      .toContain('top reason: empty-diff');
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
       .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
@@ -5593,9 +5710,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const s = await buildFleetStatus(baseConfig());
 
-    expect(s.dispatchProduction?.topReasons[0]?.reason).toContain('proposal filing disabled');
+    expect(s.dispatchProduction?.topReasons[0]?.reason).toBe('proposal-disabled');
     expect(s.dispatchProduction?.diagnosticTopReasons?.[0]).toEqual({
-      reason: 'agent returned no diff',
+      reason: 'empty-diff',
       count: 3,
     });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
@@ -5615,11 +5732,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       target: 'local-coder',
       detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
     });
-    expect(action?.detail).toContain('top reason: agent returned no diff');
+    expect(action?.detail).toContain('top reason: empty-diff');
     expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
     expect(action?.detail).not.toContain('proposal filing disabled');
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('reasons:   3x agent returned no diff');
+    expect(formatted).toContain('reasons:   3x empty-diff');
     expect(formatted).not.toContain('reasons:   16x proposal filing disabled');
   });
 
@@ -5742,7 +5859,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.dispatchProduction).toMatchObject({
-      attempts: 3,
+      attempts: 2,
       outcomes: { cancelled: 1 },
     });
     expect(s.dispatchYieldDiagnostics).toMatchObject({
@@ -5837,7 +5954,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
       diagnosticTopReasons: [
         {
-          reason: 'capture-missing: required proposal dispatch ended before final capture',
+          reason: 'proposal-capture-missing',
           count: 3,
         },
       ],
@@ -5857,7 +5974,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: capture-missing: required proposal dispatch ended before final capture');
+      .toContain('top reason: proposal-capture-missing');
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
       .toContain('shape: no-diff 0, gate/capture 3, repairs 0, policy-off 0');
     expect(s.attemptCoverage?.production).toMatchObject({
@@ -9096,7 +9213,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('2x agent returned no diff');
     expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
     expect(out).toContain('Dispatch yield:');
-    expect(out).toContain('output:    proposals 1/3 (33%), no-proposal 2');
+    expect(out).toContain('output:    reported proposal-created 1/3 (33%), no-proposal 2');
     expect(out).toContain('backends:  local-coder 0/2 0%; codex 1/1 100%');
     expect(out).toContain('2 auto-merge(s)');
     expect(out).toContain('Mission brief:');

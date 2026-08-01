@@ -5,6 +5,7 @@ import type {
   DispatchProductionSourceQuality,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { sanitizeDispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import { dispatchProductionRunStatusForOutcome } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   buildProposalFunnelObservability,
   withholdProposalFunnelForUnstableSnapshot,
@@ -38,7 +39,7 @@ function event(
   overrides: Partial<DispatchProductionEvent> = {},
 ): DispatchProductionEvent {
   const attemptId = attemptIdFor(itemId);
-  return {
+  const row: DispatchProductionEvent = {
     schemaVersion: 1,
     ts: `2026-07-31T00:00:${itemId.padStart(2, '0')}.000Z`,
     itemId,
@@ -59,6 +60,16 @@ function event(
     basis: 'run-proposal-outcome',
     ...overrides,
   };
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'runEventSummary')) {
+    row.runEventSummary = {
+      runId: row.runId,
+      status: dispatchProductionRunStatusForOutcome(row.outcome),
+      outcome: row.outcome,
+      proposalCreated: row.proposalCreated,
+      proposalId: row.proposalId,
+    };
+  }
+  return row;
 }
 
 describe('buildProposalFunnelObservability', () => {
@@ -80,8 +91,15 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
-      schemaVersion: 3,
-      state: 'available',
+      schemaVersion: 4,
+      state: 'observational',
+      authority: {
+        integrityClass: 'owner-writable-local',
+        cryptographicallyAuthenticated: false,
+        rollbackProtected: false,
+        readinessEligible: false,
+        learningEligible: false,
+      },
       sample: {
         requestedWindowHours: 24,
         observedEvents: 8,
@@ -185,21 +203,17 @@ describe('buildProposalFunnelObservability', () => {
       runId: 'run-cancelled',
       reason: 'cancelled by owner',
     });
-    const legacyCancelled = event('2', 'engine-failed', {
-      runId: 'run-cancelled',
-      reason: 'selection cancelled after daemon ownership changed',
-      runEventSummary: { status: 'aborted', outcome: 'engine-failed', proposalCreated: false },
-    });
+    const duplicateCancelled = { ...cancelled };
 
     const result = buildProposalFunnelObservability({
-      events: [filed, { ...filed }, cancelled, legacyCancelled],
+      events: [filed, { ...filed }, cancelled, duplicateCancelled],
       sourceQuality: healthySource,
       windowMs: 24 * 60 * 60 * 1000,
       eventLimit: 100,
     });
 
     expect(result).toMatchObject({
-      state: 'available',
+      state: 'observational',
       sample: {
         observedEvents: 4,
         includedAttempts: 1,
@@ -258,7 +272,7 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
-      state: 'available',
+      state: 'observational',
       sample: { includedAttempts: 1, duplicateEvents: 1, invalidAttemptIdentities: 0 },
     });
   });
@@ -330,7 +344,7 @@ describe('buildProposalFunnelObservability', () => {
     expect(result).toMatchObject({
       state: 'withheld',
       withheldReason: 'attempt-identity-conflict',
-      sample: { includedAttempts: 1, conflictingAttemptIdentities: 1 },
+      sample: { includedAttempts: 0, conflictingAttemptIdentities: 1 },
     });
   });
 
@@ -362,7 +376,7 @@ describe('buildProposalFunnelObservability', () => {
     });
   });
 
-  it('includes nested causal metadata in the duplicate conflict signature', () => {
+  it('withholds when nested status disagrees with the top-level outcome', () => {
     const original = event('1', 'empty-diff', {
       runEventSummary: {
         runId: 'run-1',
@@ -383,8 +397,8 @@ describe('buildProposalFunnelObservability', () => {
 
     expect(result).toMatchObject({
       state: 'withheld',
-      withheldReason: 'attempt-identity-conflict',
-      sample: { conflictingAttemptIdentities: 1 },
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 1 },
     });
   });
 
@@ -424,6 +438,74 @@ describe('buildProposalFunnelObservability', () => {
       observedProposalReferences: { count: 0, rate: 0 },
     });
     expect(JSON.stringify(result)).not.toContain('completeFiled');
+  });
+
+  it('never promotes a fabricated caller-selected attempt row to authority', () => {
+    const fabricated = event('fabricated', 'proposal-created', { proposalId: 'proposal-fabricated' });
+    const result = buildProposalFunnelObservability({
+      events: [fabricated],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'observational',
+      authority: {
+        integrityClass: 'owner-writable-local',
+        cryptographicallyAuthenticated: false,
+        rollbackProtected: false,
+        readinessEligible: false,
+        learningEligible: false,
+      },
+      metrics: { attempts: 1 },
+    });
+  });
+
+  it('keeps a complete owner rewrite observational instead of treating it as trusted history', () => {
+    const before = buildProposalFunnelObservability({
+      events: [event('rewrite-a', 'empty-diff')],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+    const after = buildProposalFunnelObservability({
+      events: [event('rewrite-b', 'proposal-created', { proposalId: 'proposal-rewritten' })],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    for (const result of [before, after]) {
+      expect(result.state).toBe('observational');
+      expect(result.authority).toMatchObject({
+        cryptographicallyAuthenticated: false,
+        rollbackProtected: false,
+        readinessEligible: false,
+        learningEligible: false,
+      });
+    }
+  });
+
+  it.each([
+    ['status', { status: 'failed', outcome: 'empty-diff', proposalCreated: false }],
+    ['outcome', { status: 'done', outcome: 'engine-failed', proposalCreated: false }],
+    ['proposalCreated', { status: 'done', outcome: 'empty-diff', proposalCreated: true }],
+  ] as const)('withholds a nested %s semantic mismatch', (_field, summary) => {
+    const result = buildProposalFunnelObservability({
+      events: [event('semantic-mismatch', 'empty-diff', {
+        runEventSummary: { runId: 'run-semantic-mismatch', ...summary },
+      })],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: { invalidAttemptIdentities: 1 },
+    });
   });
 
   it('withholds rates when a later source read invalidates the snapshot', () => {

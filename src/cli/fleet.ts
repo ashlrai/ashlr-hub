@@ -451,17 +451,17 @@ export function formatFleetStatus(s: FleetStatus): string {
         `unreadable ${source.unreadableFiles}`
       : 'unknown (legacy snapshot)';
     lines.push(`  source:    ${sourceDetail}`);
+    lines.push('  authority: observational only (owner-writable local rows)');
     lines.push(`  window:    ${formatProductionWindow(dispatchProduction.windowHours)}`);
-    const diagnosticAttempts = dispatchProduction.diagnosticAttempts ??
-      s.dispatchYieldDiagnostics?.diagnosticAttempts ?? dispatchProduction.events;
-    const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
-      Math.max(0, diagnosticAttempts - dispatchProduction.proposalsCreated);
-    const diagnosticProposalRate = dispatchProduction.diagnosticProposalRate ??
-      (diagnosticAttempts > 0 ? dispatchProduction.proposalsCreated / diagnosticAttempts : 0);
     lines.push(
-      `  output:    proposals ${dispatchProduction.proposalsCreated}/${diagnosticAttempts} ` +
-        `(${formatPercent(diagnosticProposalRate)}), no-proposal ${diagnosticNoProposal}, ` +
-        `cancelled ${dispatchProduction.outcomes.cancelled ?? 0}`,
+      `  output:    reported proposal-created ${dispatchProduction.proposalsCreated}/${dispatchProduction.attempts} ` +
+        `(${formatNullablePercent(dispatchProduction.proposalRate)}), ` +
+        `no-proposal ${dispatchProduction.noProposal}, cancelled ${dispatchProduction.cancelledEvents ?? 0}`,
+    );
+    lines.push(
+      `  sample:    ${dispatchProduction.events} physical event(s), ` +
+        `${dispatchProduction.attempts} canonical attempt(s), ` +
+        `${dispatchProduction.duplicateEvents ?? 0} duplicate(s)`,
     );
     const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
@@ -525,6 +525,9 @@ export function formatFleetStatus(s: FleetStatus): string {
         `${proposalFunnel.source.complete ? '' : ' (partial)'}`,
     );
     lines.push(
+      '  authority: observational only (owner-writable local rows; not readiness/learning eligible)',
+    );
+    lines.push(
       `  sample:    ${proposalFunnel.sample.includedAttempts} canonical attempt(s) from ` +
         `${proposalFunnel.sample.observedEvents} event(s); ` +
         `duplicates ${proposalFunnel.sample.duplicateEvents ?? 'unknown'}, ` +
@@ -533,9 +536,11 @@ export function formatFleetStatus(s: FleetStatus): string {
         `conflicts ${proposalFunnel.sample.conflictingAttemptIdentities ?? 'unknown'}`,
     );
     const metrics = proposalFunnel.metrics;
-    const currentMetricSchema = proposalFunnel.schemaVersion === 3 &&
+    const currentMetricSchema = proposalFunnel.schemaVersion === 4 &&
       metrics?.reportedProposalCreatedOutcomes !== undefined &&
-      metrics.observedProposalReferences !== undefined;
+      metrics.observedProposalReferences !== undefined &&
+      proposalFunnel.authority.readinessEligible === false &&
+      proposalFunnel.authority.learningEligible === false;
     if (proposalFunnel.state === 'withheld' || !metrics || !currentMetricSchema) {
       const reason = proposalFunnel.state === 'withheld'
         ? proposalFunnel.withheldReason ?? 'source-unavailable'
@@ -1349,10 +1354,9 @@ function formatDispatchYieldBucket(
   bucket: NonNullable<FleetStatus['dispatchProduction']>['byBackend'][number],
 ): string {
   const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
-  const attempts = bucket.diagnosticAttempts ?? bucket.attempts;
-  const rate = bucket.diagnosticProposalRate ??
-    (attempts > 0 ? bucket.proposalsCreated / attempts : 0);
-  return `${label} ${bucket.proposalsCreated}/${attempts} ${formatPercent(rate)}`;
+  const attempts = bucket.attempts;
+  const rate = bucket.proposalRate;
+  return `${label} ${bucket.proposalsCreated}/${attempts} ${formatNullablePercent(rate)}`;
 }
 
 function formatDispatchManifestBackend(
